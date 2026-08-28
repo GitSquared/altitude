@@ -9,4 +9,7 @@ export * from "./local-git.ts";
 export * from "./manifest.ts";
 export * from "./paths.ts";
 export * from "./seed-cache.ts";
+export * from "./task-checkpoint.ts";
 export * from "./transfer.ts";
+export * from "./wire.ts";
+export * from "./workspace-marker.ts";

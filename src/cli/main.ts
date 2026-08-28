@@ -30,7 +30,11 @@ import { CapsuleImageBuilder } from "../runtime/images.ts";
 import { IdentityCapsuleManager } from "../runtime/identity-manager.ts";
 import { identityVolumeName } from "../runtime/identity-capsule.ts";
 import { CapsuleProcessLauncher } from "../runtime/process-launcher.ts";
-import { TaskCapsuleBootstrapProvisioner, TaskCapsuleManager } from "../runtime/task-manager.ts";
+import {
+  TaskCapsuleBootstrapProvisioner,
+  TaskCapsuleCheckpointProvisioner,
+  TaskCapsuleManager,
+} from "../runtime/task-manager.ts";
 import { setupAltitude } from "../setup.ts";
 import { SqliteAgentWriterLeaseStore } from "../storage/agent-writer-lease-store.ts";
 import { TaskAgentSessionStore } from "../storage/task-agent-session-store.ts";
@@ -41,10 +45,13 @@ import { TaskMcpGrantStore } from "../tools/grants.ts";
 import { ProcessTaskToolExecutor } from "../tools/process-executor.ts";
 import { runTaskToolStdio } from "../tools/task-helper.ts";
 import { runTaskBootstrapStdio } from "../capsule/bootstrap.ts";
+import { runTaskCheckpointStdio } from "../capsule/task-checkpoint.ts";
 import { runTaskInit } from "../capsule/init.ts";
 import { FilesystemCapsuleCheckpointStore } from "../capsule/filesystem.ts";
 import { FilesystemRepositorySeedCache } from "../capsule/seed-cache.ts";
 import { LocalCapsulePreparer } from "../run/local-capsule.ts";
+import { LocalCapsuleCheckpointer } from "../run/local-checkpoint.ts";
+import { portableTaskStateMember } from "../run/task-state.ts";
 import { TaskRunCoordinator } from "../run/task-runner.ts";
 import { VERSION } from "../version.ts";
 
@@ -405,12 +412,14 @@ async function ensureManagedIdentity(
 
 async function prepareTaskCapsule(input: {
   readonly task: Task;
+  readonly store: TaskStore;
   readonly repositoryPath?: string;
   readonly paths: ReturnType<typeof resolveAltitudePaths>;
   readonly config: AltitudeLocalConfig;
   readonly runner: CommandRunner;
   readonly launcher: CapsuleProcessLauncher;
-}): Promise<void> {
+  readonly clock?: () => number;
+}): Promise<LocalCapsuleCheckpointer> {
   const needsInitialRepository = input.task.status === "queued";
   if (needsInitialRepository && input.repositoryPath === undefined) {
     throw new CliUsageError("The first task run requires --repository <worktree-root>");
@@ -418,11 +427,22 @@ async function prepareTaskCapsule(input: {
   if (!needsInitialRepository && input.repositoryPath !== undefined) {
     throw new CliUsageError("--repository is only accepted for the first queued run; resumes use the task capsule");
   }
+  const checkpoints = new FilesystemCapsuleCheckpointStore(input.paths.capsules);
+  const seeds = new FilesystemRepositorySeedCache(join(input.paths.cache, "repository-seeds"));
+  const checkpointProvisioner = new TaskCapsuleCheckpointProvisioner(input.launcher);
+  const checkpointer = new LocalCapsuleCheckpointer(
+    checkpoints,
+    seeds,
+    checkpointProvisioner,
+    input.store,
+    input.clock ?? Date.now,
+  );
   const preparer = new LocalCapsulePreparer(
-    new FilesystemCapsuleCheckpointStore(input.paths.capsules),
-    new FilesystemRepositorySeedCache(join(input.paths.cache, "repository-seeds")),
+    checkpoints,
+    seeds,
     new TaskCapsuleManager(input.config.runtime, input.runner),
     new TaskCapsuleBootstrapProvisioner(input.launcher),
+    checkpointer,
   );
   await preparer.prepare({
     taskId: input.task.id,
@@ -430,7 +450,9 @@ async function prepareTaskCapsule(input: {
     network: input.config.network,
     nodeId: "local",
     ...(input.repositoryPath === undefined ? {} : { repositoryPath: resolve(input.repositoryPath) }),
+    additionalMembers: [portableTaskStateMember(input.store, input.task.id)],
   });
+  return checkpointer;
 }
 
 function renderAgentEvent(event: AgentEvent): string | undefined {
@@ -454,13 +476,15 @@ async function runManagedTask(args: readonly string[], options: CliOptions, stdo
   if (task === undefined) throw new Error(`Task ${taskId} does not exist`);
   const launcher = new CapsuleProcessLauncher(config.runtime);
   const agent = await ensureManagedIdentity(config, runner, launcher, store, options);
-  await prepareTaskCapsule({
+  const checkpointer = await prepareTaskCapsule({
     task,
+    store,
     ...(option(parsed, "repository") === undefined ? {} : { repositoryPath: option(parsed, "repository")! }),
     paths,
     config,
     runner,
     launcher,
+    ...(options.clock === undefined ? {} : { clock: options.clock }),
   });
   const grants = new TaskMcpGrantStore(store.database, options.clock);
   const node = await useTaskNode({ config, store, grants, launcher, databasePath: paths.database });
@@ -489,9 +513,10 @@ async function runManagedTask(args: readonly string[], options: CliOptions, stdo
       }
     })();
     const [completion] = await Promise.all([managed.settle(), events]);
+    const checkpoint = await checkpointer.capture(taskId);
     const current = store.getTask(taskId)!;
-    if (json) stdout.write(`${JSON.stringify({ type: "completion", completion, task: current })}\n`);
-    else stdout.write(`Task ${taskId} is ${current.status} (${completion.outcome}).\n`);
+    if (json) stdout.write(`${JSON.stringify({ type: "completion", completion, task: current, checkpoint })}\n`);
+    else stdout.write(`Task ${taskId} is ${current.status} (${completion.outcome}); capsule revision ${checkpoint.revision} is durable.\n`);
     return completion.outcome === "error" || completion.outcome === "protocol_error" ? 1
       : completion.outcome === "rate_limited" ? 75 : 0;
   } finally {
@@ -512,7 +537,15 @@ async function takeManagedTask(args: readonly string[], options: CliOptions, std
   if (task === undefined) throw new Error(`Task ${taskId} does not exist`);
   const launcher = new CapsuleProcessLauncher(config.runtime);
   const agent = await ensureManagedIdentity(config, runner, launcher, store, options);
-  await prepareTaskCapsule({ task, paths, config, runner, launcher });
+  const checkpointer = await prepareTaskCapsule({
+    task,
+    store,
+    paths,
+    config,
+    runner,
+    launcher,
+    ...(options.clock === undefined ? {} : { clock: options.clock }),
+  });
   const grants = new TaskMcpGrantStore(store.database, options.clock);
   const node = await useTaskNode({ config, store, grants, launcher, databasePath: paths.database });
   try {
@@ -528,13 +561,18 @@ async function takeManagedTask(args: readonly string[], options: CliOptions, std
       identityId: config.identity.id,
       mcpEndpoint: config.node.capsuleMcpEndpoint,
     });
-    let exitCode: number;
+    let exitCode = 1;
+    let interactiveError: unknown;
     try {
       exitCode = await runner.runInteractive(launcher.interactiveCommand(take.interactive.launch));
+    } catch (error) {
+      interactiveError = error;
     } finally {
       await take.finish();
     }
-    stdout.write(`Claude Code session closed; task ${taskId} is ${store.getTask(taskId)?.status}.\n`);
+    const checkpoint = await checkpointer.capture(taskId);
+    if (interactiveError !== undefined) throw interactiveError;
+    stdout.write(`Claude Code session closed; task ${taskId} is ${store.getTask(taskId)?.status}; capsule revision ${checkpoint.revision} is durable.\n`);
     return exitCode;
   } finally {
     await node.close();
@@ -869,6 +907,8 @@ export async function runCli(args: readonly string[], options: CliOptions = {}):
         return await runTaskToolStdio();
       case "_task-bootstrap":
         return await runTaskBootstrapStdio();
+      case "_task-checkpoint":
+        return await runTaskCheckpointStdio(args[1]);
       case "_task-init":
         return await runTaskInit();
       case "_identity-control":

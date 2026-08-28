@@ -1,5 +1,4 @@
-import { randomUUID } from "node:crypto";
-import { lstat, mkdir, mkdtemp, open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 
 import { executeCommandPlan, InMemoryCommandReceiptStore, type CommandExecutor, type PlannedCommand } from "./commands.ts";
@@ -7,6 +6,13 @@ import { capsuleManifestDigest, parseCapsuleManifest, verifyCapsuleMembers, type
 import { planGitRestore } from "./git.ts";
 import { resolvePortablePath } from "./paths.ts";
 import { isSha256Digest, sha256, stableJson, utf8, type Sha256Digest } from "./canonical.ts";
+import {
+  activatePendingTaskWorkspaceCheckpoint,
+  readActiveTaskWorkspaceMarker,
+  readPendingTaskWorkspaceCheckpoint,
+  TASK_WORKSPACE_FORMAT,
+  writeActiveTaskWorkspaceMarker,
+} from "./workspace-marker.ts";
 
 export const TASK_BOOTSTRAP_PROTOCOL = "altitude.task-bootstrap/v1" as const;
 const MAX_HEADER_BYTES = 4 * 1024 * 1024;
@@ -190,25 +196,21 @@ async function restoreUntracked(root: string, path: string, bytes: Uint8Array): 
   await writeFile(destination, bytes, { flag: "wx", mode: 0o644 });
 }
 
-async function existingMarker(root: string): Promise<Record<string, unknown> | undefined> {
-  try {
-    const path = join(root, ".git", "altitude", "active.json");
-    const stat = await lstat(path);
-    if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 64 * 1024) throw new Error("Task bootstrap marker is unsafe");
-    return record(JSON.parse(await readFile(path, "utf8")) as unknown);
-  } catch (error) {
-    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return undefined;
-    throw error;
-  }
-}
-
 export async function restoreTaskWorkspace(rootInput: string, payload: TaskBootstrapPayload): Promise<{ reused: boolean }> {
   const root = resolve(rootInput);
   const stat = await lstat(root);
   if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error("Task workspace must be a regular directory");
-  const marker = await existingMarker(root);
+  const marker = await readActiveTaskWorkspaceMarker(root);
+  const pending = await readPendingTaskWorkspaceCheckpoint(root);
+  if (pending !== undefined) {
+    if (pending.checkpoint.checkpointDigest === payload.checkpointDigest) {
+      await activatePendingTaskWorkspaceCheckpoint(root, payload.checkpointDigest);
+      return { reused: true };
+    }
+    throw new Error("Task workspace contains an unpublished pending checkpoint");
+  }
   if (marker !== undefined) {
-    if (marker.schema === TASK_BOOTSTRAP_PROTOCOL && marker.checkpointDigest === payload.checkpointDigest) return { reused: true };
+    if (marker.checkpointDigest === payload.checkpointDigest) return { reused: true };
     throw new Error("Task workspace already contains a different active checkpoint");
   }
   if ((await readdir(root)).length !== 0) throw new Error("Task workspace must be empty before bootstrap");
@@ -245,24 +247,13 @@ export async function restoreTaskWorkspace(rootInput: string, payload: TaskBoots
       if (bytes === undefined) throw new Error(`Missing untracked member ${file.sourceMember}`);
       await restoreUntracked(root, file.destinationRepositoryPath, bytes);
     }
-    const markerDirectory = join(root, ".git", "altitude");
-    await mkdir(markerDirectory, { mode: 0o700 });
-    const temporary = join(markerDirectory, `.active-${randomUUID()}.tmp`);
-    const markerPath = join(markerDirectory, "active.json");
-    try {
-      await writeFile(temporary, `${stableJson({
-        schema: TASK_BOOTSTRAP_PROTOCOL,
-        capsuleId: payload.checkpoint.manifest.capsuleId,
-        taskId: payload.checkpoint.manifest.taskId,
-        revision: payload.checkpoint.manifest.revision,
-        checkpointDigest: payload.checkpointDigest,
-      })}\n`, { flag: "wx", mode: 0o600 });
-      await rename(temporary, markerPath);
-      const handle = await open(markerPath, "r");
-      try { await handle.sync(); } finally { await handle.close(); }
-    } finally {
-      await rm(temporary, { force: true }).catch(() => undefined);
-    }
+    await writeActiveTaskWorkspaceMarker(root, {
+      schema: TASK_WORKSPACE_FORMAT,
+      capsuleId: payload.checkpoint.manifest.capsuleId,
+      taskId: payload.checkpoint.manifest.taskId,
+      revision: payload.checkpoint.manifest.revision,
+      checkpointDigest: payload.checkpointDigest,
+    });
     return { reused: false };
   } catch (error) {
     if (started) {

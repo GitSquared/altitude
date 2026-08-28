@@ -27,6 +27,21 @@ export interface CapturedLocalGitCapsule {
   readonly repositoryPath: string;
 }
 
+export interface CapturedLocalGitCheckpoint {
+  readonly checkpoint: CapsuleCheckpoint;
+  readonly repositoryPath: string;
+}
+
+export interface LocalGitCaptureInput {
+  readonly capsuleId: string;
+  readonly taskId: string;
+  readonly repositoryPath: string;
+  readonly revision: number;
+  readonly ownership: ActiveOwnershipLease;
+  readonly checkpointedAt?: string;
+  readonly additionalMembers?: readonly CapsuleMemberContent[];
+}
+
 type GitResult = Readonly<{
   exitCode: number;
   stdout: Uint8Array;
@@ -106,15 +121,10 @@ async function readBundle(path: string): Promise<Uint8Array> {
   return new Uint8Array(await readFile(path));
 }
 
-/** Capture a host checkout without carrying its Git, SSH, or hosting credentials. */
-export async function captureLocalGitCapsule(input: {
-  readonly capsuleId: string;
-  readonly taskId: string;
-  readonly repositoryPath: string;
-  readonly revision: number;
-  readonly ownership: ActiveOwnershipLease;
-  readonly checkpointedAt?: string;
-}): Promise<CapturedLocalGitCapsule> {
+async function captureLocalGit(
+  input: LocalGitCaptureInput,
+  includeRepositorySeed: boolean,
+): Promise<CapturedLocalGitCheckpoint & { readonly repositorySeedBundle?: Uint8Array }> {
   const requested = resolve(input.repositoryPath);
   const requestedStat = await lstat(requested);
   if (requestedStat.isSymbolicLink() || !requestedStat.isDirectory()) {
@@ -148,8 +158,8 @@ export async function captureLocalGitCapsule(input: {
   const temporary = await mkdtemp(join(tmpdir(), "altitude-git-capture-"));
   try {
     const seedPath = join(temporary, "repository-seed.bundle");
-    await git(repository, ["bundle", "create", seedPath, "--all"]);
-    const members: CapsuleMemberContent[] = [];
+    if (includeRepositorySeed) await git(repository, ["bundle", "create", seedPath, "--all"]);
+    const members: CapsuleMemberContent[] = [...(input.additionalMembers ?? [])];
     if (capture.outputs.bundleMember !== null) {
       const deltaPath = join(temporary, "repository-delta.bundle");
       await git(repository, ["bundle", "create", deltaPath, "HEAD", `^${baseCommit}`]);
@@ -192,10 +202,27 @@ export async function captureLocalGitCapsule(input: {
         repository: repositorySnapshot,
         members,
       }),
-      repositorySeedBundle: await readBundle(seedPath),
       repositoryPath: repository,
+      ...(includeRepositorySeed ? { repositorySeedBundle: await readBundle(seedPath) } : {}),
     };
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
+}
+
+/** Capture a host checkout and its node-local seed without carrying credentials. */
+export async function captureLocalGitCapsule(input: LocalGitCaptureInput): Promise<CapturedLocalGitCapsule> {
+  const captured = await captureLocalGit(input, true);
+  if (captured.repositorySeedBundle === undefined) throw new Error("Repository seed capture failed");
+  return {
+    checkpoint: captured.checkpoint,
+    repositoryPath: captured.repositoryPath,
+    repositorySeedBundle: captured.repositorySeedBundle,
+  };
+}
+
+/** Capture only the portable delta from an already-materialized task workspace. */
+export async function captureLocalGitCheckpoint(input: LocalGitCaptureInput): Promise<CapturedLocalGitCheckpoint> {
+  const captured = await captureLocalGit(input, false);
+  return { checkpoint: captured.checkpoint, repositoryPath: captured.repositoryPath };
 }

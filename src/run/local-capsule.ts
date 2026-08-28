@@ -7,8 +7,13 @@ import {
   type CapsuleCheckpointReference,
 } from "../capsule/filesystem.ts";
 import { capsuleManifestDigest, type CapsuleCheckpoint } from "../capsule/manifest.ts";
+import type { CapsuleMemberContent } from "../capsule/manifest.ts";
 import type { FilesystemRepositorySeedCache } from "../capsule/seed-cache.ts";
 import type { TaskCapsuleBootstrapProvisioner, TaskCapsuleManager } from "../runtime/task-manager.ts";
+
+type PendingCheckpointRecoverer = Readonly<{
+  recoverPending(taskId: string): Promise<CapsuleCheckpointReference | undefined>;
+}>;
 
 export interface PreparedLocalCapsule {
   readonly checkpoint: CapsuleCheckpointReference;
@@ -22,6 +27,7 @@ export class LocalCapsulePreparer {
     private readonly seeds: Pick<FilesystemRepositorySeedCache, "put" | "read">,
     private readonly capsules: Pick<TaskCapsuleManager, "ensure">,
     private readonly bootstrap: Pick<TaskCapsuleBootstrapProvisioner, "bootstrap">,
+    private readonly pending?: PendingCheckpointRecoverer,
   ) {}
 
   async prepare(input: {
@@ -30,6 +36,7 @@ export class LocalCapsulePreparer {
     readonly network: string;
     readonly nodeId: string;
     readonly repositoryPath?: string;
+    readonly additionalMembers?: readonly CapsuleMemberContent[];
   }): Promise<PreparedLocalCapsule> {
     let checkpoint: CapsuleCheckpoint | undefined;
     let seed: Uint8Array;
@@ -52,6 +59,7 @@ export class LocalCapsulePreparer {
           ownerNodeId: input.nodeId,
           status: "active",
         },
+        ...(input.additionalMembers === undefined ? {} : { additionalMembers: input.additionalMembers }),
       });
       const reference = await this.checkpoints.publish(captured.checkpoint);
       checkpoint = await this.checkpoints.activate(reference);
@@ -70,6 +78,11 @@ export class LocalCapsulePreparer {
       image: input.taskImage,
       network: input.network,
     });
+    const recovered = await this.pending?.recoverPending(input.taskId);
+    if (recovered !== undefined) {
+      checkpoint = await this.checkpoints.readActive(input.taskId);
+      seed = await this.seeds.read(capsuleManifestDigest(checkpoint.manifest));
+    }
     const materialized = await this.bootstrap.bootstrap({
       taskId: input.taskId,
       checkpoint,

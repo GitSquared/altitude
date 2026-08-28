@@ -1,10 +1,17 @@
 import { describe, expect, test } from "bun:test";
 
 import type { CommandResult, CommandRunner, CommandSpec } from "../src/process/command.ts";
-import { taskVolumeName, TaskCapsuleBootstrapProvisioner, TaskCapsuleManager } from "../src/runtime/task-manager.ts";
+import {
+  taskVolumeName,
+  TaskCapsuleBootstrapProvisioner,
+  TaskCapsuleCheckpointProvisioner,
+  TaskCapsuleManager,
+} from "../src/runtime/task-manager.ts";
 import type { ProcessExit, ProcessLaunchSpec, ProcessLauncher, RunningProcess } from "../src/runtime/protocol.ts";
-import { createCapsuleCheckpoint } from "../src/capsule/manifest.ts";
+import { createCapsuleCheckpoint, capsuleManifestDigest } from "../src/capsule/manifest.ts";
 import { portableCapsulePath } from "../src/capsule/paths.ts";
+import { TASK_CHECKPOINT_PROTOCOL, decodeTaskCheckpointRequest } from "../src/capsule/task-checkpoint.ts";
+import { encodeCapsuleWire } from "../src/capsule/wire.ts";
 
 const ok: CommandResult = { exitCode: 0, stdout: "", stderr: "" };
 
@@ -29,7 +36,27 @@ class CapturedProcess implements RunningProcess {
   readonly exited: Promise<ProcessExit> = Promise.resolve({ exitCode: 0 });
   input?: Uint8Array;
   writeStdin(chunk: string | Uint8Array): Promise<void> {
-    this.input = typeof chunk === "string" ? new TextEncoder().encode(chunk) : chunk;
+    this.input = typeof chunk === "string" ? new TextEncoder().encode(chunk) : new Uint8Array(chunk);
+    return Promise.resolve();
+  }
+  closeStdin(): Promise<void> { return Promise.resolve(); }
+  terminate(): Promise<void> { return Promise.resolve(); }
+}
+
+class BinaryProcess implements RunningProcess {
+  readonly stdout: AsyncIterable<Uint8Array>;
+  readonly stderr = new Bytes("");
+  readonly exited: Promise<ProcessExit>;
+  input = new Uint8Array();
+
+  constructor(output: Uint8Array | string, exitCode = 0) {
+    const bytes = typeof output === "string" ? new TextEncoder().encode(output) : output;
+    this.stdout = { async *[Symbol.asyncIterator]() { yield bytes; } };
+    this.exited = Promise.resolve({ exitCode });
+  }
+
+  writeStdin(chunk: string | Uint8Array): Promise<void> {
+    this.input = typeof chunk === "string" ? new TextEncoder().encode(chunk) : new Uint8Array(chunk);
     return Promise.resolve();
   }
   closeStdin(): Promise<void> { return Promise.resolve(); }
@@ -91,5 +118,66 @@ describe("task capsule manager", () => {
       env: { ALTITUDE_TASK_BOOTSTRAP: "1" },
     });
     expect(child.input?.byteLength).toBeGreaterThan(3);
+  });
+
+  test("captures, recovers, and activates task checkpoints through the bound capsule", async () => {
+    const state = { path: portableCapsulePath("state/task.json"), bytes: new TextEncoder().encode("{}\n") };
+    const next = createCapsuleCheckpoint({
+      capsuleId: "task-1",
+      taskId: "task-1",
+      revision: 2,
+      checkpointedAt: "2026-08-29T12:05:00.000Z",
+      ownership: { epoch: 1, leaseId: "lease-1", ownerNodeId: "local", status: "active" },
+      repository: {
+        kind: "git",
+        remoteUrl: "git@github.com:gitsquared/fixture.git",
+        defaultBranch: "main",
+        branch: "main",
+        baseCommit: "a".repeat(40),
+        headCommit: "a".repeat(40),
+        bundleMember: null,
+        stagedPatchMember: portableCapsulePath("git/staged.patch"),
+        unstagedPatchMember: portableCapsulePath("git/unstaged.patch"),
+        untracked: [],
+      },
+      members: [
+        { path: portableCapsulePath("git/staged.patch"), bytes: new Uint8Array() },
+        { path: portableCapsulePath("git/unstaged.patch"), bytes: new Uint8Array() },
+        state,
+      ],
+    });
+    const captureChild = new BinaryProcess(encodeCapsuleWire(next));
+    const children = [
+      captureChild,
+      new BinaryProcess(encodeCapsuleWire(next)),
+      new BinaryProcess(`${JSON.stringify({ schema: TASK_CHECKPOINT_PROTOCOL, ok: true })}\n`),
+    ];
+    const launches: Array<ProcessLaunchSpec & { readonly io: "piped" }> = [];
+    const launcher: ProcessLauncher = {
+      launch(spec) { launches.push(spec); return Promise.resolve(children.shift()!); },
+    };
+    const provisioner = new TaskCapsuleCheckpointProvisioner(launcher);
+    const request = {
+      schema: TASK_CHECKPOINT_PROTOCOL,
+      capsuleId: "task-1",
+      taskId: "task-1",
+      revision: 2,
+      checkpointedAt: "2026-08-29T12:05:00.000Z",
+      ownership: next.manifest.ownership,
+      previousCheckpointDigest: `sha256:${"1".repeat(64)}`,
+      repositoryBindingDigest: `sha256:${"2".repeat(64)}`,
+      additionalMembers: [state],
+    } as const;
+    expect(await provisioner.capture(request)).toEqual(next);
+    expect(await provisioner.pending("task-1")).toEqual(next);
+    await provisioner.activate("task-1", capsuleManifestDigest(next.manifest));
+
+    expect(decodeTaskCheckpointRequest(captureChild.input)).toEqual(request);
+    expect(launches.map((launch) => launch.args)).toEqual([
+      ["_task-checkpoint", "capture"],
+      ["_task-checkpoint", "pending"],
+      ["_task-checkpoint", "activate"],
+    ]);
+    expect(launches.every((launch) => launch.target.kind === "task-capsule")).toBeTrue();
   });
 });
