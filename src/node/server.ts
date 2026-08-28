@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type { RuntimeKind } from "../runtime/capsule-runtime.ts";
 import type { TaskStore } from "../storage/task-store.ts";
 import type { TaskMcpGrantStore } from "../tools/grants.ts";
@@ -17,6 +19,11 @@ export interface RunningAltitudeNode {
   readonly port: number;
   readonly url: URL;
   close(): Promise<void>;
+}
+
+export function nodeInstanceId(databasePath: string): string {
+  if (!databasePath.trim() || databasePath.includes("\0")) throw new Error("Node database path is invalid");
+  return `node-${createHash("sha256").update(databasePath, "utf8").digest("hex").slice(0, 24)}`;
 }
 
 function json(value: unknown, init?: ResponseInit): Response {
@@ -39,6 +46,7 @@ export function createAltitudeNodeService(input: {
   readonly store: TaskStore;
   readonly grants: TaskMcpGrantStore;
   readonly executor: TaskToolExecutor;
+  readonly instanceId?: string;
   readonly allowedHostnames?: readonly string[];
 }): AltitudeNodeService {
   const mcp: TaskMcpEndpoint = createTaskMcpEndpoint({
@@ -60,7 +68,13 @@ export function createAltitudeNodeService(input: {
         }
         const body = request.method === "HEAD"
           ? null
-          : JSON.stringify({ ok: true, service: "altitude-node", version: VERSION, runtime: input.runtime });
+          : JSON.stringify({
+              ok: true,
+              service: "altitude-node",
+              version: VERSION,
+              runtime: input.runtime,
+              instanceId: input.instanceId ?? "unbound",
+            });
         return new Response(body, {
           status: 200,
           headers: {

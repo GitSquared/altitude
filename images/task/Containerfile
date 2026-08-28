@@ -18,7 +18,7 @@ RUN apt-get update \
 COPY --from=altitude-build --chown=1000:1000 /out/altitude /opt/altitude/bin/altitude
 
 ENV PATH="/opt/altitude/bin:${PATH}" \
-    HOME=/tmp/altitude-home
+    HOME=/tmp
 
 USER 1000:1000
 WORKDIR /workspace

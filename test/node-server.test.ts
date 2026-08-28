@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createAltitudeNodeService } from "../src/node/server.ts";
+import { createAltitudeNodeService, nodeInstanceId } from "../src/node/server.ts";
 import { TaskStore } from "../src/storage/task-store.ts";
 import { TaskMcpGrantStore } from "../src/tools/grants.ts";
 import { TASK_TOOL_PROTOCOL, type TaskToolExecutor } from "../src/tools/protocol.ts";
@@ -27,11 +27,12 @@ describe("Altitude node service", () => {
     const executor: TaskToolExecutor = {
       execute: async () => ({ schema: TASK_TOOL_PROTOCOL, ok: true, result: {} }),
     };
-    const service = createAltitudeNodeService({ runtime: "docker", store, grants, executor });
+    const instanceId = nodeInstanceId("/state/altitude.db");
+    const service = createAltitudeNodeService({ runtime: "docker", store, grants, executor, instanceId });
     const response = await service.fetch(new Request("http://localhost/healthz"));
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("no-store");
-    expect(await response.json()).toMatchObject({ ok: true, service: "altitude-node", runtime: "docker" });
+    expect(await response.json()).toMatchObject({ ok: true, service: "altitude-node", runtime: "docker", instanceId });
 
     const head = await service.fetch(new Request("http://localhost/healthz", { method: "HEAD" }));
     expect(head.status).toBe(200);

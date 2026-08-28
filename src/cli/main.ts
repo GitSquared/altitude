@@ -1,8 +1,9 @@
 import type { Writable } from "node:stream";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 import type { AttentionResolution, EventActor } from "../core/events.ts";
 import { ClaudeCliAdapter } from "../agent/claude-cli.ts";
+import type { AgentEvent } from "../agent/protocol.ts";
 import {
   INTENT_LEVELS,
   TASK_STATUSES,
@@ -20,22 +21,31 @@ import {
   type AltitudeLocalConfig,
 } from "../config/local.ts";
 import { runDoctor, renderDoctor } from "../doctor.ts";
-import { createAltitudeNodeService, serveAltitudeNode } from "../node/server.ts";
+import { createAltitudeNodeService, nodeInstanceId, serveAltitudeNode } from "../node/server.ts";
 import { BunCommandRunner, type CommandRunner } from "../process/command.ts";
 import type { RuntimeKind } from "../runtime/capsule-runtime.ts";
 import { AppleContainerRuntime } from "../runtime/apple-container.ts";
 import { DockerCapsuleRuntime } from "../runtime/docker.ts";
 import { CapsuleImageBuilder } from "../runtime/images.ts";
 import { IdentityCapsuleManager } from "../runtime/identity-manager.ts";
+import { identityVolumeName } from "../runtime/identity-capsule.ts";
 import { CapsuleProcessLauncher } from "../runtime/process-launcher.ts";
+import { TaskCapsuleBootstrapProvisioner, TaskCapsuleManager } from "../runtime/task-manager.ts";
 import { setupAltitude } from "../setup.ts";
 import { SqliteAgentWriterLeaseStore } from "../storage/agent-writer-lease-store.ts";
+import { TaskAgentSessionStore } from "../storage/task-agent-session-store.ts";
 import { TaskStore } from "../storage/task-store.ts";
-import { runIdentityControlStdio } from "../identity/control.ts";
+import { IdentityControlProvisioner, runIdentityControlStdio } from "../identity/control.ts";
 import { runIdentityInit } from "../identity/init.ts";
 import { TaskMcpGrantStore } from "../tools/grants.ts";
 import { ProcessTaskToolExecutor } from "../tools/process-executor.ts";
 import { runTaskToolStdio } from "../tools/task-helper.ts";
+import { runTaskBootstrapStdio } from "../capsule/bootstrap.ts";
+import { runTaskInit } from "../capsule/init.ts";
+import { FilesystemCapsuleCheckpointStore } from "../capsule/filesystem.ts";
+import { FilesystemRepositorySeedCache } from "../capsule/seed-cache.ts";
+import { LocalCapsulePreparer } from "../run/local-capsule.ts";
+import { TaskRunCoordinator } from "../run/task-runner.ts";
 import { VERSION } from "../version.ts";
 
 const HELP = `altitude ${VERSION}
@@ -51,6 +61,8 @@ Commands:
   task list                   List tasks
   task show <task-id>         Show task state and event history
   task queue <task-id>        Make a draft, stopped, or failed task runnable
+  task run <task-id>          Run or resume a managed headless Claude turn
+  task take <task-id>         Enter the same session in Claude Code's TUI
   attention answer <task-id>  Answer the active Decision
   attention accept <task-id>  Accept the active Review and complete the task
   attention revise <task-id>  Return a Review with revision instructions
@@ -70,6 +82,8 @@ const TASK_HELP = `Usage:
   altitude task list [--status <status>] [--json]
   altitude task show <task-id> [--json]
   altitude task queue <task-id> [--json]
+  altitude task run <task-id> [--repository <path>] [--model <model>] [--json]
+  altitude task take <task-id>
 
 Intent levels:
   ${INTENT_LEVELS.join(", ")}
@@ -288,8 +302,242 @@ async function runTaskCommand(
       else stdout.write(`Queued ${task.id}\n`);
       return 0;
     }
+    case "run":
+      return await runManagedTask(args.slice(1), options, stdout);
+    case "take":
+      return await takeManagedTask(args.slice(1), options, stdout);
     default:
       throw new CliUsageError(`Unknown task command: ${subcommand}`);
+  }
+}
+
+type NodeUse = Readonly<{ external: boolean; close(): Promise<void> }>;
+
+async function existingNode(port: number, expectedInstanceId: string): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 500);
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/healthz`, { signal: controller.signal });
+    if (!response.ok) return false;
+    const value = await response.json() as { service?: string; instanceId?: string };
+    return value.service === "altitude-node" && value.instanceId === expectedInstanceId;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function useTaskNode(input: {
+  readonly config: AltitudeLocalConfig;
+  readonly store: TaskStore;
+  readonly grants: TaskMcpGrantStore;
+  readonly launcher: CapsuleProcessLauncher;
+  readonly databasePath: string;
+}): Promise<NodeUse> {
+  const instanceId = nodeInstanceId(input.databasePath);
+  if (await existingNode(input.config.node.port, instanceId)) {
+    return { external: true, close: async () => undefined };
+  }
+  const service = createAltitudeNodeService({
+    runtime: input.config.runtime,
+    store: input.store,
+    grants: input.grants,
+    executor: new ProcessTaskToolExecutor(input.launcher),
+    instanceId,
+    allowedHostnames: [...new Set([
+      "127.0.0.1",
+      "localhost",
+      "[::1]",
+      "host.docker.internal",
+      "host.container.internal",
+      new URL(input.config.node.capsuleMcpEndpoint).hostname,
+    ])],
+  });
+  const server = serveAltitudeNode({
+    service,
+    hostname: input.config.node.bindHost,
+    port: input.config.node.port,
+  });
+  return { external: false, close: () => server.close() };
+}
+
+async function managedContext(options: CliOptions): Promise<{
+  readonly paths: ReturnType<typeof resolveAltitudePaths>;
+  readonly config: AltitudeLocalConfig;
+  readonly runner: CommandRunner;
+}> {
+  const paths = resolveAltitudePaths(options.env ?? process.env);
+  await ensureAltitudePaths(paths);
+  const config = await readLocalConfig(paths.config);
+  if (config === undefined) throw new Error("Altitude is not set up yet. Run `altitude setup` first.");
+  return { paths, config, runner: options.commandRunner ?? new BunCommandRunner() };
+}
+
+async function ensureManagedIdentity(
+  config: AltitudeLocalConfig,
+  runner: CommandRunner,
+  launcher: CapsuleProcessLauncher,
+  store: TaskStore,
+  options: CliOptions,
+): Promise<ClaudeCliAdapter> {
+  await new IdentityCapsuleManager(config.runtime, runner).ensure({
+    identityId: config.identity.id,
+    image: config.identity.image,
+    identityVolume: identityVolumeName(config.identity.id),
+    network: config.network,
+    command: ["sleep", "infinity"],
+    environment: { CLAUDE_CONFIG_DIR: "/identity/claude", DISABLE_AUTOUPDATER: "1" },
+  });
+  const agent = new ClaudeCliAdapter({
+    identity: { id: config.identity.id, configDirectory: "/identity/claude", loginDirectory: "/identity" },
+    launcher,
+    leases: new SqliteAgentWriterLeaseStore(store.database),
+    ...(options.clock === undefined ? {} : { now: options.clock }),
+    ...(options.createId === undefined ? {} : { createId: options.createId }),
+  });
+  const probe = await agent.probe();
+  if (!probe.installed || probe.auth !== "authenticated") {
+    throw new Error("Managed Claude is not authenticated. Run `altitude setup` to log in inside the identity capsule.");
+  }
+  return agent;
+}
+
+async function prepareTaskCapsule(input: {
+  readonly task: Task;
+  readonly repositoryPath?: string;
+  readonly paths: ReturnType<typeof resolveAltitudePaths>;
+  readonly config: AltitudeLocalConfig;
+  readonly runner: CommandRunner;
+  readonly launcher: CapsuleProcessLauncher;
+}): Promise<void> {
+  const needsInitialRepository = input.task.status === "queued";
+  if (needsInitialRepository && input.repositoryPath === undefined) {
+    throw new CliUsageError("The first task run requires --repository <worktree-root>");
+  }
+  if (!needsInitialRepository && input.repositoryPath !== undefined) {
+    throw new CliUsageError("--repository is only accepted for the first queued run; resumes use the task capsule");
+  }
+  const preparer = new LocalCapsulePreparer(
+    new FilesystemCapsuleCheckpointStore(input.paths.capsules),
+    new FilesystemRepositorySeedCache(join(input.paths.cache, "repository-seeds")),
+    new TaskCapsuleManager(input.config.runtime, input.runner),
+    new TaskCapsuleBootstrapProvisioner(input.launcher),
+  );
+  await preparer.prepare({
+    taskId: input.task.id,
+    taskImage: input.config.taskImage,
+    network: input.config.network,
+    nodeId: "local",
+    ...(input.repositoryPath === undefined ? {} : { repositoryPath: resolve(input.repositoryPath) }),
+  });
+}
+
+function renderAgentEvent(event: AgentEvent): string | undefined {
+  if (event.type === "agent.message" && event.partial === false && typeof event.text === "string") return `${event.text}\n`;
+  if (event.type === "agent.api_retry") return "↻ Claude API retry\n";
+  if (event.type === "agent.rate_limit") return `! Claude rate limit: ${String(event.status)}\n`;
+  if (event.type === "agent.protocol_error") return `! Agent protocol error: ${String(event.message)}\n`;
+  return undefined;
+}
+
+async function runManagedTask(args: readonly string[], options: CliOptions, stdout: Output): Promise<number> {
+  const parsed = parseArguments(args, new Set(["repository", "model"]));
+  if (parsed.positionals.length !== 1) throw new CliUsageError("task run requires exactly one task id");
+  const taskId = parsed.positionals[0]!;
+  const { paths, config, runner } = await managedContext(options);
+  using store = new TaskStore(paths.database, {
+    ...(options.clock === undefined ? {} : { clock: options.clock }),
+    ...(options.createId === undefined ? {} : { createId: options.createId }),
+  });
+  const task = store.getTask(taskId);
+  if (task === undefined) throw new Error(`Task ${taskId} does not exist`);
+  const launcher = new CapsuleProcessLauncher(config.runtime);
+  const agent = await ensureManagedIdentity(config, runner, launcher, store, options);
+  await prepareTaskCapsule({
+    task,
+    ...(option(parsed, "repository") === undefined ? {} : { repositoryPath: option(parsed, "repository")! }),
+    paths,
+    config,
+    runner,
+    launcher,
+  });
+  const grants = new TaskMcpGrantStore(store.database, options.clock);
+  const node = await useTaskNode({ config, store, grants, launcher, databasePath: paths.database });
+  try {
+    const coordinator = new TaskRunCoordinator(
+      store,
+      new TaskAgentSessionStore(store.database, options.clock),
+      grants,
+      new IdentityControlProvisioner(launcher),
+      agent,
+    );
+    const managed = await coordinator.start({
+      taskId,
+      identityId: config.identity.id,
+      mcpEndpoint: config.node.capsuleMcpEndpoint,
+      ...(option(parsed, "model") === undefined ? {} : { model: option(parsed, "model")! }),
+    });
+    const json = wantsJson(parsed);
+    const events = (async () => {
+      for await (const event of managed.run.events) {
+        if (json) stdout.write(`${JSON.stringify({ type: "agent_event", event })}\n`);
+        else {
+          const rendered = renderAgentEvent(event);
+          if (rendered !== undefined) stdout.write(rendered);
+        }
+      }
+    })();
+    const [completion] = await Promise.all([managed.settle(), events]);
+    const current = store.getTask(taskId)!;
+    if (json) stdout.write(`${JSON.stringify({ type: "completion", completion, task: current })}\n`);
+    else stdout.write(`Task ${taskId} is ${current.status} (${completion.outcome}).\n`);
+    return completion.outcome === "error" || completion.outcome === "protocol_error" ? 1
+      : completion.outcome === "rate_limited" ? 75 : 0;
+  } finally {
+    await node.close();
+  }
+}
+
+async function takeManagedTask(args: readonly string[], options: CliOptions, stdout: Output): Promise<number> {
+  const parsed = parseArguments(args, new Set(), new Set());
+  if (parsed.positionals.length !== 1) throw new CliUsageError("task take requires exactly one task id");
+  const taskId = parsed.positionals[0]!;
+  const { paths, config, runner } = await managedContext(options);
+  using store = new TaskStore(paths.database, {
+    ...(options.clock === undefined ? {} : { clock: options.clock }),
+    ...(options.createId === undefined ? {} : { createId: options.createId }),
+  });
+  const task = store.getTask(taskId);
+  if (task === undefined) throw new Error(`Task ${taskId} does not exist`);
+  const launcher = new CapsuleProcessLauncher(config.runtime);
+  const agent = await ensureManagedIdentity(config, runner, launcher, store, options);
+  await prepareTaskCapsule({ task, paths, config, runner, launcher });
+  const grants = new TaskMcpGrantStore(store.database, options.clock);
+  const node = await useTaskNode({ config, store, grants, launcher, databasePath: paths.database });
+  try {
+    const coordinator = new TaskRunCoordinator(
+      store,
+      new TaskAgentSessionStore(store.database, options.clock),
+      grants,
+      new IdentityControlProvisioner(launcher),
+      agent,
+    );
+    const take = await coordinator.take({
+      taskId,
+      identityId: config.identity.id,
+      mcpEndpoint: config.node.capsuleMcpEndpoint,
+    });
+    let exitCode: number;
+    try {
+      exitCode = await runner.runInteractive(launcher.interactiveCommand(take.interactive.launch));
+    } finally {
+      await take.finish();
+    }
+    stdout.write(`Claude Code session closed; task ${taskId} is ${store.getTask(taskId)?.status}.\n`);
+    return exitCode;
+  } finally {
+    await node.close();
   }
 }
 
@@ -449,6 +697,7 @@ async function runNodeCommand(
     store,
     grants,
     executor: new ProcessTaskToolExecutor(launcher),
+    instanceId: nodeInstanceId(paths.database),
     ...(config === undefined ? {} : {
       allowedHostnames: [...new Set([
         "127.0.0.1",
@@ -618,6 +867,10 @@ export async function runCli(args: readonly string[], options: CliOptions = {}):
       }
       case "_task-tool":
         return await runTaskToolStdio();
+      case "_task-bootstrap":
+        return await runTaskBootstrapStdio();
+      case "_task-init":
+        return await runTaskInit();
       case "_identity-control":
         return await runIdentityControlStdio();
       case "_identity-init":

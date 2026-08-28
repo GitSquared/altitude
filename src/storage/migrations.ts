@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 
-export const CURRENT_SCHEMA_VERSION = 3;
+export const CURRENT_SCHEMA_VERSION = 4;
 
 type Migration = Readonly<{
   version: number;
@@ -143,6 +143,37 @@ const MIGRATIONS: readonly Migration[] = [
 
       CREATE INDEX task_mcp_grants_active
         ON task_mcp_grants(token_hash, expires_at, revoked_at);
+    `,
+  },
+  {
+    version: 4,
+    sql: `
+      CREATE TABLE task_agent_sessions (
+        task_id TEXT PRIMARY KEY REFERENCES tasks(id),
+        adapter TEXT NOT NULL,
+        session_id TEXT NOT NULL UNIQUE,
+        identity_id TEXT NOT NULL,
+        project_directory_name TEXT NOT NULL,
+        control_directory TEXT,
+        mcp_config_path TEXT,
+        grant_id TEXT,
+        run_count INTEGER NOT NULL DEFAULT 0 CHECK (run_count >= 0),
+        last_outcome TEXT CHECK (
+          last_outcome IS NULL OR last_outcome IN (
+            'success', 'error', 'yielded', 'stopped', 'rate_limited', 'protocol_error'
+          )
+        ),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        CHECK (
+          (control_directory IS NULL AND mcp_config_path IS NULL AND grant_id IS NULL)
+          OR
+          (control_directory IS NOT NULL AND mcp_config_path IS NOT NULL AND grant_id IS NOT NULL)
+        )
+      ) STRICT;
+
+      CREATE INDEX task_agent_sessions_by_identity
+        ON task_agent_sessions(identity_id, updated_at DESC);
     `,
   },
 ];

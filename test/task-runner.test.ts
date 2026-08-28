@@ -1,0 +1,191 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import type { AgentAdapter, AgentRun, AgentRunCompletion, AgentRunRequest, AgentTakeRequest } from "../src/agent/protocol.ts";
+import { TaskRunCoordinator } from "../src/run/task-runner.ts";
+import { TaskAgentSessionStore } from "../src/storage/task-agent-session-store.ts";
+import { TaskStore } from "../src/storage/task-store.ts";
+import { TaskMcpGrantStore } from "../src/tools/grants.ts";
+
+const directories: string[] = [];
+afterEach(() => {
+  for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
+});
+
+function state() {
+  const root = mkdtempSync(join(tmpdir(), "altitude-task-runner-"));
+  directories.push(root);
+  const store = new TaskStore(join(root, "altitude.db"), { clock: () => 1_000 });
+  store.append({
+    taskId: "task-1",
+    type: "task.created",
+    payload: { title: "Useful run", intent: "Implement the smallest real vertical slice", intentLevel: "principles" },
+    actor: { kind: "operator" },
+  });
+  store.append({
+    taskId: "task-1",
+    type: "task.state_changed",
+    payload: { to: "queued" },
+    actor: { kind: "operator" },
+  });
+  return store;
+}
+
+class FakeAgent {
+  readonly requests: AgentRunRequest[] = [];
+  readonly takes: AgentTakeRequest[] = [];
+  released = false;
+  completion: AgentRunCompletion = { outcome: "success", exit: { exitCode: 0 } };
+  start(request: AgentRunRequest): Promise<AgentRun> {
+    this.requests.push(request);
+    return Promise.resolve({
+      taskId: request.taskId,
+      sessionId: request.sessionId,
+      launch: {
+        target: { kind: "identity-capsule", identityId: "claude-personal" },
+        executable: "claude",
+        args: [],
+        io: "piped",
+        purpose: "test",
+      },
+      events: { async *[Symbol.asyncIterator]() {} },
+      completion: Promise.resolve(this.completion),
+      requestYield: async () => true,
+      stop: async () => undefined,
+    });
+  }
+  prepareInteractiveTake(request: AgentTakeRequest): ReturnType<AgentAdapter["prepareInteractiveTake"]> {
+    this.takes.push(request);
+    return Promise.resolve({
+      taskId: request.taskId,
+      sessionId: request.sessionId,
+      launch: {
+        target: { kind: "identity-capsule", identityId: "claude-personal", taskId: request.taskId },
+        executable: "claude",
+        args: ["--resume", request.sessionId],
+        cwd: request.controlDirectory,
+        io: "interactive",
+        purpose: "test take",
+      },
+      release: async () => { this.released = true; },
+    });
+  }
+}
+
+describe("task run coordinator", () => {
+  test("binds a fixed session and secret grant before launching the managed turn", async () => {
+    using store = state();
+    const sessions = new TaskAgentSessionStore(
+      store.database,
+      () => 1_000,
+      () => "01900000-0000-7000-8000-000000000001",
+    );
+    const grants = new TaskMcpGrantStore(store.database, () => 1_000);
+    const configs: unknown[] = [];
+    const agent = new FakeAgent();
+    const coordinator = new TaskRunCoordinator(store, sessions, grants, {
+      writeTaskMcpConfig: async (input) => {
+        configs.push(input.config);
+        return {
+          controlDirectory: "/identity/control/tasks/t-abc",
+          configPath: "/identity/control/tasks/t-abc/mcp.json",
+        };
+      },
+    }, agent);
+    const managed = await coordinator.start({
+      taskId: "task-1",
+      identityId: "claude-personal",
+      mcpEndpoint: "http://host.docker.internal:43100/mcp",
+    });
+    expect(store.getTask("task-1")?.status).toBe("running");
+    expect(agent.requests[0]).toMatchObject({
+      taskId: "task-1",
+      resume: false,
+      controlDirectory: "/identity/control/tasks/t-abc",
+    });
+    expect(agent.requests[0]?.prompt).toContain("no source checkout in this identity capsule");
+    expect(agent.requests[0]?.prompt).toContain("Trace, Update, Decision, and Review are additive");
+    const encodedConfig = JSON.stringify(configs[0]);
+    expect(encodedConfig).toContain("Authorization");
+    expect(encodedConfig).not.toContain("?token=");
+    const storedGrant = store.database.query<{ token_hash: string }, []>("SELECT token_hash FROM task_mcp_grants").get();
+    expect(storedGrant?.token_hash).not.toContain("Bearer");
+    expect(await managed.settle()).toMatchObject({ outcome: "success" });
+    expect(store.getTask("task-1")?.status).toBe("paused");
+    expect(sessions.get("task-1")?.runCount).toBe(1);
+  });
+
+  test("leaves a Review waiting instead of treating process exit as completion", async () => {
+    using store = state();
+    const sessions = new TaskAgentSessionStore(
+      store.database,
+      () => 1_000,
+      () => "01900000-0000-7000-8000-000000000002",
+    );
+    const grants = new TaskMcpGrantStore(store.database, () => 1_000);
+    const agent = new FakeAgent();
+    const coordinator = new TaskRunCoordinator(store, sessions, grants, {
+      writeTaskMcpConfig: async () => ({
+        controlDirectory: "/identity/control/tasks/t-def",
+        configPath: "/identity/control/tasks/t-def/mcp.json",
+      }),
+    }, agent);
+    const managed = await coordinator.start({
+      taskId: "task-1",
+      identityId: "claude-personal",
+      mcpEndpoint: "http://host.docker.internal:43100/mcp",
+    });
+    store.append({
+      taskId: "task-1",
+      type: "attention.raised",
+      payload: { attention: {
+        id: "review-1",
+        class: "review",
+        title: "Review it",
+        summary: "Checked work is ready",
+        artifacts: [{ kind: "other", label: "Diff", uri: "https://example.test/diff" }],
+        checks: ["bun test"],
+      } },
+      actor: { kind: "agent", adapter: "claude-code-cli" },
+    });
+    await managed.settle();
+    expect(store.getTask("task-1")?.status).toBe("waiting_review");
+  });
+
+  test("refreshes the grant and hands the exact fixed session to the native TUI", async () => {
+    using store = state();
+    const sessions = new TaskAgentSessionStore(
+      store.database,
+      () => 1_000,
+      () => "01900000-0000-7000-8000-000000000003",
+    );
+    const grants = new TaskMcpGrantStore(store.database, () => 1_000);
+    const agent = new FakeAgent();
+    const coordinator = new TaskRunCoordinator(store, sessions, grants, {
+      writeTaskMcpConfig: async () => ({
+        controlDirectory: "/identity/control/tasks/t-take",
+        configPath: "/identity/control/tasks/t-take/mcp.json",
+      }),
+    }, agent);
+    const run = await coordinator.start({
+      taskId: "task-1",
+      identityId: "claude-personal",
+      mcpEndpoint: "http://host.docker.internal:43100/mcp",
+    });
+    await run.settle();
+    const oldGrant = sessions.get("task-1")?.grantId;
+    const take = await coordinator.take({
+      taskId: "task-1",
+      identityId: "claude-personal",
+      mcpEndpoint: "http://host.docker.internal:43100/mcp",
+    });
+    expect(store.getTask("task-1")?.status).toBe("taken");
+    expect(agent.takes[0]?.sessionId).toBe(run.session.sessionId);
+    expect(sessions.get("task-1")?.grantId).not.toBe(oldGrant);
+    await take.finish();
+    expect(agent.released).toBeTrue();
+    expect(store.getTask("task-1")?.status).toBe("paused");
+  });
+});

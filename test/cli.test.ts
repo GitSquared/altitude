@@ -62,6 +62,13 @@ describe("CLI", () => {
     expect(cli.stdout.value).toContain("loopback");
   });
 
+  test("documents the first-run repository capsule and native take flow", async () => {
+    const cli = harness();
+    expect(await runCli(["task", "help"], cli.options)).toBe(0);
+    expect(cli.stdout.value).toContain("task run <task-id> [--repository <path>]");
+    expect(cli.stdout.value).toContain("task take <task-id>");
+  });
+
   test("persists create, queue, list, show, and status across invocations", async () => {
     const cli = harness();
     expect(await runCli([
