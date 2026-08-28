@@ -76,6 +76,63 @@ export function identityVolumeCreateCommand(
   };
 }
 
+export function identityVolumeInitializeCommand(
+  runtime: RuntimeKind,
+  spec: IdentityCapsuleLaunchSpec,
+): CommandSpec {
+  validate(spec);
+  if (runtime === "apple-container") {
+    return {
+      executable: "container",
+      args: [
+        "run",
+        "--rm",
+        "--user",
+        "0:0",
+        "--volume",
+        `${spec.identityVolume}:/identity`,
+        "--env",
+        "ALTITUDE_IDENTITY_INIT=1",
+        spec.image,
+        "altitude",
+        "_identity-init",
+      ],
+    };
+  }
+  return {
+    executable: "docker",
+    args: [
+      "run",
+      "--rm",
+      "--user",
+      "0:0",
+      "--mount",
+      `type=volume,src=${spec.identityVolume},dst=/identity`,
+      "--env",
+      "ALTITUDE_IDENTITY_INIT=1",
+      spec.image,
+      "altitude",
+      "_identity-init",
+    ],
+  };
+}
+
+export function identityNetworkCreateCommand(
+  runtime: RuntimeKind,
+  spec: IdentityCapsuleLaunchSpec,
+): CommandSpec {
+  validate(spec);
+  return runtime === "apple-container"
+    ? {
+        executable: "container",
+        args: ["network", "create", "--label", `dev.altitude.identity=${spec.identityId}`, spec.network],
+      }
+    : {
+        executable: "docker",
+        args: ["network", "create", "--label", `dev.altitude.identity=${spec.identityId}`, spec.network],
+      };
+}
+
 export function identityLaunchCommand(
   runtime: RuntimeKind,
   spec: IdentityCapsuleLaunchSpec,
@@ -105,7 +162,7 @@ export function identityLaunchCommand(
       args: [
         ...common,
         "--user",
-        "altitude",
+        "1000:1000",
         "--workdir",
         "/identity",
         "--volume",
@@ -130,6 +187,8 @@ export function identityLaunchCommand(
       "no-new-privileges",
       "--pids-limit",
       String(limits.pids),
+      "--add-host",
+      "host.docker.internal:host-gateway",
       "--user",
       "1000:1000",
       "--workdir",

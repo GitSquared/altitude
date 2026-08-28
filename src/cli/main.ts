@@ -1,6 +1,8 @@
 import type { Writable } from "node:stream";
+import { resolve } from "node:path";
 
 import type { AttentionResolution, EventActor } from "../core/events.ts";
+import { ClaudeCliAdapter } from "../agent/claude-cli.ts";
 import {
   INTENT_LEVELS,
   TASK_STATUSES,
@@ -10,10 +12,29 @@ import {
   type TaskStatus,
 } from "../core/model.ts";
 import { resolveAltitudePaths, ensureAltitudePaths } from "../config/paths.ts";
+import {
+  defaultLocalConfig,
+  readLocalConfig,
+  validateLocalConfig,
+  writeLocalConfig,
+  type AltitudeLocalConfig,
+} from "../config/local.ts";
 import { runDoctor, renderDoctor } from "../doctor.ts";
+import { createAltitudeNodeService, serveAltitudeNode } from "../node/server.ts";
 import { BunCommandRunner, type CommandRunner } from "../process/command.ts";
+import type { RuntimeKind } from "../runtime/capsule-runtime.ts";
+import { AppleContainerRuntime } from "../runtime/apple-container.ts";
+import { DockerCapsuleRuntime } from "../runtime/docker.ts";
+import { CapsuleImageBuilder } from "../runtime/images.ts";
+import { IdentityCapsuleManager } from "../runtime/identity-manager.ts";
+import { CapsuleProcessLauncher } from "../runtime/process-launcher.ts";
+import { setupAltitude } from "../setup.ts";
+import { SqliteAgentWriterLeaseStore } from "../storage/agent-writer-lease-store.ts";
 import { TaskStore } from "../storage/task-store.ts";
 import { runIdentityControlStdio } from "../identity/control.ts";
+import { runIdentityInit } from "../identity/init.ts";
+import { TaskMcpGrantStore } from "../tools/grants.ts";
+import { ProcessTaskToolExecutor } from "../tools/process-executor.ts";
 import { runTaskToolStdio } from "../tools/task-helper.ts";
 import { VERSION } from "../version.ts";
 
@@ -25,6 +46,7 @@ Usage:
   altitude <command> [options]
 
 Commands:
+  setup                       Build capsules and log in to managed Claude
   task create <intent>        Create a task at an explicit intention level
   task list                   List tasks
   task show <task-id>         Show task state and event history
@@ -33,6 +55,7 @@ Commands:
   attention accept <task-id>  Accept the active Review and complete the task
   attention revise <task-id>  Return a Review with revision instructions
   attention ack <task-id>     Acknowledge an Update by --id
+  node serve                  Run the local task/MCP control endpoint
   status                      Summarize the local control plane
   doctor                      Check the local Altitude runtime boundary
   help                        Show this help
@@ -57,6 +80,27 @@ const ATTENTION_HELP = `Usage:
   altitude attention accept <task-id> [note...] [--json]
   altitude attention revise <task-id> <instructions...> [--json]
   altitude attention ack <task-id> --id <attention-id> [note...] [--json]
+`;
+
+const NODE_HELP = `Usage:
+  altitude node serve [--host <address>] [--port <port>] [--runtime <runtime>]
+
+Runtimes:
+  apple-container, docker
+
+The listener defaults to loopback. Use --host deliberately when capsules on a
+native Linux node need to reach the service through the host gateway.
+`;
+
+const SETUP_HELP = `Usage:
+  altitude setup [--runtime <runtime>] [--identity <id>] [--source <path>]
+                 [--identity-image <image>] [--task-image <image>]
+                 [--network <name>] [--node-url <url>]
+                 [--node-host <address>] [--node-port <port>]
+                 [--skip-build] [--json]
+
+Setup builds the two OCI images, creates a source-free identity capsule, and
+opens the official Claude Code login there when authentication is needed.
 `;
 
 type Output = Pick<Writable, "write">;
@@ -345,6 +389,196 @@ async function runStatus(options: CliOptions, stdout: Output, json: boolean): Pr
   return 0;
 }
 
+function runtimeKind(value: string | undefined): RuntimeKind {
+  const runtime = value ?? (process.platform === "darwin" ? "apple-container" : "docker");
+  if (runtime !== "apple-container" && runtime !== "docker") {
+    throw new CliUsageError(`Unknown capsule runtime: ${runtime}`);
+  }
+  return runtime;
+}
+
+function portNumber(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  if (!/^[0-9]+$/u.test(value)) throw new CliUsageError("--port must be an integer");
+  const port = Number(value);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+    throw new CliUsageError("--port must be between 1 and 65535");
+  }
+  return port;
+}
+
+async function waitForShutdownSignal(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    const shutdown = () => {
+      process.off("SIGINT", shutdown);
+      process.off("SIGTERM", shutdown);
+      resolve();
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
+  });
+}
+
+async function runNodeCommand(
+  args: readonly string[],
+  options: CliOptions,
+  stdout: Output,
+): Promise<number> {
+  const subcommand = args[0] ?? "help";
+  if (["help", "--help", "-h"].includes(subcommand)) {
+    stdout.write(NODE_HELP);
+    return 0;
+  }
+  if (subcommand !== "serve") throw new CliUsageError(`Unknown node command: ${subcommand}`);
+  const parsed = parseArguments(args.slice(1), new Set(["host", "port", "runtime"]), new Set());
+  if (parsed.positionals.length !== 0) throw new CliUsageError("node serve does not take positional arguments");
+  const paths = resolveAltitudePaths(options.env ?? process.env);
+  await ensureAltitudePaths(paths);
+  const config = await readLocalConfig(paths.config);
+  const runtime = runtimeKind(option(parsed, "runtime") ?? config?.runtime);
+  const port = portNumber(option(parsed, "port")) ?? config?.node.port;
+  const hostname = option(parsed, "host") ?? config?.node.bindHost;
+  using store = new TaskStore(paths.database, {
+    ...(options.clock === undefined ? {} : { clock: options.clock }),
+    ...(options.createId === undefined ? {} : { createId: options.createId }),
+  });
+  const grants = new TaskMcpGrantStore(store.database, options.clock);
+  const launcher = new CapsuleProcessLauncher(runtime);
+  const service = createAltitudeNodeService({
+    runtime,
+    store,
+    grants,
+    executor: new ProcessTaskToolExecutor(launcher),
+    ...(config === undefined ? {} : {
+      allowedHostnames: [...new Set([
+        "127.0.0.1",
+        "localhost",
+        "[::1]",
+        "host.docker.internal",
+        "host.container.internal",
+        new URL(config.node.capsuleMcpEndpoint).hostname,
+      ])],
+    }),
+  });
+  const server = serveAltitudeNode({
+    service,
+    ...(hostname === undefined ? {} : { hostname }),
+    ...(port === undefined ? {} : { port }),
+  });
+  stdout.write(`Altitude node listening at ${server.url.toString()} (${runtime})\n`);
+  try {
+    await waitForShutdownSignal();
+  } finally {
+    await server.close();
+  }
+  return 0;
+}
+
+function setupConfig(
+  parsed: ParsedArguments,
+  existing: AltitudeLocalConfig | undefined,
+): AltitudeLocalConfig {
+  const runtime = runtimeKind(option(parsed, "runtime") ?? existing?.runtime);
+  const base = existing?.runtime === runtime ? existing : defaultLocalConfig(runtime);
+  const nodePort = portNumber(option(parsed, "node-port")) ?? base.node.port;
+  const capsuleMcpEndpoint = option(parsed, "node-url")
+    ?? (option(parsed, "node-port") === undefined
+      ? base.node.capsuleMcpEndpoint
+      : (() => {
+          const url = new URL(base.node.capsuleMcpEndpoint);
+          url.port = String(nodePort);
+          return url.toString();
+        })());
+  return validateLocalConfig({
+    ...base,
+    runtime,
+    identity: {
+      id: option(parsed, "identity") ?? base.identity.id,
+      image: option(parsed, "identity-image") ?? base.identity.image,
+    },
+    taskImage: option(parsed, "task-image") ?? base.taskImage,
+    network: option(parsed, "network") ?? base.network,
+    node: {
+      bindHost: option(parsed, "node-host") ?? base.node.bindHost,
+      port: nodePort,
+      capsuleMcpEndpoint,
+    },
+  });
+}
+
+async function runSetupCommand(
+  args: readonly string[],
+  options: CliOptions,
+  stdout: Output,
+): Promise<number> {
+  if (["help", "--help", "-h"].includes(args[0] ?? "")) {
+    stdout.write(SETUP_HELP);
+    return 0;
+  }
+  const parsed = parseArguments(
+    args,
+    new Set([
+      "runtime",
+      "identity",
+      "source",
+      "identity-image",
+      "task-image",
+      "network",
+      "node-url",
+      "node-host",
+      "node-port",
+    ]),
+    new Set(["json", "skip-build"]),
+  );
+  if (parsed.positionals.length !== 0) throw new CliUsageError("setup does not take positional arguments");
+  const paths = resolveAltitudePaths(options.env ?? process.env);
+  await ensureAltitudePaths(paths);
+  const config = setupConfig(parsed, await readLocalConfig(paths.config));
+  const runner = options.commandRunner ?? new BunCommandRunner();
+  const runtime = config.runtime === "apple-container"
+    ? new AppleContainerRuntime(runner)
+    : new DockerCapsuleRuntime(runner);
+  const launcher = new CapsuleProcessLauncher(config.runtime);
+  using store = new TaskStore(paths.database, {
+    ...(options.clock === undefined ? {} : { clock: options.clock }),
+    ...(options.createId === undefined ? {} : { createId: options.createId }),
+  });
+  const claude = new ClaudeCliAdapter({
+    identity: {
+      id: config.identity.id,
+      configDirectory: "/identity/claude",
+      loginDirectory: "/identity",
+    },
+    launcher,
+    leases: new SqliteAgentWriterLeaseStore(store.database),
+    ...(options.clock === undefined ? {} : { now: options.clock }),
+    ...(options.createId === undefined ? {} : { createId: options.createId }),
+  });
+  const json = wantsJson(parsed);
+  const result = await setupAltitude({
+    config,
+    sourceDirectory: resolve(option(parsed, "source") ?? process.cwd()),
+    buildImages: parsed.options.get("skip-build") !== true,
+    ...(json ? {} : { progress: (item) => stdout.write(`→ ${item.message}\n`) }),
+  }, {
+    runtimeProbe: runtime,
+    images: new CapsuleImageBuilder(config.runtime, runner),
+    identity: new IdentityCapsuleManager(config.runtime, runner),
+    claude,
+    interactiveCommand: (spec) => launcher.interactiveCommand(spec),
+    runner,
+  });
+  await writeLocalConfig(paths.config, config);
+  if (json) writeJson(stdout, { config, result });
+  else {
+    stdout.write(`Altitude is ready with Claude Code ${result.claude.version ?? "(version unknown)"}.\n`);
+    if (config.runtime === "apple-container" && new URL(config.node.capsuleMcpEndpoint).hostname === "host.container.internal") {
+      stdout.write("! Apple container host access still needs its explicit host.container.internal DNS rule before the first task run.\n");
+    }
+  }
+  return 0;
+}
+
 export async function runCli(args: readonly string[], options: CliOptions = {}): Promise<number> {
   const stdout = options.stdout ?? process.stdout;
   const stderr = options.stderr ?? process.stderr;
@@ -369,10 +603,14 @@ export async function runCli(args: readonly string[], options: CliOptions = {}):
         else stdout.write(renderDoctor(findings));
         return findings.some((finding) => finding.severity === "error") ? 1 : 0;
       }
+      case "setup":
+        return await runSetupCommand(args.slice(1), options, stdout);
       case "task":
         return await runTaskCommand(args.slice(1), options, stdout);
       case "attention":
         return await runAttentionCommand(args.slice(1), options, stdout);
+      case "node":
+        return await runNodeCommand(args.slice(1), options, stdout);
       case "status": {
         const parsed = parseArguments(args.slice(1));
         if (parsed.positionals.length !== 0) throw new CliUsageError("status does not take positional arguments");
@@ -382,6 +620,8 @@ export async function runCli(args: readonly string[], options: CliOptions = {}):
         return await runTaskToolStdio();
       case "_identity-control":
         return await runIdentityControlStdio();
+      case "_identity-init":
+        return await runIdentityInit();
       default:
         throw new CliUsageError(`Unknown command: ${command}`);
     }

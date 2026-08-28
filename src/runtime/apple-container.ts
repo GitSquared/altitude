@@ -54,7 +54,7 @@ export function appleLaunchSpec(spec: CapsuleLaunchSpec): CommandSpec {
       "--memory",
       spec.resources.memory,
       "--user",
-      "altitude",
+      "1000:1000",
       "--workdir",
       "/workspace",
       "--volume",

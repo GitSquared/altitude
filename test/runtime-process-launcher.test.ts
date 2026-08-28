@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 
 import {
   identityLaunchCommand,
+  identityNetworkCreateCommand,
   identityVolumeCreateCommand,
+  identityVolumeInitializeCommand,
   identityVolumeName,
   stableCapsuleName,
   type IdentityCapsuleLaunchSpec,
@@ -35,10 +37,16 @@ const idleProcess: RunningProcess = {
 describe("node-local identity runtime", () => {
   test("creates one persistent identity volume without a source mount", () => {
     const volume = identityVolumeCreateCommand("apple-container", identity);
+    const initialize = identityVolumeInitializeCommand("apple-container", identity);
+    const network = identityNetworkCreateCommand("apple-container", identity);
     const apple = identityLaunchCommand("apple-container", identity);
     const docker = identityLaunchCommand("docker", identity);
 
     expect(volume.args).toContain("8G");
+    expect(initialize.args).toContain("0:0");
+    expect(initialize.args).toContain("ALTITUDE_IDENTITY_INIT=1");
+    expect(initialize.args).not.toContain("/workspace");
+    expect(network.args).toContain(identity.network);
     expect(apple.args).toContain(`${identity.identityVolume}:/identity`);
     expect(apple.args).not.toContain("/workspace");
     expect(docker.args).toContain(`type=volume,src=${identity.identityVolume},dst=/identity`);

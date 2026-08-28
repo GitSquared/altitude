@@ -162,9 +162,17 @@ describe("Claude CLI adapter", () => {
     });
     expect(launcher.launches.map((launch) => launch.args)).toEqual([
       ["--version"],
-      ["auth", "status", "--json"],
+      ["auth", "status"],
     ]);
     expect(launcher.launches.every((launch) => launch.target.kind === "identity-capsule")).toBe(true);
+  });
+
+  test("uses the documented auth-status exit contract when JSON fields evolve", async () => {
+    const launcher = new FakeLauncher([
+      new FakeProcess({ stdout: "2.1.241 (Claude Code)\n" }),
+      new FakeProcess({ stdout: '{"account":"present"}\n' }),
+    ]);
+    expect((await adapter(launcher).probe()).auth).toBe("authenticated");
   });
 
   test("builds official login and strict native take specs", async () => {
@@ -172,7 +180,7 @@ describe("Claude CLI adapter", () => {
     const claude = adapter(new FakeLauncher([]), leases);
     const login = claude.loginLaunchSpec();
     expect(login.target).toEqual({ kind: "identity-capsule", identityId: "claude-personal" });
-    expect(login.args).toEqual(["auth", "login", "--claudeai"]);
+    expect(login.args).toEqual(["auth", "login"]);
     expect(login.env).toEqual({ CLAUDE_CONFIG_DIR: "/identity/claude" });
 
     const take = await claude.prepareInteractiveTake(request());

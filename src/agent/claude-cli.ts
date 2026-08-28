@@ -146,7 +146,9 @@ function authFromOutput(exitCode: number, stdout: string): AgentProbe["auth"] {
   } catch {
     // A successful but unknown response is deliberately not treated as auth.
   }
-  return "unknown";
+  // Claude Code documents exit 0 as logged in; fields may evolve without
+  // weakening that CLI contract.
+  return "authenticated";
 }
 
 async function boundedText(stream: AsyncIterable<Uint8Array>): Promise<string> {
@@ -233,7 +235,9 @@ export class ClaudeCliAdapter implements AgentAdapter {
     const parsedVersion = versionFromOutput(version.stdout);
     let auth: AgentProbe["auth"] = "unknown";
     try {
-      const status = await this.#capture(["auth", "status", "--json"]);
+      // Current Claude Code emits JSON by default and uses its exit status as
+      // the authenticated/unauthenticated contract.
+      const status = await this.#capture(["auth", "status"]);
       auth = authFromOutput(status.exit.exitCode, status.stdout);
     } catch {
       // Claude is installed, but a broken identity capsule must not be called logged out.
@@ -249,7 +253,7 @@ export class ClaudeCliAdapter implements AgentAdapter {
     return {
       target: { kind: "identity-capsule", identityId: this.#identity.id },
       executable: this.#executable,
-      args: ["auth", "login", "--claudeai"],
+      args: ["auth", "login"],
       cwd: this.#identity.loginDirectory,
       env: claudeEnvironment(this.#identity),
       io: "interactive",

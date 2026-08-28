@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1.7
+
+FROM oven/bun:1.4.0-debian AS altitude-build
+WORKDIR /src
+COPY package.json bun.lock tsconfig.json ./
+RUN bun install --frozen-lockfile
+COPY src ./src
+RUN bun build ./src/cli.ts --compile --outfile /out/altitude
+
+FROM oven/bun:1.4.0-debian
+
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git openssh-client ripgrep \
+    && rm -rf /var/lib/apt/lists/* \
+    && install -d -o 1000 -g 1000 -m 0755 /workspace /opt/altitude/bin
+
+COPY --from=altitude-build --chown=1000:1000 /out/altitude /opt/altitude/bin/altitude
+
+ENV PATH="/opt/altitude/bin:${PATH}" \
+    HOME=/tmp/altitude-home
+
+USER 1000:1000
+WORKDIR /workspace
+
+CMD ["sleep", "infinity"]

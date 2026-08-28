@@ -48,6 +48,20 @@ function harness(): {
 }
 
 describe("CLI", () => {
+  test("documents sandboxed first-run setup without touching a runtime", async () => {
+    const cli = harness();
+    expect(await runCli(["setup", "help"], cli.options)).toBe(0);
+    expect(cli.stdout.value).toContain("official Claude Code login");
+    expect(cli.stdout.value).toContain("source-free identity capsule");
+  });
+
+  test("documents the headless node listener without starting it", async () => {
+    const cli = harness();
+    expect(await runCli(["node", "help"], cli.options)).toBe(0);
+    expect(cli.stdout.value).toContain("altitude node serve");
+    expect(cli.stdout.value).toContain("loopback");
+  });
+
   test("persists create, queue, list, show, and status across invocations", async () => {
     const cli = harness();
     expect(await runCli([

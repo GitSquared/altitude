@@ -46,6 +46,8 @@ export function dockerLaunchSpec(spec: CapsuleLaunchSpec): CommandSpec {
       spec.resources.memory,
       "--pids-limit",
       String(spec.resources.pids),
+      "--add-host",
+      "host.docker.internal:host-gateway",
       "--user",
       "1000:1000",
       "--workdir",
