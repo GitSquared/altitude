@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 3;
 
 type Migration = Readonly<{
   version: number;
@@ -124,6 +124,25 @@ const MIGRATIONS: readonly Migration[] = [
           )
         )
       ) STRICT;
+    `,
+  },
+  {
+    version: 3,
+    sql: `
+      CREATE TABLE task_mcp_grants (
+        id TEXT PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE,
+        task_id TEXT NOT NULL REFERENCES tasks(id),
+        identity_id TEXT NOT NULL,
+        agent_session_id TEXT,
+        allowed_tools_json TEXT NOT NULL,
+        issued_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL CHECK (expires_at > issued_at),
+        revoked_at INTEGER
+      ) STRICT;
+
+      CREATE INDEX task_mcp_grants_active
+        ON task_mcp_grants(token_hash, expires_at, revoked_at);
     `,
   },
 ];

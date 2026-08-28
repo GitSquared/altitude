@@ -13,6 +13,8 @@ import { resolveAltitudePaths, ensureAltitudePaths } from "../config/paths.ts";
 import { runDoctor, renderDoctor } from "../doctor.ts";
 import { BunCommandRunner, type CommandRunner } from "../process/command.ts";
 import { TaskStore } from "../storage/task-store.ts";
+import { runIdentityControlStdio } from "../identity/control.ts";
+import { runTaskToolStdio } from "../tools/task-helper.ts";
 import { VERSION } from "../version.ts";
 
 const HELP = `altitude ${VERSION}
@@ -376,6 +378,10 @@ export async function runCli(args: readonly string[], options: CliOptions = {}):
         if (parsed.positionals.length !== 0) throw new CliUsageError("status does not take positional arguments");
         return await runStatus(options, stdout, wantsJson(parsed));
       }
+      case "_task-tool":
+        return await runTaskToolStdio();
+      case "_identity-control":
+        return await runIdentityControlStdio();
       default:
         throw new CliUsageError(`Unknown command: ${command}`);
     }
