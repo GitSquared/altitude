@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+.altitude/
+*.db
+*.db-shm
+*.db-wal
+*.bun-build
+.DS_Store

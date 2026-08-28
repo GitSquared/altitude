@@ -1,0 +1,22 @@
+{
+  "name": "altitude",
+  "version": "0.0.0",
+  "private": true,
+  "description": "An intent control plane for delegated agentic development",
+  "type": "module",
+  "packageManager": "bun@1.4.0",
+  "bin": {
+    "altitude": "./dist/altitude"
+  },
+  "scripts": {
+    "build": "bun build ./src/cli.ts --compile --outfile ./dist/altitude",
+    "check": "bun run typecheck && bun test && bun run build",
+    "dev": "bun run ./src/cli.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.11",
+    "typescript": "6.0.3"
+  }
+}
