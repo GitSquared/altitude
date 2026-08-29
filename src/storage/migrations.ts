@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 
-export const CURRENT_SCHEMA_VERSION = 4;
+export const CURRENT_SCHEMA_VERSION = 5;
 
 type Migration = Readonly<{
   version: number;
@@ -174,6 +174,14 @@ const MIGRATIONS: readonly Migration[] = [
 
       CREATE INDEX task_agent_sessions_by_identity
         ON task_agent_sessions(identity_id, updated_at DESC);
+    `,
+  },
+  {
+    version: 5,
+    sql: `
+      ALTER TABLE task_agent_sessions
+        ADD COLUMN consecutive_rate_limits INTEGER NOT NULL DEFAULT 0
+        CHECK (consecutive_rate_limits >= 0);
     `,
   },
 ];

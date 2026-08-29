@@ -307,6 +307,7 @@ export class TaskStore implements Disposable {
   append<Type extends EventType>(
     input: NewEvent<Type>,
     outbox: readonly OutboxMessageInput[] = [],
+    scheduledActions: readonly ScheduledActionInput[] = [],
   ): AppendResult<Type> {
     requireNonEmpty(input.taskId, "Task id");
     if (input.idempotencyKey !== undefined) requireNonEmpty(input.idempotencyKey, "Idempotency key");
@@ -413,6 +414,11 @@ export class TaskStore implements Disposable {
           );
       }
 
+      for (const action of scheduledActions) {
+        if (action.taskId !== task.id) throw new Error("A scheduled action must belong to the appended task");
+        this.insertScheduledAction(action, occurredAt);
+      }
+
       return { event: envelope, task, duplicate: false };
     }).immediate();
   }
@@ -472,38 +478,10 @@ export class TaskStore implements Disposable {
   }
 
   scheduleAction(input: ScheduledActionInput): ScheduleResult {
-    requireNonEmpty(input.taskId, "Scheduled action task id");
-    requireNonEmpty(input.kind, "Scheduled action kind");
-    requireTime(input.runAt, "Scheduled action time");
-    if (input.dedupeKey !== undefined) requireNonEmpty(input.dedupeKey, "Scheduled action dedupe key");
-    const payloadJson = encodeJson(input.payload, "Scheduled action payload");
     const now = this.clock();
-
     return this.database.transaction(() => {
       if (!this.getTask(input.taskId)) throw new Error(`Task ${input.taskId} does not exist`);
-      if (input.dedupeKey !== undefined) {
-        const row = this.database.query<ScheduledActionRow, [string, string]>(`
-          SELECT * FROM scheduled_actions WHERE task_id = ?1 AND dedupe_key = ?2
-        `).get(input.taskId, input.dedupeKey);
-        if (row) {
-          if (row.kind !== input.kind
-            || !sameJson(decodeJson(row.payload_json, "scheduled action payload"), input.payload)
-            || row.run_at !== input.runAt) {
-            throw new Error(`Scheduled action dedupe key ${input.dedupeKey} was reused with different work`);
-          }
-          return { action: decodeScheduledAction(row), duplicate: true };
-        }
-      }
-
-      const id = input.id ?? this.createId();
-      this.database.query<unknown, [string, string, string, string, number, string | null, number, number]>(`
-        INSERT INTO scheduled_actions(
-          id, task_id, kind, payload_json, run_at, dedupe_key, created_at, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-      `).run(id, input.taskId, input.kind, payloadJson, input.runAt, input.dedupeKey ?? null, now, now);
-      const row = this.database.query<ScheduledActionRow, [string]>("SELECT * FROM scheduled_actions WHERE id = ?1").get(id);
-      if (!row) throw new Error(`Scheduled action ${id} was not persisted`);
-      return { action: decodeScheduledAction(row), duplicate: false };
+      return this.insertScheduledAction(input, now);
     }).immediate();
   }
 
@@ -536,6 +514,29 @@ export class TaskStore implements Disposable {
     `).all(workerId, now, leaseMs, limit).map(decodeScheduledAction)).immediate();
   }
 
+  claimScheduledActionsByKind(kind: string, options: LeaseOptions): ScheduledAction[] {
+    requireNonEmpty(kind, "Scheduled action claim kind");
+    const { workerId, now, limit, leaseMs } = this.normalizeLeaseOptions(options);
+    return this.database.transaction(() => this.database.query<ScheduledActionRow, [string, number, number, number, string]>(`
+      UPDATE scheduled_actions
+      SET state = 'claimed',
+          lease_owner = ?1,
+          lease_expires_at = ?2 + ?3,
+          attempts = attempts + 1,
+          updated_at = ?2
+      WHERE id IN (
+        SELECT id FROM scheduled_actions
+        WHERE kind = ?5 AND (
+          (state = 'scheduled' AND run_at <= ?2)
+          OR (state = 'claimed' AND lease_expires_at <= ?2)
+        )
+        ORDER BY run_at, created_at, id
+        LIMIT ?4
+      )
+      RETURNING *
+    `).all(workerId, now, leaseMs, limit, kind).map(decodeScheduledAction)).immediate();
+  }
+
   completeScheduledAction(id: string, workerId: string, now = this.clock()): void {
     this.finishLease("scheduled_actions", "completed", id, workerId, now);
   }
@@ -549,6 +550,28 @@ export class TaskStore implements Disposable {
           lease_owner = NULL, lease_expires_at = NULL, updated_at = ?3
       WHERE id = ?4 AND state = 'claimed' AND lease_owner = ?5
     `).run(runAt, error, this.clock(), id, workerId).changes;
+    if (changed !== 1) throw new Error(`Scheduled action ${id} is not leased by ${workerId}`);
+  }
+
+  renewScheduledActionLease(id: string, workerId: string, now: number, leaseMs: number): void {
+    requireTime(now, "Scheduled action lease renewal time");
+    if (!Number.isSafeInteger(leaseMs) || leaseMs < 1) throw new Error("Scheduled action lease duration must be positive");
+    const changed = this.database.query<unknown, [number, number, string, string]>(`
+      UPDATE scheduled_actions
+      SET lease_expires_at = ?1 + ?2, updated_at = ?1
+      WHERE id = ?3 AND state = 'claimed' AND lease_owner = ?4
+    `).run(now, leaseMs, id, workerId).changes;
+    if (changed !== 1) throw new Error(`Scheduled action ${id} is not leased by ${workerId}`);
+  }
+
+  deadLetterScheduledAction(id: string, workerId: string, error: string, now = this.clock()): void {
+    requireNonEmpty(error, "Scheduled action failure");
+    const changed = this.database.query<unknown, [string, number, string, string]>(`
+      UPDATE scheduled_actions
+      SET state = 'dead', last_error = ?1, lease_owner = NULL,
+          lease_expires_at = NULL, updated_at = ?2
+      WHERE id = ?3 AND state = 'claimed' AND lease_owner = ?4
+    `).run(error, now, id, workerId).changes;
     if (changed !== 1) throw new Error(`Scheduled action ${id} is not leased by ${workerId}`);
   }
 
@@ -587,6 +610,37 @@ export class TaskStore implements Disposable {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) throw new Error("Lease limit must be between 1 and 1000");
     if (!Number.isSafeInteger(leaseMs) || leaseMs < 1) throw new Error("Lease duration must be a positive integer");
     return { workerId: options.workerId, now, limit, leaseMs };
+  }
+
+  private insertScheduledAction(input: ScheduledActionInput, now: number): ScheduleResult {
+    requireNonEmpty(input.taskId, "Scheduled action task id");
+    requireNonEmpty(input.kind, "Scheduled action kind");
+    requireTime(input.runAt, "Scheduled action time");
+    requireTime(now, "Scheduled action creation time");
+    if (input.dedupeKey !== undefined) requireNonEmpty(input.dedupeKey, "Scheduled action dedupe key");
+    const payloadJson = encodeJson(input.payload, "Scheduled action payload");
+    if (input.dedupeKey !== undefined) {
+      const row = this.database.query<ScheduledActionRow, [string, string]>(`
+        SELECT * FROM scheduled_actions WHERE task_id = ?1 AND dedupe_key = ?2
+      `).get(input.taskId, input.dedupeKey);
+      if (row) {
+        if (row.kind !== input.kind
+          || !sameJson(decodeJson(row.payload_json, "scheduled action payload"), input.payload)
+          || row.run_at !== input.runAt) {
+          throw new Error(`Scheduled action dedupe key ${input.dedupeKey} was reused with different work`);
+        }
+        return { action: decodeScheduledAction(row), duplicate: true };
+      }
+    }
+    const id = input.id ?? this.createId();
+    this.database.query<unknown, [string, string, string, string, number, string | null, number, number]>(`
+      INSERT INTO scheduled_actions(
+        id, task_id, kind, payload_json, run_at, dedupe_key, created_at, updated_at
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+    `).run(id, input.taskId, input.kind, payloadJson, input.runAt, input.dedupeKey ?? null, now, now);
+    const row = this.database.query<ScheduledActionRow, [string]>("SELECT * FROM scheduled_actions WHERE id = ?1").get(id);
+    if (!row) throw new Error(`Scheduled action ${id} was not persisted`);
+    return { action: decodeScheduledAction(row), duplicate: false };
   }
 
   private finishLease(

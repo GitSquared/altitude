@@ -10,8 +10,9 @@ import type { EventActor } from "../core/events.ts";
 import type { Task, TaskStatus } from "../core/model.ts";
 import type { IdentityControlProvisioner } from "../identity/control.ts";
 import type { TaskAgentSessionStore } from "../storage/task-agent-session-store.ts";
-import type { TaskStore } from "../storage/task-store.ts";
+import type { ScheduledActionInput, TaskStore } from "../storage/task-store.ts";
 import { claudeTaskMcpConfig, type TaskMcpGrantStore } from "../tools/grants.ts";
+import { planRateLimitRetry } from "./retry.ts";
 
 const SYSTEM: EventActor = { kind: "system", component: "task-runner" };
 
@@ -73,6 +74,7 @@ export class TaskRunCoordinator {
     private readonly grants: TaskMcpGrantStore,
     private readonly provisioner: McpProvisioner,
     private readonly agent: Pick<AgentAdapter, "start" | "prepareInteractiveTake">,
+    private readonly now: () => number = Date.now,
   ) {}
 
   async start(input: {
@@ -81,6 +83,9 @@ export class TaskRunCoordinator {
     readonly mcpEndpoint: string;
     readonly model?: string;
   }): Promise<ManagedTaskRun> {
+    if (input.model !== undefined && (!input.model.trim() || input.model.length > 200 || input.model.includes("\0"))) {
+      throw new Error("Agent model is invalid");
+    }
     let task = this.store.getTask(input.taskId);
     if (task === undefined) throw new Error(`Task ${input.taskId} does not exist`);
     if (!allowedStartStatus(task.status)) {
@@ -133,7 +138,7 @@ export class TaskRunCoordinator {
         run,
         session,
         grantId: grant.id,
-        settle: () => settled ??= this.#settle(activeTaskId, run.completion),
+        settle: () => settled ??= this.#settle(activeTaskId, run.completion, input.model),
       };
     } catch (error) {
       this.grants.revoke(grant.id);
@@ -206,30 +211,48 @@ export class TaskRunCoordinator {
     };
   }
 
-  async #settle(taskId: string, completionPromise: Promise<AgentRunCompletion>): Promise<AgentRunCompletion> {
+  async #settle(
+    taskId: string,
+    completionPromise: Promise<AgentRunCompletion>,
+    model?: string,
+  ): Promise<AgentRunCompletion> {
     const completion = await completionPromise;
-    this.sessions.recordOutcome(taskId, completion.outcome);
+    const session = this.sessions.recordOutcome(taskId, completion.outcome);
     const task = this.store.getTask(taskId);
     if (task?.status !== "running") return completion;
+    const retry = completion.outcome === "rate_limited"
+      ? planRateLimitRetry({
+          taskId,
+          session,
+          completion,
+          now: this.now(),
+          ...(model === undefined ? {} : { model }),
+        })
+      : undefined;
     const target: TaskStatus = completion.outcome === "rate_limited" ? "waiting_external"
       : completion.outcome === "success" || completion.outcome === "yielded" ? "paused"
         : completion.outcome === "stopped" ? "stopped" : "failed";
     const reason = completion.outcome === "success"
       ? "Agent turn ended without a blocking Decision or Review"
       : completion.outcome === "rate_limited"
-        ? "Agent rate limit requires a later retry"
+        ? `Agent rate limit; automatic retry scheduled for ${new Date(retry!.runAt).toISOString()}`
         : `Agent turn ended: ${completion.outcome}`;
-    this.#transition(taskId, target, reason);
+    this.#transition(taskId, target, reason, retry === undefined ? [] : [retry]);
     return completion;
   }
 
-  #transition(taskId: string, to: TaskStatus, reason: string): Task {
+  #transition(
+    taskId: string,
+    to: TaskStatus,
+    reason: string,
+    scheduledActions: readonly ScheduledActionInput[] = [],
+  ): Task {
     return this.store.append({
       taskId,
       type: "task.state_changed",
       payload: { to, reason },
       actor: SYSTEM,
-    }).task;
+    }, [], scheduledActions).task;
   }
 }
 

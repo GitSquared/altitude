@@ -128,6 +128,38 @@ describe("SQLite task store", () => {
     store.close();
   });
 
+  test("commits an external-wait transition and its retry timer atomically", () => {
+    const store = createStore();
+    createTask(store);
+    for (const to of ["queued", "provisioning", "running"] as const) {
+      store.append({ taskId: "task-1", type: "task.state_changed", payload: { to }, actor });
+    }
+    const before = store.getTask("task-1")!;
+    expect(() => store.append({
+      taskId: "task-1",
+      type: "task.state_changed",
+      payload: { to: "waiting_external" },
+      actor,
+    }, [], [
+      { taskId: "task-1", kind: "agent.retry", payload: { attempt: 1 }, runAt: 2_000, dedupeKey: "retry-1" },
+      { taskId: "task-1", kind: "agent.retry", payload: { attempt: 2 }, runAt: 2_000, dedupeKey: "retry-1" },
+    ])).toThrow("reused with different work");
+    expect(store.getTask("task-1")).toEqual(before);
+    expect(store.listScheduledActions()).toHaveLength(0);
+
+    store.append({
+      taskId: "task-1",
+      type: "task.state_changed",
+      payload: { to: "waiting_external" },
+      actor,
+    }, [], [
+      { taskId: "task-1", kind: "agent.retry", payload: { attempt: 1 }, runAt: 2_000, dedupeKey: "retry-1" },
+    ]);
+    expect(store.getTask("task-1")?.status).toBe("waiting_external");
+    expect(store.listScheduledActions("scheduled")).toHaveLength(1);
+    store.close();
+  });
+
   test("persists the one-blocking-attention invariant", () => {
     const store = createStore();
     createTask(store);

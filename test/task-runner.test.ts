@@ -154,6 +154,57 @@ describe("task run coordinator", () => {
     expect(store.getTask("task-1")?.status).toBe("waiting_review");
   });
 
+  test("turns a rejected rate limit into one durable exact-session retry", async () => {
+    using store = state();
+    const sessions = new TaskAgentSessionStore(
+      store.database,
+      () => 1_000,
+      () => "01900000-0000-7000-8000-000000000004",
+    );
+    const grants = new TaskMcpGrantStore(store.database, () => 1_000);
+    const agent = new FakeAgent();
+    agent.completion = {
+      outcome: "rate_limited",
+      exit: { exitCode: 1 },
+      rateLimit: {
+        type: "agent.rate_limit",
+        observedAtMs: 1_000,
+        status: "rejected",
+        resetsAtMs: 50_000,
+      },
+    };
+    const coordinator = new TaskRunCoordinator(store, sessions, grants, {
+      writeTaskMcpConfig: async () => ({
+        controlDirectory: "/identity/control/tasks/t-retry",
+        configPath: "/identity/control/tasks/t-retry/mcp.json",
+      }),
+    }, agent, () => 1_000);
+    const managed = await coordinator.start({
+      taskId: "task-1",
+      identityId: "claude-personal",
+      mcpEndpoint: "http://host.docker.internal:43100/mcp",
+      model: "claude-sonnet",
+    });
+    await managed.settle();
+    await managed.settle();
+
+    expect(store.getTask("task-1")?.status).toBe("waiting_external");
+    expect(sessions.get("task-1")?.consecutiveRateLimits).toBe(1);
+    expect(store.listScheduledActions("scheduled")).toEqual([
+      expect.objectContaining({
+        taskId: "task-1",
+        kind: "agent.retry",
+        runAt: 51_000,
+        payload: {
+          schema: "altitude.agent-retry/v1",
+          sessionId: managed.session.sessionId,
+          runNumber: 1,
+          model: "claude-sonnet",
+        },
+      }),
+    ]);
+  });
+
   test("refreshes the grant and hands the exact fixed session to the native TUI", async () => {
     using store = state();
     const sessions = new TaskAgentSessionStore(

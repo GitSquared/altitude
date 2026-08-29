@@ -15,6 +15,7 @@ export interface StoredTaskAgentSession {
   readonly mcp?: AgentMcpBoundary;
   readonly grantId?: string;
   readonly runCount: number;
+  readonly consecutiveRateLimits: number;
   readonly lastOutcome?: AgentRunOutcome;
   readonly createdAt: number;
   readonly updatedAt: number;
@@ -30,6 +31,7 @@ type SessionRow = {
   mcp_config_path: string | null;
   grant_id: string | null;
   run_count: number;
+  consecutive_rate_limits: number;
   last_outcome: AgentRunOutcome | null;
   created_at: number;
   updated_at: number;
@@ -65,6 +67,7 @@ function decode(row: SessionRow | null): StoredTaskAgentSession | undefined {
     }),
     ...(row.grant_id === null ? {} : { grantId: row.grant_id }),
     runCount: row.run_count,
+    consecutiveRateLimits: row.consecutive_rate_limits,
     ...(row.last_outcome === null ? {} : { lastOutcome: row.last_outcome }),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -83,7 +86,7 @@ export class TaskAgentSessionStore {
     return decode(this.database.query<SessionRow, [string]>(`
       SELECT task_id, adapter, session_id, identity_id, project_directory_name,
              control_directory, mcp_config_path, grant_id, run_count,
-             last_outcome, created_at, updated_at
+             consecutive_rate_limits, last_outcome, created_at, updated_at
       FROM task_agent_sessions WHERE task_id = ?1
     `).get(taskId));
   }
@@ -145,9 +148,13 @@ export class TaskAgentSessionStore {
 
   recordOutcome(taskId: string, outcome: AgentRunOutcome): StoredTaskAgentSession {
     requireId(taskId, "Task id");
-    const changed = this.database.query<unknown, [AgentRunOutcome, number, string]>(`
-      UPDATE task_agent_sessions SET last_outcome = ?1, updated_at = ?2 WHERE task_id = ?3
-    `).run(outcome, this.now(), taskId).changes;
+    const changed = this.database.query<unknown, [AgentRunOutcome, AgentRunOutcome, number, string]>(`
+      UPDATE task_agent_sessions
+      SET last_outcome = ?1,
+          consecutive_rate_limits = CASE WHEN ?2 = 'rate_limited' THEN consecutive_rate_limits + 1 ELSE 0 END,
+          updated_at = ?3
+      WHERE task_id = ?4
+    `).run(outcome, outcome, this.now(), taskId).changes;
     if (changed !== 1) throw new Error(`Task ${taskId} has no agent session`);
     return this.get(taskId)!;
   }

@@ -22,6 +22,7 @@ import {
 } from "../config/local.ts";
 import { runDoctor, renderDoctor } from "../doctor.ts";
 import { createAltitudeNodeService, nodeInstanceId, serveAltitudeNode } from "../node/server.ts";
+import { NodeScheduledActionWorker } from "../node/worker.ts";
 import { BunCommandRunner, type CommandRunner } from "../process/command.ts";
 import type { RuntimeKind } from "../runtime/capsule-runtime.ts";
 import { AppleContainerRuntime } from "../runtime/apple-container.ts";
@@ -52,6 +53,7 @@ import { FilesystemRepositorySeedCache } from "../capsule/seed-cache.ts";
 import { LocalCapsulePreparer } from "../run/local-capsule.ts";
 import { LocalCapsuleCheckpointer } from "../run/local-checkpoint.ts";
 import { portableTaskStateMember } from "../run/task-state.ts";
+import { createManagedAgentRetryExecutor } from "../run/retry-executor.ts";
 import { TaskRunCoordinator } from "../run/task-runner.ts";
 import { VERSION } from "../version.ts";
 
@@ -111,6 +113,8 @@ Runtimes:
 
 The listener defaults to loopback. Use --host deliberately when capsules on a
 native Linux node need to reach the service through the host gateway.
+With the saved runtime and listener settings, the node also resumes durable
+rate-limit retries for the exact managed Claude session.
 `;
 
 const SETUP_HELP = `Usage:
@@ -495,6 +499,7 @@ async function runManagedTask(args: readonly string[], options: CliOptions, stdo
       grants,
       new IdentityControlProvisioner(launcher),
       agent,
+      options.clock ?? Date.now,
     );
     const managed = await coordinator.start({
       taskId,
@@ -555,6 +560,7 @@ async function takeManagedTask(args: readonly string[], options: CliOptions, std
       grants,
       new IdentityControlProvisioner(launcher),
       agent,
+      options.clock ?? Date.now,
     );
     const take = await coordinator.take({
       taskId,
@@ -663,12 +669,14 @@ async function runStatus(options: CliOptions, stdout: Output, json: boolean): Pr
       openUpdates += task.openUpdates.length;
       if (task.activeAttention !== null) blockingAttention += 1;
     }
-    return { total: tasks.length, blockingAttention, openUpdates, byStatus };
+    const scheduledRetries = store.listScheduledActions("scheduled")
+      .filter((action) => action.kind === "agent.retry").length;
+    return { total: tasks.length, blockingAttention, openUpdates, scheduledRetries, byStatus };
   });
   if (json) writeJson(stdout, summary);
   else {
     const active = summary.byStatus.running + summary.byStatus.taken + summary.byStatus.provisioning;
-    stdout.write(`${summary.total} tasks · ${active} active · ${summary.blockingAttention} need attention · ${summary.openUpdates} updates\n`);
+    stdout.write(`${summary.total} tasks · ${active} active · ${summary.blockingAttention} need attention · ${summary.openUpdates} updates · ${summary.scheduledRetries} retries queued\n`);
     const nonzero = TASK_STATUSES.filter((status) => summary.byStatus[status] > 0);
     if (nonzero.length > 0) stdout.write(`${nonzero.map((status) => `${status} ${summary.byStatus[status]}`).join(" · ")}\n`);
   }
@@ -752,10 +760,38 @@ async function runNodeCommand(
     ...(hostname === undefined ? {} : { hostname }),
     ...(port === undefined ? {} : { port }),
   });
-  stdout.write(`Altitude node listening at ${server.url.toString()} (${runtime})\n`);
+  const workerCompatible = config !== undefined
+    && runtime === config.runtime
+    && port === config.node.port
+    && hostname === config.node.bindHost;
+  const retrySessions = new TaskAgentSessionStore(store.database, options.clock);
+  const worker = !workerCompatible ? undefined : new NodeScheduledActionWorker(
+    store,
+    createManagedAgentRetryExecutor({
+      tasks: store,
+      session: (taskId) => retrySessions.get(taskId),
+      run: async (taskId, model) => await runManagedTask(
+        [taskId, ...(model === undefined ? [] : ["--model", model])],
+        options,
+        stdout,
+      ),
+    }),
+    {
+      ...(options.clock === undefined ? {} : { now: options.clock }),
+      onError: (error) => (options.stderr ?? process.stderr).write(
+        `Altitude retry worker: ${error instanceof Error ? error.message : String(error)}\n`,
+      ),
+    },
+  );
+  stdout.write(`Altitude node listening at ${server.url.toString()} (${runtime}${worker === undefined ? "" : ", retry worker active"})\n`);
+  if (config !== undefined && !workerCompatible) {
+    stdout.write("Automatic retries are inactive because node runtime/listener overrides differ from the saved setup.\n");
+  }
   try {
+    worker?.start();
     await waitForShutdownSignal();
   } finally {
+    await worker?.close();
     await server.close();
   }
   return 0;

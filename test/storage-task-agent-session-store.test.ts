@@ -46,6 +46,9 @@ describe("durable task agent sessions", () => {
     expect(bound.grantId).toBe("grant-1");
     expect(sessions.markRunStarted("task-1").runCount).toBe(1);
     expect(sessions.recordOutcome("task-1", "success").lastOutcome).toBe("success");
+    expect(sessions.recordOutcome("task-1", "rate_limited").consecutiveRateLimits).toBe(1);
+    expect(sessions.recordOutcome("task-1", "rate_limited").consecutiveRateLimits).toBe(2);
+    expect(sessions.recordOutcome("task-1", "success").consecutiveRateLimits).toBe(0);
     expect(sessions.ensure("task-1", "claude-personal").sessionId).toBe(created.sessionId);
     const encoded = JSON.stringify(store.database.query("SELECT * FROM task_agent_sessions").get());
     expect(encoded).not.toContain("Bearer");
