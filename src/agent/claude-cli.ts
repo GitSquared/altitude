@@ -109,6 +109,8 @@ function validateSession(session: AgentTaskSession): void {
 function claudeEnvironment(identity: ClaudeIdentity, session?: AgentTaskSession): Readonly<Record<string, string>> {
   return {
     CLAUDE_CONFIG_DIR: identity.configDirectory,
+    // The pinned Claude CLI uses this project key for transcript storage. The
+    // checkpoint exporter later verifies the expected session file exists.
     ...(session === undefined ? {} : { CLAUDE_CODE_PROJECT_DIR_NAME: session.projectDirectoryName }),
   };
 }
@@ -366,7 +368,7 @@ export class ClaudeCliAdapter implements AgentAdapter {
       direction: "export",
       taskId: session.taskId,
       from: { scope: "identity", path: taskPath },
-      to: { scope: "task-capsule", path: join("agent", "claude", "projects", session.projectDirectoryName) },
+      to: { scope: "task-capsule", path: join("session", "claude", "files") },
       identityMaterial: "excluded",
     };
   }
@@ -377,7 +379,7 @@ export class ClaudeCliAdapter implements AgentAdapter {
     return {
       direction: "import",
       taskId: session.taskId,
-      from: { scope: "task-capsule", path: join("agent", "claude", "projects", session.projectDirectoryName) },
+      from: { scope: "task-capsule", path: join("session", "claude", "files") },
       to: { scope: "identity", path: taskPath },
       identityMaterial: "excluded",
     };

@@ -5,6 +5,10 @@ import type { AttentionResolution, EventActor } from "../core/events.ts";
 import { ClaudeCliAdapter } from "../agent/claude-cli.ts";
 import type { AgentEvent } from "../agent/protocol.ts";
 import {
+  assertResumableClaudeTranscript,
+  decodeClaudeTranscriptCapsuleMembers,
+} from "../agent/transcript.ts";
+import {
   INTENT_LEVELS,
   TASK_STATUSES,
   isIntentLevel,
@@ -44,6 +48,10 @@ import { TaskAgentSessionStore } from "../storage/task-agent-session-store.ts";
 import { TaskStore } from "../storage/task-store.ts";
 import { IdentityControlProvisioner, runIdentityControlStdio } from "../identity/control.ts";
 import { runIdentityInit } from "../identity/init.ts";
+import {
+  IdentityTranscriptProvisioner,
+  runIdentityTranscriptStdio,
+} from "../identity/transcript.ts";
 import { TaskMcpGrantStore } from "../tools/grants.ts";
 import { ProcessTaskToolExecutor } from "../tools/process-executor.ts";
 import { runTaskToolStdio } from "../tools/task-helper.ts";
@@ -462,6 +470,8 @@ async function prepareTaskCapsule(input: {
   readonly config: AltitudeLocalConfig;
   readonly runner: CommandRunner;
   readonly launcher: CapsuleProcessLauncher;
+  readonly agentSessions?: TaskAgentSessionStore;
+  readonly transcripts?: IdentityTranscriptProvisioner;
   readonly clock?: () => number;
 }): Promise<LocalCapsuleCheckpointer> {
   const needsInitialRepository = input.task.status === "queued";
@@ -480,6 +490,8 @@ async function prepareTaskCapsule(input: {
     checkpointProvisioner,
     input.store,
     input.clock ?? Date.now,
+    input.agentSessions,
+    input.transcripts,
   );
   const preparer = new LocalCapsulePreparer(
     checkpoints,
@@ -494,8 +506,28 @@ async function prepareTaskCapsule(input: {
     network: input.config.network,
     nodeId: input.config.node.id,
     ...(input.repositoryPath === undefined ? {} : { repositoryPath: resolve(input.repositoryPath) }),
-    additionalMembers: [portableTaskStateMember(input.store, input.task.id)],
+    additionalMembers: [portableTaskStateMember(
+      input.store,
+      input.task.id,
+      input.agentSessions,
+    )],
   });
+  if (input.agentSessions !== undefined && input.transcripts !== undefined) {
+    const session = input.agentSessions.get(input.task.id);
+    if (session !== undefined && session.runCount > 0) {
+      const checkpoint = await checkpoints.readActive(input.task.id);
+      const imported = await input.transcripts.import({
+        taskId: session.taskId,
+        sessionId: session.sessionId,
+        projectDirectoryName: session.projectDirectoryName,
+      }, checkpoint.members);
+      if (imported === "absent") {
+        throw new Error(
+          `Task ${input.task.id} has a resumable Claude session but its capsule has no portable transcript`,
+        );
+      }
+    }
+  }
   return checkpointer;
 }
 
@@ -520,6 +552,11 @@ async function runManagedTask(args: readonly string[], options: CliOptions, stdo
   if (task === undefined) throw new Error(`Task ${taskId} does not exist`);
   const launcher = new CapsuleProcessLauncher(config.runtime);
   const agent = await ensureManagedIdentity(config, runner, launcher, store, options);
+  const agentSessions = new TaskAgentSessionStore(store.database, options.clock);
+  const transcripts = new IdentityTranscriptProvisioner(
+    launcher,
+    config.identity.id,
+  );
   const checkpointer = await prepareTaskCapsule({
     task,
     store,
@@ -528,6 +565,8 @@ async function runManagedTask(args: readonly string[], options: CliOptions, stdo
     config,
     runner,
     launcher,
+    agentSessions,
+    transcripts,
     ...(options.clock === undefined ? {} : { clock: options.clock }),
   });
   const grants = new TaskMcpGrantStore(store.database, options.clock);
@@ -535,7 +574,7 @@ async function runManagedTask(args: readonly string[], options: CliOptions, stdo
   try {
     const coordinator = new TaskRunCoordinator(
       store,
-      new TaskAgentSessionStore(store.database, options.clock),
+      agentSessions,
       grants,
       new IdentityControlProvisioner(launcher),
       agent,
@@ -582,6 +621,11 @@ async function takeManagedTask(args: readonly string[], options: CliOptions, std
   if (task === undefined) throw new Error(`Task ${taskId} does not exist`);
   const launcher = new CapsuleProcessLauncher(config.runtime);
   const agent = await ensureManagedIdentity(config, runner, launcher, store, options);
+  const agentSessions = new TaskAgentSessionStore(store.database, options.clock);
+  const transcripts = new IdentityTranscriptProvisioner(
+    launcher,
+    config.identity.id,
+  );
   const checkpointer = await prepareTaskCapsule({
     task,
     store,
@@ -589,6 +633,8 @@ async function takeManagedTask(args: readonly string[], options: CliOptions, std
     config,
     runner,
     launcher,
+    agentSessions,
+    transcripts,
     ...(options.clock === undefined ? {} : { clock: options.clock }),
   });
   const grants = new TaskMcpGrantStore(store.database, options.clock);
@@ -596,7 +642,7 @@ async function takeManagedTask(args: readonly string[], options: CliOptions, std
   try {
     const coordinator = new TaskRunCoordinator(
       store,
-      new TaskAgentSessionStore(store.database, options.clock),
+      agentSessions,
       grants,
       new IdentityControlProvisioner(launcher),
       agent,
@@ -649,6 +695,7 @@ async function reviewManagedTask(
   }
 
   const launcher = new CapsuleProcessLauncher(config.runtime);
+  const agentSessions = new TaskAgentSessionStore(store.database, options.clock);
   const checkpointer = await prepareTaskCapsule({
     task,
     store,
@@ -656,6 +703,7 @@ async function reviewManagedTask(
     config,
     runner,
     launcher,
+    agentSessions,
     ...(options.clock === undefined ? {} : { clock: options.clock }),
   });
   const checkpoint = await new FilesystemCapsuleCheckpointStore(paths.capsules).readActive(taskId);
@@ -812,6 +860,28 @@ async function sendManagedTask(
             : { pigeonsExecutable: option(parsed, "pigeons")! }),
         },
   };
+  const checkpoints = new FilesystemCapsuleCheckpointStore(paths.capsules);
+  const activeCheckpoint = await checkpoints.readActive(taskId);
+  const agentSessions = new TaskAgentSessionStore(store.database, options.clock);
+  const agentSession = agentSessions.get(taskId);
+  const transcript = decodeClaudeTranscriptCapsuleMembers(
+    activeCheckpoint.members,
+  );
+  if (agentSession !== undefined && agentSession.runCount > 0) {
+    if (transcript === undefined
+      || transcript.taskId !== agentSession.taskId
+      || transcript.sessionId !== agentSession.sessionId
+      || transcript.projectDirectoryName !== agentSession.projectDirectoryName) {
+      throw new Error(
+        `Task ${taskId} cannot move until its Claude transcript is durably checkpointed`,
+      );
+    }
+    assertResumableClaudeTranscript(transcript);
+  } else if (transcript !== undefined) {
+    throw new Error(
+      `Task ${taskId} has transcript bytes without a resumable agent session`,
+    );
+  }
   store.append({
     taskId,
     type: "task.state_changed",
@@ -821,7 +891,6 @@ async function sendManagedTask(
     },
     actor: OPERATOR,
   });
-  const checkpoints = new FilesystemCapsuleCheckpointStore(paths.capsules);
   const seeds = new FilesystemRepositorySeedCache(
     join(paths.cache, "repository-seeds"),
   );
@@ -844,7 +913,11 @@ async function sendManagedTask(
     prepared = await coordinator.prepare({
       taskId,
       targetNodeId,
-      additionalMembers: [portableTaskStateMember(store, taskId)],
+      additionalMembers: [portableTaskStateMember(
+        store,
+        taskId,
+        agentSessions,
+      )],
     });
   } catch (error) {
     if (store.getTask(taskId)?.status === "transferring") {
@@ -1072,9 +1145,14 @@ async function runTransferReceiverCommand(
     ...(options.clock === undefined ? {} : { clock: options.clock }),
     ...(options.createId === undefined ? {} : { createId: options.createId }),
   });
-  const imported = store.importPortableTaskState(
-    decodePortableTaskState(stateMember.bytes),
-  );
+  const portableState = decodePortableTaskState(stateMember.bytes);
+  const imported = store.importPortableTaskState(portableState);
+  if (portableState.agentSession !== undefined) {
+    new TaskAgentSessionStore(store.database, options.clock).importPortable(
+      portableState.agentSession,
+      config.identity.id,
+    );
+  }
   if (imported.status === "transferring") {
     store.append({
       taskId: imported.id,
@@ -1331,6 +1409,8 @@ export async function runCli(args: readonly string[], options: CliOptions = {}):
         return await runIdentityControlStdio();
       case "_identity-init":
         return await runIdentityInit();
+      case "_identity-transcript":
+        return await runIdentityTranscriptStdio(args[1]);
       case "_transfer":
         return await runTransferReceiverCommand(args.slice(1), options, stdout);
       default:

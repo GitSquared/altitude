@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Database } from "bun:sqlite";
 
 import type { AgentMcpBoundary, AgentRunOutcome } from "../agent/protocol.ts";
+import type { PortableTaskAgentSession } from "../run/task-state.ts";
 import { ALL_CLAUDE_ALTITUDE_TOOLS } from "../tools/mcp.ts";
 
 export interface StoredTaskAgentSession {
@@ -44,6 +45,15 @@ function requireId(value: string, label: string): void {
 function projectDirectory(taskId: string): string {
   return `altitude-${createHash("sha256").update(taskId, "utf8").digest("hex").slice(0, 24)}`;
 }
+
+const AGENT_OUTCOMES = new Set<AgentRunOutcome>([
+  "success",
+  "error",
+  "yielded",
+  "stopped",
+  "rate_limited",
+  "protocol_error",
+]);
 
 function decode(row: SessionRow | null): StoredTaskAgentSession | undefined {
   if (row === null) return undefined;
@@ -113,6 +123,101 @@ export class TaskAgentSessionStore {
       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
     `).run(taskId, "claude-code-cli", sessionId, identityId, projectDirectory(taskId), now, now);
     return this.get(taskId)!;
+  }
+
+  importPortable(
+    snapshot: PortableTaskAgentSession,
+    targetIdentityId: string,
+  ): StoredTaskAgentSession {
+    requireId(snapshot.taskId, "Task id");
+    requireId(targetIdentityId, "Identity id");
+    if (snapshot.schema !== "altitude.agent-session/v1"
+      || snapshot.adapter !== "claude-code-cli"
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(snapshot.sessionId)
+      || !/^[A-Za-z0-9._-]+$/u.test(snapshot.projectDirectoryName)
+      || !Number.isSafeInteger(snapshot.runCount) || snapshot.runCount < 0
+      || !Number.isSafeInteger(snapshot.consecutiveRateLimits)
+      || snapshot.consecutiveRateLimits < 0
+      || !Number.isSafeInteger(snapshot.createdAt) || snapshot.createdAt < 0
+      || !Number.isSafeInteger(snapshot.updatedAt)
+      || snapshot.updatedAt < snapshot.createdAt
+      || (snapshot.lastOutcome !== undefined
+        && !AGENT_OUTCOMES.has(snapshot.lastOutcome))) {
+      throw new Error("Portable task agent session is invalid");
+    }
+    return this.database.transaction(() => {
+      const existing = this.get(snapshot.taskId);
+      if (existing === undefined) {
+        this.database.query<unknown, [string, string, string, string, number, number, AgentRunOutcome | null, number, number]>(`
+          INSERT INTO task_agent_sessions(
+            task_id, adapter, session_id, identity_id,
+            project_directory_name, run_count, consecutive_rate_limits,
+            last_outcome, created_at, updated_at
+          ) VALUES (?1, 'claude-code-cli', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        `).run(
+          snapshot.taskId,
+          snapshot.sessionId,
+          targetIdentityId,
+          snapshot.projectDirectoryName,
+          snapshot.runCount,
+          snapshot.consecutiveRateLimits,
+          snapshot.lastOutcome ?? null,
+          snapshot.createdAt,
+          snapshot.updatedAt,
+        );
+        return this.get(snapshot.taskId)!;
+      }
+      if (existing.sessionId !== snapshot.sessionId
+        || existing.adapter !== snapshot.adapter
+        || existing.projectDirectoryName !== snapshot.projectDirectoryName) {
+        throw new Error(
+          `Target task ${snapshot.taskId} is bound to another agent session`,
+        );
+      }
+      if (existing.runCount === snapshot.runCount
+        && existing.lastOutcome !== undefined
+        && snapshot.lastOutcome !== undefined
+        && existing.lastOutcome !== snapshot.lastOutcome) {
+        throw new Error("Target agent session outcome diverges from the capsule");
+      }
+      if (existing.grantId !== undefined) {
+        this.database.query<unknown, [number, string]>(`
+          UPDATE task_mcp_grants
+          SET revoked_at = COALESCE(revoked_at, ?1)
+          WHERE id = ?2
+        `).run(this.now(), existing.grantId);
+      }
+      const existingIsAhead = existing.runCount > snapshot.runCount;
+      const sameRun = existing.runCount === snapshot.runCount;
+      this.database.query<unknown, [string, number, number, AgentRunOutcome | null, number, number, string]>(`
+        UPDATE task_agent_sessions
+        SET identity_id = ?1,
+            control_directory = NULL,
+            mcp_config_path = NULL,
+            grant_id = NULL,
+            run_count = ?2,
+            consecutive_rate_limits = ?3,
+            last_outcome = ?4,
+            created_at = ?5,
+            updated_at = ?6
+        WHERE task_id = ?7
+      `).run(
+        targetIdentityId,
+        existingIsAhead ? existing.runCount : snapshot.runCount,
+        existingIsAhead
+          ? existing.consecutiveRateLimits
+          : sameRun
+          ? Math.max(existing.consecutiveRateLimits, snapshot.consecutiveRateLimits)
+          : snapshot.consecutiveRateLimits,
+        (existingIsAhead ? existing.lastOutcome : snapshot.lastOutcome)
+          ?? existing.lastOutcome
+          ?? null,
+        Math.min(existing.createdAt, snapshot.createdAt),
+        Math.max(existing.updatedAt, snapshot.updatedAt),
+        snapshot.taskId,
+      );
+      return this.get(snapshot.taskId)!;
+    }).immediate();
   }
 
   bindMcp(input: {

@@ -336,13 +336,13 @@ describe("Claude CLI adapter", () => {
       direction: "export",
       taskId: "task-1",
       from: { scope: "identity", path: "/identity/claude/projects/altitude-task-1" },
-      to: { scope: "task-capsule", path: "agent/claude/projects/altitude-task-1" },
+      to: { scope: "task-capsule", path: "session/claude/files" },
       identityMaterial: "excluded",
     });
     expect(imported).toEqual({
       direction: "import",
       taskId: "task-1",
-      from: { scope: "task-capsule", path: "agent/claude/projects/altitude-task-1" },
+      from: { scope: "task-capsule", path: "session/claude/files" },
       to: { scope: "identity", path: "/identity/claude/projects/altitude-task-1" },
       identityMaterial: "excluded",
     });

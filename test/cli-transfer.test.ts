@@ -11,6 +11,11 @@ import {
   portableCapsulePath,
   utf8,
 } from "../src/capsule/index.ts";
+import {
+  claudeTranscriptCapsuleMembers,
+  createClaudeTranscriptBundle,
+  decodeClaudeTranscriptCapsuleMembers,
+} from "../src/agent/transcript.ts";
 import { runCli, type CliOptions } from "../src/cli/main.ts";
 import {
   defaultLocalConfig,
@@ -22,8 +27,12 @@ import type {
   CommandRunner,
   CommandSpec,
 } from "../src/process/command.ts";
-import { portableTaskStateMember } from "../src/run/task-state.ts";
+import {
+  PORTABLE_TASK_STATE_MEMBER,
+  portableTaskStateMember,
+} from "../src/run/task-state.ts";
 import { TaskStore } from "../src/storage/task-store.ts";
+import { TaskAgentSessionStore } from "../src/storage/task-agent-session-store.ts";
 
 const roots: string[] = [];
 
@@ -78,6 +87,29 @@ test("task send moves a paused capsule through the remote command boundary", asy
       actor: { kind: "system", component: "fixture" },
     });
   }
+  const sessions = new TaskAgentSessionStore(
+    store.database,
+    () => 1_000,
+    () => "01900000-0000-7000-8000-000000000001",
+  );
+  const session = sessions.ensure("task-send", "claude-personal");
+  sessions.bindMcp({
+    taskId: "task-send",
+    grantId: "grant-source",
+    controlDirectory: "/identity/control/tasks/task-send",
+    configPath: "/identity/control/tasks/task-send/mcp.json",
+  });
+  sessions.markRunStarted("task-send");
+  sessions.recordOutcome("task-send", "yielded");
+  const transcript = createClaudeTranscriptBundle({
+    taskId: "task-send",
+    sessionId: session.sessionId,
+    projectDirectoryName: session.projectDirectoryName,
+    files: [{
+      path: session.sessionId + ".jsonl",
+      bytes: utf8("portable context\n"),
+    }],
+  });
   const initial = createCapsuleCheckpoint({
     capsuleId: "task-send",
     taskId: "task-send",
@@ -104,7 +136,8 @@ test("task send moves a paused capsule through the remote command boundary", asy
     members: [
       { path: portableCapsulePath("git/staged.patch"), bytes: new Uint8Array() },
       { path: portableCapsulePath("git/unstaged.patch"), bytes: new Uint8Array() },
-      portableTaskStateMember(store, "task-send"),
+      portableTaskStateMember(store, "task-send", sessions),
+      ...claudeTranscriptCapsuleMembers(transcript),
     ],
   });
   const sourceCheckpoints = new FilesystemCapsuleCheckpointStore(
@@ -186,4 +219,17 @@ test("task send moves a paused capsule through the remote command boundary", asy
     .toMatchObject({ ownerNodeId: "straylight", epoch: 2 });
   expect((await targetCheckpoints.readActive("task-send")).manifest.ownership)
     .toMatchObject({ ownerNodeId: "straylight", epoch: 2 });
+  const target = await targetCheckpoints.readActive("task-send");
+  expect(decodeClaudeTranscriptCapsuleMembers(target.members)).toEqual(
+    transcript,
+  );
+  const portable = target.members.find(
+    (member) => member.path === PORTABLE_TASK_STATE_MEMBER,
+  );
+  expect(portable && new TextDecoder().decode(portable.bytes)).toContain(
+    session.sessionId,
+  );
+  expect(portable && new TextDecoder().decode(portable.bytes)).not.toContain(
+    "claude-personal",
+  );
 });

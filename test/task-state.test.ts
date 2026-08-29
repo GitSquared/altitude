@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { TaskStore } from "../src/storage/task-store.ts";
+import { TaskAgentSessionStore } from "../src/storage/task-agent-session-store.ts";
 import { IntentSubmissionStore } from "../src/intent/submission.ts";
 import {
   PORTABLE_TASK_STATE_FORMAT,
@@ -38,13 +39,28 @@ describe("portable task state", () => {
       payload: { to: "queued", reason: "Ready" },
       actor: { kind: "operator" },
     });
+    const sessions = new TaskAgentSessionStore(
+      store.database,
+      () => 42,
+      () => "01900000-0000-7000-8000-000000000001",
+    );
+    sessions.ensure("task-1", "claude-source");
+    sessions.bindMcp({
+      taskId: "task-1",
+      grantId: "grant-source",
+      controlDirectory: "/identity/control/tasks/task-1",
+      configPath: "/identity/control/tasks/task-1/mcp.json",
+    });
+    sessions.markRunStarted("task-1");
+    sessions.recordOutcome("task-1", "success");
 
-    const member = portableTaskStateMember(store, "task-1");
+    const member = portableTaskStateMember(store, "task-1", sessions);
     const value = JSON.parse(new TextDecoder().decode(member.bytes)) as {
       schema: string;
       task: { status: string; revision: number };
       events: Array<{ sequence: number }>;
       intentArtifacts: Array<{ tool: string; base: { checkpointRevision: number } }>;
+      agentSession: { sessionId: string; runCount: number };
     };
     expect(String(member.path)).toBe("state/task.json");
     expect(value.schema).toBe(PORTABLE_TASK_STATE_FORMAT);
@@ -53,16 +69,31 @@ describe("portable task state", () => {
     expect(value.intentArtifacts).toMatchObject([
       { tool: "redmarker", base: { checkpointRevision: 1 } },
     ]);
+    expect(value.agentSession).toMatchObject({
+      sessionId: "01900000-0000-7000-8000-000000000001",
+      runCount: 1,
+    });
+    expect(new TextDecoder().decode(member.bytes)).not.toContain("claude-source");
+    expect(new TextDecoder().decode(member.bytes)).not.toContain("grant-source");
+    expect(new TextDecoder().decode(member.bytes)).not.toContain("controlDirectory");
 
     using target = new TaskStore(":memory:");
-    const imported = target.importPortableTaskState(
-      decodePortableTaskState(member.bytes),
-    );
+    const snapshot = decodePortableTaskState(member.bytes);
+    const imported = target.importPortableTaskState(snapshot);
     expect(imported).toEqual(store.getTask("task-1")!);
     expect(target.getEvents("task-1")).toEqual(store.getEvents("task-1"));
     expect(target.listIntentArtifacts("task-1")).toEqual(
       store.listIntentArtifacts("task-1"),
     );
+    const targetSession = new TaskAgentSessionStore(target.database)
+      .importPortable(snapshot.agentSession!, "claude-target");
+    expect(targetSession).toMatchObject({
+      sessionId: value.agentSession.sessionId,
+      identityId: "claude-target",
+      runCount: 1,
+    });
+    expect(targetSession.controlDirectory).toBeUndefined();
+    expect(targetSession.grantId).toBeUndefined();
   });
 
   test("rejects a projection that does not replay from its claimed events", () => {

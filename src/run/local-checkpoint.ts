@@ -2,7 +2,10 @@ import { capsuleManifestDigest, type CapsuleCheckpoint, type CapsuleManifestV1 }
 import type { CapsuleCheckpointReference, FilesystemCapsuleCheckpointStore } from "../capsule/filesystem.ts";
 import type { FilesystemRepositorySeedCache } from "../capsule/seed-cache.ts";
 import { TASK_CHECKPOINT_PROTOCOL, repositorySeedBindingDigest } from "../capsule/task-checkpoint.ts";
+import { isClaudeTranscriptMember } from "../agent/transcript.ts";
+import type { IdentityTranscriptProvisioner } from "../identity/transcript.ts";
 import type { TaskCapsuleCheckpointProvisioner } from "../runtime/task-manager.ts";
+import type { TaskAgentSessionStore } from "../storage/task-agent-session-store.ts";
 import type { TaskStore } from "../storage/task-store.ts";
 import { portableTaskStateMember } from "./task-state.ts";
 
@@ -46,12 +49,24 @@ export class LocalCapsuleCheckpointer {
     private readonly provisioner: CheckpointProvisioner,
     private readonly tasks: Pick<TaskStore, "getTask" | "getEvents" | "listIntentArtifacts">,
     private readonly now: () => number = Date.now,
+    private readonly agentSessions?: Pick<TaskAgentSessionStore, "get">,
+    private readonly transcripts?: Pick<IdentityTranscriptProvisioner, "export">,
   ) {}
 
   async capture(taskId: string): Promise<CapsuleCheckpointReference> {
     const previous = await this.checkpoints.readActive(taskId);
     const previousDigest = capsuleManifestDigest(previous.manifest);
     const seed = await this.seeds.read(previousDigest);
+    const session = this.agentSessions?.get(taskId);
+    const transcriptMembers = session !== undefined
+      && session.runCount > 0
+      && this.transcripts !== undefined
+      ? await this.transcripts.export({
+          taskId: session.taskId,
+          sessionId: session.sessionId,
+          projectDirectoryName: session.projectDirectoryName,
+        })
+      : previous.members.filter((member) => isClaudeTranscriptMember(member.path));
     const checkpoint = await this.provisioner.capture({
       schema: TASK_CHECKPOINT_PROTOCOL,
       taskId,
@@ -61,7 +76,10 @@ export class LocalCapsuleCheckpointer {
       ownership: previous.manifest.ownership,
       previousCheckpointDigest: previousDigest,
       repositoryBindingDigest: repositorySeedBindingDigest(previous.manifest.repository),
-      additionalMembers: [portableTaskStateMember(this.tasks, taskId)],
+      additionalMembers: [
+        portableTaskStateMember(this.tasks, taskId, this.agentSessions),
+        ...transcriptMembers,
+      ],
     });
     assertCheckpointAdvance(previous.manifest, checkpoint.manifest);
     return await this.#publishAndActivate(checkpoint, seed);
