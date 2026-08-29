@@ -10,6 +10,8 @@ export interface IntentArtifactEnvelope {
   readonly base: {
     readonly url: string;
     readonly headSha: string;
+    readonly checkpointDigest: string;
+    readonly checkpointRevision: number;
   };
   readonly payloadSchema: string;
   readonly payload: unknown;

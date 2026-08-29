@@ -67,6 +67,7 @@ describe("CLI", () => {
     expect(await runCli(["task", "help"], cli.options)).toBe(0);
     expect(cli.stdout.value).toContain("task run <task-id> [--repository <path>]");
     expect(cli.stdout.value).toContain("task take <task-id>");
+    expect(cli.stdout.value).toContain("task review <task-id> --url <loopback-url>");
   });
 
   test("persists create, queue, list, show, and status across invocations", async () => {

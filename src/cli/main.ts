@@ -23,6 +23,8 @@ import {
 import { runDoctor, renderDoctor } from "../doctor.ts";
 import { createAltitudeNodeService, nodeInstanceId, serveAltitudeNode } from "../node/server.ts";
 import { NodeScheduledActionWorker } from "../node/worker.ts";
+import { RedmarkerIntentTool } from "../intent/redmarker.ts";
+import { IntentSubmissionStore } from "../intent/submission.ts";
 import { BunCommandRunner, type CommandRunner } from "../process/command.ts";
 import type { RuntimeKind } from "../runtime/capsule-runtime.ts";
 import { AppleContainerRuntime } from "../runtime/apple-container.ts";
@@ -49,6 +51,7 @@ import { runTaskBootstrapStdio } from "../capsule/bootstrap.ts";
 import { runTaskCheckpointStdio } from "../capsule/task-checkpoint.ts";
 import { runTaskInit } from "../capsule/init.ts";
 import { FilesystemCapsuleCheckpointStore } from "../capsule/filesystem.ts";
+import { capsuleManifestDigest } from "../capsule/manifest.ts";
 import { FilesystemRepositorySeedCache } from "../capsule/seed-cache.ts";
 import { LocalCapsulePreparer } from "../run/local-capsule.ts";
 import { LocalCapsuleCheckpointer } from "../run/local-checkpoint.ts";
@@ -72,6 +75,7 @@ Commands:
   task queue <task-id>        Make a draft, stopped, or failed task runnable
   task run <task-id>          Run or resume a managed headless Claude turn
   task take <task-id>         Enter the same session in Claude Code's TUI
+  task review <task-id>       Add visual intent with managed Redmarker
   attention answer <task-id>  Answer the active Decision
   attention accept <task-id>  Accept the active Review and complete the task
   attention revise <task-id>  Return a Review with revision instructions
@@ -93,6 +97,7 @@ const TASK_HELP = `Usage:
   altitude task queue <task-id> [--json]
   altitude task run <task-id> [--repository <path>] [--model <model>] [--json]
   altitude task take <task-id>
+  altitude task review <task-id> --url <loopback-url> [--redmarker <executable>] [--json]
 
 Intent levels:
   ${INTENT_LEVELS.join(", ")}
@@ -282,7 +287,11 @@ async function runTaskCommand(
       const result = await withStore(options, (store) => {
         const task = store.getTask(taskId);
         if (task === undefined) throw new Error(`Task ${taskId} does not exist`);
-        return { task, events: store.getEvents(taskId) };
+        return {
+          task,
+          events: store.getEvents(taskId),
+          intentArtifacts: store.listIntentArtifacts(taskId),
+        };
       });
       if (wantsJson(parsed)) writeJson(stdout, result);
       else {
@@ -290,6 +299,12 @@ async function runTaskCommand(
         stdout.write("History:\n");
         for (const event of result.events) {
           stdout.write(`  ${event.sequence}. ${event.type}  ${new Date(event.occurredAt).toISOString()}\n`);
+        }
+        if (result.intentArtifacts.length > 0) {
+          stdout.write("Visual intent:\n");
+          for (const artifact of result.intentArtifacts) {
+            stdout.write(`  ${artifact.tool} ${artifact.artifactId}  ${artifact.createdAt}\n`);
+          }
         }
       }
       return 0;
@@ -317,6 +332,8 @@ async function runTaskCommand(
       return await runManagedTask(args.slice(1), options, stdout);
     case "take":
       return await takeManagedTask(args.slice(1), options, stdout);
+    case "review":
+      return await reviewManagedTask(args.slice(1), options, stdout);
     default:
       throw new CliUsageError(`Unknown task command: ${subcommand}`);
   }
@@ -345,6 +362,7 @@ async function useTaskNode(input: {
   readonly grants: TaskMcpGrantStore;
   readonly launcher: CapsuleProcessLauncher;
   readonly databasePath: string;
+  readonly submissions?: IntentSubmissionStore;
 }): Promise<NodeUse> {
   const instanceId = nodeInstanceId(input.databasePath);
   if (await existingNode(input.config.node.port, instanceId)) {
@@ -355,6 +373,7 @@ async function useTaskNode(input: {
     store: input.store,
     grants: input.grants,
     executor: new ProcessTaskToolExecutor(input.launcher),
+    ...(input.submissions === undefined ? {} : { submissions: input.submissions }),
     instanceId,
     allowedHostnames: [...new Set([
       "127.0.0.1",
@@ -585,6 +604,124 @@ async function takeManagedTask(args: readonly string[], options: CliOptions, std
   }
 }
 
+async function reviewManagedTask(
+  args: readonly string[],
+  options: CliOptions,
+  stdout: Output,
+): Promise<number> {
+  const parsed = parseArguments(args, new Set(["url", "redmarker"]));
+  if (parsed.positionals.length !== 1) {
+    throw new CliUsageError("task review requires exactly one task id");
+  }
+  const targetUrl = option(parsed, "url");
+  if (targetUrl === undefined) throw new CliUsageError("task review requires --url <loopback-url>");
+  const taskId = parsed.positionals[0]!;
+  const { paths, config, runner } = await managedContext(options);
+  using store = new TaskStore(paths.database, {
+    ...(options.clock === undefined ? {} : { clock: options.clock }),
+    ...(options.createId === undefined ? {} : { createId: options.createId }),
+  });
+  const task = store.getTask(taskId);
+  if (task === undefined) throw new Error(`Task ${taskId} does not exist`);
+  if (task.status === "draft" || task.status === "queued") {
+    throw new Error(`Task ${taskId} has no reviewable capsule yet; run it once before visual review`);
+  }
+
+  const launcher = new CapsuleProcessLauncher(config.runtime);
+  const checkpointer = await prepareTaskCapsule({
+    task,
+    store,
+    paths,
+    config,
+    runner,
+    launcher,
+    ...(options.clock === undefined ? {} : { clock: options.clock }),
+  });
+  const checkpoint = await new FilesystemCapsuleCheckpointStore(paths.capsules).readActive(taskId);
+  if (checkpoint.manifest.taskId !== taskId) {
+    throw new Error(`Active capsule for ${taskId} has a mismatched task binding`);
+  }
+  const checkpointDigest = capsuleManifestDigest(checkpoint.manifest);
+  const submissions = new IntentSubmissionStore(store, {
+    ...(options.clock === undefined ? {} : { clock: options.clock }),
+  });
+  const grant = submissions.issue({
+    taskId,
+    capsuleId: checkpoint.manifest.capsuleId,
+    baseUrl: targetUrl,
+    headSha: checkpoint.manifest.repository.headCommit,
+    checkpointDigest,
+    checkpointRevision: checkpoint.manifest.revision,
+  });
+  const grants = new TaskMcpGrantStore(store.database, options.clock);
+  let node: NodeUse | undefined;
+  try {
+    node = await useTaskNode({
+      config,
+      store,
+      grants,
+      launcher,
+      databasePath: paths.database,
+      submissions,
+    });
+    const submissionUrl = new URL(
+      `/v1/intent-tools/redmarker/${grant.sessionId}`,
+      `http://127.0.0.1:${config.node.port}`,
+    ).toString();
+    const launch = new RedmarkerIntentTool(
+      option(parsed, "redmarker")
+        ?? options.env?.ALTITUDE_REDMARKER_BIN
+        ?? process.env.ALTITUDE_REDMARKER_BIN
+        ?? "redmarker",
+    ).launch({
+      taskId,
+      capsuleId: checkpoint.manifest.capsuleId,
+      targetUrl,
+      submissionUrl,
+      submissionToken: grant.token,
+    });
+    const exitCode = await runner.runInteractive({
+      executable: launch.executable,
+      args: launch.args,
+      env: launch.environment,
+    });
+    const artifact = submissions.artifactForSession(grant.sessionId);
+    if (artifact === undefined) {
+      if (wantsJson(parsed)) {
+        writeJson(stdout, {
+          taskId,
+          exitCode,
+          submitted: false,
+          message: "Redmarker exited without a managed artifact; its local copy fallback remains authoritative.",
+        });
+      } else {
+        stdout.write(
+          "No managed visual artifact was received; keep the Redmarker clipboard fallback if you made one.\n",
+        );
+      }
+      return exitCode;
+    }
+    const durableCheckpoint = await checkpointer.capture(taskId);
+    if (wantsJson(parsed)) {
+      writeJson(stdout, {
+        taskId,
+        exitCode,
+        submitted: true,
+        artifact,
+        checkpoint: durableCheckpoint,
+      });
+    } else {
+      stdout.write(
+        `Added Redmarker artifact ${artifact.artifactId} to task ${taskId}; capsule revision ${durableCheckpoint.revision} is durable.\n`,
+      );
+    }
+    return exitCode;
+  } finally {
+    submissions.revoke(grant.sessionId);
+    await node?.close();
+  }
+}
+
 function resolutionFor(
   command: string,
   task: Task,
@@ -743,6 +880,9 @@ async function runNodeCommand(
     store,
     grants,
     executor: new ProcessTaskToolExecutor(launcher),
+    submissions: new IntentSubmissionStore(store, {
+      ...(options.clock === undefined ? {} : { clock: options.clock }),
+    }),
     instanceId: nodeInstanceId(paths.database),
     ...(config === undefined ? {} : {
       allowedHostnames: [...new Set([

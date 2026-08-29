@@ -44,7 +44,7 @@ export class LocalCapsuleCheckpointer {
     private readonly checkpoints: CheckpointStore,
     private readonly seeds: SeedCache,
     private readonly provisioner: CheckpointProvisioner,
-    private readonly tasks: Pick<TaskStore, "getTask" | "getEvents">,
+    private readonly tasks: Pick<TaskStore, "getTask" | "getEvents" | "listIntentArtifacts">,
     private readonly now: () => number = Date.now,
   ) {}
 

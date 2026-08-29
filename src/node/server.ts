@@ -1,5 +1,14 @@
 import { createHash } from "node:crypto";
 
+import {
+  hostHeaderValidationResponse,
+  originValidationResponse,
+} from "@modelcontextprotocol/server";
+
+import {
+  createIntentSubmissionHandler,
+  IntentSubmissionStore,
+} from "../intent/submission.ts";
 import type { RuntimeKind } from "../runtime/capsule-runtime.ts";
 import type { TaskStore } from "../storage/task-store.ts";
 import type { TaskMcpGrantStore } from "../tools/grants.ts";
@@ -46,14 +55,24 @@ export function createAltitudeNodeService(input: {
   readonly store: TaskStore;
   readonly grants: TaskMcpGrantStore;
   readonly executor: TaskToolExecutor;
+  readonly submissions?: IntentSubmissionStore;
   readonly instanceId?: string;
   readonly allowedHostnames?: readonly string[];
 }): AltitudeNodeService {
+  const allowedHostnames = [...(input.allowedHostnames ?? [
+    "127.0.0.1",
+    "localhost",
+    "[::1]",
+    "host.docker.internal",
+    "host.container.internal",
+  ])];
+  const submissions = input.submissions ?? new IntentSubmissionStore(input.store);
+  const submit = createIntentSubmissionHandler(submissions);
   const mcp: TaskMcpEndpoint = createTaskMcpEndpoint({
     grants: input.grants,
     store: input.store,
     executor: input.executor,
-    ...(input.allowedHostnames === undefined ? {} : { allowedHostnames: input.allowedHostnames }),
+    allowedHostnames,
   });
 
   return {
@@ -82,6 +101,12 @@ export function createAltitudeNodeService(input: {
             "content-type": "application/json; charset=utf-8",
           },
         });
+      }
+      if (url.pathname.startsWith("/v1/intent-tools/")) {
+        const rejected = hostHeaderValidationResponse(request, allowedHostnames)
+          ?? originValidationResponse(request, allowedHostnames);
+        if (rejected !== undefined) return rejected;
+        return await submit(request);
       }
       if (url.pathname === "/mcp") return await mcp.fetch(request);
       return json({ error: "not_found" }, { status: 404 });

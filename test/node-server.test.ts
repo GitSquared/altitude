@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createAltitudeNodeService, nodeInstanceId } from "../src/node/server.ts";
+import { IntentSubmissionStore } from "../src/intent/submission.ts";
 import { TaskStore } from "../src/storage/task-store.ts";
 import { TaskMcpGrantStore } from "../src/tools/grants.ts";
 import { TASK_TOOL_PROTOCOL, type TaskToolExecutor } from "../src/tools/protocol.ts";
@@ -55,6 +56,59 @@ describe("Altitude node service", () => {
       body: "{}",
     }));
     expect(mcp.status).toBe(401);
+    await service.close();
+    store.close();
+  });
+
+  test("accepts a one-use Redmarker artifact on the node and keeps it in task history", async () => {
+    const { store, grants } = state();
+    store.append({
+      taskId: "task-visual",
+      type: "task.created",
+      payload: { title: "Visual", intent: "Capture visual intent", intentLevel: "precise_instructions" },
+      actor: { kind: "operator" },
+    });
+    const submissions = new IntentSubmissionStore(store, { clock: () => 1_000 });
+    const grant = submissions.issue({
+      taskId: "task-visual",
+      capsuleId: "task-visual",
+      baseUrl: "http://127.0.0.1:3000/",
+      headSha: "a".repeat(40),
+      checkpointDigest: `sha256:${"b".repeat(64)}`,
+      checkpointRevision: 4,
+    });
+    const executor: TaskToolExecutor = {
+      execute: async () => ({ schema: TASK_TOOL_PROTOCOL, ok: true, result: {} }),
+    };
+    const service = createAltitudeNodeService({
+      runtime: "docker",
+      store,
+      grants,
+      submissions,
+      executor,
+    });
+    const request = (hostname = "localhost") => new Request(
+      `http://${hostname}/v1/intent-tools/redmarker/${grant.sessionId}`,
+      {
+        method: "POST",
+        headers: {
+          host: hostname,
+          authorization: `Bearer ${grant.token}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          schemaVersion: "redmarker-review/v1",
+          project: { name: "fixture" },
+          page: { pathname: "/", title: "Fixture", viewport: { width: 800, height: 600 } },
+          marks: [{ id: "mark-1" }],
+        }),
+      },
+    );
+    expect((await service.fetch(request("attacker.example"))).status).toBe(403);
+    const accepted = await service.fetch(request());
+    expect(accepted.status).toBe(202);
+    expect(store.listIntentArtifacts("task-visual")).toHaveLength(1);
+    expect((await service.fetch(request())).status).toBe(404);
     await service.close();
     store.close();
   });

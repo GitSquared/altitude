@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 
 import { TaskStore } from "../src/storage/task-store.ts";
+import { IntentSubmissionStore } from "../src/intent/submission.ts";
 import {
   TaskMcpGrantStore,
   claudeTaskMcpConfig,
@@ -105,6 +106,21 @@ describe("task MCP grants", () => {
 describe("task MCP endpoint", () => {
   test("serves only granted tools through the official MCP client", async () => {
     const store = runningTask(databasePath());
+    const submissions = new IntentSubmissionStore(store, { clock: () => 1_000 });
+    const visual = submissions.issue({
+      taskId: "task-1",
+      capsuleId: "task-1",
+      baseUrl: "http://127.0.0.1:3000/",
+      headSha: "a".repeat(40),
+      checkpointDigest: `sha256:${"b".repeat(64)}`,
+      checkpointRevision: 2,
+    });
+    submissions.consume(visual.sessionId, visual.token, {
+      schemaVersion: "redmarker-review/v1",
+      project: { name: "Fixture" },
+      page: { pathname: "/", title: "Fixture", viewport: { width: 800, height: 600 } },
+      marks: [{ id: "mark-1" }],
+    });
     const grants = new TaskMcpGrantStore(store.database, () => 1_000);
     const grant = grants.issue({
       taskId: "task-1",
@@ -134,6 +150,11 @@ describe("task MCP endpoint", () => {
     try {
       const listed = await client.listTools();
       expect(listed.tools.map((tool) => tool.name).sort()).toEqual(["get_task", "read_file", "report_update"]);
+
+      const task = await client.callTool({ name: "get_task", arguments: {} });
+      expect(task.structuredContent).toMatchObject({
+        intentArtifacts: [{ tool: "redmarker", base: { checkpointRevision: 2 } }],
+      });
 
       const read = await client.callTool({ name: "read_file", arguments: { path: "README.md" } });
       expect(read.isError).not.toBeTrue();

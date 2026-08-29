@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 
-export const CURRENT_SCHEMA_VERSION = 5;
+export const CURRENT_SCHEMA_VERSION = 6;
 
 type Migration = Readonly<{
   version: number;
@@ -182,6 +182,49 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE task_agent_sessions
         ADD COLUMN consecutive_rate_limits INTEGER NOT NULL DEFAULT 0
         CHECK (consecutive_rate_limits >= 0);
+    `,
+  },
+  {
+    version: 6,
+    sql: `
+      CREATE TABLE intent_submission_grants (
+        session_id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id),
+        capsule_id TEXT NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        base_url TEXT NOT NULL,
+        head_sha TEXT NOT NULL,
+        checkpoint_digest TEXT NOT NULL,
+        checkpoint_revision INTEGER NOT NULL CHECK (checkpoint_revision > 0),
+        created_at INTEGER NOT NULL CHECK (created_at >= 0),
+        expires_at INTEGER NOT NULL CHECK (expires_at > created_at),
+        consumed_at INTEGER,
+        revoked_at INTEGER,
+        CHECK (consumed_at IS NULL OR consumed_at >= created_at),
+        CHECK (revoked_at IS NULL OR revoked_at >= created_at),
+        CHECK (consumed_at IS NULL OR revoked_at IS NULL)
+      ) STRICT;
+
+      CREATE INDEX intent_submission_grants_active
+        ON intent_submission_grants(session_id, expires_at, consumed_at, revoked_at);
+
+      CREATE TABLE intent_artifacts (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL UNIQUE REFERENCES intent_submission_grants(session_id),
+        task_id TEXT NOT NULL REFERENCES tasks(id),
+        capsule_id TEXT NOT NULL,
+        tool TEXT NOT NULL CHECK (tool = 'redmarker'),
+        payload_schema TEXT NOT NULL,
+        base_url TEXT NOT NULL,
+        head_sha TEXT NOT NULL,
+        checkpoint_digest TEXT NOT NULL,
+        checkpoint_revision INTEGER NOT NULL CHECK (checkpoint_revision > 0),
+        created_at INTEGER NOT NULL CHECK (created_at >= 0),
+        artifact_json TEXT NOT NULL
+      ) STRICT;
+
+      CREATE INDEX intent_artifacts_by_task_time
+        ON intent_artifacts(task_id, created_at, id);
     `,
   },
 ];

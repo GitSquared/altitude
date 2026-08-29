@@ -14,6 +14,7 @@ import {
 } from "../core/events.ts";
 import type { Task, TaskStatus } from "../core/model.ts";
 import { assertTaskInvariants, reduceTask, replayTask } from "../core/reducer.ts";
+import type { IntentArtifactEnvelope } from "../intent/protocol.ts";
 import { migrate } from "./migrations.ts";
 
 export type OutboxState = "pending" | "processing" | "delivered" | "dead";
@@ -133,6 +134,10 @@ type ScheduledActionRow = {
   updated_at: number;
 };
 
+type IntentArtifactRow = {
+  artifact_json: string;
+};
+
 function requireNonEmpty(value: string, label: string): void {
   if (!value.trim()) throw new Error(`${label} must not be empty`);
 }
@@ -216,6 +221,14 @@ function decodeScheduledAction(row: ScheduledActionRow): ScheduledAction {
   };
 }
 
+function decodeIntentArtifact(row: IntentArtifactRow): IntentArtifactEnvelope {
+  const artifact = decodeJson(row.artifact_json, "intent artifact") as IntentArtifactEnvelope;
+  if (!artifact || typeof artifact !== "object" || artifact.schema !== "altitude.intent-artifact/v1") {
+    throw new Error("Stored intent artifact has an unsupported envelope");
+  }
+  return artifact;
+}
+
 function sameJson(left: unknown, right: unknown): boolean {
   return isDeepStrictEqual(left, right);
 }
@@ -278,6 +291,24 @@ export class TaskStore implements Disposable {
       .all(taskId, afterSequence)
       .map((row) => decodeEvent(row))
       .filter((event): event is EventEnvelope => event !== undefined);
+  }
+
+  listIntentArtifacts(taskId: string): IntentArtifactEnvelope[] {
+    return this.database
+      .query<IntentArtifactRow, [string]>(
+        "SELECT artifact_json FROM intent_artifacts WHERE task_id = ?1 ORDER BY created_at, id",
+      )
+      .all(taskId)
+      .map(decodeIntentArtifact);
+  }
+
+  getIntentArtifact(artifactId: string): IntentArtifactEnvelope | undefined {
+    const row = this.database
+      .query<IntentArtifactRow, [string]>(
+        "SELECT artifact_json FROM intent_artifacts WHERE id = ?1",
+      )
+      .get(artifactId);
+    return row === null ? undefined : decodeIntentArtifact(row);
   }
 
   rebuildTaskProjection(taskId: string): Task {

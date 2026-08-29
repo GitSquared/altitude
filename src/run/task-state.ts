@@ -1,5 +1,6 @@
 import type { EventEnvelope } from "../core/events.ts";
 import type { Task } from "../core/model.ts";
+import type { IntentArtifactEnvelope } from "../intent/protocol.ts";
 import { stableJson, utf8 } from "../capsule/canonical.ts";
 import type { CapsuleMemberContent } from "../capsule/manifest.ts";
 import { portableCapsulePath } from "../capsule/paths.ts";
@@ -13,10 +14,11 @@ export interface PortableTaskState {
   readonly schema: typeof PORTABLE_TASK_STATE_FORMAT;
   readonly task: Task;
   readonly events: readonly EventEnvelope[];
+  readonly intentArtifacts: readonly IntentArtifactEnvelope[];
 }
 
 export function portableTaskStateMember(
-  store: Pick<TaskStore, "getTask" | "getEvents">,
+  store: Pick<TaskStore, "getTask" | "getEvents" | "listIntentArtifacts">,
   taskId: string,
 ): CapsuleMemberContent {
   const task = store.getTask(taskId);
@@ -25,6 +27,7 @@ export function portableTaskStateMember(
     schema: PORTABLE_TASK_STATE_FORMAT,
     task,
     events: store.getEvents(taskId),
+    intentArtifacts: store.listIntentArtifacts(taskId),
   };
   const bytes = utf8(`${stableJson(snapshot)}\n`);
   if (bytes.byteLength > MAX_PORTABLE_TASK_STATE_BYTES) {

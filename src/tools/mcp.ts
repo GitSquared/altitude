@@ -113,7 +113,12 @@ function registerTaskTools(
   }, async () => {
     const task = store.getTask(grant.taskId);
     if (task === undefined) return errorResult(new Error(`Task ${grant.taskId} does not exist`));
-    return textResult({ ok: true, task, events: store.getEvents(grant.taskId).slice(-100) });
+    return textResult({
+      ok: true,
+      task,
+      events: store.getEvents(grant.taskId).slice(-100),
+      intentArtifacts: store.listIntentArtifacts(grant.taskId).slice(-20),
+    });
   });
 
   if (has("read_file")) server.registerTool("read_file", {
