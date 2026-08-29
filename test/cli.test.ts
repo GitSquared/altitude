@@ -68,6 +68,7 @@ describe("CLI", () => {
     expect(cli.stdout.value).toContain("task run <task-id> [--repository <path>]");
     expect(cli.stdout.value).toContain("task take <task-id>");
     expect(cli.stdout.value).toContain("task review <task-id> --url <loopback-url>");
+    expect(cli.stdout.value).toContain("task send <task-id> --node <id>");
   });
 
   test("persists create, queue, list, show, and status across invocations", async () => {

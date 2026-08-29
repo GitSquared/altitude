@@ -11,5 +11,6 @@ export * from "./paths.ts";
 export * from "./seed-cache.ts";
 export * from "./task-checkpoint.ts";
 export * from "./transfer.ts";
+export * from "./transfer-runtime.ts";
 export * from "./wire.ts";
 export * from "./workspace-marker.ts";

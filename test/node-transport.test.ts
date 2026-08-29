@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   SshNodeTransport,
+  SshCapsuleTransferTransport,
   buildPortForwardSpec,
   buildRemoteCommandSpec,
   buildSshBaseArgs,
@@ -87,5 +88,49 @@ describe("node SSH transport", () => {
         stdin: `${JSON.stringify({ schema: "altitude.node-rpc/v1", requestId: "r1", command: "status", payload: {} })}\n`,
       }),
     );
+  });
+
+  test("keeps capsule bytes on SSH stdin and validates both transfer receipts", async () => {
+    const captured: CommandSpec[] = [];
+    const checkpoint = {
+      capsuleId: "task-1",
+      revision: 2,
+      digest: `sha256:${"a".repeat(64)}` as const,
+    };
+    const runner: CommandRunner = {
+      async run(spec): Promise<CommandResult> {
+        captured.push(spec);
+        const activate = spec.args?.at(-1) === "activate";
+        return {
+          exitCode: 0,
+          stdout: `${JSON.stringify(activate ? {
+            schema: "altitude.target-activation/v1",
+            transferId: "transfer-1",
+            targetNodeId: "straylight",
+            checkpoint,
+          } : {
+            schema: "altitude.target-prepared/v1",
+            transferId: "transfer-1",
+            targetNodeId: "straylight",
+            checkpoint,
+          })}\n`,
+          stderr: "",
+        };
+      },
+      async runInteractive(): Promise<number> {
+        throw new Error("not used");
+      },
+    };
+    const transport = new SshCapsuleTransferTransport(runner, direct);
+    const payload = new Uint8Array([1, 2, 3, 4]);
+    expect(await transport.prepare(payload)).toMatchObject({
+      schema: "altitude.target-prepared/v1",
+      checkpoint,
+    });
+    expect(await transport.activate({ transferId: "transfer-1", checkpoint }))
+      .toMatchObject({ schema: "altitude.target-activation/v1", checkpoint });
+    expect(captured[0]?.stdin).toEqual(payload);
+    expect(captured[0]?.args).not.toContain(payload.join(""));
+    expect(captured[1]?.stdin).toBe(`${JSON.stringify({ transferId: "transfer-1", checkpoint })}\n`);
   });
 });

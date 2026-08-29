@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 
-export const CURRENT_SCHEMA_VERSION = 6;
+export const CURRENT_SCHEMA_VERSION = 7;
 
 type Migration = Readonly<{
   version: number;
@@ -222,6 +222,44 @@ const MIGRATIONS: readonly Migration[] = [
         created_at INTEGER NOT NULL CHECK (created_at >= 0),
         artifact_json TEXT NOT NULL
       ) STRICT;
+
+      CREATE INDEX intent_artifacts_by_task_time
+        ON intent_artifacts(task_id, created_at, id);
+    `,
+  },
+  {
+    version: 7,
+    sql: `
+      DROP INDEX intent_artifacts_by_task_time;
+      ALTER TABLE intent_artifacts RENAME TO intent_artifacts_v6;
+
+      CREATE TABLE intent_artifacts (
+        id TEXT PRIMARY KEY,
+        session_id TEXT UNIQUE REFERENCES intent_submission_grants(session_id),
+        task_id TEXT NOT NULL REFERENCES tasks(id),
+        capsule_id TEXT NOT NULL,
+        tool TEXT NOT NULL CHECK (tool = 'redmarker'),
+        payload_schema TEXT NOT NULL,
+        base_url TEXT NOT NULL,
+        head_sha TEXT NOT NULL,
+        checkpoint_digest TEXT NOT NULL,
+        checkpoint_revision INTEGER NOT NULL CHECK (checkpoint_revision > 0),
+        created_at INTEGER NOT NULL CHECK (created_at >= 0),
+        artifact_json TEXT NOT NULL
+      ) STRICT;
+
+      INSERT INTO intent_artifacts(
+        id, session_id, task_id, capsule_id, tool, payload_schema,
+        base_url, head_sha, checkpoint_digest, checkpoint_revision,
+        created_at, artifact_json
+      )
+      SELECT
+        id, session_id, task_id, capsule_id, tool, payload_schema,
+        base_url, head_sha, checkpoint_digest, checkpoint_revision,
+        created_at, artifact_json
+      FROM intent_artifacts_v6;
+
+      DROP TABLE intent_artifacts_v6;
 
       CREATE INDEX intent_artifacts_by_task_time
         ON intent_artifacts(task_id, created_at, id);

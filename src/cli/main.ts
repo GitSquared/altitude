@@ -52,10 +52,24 @@ import { runTaskCheckpointStdio } from "../capsule/task-checkpoint.ts";
 import { runTaskInit } from "../capsule/init.ts";
 import { FilesystemCapsuleCheckpointStore } from "../capsule/filesystem.ts";
 import { capsuleManifestDigest } from "../capsule/manifest.ts";
+import {
+  FilesystemCapsuleTransferReceiver,
+  LocalToRemoteCapsuleTransfer,
+  MAX_CAPSULE_TRANSFER_PACKAGE_BYTES,
+  type PreparedCapsuleTransfer,
+} from "../capsule/transfer-runtime.ts";
+import {
+  SshCapsuleTransferTransport,
+  type NodeConnection,
+} from "../node/transport.ts";
 import { FilesystemRepositorySeedCache } from "../capsule/seed-cache.ts";
 import { LocalCapsulePreparer } from "../run/local-capsule.ts";
 import { LocalCapsuleCheckpointer } from "../run/local-checkpoint.ts";
-import { portableTaskStateMember } from "../run/task-state.ts";
+import {
+  PORTABLE_TASK_STATE_MEMBER,
+  decodePortableTaskState,
+  portableTaskStateMember,
+} from "../run/task-state.ts";
 import { createManagedAgentRetryExecutor } from "../run/retry-executor.ts";
 import { TaskRunCoordinator } from "../run/task-runner.ts";
 import { VERSION } from "../version.ts";
@@ -76,6 +90,7 @@ Commands:
   task run <task-id>          Run or resume a managed headless Claude turn
   task take <task-id>         Enter the same session in Claude Code's TUI
   task review <task-id>       Add visual intent with managed Redmarker
+  task send <task-id>         Move a paused capsule to another node
   attention answer <task-id>  Answer the active Decision
   attention accept <task-id>  Accept the active Review and complete the task
   attention revise <task-id>  Return a Review with revision instructions
@@ -98,6 +113,10 @@ const TASK_HELP = `Usage:
   altitude task run <task-id> [--repository <path>] [--model <model>] [--json]
   altitude task take <task-id>
   altitude task review <task-id> --url <loopback-url> [--redmarker <executable>] [--json]
+  altitude task send <task-id> --node <id> --user <user>
+                     --identity-file <path> --known-hosts-file <path>
+                     (--host <host> [--ssh-port <port>] | --pigeons-endpoint <id>)
+                     [--remote-altitude <executable>] [--json]
 
 Intent levels:
   ${INTENT_LEVELS.join(", ")}
@@ -126,7 +145,7 @@ const SETUP_HELP = `Usage:
   altitude setup [--runtime <runtime>] [--identity <id>] [--source <path>]
                  [--identity-image <image>] [--task-image <image>]
                  [--network <name>] [--node-url <url>]
-                 [--node-host <address>] [--node-port <port>]
+                 [--node-id <id>] [--node-host <address>] [--node-port <port>]
                  [--skip-build] [--json]
 
 Setup builds the two OCI images, creates a source-free identity capsule, and
@@ -334,6 +353,8 @@ async function runTaskCommand(
       return await takeManagedTask(args.slice(1), options, stdout);
     case "review":
       return await reviewManagedTask(args.slice(1), options, stdout);
+    case "send":
+      return await sendManagedTask(args.slice(1), options, stdout);
     default:
       throw new CliUsageError(`Unknown task command: ${subcommand}`);
   }
@@ -471,7 +492,7 @@ async function prepareTaskCapsule(input: {
     taskId: input.task.id,
     taskImage: input.config.taskImage,
     network: input.config.network,
-    nodeId: "local",
+    nodeId: input.config.node.id,
     ...(input.repositoryPath === undefined ? {} : { repositoryPath: resolve(input.repositoryPath) }),
     additionalMembers: [portableTaskStateMember(input.store, input.task.id)],
   });
@@ -722,6 +743,132 @@ async function reviewManagedTask(
   }
 }
 
+async function sendManagedTask(
+  args: readonly string[],
+  options: CliOptions,
+  stdout: Output,
+): Promise<number> {
+  const parsed = parseArguments(args, new Set([
+    "node",
+    "host",
+    "ssh-port",
+    "user",
+    "identity-file",
+    "known-hosts-file",
+    "pigeons-endpoint",
+    "pigeons",
+    "remote-altitude",
+  ]));
+  if (parsed.positionals.length !== 1) {
+    throw new CliUsageError("task send requires exactly one task id");
+  }
+  const required = (name: string): string => {
+    const value = option(parsed, name);
+    if (value === undefined) throw new CliUsageError("task send requires --" + name);
+    return value;
+  };
+  const targetNodeId = required("node");
+  const host = option(parsed, "host");
+  const pigeonsEndpoint = option(parsed, "pigeons-endpoint");
+  if ((host === undefined) === (pigeonsEndpoint === undefined)) {
+    throw new CliUsageError(
+      "task send requires exactly one of --host or --pigeons-endpoint",
+    );
+  }
+  if (pigeonsEndpoint !== undefined && option(parsed, "ssh-port") !== undefined) {
+    throw new CliUsageError("--ssh-port is only valid with --host");
+  }
+  const { paths, config, runner } = await managedContext(options);
+  const taskId = parsed.positionals[0]!;
+  using store = new TaskStore(paths.database, {
+    ...(options.clock === undefined ? {} : { clock: options.clock }),
+    ...(options.createId === undefined ? {} : { createId: options.createId }),
+  });
+  const task = store.getTask(taskId);
+  if (task === undefined) throw new Error("Task " + taskId + " does not exist");
+  if (task.status !== "paused") {
+    throw new Error(
+      "Task " + taskId + " must be paused before it can move to another node",
+    );
+  }
+  const connection: NodeConnection = {
+    nodeId: targetNodeId,
+    user: required("user"),
+    identityFile: resolve(required("identity-file")),
+    knownHostsFile: resolve(required("known-hosts-file")),
+    route: host !== undefined
+      ? {
+          kind: "ssh",
+          host,
+          ...(option(parsed, "ssh-port") === undefined
+            ? {}
+            : { port: portNumber(option(parsed, "ssh-port"))! }),
+        }
+      : {
+          kind: "pigeons",
+          endpointId: pigeonsEndpoint!,
+          ...(option(parsed, "pigeons") === undefined
+            ? {}
+            : { pigeonsExecutable: option(parsed, "pigeons")! }),
+        },
+  };
+  store.append({
+    taskId,
+    type: "task.state_changed",
+    payload: {
+      to: "transferring",
+      reason: "Preparing capsule transfer to node " + targetNodeId,
+    },
+    actor: OPERATOR,
+  });
+  const checkpoints = new FilesystemCapsuleCheckpointStore(paths.capsules);
+  const seeds = new FilesystemRepositorySeedCache(
+    join(paths.cache, "repository-seeds"),
+  );
+  const coordinator = new LocalToRemoteCapsuleTransfer(
+    checkpoints,
+    seeds,
+    config.node.id,
+    new SshCapsuleTransferTransport(
+      runner,
+      connection,
+      option(parsed, "remote-altitude") ?? "altitude",
+    ),
+    {
+      ...(options.clock === undefined ? {} : { now: options.clock }),
+      ...(options.createId === undefined ? {} : { createId: options.createId }),
+    },
+  );
+  let prepared: PreparedCapsuleTransfer;
+  try {
+    prepared = await coordinator.prepare({
+      taskId,
+      targetNodeId,
+      additionalMembers: [portableTaskStateMember(store, taskId)],
+    });
+  } catch (error) {
+    if (store.getTask(taskId)?.status === "transferring") {
+      store.append({
+        taskId,
+        type: "task.state_changed",
+        payload: { to: "paused", reason: "Capsule transfer preparation failed" },
+        actor: { kind: "system", component: "capsule-transfer" },
+      });
+    }
+    throw error;
+  }
+  const committed = await coordinator.commit(prepared);
+  if (wantsJson(parsed)) {
+    writeJson(stdout, { task: store.getTask(taskId), transfer: committed });
+  } else {
+    stdout.write(
+      "Moved task " + taskId + " to " + targetNodeId
+        + " at capsule revision " + committed.targetCheckpoint.revision + ".\n",
+    );
+  }
+  return 0;
+}
+
 function resolutionFor(
   command: string,
   task: Task,
@@ -850,6 +997,97 @@ async function waitForShutdownSignal(): Promise<void> {
   });
 }
 
+async function readStdinBytes(limit: number): Promise<Uint8Array> {
+  const reader = Bun.stdin.stream().getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) {
+        await reader.cancel();
+        throw new Error(`Transfer input exceeds ${limit} bytes`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+async function runTransferReceiverCommand(
+  args: readonly string[],
+  options: CliOptions,
+  stdout: Output,
+): Promise<number> {
+  const operation = args[0];
+  if ((operation !== "prepare" && operation !== "activate") || args.length !== 1) {
+    throw new CliUsageError("_transfer requires prepare or activate");
+  }
+  const paths = resolveAltitudePaths(options.env ?? process.env);
+  await ensureAltitudePaths(paths);
+  const config = await readLocalConfig(paths.config);
+  if (config === undefined) throw new Error("Target Altitude node is not set up");
+  const checkpoints = new FilesystemCapsuleCheckpointStore(paths.capsules);
+  const receiver = new FilesystemCapsuleTransferReceiver(
+    checkpoints,
+    new FilesystemRepositorySeedCache(join(paths.cache, "repository-seeds")),
+    config.node.id,
+  );
+  if (operation === "prepare") {
+    writeJson(stdout, await receiver.prepare(
+      await readStdinBytes(MAX_CAPSULE_TRANSFER_PACKAGE_BYTES),
+    ));
+    return 0;
+  }
+  const bytes = await readStdinBytes(64 * 1024);
+  let request: unknown;
+  try {
+    request = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
+  } catch (error) {
+    throw new Error("Target activation request is invalid JSON", { cause: error });
+  }
+  if (typeof request !== "object" || request === null) {
+    throw new Error("Target activation request is invalid");
+  }
+  const value = request as Parameters<typeof receiver.activate>[0];
+  const activation = await receiver.activate(value);
+  const checkpoint = await checkpoints.read(activation.checkpoint);
+  const stateMember = checkpoint.members.find(
+    (member) => member.path === PORTABLE_TASK_STATE_MEMBER,
+  );
+  if (stateMember === undefined) {
+    throw new Error("Transferred capsule has no portable task state");
+  }
+  using store = new TaskStore(paths.database, {
+    ...(options.clock === undefined ? {} : { clock: options.clock }),
+    ...(options.createId === undefined ? {} : { createId: options.createId }),
+  });
+  const imported = store.importPortableTaskState(
+    decodePortableTaskState(stateMember.bytes),
+  );
+  if (imported.status === "transferring") {
+    store.append({
+      taskId: imported.id,
+      type: "task.state_changed",
+      payload: { to: "queued", reason: `Capsule activated on node ${config.node.id}` },
+      actor: { kind: "system", component: "capsule-transfer" },
+      idempotencyKey: `transfer:${activation.transferId}:activated`,
+    });
+  }
+  writeJson(stdout, activation);
+  return 0;
+}
+
 async function runNodeCommand(
   args: readonly string[],
   options: CliOptions,
@@ -962,6 +1200,7 @@ function setupConfig(
     taskImage: option(parsed, "task-image") ?? base.taskImage,
     network: option(parsed, "network") ?? base.network,
     node: {
+      id: option(parsed, "node-id") ?? base.node.id,
       bindHost: option(parsed, "node-host") ?? base.node.bindHost,
       port: nodePort,
       capsuleMcpEndpoint,
@@ -988,6 +1227,7 @@ async function runSetupCommand(
       "task-image",
       "network",
       "node-url",
+      "node-id",
       "node-host",
       "node-port",
     ]),
@@ -1091,6 +1331,8 @@ export async function runCli(args: readonly string[], options: CliOptions = {}):
         return await runIdentityControlStdio();
       case "_identity-init":
         return await runIdentityInit();
+      case "_transfer":
+        return await runTransferReceiverCommand(args.slice(1), options, stdout);
       default:
         throw new CliUsageError(`Unknown command: ${command}`);
     }

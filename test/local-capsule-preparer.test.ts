@@ -59,6 +59,14 @@ describe("local capsule preparation", () => {
     expect(bootstraps).toHaveLength(2);
     expect(bootstraps[1]?.seedSize).toBe(bootstraps[0]?.seedSize);
 
+    expect(preparer.prepare({
+      taskId: "task-1",
+      taskImage: "altitude-task:dev",
+      network: "altitude-control",
+      nodeId: "straylight",
+    })).rejects.toThrow("owned by node local, not straylight");
+    expect(bootstraps).toHaveLength(2);
+
     const resumed = await preparer.prepare({
       taskId: "task-1",
       taskImage: "altitude-task:dev",

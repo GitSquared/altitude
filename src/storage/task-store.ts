@@ -15,6 +15,7 @@ import {
 import type { Task, TaskStatus } from "../core/model.ts";
 import { assertTaskInvariants, reduceTask, replayTask } from "../core/reducer.ts";
 import type { IntentArtifactEnvelope } from "../intent/protocol.ts";
+import type { PortableTaskState } from "../run/task-state.ts";
 import { migrate } from "./migrations.ts";
 
 export type OutboxState = "pending" | "processing" | "delivered" | "dead";
@@ -309,6 +310,76 @@ export class TaskStore implements Disposable {
       )
       .get(artifactId);
     return row === null ? undefined : decodeIntentArtifact(row);
+  }
+
+  importPortableTaskState(snapshot: PortableTaskState): Task {
+    if (snapshot.events.length === 0 || snapshot.task.id !== snapshot.events[0]?.taskId) {
+      throw new Error("Portable task state has no bound event stream");
+    }
+    for (let index = 0; index < snapshot.events.length; index += 1) {
+      const event = snapshot.events[index]!;
+      if (event.taskId !== snapshot.task.id || event.sequence !== index + 1) {
+        throw new Error("Portable task event sequence is invalid");
+      }
+    }
+    return this.database.transaction(() => {
+      const existing = this.getEvents(snapshot.task.id);
+      const sharedLength = Math.min(existing.length, snapshot.events.length);
+      for (let index = 0; index < sharedLength; index += 1) {
+        if (!sameJson(existing[index], snapshot.events[index])) {
+          throw new Error("Target task history diverges from the portable capsule");
+        }
+      }
+      for (const event of snapshot.events.slice(existing.length)) {
+        this.append({
+          taskId: event.taskId,
+          type: event.type,
+          payload: event.payload,
+          actor: event.actor,
+          occurredAt: event.occurredAt,
+          eventId: event.id,
+          ...(event.idempotencyKey === undefined ? {} : { idempotencyKey: event.idempotencyKey }),
+        } as NewEvent);
+      }
+      const imported = this.getTask(snapshot.task.id);
+      if (imported === undefined
+        || (existing.length <= snapshot.events.length && !sameJson(imported, snapshot.task))) {
+        throw new Error("Imported task projection does not match the portable capsule");
+      }
+      for (const artifact of snapshot.intentArtifacts) {
+        if (artifact.taskId !== snapshot.task.id || artifact.tool !== "redmarker"
+          || !artifact.artifactId.trim() || !Number.isFinite(Date.parse(artifact.createdAt))) {
+          throw new Error("Portable intent artifact is invalid");
+        }
+        const prior = this.getIntentArtifact(artifact.artifactId);
+        if (prior !== undefined) {
+          if (!sameJson(prior, artifact)) {
+            throw new Error(`Intent artifact ${artifact.artifactId} diverges from the portable capsule`);
+          }
+          continue;
+        }
+        this.database.query<unknown, [string, string, string, string, string, string, string, string, number, number, string]>(`
+          INSERT INTO intent_artifacts(
+            id, session_id, task_id, capsule_id, tool, payload_schema,
+            base_url, head_sha, checkpoint_digest, checkpoint_revision,
+            created_at, artifact_json
+          ) VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+        `).run(
+          artifact.artifactId,
+          artifact.taskId,
+          artifact.capsuleId,
+          artifact.tool,
+          artifact.payloadSchema,
+          artifact.base.url,
+          artifact.base.headSha,
+          artifact.base.checkpointDigest,
+          artifact.base.checkpointRevision,
+          Date.parse(artifact.createdAt),
+          encodeJson(artifact, "Intent artifact"),
+        );
+      }
+      return imported;
+    }).immediate();
   }
 
   rebuildTaskProjection(taskId: string): Task {

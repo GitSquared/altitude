@@ -17,6 +17,7 @@ export interface AltitudeLocalConfig {
   readonly taskImage: string;
   readonly network: string;
   readonly node: Readonly<{
+    id: string;
     bindHost: string;
     port: number;
     capsuleMcpEndpoint: string;
@@ -47,6 +48,8 @@ export function validateLocalConfig(value: unknown): AltitudeLocalConfig {
   if (!validImage(config.taskImage)) throw new Error("Altitude task image is invalid");
   if (!validId(config.network)) throw new Error("Altitude network is invalid");
   if (typeof config.node !== "object" || config.node === null) throw new Error("Altitude node config is invalid");
+  const nodeId = config.node.id ?? "local";
+  if (!validId(nodeId)) throw new Error("Altitude node id is invalid");
   if (typeof config.node.bindHost !== "string" || !config.node.bindHost.trim() || config.node.bindHost.includes("\0")) {
     throw new Error("Altitude node bind host is invalid");
   }
@@ -57,7 +60,10 @@ export function validateLocalConfig(value: unknown): AltitudeLocalConfig {
   if (!['http:', 'https:'].includes(endpoint.protocol) || endpoint.username || endpoint.password || endpoint.pathname !== "/mcp") {
     throw new Error("Altitude capsule MCP endpoint must be credential-free HTTP(S) ending in /mcp");
   }
-  return config as AltitudeLocalConfig;
+  return {
+    ...(config as AltitudeLocalConfig),
+    node: { ...config.node, id: nodeId } as AltitudeLocalConfig["node"],
+  };
 }
 
 export function defaultLocalConfig(runtime: RuntimeKind): AltitudeLocalConfig {
@@ -69,6 +75,7 @@ export function defaultLocalConfig(runtime: RuntimeKind): AltitudeLocalConfig {
     taskImage: "altitude-task:dev",
     network: "altitude-control",
     node: {
+      id: "local",
       bindHost: process.platform === "linux" ? "0.0.0.0" : "127.0.0.1",
       port: DEFAULT_NODE_PORT,
       capsuleMcpEndpoint: `http://${capsuleHost}:${DEFAULT_NODE_PORT}/mcp`,

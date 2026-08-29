@@ -46,6 +46,11 @@ export class LocalCapsulePreparer {
       if (!(error instanceof CapsuleCheckpointNotFoundError)) throw error;
     }
     if (checkpoint !== undefined) {
+      if (checkpoint.manifest.ownership.ownerNodeId !== input.nodeId) {
+        throw new Error(
+          `Capsule ${checkpoint.manifest.capsuleId} is owned by node ${checkpoint.manifest.ownership.ownerNodeId}, not ${input.nodeId}`,
+        );
+      }
       seed = await this.seeds.read(capsuleManifestDigest(checkpoint.manifest));
     } else if (input.repositoryPath !== undefined) {
       const captured = await captureLocalGitCapsule({

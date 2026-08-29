@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test";
 
 import { TaskStore } from "../src/storage/task-store.ts";
 import { IntentSubmissionStore } from "../src/intent/submission.ts";
-import { PORTABLE_TASK_STATE_FORMAT, portableTaskStateMember } from "../src/run/task-state.ts";
+import {
+  PORTABLE_TASK_STATE_FORMAT,
+  decodePortableTaskState,
+  portableTaskStateMember,
+} from "../src/run/task-state.ts";
 
 describe("portable task state", () => {
   test("carries the replayable task projection and its additive event history", () => {
@@ -49,5 +53,25 @@ describe("portable task state", () => {
     expect(value.intentArtifacts).toMatchObject([
       { tool: "redmarker", base: { checkpointRevision: 1 } },
     ]);
+
+    using target = new TaskStore(":memory:");
+    const imported = target.importPortableTaskState(
+      decodePortableTaskState(member.bytes),
+    );
+    expect(imported).toEqual(store.getTask("task-1")!);
+    expect(target.getEvents("task-1")).toEqual(store.getEvents("task-1"));
+    expect(target.listIntentArtifacts("task-1")).toEqual(
+      store.listIntentArtifacts("task-1"),
+    );
+  });
+
+  test("rejects a projection that does not replay from its claimed events", () => {
+    const bytes = new TextEncoder().encode(JSON.stringify({
+      schema: PORTABLE_TASK_STATE_FORMAT,
+      task: { id: "task-1", status: "completed" },
+      events: [],
+      intentArtifacts: [],
+    }));
+    expect(() => decodePortableTaskState(bytes)).toThrow("event history is invalid");
   });
 });
