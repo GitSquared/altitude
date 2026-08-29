@@ -28,6 +28,10 @@ import type {
   CommandSpec,
 } from "../src/process/command.ts";
 import {
+  FilesystemNodeRegistry,
+  registeredNode,
+} from "../src/node/registry.ts";
+import {
   PORTABLE_TASK_STATE_MEMBER,
   decodePortableTaskState,
   portableTaskStateMember,
@@ -69,6 +73,13 @@ test("task send moves a paused capsule through the remote command boundary", asy
     node: { ...defaultLocalConfig("docker").node, id: "macbook" },
   };
   await writeLocalConfig(paths.config, config);
+  await new FilesystemNodeRegistry(paths.nodes).put(registeredNode({
+    nodeId: "straylight",
+    user: "altitude",
+    identityFile: "/private/state/id_ed25519",
+    knownHostsFile: "/private/state/known_hosts",
+    route: { kind: "ssh", host: "straylight.example" },
+  }));
 
   const store = new TaskStore(paths.database, { clock: () => 1_000 });
   store.append({
@@ -220,14 +231,6 @@ test("task send moves a paused capsule through the remote command boundary", asy
     "task-send",
     "--node",
     "straylight",
-    "--host",
-    "straylight.example",
-    "--user",
-    "altitude",
-    "--identity-file",
-    "/private/state/id_ed25519",
-    "--known-hosts-file",
-    "/private/state/known_hosts",
   ], options)).toBe(0);
   expect(stderr.value).toBe("");
   expect(stdout.value).toContain("Moved task task-send to straylight");

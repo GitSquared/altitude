@@ -5,6 +5,11 @@ import { join } from "node:path";
 
 import type { CliOptions } from "../src/cli/main.ts";
 import { runCli } from "../src/cli/main.ts";
+import type {
+  CommandResult,
+  CommandRunner,
+  CommandSpec,
+} from "../src/process/command.ts";
 import { TaskStore } from "../src/storage/task-store.ts";
 
 const temporaryDirectories: string[] = [];
@@ -60,6 +65,65 @@ describe("CLI", () => {
     expect(await runCli(["node", "help"], cli.options)).toBe(0);
     expect(cli.stdout.value).toContain("altitude node serve");
     expect(cli.stdout.value).toContain("loopback");
+    expect(cli.stdout.value).toContain("node add <id>");
+  });
+
+  test("remembers and checks a remote node without touching user SSH config", async () => {
+    const cli = harness();
+    expect(await runCli([
+      "node",
+      "add",
+      "straylight",
+      "--host",
+      "straylight.example",
+      "--ssh-port",
+      "2222",
+      "--user",
+      "altitude",
+      "--identity-file",
+      "/state/id_ed25519",
+      "--known-hosts-file",
+      "/state/known_hosts",
+      "--remote-altitude",
+      "/opt/altitude",
+      "--json",
+    ], cli.options)).toBe(0);
+    expect(JSON.parse(cli.stdout.value)).toMatchObject({
+      connection: {
+        nodeId: "straylight",
+        route: { kind: "ssh", host: "straylight.example", port: 2222 },
+      },
+      remoteAltitude: "/opt/altitude",
+    });
+
+    cli.stdout.value = "";
+    expect(await runCli(["node", "list"], cli.options)).toBe(0);
+    expect(cli.stdout.value).toContain("straylight  altitude@straylight.example:2222");
+
+    let command: CommandSpec | undefined;
+    const runner: CommandRunner = {
+      async run(spec): Promise<CommandResult> {
+        command = spec;
+        return { exitCode: 0, stdout: "0.0.0\n", stderr: "" };
+      },
+      async runInteractive(): Promise<number> {
+        throw new Error("not used");
+      },
+    };
+    cli.stdout.value = "";
+    expect(await runCli([
+      "node",
+      "check",
+      "straylight",
+      "--accept-new-host-key",
+      "--json",
+    ], { ...cli.options, commandRunner: runner })).toBe(0);
+    expect(JSON.parse(cli.stdout.value)).toEqual({
+      nodeId: "straylight",
+      version: "0.0.0",
+    });
+    expect(command?.args).toContain("StrictHostKeyChecking=accept-new");
+    expect(command?.args?.slice(-3)).toEqual(["--", "/opt/altitude", "version"]);
   });
 
   test("documents the first-run repository capsule and native take flow", async () => {

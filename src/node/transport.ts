@@ -50,7 +50,7 @@ const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SAFE_ABSOLUTE_PATH = /^\/[A-Za-z0-9._/@%+,:=-]+$/;
 const SAFE_EXECUTABLE = /^\/[A-Za-z0-9._/@%+,:=-]+$|^[A-Za-z0-9._-]+$/;
 
-function assertConnection(connection: NodeConnection): void {
+export function assertNodeConnection(connection: NodeConnection): void {
   if (!SAFE_ID.test(connection.nodeId)) throw new Error("Unsafe node id");
   if (!SAFE_USER.test(connection.user)) throw new Error("Unsafe SSH user");
   if (!SAFE_ABSOLUTE_PATH.test(connection.identityFile)
@@ -73,11 +73,69 @@ function assertConnection(connection: NodeConnection): void {
   }
 }
 
+export function parseNodeConnection(value: unknown): NodeConnection {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Node connection is invalid");
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record.nodeId !== "string"
+    || typeof record.user !== "string"
+    || typeof record.identityFile !== "string"
+    || typeof record.knownHostsFile !== "string"
+    || typeof record.route !== "object"
+    || record.route === null
+    || Array.isArray(record.route)) {
+    throw new Error("Node connection is invalid");
+  }
+  const route = record.route as Record<string, unknown>;
+  let parsedRoute: NodeRoute;
+  if (route.kind === "ssh" && typeof route.host === "string") {
+    if (route.port !== undefined && typeof route.port !== "number") {
+      throw new Error("Node connection is invalid");
+    }
+    parsedRoute = {
+      kind: "ssh",
+      host: route.host,
+      ...(route.port === undefined ? {} : { port: route.port }),
+    };
+  } else if (route.kind === "pigeons" && typeof route.endpointId === "string") {
+    if (route.pigeonsExecutable !== undefined
+      && typeof route.pigeonsExecutable !== "string") {
+      throw new Error("Node connection is invalid");
+    }
+    parsedRoute = {
+      kind: "pigeons",
+      endpointId: route.endpointId,
+      ...(route.pigeonsExecutable === undefined
+        ? {}
+        : { pigeonsExecutable: route.pigeonsExecutable }),
+    };
+  } else {
+    throw new Error("Node connection is invalid");
+  }
+  const connection: NodeConnection = {
+    nodeId: record.nodeId,
+    user: record.user,
+    identityFile: record.identityFile,
+    knownHostsFile: record.knownHostsFile,
+    route: parsedRoute,
+  };
+  assertNodeConnection(connection);
+  return connection;
+}
+
+export function parseRemoteAltitudeExecutable(value: unknown): string {
+  if (typeof value !== "string" || !SAFE_EXECUTABLE.test(value)) {
+    throw new Error("Remote Altitude executable is invalid");
+  }
+  return value;
+}
+
 export function buildSshBaseArgs(
   connection: NodeConnection,
   options: { readonly acceptNewHostKey?: boolean } = {},
 ): readonly string[] {
-  assertConnection(connection);
+  assertNodeConnection(connection);
   const strictHostKey = options.acceptNewHostKey === true ? "accept-new" : "yes";
   const args = [
     "-F",
@@ -204,9 +262,7 @@ export class SshCapsuleTransferTransport implements CapsuleTransferTransport {
     private readonly connection: NodeConnection,
     private readonly remoteExecutable = "altitude",
   ) {
-    if (!SAFE_EXECUTABLE.test(remoteExecutable)) {
-      throw new Error("Remote Altitude executable is invalid");
-    }
+    parseRemoteAltitudeExecutable(remoteExecutable);
   }
 
   async prepare(payload: Uint8Array): Promise<TargetPreparedReceipt> {

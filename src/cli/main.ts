@@ -71,8 +71,14 @@ import {
 } from "../capsule/transfer-runtime.ts";
 import {
   SshCapsuleTransferTransport,
+  buildRemoteCommandSpec,
   type NodeConnection,
 } from "../node/transport.ts";
+import {
+  FilesystemNodeRegistry,
+  registeredNode,
+  type RegisteredNode,
+} from "../node/registry.ts";
 import { FilesystemRepositorySeedCache } from "../capsule/seed-cache.ts";
 import { LocalCapsulePreparer } from "../run/local-capsule.ts";
 import { LocalCapsuleCheckpointer } from "../run/local-checkpoint.ts";
@@ -106,11 +112,14 @@ Commands:
   task run <task-id>          Run or resume a managed headless Claude turn
   task take <task-id>         Enter the same session in Claude Code's TUI
   task review <task-id>       Add visual intent with managed Redmarker
-  task send <task-id>         Move a paused capsule to another node
+  task send <task-id>         Move a paused capsule to a registered node
   attention answer <task-id>  Answer the active Decision
   attention accept <task-id>  Accept the active Review and complete the task
   attention revise <task-id>  Return a Review with revision instructions
   attention ack <task-id>     Acknowledge an Update by --id
+  node add                    Remember a remote node connection
+  node list                   List remembered remote nodes
+  node check                  Verify a remote Altitude connection
   node serve                  Run the local task/MCP control endpoint
   status                      Summarize the local control plane
   doctor                      Check the local Altitude runtime boundary
@@ -129,6 +138,7 @@ const TASK_HELP = `Usage:
   altitude task run <task-id> [--repository <path>] [--model <model>] [--json]
   altitude task take <task-id>
   altitude task review <task-id> --url <loopback-url> [--redmarker <executable>] [--json]
+  altitude task send <task-id> --node <registered-id> [--json]
   altitude task send <task-id> --node <id> --user <user>
                      --identity-file <path> --known-hosts-file <path>
                      (--host <host> [--ssh-port <port>] | --pigeons-endpoint <id>)
@@ -146,6 +156,14 @@ const ATTENTION_HELP = `Usage:
 `;
 
 const NODE_HELP = `Usage:
+  altitude node add <id> --user <user> --identity-file <absolute-path>
+                    --known-hosts-file <absolute-path>
+                    (--host <host> [--ssh-port <port>] | --pigeons-endpoint <id>)
+                    [--pigeons <executable>] [--remote-altitude <executable>]
+                    [--json]
+  altitude node list [--json]
+  altitude node show <id> [--json]
+  altitude node check <id> [--accept-new-host-key] [--json]
   altitude node serve [--host <address>] [--port <port>] [--runtime <runtime>]
 
 Runtimes:
@@ -154,7 +172,7 @@ Runtimes:
 The listener defaults to loopback. Use --host deliberately when capsules on a
 native Linux node need to reach the service through the host gateway.
 With the saved runtime and listener settings, the node also resumes durable
-rate-limit retries for the exact managed Claude session.
+rate-limit retries and starts tasks received from another node.
 `;
 
 const SETUP_HELP = `Usage:
@@ -824,17 +842,65 @@ async function sendManagedTask(
     return value;
   };
   const targetNodeId = required("node");
-  const host = option(parsed, "host");
-  const pigeonsEndpoint = option(parsed, "pigeons-endpoint");
-  if ((host === undefined) === (pigeonsEndpoint === undefined)) {
-    throw new CliUsageError(
-      "task send requires exactly one of --host or --pigeons-endpoint",
-    );
-  }
-  if (pigeonsEndpoint !== undefined && option(parsed, "ssh-port") !== undefined) {
-    throw new CliUsageError("--ssh-port is only valid with --host");
-  }
   const { paths, config, runner } = await managedContext(options);
+  const inlineConnection = [
+    "host",
+    "ssh-port",
+    "user",
+    "identity-file",
+    "known-hosts-file",
+    "pigeons-endpoint",
+    "pigeons",
+  ].some((name) => option(parsed, name) !== undefined);
+  let connection: NodeConnection;
+  let remoteAltitude: string;
+  if (!inlineConnection) {
+    const remembered = await new FilesystemNodeRegistry(paths.nodes).get(
+      targetNodeId,
+    );
+    if (remembered === undefined) {
+      throw new Error(
+        `Node ${targetNodeId} is not registered. Run \`altitude node add ${targetNodeId} ...\` first.`,
+      );
+    }
+    connection = remembered.connection;
+    remoteAltitude = option(parsed, "remote-altitude")
+      ?? remembered.remoteAltitude;
+  } else {
+    const host = option(parsed, "host");
+    const pigeonsEndpoint = option(parsed, "pigeons-endpoint");
+    if ((host === undefined) === (pigeonsEndpoint === undefined)) {
+      throw new CliUsageError(
+        "task send requires exactly one of --host or --pigeons-endpoint",
+      );
+    }
+    if (pigeonsEndpoint !== undefined
+      && option(parsed, "ssh-port") !== undefined) {
+      throw new CliUsageError("--ssh-port is only valid with --host");
+    }
+    connection = {
+      nodeId: targetNodeId,
+      user: required("user"),
+      identityFile: resolve(required("identity-file")),
+      knownHostsFile: resolve(required("known-hosts-file")),
+      route: host !== undefined
+        ? {
+            kind: "ssh",
+            host,
+            ...(option(parsed, "ssh-port") === undefined
+              ? {}
+              : { port: portNumber(option(parsed, "ssh-port"))! }),
+          }
+        : {
+            kind: "pigeons",
+            endpointId: pigeonsEndpoint!,
+            ...(option(parsed, "pigeons") === undefined
+              ? {}
+              : { pigeonsExecutable: option(parsed, "pigeons")! }),
+          },
+    };
+    remoteAltitude = option(parsed, "remote-altitude") ?? "altitude";
+  }
   const taskId = parsed.positionals[0]!;
   using store = new TaskStore(paths.database, {
     ...(options.clock === undefined ? {} : { clock: options.clock }),
@@ -847,27 +913,6 @@ async function sendManagedTask(
       "Task " + taskId + " must be paused before it can move to another node",
     );
   }
-  const connection: NodeConnection = {
-    nodeId: targetNodeId,
-    user: required("user"),
-    identityFile: resolve(required("identity-file")),
-    knownHostsFile: resolve(required("known-hosts-file")),
-    route: host !== undefined
-      ? {
-          kind: "ssh",
-          host,
-          ...(option(parsed, "ssh-port") === undefined
-            ? {}
-            : { port: portNumber(option(parsed, "ssh-port"))! }),
-        }
-      : {
-          kind: "pigeons",
-          endpointId: pigeonsEndpoint!,
-          ...(option(parsed, "pigeons") === undefined
-            ? {}
-            : { pigeonsExecutable: option(parsed, "pigeons")! }),
-        },
-  };
   const checkpoints = new FilesystemCapsuleCheckpointStore(paths.capsules);
   const activeCheckpoint = await checkpoints.readActive(taskId);
   const agentSessions = new TaskAgentSessionStore(store.database, options.clock);
@@ -909,7 +954,7 @@ async function sendManagedTask(
     new SshCapsuleTransferTransport(
       runner,
       connection,
-      option(parsed, "remote-altitude") ?? "altitude",
+      remoteAltitude,
     ),
     {
       ...(options.clock === undefined ? {} : { now: options.clock }),
@@ -1168,6 +1213,151 @@ async function runTransferReceiverCommand(
   return 0;
 }
 
+function registeredNodeRoute(record: RegisteredNode): string {
+  const route = record.connection.route;
+  return route.kind === "ssh"
+    ? `${record.connection.user}@${route.host}${route.port === undefined ? "" : `:${route.port}`}`
+    : `${record.connection.user}@pigeons:${route.endpointId.slice(0, 12)}`;
+}
+
+async function runNodeRegistryCommand(
+  subcommand: "add" | "list" | "show" | "check",
+  args: readonly string[],
+  options: CliOptions,
+  stdout: Output,
+): Promise<number> {
+  const paths = resolveAltitudePaths(options.env ?? process.env);
+  await ensureAltitudePaths(paths);
+  const registry = new FilesystemNodeRegistry(paths.nodes);
+  if (subcommand === "list") {
+    const parsed = parseArguments(args);
+    if (parsed.positionals.length !== 0) {
+      throw new CliUsageError("node list does not take positional arguments");
+    }
+    const nodes = await registry.list();
+    if (wantsJson(parsed)) writeJson(stdout, nodes);
+    else if (nodes.length === 0) stdout.write("No remote nodes registered.\n");
+    else {
+      for (const node of nodes) {
+        stdout.write(
+          `${node.connection.nodeId}  ${registeredNodeRoute(node)}  ${node.remoteAltitude}\n`,
+        );
+      }
+    }
+    return 0;
+  }
+
+  if (subcommand === "show") {
+    const parsed = parseArguments(args);
+    if (parsed.positionals.length !== 1) {
+      throw new CliUsageError("node show requires exactly one node id");
+    }
+    const id = parsed.positionals[0]!;
+    const node = await registry.get(id);
+    if (node === undefined) throw new Error(`Node ${id} is not registered`);
+    if (wantsJson(parsed)) writeJson(stdout, node);
+    else {
+      stdout.write(`${node.connection.nodeId}\n`);
+      stdout.write(`Route: ${registeredNodeRoute(node)}\n`);
+      stdout.write(`Identity: ${node.connection.identityFile}\n`);
+      stdout.write(`Known hosts: ${node.connection.knownHostsFile}\n`);
+      stdout.write(`Remote Altitude: ${node.remoteAltitude}\n`);
+    }
+    return 0;
+  }
+
+  if (subcommand === "check") {
+    const parsed = parseArguments(
+      args,
+      new Set(),
+      new Set(["json", "accept-new-host-key"]),
+    );
+    if (parsed.positionals.length !== 1) {
+      throw new CliUsageError("node check requires exactly one node id");
+    }
+    const id = parsed.positionals[0]!;
+    const node = await registry.get(id);
+    if (node === undefined) throw new Error(`Node ${id} is not registered`);
+    const runner = options.commandRunner ?? new BunCommandRunner();
+    const result = await runner.run(buildRemoteCommandSpec(
+      node.connection,
+      [node.remoteAltitude, "version"],
+      { acceptNewHostKey: parsed.options.get("accept-new-host-key") === true },
+    ));
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `Node ${id} check failed (${result.exitCode}): ${result.stderr.trim()}`,
+      );
+    }
+    const version = result.stdout.trim();
+    if (!version) throw new Error(`Node ${id} returned no Altitude version`);
+    if (wantsJson(parsed)) writeJson(stdout, { nodeId: id, version });
+    else stdout.write(`${id} is reachable with Altitude ${version}.\n`);
+    return 0;
+  }
+
+  const parsed = parseArguments(args, new Set([
+    "host",
+    "ssh-port",
+    "user",
+    "identity-file",
+    "known-hosts-file",
+    "pigeons-endpoint",
+    "pigeons",
+    "remote-altitude",
+  ]));
+  if (parsed.positionals.length !== 1) {
+    throw new CliUsageError("node add requires exactly one node id");
+  }
+  const required = (name: string): string => {
+    const value = option(parsed, name);
+    if (value === undefined) throw new CliUsageError("node add requires --" + name);
+    return value;
+  };
+  const id = parsed.positionals[0]!;
+  const host = option(parsed, "host");
+  const pigeonsEndpoint = option(parsed, "pigeons-endpoint");
+  if ((host === undefined) === (pigeonsEndpoint === undefined)) {
+    throw new CliUsageError(
+      "node add requires exactly one of --host or --pigeons-endpoint",
+    );
+  }
+  if (pigeonsEndpoint !== undefined && option(parsed, "ssh-port") !== undefined) {
+    throw new CliUsageError("--ssh-port is only valid with --host");
+  }
+  if (host !== undefined && option(parsed, "pigeons") !== undefined) {
+    throw new CliUsageError("--pigeons is only valid with --pigeons-endpoint");
+  }
+  const node = await registry.put(registeredNode({
+    nodeId: id,
+    user: required("user"),
+    identityFile: resolve(required("identity-file")),
+    knownHostsFile: resolve(required("known-hosts-file")),
+    route: host !== undefined
+      ? {
+          kind: "ssh",
+          host,
+          ...(option(parsed, "ssh-port") === undefined
+            ? {}
+            : { port: portNumber(option(parsed, "ssh-port"))! }),
+        }
+      : {
+          kind: "pigeons",
+          endpointId: pigeonsEndpoint!,
+          ...(option(parsed, "pigeons") === undefined
+            ? {}
+            : { pigeonsExecutable: option(parsed, "pigeons")! }),
+        },
+  }, option(parsed, "remote-altitude") ?? "altitude"));
+  if (wantsJson(parsed)) writeJson(stdout, node);
+  else {
+    stdout.write(
+      `Registered node ${node.connection.nodeId} at ${registeredNodeRoute(node)}.\n`,
+    );
+  }
+  return 0;
+}
+
 async function runNodeCommand(
   args: readonly string[],
   options: CliOptions,
@@ -1177,6 +1367,10 @@ async function runNodeCommand(
   if (["help", "--help", "-h"].includes(subcommand)) {
     stdout.write(NODE_HELP);
     return 0;
+  }
+  if (subcommand === "add" || subcommand === "list"
+    || subcommand === "show" || subcommand === "check") {
+    return await runNodeRegistryCommand(subcommand, args.slice(1), options, stdout);
   }
   if (subcommand !== "serve") throw new CliUsageError(`Unknown node command: ${subcommand}`);
   const parsed = parseArguments(args.slice(1), new Set(["host", "port", "runtime"]), new Set());
