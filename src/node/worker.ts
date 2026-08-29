@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 
-import { AGENT_RETRY_ACTION_KIND, parseAgentRetryPayload, type AgentRetryPayload } from "../run/retry.ts";
+import {
+  AGENT_RETRY_ACTION_KIND,
+  parseAgentRetryPayload,
+  type AgentRetryPayload,
+} from "../run/retry.ts";
 import type { ScheduledAction, TaskStore } from "../storage/task-store.ts";
 
 const DEFAULT_POLL_MS = 1_000;
@@ -13,6 +17,15 @@ export type AgentRetryExecutor = (
   payload: AgentRetryPayload,
 ) => Promise<"executed" | "skipped">;
 
+export interface ScheduledActionKindHandler<Payload> {
+  readonly kind: string;
+  parse(payload: unknown): Payload;
+  execute(
+    taskId: string,
+    payload: Payload,
+  ): Promise<"executed" | "skipped">;
+}
+
 export interface NodeScheduledActionWorkerOptions {
   readonly workerId?: string;
   readonly pollMs?: number;
@@ -23,8 +36,21 @@ export interface NodeScheduledActionWorkerOptions {
   readonly onError?: (error: unknown) => void;
 }
 
-function positiveInteger(value: number, label: string, maximum = Number.MAX_SAFE_INTEGER): number {
-  if (!Number.isSafeInteger(value) || value < 1 || value > maximum) throw new Error(`${label} is invalid`);
+type ScheduledActionStore = Pick<
+  TaskStore,
+  "claimScheduledActionsByKind" | "completeScheduledAction"
+    | "retryScheduledAction" | "deadLetterScheduledAction"
+    | "renewScheduledActionLease" | "recoverExpiredLeases"
+>;
+
+function positiveInteger(
+  value: number,
+  label: string,
+  maximum = Number.MAX_SAFE_INTEGER,
+): number {
+  if (!Number.isSafeInteger(value) || value < 1 || value > maximum) {
+    throw new Error(label + " is invalid");
+  }
   return value;
 }
 
@@ -33,12 +59,15 @@ function message(error: unknown): string {
 }
 
 function workerRetryAt(now: number, attempts: number): number {
-  const delay = Math.min(MAX_WORKER_BACKOFF_MS, 5_000 * 2 ** Math.min(Math.max(0, attempts - 1), 10));
+  const delay = Math.min(
+    MAX_WORKER_BACKOFF_MS,
+    5_000 * 2 ** Math.min(Math.max(0, attempts - 1), 10),
+  );
   return now + delay;
 }
 
-/** Claims durable node actions and keeps their lease alive across long agent turns. */
-export class NodeScheduledActionWorker {
+/** Claims one durable action kind and keeps its lease alive during long work. */
+export class NodeScheduledActionKindWorker<Payload> {
   readonly workerId: string;
   readonly #pollMs: number;
   readonly #leaseMs: number;
@@ -51,20 +80,34 @@ export class NodeScheduledActionWorker {
   #closed = false;
 
   constructor(
-    private readonly store: Pick<
-      TaskStore,
-      "claimScheduledActionsByKind" | "completeScheduledAction" | "retryScheduledAction"
-      | "deadLetterScheduledAction" | "renewScheduledActionLease" | "recoverExpiredLeases"
-    >,
-    private readonly executeAgentRetry: AgentRetryExecutor,
+    private readonly store: ScheduledActionStore,
+    private readonly handler: ScheduledActionKindHandler<Payload>,
     options: NodeScheduledActionWorkerOptions = {},
   ) {
-    this.workerId = options.workerId ?? `altitude-node-${randomUUID()}`;
-    if (!this.workerId.trim()) throw new Error("Scheduled action worker id is required");
-    this.#pollMs = positiveInteger(options.pollMs ?? DEFAULT_POLL_MS, "Scheduled action poll interval");
-    this.#leaseMs = positiveInteger(options.leaseMs ?? DEFAULT_LEASE_MS, "Scheduled action lease duration");
-    this.#maxAttempts = positiveInteger(options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS, "Scheduled action maximum attempts", 100);
-    this.#claimLimit = positiveInteger(options.claimLimit ?? 4, "Scheduled action claim limit", 100);
+    if (!handler.kind.trim()) throw new Error("Scheduled action kind is required");
+    this.workerId = options.workerId
+      ?? `altitude-node-${handler.kind}-${randomUUID()}`;
+    if (!this.workerId.trim()) {
+      throw new Error("Scheduled action worker id is required");
+    }
+    this.#pollMs = positiveInteger(
+      options.pollMs ?? DEFAULT_POLL_MS,
+      "Scheduled action poll interval",
+    );
+    this.#leaseMs = positiveInteger(
+      options.leaseMs ?? DEFAULT_LEASE_MS,
+      "Scheduled action lease duration",
+    );
+    this.#maxAttempts = positiveInteger(
+      options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+      "Scheduled action maximum attempts",
+      100,
+    );
+    this.#claimLimit = positiveInteger(
+      options.claimLimit ?? 4,
+      "Scheduled action claim limit",
+      100,
+    );
     this.#now = options.now ?? Date.now;
     this.#onError = options.onError ?? (() => undefined);
   }
@@ -87,13 +130,15 @@ export class NodeScheduledActionWorker {
 
   async runOnce(): Promise<number> {
     if (this.#closed) return 0;
-    const actions = this.store.claimScheduledActionsByKind(AGENT_RETRY_ACTION_KIND, {
+    const actions = this.store.claimScheduledActionsByKind(this.handler.kind, {
       workerId: this.workerId,
       now: this.#now(),
       leaseMs: this.#leaseMs,
       limit: this.#claimLimit,
     });
-    const results = await Promise.allSettled(actions.map(async (action) => await this.#execute(action)));
+    const results = await Promise.allSettled(
+      actions.map(async (action) => await this.#execute(action)),
+    );
     for (const result of results) {
       if (result.status === "rejected") this.#onError(result.reason);
     }
@@ -103,47 +148,107 @@ export class NodeScheduledActionWorker {
   #kick(): void {
     if (this.#closed || this.#active !== undefined) return;
     this.#active = this.runOnce()
-      .catch((error) => { this.#onError(error); return 0; })
-      .finally(() => { this.#active = undefined; });
+      .catch((error) => {
+        this.#onError(error);
+        return 0;
+      })
+      .finally(() => {
+        this.#active = undefined;
+      });
   }
 
   async #execute(action: ScheduledAction): Promise<void> {
     let renewalError: unknown;
     let retryable = true;
-    const renewalEvery = Math.max(1_000, Math.min(60_000, Math.floor(this.#leaseMs / 3)));
+    const renewalEvery = Math.max(
+      1_000,
+      Math.min(60_000, Math.floor(this.#leaseMs / 3)),
+    );
     const renewal = setInterval(() => {
       try {
-        this.store.renewScheduledActionLease(action.id, this.workerId, this.#now(), this.#leaseMs);
+        this.store.renewScheduledActionLease(
+          action.id,
+          this.workerId,
+          this.#now(),
+          this.#leaseMs,
+        );
       } catch (error) {
         renewalError = error;
       }
     }, renewalEvery);
     try {
-      if (action.kind !== AGENT_RETRY_ACTION_KIND) {
+      if (action.kind !== this.handler.kind) {
         retryable = false;
-        throw new Error(`Unsupported scheduled action kind ${action.kind}`);
+        throw new Error("Scheduled action kind changed after it was claimed");
       }
-      let payload: AgentRetryPayload;
+      let payload: Payload;
       try {
-        payload = parseAgentRetryPayload(action.payload);
+        payload = this.handler.parse(action.payload);
       } catch (error) {
         retryable = false;
         throw error;
       }
-      await this.executeAgentRetry(action.taskId, payload);
+      await this.handler.execute(action.taskId, payload);
       if (renewalError !== undefined) throw renewalError;
-      this.store.completeScheduledAction(action.id, this.workerId, this.#now());
+      this.store.completeScheduledAction(
+        action.id,
+        this.workerId,
+        this.#now(),
+      );
     } catch (error) {
       const detail = message(error);
       if (!retryable || action.attempts >= this.#maxAttempts) {
-        this.store.deadLetterScheduledAction(action.id, this.workerId, detail, this.#now());
+        this.store.deadLetterScheduledAction(
+          action.id,
+          this.workerId,
+          detail,
+          this.#now(),
+        );
       } else {
         const now = this.#now();
-        this.store.retryScheduledAction(action.id, this.workerId, workerRetryAt(now, action.attempts), detail);
+        this.store.retryScheduledAction(
+          action.id,
+          this.workerId,
+          workerRetryAt(now, action.attempts),
+          detail,
+        );
       }
       this.#onError(error);
     } finally {
       clearInterval(renewal);
     }
+  }
+}
+
+/** Backward-compatible exact-session retry worker. */
+export class NodeScheduledActionWorker {
+  readonly #worker: NodeScheduledActionKindWorker<AgentRetryPayload>;
+
+  constructor(
+    store: ScheduledActionStore,
+    executeAgentRetry: AgentRetryExecutor,
+    options: NodeScheduledActionWorkerOptions = {},
+  ) {
+    this.#worker = new NodeScheduledActionKindWorker(store, {
+      kind: AGENT_RETRY_ACTION_KIND,
+      parse: parseAgentRetryPayload,
+      execute: executeAgentRetry,
+    }, options);
+  }
+
+  get workerId(): string {
+    return this.#worker.workerId;
+  }
+
+  start(): void {
+    this.#worker.start();
+  }
+
+  close(): Promise<void> {
+    return this.#worker.close();
+  }
+
+  runOnce(): Promise<number> {
+    return this.#worker.runOnce();
   }
 }

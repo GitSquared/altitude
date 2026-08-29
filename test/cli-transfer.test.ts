@@ -29,8 +29,10 @@ import type {
 } from "../src/process/command.ts";
 import {
   PORTABLE_TASK_STATE_MEMBER,
+  decodePortableTaskState,
   portableTaskStateMember,
 } from "../src/run/task-state.ts";
+import { activateTransferredTask } from "../src/run/transfer-activation.ts";
 import { TaskStore } from "../src/storage/task-store.ts";
 import { TaskAgentSessionStore } from "../src/storage/task-agent-session-store.ts";
 
@@ -158,6 +160,10 @@ test("task send moves a paused capsule through the remote command boundary", asy
     new FilesystemRepositorySeedCache(join(targetRoot, "seeds")),
     "straylight",
   );
+  using targetStore = new TaskStore(join(targetRoot, "altitude.db"), {
+    clock: () => Date.parse("2026-08-29T10:05:00.000Z"),
+  });
+  const targetSessions = new TaskAgentSessionStore(targetStore.database);
   const commands: CommandSpec[] = [];
   const runner: CommandRunner = {
     async run(spec): Promise<CommandResult> {
@@ -172,6 +178,21 @@ test("task send moves a paused capsule through the remote command boundary", asy
       }
       if (spec.args?.at(-1) === "activate" && typeof spec.stdin === "string") {
         const receipt = await receiver.activate(JSON.parse(spec.stdin));
+        const checkpoint = await targetCheckpoints.read(receipt.checkpoint);
+        const state = checkpoint.members.find(
+          (member) => member.path === PORTABLE_TASK_STATE_MEMBER,
+        );
+        if (state === undefined) throw new Error("missing portable task state");
+        activateTransferredTask({
+          store: targetStore,
+          sessions: targetSessions,
+          portableState: decodePortableTaskState(state.bytes),
+          targetIdentityId: "claude-remote",
+          targetNodeId: "straylight",
+          transferId: receipt.transferId,
+          checkpoint: receipt.checkpoint,
+          activatedAt: Date.parse("2026-08-29T10:05:00.000Z"),
+        });
         return {
           exitCode: 0,
           stdout: JSON.stringify(receipt) + "\n",
@@ -232,4 +253,12 @@ test("task send moves a paused capsule through the remote command boundary", asy
   expect(portable && new TextDecoder().decode(portable.bytes)).not.toContain(
     "claude-personal",
   );
+  expect(targetStore.getTask("task-send")?.status).toBe("queued");
+  expect(targetSessions.get("task-send")?.identityId).toBe("claude-remote");
+  expect(targetStore.listScheduledActions("scheduled")).toEqual([
+    expect.objectContaining({
+      kind: "task.run",
+      dedupeKey: expect.stringContaining("transfer:"),
+    }),
+  ]);
 });

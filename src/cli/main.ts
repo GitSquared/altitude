@@ -26,7 +26,10 @@ import {
 } from "../config/local.ts";
 import { runDoctor, renderDoctor } from "../doctor.ts";
 import { createAltitudeNodeService, nodeInstanceId, serveAltitudeNode } from "../node/server.ts";
-import { NodeScheduledActionWorker } from "../node/worker.ts";
+import {
+  NodeScheduledActionKindWorker,
+  NodeScheduledActionWorker,
+} from "../node/worker.ts";
 import { RedmarkerIntentTool } from "../intent/redmarker.ts";
 import { IntentSubmissionStore } from "../intent/submission.ts";
 import { BunCommandRunner, type CommandRunner } from "../process/command.ts";
@@ -79,6 +82,11 @@ import {
   portableTaskStateMember,
 } from "../run/task-state.ts";
 import { createManagedAgentRetryExecutor } from "../run/retry-executor.ts";
+import {
+  TASK_DISPATCH_ACTION_KIND,
+  parseTaskDispatchPayload,
+} from "../run/dispatch.ts";
+import { activateTransferredTask } from "../run/transfer-activation.ts";
 import { TaskRunCoordinator } from "../run/task-runner.ts";
 import { VERSION } from "../version.ts";
 
@@ -1146,22 +1154,16 @@ async function runTransferReceiverCommand(
     ...(options.createId === undefined ? {} : { createId: options.createId }),
   });
   const portableState = decodePortableTaskState(stateMember.bytes);
-  const imported = store.importPortableTaskState(portableState);
-  if (portableState.agentSession !== undefined) {
-    new TaskAgentSessionStore(store.database, options.clock).importPortable(
-      portableState.agentSession,
-      config.identity.id,
-    );
-  }
-  if (imported.status === "transferring") {
-    store.append({
-      taskId: imported.id,
-      type: "task.state_changed",
-      payload: { to: "queued", reason: `Capsule activated on node ${config.node.id}` },
-      actor: { kind: "system", component: "capsule-transfer" },
-      idempotencyKey: `transfer:${activation.transferId}:activated`,
-    });
-  }
+  activateTransferredTask({
+    store,
+    sessions: new TaskAgentSessionStore(store.database, options.clock),
+    portableState,
+    targetIdentityId: config.identity.id,
+    targetNodeId: config.node.id,
+    transferId: activation.transferId,
+    checkpoint: activation.checkpoint,
+    activatedAt: (options.clock ?? Date.now)(),
+  });
   writeJson(stdout, activation);
   return 0;
 }
@@ -1221,7 +1223,7 @@ async function runNodeCommand(
     && port === config.node.port
     && hostname === config.node.bindHost;
   const retrySessions = new TaskAgentSessionStore(store.database, options.clock);
-  const worker = !workerCompatible ? undefined : new NodeScheduledActionWorker(
+  const retryWorker = !workerCompatible ? undefined : new NodeScheduledActionWorker(
     store,
     createManagedAgentRetryExecutor({
       tasks: store,
@@ -1239,15 +1241,59 @@ async function runNodeCommand(
       ),
     },
   );
-  stdout.write(`Altitude node listening at ${server.url.toString()} (${runtime}${worker === undefined ? "" : ", retry worker active"})\n`);
+  const dispatchWorker = !workerCompatible || config === undefined
+    ? undefined
+    : new NodeScheduledActionKindWorker(store, {
+        kind: TASK_DISPATCH_ACTION_KIND,
+        parse: (value) => {
+          const payload = parseTaskDispatchPayload(value);
+          if (payload.targetNodeId !== config.node.id) {
+            throw new Error(
+              `Task dispatch targets node ${payload.targetNodeId}, not ${config.node.id}`,
+            );
+          }
+          return payload;
+        },
+        execute: async (taskId, payload) => {
+          if (store.getTask(taskId)?.status !== "queued") return "skipped";
+          const active = await new FilesystemCapsuleCheckpointStore(
+            paths.capsules,
+          ).readActive(taskId);
+          if (active.manifest.ownership.ownerNodeId !== config.node.id) {
+            return "skipped";
+          }
+          if (active.manifest.revision !== payload.checkpointRevision
+            || capsuleManifestDigest(active.manifest) !== payload.checkpointDigest) {
+            throw new Error(
+              `Task ${taskId} active capsule changed before remote dispatch`,
+            );
+          }
+          await runManagedTask([taskId], options, stdout);
+          if (store.getTask(taskId)?.status === "queued") {
+            throw new Error(`Remote task ${taskId} did not leave the queue`);
+          }
+          return "executed";
+        },
+      }, {
+        ...(options.clock === undefined ? {} : { now: options.clock }),
+        onError: (error) => (options.stderr ?? process.stderr).write(
+          `Altitude dispatch worker: ${error instanceof Error ? error.message : String(error)}\n`,
+        ),
+      });
+  stdout.write(
+    `Altitude node listening at ${server.url.toString()} (${runtime}`
+      + (retryWorker === undefined ? "" : ", retry and dispatch workers active")
+      + ")\n",
+  );
   if (config !== undefined && !workerCompatible) {
     stdout.write("Automatic retries are inactive because node runtime/listener overrides differ from the saved setup.\n");
   }
   try {
-    worker?.start();
+    retryWorker?.start();
+    dispatchWorker?.start();
     await waitForShutdownSignal();
   } finally {
-    await worker?.close();
+    await Promise.all([retryWorker?.close(), dispatchWorker?.close()]);
     await server.close();
   }
   return 0;
