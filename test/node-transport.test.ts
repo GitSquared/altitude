@@ -52,6 +52,10 @@ describe("node SSH transport", () => {
     expect(() =>
       buildSshBaseArgs({ ...direct, route: { kind: "ssh", host: "host; touch /tmp/nope" } }),
     ).toThrow("Unsafe SSH host");
+    expect(() => buildRemoteCommandSpec(
+      direct,
+      ["altitude", "version;touch", "/tmp/nope"],
+    )).toThrow("Unsafe remote command argument");
   });
 
   test("builds loopback-only port forwards", () => {

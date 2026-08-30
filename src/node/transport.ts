@@ -49,6 +49,7 @@ const SAFE_USER = /^[a-z_][a-z0-9_-]*$/i;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SAFE_ABSOLUTE_PATH = /^\/[A-Za-z0-9._/@%+,:=-]+$/;
 const SAFE_EXECUTABLE = /^\/[A-Za-z0-9._/@%+,:=-]+$|^[A-Za-z0-9._-]+$/;
+const SAFE_REMOTE_ARGUMENT = /^[A-Za-z0-9._/@%+,:={}-]+$/;
 
 export function assertNodeConnection(connection: NodeConnection): void {
   if (!SAFE_ID.test(connection.nodeId)) throw new Error("Unsafe node id");
@@ -133,7 +134,9 @@ export function parseRemoteAltitudeExecutable(value: unknown): string {
 
 export function buildSshBaseArgs(
   connection: NodeConnection,
-  options: { readonly acceptNewHostKey?: boolean } = {},
+  options: {
+    readonly acceptNewHostKey?: boolean;
+  } = {},
 ): readonly string[] {
   assertNodeConnection(connection);
   const strictHostKey = options.acceptNewHostKey === true ? "accept-new" : "yes";
@@ -149,7 +152,6 @@ export function buildSshBaseArgs(
     "-o",
     `IdentityFile=${connection.identityFile}`,
   ];
-
   if (connection.route.kind === "ssh") {
     if (connection.route.port !== undefined) args.push("-p", String(connection.route.port));
     args.push(`${connection.user}@${connection.route.host}`);
@@ -165,8 +167,15 @@ export function buildSshBaseArgs(
 export function buildRemoteCommandSpec(
   connection: NodeConnection,
   remoteArgs: readonly string[],
-  options: { readonly stdin?: string | Uint8Array; readonly acceptNewHostKey?: boolean } = {},
+  options: {
+    readonly stdin?: string | Uint8Array;
+    readonly acceptNewHostKey?: boolean;
+  } = {},
 ): CommandSpec {
+  if (remoteArgs.length === 0
+    || remoteArgs.some((argument) => !SAFE_REMOTE_ARGUMENT.test(argument))) {
+    throw new Error("Unsafe remote command argument");
+  }
   return {
     executable: "ssh",
     args: [...buildSshBaseArgs(connection, options), "--", ...remoteArgs],

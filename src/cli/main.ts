@@ -95,6 +95,10 @@ import {
 import { activateTransferredTask } from "../run/transfer-activation.ts";
 import { TaskRunCoordinator } from "../run/task-runner.ts";
 import { VERSION } from "../version.ts";
+import {
+  isAltitudeSourceCheckout,
+  prepareStandaloneImageContext,
+} from "../runtime/standalone-images.ts";
 
 const HELP = `altitude ${VERSION}
 
@@ -173,6 +177,8 @@ The listener defaults to loopback. Use --host deliberately when capsules on a
 native Linux node need to reach the service through the host gateway.
 With the saved runtime and listener settings, the node also resumes durable
 rate-limit retries and starts tasks received from another node.
+Altitude does not install or manage an operating-system service; run this command
+under whichever process supervisor belongs to the node.
 `;
 
 const SETUP_HELP = `Usage:
@@ -184,6 +190,8 @@ const SETUP_HELP = `Usage:
 
 Setup builds the two OCI images, creates a source-free identity capsule, and
 opens the official Claude Code login there when authentication is needed.
+On Linux, an installed Altitude binary builds its capsules from itself; --source
+selects an Altitude checkout explicitly (and is currently required elsewhere).
 `;
 
 type Output = Pick<Writable, "write">;
@@ -1576,19 +1584,40 @@ async function runSetupCommand(
     ...(options.createId === undefined ? {} : { createId: options.createId }),
   });
   const json = wantsJson(parsed);
-  const result = await setupAltitude({
-    config,
-    sourceDirectory: resolve(option(parsed, "source") ?? process.cwd()),
-    buildImages: parsed.options.get("skip-build") !== true,
-    ...(json ? {} : { progress: (item) => stdout.write(`→ ${item.message}\n`) }),
-  }, {
-    runtimeProbe: runtime,
-    images: new CapsuleImageBuilder(config.runtime, runner),
-    identity: new IdentityCapsuleManager(config.runtime, runner),
-    claude,
-    interactiveCommand: (spec) => launcher.interactiveCommand(spec),
-    runner,
-  });
+  const buildImages = parsed.options.get("skip-build") !== true;
+  const requestedSource = option(parsed, "source");
+  const candidateSource = resolve(requestedSource ?? process.cwd());
+  const sourceAvailable = buildImages
+    ? await isAltitudeSourceCheckout(candidateSource)
+    : false;
+  if (buildImages && requestedSource !== undefined && !sourceAvailable) {
+    throw new Error(`${candidateSource} is not an Altitude source checkout`);
+  }
+  const standalone = buildImages && !sourceAvailable
+    ? await prepareStandaloneImageContext({
+        parentDirectory: join(paths.cache, "image-builds"),
+        executable: process.execPath,
+      })
+    : undefined;
+  let result;
+  try {
+    result = await setupAltitude({
+      config,
+      sourceDirectory: standalone?.directory
+        ?? candidateSource,
+      buildImages,
+      ...(json ? {} : { progress: (item) => stdout.write(`→ ${item.message}\n`) }),
+    }, {
+      runtimeProbe: runtime,
+      images: new CapsuleImageBuilder(config.runtime, runner),
+      identity: new IdentityCapsuleManager(config.runtime, runner),
+      claude,
+      interactiveCommand: (spec) => launcher.interactiveCommand(spec),
+      runner,
+    });
+  } finally {
+    await standalone?.cleanup();
+  }
   await writeLocalConfig(paths.config, config);
   if (json) writeJson(stdout, { config, result });
   else {
