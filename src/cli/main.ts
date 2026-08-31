@@ -61,6 +61,7 @@ import { runTaskToolStdio } from "../tools/task-helper.ts";
 import { runTaskBootstrapStdio } from "../capsule/bootstrap.ts";
 import { runTaskCheckpointStdio } from "../capsule/task-checkpoint.ts";
 import { runTaskInit } from "../capsule/init.ts";
+import { createFactoryGitRepository } from "../capsule/factory-git.ts";
 import { FilesystemCapsuleCheckpointStore } from "../capsule/filesystem.ts";
 import { capsuleManifestDigest } from "../capsule/manifest.ts";
 import {
@@ -150,6 +151,10 @@ const TASK_HELP = `Usage:
 
 Intent levels:
   ${INTENT_LEVELS.join(", ")}
+
+The first run starts in a clean Altitude-created Git capsule by default.
+--repository explicitly imports that host worktree instead; Altitude never
+infers or mounts the current directory.
 `;
 
 const ATTENTION_HELP = `Usage:
@@ -509,9 +514,6 @@ async function prepareTaskCapsule(input: {
   readonly clock?: () => number;
 }): Promise<LocalCapsuleCheckpointer> {
   const needsInitialRepository = input.task.status === "queued";
-  if (needsInitialRepository && input.repositoryPath === undefined) {
-    throw new CliUsageError("The first task run requires --repository <worktree-root>");
-  }
   if (!needsInitialRepository && input.repositoryPath !== undefined) {
     throw new CliUsageError("--repository is only accepted for the first queued run; resumes use the task capsule");
   }
@@ -534,18 +536,30 @@ async function prepareTaskCapsule(input: {
     new TaskCapsuleBootstrapProvisioner(input.launcher),
     checkpointer,
   );
-  await preparer.prepare({
-    taskId: input.task.id,
-    taskImage: input.config.taskImage,
-    network: input.config.network,
-    nodeId: input.config.node.id,
-    ...(input.repositoryPath === undefined ? {} : { repositoryPath: resolve(input.repositoryPath) }),
-    additionalMembers: [portableTaskStateMember(
-      input.store,
-      input.task.id,
-      input.agentSessions,
-    )],
-  });
+  const factory = needsInitialRepository && input.repositoryPath === undefined
+    ? await createFactoryGitRepository({
+        parentDirectory: join(input.paths.cache, "factory-repositories"),
+        taskId: input.task.id,
+      })
+    : undefined;
+  try {
+    await preparer.prepare({
+      taskId: input.task.id,
+      taskImage: input.config.taskImage,
+      network: input.config.network,
+      nodeId: input.config.node.id,
+      ...(input.repositoryPath === undefined && factory === undefined
+        ? {}
+        : { repositoryPath: factory?.path ?? resolve(input.repositoryPath!) }),
+      additionalMembers: [portableTaskStateMember(
+        input.store,
+        input.task.id,
+        input.agentSessions,
+      )],
+    });
+  } finally {
+    await factory?.cleanup();
+  }
   if (input.agentSessions !== undefined && input.transcripts !== undefined) {
     const session = input.agentSessions.get(input.task.id);
     if (session !== undefined && session.runCount > 0) {

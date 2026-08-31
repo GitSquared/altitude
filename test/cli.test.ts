@@ -126,10 +126,12 @@ describe("CLI", () => {
     expect(command?.args?.slice(-3)).toEqual(["--", "/opt/altitude", "version"]);
   });
 
-  test("documents the first-run repository capsule and native take flow", async () => {
+  test("documents the capsule-first run and native take flow", async () => {
     const cli = harness();
     expect(await runCli(["task", "help"], cli.options)).toBe(0);
     expect(cli.stdout.value).toContain("task run <task-id> [--repository <path>]");
+    expect(cli.stdout.value).toContain("clean Altitude-created Git capsule");
+    expect(cli.stdout.value).toContain("never\ninfers or mounts the current directory");
     expect(cli.stdout.value).toContain("task take <task-id>");
     expect(cli.stdout.value).toContain("task review <task-id> --url <loopback-url>");
     expect(cli.stdout.value).toContain("task send <task-id> --node <id>");

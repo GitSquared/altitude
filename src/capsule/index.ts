@@ -3,6 +3,7 @@ export * from "./bootstrap.ts";
 export * from "./canonical.ts";
 export * from "./commands.ts";
 export * from "./filesystem.ts";
+export * from "./factory-git.ts";
 export * from "./git.ts";
 export * from "./init.ts";
 export * from "./local-git.ts";
