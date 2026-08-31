@@ -186,6 +186,42 @@ function registerTaskTools(
     annotations: { readOnlyHint: true, idempotentHint: true },
   }, () => execute(executor, grant, { schema: TASK_TOOL_PROTOCOL, operation: "git_status" }));
 
+  if (has("create_pull_request")) server.registerTool("create_pull_request", {
+    title: "Create draft pull request",
+    description: "Create a GitHub draft pull request from the task capsule's explicit node-local GitHub login. This tool can never merge or publish a non-draft PR.",
+    inputSchema: z.object({
+      repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u),
+      head: z.string().min(1).max(255),
+      base: z.string().min(1).max(255),
+      title: z.string().min(1).max(500),
+      body: z.string().min(1).max(100_000),
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  }, (input) => execute(executor, grant, {
+    schema: TASK_TOOL_PROTOCOL,
+    operation: "github_pr_create",
+    ...input,
+  }));
+
+  if (has("inspect_pull_request")) server.registerTool("inspect_pull_request", {
+    title: "Inspect pull request readiness",
+    description: "Read normalized GitHub checks and reviews, then combine them with explicit local verification evidence. Green CI alone is never enough for Review.",
+    inputSchema: z.object({
+      url: z.string().url().max(4_096),
+      evidence: z.object({
+        worktreeClean: z.boolean(),
+        headPushed: z.boolean(),
+        pathExercised: z.boolean(),
+        feedbackAddressed: z.boolean(),
+      }),
+    }),
+    annotations: { readOnlyHint: true, idempotentHint: true },
+  }, (input) => execute(executor, grant, {
+    schema: TASK_TOOL_PROTOCOL,
+    operation: "github_pr_inspect",
+    ...input,
+  }));
+
   if (has("record_trace")) server.registerTool("record_trace", {
     title: "Record trace",
     description: "Append low-level operational history without interrupting the operator or changing task execution.",

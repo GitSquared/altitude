@@ -148,6 +148,77 @@ describe("task capsule tools", () => {
     }));
     expect(rejected).toMatchObject({ ok: false });
   });
+
+  test("creates only draft PRs and evaluates normalized GitHub readiness", async () => {
+    const root = workspace();
+    const created: unknown[] = [];
+    const snapshot = {
+      url: "https://github.com/example/project/pull/42",
+      number: 42,
+      title: "Capsule work",
+      state: "open" as const,
+      draft: true,
+      mergeState: "CLEAN",
+      reviewDecision: "",
+      headRefName: "agent/capsule",
+      headSha: "a".repeat(40),
+      checks: [{ name: "test", state: "success" as const }],
+      reviews: [],
+      observedAt: "2026-08-31T12:00:00.000Z",
+    };
+    const dependencies = {
+      github: {
+        authenticated: async () => true,
+        createDraftPullRequest: async (input: unknown) => {
+          created.push(input);
+          return snapshot.url;
+        },
+        inspectPullRequest: async () => snapshot,
+      },
+    };
+    const create = await executeTaskTool(root, request({
+      operation: "github_pr_create",
+      repository: "example/project",
+      head: "agent/capsule",
+      base: "main",
+      title: "Capsule work",
+      body: "Checked by Altitude",
+    }), dependencies);
+    expect(create).toMatchObject({ ok: true, result: { url: snapshot.url, draft: true } });
+    expect(created).toHaveLength(1);
+
+    const inspect = await executeTaskTool(root, request({
+      operation: "github_pr_inspect",
+      url: snapshot.url,
+      evidence: {
+        worktreeClean: true,
+        headPushed: true,
+        pathExercised: false,
+        feedbackAddressed: true,
+      },
+    }), dependencies);
+    expect(inspect).toMatchObject({
+      ok: true,
+      result: {
+        snapshot: { number: 42 },
+        readiness: { ready: false, blockers: ["The changed path has not been exercised"] },
+      },
+    });
+
+    const loggedOut = await executeTaskTool(root, request({
+      operation: "github_pr_inspect",
+      url: snapshot.url,
+      evidence: {
+        worktreeClean: true,
+        headPushed: true,
+        pathExercised: true,
+        feedbackAddressed: true,
+      },
+    }), {
+      github: { ...dependencies.github, authenticated: async () => false },
+    });
+    expect(loggedOut).toMatchObject({ ok: false, error: { code: "github_auth_required" } });
+  });
 });
 
 describe("task tool process boundary", () => {

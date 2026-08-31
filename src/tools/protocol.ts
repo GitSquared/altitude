@@ -43,6 +43,26 @@ export type TaskToolRequest =
   | Readonly<{
       schema: typeof TASK_TOOL_PROTOCOL;
       operation: "git_status";
+    }>
+  | Readonly<{
+      schema: typeof TASK_TOOL_PROTOCOL;
+      operation: "github_pr_create";
+      repository: string;
+      head: string;
+      base: string;
+      title: string;
+      body: string;
+    }>
+  | Readonly<{
+      schema: typeof TASK_TOOL_PROTOCOL;
+      operation: "github_pr_inspect";
+      url: string;
+      evidence: Readonly<{
+        worktreeClean: boolean;
+        headPushed: boolean;
+        pathExercised: boolean;
+        feedbackAddressed: boolean;
+      }>;
     }>;
 
 export type TaskToolResponse =

@@ -67,6 +67,13 @@ function requiredNumber(value: unknown, field: string): number {
   return value;
 }
 
+function commandText(value: string, field: string, maximum: number): string {
+  if (!value.trim() || value.length > maximum || value.includes("\0")) {
+    throw new Error(`Invalid GitHub ${field}`);
+  }
+  return value;
+}
+
 function normalizeCheckState(status: unknown, conclusion: unknown, state: unknown): CheckState {
   const normalizedStatus = typeof status === "string" ? status.toUpperCase() : "";
   const normalizedConclusion = typeof conclusion === "string" ? conclusion.toUpperCase() : "";
@@ -228,6 +235,14 @@ export class GitHubCliAdapter {
     readonly body: string;
   }): Promise<string> {
     if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(input.repository)) throw new Error("Invalid GitHub repository");
+    if (!/^[A-Za-z0-9][A-Za-z0-9._/:-]{0,254}$/u.test(input.head) || input.head.includes("..")) {
+      throw new Error("Invalid GitHub head ref");
+    }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/u.test(input.base) || input.base.includes("..")) {
+      throw new Error("Invalid GitHub base ref");
+    }
+    commandText(input.title, "pull request title", 500);
+    commandText(input.body, "pull request body", 100_000);
     const result = await this.runner.run({
       executable: "gh",
       args: [

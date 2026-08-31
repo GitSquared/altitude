@@ -126,7 +126,7 @@ describe("task MCP endpoint", () => {
       taskId: "task-1",
       identityId: "claude-personal",
       agentSessionId: "session-1",
-      allowedTools: ["get_task", "read_file", "report_update"],
+      allowedTools: ["get_task", "read_file", "report_update", "create_pull_request", "inspect_pull_request"],
       ttlMs: 60_000,
     });
     const calls: Array<{ taskId: string; request: TaskToolRequest }> = [];
@@ -149,7 +149,13 @@ describe("task MCP endpoint", () => {
     await client.connect(transport);
     try {
       const listed = await client.listTools();
-      expect(listed.tools.map((tool) => tool.name).sort()).toEqual(["get_task", "read_file", "report_update"]);
+      expect(listed.tools.map((tool) => tool.name).sort()).toEqual([
+        "create_pull_request",
+        "get_task",
+        "inspect_pull_request",
+        "read_file",
+        "report_update",
+      ]);
 
       const task = await client.callTool({ name: "get_task", arguments: {} });
       expect(task.structuredContent).toMatchObject({
@@ -162,6 +168,57 @@ describe("task MCP endpoint", () => {
         taskId: "task-1",
         request: { schema: TASK_TOOL_PROTOCOL, operation: "read_file", path: "README.md" },
       }]);
+
+      await client.callTool({
+        name: "create_pull_request",
+        arguments: {
+          repository: "example/project",
+          head: "agent/capsule",
+          base: "main",
+          title: "Capsule work",
+          body: "Checked by Altitude",
+        },
+      });
+      await client.callTool({
+        name: "inspect_pull_request",
+        arguments: {
+          url: "https://github.com/example/project/pull/42",
+          evidence: {
+            worktreeClean: true,
+            headPushed: true,
+            pathExercised: true,
+            feedbackAddressed: true,
+          },
+        },
+      });
+      expect(calls.slice(1)).toEqual([
+        {
+          taskId: "task-1",
+          request: {
+            schema: TASK_TOOL_PROTOCOL,
+            operation: "github_pr_create",
+            repository: "example/project",
+            head: "agent/capsule",
+            base: "main",
+            title: "Capsule work",
+            body: "Checked by Altitude",
+          },
+        },
+        {
+          taskId: "task-1",
+          request: {
+            schema: TASK_TOOL_PROTOCOL,
+            operation: "github_pr_inspect",
+            url: "https://github.com/example/project/pull/42",
+            evidence: {
+              worktreeClean: true,
+              headPushed: true,
+              pathExercised: true,
+              feedbackAddressed: true,
+            },
+          },
+        },
+      ]);
 
       const update = await client.callTool({
         name: "report_update",

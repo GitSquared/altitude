@@ -13,6 +13,12 @@ import { isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 
 import { safeRepositoryPath } from "../capsule/paths.ts";
 import {
+  GitHubCliAdapter,
+  evaluatePullRequestReadiness,
+  type PullRequestReadinessEvidence,
+} from "../codehost/github.ts";
+import type { CommandRunner, CommandSpec } from "../process/command.ts";
+import {
   TASK_TOOL_PROTOCOL,
   type TaskToolRequest,
   type TaskToolResponse,
@@ -21,6 +27,10 @@ import {
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 120_000;
+
+export interface TaskToolDependencies {
+  readonly github: Pick<GitHubCliAdapter, "authenticated" | "createDraftPullRequest" | "inspectPullRequest">;
+}
 
 class TaskToolError extends Error {
   constructor(readonly code: string, message: string) {
@@ -256,6 +266,40 @@ async function runCommand(
   }
 }
 
+class TaskCapsuleCommandRunner implements CommandRunner {
+  constructor(private readonly root: string) {}
+
+  run(spec: CommandSpec): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    if (spec.stdin !== undefined) throw new TaskToolError("invalid_command", "Task command stdin is not supported here");
+    const env = spec.env === undefined
+      ? undefined
+      : Object.fromEntries(Object.entries(spec.env).filter((entry): entry is [string, string] => entry[1] !== undefined));
+    return runCommand(this.root, {
+      executable: spec.executable,
+      ...(spec.args === undefined ? {} : { args: spec.args }),
+      ...(spec.cwd === undefined ? {} : { cwd: spec.cwd }),
+      ...(env === undefined ? {} : { env }),
+    });
+  }
+
+  runInteractive(): Promise<number> {
+    throw new TaskToolError("invalid_command", "Interactive commands are not available through task tools");
+  }
+}
+
+function defaultDependencies(root: string): TaskToolDependencies {
+  return { github: new GitHubCliAdapter(new TaskCapsuleCommandRunner(root)) };
+}
+
+async function requireGitHubAuthentication(github: TaskToolDependencies["github"]): Promise<void> {
+  if (!(await github.authenticated())) {
+    throw new TaskToolError(
+      "github_auth_required",
+      "GitHub is not logged in on this node. Ask the operator to open task setup and run `gh auth login`.",
+    );
+  }
+}
+
 async function searchText(root: string, request: Extract<TaskToolRequest, { operation: "search_text" }>): Promise<unknown> {
   if (!request.query || request.query.length > 1_024 || request.query.includes("\0")) {
     throw new TaskToolError("invalid_argument", "Search query must contain 1 to 1024 characters");
@@ -278,7 +322,11 @@ async function searchText(root: string, request: Extract<TaskToolRequest, { oper
   return { path, matches, truncated: result.stdout.split("\n").filter(Boolean).length > limit };
 }
 
-export async function executeTaskTool(root: string, request: TaskToolRequest): Promise<TaskToolResponse> {
+export async function executeTaskTool(
+  root: string,
+  request: TaskToolRequest,
+  dependencies: TaskToolDependencies = defaultDependencies(resolve(root)),
+): Promise<TaskToolResponse> {
   try {
     if (request.schema !== TASK_TOOL_PROTOCOL) throw new TaskToolError("unsupported_protocol", "Unsupported task tool protocol");
     const resolvedRoot = resolve(root);
@@ -291,6 +339,22 @@ export async function executeTaskTool(root: string, request: TaskToolRequest): P
                   executable: "git",
                   args: ["status", "--short", "--branch", "--porcelain=v2"],
                 })
+                : request.operation === "github_pr_create" ? await (async () => {
+                    await requireGitHubAuthentication(dependencies.github);
+                    const url = await dependencies.github.createDraftPullRequest(request);
+                    return { url, draft: true };
+                  })()
+                  : request.operation === "github_pr_inspect" ? await (async () => {
+                      await requireGitHubAuthentication(dependencies.github);
+                      const snapshot = await dependencies.github.inspectPullRequest(request.url);
+                      return {
+                        snapshot,
+                        readiness: evaluatePullRequestReadiness(
+                          snapshot,
+                          request.evidence as PullRequestReadinessEvidence,
+                        ),
+                      };
+                    })()
                 : (() => { throw new TaskToolError("unsupported_operation", "Unsupported task tool operation"); })();
     return { schema: TASK_TOOL_PROTOCOL, ok: true, result };
   } catch (error) {

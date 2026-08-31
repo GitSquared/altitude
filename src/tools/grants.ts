@@ -10,6 +10,8 @@ export const TASK_MCP_TOOL_NAMES = [
   "search_text",
   "run_command",
   "git_status",
+  "create_pull_request",
+  "inspect_pull_request",
   "record_trace",
   "report_update",
   "request_decision",
