@@ -1451,6 +1451,85 @@ function resolutionFor(
   }
 }
 
+async function persistAttentionResolution(
+  options: CliOptions,
+  taskId: string,
+  attentionId: string,
+  resolution: AttentionResolution,
+): Promise<Task> {
+  return await withStore(options, (store) => store.append({
+    taskId,
+    type: "attention.resolved",
+    payload: { attentionId, resolution },
+    actor: OPERATOR,
+  }).task);
+}
+
+async function continueAfterAttentionResolution(input: {
+  readonly task: Task;
+  readonly resolution: AttentionResolution;
+  readonly options: CliOptions;
+  readonly stdout: Output;
+}): Promise<{ readonly exitCode: number; readonly notice: string }> {
+  const paths = resolveAltitudePaths(input.options.env ?? process.env);
+  const terminals = new TerminalSessionManager(paths.terminals);
+  let terminal = await terminals.status(input.task.id, "agent");
+  const accepted = input.resolution.kind === "accepted";
+
+  if (accepted) {
+    if (terminal?.state === "running") {
+      terminal = await terminals.terminate(input.task.id, "agent");
+    }
+    if (terminal !== undefined && terminal.state !== "starting") {
+      await takeManagedTask([input.task.id], input.options, input.stdout);
+    }
+    return { exitCode: 0, notice: "Review accepted. The task is complete and its capsule is durable." };
+  }
+
+  if (terminal?.state === "running") {
+    await terminals.writeInput(
+      input.task.id,
+      "Altitude recorded new operator input in the durable task ledger. Call get_task now, follow the resolved Decision or Review instructions, and continue from that intent.\r",
+      "agent",
+    );
+    return { exitCode: 0, notice: "Response recorded and routed into the live Claude session." };
+  }
+  if (terminal?.state === "starting") {
+    return { exitCode: 0, notice: "Response recorded. Claude is still starting; reopen the task to continue." };
+  }
+  if (terminal !== undefined) {
+    await takeManagedTask([input.task.id], input.options, input.stdout);
+  }
+
+  let current = await withStore(input.options, (store) => store.getTask(input.task.id));
+  if (current?.status === "taken") {
+    current = await withStore(input.options, (store) => store.append({
+      taskId: input.task.id,
+      type: "task.state_changed",
+      payload: { to: "paused", reason: "Native Claude session ended before routed input arrived" },
+      actor: { kind: "system", component: "attention-router" },
+    }).task);
+  }
+  if (current?.status !== "running" && current?.status !== "paused") {
+    return {
+      exitCode: 0,
+      notice: `Response recorded; task is ${current?.status ?? "unavailable"}.`,
+    };
+  }
+  if (await readLocalConfig(paths.config) === undefined) {
+    return {
+      exitCode: 0,
+      notice: "Response recorded. Set up Altitude before resuming Claude.",
+    };
+  }
+  const exitCode = await runManagedTask([input.task.id], input.options, input.stdout);
+  const resumed = await withStore(input.options, (store) => store.getTask(input.task.id));
+  return {
+    exitCode,
+    notice: `Response recorded; Claude resumed and the task is ${resumed?.status ?? "unavailable"}.`,
+  };
+}
+
 async function runAttentionCommand(
   args: readonly string[],
   options: CliOptions,
@@ -1468,7 +1547,7 @@ async function runAttentionCommand(
   const [taskId, ...words] = parsed.positionals;
   if (taskId === undefined) throw new CliUsageError(`attention ${subcommand} requires a task id`);
 
-  const task = await withStore(options, (store) => {
+  const resolved = await withStore(options, (store) => {
     const current = store.getTask(taskId);
     if (current === undefined) throw new Error(`Task ${taskId} does not exist`);
     let attentionId: string;
@@ -1484,16 +1563,36 @@ async function runAttentionCommand(
     } else {
       ({ attentionId, resolution } = resolutionFor(subcommand, current, words));
     }
-    return store.append({
+    const task = store.append({
       taskId,
       type: "attention.resolved",
       payload: { attentionId, resolution },
       actor: OPERATOR,
     }).task;
+    return { task, resolution };
   });
-  if (wantsJson(parsed)) writeJson(stdout, task);
-  else stdout.write(`Resolved ${subcommand} for ${task.id}; task is ${task.status}.\n`);
-  return 0;
+  const json = wantsJson(parsed);
+  if (!json) stdout.write(`Resolved ${subcommand} for ${resolved.task.id}; task is ${resolved.task.status}.\n`);
+  if (subcommand === "ack") {
+    if (json) writeJson(stdout, resolved.task);
+    return 0;
+  }
+  const continuationOutput: Output = json ? { write: () => true } : stdout;
+  const continued = await continueAfterAttentionResolution({
+    task: resolved.task,
+    resolution: resolved.resolution,
+    options,
+    stdout: continuationOutput,
+  });
+  if (json) {
+    writeJson(stdout, {
+      task: await withStore(options, (store) => store.getTask(resolved.task.id)),
+      continuation: continued,
+    });
+  } else {
+    stdout.write(`${continued.notice}\n`);
+  }
+  return continued.exitCode;
 }
 
 async function runStatus(options: CliOptions, stdout: Output, json: boolean): Promise<number> {
@@ -2195,6 +2294,21 @@ async function runTuiCommand(options: CliOptions, stdout: Output): Promise<numbe
         return status?.state === "running"
           ? "Workbench is still running. Press s to reattach; exit it before running or sending this task."
           : "Portable workbench checkpointed.";
+      },
+      resolveAttention: async (taskId, attentionId, resolution) => {
+        await ensureControlPlane();
+        const task = await persistAttentionResolution(options, taskId, attentionId, resolution);
+        if (resolution.kind === "acknowledged") return "Update acknowledged.";
+        const continued = await continueAfterAttentionResolution({
+          task,
+          resolution,
+          options,
+          stdout,
+        });
+        if (continued.exitCode !== 0) {
+          throw new Error(`Claude exited with status ${continued.exitCode} after the response was recorded`);
+        }
+        return continued.notice;
       },
     });
   } finally {

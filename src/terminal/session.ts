@@ -22,6 +22,7 @@ export type TerminalSessionKind = "workbench" | "agent";
 const MAX_REPLAY_BYTES = 1024 * 1024;
 const MAX_LOG_BYTES = 4 * 1024 * 1024;
 const MAX_HANDSHAKE_BYTES = 4096;
+const MAX_INJECTED_INPUT_BYTES = 64 * 1024;
 const STARTING_STALE_MS = 60_000;
 
 export type TerminalSessionStatus =
@@ -364,6 +365,22 @@ export class TerminalSessionManager {
     }
     throw new Error(`Terminal session ${taskId} did not stop`);
   }
+
+  async writeInput(taskId: string, input: string, kind: TerminalSessionKind): Promise<void> {
+    if (!input || Buffer.byteLength(input, "utf8") > MAX_INJECTED_INPUT_BYTES || input.includes("\0")) {
+      throw new Error("Terminal input is invalid");
+    }
+    const status = await this.status(taskId, kind);
+    if (status?.state !== "running") throw new Error(`Task ${taskId} has no live ${kind} terminal`);
+    const socket = createConnection(this.socketPath(taskId, kind));
+    await new Promise<void>((resolveWrite, reject) => {
+      socket.once("connect", () => {
+        socket.end(`${JSON.stringify({ mode: "input", cols: 80, rows: 24, input })}\n`);
+      });
+      socket.once("close", resolveWrite);
+      socket.once("error", reject);
+    });
+  }
 }
 
 function replayLog(directory: string): Buffer {
@@ -434,6 +451,13 @@ export async function runTerminalSupervisor(requestedSessionId: string | undefin
           child?.kill("SIGTERM");
           return socket.end();
         }
+        if (value.mode === "input") {
+          if (typeof value.input !== "string" || !value.input
+            || Buffer.byteLength(value.input, "utf8") > MAX_INJECTED_INPUT_BYTES
+            || value.input.includes("\0")) return socket.destroy();
+          terminal.write(value.input);
+          return socket.end();
+        }
         if (value.mode !== "attach" || attached !== undefined) return socket.destroy();
         attached = socket;
         socket.write(replayLog(directory));
@@ -456,6 +480,10 @@ export async function runTerminalSupervisor(requestedSessionId: string | undefin
     });
     atomicStatus(directory, nowStatus({ state: "running", supervisorPid: process.pid, childPid: child.pid }));
     const exitCode = await child.exited;
+    // Bun can deliver the final PTY data callback just after the child exit
+    // promise settles. Give that callback one event-loop turn before closing
+    // the attached client so the terminal transcript is not truncated.
+    await Bun.sleep(10);
     atomicStatus(directory, nowStatus({ state: "exited", exitCode, signal: child.signalCode }));
     attached?.end();
     await new Promise<void>((resolveClose) => server.close(() => resolveClose()));

@@ -1,4 +1,5 @@
-import type { Task, TaskStatus } from "../core/model.ts";
+import type { DecisionAttention, ReviewAttention, Task, TaskStatus } from "../core/model.ts";
+import type { AttentionResolution } from "../core/events.ts";
 import type { TuiTerminal } from "./terminal.ts";
 
 export interface AltitudeTuiActions {
@@ -9,6 +10,11 @@ export interface AltitudeTuiActions {
   runTask(taskId: string): Promise<void>;
   takeTask(taskId: string): Promise<string | undefined>;
   openShell(taskId: string): Promise<string | undefined>;
+  resolveAttention(
+    taskId: string,
+    attentionId: string,
+    resolution: AttentionResolution,
+  ): Promise<string | undefined>;
 }
 
 type TaskGroup = "Needs you" | "Working" | "Ready" | "Done";
@@ -73,13 +79,19 @@ export function renderTaskBoard(
       for (const { task, index } of grouped) {
         const cursor = index === selectedIndex ? ">" : " ";
         const attention = task.activeAttention === null ? "" : ` · ${task.activeAttention.class}`;
-        lines.push(`${cursor} ${task.title}`, `    ${task.status}${attention}`);
+        const updates = task.openUpdates.length === 0
+          ? ""
+          : ` · ${task.openUpdates.length} update${task.openUpdates.length === 1 ? "" : "s"}`;
+        lines.push(`${cursor} ${task.title}`, `    ${task.status}${attention}${updates}`);
+        if (task.activeAttention !== null) {
+          lines.push(`    ↳ ${task.activeAttention.title}: ${task.activeAttention.summary}`);
+        }
       }
       lines.push("");
     }
   }
   if (notice !== undefined) lines.push(`! ${notice}`, "");
-  lines.push("[j/k or arrows] select   [enter] open   [r] run   [s] setup   [n] new   [q] quit", "");
+  lines.push("[j/k or arrows] select   [enter] open/respond   [u] ack update   [r] run   [s] setup   [n] new   [q] quit", "");
   return lines.join("\n");
 }
 
@@ -111,6 +123,46 @@ async function externalNotice(
   } finally {
     terminal.afterExternal();
   }
+}
+
+async function prompt(
+  terminal: TuiTerminal,
+  message: string,
+): Promise<string | undefined> {
+  terminal.beforeExternal();
+  try {
+    return await terminal.readLine(message);
+  } finally {
+    terminal.afterExternal();
+  }
+}
+
+function decisionPrompt(attention: DecisionAttention): string {
+  return [
+    attention.title,
+    attention.summary,
+    "",
+    attention.question,
+    ...(attention.recommendation === undefined ? [] : [`Recommendation: ${attention.recommendation}`]),
+    ...(attention.options ?? []).map((option) => `- ${option.label}: ${option.tradeoff ?? option.value}`),
+    "> ",
+  ].join("\n");
+}
+
+function reviewPrompt(attention: ReviewAttention): string {
+  return [
+    attention.title,
+    attention.summary,
+    "",
+    "Artifacts",
+    ...attention.artifacts.map((artifact) => `- ${artifact.label}: ${artifact.uri}`),
+    "Checks",
+    ...attention.checks.map((check) => `- ${check}`),
+    ...(attention.caveats === undefined ? [] : ["Caveats", ...attention.caveats.map((caveat) => `- ${caveat}`)]),
+    "",
+    "Type \"accept\" or enter revision instructions:",
+    "> ",
+  ].join("\n");
 }
 
 export async function runAltitudeTui(
@@ -172,13 +224,70 @@ export async function runAltitudeTui(
     }
     if ((key === "enter" || key === "run") && tasks.length > 0) {
       const task = tasks[selectedIndex]!;
+      if (key === "enter" && task.activeAttention?.class === "decision") {
+        const answer = (await prompt(
+          terminal,
+          decisionPrompt(task.activeAttention),
+        ))?.trim();
+        if (!answer) {
+          notice = "Decision left open.";
+          continue;
+        }
+        notice = await externalNotice(terminal, () => actions.resolveAttention(
+          task.id,
+          task.activeAttention!.id,
+          { kind: "answered", answer },
+        ));
+        continue;
+      }
+      if (key === "enter" && task.activeAttention?.class === "review") {
+        const response = (await prompt(
+          terminal,
+          reviewPrompt(task.activeAttention),
+        ))?.trim();
+        if (!response) {
+          notice = "Review left open.";
+          continue;
+        }
+        const resolution: AttentionResolution = response.toLowerCase() === "accept"
+          ? { kind: "accepted" }
+          : { kind: "revision_requested", instructions: response };
+        notice = await externalNotice(terminal, () => actions.resolveAttention(
+          task.id,
+          task.activeAttention!.id,
+          resolution,
+        ));
+        continue;
+      }
       if (task.status === "waiting_decision" || task.status === "waiting_review") {
-        notice = `${task.activeAttention?.class ?? "Attention"} needs an answer; use the attention command for now.`;
+        notice = "Respond with enter before starting more work.";
         continue;
       }
       notice = key === "enter" && canTake(task)
         ? await externalNotice(terminal, () => actions.takeTask(task.id))
         : await external(terminal, () => actions.runTask(task.id));
+      continue;
+    }
+    if (key === "ack" && tasks.length > 0) {
+      const task = tasks[selectedIndex]!;
+      const update = task.openUpdates[0];
+      if (update === undefined) {
+        notice = "This task has no open Update.";
+        continue;
+      }
+      const note = await prompt(
+        terminal,
+        `${update.title}\n${update.summary}\nOptional acknowledgement note (enter for none):\n> `,
+      );
+      if (note === undefined) {
+        notice = "Update left open.";
+        continue;
+      }
+      notice = await externalNotice(terminal, () => actions.resolveAttention(
+        task.id,
+        update.id,
+        { kind: "acknowledged", ...(note.trim() ? { note: note.trim() } : {}) },
+      ));
       continue;
     }
     if (key === "shell" && tasks.length > 0) {

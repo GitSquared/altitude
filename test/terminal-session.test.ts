@@ -121,4 +121,29 @@ describe("detachable terminal supervisor", () => {
     })).toMatchObject({ state: "failed" });
     await manager.finalize("task-3");
   });
+
+  test("injects routed operator input into a detached agent terminal", async () => {
+    const root = mkdtempSync(join(tmpdir(), "altitude-agent-input-"));
+    roots.push(root);
+    const manager = new TerminalSessionManager(root, [
+      process.execPath,
+      join(import.meta.dir, "..", "src", "cli.ts"),
+    ]);
+    expect(await manager.start({
+      taskId: "task-4",
+      kind: "agent",
+      command: {
+        executable: "/bin/sh",
+        args: ["-c", "IFS= read -r line; test \"$line\" = continue"],
+      },
+    })).toMatchObject({ state: "running" });
+    await manager.writeInput("task-4", "continue\n", "agent");
+    let status = await manager.status("task-4", "agent");
+    for (let attempt = 0; attempt < 100 && status?.state === "running"; attempt += 1) {
+      await Bun.sleep(10);
+      status = await manager.status("task-4", "agent");
+    }
+    expect(status).toMatchObject({ state: "exited", exitCode: 0 });
+    await manager.finalize("task-4", "agent");
+  });
 });

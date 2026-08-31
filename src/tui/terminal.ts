@@ -8,6 +8,7 @@ export type TuiKey =
   | "new"
   | "run"
   | "shell"
+  | "ack"
   | "quit"
   | "unknown";
 
@@ -27,6 +28,7 @@ export function decodeTuiKey(value: string): TuiKey {
   if (value === "n") return "new";
   if (value === "r") return "run";
   if (value === "s") return "shell";
+  if (value === "u") return "ack";
   if (value === "q" || value === "\u0003" || value === "\u001b") return "quit";
   return "unknown";
 }

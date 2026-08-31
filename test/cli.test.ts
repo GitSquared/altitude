@@ -13,6 +13,7 @@ import type {
 import { TaskStore } from "../src/storage/task-store.ts";
 import type { TuiTerminal } from "../src/tui/terminal.ts";
 import { defaultLocalConfig, writeLocalConfig } from "../src/config/local.ts";
+import { TerminalSessionManager } from "../src/terminal/session.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -331,6 +332,63 @@ describe("CLI", () => {
     cli.stdout.value = "";
     expect(await runCli(["attention", "accept", taskId, "Looks", "good"], cli.options)).toBe(0);
     expect(cli.stdout.value).toContain("task is completed");
+  });
+
+  test("routes a resolved Decision into an already-running native Claude terminal", async () => {
+    const cli = harness();
+    await writeLocalConfig(join(cli.root, "config.json"), defaultLocalConfig("docker"));
+    await runCli(["task", "create", "Route an answer", "--json"], cli.options);
+    const taskId = (JSON.parse(cli.stdout.value) as { id: string }).id;
+    using store = new TaskStore(join(cli.root, "altitude.db"), {
+      clock: () => 3_000,
+      createId: () => crypto.randomUUID(),
+    });
+    for (const to of ["queued", "provisioning", "running"] as const) {
+      store.append({
+        taskId,
+        type: "task.state_changed",
+        payload: { to },
+        actor: { kind: "system", component: "test" },
+      });
+    }
+    store.append({
+      taskId,
+      type: "attention.raised",
+      payload: {
+        attention: {
+          id: "decision-live",
+          class: "decision",
+          title: "Choose",
+          summary: "Claude is waiting",
+          question: "Continue?",
+        },
+      },
+      actor: { kind: "agent", adapter: "test" },
+    });
+
+    const terminals = new TerminalSessionManager(join(cli.root, "terminals"), [
+      process.execPath,
+      join(import.meta.dir, "..", "src", "cli.ts"),
+    ]);
+    expect(await terminals.start({
+      taskId,
+      kind: "agent",
+      command: {
+        executable: "/bin/sh",
+        args: ["-c", "IFS= read -r line; case \"$line\" in 'Altitude recorded'*) exit 0;; *) exit 1;; esac"],
+      },
+    })).toMatchObject({ state: "running" });
+
+    cli.stdout.value = "";
+    expect(await runCli(["attention", "answer", taskId, "Yes"], cli.options)).toBe(0);
+    expect(cli.stdout.value).toContain("routed into the live Claude session");
+    let status = await terminals.status(taskId, "agent");
+    for (let attempt = 0; attempt < 100 && status?.state === "running"; attempt += 1) {
+      await Bun.sleep(10);
+      status = await terminals.status(taskId, "agent");
+    }
+    expect(status).toMatchObject({ state: "exited", exitCode: 0 });
+    await terminals.finalize(taskId, "agent");
   });
 
   test("returns a captured usage error for unknown commands and invalid levels", async () => {
