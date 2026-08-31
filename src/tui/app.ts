@@ -8,6 +8,7 @@ export interface AltitudeTuiActions {
   createTask(intent: string): Promise<Task>;
   runTask(taskId: string): Promise<void>;
   takeTask(taskId: string): Promise<void>;
+  openShell(taskId: string): Promise<void>;
 }
 
 type TaskGroup = "Needs you" | "Working" | "Ready" | "Done";
@@ -78,7 +79,7 @@ export function renderTaskBoard(
     }
   }
   if (notice !== undefined) lines.push(`! ${notice}`, "");
-  lines.push("[j/k or arrows] select   [enter] open   [r] run   [n] new   [q] quit", "");
+  lines.push("[j/k or arrows] select   [enter] open   [r] run   [s] setup   [n] new   [q] quit", "");
   return lines.join("\n");
 }
 
@@ -167,6 +168,10 @@ export async function runAltitudeTui(
           ? actions.takeTask(task.id)
           : actions.runTask(task.id),
       );
+      continue;
+    }
+    if (key === "shell" && tasks.length > 0) {
+      notice = await external(terminal, () => actions.openShell(tasks[selectedIndex]!.id));
     }
   }
 }

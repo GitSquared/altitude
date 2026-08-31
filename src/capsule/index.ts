@@ -15,3 +15,4 @@ export * from "./transfer.ts";
 export * from "./transfer-runtime.ts";
 export * from "./wire.ts";
 export * from "./workspace-marker.ts";
+export * from "./task-environment.ts";

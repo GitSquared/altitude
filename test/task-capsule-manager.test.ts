@@ -74,6 +74,8 @@ describe("task capsule manager", () => {
     expect(result).toMatchObject({ state: "created", volume: taskVolumeName("task-1") });
     expect(runner.commands[2]?.args).toContain("ALTITUDE_TASK_INIT=1");
     expect(runner.commands[4]?.args).toContain("host.docker.internal:host-gateway");
+    expect(runner.commands[4]?.args).toContain("HOME=/workspace/.altitude/environment/home");
+    expect(runner.commands[4]?.args).toContain("XDG_CACHE_HOME=/tmp/altitude-cache");
     expect(runner.commands[4]?.args?.join(" ")).not.toContain("docker.sock");
   });
 

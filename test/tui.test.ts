@@ -77,6 +77,7 @@ describe("Altitude TUI", () => {
       createTask: async () => { throw new Error("not used"); },
       runTask: async () => { throw new Error("not used"); },
       takeTask: async () => { throw new Error("not used"); },
+      openShell: async () => { throw new Error("not used"); },
     };
 
     expect(await runAltitudeTui(terminal, actions)).toBe(0);
@@ -107,6 +108,7 @@ describe("Altitude TUI", () => {
         takes.push(taskId);
         tasks[0] = task({ ...tasks[0]!, status: "paused", revision: 2, updatedAt: 3 });
       },
+      openShell: async () => { throw new Error("not used"); },
     };
 
     expect(await runAltitudeTui(terminal, actions)).toBe(0);
@@ -152,6 +154,7 @@ describe("Altitude TUI", () => {
       createTask: async () => { throw new Error("not used"); },
       runTask: async () => { throw new Error("not used"); },
       takeTask: async () => { throw new Error("not used"); },
+      openShell: async () => { throw new Error("not used"); },
     };
 
     expect(await runAltitudeTui(terminal, actions)).toBe(0);
@@ -160,10 +163,30 @@ describe("Altitude TUI", () => {
     expect(terminal.frames[0]).toContain("after Altitude closes");
   });
 
+  test("opens explicit capsule setup from the overview", async () => {
+    const terminal = new ScriptedTerminal(["shell", "quit"]);
+    const setups: string[] = [];
+    const ready = task({ id: "task-1", title: "Prepare the compiler", status: "queued" });
+    const actions: AltitudeTuiActions = {
+      configured: async () => true,
+      configureClaude: async () => { throw new Error("not used"); },
+      listTasks: async () => [ready],
+      createTask: async () => { throw new Error("not used"); },
+      runTask: async () => { throw new Error("not used"); },
+      takeTask: async () => { throw new Error("not used"); },
+      openShell: async (taskId) => { setups.push(taskId); },
+    };
+
+    expect(await runAltitudeTui(terminal, actions)).toBe(0);
+    expect(setups).toEqual(["task-1"]);
+    expect(terminal.frames[0]).toContain("[s] setup");
+  });
+
   test("decodes the small stable navigation vocabulary", () => {
     expect(decodeTuiKey("\u001b[A")).toBe("up");
     expect(decodeTuiKey("j")).toBe("down");
     expect(decodeTuiKey("\r")).toBe("enter");
+    expect(decodeTuiKey("s")).toBe("shell");
     expect(decodeTuiKey("\u0003")).toBe("quit");
     expect(decodeTuiKey("x")).toBe("unknown");
   });

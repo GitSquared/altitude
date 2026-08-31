@@ -51,8 +51,16 @@ RUN apt-get update \\
 
 COPY --chown=1000:1000 --chmod=0755 altitude /opt/altitude/bin/altitude
 
-ENV PATH="/opt/altitude/bin:\${PATH}" \\
-    HOME=/tmp
+ENV ALTITUDE_CAPSULE=task \\
+    HOME=/workspace/.altitude/environment/home \\
+    XDG_CONFIG_HOME=/workspace/.altitude/environment/home/.config \\
+    XDG_DATA_HOME=/workspace/.altitude/environment/home/.local/share \\
+    XDG_STATE_HOME=/workspace/.altitude/environment/home/.local/state \\
+    XDG_CACHE_HOME=/tmp/altitude-cache \\
+    BUN_INSTALL=/workspace/.altitude/environment/home/.bun \\
+    BUN_INSTALL_CACHE_DIR=/tmp/bun-install-cache \\
+    NPM_CONFIG_CACHE=/tmp/npm-cache \\
+    PATH=/workspace/.altitude/environment/bin:/workspace/.altitude/environment/home/.local/bin:/workspace/.altitude/environment/home/.bun/bin:/opt/altitude/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 USER 1000:1000
 WORKDIR /workspace

@@ -16,6 +16,7 @@ import {
   type GitRepositorySnapshot,
 } from "./manifest.ts";
 import { portableCapsulePath } from "./paths.ts";
+import { captureTaskEnvironment } from "./task-environment.ts";
 import { decodeCapsuleWire, encodeCapsuleWire, MAX_CAPSULE_WIRE_BYTES } from "./wire.ts";
 import {
   activatePendingTaskWorkspaceCheckpoint,
@@ -249,6 +250,13 @@ export async function captureTaskWorkspaceCheckpoint(
     || request.revision <= active.revision) {
     throw new Error("Task checkpoint request does not advance the active workspace checkpoint");
   }
+  const environmentMembers = await captureTaskEnvironment(root);
+  const additionalPaths = new Set(request.additionalMembers.map((member) => member.path));
+  for (const member of environmentMembers) {
+    if (additionalPaths.has(member.path)) {
+      throw new Error(`Task checkpoint request cannot replace managed environment member ${member.path}`);
+    }
+  }
   const captured = await captureLocalGitCheckpoint({
     taskId: request.taskId,
     capsuleId: request.capsuleId,
@@ -256,7 +264,7 @@ export async function captureTaskWorkspaceCheckpoint(
     revision: request.revision,
     checkpointedAt: request.checkpointedAt,
     ownership: request.ownership,
-    additionalMembers: request.additionalMembers,
+    additionalMembers: [...request.additionalMembers, ...environmentMembers],
   });
   if (repositorySeedBindingDigest(captured.checkpoint.manifest.repository) !== request.repositoryBindingDigest) {
     throw new Error("Task workspace changed its repository seed binding");

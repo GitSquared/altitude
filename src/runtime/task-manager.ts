@@ -13,6 +13,7 @@ import { DEFAULT_CAPSULE_RESOURCES, type CapsuleLaunchSpec, type RuntimeKind } f
 import { dockerLaunchSpec, dockerNetworkCreateSpec, dockerVolumeCreateSpec } from "./docker.ts";
 import { stableCapsuleName } from "./identity-capsule.ts";
 import type { ProcessLauncher } from "./protocol.ts";
+import { taskEnvironmentVariables } from "../capsule/task-environment.ts";
 
 export interface TaskCapsuleSpec {
   readonly taskId: string;
@@ -38,7 +39,7 @@ function launchSpec(input: TaskCapsuleSpec): CapsuleLaunchSpec {
     network: input.network,
     command: ["sleep", "infinity"],
     resources: DEFAULT_CAPSULE_RESOURCES,
-    environment: { ALTITUDE_TASK_ID: input.taskId, HOME: "/tmp" },
+    environment: { ALTITUDE_TASK_ID: input.taskId, ...taskEnvironmentVariables() },
   };
 }
 

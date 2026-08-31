@@ -17,6 +17,8 @@ import {
   readActiveTaskWorkspaceMarker,
   readPendingTaskWorkspaceCheckpoint,
   repositorySeedBindingDigest,
+  initializeTaskEnvironment,
+  restoreTaskWorkspace,
   utf8,
   writeActiveTaskWorkspaceMarker,
 } from "../src/capsule/index.ts";
@@ -65,6 +67,8 @@ describe("task workspace checkpoint", () => {
     });
     writeFileSync(join(repository, "README.md"), "# after\n");
     writeFileSync(join(repository, "new.txt"), "portable\n");
+    await initializeTaskEnvironment(repository);
+    writeFileSync(join(repository, ".altitude", "environment", "bin", "remembered-tool"), "tool bytes\n");
 
     const request = {
       schema: TASK_CHECKPOINT_PROTOCOL,
@@ -84,12 +88,24 @@ describe("task workspace checkpoint", () => {
     const digest = capsuleManifestDigest(checkpoint.manifest);
     expect(checkpoint.manifest.revision).toBe(2);
     expect(checkpoint.manifest.members.map((member) => String(member.path))).toContain("state/task.json");
+    expect(checkpoint.manifest.members.map((member) => String(member.path))).toContain("workspace/environment.json");
     expect(checkpoint.manifest.repository.untracked.map((entry) => String(entry.repositoryPath))).toEqual(["new.txt"]);
 
     const pending = await readPendingTaskWorkspaceCheckpoint(repository);
     expect(pending?.previousCheckpointDigest).toBe(previousCheckpointDigest);
     expect(capsuleManifestDigest(decodeCapsuleWire(pending!.wireBytes).manifest)).toBe(digest);
     expect((await readActiveTaskWorkspaceMarker(repository))?.checkpointDigest).toBe(previousCheckpointDigest);
+
+    const restarted = mkdtempSync(join(tmpdir(), "altitude-task-checkpoint-restart-"));
+    directories.push(restarted);
+    expect(await restoreTaskWorkspace(restarted, {
+      checkpoint,
+      checkpointDigest: digest,
+      repositorySeedBundle: initial.repositorySeedBundle,
+    })).toEqual({ reused: false });
+    expect(await Bun.file(join(restarted, ".altitude", "environment", "bin", "remembered-tool")).text())
+      .toBe("tool bytes\n");
+    expect(await Bun.file(join(restarted, "new.txt")).text()).toBe("portable\n");
 
     await activatePendingTaskWorkspaceCheckpoint(repository, digest);
     expect((await readActiveTaskWorkspaceMarker(repository))?.checkpointDigest).toBe(digest);

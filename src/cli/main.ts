@@ -62,6 +62,7 @@ import { runTaskBootstrapStdio } from "../capsule/bootstrap.ts";
 import { runTaskCheckpointStdio } from "../capsule/task-checkpoint.ts";
 import { runTaskInit } from "../capsule/init.ts";
 import { createFactoryGitRepository } from "../capsule/factory-git.ts";
+import { taskEnvironmentVariables } from "../capsule/task-environment.ts";
 import { FilesystemCapsuleCheckpointStore } from "../capsule/filesystem.ts";
 import { capsuleManifestDigest } from "../capsule/manifest.ts";
 import {
@@ -117,6 +118,7 @@ Commands:
   task queue <task-id>        Make a draft, stopped, or failed task runnable
   task run <task-id>          Run or resume a managed headless Claude turn
   task take <task-id>         Enter the same session in Claude Code's TUI
+  task shell <task-id>        Set up tools and config inside the task capsule
   task review <task-id>       Add visual intent with managed Redmarker
   task send <task-id>         Move a paused capsule to a registered node
   attention answer <task-id>  Answer the active Decision
@@ -146,6 +148,7 @@ const TASK_HELP = `Usage:
   altitude task queue <task-id> [--json]
   altitude task run <task-id> [--repository <path>] [--model <model>] [--json]
   altitude task take <task-id>
+  altitude task shell <task-id>
   altitude task review <task-id> --url <loopback-url> [--redmarker <executable>] [--json]
   altitude task send <task-id> --node <registered-id> [--json]
   altitude task send <task-id> --node <id> --user <user>
@@ -483,6 +486,8 @@ async function runTaskCommand(
       return await runManagedTask(args.slice(1), options, stdout);
     case "take":
       return await takeManagedTask(args.slice(1), options, stdout);
+    case "shell":
+      return await openTaskShell(args.slice(1), options, stdout);
     case "review":
       return await reviewManagedTask(args.slice(1), options, stdout);
     case "send":
@@ -924,6 +929,57 @@ async function takeManagedTask(args: readonly string[], options: CliOptions, std
   } finally {
     await node.close();
   }
+}
+
+async function openTaskShell(args: readonly string[], options: CliOptions, stdout: Output): Promise<number> {
+  const parsed = parseArguments(args);
+  if (parsed.positionals.length !== 1) throw new CliUsageError("task shell requires exactly one task id");
+  const taskId = parsed.positionals[0]!;
+  const { paths, config, runner } = await managedContext(options);
+  using store = new TaskStore(paths.database, {
+    ...(options.clock === undefined ? {} : { clock: options.clock }),
+    ...(options.createId === undefined ? {} : { createId: options.createId }),
+  });
+  const task = store.getTask(taskId);
+  if (task === undefined) throw new Error(`Task ${taskId} does not exist`);
+  const launcher = new CapsuleProcessLauncher(config.runtime);
+  const agentSessions = new TaskAgentSessionStore(store.database, options.clock);
+  const checkpointer = await prepareTaskCapsule({
+    task,
+    store,
+    paths,
+    config,
+    runner,
+    launcher,
+    agentSessions,
+    ...(options.clock === undefined ? {} : { clock: options.clock }),
+  });
+  stdout.write([
+    `Entering the portable workbench for ${taskId}.`,
+    "Tools and non-secret config saved under $HOME will travel with this task.",
+    "Harness, Git hosting, and signing logins belong in node-local identity capsules.",
+    "Exit the shell to checkpoint the workbench.",
+    "",
+  ].join("\n"));
+  let exitCode = 1;
+  let interactiveError: unknown;
+  try {
+    exitCode = await runner.runInteractive(launcher.interactiveCommand({
+      target: { kind: "task-capsule", taskId },
+      executable: "/bin/sh",
+      args: ["-i"],
+      cwd: "/workspace",
+      env: taskEnvironmentVariables(),
+      io: "interactive",
+      purpose: "Set up portable tools and configuration in this task capsule",
+    }));
+  } catch (error) {
+    interactiveError = error;
+  }
+  const checkpoint = await checkpointer.capture(taskId);
+  if (interactiveError !== undefined) throw interactiveError;
+  stdout.write(`Workbench checkpointed in capsule revision ${checkpoint.revision}.\n`);
+  return exitCode;
 }
 
 async function reviewManagedTask(
@@ -1982,6 +2038,12 @@ async function runTuiCommand(options: CliOptions, stdout: Output): Promise<numbe
         await ensureControlPlane();
         const exitCode = await takeManagedTask([taskId], options, stdout);
         if (exitCode !== 0) throw new Error(`Claude Code exited with status ${exitCode}`);
+      },
+      openShell: async (taskId) => {
+        await ensureControlPlane();
+        await makeTaskRunnable(taskId, options);
+        const exitCode = await openTaskShell([taskId], options, stdout);
+        if (exitCode !== 0) throw new Error(`Task shell exited with status ${exitCode}`);
       },
     });
   } finally {

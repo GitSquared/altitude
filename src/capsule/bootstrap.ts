@@ -13,6 +13,7 @@ import {
   TASK_WORKSPACE_FORMAT,
   writeActiveTaskWorkspaceMarker,
 } from "./workspace-marker.ts";
+import { restoreTaskEnvironment } from "./task-environment.ts";
 
 export const TASK_BOOTSTRAP_PROTOCOL = "altitude.task-bootstrap/v1" as const;
 const MAX_HEADER_BYTES = 4 * 1024 * 1024;
@@ -247,6 +248,13 @@ export async function restoreTaskWorkspace(rootInput: string, payload: TaskBoots
       if (bytes === undefined) throw new Error(`Missing untracked member ${file.sourceMember}`);
       await restoreUntracked(root, file.destinationRepositoryPath, bytes);
     }
+    try {
+      await lstat(join(root, ".altitude"));
+      throw new Error("Repository content occupies Altitude's reserved .altitude workbench path");
+    } catch (error) {
+      if (typeof error !== "object" || error === null || !("code" in error) || error.code !== "ENOENT") throw error;
+    }
+    await restoreTaskEnvironment(root, payload.checkpoint.members);
     await writeActiveTaskWorkspaceMarker(root, {
       schema: TASK_WORKSPACE_FORMAT,
       capsuleId: payload.checkpoint.manifest.capsuleId,
