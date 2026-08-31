@@ -87,6 +87,33 @@ describe("CLI", () => {
     expect(cli.stdout.value).toContain("task create <intent>");
   });
 
+  test("configured bare altitude owns and closes the local control plane", async () => {
+    const cli = harness();
+    const base = defaultLocalConfig("docker");
+    await writeLocalConfig(join(cli.root, "config.json"), base);
+    let starts = 0;
+    let closes = 0;
+    const terminal: TuiTerminal = {
+      interactive: true,
+      draw() {},
+      async readKey() { return "quit"; },
+      async readLine() { return undefined; },
+      beforeExternal() {},
+      afterExternal() {},
+    };
+
+    expect(await runCli([], {
+      ...cli.options,
+      terminal,
+      startTuiControlPlane: async () => {
+        starts += 1;
+        return { close: async () => { closes += 1; } };
+      },
+    })).toBe(0);
+    expect(starts).toBe(1);
+    expect(closes).toBe(1);
+  });
+
   test("documents sandboxed first-run setup without touching a runtime", async () => {
     const cli = harness();
     expect(await runCli(["setup", "help"], cli.options)).toBe(0);

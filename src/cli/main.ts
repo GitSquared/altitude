@@ -233,6 +233,7 @@ export interface CliOptions {
   readonly createId?: () => string;
   readonly commandRunner?: CommandRunner;
   readonly terminal?: TuiTerminal;
+  readonly startTuiControlPlane?: () => Promise<Pick<NodeUse, "close">>;
 }
 
 type ParsedArguments = Readonly<{
@@ -542,6 +543,125 @@ async function useTaskNode(input: {
     port: input.config.node.port,
   });
   return { external: false, close: () => server.close() };
+}
+
+async function useTuiControlPlane(input: {
+  readonly paths: ReturnType<typeof resolveAltitudePaths>;
+  readonly config: AltitudeLocalConfig;
+  readonly options: CliOptions;
+  readonly stdout: Output;
+}): Promise<NodeUse> {
+  const instanceId = nodeInstanceId(input.paths.database);
+  if (await existingNode(input.config.node.port, instanceId)) {
+    return { external: true, close: async () => undefined };
+  }
+  const store = new TaskStore(input.paths.database, {
+    ...(input.options.clock === undefined ? {} : { clock: input.options.clock }),
+    ...(input.options.createId === undefined ? {} : { createId: input.options.createId }),
+  });
+  const launcher = new CapsuleProcessLauncher(input.config.runtime);
+  const grants = new TaskMcpGrantStore(store.database, input.options.clock);
+  let server: ReturnType<typeof serveAltitudeNode> | undefined;
+  try {
+    const service = createAltitudeNodeService({
+      runtime: input.config.runtime,
+      store,
+      grants,
+      executor: new ProcessTaskToolExecutor(launcher),
+      submissions: new IntentSubmissionStore(store, {
+        ...(input.options.clock === undefined ? {} : { clock: input.options.clock }),
+      }),
+      instanceId,
+      allowedHostnames: [...new Set([
+        "127.0.0.1",
+        "localhost",
+        "[::1]",
+        "host.docker.internal",
+        "host.container.internal",
+        new URL(input.config.node.capsuleMcpEndpoint).hostname,
+      ])],
+    });
+    server = serveAltitudeNode({
+      service,
+      hostname: input.config.node.bindHost,
+      port: input.config.node.port,
+    });
+  } catch (error) {
+    store.close();
+    throw error;
+  }
+
+  const retrySessions = new TaskAgentSessionStore(store.database, input.options.clock);
+  const onError = (component: string) => (error: unknown) => (
+    input.options.stderr ?? process.stderr
+  ).write(`Altitude ${component}: ${error instanceof Error ? error.message : String(error)}\n`);
+  const retryWorker = new NodeScheduledActionWorker(
+    store,
+    createManagedAgentRetryExecutor({
+      tasks: store,
+      session: (taskId) => retrySessions.get(taskId),
+      run: async (taskId, model) => await runManagedTask(
+        [taskId, ...(model === undefined ? [] : ["--model", model])],
+        input.options,
+        input.stdout,
+      ),
+    }),
+    {
+      ...(input.options.clock === undefined ? {} : { now: input.options.clock }),
+      onError: onError("retry worker"),
+    },
+  );
+  const dispatchWorker = new NodeScheduledActionKindWorker(store, {
+    kind: TASK_DISPATCH_ACTION_KIND,
+    parse: (value) => {
+      const payload = parseTaskDispatchPayload(value);
+      if (payload.targetNodeId !== input.config.node.id) {
+        throw new Error(
+          `Task dispatch targets node ${payload.targetNodeId}, not ${input.config.node.id}`,
+        );
+      }
+      return payload;
+    },
+    execute: async (taskId, payload) => {
+      if (store.getTask(taskId)?.status !== "queued") return "skipped";
+      const active = await new FilesystemCapsuleCheckpointStore(input.paths.capsules).readActive(taskId);
+      if (active.manifest.ownership.ownerNodeId !== input.config.node.id) return "skipped";
+      if (active.manifest.revision !== payload.checkpointRevision
+        || capsuleManifestDigest(active.manifest) !== payload.checkpointDigest) {
+        throw new Error(`Task ${taskId} active capsule changed before remote dispatch`);
+      }
+      await runManagedTask([taskId], input.options, input.stdout);
+      if (store.getTask(taskId)?.status === "queued") {
+        throw new Error(`Dispatched task ${taskId} did not leave the queue`);
+      }
+      return "executed";
+    },
+  }, {
+    ...(input.options.clock === undefined ? {} : { now: input.options.clock }),
+    onError: onError("dispatch worker"),
+  });
+  try {
+    retryWorker.start();
+    dispatchWorker.start();
+  } catch (error) {
+    await Promise.allSettled([retryWorker.close(), dispatchWorker.close(), server.close()]);
+    store.close();
+    throw error;
+  }
+
+  let closed = false;
+  return {
+    external: false,
+    close: async () => {
+      if (closed) return;
+      closed = true;
+      try {
+        await Promise.all([retryWorker.close(), dispatchWorker.close(), server.close()]);
+      } finally {
+        store.close();
+      }
+    },
+  };
 }
 
 async function managedContext(options: CliOptions): Promise<{
@@ -1804,44 +1924,69 @@ async function runTuiCommand(options: CliOptions, stdout: Output): Promise<numbe
     return 2;
   }
   const paths = resolveAltitudePaths(options.env ?? process.env);
-  return await runAltitudeTui(terminal, {
-    configured: async () => await readLocalConfig(paths.config) !== undefined,
-    configureClaude: async () => {
-      const exitCode = await runSetupCommand([], options, stdout);
-      if (exitCode !== 0) throw new Error(`Claude capsule setup exited with status ${exitCode}`);
-    },
-    listTasks: async () => await withStore(options, (store) => store.listTasks()),
-    createTask: async (intent) => await withStore(options, (store) => {
-      const taskId = options.createId?.() ?? crypto.randomUUID();
-      store.append({
-        taskId,
-        type: "task.created",
-        payload: {
-          title: generatedTitle(intent),
-          intent,
-          intentLevel: "principles",
-        },
-        actor: OPERATOR,
-      });
-      return store.append({
-        taskId,
-        type: "task.state_changed",
-        payload: { to: "queued", reason: "Created from the Altitude factory overview" },
-        actor: OPERATOR,
-      }).task;
-    }),
-    runTask: async (taskId) => {
-      await makeTaskRunnable(taskId, options);
-      const exitCode = await runManagedTask([taskId], options, stdout);
-      if (exitCode !== 0 && exitCode !== 75) {
-        throw new Error(`Managed task exited with status ${exitCode}`);
-      }
-    },
-    takeTask: async (taskId) => {
-      const exitCode = await takeManagedTask([taskId], options, stdout);
-      if (exitCode !== 0) throw new Error(`Claude Code exited with status ${exitCode}`);
-    },
-  });
+  let controlPlane: NodeUse | undefined;
+  const ensureControlPlane = async () => {
+    if (controlPlane !== undefined) return;
+    const config = await readLocalConfig(paths.config);
+    if (config === undefined) throw new Error("Altitude's local factory is not configured");
+    const started = options.startTuiControlPlane === undefined
+      ? await useTuiControlPlane({ paths, config, options, stdout })
+      : await options.startTuiControlPlane();
+    controlPlane = {
+      external: options.startTuiControlPlane !== undefined,
+      close: () => started.close(),
+    };
+  };
+  try {
+    return await runAltitudeTui(terminal, {
+      configured: async () => await readLocalConfig(paths.config) !== undefined,
+      configureClaude: async () => {
+        const exitCode = await runSetupCommand([], options, stdout);
+        if (exitCode !== 0) throw new Error(`Claude capsule setup exited with status ${exitCode}`);
+      },
+      listTasks: async () => {
+        await ensureControlPlane();
+        return await withStore(options, (store) => store.listTasks());
+      },
+      createTask: async (intent) => {
+        await ensureControlPlane();
+        return await withStore(options, (store) => {
+          const taskId = options.createId?.() ?? crypto.randomUUID();
+          store.append({
+            taskId,
+            type: "task.created",
+            payload: {
+              title: generatedTitle(intent),
+              intent,
+              intentLevel: "principles",
+            },
+            actor: OPERATOR,
+          });
+          return store.append({
+            taskId,
+            type: "task.state_changed",
+            payload: { to: "queued", reason: "Created from the Altitude factory overview" },
+            actor: OPERATOR,
+          }).task;
+        });
+      },
+      runTask: async (taskId) => {
+        await ensureControlPlane();
+        await makeTaskRunnable(taskId, options);
+        const exitCode = await runManagedTask([taskId], options, stdout);
+        if (exitCode !== 0 && exitCode !== 75) {
+          throw new Error(`Managed task exited with status ${exitCode}`);
+        }
+      },
+      takeTask: async (taskId) => {
+        await ensureControlPlane();
+        const exitCode = await takeManagedTask([taskId], options, stdout);
+        if (exitCode !== 0) throw new Error(`Claude Code exited with status ${exitCode}`);
+      },
+    });
+  } finally {
+    await controlPlane?.close();
+  }
 }
 
 export async function runCli(args: readonly string[], options: CliOptions = {}): Promise<number> {

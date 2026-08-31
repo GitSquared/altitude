@@ -142,6 +142,24 @@ describe("Altitude TUI", () => {
     expect(content).toContain("waiting_decision · decision");
   });
 
+  test("restores checkpointed tasks and earns the remote-node suggestion", async () => {
+    const terminal = new ScriptedTerminal(["quit"]);
+    const paused = task({ id: "task-1", title: "Continue the compiler", status: "paused" });
+    const actions: AltitudeTuiActions = {
+      configured: async () => true,
+      configureClaude: async () => { throw new Error("not used"); },
+      listTasks: async () => [paused],
+      createTask: async () => { throw new Error("not used"); },
+      runTask: async () => { throw new Error("not used"); },
+      takeTask: async () => { throw new Error("not used"); },
+    };
+
+    expect(await runAltitudeTui(terminal, actions)).toBe(0);
+    expect(terminal.frames[0]).toContain("Restored 1 checkpointed task");
+    expect(terminal.frames[0]).toContain("altitude node add");
+    expect(terminal.frames[0]).toContain("after Altitude closes");
+  });
+
   test("decodes the small stable navigation vocabulary", () => {
     expect(decodeTuiKey("\u001b[A")).toBe("up");
     expect(decodeTuiKey("j")).toBe("down");

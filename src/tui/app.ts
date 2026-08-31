@@ -116,7 +116,14 @@ export async function runAltitudeTui(
   }
 
   let selectedIndex = 0;
-  let notice: string | undefined;
+  const restoredTasks = await actions.listTasks();
+  const resumable = restoredTasks.filter((task) => task.status === "paused").length;
+  const scheduled = restoredTasks.filter((task) => task.status === "waiting_external").length;
+  let notice = resumable > 0
+    ? `Restored ${resumable} checkpointed task${resumable === 1 ? "" : "s"}. Press enter to resume. Want work to continue after Altitude closes? Add a remote node with \`altitude node add\`.`
+    : scheduled > 0
+      ? `Resumed local workers for ${scheduled} scheduled task${scheduled === 1 ? "" : "s"}. Keep Altitude open, or add a remote node for unattended work.`
+      : undefined;
   while (true) {
     const tasks = orderedTasks(await actions.listTasks());
     selectedIndex = tasks.length === 0 ? 0 : Math.min(selectedIndex, tasks.length - 1);
