@@ -102,6 +102,7 @@ import {
   prepareStandaloneImageContext,
 } from "../runtime/standalone-images.ts";
 import { runAltitudeTui, ProcessTuiTerminal, type TuiTerminal } from "../tui/index.ts";
+import { runTerminalSupervisor, TerminalSessionManager } from "../terminal/session.ts";
 
 const HELP = `altitude ${VERSION}
 
@@ -499,6 +500,18 @@ async function runTaskCommand(
 
 type NodeUse = Readonly<{ external: boolean; close(): Promise<void> }>;
 
+async function requireSettledWorkbench(
+  paths: ReturnType<typeof resolveAltitudePaths>,
+  taskId: string,
+): Promise<void> {
+  const status = await new TerminalSessionManager(paths.terminals).status(taskId);
+  if (status === undefined) return;
+  if (status.state === "running" || status.state === "starting") {
+    throw new Error(`Task ${taskId} has a live workbench; reopen it with \`altitude task shell ${taskId}\` and exit before continuing`);
+  }
+  throw new Error(`Task ${taskId} has an uncheckpointed workbench; run \`altitude task shell ${taskId}\` once to finalize it`);
+}
+
 async function existingNode(port: number, expectedInstanceId: string): Promise<boolean> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 500);
@@ -801,6 +814,7 @@ async function runManagedTask(args: readonly string[], options: CliOptions, stdo
   if (parsed.positionals.length !== 1) throw new CliUsageError("task run requires exactly one task id");
   const taskId = parsed.positionals[0]!;
   const { paths, config, runner } = await managedContext(options);
+  await requireSettledWorkbench(paths, taskId);
   using store = new TaskStore(paths.database, {
     ...(options.clock === undefined ? {} : { clock: options.clock }),
     ...(options.createId === undefined ? {} : { createId: options.createId }),
@@ -870,6 +884,7 @@ async function takeManagedTask(args: readonly string[], options: CliOptions, std
   if (parsed.positionals.length !== 1) throw new CliUsageError("task take requires exactly one task id");
   const taskId = parsed.positionals[0]!;
   const { paths, config, runner } = await managedContext(options);
+  await requireSettledWorkbench(paths, taskId);
   using store = new TaskStore(paths.database, {
     ...(options.clock === undefined ? {} : { clock: options.clock }),
     ...(options.createId === undefined ? {} : { createId: options.createId }),
@@ -961,25 +976,39 @@ async function openTaskShell(args: readonly string[], options: CliOptions, stdou
     "Exit the shell to checkpoint the workbench.",
     "",
   ].join("\n"));
-  let exitCode = 1;
-  let interactiveError: unknown;
-  try {
-    exitCode = await runner.runInteractive(launcher.interactiveCommand({
-      target: { kind: "task-capsule", taskId },
-      executable: "/bin/sh",
-      args: ["-i"],
-      cwd: "/workspace",
-      env: taskEnvironmentVariables(),
-      io: "interactive",
-      purpose: "Set up portable tools and configuration in this task capsule",
-    }));
-  } catch (error) {
-    interactiveError = error;
+  const command = launcher.interactiveCommand({
+    target: { kind: "task-capsule", taskId },
+    executable: "/bin/sh",
+    args: ["-i"],
+    cwd: "/workspace",
+    env: taskEnvironmentVariables(),
+    io: "interactive",
+    purpose: "Set up portable tools and configuration in this task capsule",
+  });
+  const terminals = new TerminalSessionManager(paths.terminals);
+  let status = await terminals.status(taskId);
+  if (status === undefined) status = await terminals.start({ taskId, command });
+  if (status.state === "starting") throw new Error("Task workbench is still starting");
+  if (status.state === "failed") {
+    await terminals.finalize(taskId);
+    throw new Error(`Task workbench failed: ${status.error}`);
+  }
+  if (status.state === "exited") {
+    const checkpoint = await checkpointer.capture(taskId);
+    await terminals.finalize(taskId);
+    stdout.write(`Workbench checkpointed in capsule revision ${checkpoint.revision}.\n`);
+    return status.exitCode;
+  }
+  stdout.write("Press Ctrl-G, then d to return to Altitude without stopping this workbench.\n");
+  const attached = await terminals.attach(taskId);
+  if (attached.outcome === "detached") {
+    stdout.write(`Workbench for ${taskId} is still running; open it again with [s] or \`altitude task shell ${taskId}\`.\n`);
+    return 0;
   }
   const checkpoint = await checkpointer.capture(taskId);
-  if (interactiveError !== undefined) throw interactiveError;
+  await terminals.finalize(taskId);
   stdout.write(`Workbench checkpointed in capsule revision ${checkpoint.revision}.\n`);
-  return exitCode;
+  return attached.status.state === "exited" ? attached.status.exitCode : 1;
 }
 
 async function reviewManagedTask(
@@ -995,6 +1024,7 @@ async function reviewManagedTask(
   if (targetUrl === undefined) throw new CliUsageError("task review requires --url <loopback-url>");
   const taskId = parsed.positionals[0]!;
   const { paths, config, runner } = await managedContext(options);
+  await requireSettledWorkbench(paths, taskId);
   using store = new TaskStore(paths.database, {
     ...(options.clock === undefined ? {} : { clock: options.clock }),
     ...(options.createId === undefined ? {} : { createId: options.createId }),
@@ -1128,6 +1158,8 @@ async function sendManagedTask(
   };
   const targetNodeId = required("node");
   const { paths, config, runner } = await managedContext(options);
+  const taskId = parsed.positionals[0]!;
+  await requireSettledWorkbench(paths, taskId);
   const inlineConnection = [
     "host",
     "ssh-port",
@@ -1186,7 +1218,6 @@ async function sendManagedTask(
     };
     remoteAltitude = option(parsed, "remote-altitude") ?? "altitude";
   }
-  const taskId = parsed.positionals[0]!;
   using store = new TaskStore(paths.database, {
     ...(options.clock === undefined ? {} : { clock: options.clock }),
     ...(options.createId === undefined ? {} : { createId: options.createId }),
@@ -2105,6 +2136,8 @@ export async function runCli(args: readonly string[], options: CliOptions = {}):
         return await runIdentityInit();
       case "_identity-transcript":
         return await runIdentityTranscriptStdio(args[1]);
+      case "_terminal-supervisor":
+        return await runTerminalSupervisor(args[1]);
       case "_transfer":
         return await runTransferReceiverCommand(args.slice(1), options, stdout);
       default:

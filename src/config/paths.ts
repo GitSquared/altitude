@@ -10,6 +10,7 @@ export interface AltitudePaths {
   readonly capsules: string;
   readonly identities: string;
   readonly nodes: string;
+  readonly terminals: string;
 }
 export function resolveAltitudePaths(
   env: Readonly<Record<string, string | undefined>> = process.env,
@@ -29,6 +30,7 @@ export function resolveAltitudePaths(
     capsules: join(stateRoot, "capsules"),
     identities: join(stateRoot, "identities"),
     nodes: join(stateRoot, "nodes"),
+    terminals: join(stateRoot, "terminals"),
   };
 }
 
@@ -39,6 +41,7 @@ export async function ensureAltitudePaths(paths: AltitudePaths): Promise<void> {
     paths.capsules,
     paths.identities,
     paths.nodes,
+    paths.terminals,
   ];
 
   await Promise.all(

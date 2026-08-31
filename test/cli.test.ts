@@ -220,6 +220,7 @@ describe("CLI", () => {
     expect(cli.stdout.value).toContain("clean Altitude-created Git capsule");
     expect(cli.stdout.value).toContain("never\ninfers or mounts the current directory");
     expect(cli.stdout.value).toContain("task take <task-id>");
+    expect(cli.stdout.value).toContain("task shell <task-id>");
     expect(cli.stdout.value).toContain("task review <task-id> --url <loopback-url>");
     expect(cli.stdout.value).toContain("task send <task-id> --node <id>");
   });

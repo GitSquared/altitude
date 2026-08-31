@@ -9,5 +9,6 @@ describe("Altitude paths", () => {
     expect(paths.database).toBe("/tmp/altitude-test/altitude.db");
     expect(paths.identities).toBe("/tmp/altitude-test/identities");
     expect(paths.config).toBe("/tmp/altitude-test/config.json");
+    expect(paths.terminals).toBe("/tmp/altitude-test/terminals");
   });
 });
