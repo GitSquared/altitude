@@ -174,12 +174,13 @@ describe("Altitude TUI", () => {
       createTask: async () => { throw new Error("not used"); },
       runTask: async () => { throw new Error("not used"); },
       takeTask: async () => { throw new Error("not used"); },
-      openShell: async (taskId) => { setups.push(taskId); },
+      openShell: async (taskId) => { setups.push(taskId); return "Workbench is still running."; },
     };
 
     expect(await runAltitudeTui(terminal, actions)).toBe(0);
     expect(setups).toEqual(["task-1"]);
     expect(terminal.frames[0]).toContain("[s] setup");
+    expect(terminal.frames.at(-1)).toContain("Workbench is still running.");
   });
 
   test("decodes the small stable navigation vocabulary", () => {

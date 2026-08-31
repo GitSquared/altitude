@@ -2075,6 +2075,10 @@ async function runTuiCommand(options: CliOptions, stdout: Output): Promise<numbe
         await makeTaskRunnable(taskId, options);
         const exitCode = await openTaskShell([taskId], options, stdout);
         if (exitCode !== 0) throw new Error(`Task shell exited with status ${exitCode}`);
+        const status = await new TerminalSessionManager(paths.terminals).status(taskId);
+        return status?.state === "running"
+          ? "Workbench is still running. Press s to reattach; exit it before running or sending this task."
+          : "Portable workbench checkpointed.";
       },
     });
   } finally {
