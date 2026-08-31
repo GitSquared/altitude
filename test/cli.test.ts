@@ -11,6 +11,7 @@ import type {
   CommandSpec,
 } from "../src/process/command.ts";
 import { TaskStore } from "../src/storage/task-store.ts";
+import type { TuiTerminal } from "../src/tui/terminal.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -53,6 +54,38 @@ function harness(): {
 }
 
 describe("CLI", () => {
+  test("bare altitude opens the capsule-first factory overview", async () => {
+    const cli = harness();
+    const frames: string[] = [];
+    const terminal: TuiTerminal = {
+      interactive: true,
+      draw(content) { frames.push(content); },
+      async readKey() { return "quit"; },
+      async readLine() { return undefined; },
+      beforeExternal() {},
+      afterExternal() {},
+    };
+    expect(await runCli([], { ...cli.options, terminal })).toBe(0);
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toContain("delegated software factory");
+    expect(frames[0]).toContain("do not inherit this");
+  });
+
+  test("bare altitude fails clearly instead of hanging without a terminal", async () => {
+    const cli = harness();
+    const terminal: TuiTerminal = {
+      interactive: false,
+      draw() {},
+      async readKey() { return "quit"; },
+      async readLine() { return undefined; },
+      beforeExternal() {},
+      afterExternal() {},
+    };
+    expect(await runCli([], { ...cli.options, terminal })).toBe(2);
+    expect(cli.stdout.value).toContain("requires an interactive terminal");
+    expect(cli.stdout.value).toContain("task create <intent>");
+  });
+
   test("documents sandboxed first-run setup without touching a runtime", async () => {
     const cli = harness();
     expect(await runCli(["setup", "help"], cli.options)).toBe(0);

@@ -100,6 +100,7 @@ import {
   isAltitudeSourceCheckout,
   prepareStandaloneImageContext,
 } from "../runtime/standalone-images.ts";
+import { runAltitudeTui, ProcessTuiTerminal, type TuiTerminal } from "../tui/index.ts";
 
 const HELP = `altitude ${VERSION}
 
@@ -208,6 +209,7 @@ export interface CliOptions {
   readonly clock?: () => number;
   readonly createId?: () => string;
   readonly commandRunner?: CommandRunner;
+  readonly terminal?: TuiTerminal;
 }
 
 type ParsedArguments = Readonly<{
@@ -1643,12 +1645,79 @@ async function runSetupCommand(
   return 0;
 }
 
+async function makeTaskRunnable(taskId: string, options: CliOptions): Promise<void> {
+  await withStore(options, (store) => {
+    const task = store.getTask(taskId);
+    if (task === undefined) throw new Error(`Task ${taskId} does not exist`);
+    if (task.status === "draft" || task.status === "stopped" || task.status === "failed") {
+      store.append({
+        taskId,
+        type: "task.state_changed",
+        payload: { to: "queued", reason: "Queued from the Altitude factory overview" },
+        actor: OPERATOR,
+      });
+      return;
+    }
+    if (task.status === "completed" || task.status === "archived") {
+      throw new Error(`Task ${taskId} is ${task.status} and cannot be run`);
+    }
+  });
+}
+
+async function runTuiCommand(options: CliOptions, stdout: Output): Promise<number> {
+  const terminal = options.terminal ?? new ProcessTuiTerminal();
+  if (!terminal.interactive) {
+    stdout.write(`Altitude's factory overview requires an interactive terminal.\n\n${HELP}`);
+    return 2;
+  }
+  const paths = resolveAltitudePaths(options.env ?? process.env);
+  return await runAltitudeTui(terminal, {
+    configured: async () => await readLocalConfig(paths.config) !== undefined,
+    configureClaude: async () => {
+      const exitCode = await runSetupCommand([], options, stdout);
+      if (exitCode !== 0) throw new Error(`Claude capsule setup exited with status ${exitCode}`);
+    },
+    listTasks: async () => await withStore(options, (store) => store.listTasks()),
+    createTask: async (intent) => await withStore(options, (store) => {
+      const taskId = options.createId?.() ?? crypto.randomUUID();
+      store.append({
+        taskId,
+        type: "task.created",
+        payload: {
+          title: generatedTitle(intent),
+          intent,
+          intentLevel: "principles",
+        },
+        actor: OPERATOR,
+      });
+      return store.append({
+        taskId,
+        type: "task.state_changed",
+        payload: { to: "queued", reason: "Created from the Altitude factory overview" },
+        actor: OPERATOR,
+      }).task;
+    }),
+    runTask: async (taskId) => {
+      await makeTaskRunnable(taskId, options);
+      const exitCode = await runManagedTask([taskId], options, stdout);
+      if (exitCode !== 0 && exitCode !== 75) {
+        throw new Error(`Managed task exited with status ${exitCode}`);
+      }
+    },
+    takeTask: async (taskId) => {
+      const exitCode = await takeManagedTask([taskId], options, stdout);
+      if (exitCode !== 0) throw new Error(`Claude Code exited with status ${exitCode}`);
+    },
+  });
+}
+
 export async function runCli(args: readonly string[], options: CliOptions = {}): Promise<number> {
   const stdout = options.stdout ?? process.stdout;
   const stderr = options.stderr ?? process.stderr;
-  const command = args[0] ?? "help";
+  const command = args[0];
 
   try {
+    if (command === undefined) return await runTuiCommand(options, stdout);
     switch (command) {
       case "help":
       case "--help":
