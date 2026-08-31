@@ -12,6 +12,7 @@ import type {
 } from "../src/process/command.ts";
 import { TaskStore } from "../src/storage/task-store.ts";
 import type { TuiTerminal } from "../src/tui/terminal.ts";
+import { defaultLocalConfig, writeLocalConfig } from "../src/config/local.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -91,6 +92,32 @@ describe("CLI", () => {
     expect(await runCli(["setup", "help"], cli.options)).toBe(0);
     expect(cli.stdout.value).toContain("official Claude Code login");
     expect(cli.stdout.value).toContain("source-free identity capsule");
+  });
+
+  test("reads and changes only explicit non-secret configuration", async () => {
+    const cli = harness();
+    expect(await runCli(["config", "help"], cli.options)).toBe(0);
+    expect(cli.stdout.value).toContain("identity.id");
+    expect(cli.stdout.value).toContain("credentials stay inside");
+    expect(cli.stdout.value).not.toContain("apiKey");
+
+    cli.stdout.value = "";
+    expect(await runCli(["config", "path"], cli.options)).toBe(0);
+    expect(cli.stdout.value.trim()).toBe(join(cli.root, "config.json"));
+    await writeLocalConfig(join(cli.root, "config.json"), defaultLocalConfig("docker"));
+
+    cli.stdout.value = "";
+    expect(await runCli(["config", "set", "node.port", "43210", "--json"], cli.options)).toBe(0);
+    expect(JSON.parse(cli.stdout.value)).toEqual({ key: "node.port", value: 43210 });
+
+    cli.stdout.value = "";
+    expect(await runCli(["config", "get", "node.port"], cli.options)).toBe(0);
+    expect(cli.stdout.value).toBe("node.port = 43210\n");
+
+    cli.stderr.value = "";
+    expect(await runCli(["config", "set", "claude.apiKey", "secret"], cli.options)).toBe(2);
+    expect(cli.stderr.value).toContain("Unknown config key: claude.apiKey");
+    expect(cli.stderr.value).not.toContain("claude.apiKey = secret");
   });
 
   test("documents the headless node listener without starting it", async () => {

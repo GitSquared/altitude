@@ -127,6 +127,9 @@ Commands:
   node list                   List remembered remote nodes
   node check                  Verify a remote Altitude connection
   node serve                  Run the local task/MCP control endpoint
+  config get                  Read non-secret Altitude configuration
+  config set                  Change one explicit configuration value
+  config path                 Print the configuration file path
   status                      Summarize the local control plane
   doctor                      Check the local Altitude runtime boundary
   help                        Show this help
@@ -200,6 +203,26 @@ On Linux, an installed Altitude binary builds its capsules from itself; --source
 selects an Altitude checkout explicitly (and is currently required elsewhere).
 `;
 
+const CONFIG_HELP = `Usage:
+  altitude config get [key] [--json]
+  altitude config set <key> <value> [--json]
+  altitude config path
+
+Keys:
+  runtime
+  identity.id
+  identity.image
+  taskImage
+  network
+  node.id
+  node.bindHost
+  node.port
+  node.capsuleMcpEndpoint
+
+This file contains only non-secret control-plane settings. Native logins and
+credentials stay inside their node-local identity capsules.
+`;
+
 type Output = Pick<Writable, "write">;
 
 export interface CliOptions {
@@ -265,6 +288,65 @@ function option(parsed: ParsedArguments, name: string): string | undefined {
 
 function wantsJson(parsed: ParsedArguments): boolean {
   return parsed.options.get("json") === true;
+}
+
+const CONFIG_KEYS = [
+  "runtime",
+  "identity.id",
+  "identity.image",
+  "taskImage",
+  "network",
+  "node.id",
+  "node.bindHost",
+  "node.port",
+  "node.capsuleMcpEndpoint",
+] as const;
+
+type ConfigKey = (typeof CONFIG_KEYS)[number];
+
+function isConfigKey(value: string): value is ConfigKey {
+  return (CONFIG_KEYS as readonly string[]).includes(value);
+}
+
+function configValue(config: AltitudeLocalConfig, key: ConfigKey): string | number {
+  switch (key) {
+    case "runtime": return config.runtime;
+    case "identity.id": return config.identity.id;
+    case "identity.image": return config.identity.image;
+    case "taskImage": return config.taskImage;
+    case "network": return config.network;
+    case "node.id": return config.node.id;
+    case "node.bindHost": return config.node.bindHost;
+    case "node.port": return config.node.port;
+    case "node.capsuleMcpEndpoint": return config.node.capsuleMcpEndpoint;
+  }
+}
+
+function withConfigValue(
+  config: AltitudeLocalConfig,
+  key: ConfigKey,
+  rawValue: string,
+): AltitudeLocalConfig {
+  const value: string | number = key === "node.port"
+    ? (() => {
+        if (!/^\d+$/u.test(rawValue)) throw new CliUsageError("node.port must be an integer");
+        return Number(rawValue);
+      })()
+    : rawValue;
+  switch (key) {
+    case "runtime": return validateLocalConfig({ ...config, runtime: value });
+    case "identity.id": return validateLocalConfig({ ...config, identity: { ...config.identity, id: value } });
+    case "identity.image": return validateLocalConfig({ ...config, identity: { ...config.identity, image: value } });
+    case "taskImage": return validateLocalConfig({ ...config, taskImage: value });
+    case "network": return validateLocalConfig({ ...config, network: value });
+    case "node.id": return validateLocalConfig({ ...config, node: { ...config.node, id: value } });
+    case "node.bindHost": return validateLocalConfig({ ...config, node: { ...config.node, bindHost: value } });
+    case "node.port": return validateLocalConfig({ ...config, node: { ...config.node, port: value } });
+    case "node.capsuleMcpEndpoint": return validateLocalConfig({
+      ...config,
+      node: { ...config.node, capsuleMcpEndpoint: value },
+    });
+  }
 }
 
 function generatedTitle(intent: string): string {
@@ -1667,6 +1749,54 @@ async function makeTaskRunnable(taskId: string, options: CliOptions): Promise<vo
   });
 }
 
+async function runConfigCommand(
+  args: readonly string[],
+  options: CliOptions,
+  stdout: Output,
+): Promise<number> {
+  const subcommand = args[0] ?? "help";
+  if (["help", "--help", "-h"].includes(subcommand)) {
+    stdout.write(CONFIG_HELP);
+    return 0;
+  }
+  const paths = resolveAltitudePaths(options.env ?? process.env);
+  if (subcommand === "path") {
+    const parsed = parseArguments(args.slice(1), new Set(), new Set());
+    if (parsed.positionals.length !== 0) throw new CliUsageError("config path does not take arguments");
+    stdout.write(`${paths.config}\n`);
+    return 0;
+  }
+
+  const config = await readLocalConfig(paths.config);
+  if (config === undefined) {
+    throw new Error("Altitude has no local configuration yet. Run `altitude` to enter the factory.");
+  }
+  if (subcommand === "get") {
+    const parsed = parseArguments(args.slice(1));
+    if (parsed.positionals.length > 1) throw new CliUsageError("config get accepts at most one key");
+    const key = parsed.positionals[0];
+    if (key !== undefined && !isConfigKey(key)) throw new CliUsageError(`Unknown config key: ${key}`);
+    const value = key === undefined ? config : configValue(config, key);
+    if (wantsJson(parsed)) writeJson(stdout, value);
+    else if (key === undefined) stdout.write(`${JSON.stringify(config, null, 2)}\n`);
+    else stdout.write(`${key} = ${String(value)}\n`);
+    return 0;
+  }
+  if (subcommand === "set") {
+    const parsed = parseArguments(args.slice(1));
+    if (parsed.positionals.length !== 2) throw new CliUsageError("config set requires a key and value");
+    const [key, value] = parsed.positionals as [string, string];
+    if (!isConfigKey(key)) throw new CliUsageError(`Unknown config key: ${key}`);
+    const updated = withConfigValue(config, key, value);
+    await writeLocalConfig(paths.config, updated);
+    const stored = configValue(updated, key);
+    if (wantsJson(parsed)) writeJson(stdout, { key, value: stored });
+    else stdout.write(`Set ${key} = ${String(stored)}\n`);
+    return 0;
+  }
+  throw new CliUsageError(`Unknown config command: ${subcommand}`);
+}
+
 async function runTuiCommand(options: CliOptions, stdout: Output): Promise<number> {
   const terminal = options.terminal ?? new ProcessTuiTerminal();
   if (!terminal.interactive) {
@@ -1741,6 +1871,8 @@ export async function runCli(args: readonly string[], options: CliOptions = {}):
       }
       case "setup":
         return await runSetupCommand(args.slice(1), options, stdout);
+      case "config":
+        return await runConfigCommand(args.slice(1), options, stdout);
       case "task":
         return await runTaskCommand(args.slice(1), options, stdout);
       case "attention":
