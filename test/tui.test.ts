@@ -92,7 +92,7 @@ describe("Altitude TUI", () => {
   test("creates and starts the first delegated task without asking for a host path", async () => {
     const terminal = new ScriptedTerminal(["new", "quit"], ["Build a tiny compiler"]);
     const tasks: Task[] = [];
-    const runs: string[] = [];
+    const takes: string[] = [];
     const actions: AltitudeTuiActions = {
       configured: async () => true,
       configureClaude: async () => { throw new Error("not used"); },
@@ -102,16 +102,16 @@ describe("Altitude TUI", () => {
         tasks.push(created);
         return created;
       },
-      runTask: async (taskId) => {
-        runs.push(taskId);
+      runTask: async () => { throw new Error("not used"); },
+      takeTask: async (taskId) => {
+        takes.push(taskId);
         tasks[0] = task({ ...tasks[0]!, status: "paused", revision: 2, updatedAt: 3 });
       },
-      takeTask: async () => { throw new Error("not used"); },
     };
 
     expect(await runAltitudeTui(terminal, actions)).toBe(0);
     expect(terminal.prompts).toEqual(["What would you like to delegate? "]);
-    expect(runs).toEqual(["task-1"]);
+    expect(takes).toEqual(["task-1"]);
     expect(terminal.frames.at(-1)).toContain("Build a tiny compiler");
     expect(terminal.frames.at(-1)).toContain("paused");
   });

@@ -142,7 +142,7 @@ export async function runAltitudeTui(
       }
       try {
         const task = await actions.createTask(intent);
-        notice = await external(terminal, () => actions.runTask(task.id));
+        notice = await external(terminal, () => actions.takeTask(task.id));
       } catch (error) {
         notice = error instanceof Error ? error.message : String(error);
       }

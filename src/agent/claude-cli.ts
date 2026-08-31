@@ -5,6 +5,7 @@ import type {
   AgentAdapter,
   AgentCapabilities,
   AgentEvent,
+  AgentInteractiveStartRequest,
   AgentInteractiveSession,
   AgentProbe,
   AgentRun,
@@ -325,6 +326,19 @@ export class ClaudeCliAdapter implements AgentAdapter {
   }
 
   async prepareInteractiveTake(request: AgentTakeRequest): Promise<AgentInteractiveSession> {
+    return await this.#prepareInteractive(request, true);
+  }
+
+  async prepareInteractiveStart(request: AgentInteractiveStartRequest): Promise<AgentInteractiveSession> {
+    if (!request.prompt.trim()) throw new Error("Claude interactive prompt is required");
+    return await this.#prepareInteractive(request, false, request.prompt);
+  }
+
+  async #prepareInteractive(
+    request: AgentTakeRequest,
+    resume: boolean,
+    initialPrompt?: string,
+  ): Promise<AgentInteractiveSession> {
     validateSession(request);
     const lease = await acquireLease(
       this.#leases,
@@ -339,15 +353,18 @@ export class ClaudeCliAdapter implements AgentAdapter {
       target: { kind: "identity-capsule", identityId: this.#identity.id, taskId: request.taskId },
       executable: this.#executable,
       args: [
-        "--resume",
+        resume ? "--resume" : "--session-id",
         request.sessionId,
         ...strictMcpArgs(request),
         ...(request.displayName === undefined ? [] : ["--name", request.displayName]),
+        ...(initialPrompt === undefined ? [] : [initialPrompt]),
       ],
       cwd: request.controlDirectory,
       env: claudeEnvironment(this.#identity, request),
       io: "interactive",
-      purpose: "Take this task in the native Claude Code TUI",
+      purpose: resume
+        ? "Take this task in the native Claude Code TUI"
+        : "Start this task in the native Claude Code TUI",
     };
     return {
       taskId: request.taskId,

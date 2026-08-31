@@ -706,7 +706,10 @@ async function takeManagedTask(args: readonly string[], options: CliOptions, std
     let exitCode = 1;
     let interactiveError: unknown;
     try {
-      exitCode = await runner.runInteractive(launcher.interactiveCommand(take.interactive.launch));
+      exitCode = await runner.runInteractive(
+        launcher.interactiveCommand(take.interactive.launch),
+        { started: () => take.started() },
+      );
     } catch (error) {
       interactiveError = error;
     } finally {

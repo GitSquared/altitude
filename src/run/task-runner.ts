@@ -26,6 +26,8 @@ export interface ManagedTaskRun {
 export interface ManagedInteractiveTake {
   readonly session: AgentTaskSession;
   readonly interactive: AgentInteractiveSession;
+  /** Persist that the native child really spawned before it can be resumed. */
+  started(): void;
   finish(): Promise<void>;
 }
 
@@ -73,7 +75,8 @@ export class TaskRunCoordinator {
     private readonly sessions: TaskAgentSessionStore,
     private readonly grants: TaskMcpGrantStore,
     private readonly provisioner: McpProvisioner,
-    private readonly agent: Pick<AgentAdapter, "start" | "prepareInteractiveTake">,
+    private readonly agent: Pick<AgentAdapter, "start" | "prepareInteractiveTake">
+      & Partial<Pick<AgentAdapter, "prepareInteractiveStart">>,
     private readonly now: () => number = Date.now,
   ) {}
 
@@ -155,13 +158,16 @@ export class TaskRunCoordinator {
     readonly identityId: string;
     readonly mcpEndpoint: string;
   }): Promise<ManagedInteractiveTake> {
-    const task = this.store.getTask(input.taskId);
+    let task = this.store.getTask(input.taskId);
     if (task === undefined) throw new Error(`Task ${input.taskId} does not exist`);
-    if (task.status !== "running" && task.status !== "paused" && task.status !== "waiting_external") {
+    if (task.status !== "queued" && task.status !== "provisioning" && task.status !== "running"
+      && task.status !== "paused" && task.status !== "waiting_external") {
       throw new Error(`Task ${task.id} cannot be taken while ${task.status}`);
     }
-    const existing = this.sessions.get(input.taskId);
-    if (existing === undefined) throw new Error(`Task ${input.taskId} has no Claude session to take`);
+    if (task.status === "queued") {
+      task = this.#transition(task.id, "provisioning", "Preparing task capsule and native Claude session");
+    }
+    const existing = this.sessions.ensure(input.taskId, input.identityId);
     if (existing.identityId !== input.identityId) throw new Error(`Task ${input.taskId} is bound to another identity`);
     const grant = this.grants.issue({
       taskId: input.taskId,
@@ -186,10 +192,22 @@ export class TaskRunCoordinator {
       this.grants.revoke(grant.id);
       throw error;
     }
-    const interactive = await this.agent.prepareInteractiveTake({
-      ...session,
-      displayName: task.title,
-    });
+    const startsSession = existing.runCount === 0;
+    const prepareStart = this.agent.prepareInteractiveStart;
+    if (startsSession && prepareStart === undefined) {
+      this.grants.revoke(grant.id);
+      throw new Error("The configured coding harness cannot start a native interactive session");
+    }
+    const interactive = startsSession
+      ? await prepareStart!.call(this.agent, {
+          ...session,
+          displayName: task.title,
+          prompt: taskPrompt(task),
+        })
+      : await this.agent.prepareInteractiveTake({
+          ...session,
+          displayName: task.title,
+        });
     try {
       this.#transition(task.id, "taken", "Operator entered the native Claude Code session");
     } catch (error) {
@@ -197,9 +215,15 @@ export class TaskRunCoordinator {
       throw error;
     }
     let finished = false;
+    let started = !startsSession;
     return {
       session,
       interactive,
+      started: () => {
+        if (started) return;
+        started = true;
+        this.sessions.markRunStarted(task.id);
+      },
       finish: async () => {
         if (finished) return;
         finished = true;

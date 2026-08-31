@@ -200,6 +200,13 @@ describe("Claude CLI adapter", () => {
     expect((await leases.current("task-1"))?.mode).toBe("interactive");
     await take.release();
     expect(await leases.current("task-1")).toBeUndefined();
+
+    const start = await claude.prepareInteractiveStart(request());
+    expect(start.launch.args).toContain("--session-id");
+    expect(start.launch.args).not.toContain("--resume");
+    expect(start.launch.args).toContain("Implement the first slice.");
+    expect(start.launch.purpose).toContain("Start this task");
+    await start.release();
   });
 
   test("starts a fixed stream-json session and normalizes fragmented output", async () => {

@@ -12,9 +12,17 @@ export interface CommandResult {
   readonly stderr: string;
 }
 
+export interface InteractiveCommandHooks {
+  /** Called synchronously after the child has spawned successfully. */
+  started?(): void;
+}
+
 export interface CommandRunner {
   run(spec: CommandSpec): Promise<CommandResult>;
-  runInteractive(spec: Omit<CommandSpec, "stdin">): Promise<number>;
+  runInteractive(
+    spec: Omit<CommandSpec, "stdin">,
+    hooks?: InteractiveCommandHooks,
+  ): Promise<number>;
 }
 
 function commandEnvironment(
@@ -42,7 +50,10 @@ export class BunCommandRunner implements CommandRunner {
     return { exitCode, stdout, stderr };
   }
 
-  async runInteractive(spec: Omit<CommandSpec, "stdin">): Promise<number> {
+  async runInteractive(
+    spec: Omit<CommandSpec, "stdin">,
+    hooks?: InteractiveCommandHooks,
+  ): Promise<number> {
     const subprocess = Bun.spawn([spec.executable, ...(spec.args ?? [])], {
       ...(spec.cwd === undefined ? {} : { cwd: spec.cwd }),
       env: commandEnvironment(spec.env),
@@ -50,6 +61,13 @@ export class BunCommandRunner implements CommandRunner {
       stdout: "inherit",
       stderr: "inherit",
     });
+    try {
+      hooks?.started?.();
+    } catch (error) {
+      subprocess.kill("SIGTERM");
+      await subprocess.exited.catch(() => undefined);
+      throw error;
+    }
 
     return await subprocess.exited;
   }

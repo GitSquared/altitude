@@ -15,7 +15,7 @@ export class DomainInvariantError extends Error {
 const ALLOWED_TRANSITIONS: Readonly<Record<TaskStatus, readonly TaskStatus[]>> = {
   draft: ["queued", "stopped", "archived"],
   queued: ["provisioning", "paused", "stopped", "failed"],
-  provisioning: ["running", "paused", "stopped", "failed"],
+  provisioning: ["running", "taken", "paused", "stopped", "failed"],
   running: ["waiting_external", "taken", "pausing", "paused", "stopped", "failed"],
   waiting_decision: [],
   waiting_review: [],

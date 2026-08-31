@@ -3,7 +3,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { AgentAdapter, AgentRun, AgentRunCompletion, AgentRunRequest, AgentTakeRequest } from "../src/agent/protocol.ts";
+import type {
+  AgentAdapter,
+  AgentInteractiveStartRequest,
+  AgentRun,
+  AgentRunCompletion,
+  AgentRunRequest,
+  AgentTakeRequest,
+} from "../src/agent/protocol.ts";
 import { TaskRunCoordinator } from "../src/run/task-runner.ts";
 import { TaskAgentSessionStore } from "../src/storage/task-agent-session-store.ts";
 import { TaskStore } from "../src/storage/task-store.ts";
@@ -35,6 +42,7 @@ function state() {
 
 class FakeAgent {
   readonly requests: AgentRunRequest[] = [];
+  readonly interactiveStarts: AgentInteractiveStartRequest[] = [];
   readonly takes: AgentTakeRequest[] = [];
   released = false;
   completion: AgentRunCompletion = { outcome: "success", exit: { exitCode: 0 } };
@@ -68,6 +76,24 @@ class FakeAgent {
         cwd: request.controlDirectory,
         io: "interactive",
         purpose: "test take",
+      },
+      release: async () => { this.released = true; },
+    });
+  }
+  prepareInteractiveStart(
+    request: AgentInteractiveStartRequest,
+  ): ReturnType<AgentAdapter["prepareInteractiveStart"]> {
+    this.interactiveStarts.push(request);
+    return Promise.resolve({
+      taskId: request.taskId,
+      sessionId: request.sessionId,
+      launch: {
+        target: { kind: "identity-capsule", identityId: "claude-personal", taskId: request.taskId },
+        executable: "claude",
+        args: ["--session-id", request.sessionId, request.prompt],
+        cwd: request.controlDirectory,
+        io: "interactive",
+        purpose: "test interactive start",
       },
       release: async () => { this.released = true; },
     });
@@ -238,5 +264,87 @@ describe("task run coordinator", () => {
     await take.finish();
     expect(agent.released).toBeTrue();
     expect(store.getTask("task-1")?.status).toBe("paused");
+  });
+
+  test("starts the first fixed session directly in the native TUI and records it only after spawn", async () => {
+    using store = state();
+    const sessions = new TaskAgentSessionStore(
+      store.database,
+      () => 1_000,
+      () => "01900000-0000-7000-8000-000000000005",
+    );
+    const grants = new TaskMcpGrantStore(store.database, () => 1_000);
+    const agent = new FakeAgent();
+    const coordinator = new TaskRunCoordinator(store, sessions, grants, {
+      writeTaskMcpConfig: async () => ({
+        controlDirectory: "/identity/control/tasks/t-first",
+        configPath: "/identity/control/tasks/t-first/mcp.json",
+      }),
+    }, agent);
+
+    const first = await coordinator.take({
+      taskId: "task-1",
+      identityId: "claude-personal",
+      mcpEndpoint: "http://host.docker.internal:43100/mcp",
+    });
+    expect(store.getTask("task-1")?.status).toBe("taken");
+    expect(agent.interactiveStarts).toHaveLength(1);
+    expect(agent.interactiveStarts[0]?.prompt).toContain("Canonical intent (principles)");
+    expect(sessions.get("task-1")?.runCount).toBe(0);
+
+    first.started();
+    first.started();
+    expect(sessions.get("task-1")?.runCount).toBe(1);
+    await first.finish();
+    expect(store.getTask("task-1")?.status).toBe("paused");
+
+    const resumed = await coordinator.take({
+      taskId: "task-1",
+      identityId: "claude-personal",
+      mcpEndpoint: "http://host.docker.internal:43100/mcp",
+    });
+    expect(agent.takes).toHaveLength(1);
+    expect(agent.takes[0]?.sessionId).toBe(first.session.sessionId);
+    await resumed.finish();
+  });
+
+  test("retries a native first session as new when the child never spawned", async () => {
+    using store = state();
+    const sessions = new TaskAgentSessionStore(
+      store.database,
+      () => 1_000,
+      () => "01900000-0000-7000-8000-000000000006",
+    );
+    const agent = new FakeAgent();
+    const coordinator = new TaskRunCoordinator(
+      store,
+      sessions,
+      new TaskMcpGrantStore(store.database, () => 1_000),
+      {
+        writeTaskMcpConfig: async () => ({
+          controlDirectory: "/identity/control/tasks/t-retry-first",
+          configPath: "/identity/control/tasks/t-retry-first/mcp.json",
+        }),
+      },
+      agent,
+    );
+
+    const failedSpawn = await coordinator.take({
+      taskId: "task-1",
+      identityId: "claude-personal",
+      mcpEndpoint: "http://host.docker.internal:43100/mcp",
+    });
+    await failedSpawn.finish();
+    expect(sessions.get("task-1")?.runCount).toBe(0);
+
+    const retry = await coordinator.take({
+      taskId: "task-1",
+      identityId: "claude-personal",
+      mcpEndpoint: "http://host.docker.internal:43100/mcp",
+    });
+    expect(agent.interactiveStarts).toHaveLength(2);
+    expect(agent.takes).toHaveLength(0);
+    expect(retry.session.sessionId).toBe(failedSpawn.session.sessionId);
+    await retry.finish();
   });
 });

@@ -51,6 +51,10 @@ export interface AgentRunRequest extends AgentTaskSession {
 
 export interface AgentTakeRequest extends AgentTaskSession {}
 
+export interface AgentInteractiveStartRequest extends AgentTaskSession {
+  readonly prompt: string;
+}
+
 export type AgentRateLimitStatus = "allowed" | "warning" | "rejected" | "unknown";
 
 interface ObservedAgentEvent {
@@ -159,6 +163,7 @@ export interface AgentAdapter {
   probe(): Promise<AgentProbe>;
   loginLaunchSpec(): ProcessLaunchSpec & { readonly io: "interactive" };
   start(request: AgentRunRequest): Promise<AgentRun>;
+  prepareInteractiveStart(request: AgentInteractiveStartRequest): Promise<AgentInteractiveSession>;
   prepareInteractiveTake(request: AgentTakeRequest): Promise<AgentInteractiveSession>;
   transcriptExportPlan(session: AgentTaskSession): AgentTranscriptTransferPlan;
   transcriptImportPlan(session: AgentTaskSession): AgentTranscriptTransferPlan;
