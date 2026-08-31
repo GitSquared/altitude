@@ -222,6 +222,9 @@ export function reduceTask(current: Task | undefined, event: EventEnvelope): Tas
       requireText(event.payload.title, "Task title");
       next = { ...current, title: event.payload.title.trim() };
       break;
+    case "operator.input_received":
+      next = current;
+      break;
     case "attention.raised":
       next = raiseAttention(current, event.payload.attention, event.occurredAt);
       break;

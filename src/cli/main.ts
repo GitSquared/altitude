@@ -27,6 +27,7 @@ import {
 import { runDoctor, renderDoctor } from "../doctor.ts";
 import { createAltitudeNodeService, nodeInstanceId, serveAltitudeNode } from "../node/server.ts";
 import {
+  NodeOutboxTopicWorker,
   NodeScheduledActionKindWorker,
   NodeScheduledActionWorker,
 } from "../node/worker.ts";
@@ -49,6 +50,11 @@ import { setupAltitude } from "../setup.ts";
 import { SqliteAgentWriterLeaseStore } from "../storage/agent-writer-lease-store.ts";
 import { TaskAgentSessionStore } from "../storage/task-agent-session-store.ts";
 import { TaskStore } from "../storage/task-store.ts";
+import { LinearTrackerStateStore } from "../tracker/state.ts";
+import {
+  LINEAR_INPUT_ROUTE_TOPIC,
+  parseLinearInputRoutePayload,
+} from "../tracker/webhook.ts";
 import { IdentityControlProvisioner, runIdentityControlStdio } from "../identity/control.ts";
 import { runIdentityInit } from "../identity/init.ts";
 import {
@@ -127,6 +133,8 @@ Commands:
   attention accept <task-id>  Accept the active Review and complete the task
   attention revise <task-id>  Return a Review with revision instructions
   attention ack <task-id>     Acknowledge an Update by --id
+  tracker linear bind         Connect a task capsule to a Linear issue
+  tracker linear show         Show a task's Linear projection binding
   node add                    Remember a remote node connection
   node list                   List remembered remote nodes
   node check                  Verify a remote Altitude connection
@@ -171,6 +179,19 @@ const ATTENTION_HELP = `Usage:
   altitude attention accept <task-id> [note...] [--json]
   altitude attention revise <task-id> <instructions...> [--json]
   altitude attention ack <task-id> --id <attention-id> [note...] [--json]
+`;
+
+const TRACKER_HELP = `Usage:
+  altitude tracker linear bind <task-id> --issue-id <uuid>
+                               [--issue-identifier <key>]
+                               [--agent-session-id <uuid>]
+                               [--app-user-id <uuid>]
+                               [--mention-token <token>] [--json]
+  altitude tracker linear show <task-id> [--json]
+
+The binding is node-local projection metadata; the task capsule remains the
+operational source of truth. Set ALTITUDE_LINEAR_WEBHOOK_SECRET only in the
+environment of the Altitude node process to enable the signed webhook endpoint.
 `;
 
 const NODE_HELP = `Usage:
@@ -249,6 +270,11 @@ type ParsedArguments = Readonly<{
 class CliUsageError extends Error {}
 
 const OPERATOR: EventActor = { kind: "operator" };
+
+function linearWebhookSecret(options: CliOptions): string | undefined {
+  const secret = (options.env ?? process.env).ALTITUDE_LINEAR_WEBHOOK_SECRET;
+  return secret?.trim() ? secret : undefined;
+}
 
 function parseArguments(
   args: readonly string[],
@@ -547,6 +573,7 @@ async function useTaskNode(input: {
   readonly launcher: CapsuleProcessLauncher;
   readonly databasePath: string;
   readonly submissions?: IntentSubmissionStore;
+  readonly linearWebhookSecret?: string;
 }): Promise<NodeUse> {
   const instanceId = nodeInstanceId(input.databasePath);
   if (await existingNode(input.config.node.port, instanceId)) {
@@ -558,6 +585,9 @@ async function useTaskNode(input: {
     grants: input.grants,
     executor: new ProcessTaskToolExecutor(input.launcher),
     ...(input.submissions === undefined ? {} : { submissions: input.submissions }),
+    ...(input.linearWebhookSecret === undefined
+      ? {}
+      : { linearWebhookSecret: input.linearWebhookSecret }),
     instanceId,
     allowedHostnames: [...new Set([
       "127.0.0.1",
@@ -603,6 +633,9 @@ async function useTuiControlPlane(input: {
         ...(input.options.clock === undefined ? {} : { clock: input.options.clock }),
       }),
       instanceId,
+      ...(linearWebhookSecret(input.options) === undefined
+        ? {}
+        : { linearWebhookSecret: linearWebhookSecret(input.options)! }),
       allowedHostnames: [...new Set([
         "127.0.0.1",
         "localhost",
@@ -671,11 +704,38 @@ async function useTuiControlPlane(input: {
     ...(input.options.clock === undefined ? {} : { now: input.options.clock }),
     onError: onError("dispatch worker"),
   });
+  const trackerInputWorker = new NodeOutboxTopicWorker(store, {
+    topic: LINEAR_INPUT_ROUTE_TOPIC,
+    parse: parseLinearInputRoutePayload,
+    execute: async (taskId, payload) => {
+      const task = store.getTask(taskId);
+      if (task === undefined) throw new Error(`Task ${taskId} does not exist`);
+      const continued = await continueAfterOperatorInput({
+        task,
+        ...(payload.resolution === undefined ? {} : { resolution: payload.resolution }),
+        options: input.options,
+        stdout: input.stdout,
+      });
+      if (continued.exitCode !== 0 && continued.exitCode !== 75) {
+        throw new Error(`Claude exited with status ${continued.exitCode} after Linear input was recorded`);
+      }
+      return "executed";
+    },
+  }, {
+    ...(input.options.clock === undefined ? {} : { now: input.options.clock }),
+    onError: onError("Linear input worker"),
+  });
   try {
     retryWorker.start();
     dispatchWorker.start();
+    trackerInputWorker.start();
   } catch (error) {
-    await Promise.allSettled([retryWorker.close(), dispatchWorker.close(), server.close()]);
+    await Promise.allSettled([
+      retryWorker.close(),
+      dispatchWorker.close(),
+      trackerInputWorker.close(),
+      server.close(),
+    ]);
     store.close();
     throw error;
   }
@@ -687,7 +747,12 @@ async function useTuiControlPlane(input: {
       if (closed) return;
       closed = true;
       try {
-        await Promise.all([retryWorker.close(), dispatchWorker.close(), server.close()]);
+        await Promise.all([
+          retryWorker.close(),
+          dispatchWorker.close(),
+          trackerInputWorker.close(),
+          server.close(),
+        ]);
       } finally {
         store.close();
       }
@@ -855,7 +920,16 @@ async function runManagedTask(args: readonly string[], options: CliOptions, stdo
     ...(options.clock === undefined ? {} : { clock: options.clock }),
   });
   const grants = new TaskMcpGrantStore(store.database, options.clock);
-  const node = await useTaskNode({ config, store, grants, launcher, databasePath: paths.database });
+  const node = await useTaskNode({
+    config,
+    store,
+    grants,
+    launcher,
+    databasePath: paths.database,
+    ...(linearWebhookSecret(options) === undefined
+      ? {}
+      : { linearWebhookSecret: linearWebhookSecret(options)! }),
+  });
   try {
     const coordinator = new TaskRunCoordinator(
       store,
@@ -976,7 +1050,16 @@ async function takeManagedTask(
     stdout.write(`Claude terminal reconciled; capsule revision ${reconciled.revision} is durable.\n`);
     return reconciled.exitCode;
   }
-  const node = await useTaskNode({ config, store, grants, launcher, databasePath: paths.database });
+  const node = await useTaskNode({
+    config,
+    store,
+    grants,
+    launcher,
+    databasePath: paths.database,
+    ...(linearWebhookSecret(options) === undefined
+      ? {}
+      : { linearWebhookSecret: linearWebhookSecret(options)! }),
+  });
   try {
     if (terminalStatus === undefined) {
       const agent = await ensureManagedIdentity(config, runner, launcher, store, options);
@@ -1185,6 +1268,9 @@ async function reviewManagedTask(
       launcher,
       databasePath: paths.database,
       submissions,
+      ...(linearWebhookSecret(options) === undefined
+        ? {}
+        : { linearWebhookSecret: linearWebhookSecret(options)! }),
     });
     const submissionUrl = new URL(
       `/v1/intent-tools/redmarker/${grant.sessionId}`,
@@ -1466,16 +1552,16 @@ async function persistAttentionResolution(
   }).task);
 }
 
-async function continueAfterAttentionResolution(input: {
+async function continueAfterOperatorInput(input: {
   readonly task: Task;
-  readonly resolution: AttentionResolution;
+  readonly resolution?: AttentionResolution;
   readonly options: CliOptions;
   readonly stdout: Output;
 }): Promise<{ readonly exitCode: number; readonly notice: string }> {
   const paths = resolveAltitudePaths(input.options.env ?? process.env);
   const terminals = new TerminalSessionManager(paths.terminals);
   let terminal = await terminals.status(input.task.id, "agent");
-  const accepted = input.resolution.kind === "accepted";
+  const accepted = input.resolution?.kind === "accepted";
 
   if (accepted) {
     if (terminal?.state === "running") {
@@ -1490,7 +1576,7 @@ async function continueAfterAttentionResolution(input: {
   if (terminal?.state === "running") {
     await terminals.writeInput(
       input.task.id,
-      "Altitude recorded new operator input in the durable task ledger. Call get_task now, follow the resolved Decision or Review instructions, and continue from that intent.\r",
+      "Altitude recorded new operator input in the durable task ledger. Call get_task now, read the latest operator input or resolved attention, and continue from that intent.\r",
       "agent",
     );
     return { exitCode: 0, notice: "Response recorded and routed into the live Claude session." };
@@ -1579,7 +1665,7 @@ async function runAttentionCommand(
     return 0;
   }
   const continuationOutput: Output = json ? { write: () => true } : stdout;
-  const continued = await continueAfterAttentionResolution({
+  const continued = await continueAfterOperatorInput({
     task: resolved.task,
     resolution: resolved.resolution,
     options,
@@ -1594,6 +1680,83 @@ async function runAttentionCommand(
     stdout.write(`${continued.notice}\n`);
   }
   return continued.exitCode;
+}
+
+async function runTrackerCommand(
+  args: readonly string[],
+  options: CliOptions,
+  stdout: Output,
+): Promise<number> {
+  const provider = args[0] ?? "help";
+  if (["help", "--help", "-h"].includes(provider)) {
+    stdout.write(TRACKER_HELP);
+    return 0;
+  }
+  if (provider !== "linear") throw new CliUsageError(`Unknown tracker provider: ${provider}`);
+  const subcommand = args[1] ?? "help";
+  if (["help", "--help", "-h"].includes(subcommand)) {
+    stdout.write(TRACKER_HELP);
+    return 0;
+  }
+  if (subcommand !== "bind" && subcommand !== "show") {
+    throw new CliUsageError(`Unknown Linear tracker command: ${subcommand}`);
+  }
+  const parsed = parseArguments(
+    args.slice(2),
+    subcommand === "bind"
+      ? new Set([
+          "issue-id",
+          "issue-identifier",
+          "agent-session-id",
+          "app-user-id",
+          "mention-token",
+        ])
+      : new Set(),
+  );
+  if (parsed.positionals.length !== 1) {
+    throw new CliUsageError(`tracker linear ${subcommand} requires exactly one task id`);
+  }
+  const taskId = parsed.positionals[0]!;
+  const binding = await withStore(options, (store) => {
+    if (store.getTask(taskId) === undefined) throw new Error(`Task ${taskId} does not exist`);
+    const state = new LinearTrackerStateStore(store.database, options.clock);
+    if (subcommand === "show") {
+      const existing = state.getByTaskId(taskId);
+      if (existing === undefined) throw new Error(`Task ${taskId} has no Linear binding`);
+      return existing;
+    }
+    const issueId = option(parsed, "issue-id");
+    if (issueId === undefined) throw new CliUsageError("tracker linear bind requires --issue-id <uuid>");
+    return state.bind({
+      taskId,
+      issueId,
+      ...(option(parsed, "issue-identifier") === undefined
+        ? {}
+        : { issueIdentifier: option(parsed, "issue-identifier")! }),
+      ...(option(parsed, "agent-session-id") === undefined
+        ? {}
+        : { agentSessionId: option(parsed, "agent-session-id")! }),
+      ...(option(parsed, "app-user-id") === undefined
+        ? {}
+        : { appUserId: option(parsed, "app-user-id")! }),
+      ...(option(parsed, "mention-token") === undefined
+        ? {}
+        : { mentionTokens: [option(parsed, "mention-token")!] }),
+    });
+  });
+  if (wantsJson(parsed)) writeJson(stdout, binding);
+  else if (subcommand === "bind") {
+    stdout.write(
+      `Bound task ${binding.taskId} to Linear ${binding.issueIdentifier ?? binding.issueId}.\n`
+        + "Run the node with ALTITUDE_LINEAR_WEBHOOK_SECRET set to accept signed replies and mentions.\n",
+    );
+  } else {
+    stdout.write(
+      `Task ${binding.taskId} projects to Linear ${binding.issueIdentifier ?? binding.issueId}`
+        + (binding.agentSessionId === undefined ? ".\n" : ` via Agent Session ${binding.agentSessionId}.\n`),
+    );
+  }
+  return 0;
 }
 
 async function runStatus(options: CliOptions, stdout: Output, json: boolean): Promise<number> {
@@ -1924,6 +2087,9 @@ async function runNodeCommand(
       ...(options.clock === undefined ? {} : { clock: options.clock }),
     }),
     instanceId: nodeInstanceId(paths.database),
+    ...(linearWebhookSecret(options) === undefined
+      ? {}
+      : { linearWebhookSecret: linearWebhookSecret(options)! }),
     ...(config === undefined ? {} : {
       allowedHostnames: [...new Set([
         "127.0.0.1",
@@ -2002,9 +2168,36 @@ async function runNodeCommand(
           `Altitude dispatch worker: ${error instanceof Error ? error.message : String(error)}\n`,
         ),
       });
+  const trackerInputWorker = !workerCompatible
+    ? undefined
+    : new NodeOutboxTopicWorker(store, {
+        topic: LINEAR_INPUT_ROUTE_TOPIC,
+        parse: parseLinearInputRoutePayload,
+        execute: async (taskId, payload) => {
+          const task = store.getTask(taskId);
+          if (task === undefined) throw new Error(`Task ${taskId} does not exist`);
+          const continued = await continueAfterOperatorInput({
+            task,
+            ...(payload.resolution === undefined ? {} : { resolution: payload.resolution }),
+            options,
+            stdout,
+          });
+          if (continued.exitCode !== 0 && continued.exitCode !== 75) {
+            throw new Error(
+              `Claude exited with status ${continued.exitCode} after Linear input was recorded`,
+            );
+          }
+          return "executed";
+        },
+      }, {
+        ...(options.clock === undefined ? {} : { now: options.clock }),
+        onError: (error) => (options.stderr ?? process.stderr).write(
+          `Altitude Linear input worker: ${error instanceof Error ? error.message : String(error)}\n`,
+        ),
+      });
   stdout.write(
     `Altitude node listening at ${server.url.toString()} (${runtime}`
-      + (retryWorker === undefined ? "" : ", retry and dispatch workers active")
+      + (retryWorker === undefined ? "" : ", retry, dispatch, and tracker workers active")
       + ")\n",
   );
   if (config !== undefined && !workerCompatible) {
@@ -2013,9 +2206,14 @@ async function runNodeCommand(
   try {
     retryWorker?.start();
     dispatchWorker?.start();
+    trackerInputWorker?.start();
     await waitForShutdownSignal();
   } finally {
-    await Promise.all([retryWorker?.close(), dispatchWorker?.close()]);
+    await Promise.all([
+      retryWorker?.close(),
+      dispatchWorker?.close(),
+      trackerInputWorker?.close(),
+    ]);
     await server.close();
   }
   return 0;
@@ -2300,7 +2498,7 @@ async function runTuiCommand(options: CliOptions, stdout: Output): Promise<numbe
         await ensureControlPlane();
         const task = await persistAttentionResolution(options, taskId, attentionId, resolution);
         if (resolution.kind === "acknowledged") return "Update acknowledged.";
-        const continued = await continueAfterAttentionResolution({
+        const continued = await continueAfterOperatorInput({
           task,
           resolution,
           options,
@@ -2366,6 +2564,8 @@ export async function runCli(args: readonly string[], options: CliOptions = {}):
         return await runTaskCommand(args.slice(1), options, stdout);
       case "attention":
         return await runAttentionCommand(args.slice(1), options, stdout);
+      case "tracker":
+        return await runTrackerCommand(args.slice(1), options, stdout);
       case "node":
         return await runNodeCommand(args.slice(1), options, stdout);
       case "status": {

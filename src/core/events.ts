@@ -35,6 +35,17 @@ export type EventPayloads = {
   "task.renamed": Readonly<{
     title: string;
   }>;
+  "operator.input_received": Readonly<{
+    text: string;
+    provider: string;
+    source: Readonly<{
+      surface: string;
+      externalId: string;
+      parentExternalId?: string;
+    }>;
+    actorId?: string;
+    routeReason: string;
+  }>;
   "attention.raised": Readonly<{
     attention: Attention;
   }>;

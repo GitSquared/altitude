@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { AGENT_RETRY_PAYLOAD_FORMAT } from "../src/run/retry.ts";
-import { NodeScheduledActionWorker } from "../src/node/worker.ts";
+import { NodeOutboxTopicWorker, NodeScheduledActionWorker } from "../src/node/worker.ts";
 import { TaskStore } from "../src/storage/task-store.ts";
 
 function state(now: () => number): TaskStore {
@@ -81,5 +81,84 @@ describe("node scheduled action worker", () => {
     expect(store.listScheduledActions("scheduled")).toEqual([
       expect.objectContaining({ kind: "mystery" }),
     ]);
+  });
+});
+
+describe("node outbox topic worker", () => {
+  function queue(store: TaskStore, topic = "tracker.linear.input.route"): void {
+    store.append({
+      taskId: "task-1",
+      type: "task.renamed",
+      payload: { title: "Routed" },
+      actor: { kind: "system", component: "test" },
+    }, [{ topic, payload: { value: "hello" }, dedupeKey: `${topic}:1` }]);
+  }
+
+  test("delivers only its topic exactly once", async () => {
+    const now = 1_000;
+    using store = state(() => now);
+    queue(store);
+    queue(store, "another.topic");
+    const deliveries: unknown[] = [];
+    const worker = new NodeOutboxTopicWorker(store, {
+      topic: "tracker.linear.input.route",
+      parse(value) { return value as { value: string }; },
+      async execute(taskId, value) {
+        deliveries.push({ taskId, value });
+        return "executed";
+      },
+    }, { workerId: "outbox-1", now: () => now });
+
+    expect(await worker.runOnce()).toBe(1);
+    expect(deliveries).toEqual([{ taskId: "task-1", value: { value: "hello" } }]);
+    expect(store.listOutbox("delivered")).toHaveLength(1);
+    expect(store.listOutbox("pending")).toEqual([
+      expect.objectContaining({ topic: "another.topic" }),
+    ]);
+    expect(await worker.runOnce()).toBe(0);
+  });
+
+  test("retries transient delivery failure and dead-letters malformed payloads", async () => {
+    let now = 1_000;
+    using store = state(() => now);
+    queue(store);
+    let attempts = 0;
+    const worker = new NodeOutboxTopicWorker(store, {
+      topic: "tracker.linear.input.route",
+      parse(value) { return value as { value: string }; },
+      async execute() {
+        attempts += 1;
+        if (attempts === 1) throw new Error("agent still owns the writer lease");
+        return "executed";
+      },
+    }, { workerId: "outbox-1", now: () => now, onError: () => undefined });
+
+    await worker.runOnce();
+    expect(store.listOutbox("pending")[0]).toMatchObject({
+      attempts: 1,
+      availableAt: 6_000,
+      lastError: "agent still owns the writer lease",
+    });
+    now = 6_000;
+    expect(await worker.runOnce()).toBe(1);
+    expect(store.listOutbox("delivered")[0]?.attempts).toBe(2);
+
+    store.append({
+      taskId: "task-1",
+      type: "task.renamed",
+      payload: { title: "Malformed" },
+      actor: { kind: "system", component: "test" },
+    }, [{
+      topic: "tracker.linear.input.route",
+      payload: { broken: true },
+      dedupeKey: "malformed",
+    }]);
+    const strict = new NodeOutboxTopicWorker(store, {
+      topic: "tracker.linear.input.route",
+      parse() { throw new Error("invalid route payload"); },
+      async execute() { return "executed"; },
+    }, { workerId: "outbox-2", now: () => now, onError: () => undefined });
+    expect(await strict.runOnce()).toBe(1);
+    expect(store.listOutbox("dead")[0]).toMatchObject({ lastError: "invalid route payload" });
   });
 });

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -154,6 +154,51 @@ describe("CLI", () => {
     expect(cli.stdout.value).toContain("altitude node serve");
     expect(cli.stdout.value).toContain("loopback");
     expect(cli.stdout.value).toContain("node add <id>");
+  });
+
+  test("binds a task to Linear without putting webhook secrets in config", async () => {
+    const cli = harness();
+    expect(await runCli(["task", "create", "Project intent through Linear", "--json"], cli.options)).toBe(0);
+    const taskId = JSON.parse(cli.stdout.value).id as string;
+
+    cli.stdout.value = "";
+    expect(await runCli([
+      "tracker",
+      "linear",
+      "bind",
+      taskId,
+      "--issue-id",
+      "issue-1",
+      "--issue-identifier",
+      "ALT-1",
+      "--agent-session-id",
+      "session-1",
+      "--app-user-id",
+      "app-user-1",
+      "--json",
+    ], {
+      ...cli.options,
+      env: {
+        ...cli.options.env,
+        ALTITUDE_LINEAR_WEBHOOK_SECRET: "must-stay-in-process-memory",
+      },
+    })).toBe(0);
+    expect(JSON.parse(cli.stdout.value)).toMatchObject({
+      taskId,
+      issueId: "issue-1",
+      issueIdentifier: "ALT-1",
+      agentSessionId: "session-1",
+      appUserId: "app-user-1",
+      mentionTokens: ["@altitude"],
+    });
+
+    cli.stdout.value = "";
+    expect(await runCli(["tracker", "linear", "show", taskId], cli.options)).toBe(0);
+    expect(cli.stdout.value).toContain("ALT-1 via Agent Session session-1");
+    expect(() => readFileSync(join(cli.root, "config.json"), "utf8")).toThrow();
+    expect(readFileSync(join(cli.root, "altitude.db")).includes(
+      Buffer.from("must-stay-in-process-memory"),
+    )).toBeFalse();
   });
 
   test("remembers and checks a remote node without touching user SSH config", async () => {

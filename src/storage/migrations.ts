@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 
-export const CURRENT_SCHEMA_VERSION = 7;
+export const CURRENT_SCHEMA_VERSION = 8;
 
 type Migration = Readonly<{
   version: number;
@@ -263,6 +263,38 @@ const MIGRATIONS: readonly Migration[] = [
 
       CREATE INDEX intent_artifacts_by_task_time
         ON intent_artifacts(task_id, created_at, id);
+    `,
+  },
+  {
+    version: 8,
+    sql: `
+      CREATE TABLE linear_task_bindings (
+        task_id TEXT PRIMARY KEY REFERENCES tasks(id),
+        issue_id TEXT NOT NULL UNIQUE,
+        issue_identifier TEXT,
+        agent_session_id TEXT,
+        app_user_id TEXT,
+        mention_tokens_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL CHECK (created_at >= 0),
+        updated_at INTEGER NOT NULL CHECK (updated_at >= created_at)
+      ) STRICT;
+
+      CREATE TABLE linear_attention_correlations (
+        task_id TEXT NOT NULL REFERENCES tasks(id),
+        attention_id TEXT NOT NULL,
+        attention_class TEXT NOT NULL
+          CHECK (attention_class IN ('trace', 'update', 'decision', 'review')),
+        issue_id TEXT NOT NULL,
+        issue_comment_id TEXT NOT NULL UNIQUE,
+        agent_session_id TEXT,
+        created_at INTEGER NOT NULL CHECK (created_at >= 0),
+        updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+        PRIMARY KEY(task_id, attention_id),
+        FOREIGN KEY(task_id) REFERENCES linear_task_bindings(task_id)
+      ) STRICT;
+
+      CREATE INDEX linear_attention_correlations_by_issue
+        ON linear_attention_correlations(issue_id, created_at, attention_id);
     `,
   },
 ];

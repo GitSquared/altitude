@@ -11,6 +11,7 @@ import {
 } from "../intent/submission.ts";
 import type { RuntimeKind } from "../runtime/capsule-runtime.ts";
 import type { TaskStore } from "../storage/task-store.ts";
+import { createLinearWebhookHandler } from "../tracker/webhook.ts";
 import type { TaskMcpGrantStore } from "../tools/grants.ts";
 import { createTaskMcpEndpoint, type TaskMcpEndpoint } from "../tools/mcp.ts";
 import type { TaskToolExecutor } from "../tools/protocol.ts";
@@ -58,6 +59,7 @@ export function createAltitudeNodeService(input: {
   readonly submissions?: IntentSubmissionStore;
   readonly instanceId?: string;
   readonly allowedHostnames?: readonly string[];
+  readonly linearWebhookSecret?: string;
 }): AltitudeNodeService {
   const allowedHostnames = [...(input.allowedHostnames ?? [
     "127.0.0.1",
@@ -74,6 +76,9 @@ export function createAltitudeNodeService(input: {
     executor: input.executor,
     allowedHostnames,
   });
+  const linearWebhook = input.linearWebhookSecret === undefined
+    ? undefined
+    : createLinearWebhookHandler({ secret: input.linearWebhookSecret, store: input.store });
 
   return {
     async fetch(request): Promise<Response> {
@@ -107,6 +112,9 @@ export function createAltitudeNodeService(input: {
           ?? originValidationResponse(request, allowedHostnames);
         if (rejected !== undefined) return rejected;
         return await submit(request);
+      }
+      if (url.pathname === "/v1/tracker/linear/webhook" && linearWebhook !== undefined) {
+        return await linearWebhook(request);
       }
       if (url.pathname === "/mcp") return await mcp.fetch(request);
       return json({ error: "not_found" }, { status: 404 });

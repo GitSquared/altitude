@@ -294,6 +294,14 @@ export class TaskStore implements Disposable {
       .filter((event): event is EventEnvelope => event !== undefined);
   }
 
+  getEventByIdempotencyKey(taskId: string, idempotencyKey: string): EventEnvelope | undefined {
+    requireNonEmpty(taskId, "Task id");
+    requireNonEmpty(idempotencyKey, "Idempotency key");
+    return decodeEvent(this.database.query<EventRow, [string, string]>(`
+      SELECT event_json FROM events WHERE task_id = ?1 AND idempotency_key = ?2
+    `).get(taskId, idempotencyKey));
+  }
+
   listIntentArtifacts(taskId: string): IntentArtifactEnvelope[] {
     return this.database
       .query<IntentArtifactRow, [string]>(
@@ -552,6 +560,29 @@ export class TaskStore implements Disposable {
     `).all(workerId, now, leaseMs, limit).map(decodeOutbox)).immediate();
   }
 
+  claimOutboxByTopic(topic: string, options: LeaseOptions): OutboxMessage[] {
+    requireNonEmpty(topic, "Outbox claim topic");
+    const { workerId, now, limit, leaseMs } = this.normalizeLeaseOptions(options);
+    return this.database.transaction(() => this.database.query<OutboxRow, [string, number, number, number, string]>(`
+      UPDATE outbox
+      SET state = 'processing',
+          lease_owner = ?1,
+          lease_expires_at = ?2 + ?3,
+          attempts = attempts + 1,
+          updated_at = ?2
+      WHERE id IN (
+        SELECT id FROM outbox
+        WHERE topic = ?5 AND (
+          (state = 'pending' AND available_at <= ?2)
+          OR (state = 'processing' AND lease_expires_at <= ?2)
+        )
+        ORDER BY available_at, created_at, id
+        LIMIT ?4
+      )
+      RETURNING *
+    `).all(workerId, now, leaseMs, limit, topic).map(decodeOutbox)).immediate();
+  }
+
   deliverOutbox(id: string, workerId: string, now = this.clock()): void {
     this.finishLease("outbox", "delivered", id, workerId, now);
   }
@@ -565,6 +596,17 @@ export class TaskStore implements Disposable {
           lease_owner = NULL, lease_expires_at = NULL, updated_at = ?3
       WHERE id = ?4 AND state = 'processing' AND lease_owner = ?5
     `).run(availableAt, error, this.clock(), id, workerId).changes;
+    if (changed !== 1) throw new Error(`Outbox message ${id} is not leased by ${workerId}`);
+  }
+
+  renewOutboxLease(id: string, workerId: string, now: number, leaseMs: number): void {
+    requireTime(now, "Outbox lease renewal time");
+    if (!Number.isSafeInteger(leaseMs) || leaseMs < 1) throw new Error("Outbox lease duration must be positive");
+    const changed = this.database.query<unknown, [number, number, string, string]>(`
+      UPDATE outbox
+      SET lease_expires_at = ?1 + ?2, updated_at = ?1
+      WHERE id = ?3 AND state = 'processing' AND lease_owner = ?4
+    `).run(now, leaseMs, id, workerId).changes;
     if (changed !== 1) throw new Error(`Outbox message ${id} is not leased by ${workerId}`);
   }
 

@@ -24,15 +24,9 @@ export type LinearIssueCommentCreate = Readonly<{
   routing: TrackerNotificationRoute;
 }>;
 
-export type LinearAgentInputOption = Readonly<{
-  label: string;
-  value: string;
-}>;
-
 export type LinearAgentInputRequest = Readonly<{
   agentSessionId: string;
   body: string;
-  options?: readonly LinearAgentInputOption[];
   idempotencyKey: string;
   routing: TrackerNotificationRoute;
 }>;
@@ -179,18 +173,6 @@ function renderNativeInput(attention: Extract<Attention, { class: "decision" | "
   ].join("\n\n");
 }
 
-function nativeInputOptions(
-  attention: Extract<Attention, { class: "decision" | "review" }>,
-): readonly LinearAgentInputOption[] | undefined {
-  if (attention.class === "decision") {
-    return attention.options?.map(({ label, value }) => ({ label, value }));
-  }
-  return [
-    { label: "Accept", value: `altitude:review:${attention.id}:accept` },
-    { label: "Request revision", value: `altitude:review:${attention.id}:revise` },
-  ];
-}
-
 function renderResolution(resolution: AttentionResolution): string {
   switch (resolution.kind) {
     case "acknowledged":
@@ -234,11 +216,9 @@ export class LinearTrackerAdapter {
     let agentInputActivityId: string | undefined;
     if (isBlockingAttentionClass(input.attention.class) && input.binding.agentSessionId) {
       const attention = input.attention as Extract<Attention, { class: "decision" | "review" }>;
-      const options = nativeInputOptions(attention);
       const native = await this.mutations.requestAgentInput({
         agentSessionId: requireId(input.binding.agentSessionId, "Linear Agent Session id"),
         body: renderNativeInput(attention),
-        ...(options === undefined ? {} : { options }),
         idempotencyKey: `linear:attention:${taskId}:${attentionId}:agent-input`,
         routing,
       });
@@ -340,6 +320,11 @@ function externalIssueId(payload: Record<string, unknown>): string | undefined {
     ?? text(notificationIssue?.id)
     ?? text(session?.issueId)
     ?? text(sessionIssue?.id);
+}
+
+export function linearWebhookIssueId(value: unknown): string | undefined {
+  const payload = record(value);
+  return payload === undefined ? undefined : externalIssueId(payload);
 }
 
 function correlationForComment(
