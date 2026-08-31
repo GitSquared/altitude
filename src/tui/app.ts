@@ -7,7 +7,7 @@ export interface AltitudeTuiActions {
   listTasks(): Promise<readonly Task[]>;
   createTask(intent: string): Promise<Task>;
   runTask(taskId: string): Promise<void>;
-  takeTask(taskId: string): Promise<void>;
+  takeTask(taskId: string): Promise<string | undefined>;
   openShell(taskId: string): Promise<string | undefined>;
 }
 
@@ -84,7 +84,7 @@ export function renderTaskBoard(
 }
 
 function canTake(task: Task): boolean {
-  return task.status === "paused" || task.status === "running" || task.status === "waiting_external";
+  return task.status === "paused" || task.status === "running" || task.status === "waiting_external" || task.status === "taken";
 }
 
 async function external(terminal: TuiTerminal, action: () => Promise<void>): Promise<string | undefined> {
@@ -92,6 +92,20 @@ async function external(terminal: TuiTerminal, action: () => Promise<void>): Pro
   try {
     await action();
     return undefined;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  } finally {
+    terminal.afterExternal();
+  }
+}
+
+async function externalNotice(
+  terminal: TuiTerminal,
+  action: () => Promise<string | undefined>,
+): Promise<string | undefined> {
+  terminal.beforeExternal();
+  try {
+    return await action();
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
   } finally {
@@ -150,7 +164,7 @@ export async function runAltitudeTui(
       }
       try {
         const task = await actions.createTask(intent);
-        notice = await external(terminal, () => actions.takeTask(task.id));
+        notice = await externalNotice(terminal, () => actions.takeTask(task.id));
       } catch (error) {
         notice = error instanceof Error ? error.message : String(error);
       }
@@ -162,12 +176,9 @@ export async function runAltitudeTui(
         notice = `${task.activeAttention?.class ?? "Attention"} needs an answer; use the attention command for now.`;
         continue;
       }
-      notice = await external(
-        terminal,
-        () => key === "enter" && canTake(task)
-          ? actions.takeTask(task.id)
-          : actions.runTask(task.id),
-      );
+      notice = key === "enter" && canTake(task)
+        ? await externalNotice(terminal, () => actions.takeTask(task.id))
+        : await external(terminal, () => actions.runTask(task.id));
       continue;
     }
     if (key === "shell" && tasks.length > 0) {

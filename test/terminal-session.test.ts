@@ -87,4 +87,38 @@ describe("detachable terminal supervisor", () => {
     await manager.finalize("task-1");
     expect(await manager.status("task-1")).toBeUndefined();
   });
+
+  test("isolates agent terminals and terminates them through the supervisor", async () => {
+    const root = mkdtempSync(join(tmpdir(), "altitude-agent-terminal-"));
+    roots.push(root);
+    const manager = new TerminalSessionManager(root, [
+      process.execPath,
+      join(import.meta.dir, "..", "src", "cli.ts"),
+    ]);
+    const started = await manager.start({
+      taskId: "task-2",
+      kind: "agent",
+      command: {
+        executable: "/bin/sh",
+        args: ["-c", "trap 'exit 0' TERM; while :; do sleep 1; done"],
+      },
+    });
+    if (started.state === "failed") throw new Error(started.error);
+    expect(started.state).toBe("running");
+    expect(await manager.status("task-2")).toBeUndefined();
+    expect(await manager.status("task-2", "agent")).toMatchObject({ state: "running" });
+    expect(await manager.terminate("task-2", "agent")).toMatchObject({ state: "exited" });
+    await manager.finalize("task-2", "agent");
+  });
+
+  test("records a supervisor that cannot start without launching a terminal child", async () => {
+    const root = mkdtempSync(join(tmpdir(), "altitude-failed-terminal-"));
+    roots.push(root);
+    const manager = new TerminalSessionManager(root, ["/definitely/missing/altitude-supervisor"]);
+    expect(await manager.start({
+      taskId: "task-3",
+      command: { executable: "/bin/sh", args: ["-c", "exit 42"] },
+    })).toMatchObject({ state: "failed" });
+    await manager.finalize("task-3");
+  });
 });

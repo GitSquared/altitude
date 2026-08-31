@@ -183,6 +183,25 @@ describe("Altitude TUI", () => {
     expect(terminal.frames.at(-1)).toContain("Workbench is still running.");
   });
 
+  test("returns to the overview with a visible detached-Claude notice", async () => {
+    const terminal = new ScriptedTerminal(["enter", "quit"]);
+    const active = task({ id: "task-1", title: "Keep compiling", status: "taken" });
+    const actions: AltitudeTuiActions = {
+      configured: async () => true,
+      configureClaude: async () => { throw new Error("not used"); },
+      listTasks: async () => [active],
+      createTask: async () => { throw new Error("not used"); },
+      runTask: async () => { throw new Error("not used"); },
+      takeTask: async () => "Claude is still working. Press enter to reattach.",
+      openShell: async () => { throw new Error("not used"); },
+    };
+
+    expect(await runAltitudeTui(terminal, actions)).toBe(0);
+    expect(terminal.frames.at(-1)).toContain("Claude is still working. Press enter to reattach.");
+    expect(terminal.externalEntries).toBe(1);
+    expect(terminal.externalExits).toBe(1);
+  });
+
   test("decodes the small stable navigation vocabulary", () => {
     expect(decodeTuiKey("\u001b[A")).toBe("up");
     expect(decodeTuiKey("j")).toBe("down");

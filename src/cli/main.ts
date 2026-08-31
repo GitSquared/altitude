@@ -96,6 +96,7 @@ import {
 } from "../run/dispatch.ts";
 import { activateTransferredTask } from "../run/transfer-activation.ts";
 import { TaskRunCoordinator } from "../run/task-runner.ts";
+import { reconcileExitedInteractiveAgent } from "../run/interactive-terminal.ts";
 import { VERSION } from "../version.ts";
 import {
   isAltitudeSourceCheckout,
@@ -512,6 +513,18 @@ async function requireSettledWorkbench(
   throw new Error(`Task ${taskId} has an uncheckpointed workbench; run \`altitude task shell ${taskId}\` once to finalize it`);
 }
 
+async function requireSettledAgentTerminal(
+  paths: ReturnType<typeof resolveAltitudePaths>,
+  taskId: string,
+): Promise<void> {
+  const status = await new TerminalSessionManager(paths.terminals).status(taskId, "agent");
+  if (status === undefined) return;
+  if (status.state === "running" || status.state === "starting") {
+    throw new Error(`Task ${taskId} has a live Claude terminal; open the task and leave Claude before continuing`);
+  }
+  throw new Error(`Task ${taskId} has a finished Claude terminal awaiting reconciliation; open the task once to checkpoint it`);
+}
+
 async function existingNode(port: number, expectedInstanceId: string): Promise<boolean> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 500);
@@ -815,6 +828,7 @@ async function runManagedTask(args: readonly string[], options: CliOptions, stdo
   const taskId = parsed.positionals[0]!;
   const { paths, config, runner } = await managedContext(options);
   await requireSettledWorkbench(paths, taskId);
+  await requireSettledAgentTerminal(paths, taskId);
   using store = new TaskStore(paths.database, {
     ...(options.clock === undefined ? {} : { clock: options.clock }),
     ...(options.createId === undefined ? {} : { createId: options.createId }),
@@ -879,7 +893,56 @@ async function runManagedTask(args: readonly string[], options: CliOptions, stdo
   }
 }
 
-async function takeManagedTask(args: readonly string[], options: CliOptions, stdout: Output): Promise<number> {
+async function reconcileAgentTerminal(input: {
+  readonly taskId: string;
+  readonly status: Awaited<ReturnType<TerminalSessionManager["status"]>>;
+  readonly paths: ReturnType<typeof resolveAltitudePaths>;
+  readonly config: AltitudeLocalConfig;
+  readonly runner: CommandRunner;
+  readonly store: TaskStore;
+  readonly launcher: CapsuleProcessLauncher;
+  readonly sessions: TaskAgentSessionStore;
+  readonly grants: TaskMcpGrantStore;
+  readonly options: CliOptions;
+}): Promise<{ readonly revision: number; readonly exitCode: number }> {
+  if (input.status === undefined || input.status.state === "running" || input.status.state === "starting") {
+    throw new Error("A live Claude terminal cannot be reconciled");
+  }
+  const leases = new SqliteAgentWriterLeaseStore(input.store.database);
+  await reconcileExitedInteractiveAgent({
+    taskId: input.taskId,
+    status: input.status,
+    tasks: input.store,
+    sessions: input.sessions,
+    leases,
+    grants: input.grants,
+  });
+  const transcripts = new IdentityTranscriptProvisioner(input.launcher, input.config.identity.id);
+  const checkpointer = await prepareTaskCapsule({
+    task: input.store.getTask(input.taskId)!,
+    store: input.store,
+    paths: input.paths,
+    config: input.config,
+    runner: input.runner,
+    launcher: input.launcher,
+    agentSessions: input.sessions,
+    transcripts,
+    ...(input.options.clock === undefined ? {} : { clock: input.options.clock }),
+  });
+  const checkpoint = await checkpointer.capture(input.taskId);
+  await new TerminalSessionManager(input.paths.terminals).finalize(input.taskId, "agent");
+  return {
+    revision: checkpoint.revision,
+    exitCode: input.status.state === "exited" ? input.status.exitCode : 1,
+  };
+}
+
+async function takeManagedTask(
+  args: readonly string[],
+  options: CliOptions,
+  stdout: Output,
+  detachable = false,
+): Promise<number> {
   const parsed = parseArguments(args, new Set(), new Set());
   if (parsed.positionals.length !== 1) throw new CliUsageError("task take requires exactly one task id");
   const taskId = parsed.positionals[0]!;
@@ -892,55 +955,101 @@ async function takeManagedTask(args: readonly string[], options: CliOptions, std
   const task = store.getTask(taskId);
   if (task === undefined) throw new Error(`Task ${taskId} does not exist`);
   const launcher = new CapsuleProcessLauncher(config.runtime);
-  const agent = await ensureManagedIdentity(config, runner, launcher, store, options);
   const agentSessions = new TaskAgentSessionStore(store.database, options.clock);
-  const transcripts = new IdentityTranscriptProvisioner(
-    launcher,
-    config.identity.id,
-  );
-  const checkpointer = await prepareTaskCapsule({
-    task,
-    store,
-    paths,
-    config,
-    runner,
-    launcher,
-    agentSessions,
-    transcripts,
-    ...(options.clock === undefined ? {} : { clock: options.clock }),
-  });
   const grants = new TaskMcpGrantStore(store.database, options.clock);
+  const terminals = new TerminalSessionManager(paths.terminals);
+  let terminalStatus = await terminals.status(taskId, "agent");
+  if (terminalStatus?.state === "starting") throw new Error("Claude terminal is still starting; try opening the task again");
+  if (terminalStatus !== undefined && terminalStatus.state !== "running") {
+    const reconciled = await reconcileAgentTerminal({
+      taskId,
+      status: terminalStatus,
+      paths,
+      config,
+      runner,
+      store,
+      launcher,
+      sessions: agentSessions,
+      grants,
+      options,
+    });
+    stdout.write(`Claude terminal reconciled; capsule revision ${reconciled.revision} is durable.\n`);
+    return reconciled.exitCode;
+  }
   const node = await useTaskNode({ config, store, grants, launcher, databasePath: paths.database });
   try {
-    const coordinator = new TaskRunCoordinator(
-      store,
-      agentSessions,
-      grants,
-      new IdentityControlProvisioner(launcher),
-      agent,
-      options.clock ?? Date.now,
-    );
-    const take = await coordinator.take({
-      taskId,
-      identityId: config.identity.id,
-      mcpEndpoint: config.node.capsuleMcpEndpoint,
-    });
-    let exitCode = 1;
-    let interactiveError: unknown;
-    try {
-      exitCode = await runner.runInteractive(
-        launcher.interactiveCommand(take.interactive.launch),
-        { started: () => take.started() },
+    if (terminalStatus === undefined) {
+      const agent = await ensureManagedIdentity(config, runner, launcher, store, options);
+      const transcripts = new IdentityTranscriptProvisioner(launcher, config.identity.id);
+      await prepareTaskCapsule({
+        task,
+        store,
+        paths,
+        config,
+        runner,
+        launcher,
+        agentSessions,
+        transcripts,
+        ...(options.clock === undefined ? {} : { clock: options.clock }),
+      });
+      const coordinator = new TaskRunCoordinator(
+        store,
+        agentSessions,
+        grants,
+        new IdentityControlProvisioner(launcher),
+        agent,
+        options.clock ?? Date.now,
       );
-    } catch (error) {
-      interactiveError = error;
-    } finally {
-      await take.finish();
+      const take = await coordinator.take({
+        taskId,
+        identityId: config.identity.id,
+        mcpEndpoint: config.node.capsuleMcpEndpoint,
+      });
+      try {
+        terminalStatus = await terminals.start({
+          taskId,
+          kind: "agent",
+          command: launcher.interactiveCommand(take.interactive.launch),
+        });
+      } catch (error) {
+        await take.finish();
+        throw error;
+      }
+      if (terminalStatus.state === "failed") {
+        await terminals.finalize(taskId, "agent");
+        await take.finish();
+        throw new Error(`Claude terminal failed: ${terminalStatus.error}`);
+      }
+      if (terminalStatus.state === "starting") throw new Error("Claude terminal is still starting");
+      take.started();
     }
-    const checkpoint = await checkpointer.capture(taskId);
-    if (interactiveError !== undefined) throw interactiveError;
-    stdout.write(`Claude Code session closed; task ${taskId} is ${store.getTask(taskId)?.status}; capsule revision ${checkpoint.revision} is durable.\n`);
-    return exitCode;
+    if (terminalStatus.state === "exited") {
+      const reconciled = await reconcileAgentTerminal({
+        taskId, status: terminalStatus, paths, config, runner, store, launcher,
+        sessions: agentSessions, grants, options,
+      });
+      stdout.write(`Claude Code session closed; capsule revision ${reconciled.revision} is durable.\n`);
+      return reconciled.exitCode;
+    }
+    const canDetach = detachable && node.external;
+    if (canDetach) stdout.write("Press Ctrl-G, then d to return to Altitude without stopping Claude.\n");
+    const attached = await terminals.attach(
+      taskId,
+      process.stdin,
+      process.stdout,
+      "agent",
+      canDetach,
+    );
+    if (attached.outcome === "detached") {
+      stdout.write(`Claude is still working on ${taskId}; open the task again to reattach.\n`);
+      return 0;
+    }
+    const reconciled = await reconcileAgentTerminal({
+      taskId, status: attached.status, paths, config, runner, store, launcher,
+      sessions: agentSessions, grants, options,
+    });
+    stdout.write(`Claude Code session closed; task ${taskId} is ${store.getTask(taskId)?.status}; capsule revision ${reconciled.revision} is durable.\n`);
+    return reconciled.exitCode;
   } finally {
     await node.close();
   }
@@ -951,6 +1060,7 @@ async function openTaskShell(args: readonly string[], options: CliOptions, stdou
   if (parsed.positionals.length !== 1) throw new CliUsageError("task shell requires exactly one task id");
   const taskId = parsed.positionals[0]!;
   const { paths, config, runner } = await managedContext(options);
+  await requireSettledAgentTerminal(paths, taskId);
   using store = new TaskStore(paths.database, {
     ...(options.clock === undefined ? {} : { clock: options.clock }),
     ...(options.createId === undefined ? {} : { createId: options.createId }),
@@ -1025,6 +1135,7 @@ async function reviewManagedTask(
   const taskId = parsed.positionals[0]!;
   const { paths, config, runner } = await managedContext(options);
   await requireSettledWorkbench(paths, taskId);
+  await requireSettledAgentTerminal(paths, taskId);
   using store = new TaskStore(paths.database, {
     ...(options.clock === undefined ? {} : { clock: options.clock }),
     ...(options.createId === undefined ? {} : { createId: options.createId }),
@@ -1160,6 +1271,7 @@ async function sendManagedTask(
   const { paths, config, runner } = await managedContext(options);
   const taskId = parsed.positionals[0]!;
   await requireSettledWorkbench(paths, taskId);
+  await requireSettledAgentTerminal(paths, taskId);
   const inlineConnection = [
     "host",
     "ssh-port",
@@ -2067,8 +2179,12 @@ async function runTuiCommand(options: CliOptions, stdout: Output): Promise<numbe
       },
       takeTask: async (taskId) => {
         await ensureControlPlane();
-        const exitCode = await takeManagedTask([taskId], options, stdout);
+        const exitCode = await takeManagedTask([taskId], options, stdout, true);
         if (exitCode !== 0) throw new Error(`Claude Code exited with status ${exitCode}`);
+        const status = await new TerminalSessionManager(paths.terminals).status(taskId, "agent");
+        return status?.state === "running"
+          ? "Claude is still working. Press enter to reattach; keep Altitude open, or set up a remote node for unattended work."
+          : undefined;
       },
       openShell: async (taskId) => {
         await ensureControlPlane();
@@ -2082,7 +2198,23 @@ async function runTuiCommand(options: CliOptions, stdout: Output): Promise<numbe
       },
     });
   } finally {
-    await controlPlane?.close();
+    try {
+      if (controlPlane !== undefined) {
+        const terminals = new TerminalSessionManager(paths.terminals);
+        const tasks = await withStore(options, (store) => store.listTasks());
+        for (const task of tasks) {
+          const status = await terminals.status(task.id, "agent");
+          if (status === undefined) continue;
+          if (status.state === "running") await terminals.terminate(task.id, "agent");
+          const exitCode = await takeManagedTask([task.id], options, stdout);
+          if (exitCode !== 0 && exitCode !== 143) {
+            (options.stderr ?? process.stderr).write(`Altitude could not cleanly pause ${task.id}; Claude exited ${exitCode}.\n`);
+          }
+        }
+      }
+    } finally {
+      await controlPlane?.close();
+    }
   }
 }
 
