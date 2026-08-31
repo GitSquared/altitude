@@ -1082,7 +1082,8 @@ async function openTaskShell(args: readonly string[], options: CliOptions, stdou
   stdout.write([
     `Entering the portable workbench for ${taskId}.`,
     "Tools and non-secret config saved under $HOME will travel with this task.",
-    "Harness, Git hosting, and signing logins belong in node-local identity capsules.",
+    "Run `gh auth login` here when this task needs GitHub; that login stays on this node.",
+    "Other credentials and signing identities also belong in the node-local area, never portable state.",
     "Exit the shell to checkpoint the workbench.",
     "",
   ].join("\n"));

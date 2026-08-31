@@ -35,6 +35,7 @@ const NODE_LOCAL_ROOTS = new Set([
 
 const CREDENTIAL_FILENAMES = new Set([
   ".credentials.json",
+  ".git-credentials",
   ".netrc",
   ".npmrc",
   "credentials.json",

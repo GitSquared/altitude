@@ -14,6 +14,7 @@ import { join } from "node:path";
 
 import {
   TASK_ENVIRONMENT_METADATA_MEMBER,
+  TASK_NODE_LOCAL_ROOT,
   captureTaskEnvironment,
   restoreTaskEnvironment,
   taskEnvironmentVariables,
@@ -72,6 +73,12 @@ describe("portable task environment", () => {
     writeFileSync(join(home, ".ssh", "id_ed25519"), "secret");
     await expect(captureTaskEnvironment(secret)).rejects.toThrow("credential boundary");
 
+    const gitCredential = workspace("git-credential");
+    await captureTaskEnvironment(gitCredential);
+    const gitCredentialHome = join(gitCredential, ".altitude", "environment", "home");
+    writeFileSync(join(gitCredentialHome, ".git-credentials"), "https://secret@example.test\n");
+    await expect(captureTaskEnvironment(gitCredential)).rejects.toThrow("credential boundary");
+
     const escaping = workspace("escaping");
     await captureTaskEnvironment(escaping);
     symlinkSync("/etc/passwd", join(escaping, ".altitude", "environment", "home", "outside"));
@@ -83,5 +90,24 @@ describe("portable task environment", () => {
     expect(environment.HOME).toBe("/workspace/.altitude/environment/home");
     expect(environment.PATH?.startsWith("/workspace/.altitude/environment/bin:")).toBeTrue();
     expect(environment.XDG_CACHE_HOME).toBe("/tmp/altitude-cache");
+    expect(environment.GH_CONFIG_DIR).toBe(`${TASK_NODE_LOCAL_ROOT}/gh`);
+  });
+
+  test("keeps explicit GitHub login node-local while portable config travels", async () => {
+    const source = workspace("github-login");
+    await captureTaskEnvironment(source);
+    const nodeLocalGh = join(source, ".altitude", "node-local", "gh");
+    mkdirSync(nodeLocalGh, { recursive: true });
+    writeFileSync(join(nodeLocalGh, "hosts.yml"), "github.com: secret\n");
+    const portableConfig = join(source, ".altitude", "environment", "home", ".gitconfig");
+    writeFileSync(portableConfig, "[user]\n\tname = Capsule operator\n");
+
+    const members = await captureTaskEnvironment(source);
+    expect(members.some((member) => new TextDecoder().decode(member.bytes).includes("github.com: secret"))).toBeFalse();
+    const target = workspace("github-login-target");
+    await restoreTaskEnvironment(target, members);
+    expect(await Bun.file(join(target, ".altitude", "environment", "home", ".gitconfig")).text())
+      .toContain("Capsule operator");
+    expect(await Bun.file(join(target, ".altitude", "node-local", "gh", "hosts.yml")).exists()).toBeFalse();
   });
 });

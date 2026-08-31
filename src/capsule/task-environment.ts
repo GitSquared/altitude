@@ -19,6 +19,7 @@ import { portableCapsulePath, type PortableCapsulePath } from "./paths.ts";
 export const TASK_ENVIRONMENT_ROOT = "/workspace/.altitude/environment" as const;
 export const TASK_ENVIRONMENT_HOME = `${TASK_ENVIRONMENT_ROOT}/home` as const;
 export const TASK_ENVIRONMENT_BIN = `${TASK_ENVIRONMENT_ROOT}/bin` as const;
+export const TASK_NODE_LOCAL_ROOT = "/workspace/.altitude/node-local" as const;
 export const TASK_ENVIRONMENT_METADATA_MEMBER = portableCapsulePath("workspace/environment.json");
 
 const TASK_ENVIRONMENT_FORMAT = "altitude.task-environment/v1" as const;
@@ -88,6 +89,7 @@ export async function initializeTaskEnvironment(rootInput: string): Promise<void
   await ensureDirectory(join(root, ENVIRONMENT_DIRECTORY));
   await ensureDirectory(join(root, ENVIRONMENT_DIRECTORY, "home"));
   await ensureDirectory(join(root, ENVIRONMENT_DIRECTORY, "bin"));
+  await ensureDirectory(join(root, ".altitude", "node-local"));
   await ensureGitExclude(root);
 }
 
@@ -265,6 +267,7 @@ export function taskEnvironmentVariables(): Readonly<Record<string, string>> {
     BUN_INSTALL: `${TASK_ENVIRONMENT_HOME}/.bun`,
     BUN_INSTALL_CACHE_DIR: "/tmp/bun-install-cache",
     NPM_CONFIG_CACHE: "/tmp/npm-cache",
+    GH_CONFIG_DIR: `${TASK_NODE_LOCAL_ROOT}/gh`,
     PATH: [
       TASK_ENVIRONMENT_BIN,
       `${TASK_ENVIRONMENT_HOME}/.local/bin`,

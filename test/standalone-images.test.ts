@@ -68,6 +68,10 @@ test("standalone image context carries only the installed binary and capsule rec
     join(context.directory, "images", "task", "Containerfile"),
     "utf8",
   )).toContain("COPY --chown=1000:1000 --chmod=0755 altitude");
+  expect(readFileSync(
+    join(context.directory, "images", "task", "Containerfile"),
+    "utf8",
+  )).toContain("ca-certificates gh git openssh-client ripgrep");
   expect(readFileSync(join(context.directory, ".dockerignore"), "utf8"))
     .not.toContain("identity/claude");
 

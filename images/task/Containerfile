@@ -11,7 +11,7 @@ FROM oven/bun:1.4.0-debian
 
 USER root
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates git openssh-client ripgrep \
+    && apt-get install -y --no-install-recommends ca-certificates gh git openssh-client ripgrep \
     && rm -rf /var/lib/apt/lists/* \
     && install -d -o 1000 -g 1000 -m 0755 /workspace /opt/altitude/bin
 
@@ -26,6 +26,7 @@ ENV ALTITUDE_CAPSULE=task \
     BUN_INSTALL=/workspace/.altitude/environment/home/.bun \
     BUN_INSTALL_CACHE_DIR=/tmp/bun-install-cache \
     NPM_CONFIG_CACHE=/tmp/npm-cache \
+    GH_CONFIG_DIR=/workspace/.altitude/node-local/gh \
     PATH=/workspace/.altitude/environment/bin:/workspace/.altitude/environment/home/.local/bin:/workspace/.altitude/environment/home/.bun/bin:/opt/altitude/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 USER 1000:1000
