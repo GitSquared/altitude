@@ -134,6 +134,20 @@ export async function runMicrosandboxAttach(encoded: string | undefined): Promis
   return await sandbox.attachWithBuilder(payload.executable, options);
 }
 
+async function attachMicrosandboxProcess(
+  spec: ProcessLaunchSpec & { readonly io: "interactive" },
+): Promise<number> {
+  validateLaunch(spec);
+  if (spec.target.kind === "host") {
+    throw new Error("A capsule process launcher cannot silently execute on the host");
+  }
+  const sandbox = await (await Sandbox.get(targetContainer(spec.target))).connectOrStart(true);
+  const options = new AttachOptionsBuilder().args([...spec.args]);
+  if (spec.cwd !== undefined) options.cwd(spec.cwd);
+  if (spec.env !== undefined) options.envs({ ...spec.env });
+  return await sandbox.attachWithBuilder(spec.executable, options);
+}
+
 class ByteQueue implements AsyncIterable<Uint8Array> {
   readonly #values: Uint8Array[] = [];
   readonly #waiters: Array<() => void> = [];
@@ -237,5 +251,13 @@ export class CapsuleProcessLauncher implements ProcessLauncher {
 
   interactiveCommand(spec: ProcessLaunchSpec & { readonly io: "interactive" }): CommandSpec {
     return microsandboxAttachCommand(spec);
+  }
+
+  /**
+   * Attach the current process directly to a capsule. Setup uses this path so
+   * native login input does not cross Altitude's detached-session relay.
+   */
+  attach(spec: ProcessLaunchSpec & { readonly io: "interactive" }): Promise<number> {
+    return attachMicrosandboxProcess(spec);
   }
 }

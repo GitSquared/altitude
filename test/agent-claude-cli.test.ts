@@ -180,7 +180,7 @@ describe("Claude CLI adapter", () => {
     const claude = adapter(new FakeLauncher([]), leases);
     const login = claude.loginLaunchSpec();
     expect(login.target).toEqual({ kind: "identity-capsule", identityId: "claude-personal" });
-    expect(login.args).toEqual(["auth", "login"]);
+    expect(login.args).toEqual([]);
     expect(login.env).toEqual({ CLAUDE_CONFIG_DIR: "/identity/claude" });
 
     const take = await claude.prepareInteractiveTake(request());

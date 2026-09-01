@@ -256,11 +256,11 @@ export class ClaudeCliAdapter implements AgentAdapter {
     return {
       target: { kind: "identity-capsule", identityId: this.#identity.id },
       executable: this.#executable,
-      args: ["auth", "login"],
+      args: [],
       cwd: this.#identity.loginDirectory,
       env: claudeEnvironment(this.#identity),
       io: "interactive",
-      purpose: "Authenticate the node-local Claude identity",
+      purpose: "Open Claude inside the node-local identity capsule for native login",
     };
   }
 

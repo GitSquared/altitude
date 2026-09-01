@@ -1,18 +1,15 @@
 import { describe, expect, test } from "bun:test";
 
-import type { AgentProbe } from "../src/agent/protocol.ts";
+import type { AgentAdapter, AgentProbe } from "../src/agent/protocol.ts";
 import { defaultLocalConfig } from "../src/config/local.ts";
-import type { CommandRunner, CommandSpec } from "../src/process/command.ts";
 import { setupAltitude, type SetupProgress } from "../src/setup.ts";
 
-class InteractiveRunner implements CommandRunner {
+class InteractiveLogin {
   interactive = 0;
-  run(): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-    throw new Error("Unexpected non-interactive command");
-  }
-  runInteractive(spec: Omit<CommandSpec, "stdin">): Promise<number> {
+  run(spec: ReturnType<AgentAdapter["loginLaunchSpec"]>): Promise<number> {
     this.interactive += 1;
-    expect(spec.args).toEqual(["auth", "login"]);
+    expect(spec.target).toEqual({ kind: "identity-capsule", identityId: "claude-personal" });
+    expect(spec.args).toEqual([]);
     return Promise.resolve(0);
   }
 }
@@ -21,7 +18,7 @@ describe("Altitude first-run setup", () => {
   test("initializes an identity capsule and logs in only inside it", async () => {
     const identities: unknown[] = [];
     const progress: SetupProgress[] = [];
-    const runner = new InteractiveRunner();
+    const login = new InteractiveLogin();
     const probes: AgentProbe[] = [
       { installed: true, version: "2.1.248", auth: "unauthenticated" },
       { installed: true, version: "2.1.248", auth: "authenticated" },
@@ -42,19 +39,18 @@ describe("Altitude first-run setup", () => {
         loginLaunchSpec: () => ({
           target: { kind: "identity-capsule", identityId: "claude-personal" },
           executable: "claude",
-          args: ["auth", "login"],
+          args: [],
           cwd: "/identity",
           env: { CLAUDE_CONFIG_DIR: "/identity/claude" },
           io: "interactive",
           purpose: "login",
         }),
       },
-      interactiveCommand: (spec) => ({ executable: spec.executable, args: spec.args }),
-      runner,
+      login: (spec) => login.run(spec),
     });
     expect(identities).toHaveLength(1);
     expect(JSON.stringify(identities[0])).not.toContain("workspace");
-    expect(runner.interactive).toBe(1);
+    expect(login.interactive).toBe(1);
     expect(progress.map((item) => item.step)).toEqual([
       "runtime",
       "identity",
@@ -65,7 +61,7 @@ describe("Altitude first-run setup", () => {
   });
 
   test("does not prompt again when the managed identity is already authenticated", async () => {
-    const runner = new InteractiveRunner();
+    const login = new InteractiveLogin();
     await setupAltitude({
       config: defaultLocalConfig(),
     }, {
@@ -75,10 +71,9 @@ describe("Altitude first-run setup", () => {
         probe: async () => ({ installed: true, auth: "authenticated" }),
         loginLaunchSpec: () => { throw new Error("must not login"); },
       },
-      interactiveCommand: () => { throw new Error("must not plan login"); },
-      runner,
+      login: () => { throw new Error("must not open login"); },
     });
-    expect(runner.interactive).toBe(0);
+    expect(login.interactive).toBe(0);
   });
 
   test("stops before identity work when Microsandbox is unavailable", async () => {
@@ -91,8 +86,7 @@ describe("Altitude first-run setup", () => {
         probe: async () => { throw new Error("must not probe"); },
         loginLaunchSpec: () => { throw new Error("must not login"); },
       },
-      interactiveCommand: () => { throw new Error("must not plan"); },
-      runner: new InteractiveRunner(),
+      login: () => { throw new Error("must not open login"); },
     })).rejects.toThrow("engine stopped");
   });
 });
