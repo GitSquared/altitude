@@ -9,6 +9,8 @@
     "altitude": "./dist/altitude"
   },
   "scripts": {
+    "acceptance:iroh": "ALTITUDE_ACCEPTANCE_IROH=1 bun test src/node/iroh.test.ts",
+    "acceptance:microsandbox": "ALTITUDE_ACCEPTANCE_MICROSANDBOX=1 bun test src/runtime/microsandbox.acceptance.test.ts",
     "build": "bun build ./src/cli.ts --compile --outfile ./dist/altitude",
     "check": "bun run typecheck && bun test && bun run build",
     "dev": "bun run ./src/cli.ts",

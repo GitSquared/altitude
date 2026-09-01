@@ -111,6 +111,10 @@ import {
 } from "../run/task-state.ts";
 import { createManagedAgentRetryExecutor } from "../run/retry-executor.ts";
 import {
+  planLocalResume,
+  resumeLocalTasksOnOpen,
+} from "../run/local-resume.ts";
+import {
   TASK_DISPATCH_ACTION_KIND,
   parseTaskDispatchPayload,
 } from "../run/dispatch.ts";
@@ -1036,7 +1040,7 @@ async function takeManagedTask(
   args: readonly string[],
   options: CliOptions,
   stdout: Output,
-  detachable = false,
+  behavior: Readonly<{ detachable?: boolean; attach?: boolean }> = {},
 ): Promise<number> {
   const parsed = parseArguments(args, new Set(), new Set());
   if (parsed.positionals.length !== 1) throw new CliUsageError("task take requires exactly one task id");
@@ -1137,7 +1141,8 @@ async function takeManagedTask(
       stdout.write(`Claude Code session closed; capsule revision ${reconciled.revision} is durable.\n`);
       return reconciled.exitCode;
     }
-    const canDetach = detachable && node.external;
+    if (behavior.attach === false) return 0;
+    const canDetach = behavior.detachable === true && node.external;
     if (canDetach) stdout.write("Press Ctrl-G, then d to return to Altitude without stopping Claude.\n");
     const attached = await terminals.attach(
       taskId,
@@ -2267,6 +2272,49 @@ async function runConfigCommand(
   throw new CliUsageError(`Unknown config command: ${subcommand}`);
 }
 
+async function resumeTasksInterruptedByTui(
+  options: CliOptions,
+  stdout: Output,
+): Promise<{ readonly resumed: number; readonly deferred: number }> {
+  const paths = resolveAltitudePaths(options.env ?? process.env);
+  using store = new TaskStore(paths.database, {
+    ...(options.clock === undefined ? {} : { clock: options.clock }),
+    ...(options.createId === undefined ? {} : { createId: options.createId }),
+  });
+  const now = options.clock?.() ?? Date.now();
+  const sessions = new TaskAgentSessionStore(store.database, options.clock);
+  return await resumeLocalTasksOnOpen({
+    store,
+    sessions,
+    now,
+    workerId: `tui-open:${crypto.randomUUID()}`,
+    start: async (taskId) => await takeManagedTask(
+      [taskId],
+      options,
+      stdout,
+      { detachable: true, attach: false },
+    ),
+    onError: (taskId, error) => {
+      (options.stderr ?? process.stderr).write(
+        `Altitude deferred automatic resume for ${taskId}: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    },
+  });
+}
+
+async function rememberTuiInterruptedTask(
+  taskId: string,
+  options: CliOptions,
+): Promise<boolean> {
+  return await withStore(options, (store) => {
+    if (store.getTask(taskId)?.status !== "paused") return false;
+    const session = new TaskAgentSessionStore(store.database, options.clock).get(taskId);
+    if (session === undefined || session.runCount < 1) return false;
+    store.scheduleAction(planLocalResume(session, options.clock?.() ?? Date.now()));
+    return true;
+  });
+}
+
 async function runTuiCommand(options: CliOptions, stdout: Output): Promise<number> {
   if (options.startTui === undefined
     && (process.stdin.isTTY !== true || process.stdout.isTTY !== true)) {
@@ -2293,6 +2341,10 @@ async function runTuiCommand(options: CliOptions, stdout: Output): Promise<numbe
       configureClaude: async () => {
         const exitCode = await runSetupCommand([], options, stdout);
         if (exitCode !== 0) throw new Error(`Claude capsule setup exited with status ${exitCode}`);
+      },
+      resumeInterruptedTasks: async () => {
+        await ensureControlPlane();
+        return await resumeTasksInterruptedByTui(options, stdout);
       },
       listTasks: async () => {
         await ensureControlPlane();
@@ -2330,7 +2382,7 @@ async function runTuiCommand(options: CliOptions, stdout: Output): Promise<numbe
       },
       takeTask: async (taskId) => {
         await ensureControlPlane();
-        const exitCode = await takeManagedTask([taskId], options, stdout, true);
+        const exitCode = await takeManagedTask([taskId], options, stdout, { detachable: true });
         if (exitCode !== 0) throw new Error(`Claude Code exited with status ${exitCode}`);
         const status = await new TerminalSessionManager(paths.terminals).status(taskId, "agent");
         return status?.state === "running"
@@ -2376,7 +2428,9 @@ async function runTuiCommand(options: CliOptions, stdout: Output): Promise<numbe
           const exitCode = await takeManagedTask([task.id], options, stdout);
           if (exitCode !== 0 && exitCode !== 143) {
             (options.stderr ?? process.stderr).write(`Altitude could not cleanly pause ${task.id}; Claude exited ${exitCode}.\n`);
+            continue;
           }
+          await rememberTuiInterruptedTask(task.id, options);
         }
       }
     } finally {

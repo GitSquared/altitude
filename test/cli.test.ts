@@ -96,6 +96,7 @@ describe("CLI", () => {
     expect(await runCli([], {
       ...cli.options,
       startTui: async (actions) => {
+        expect(await actions.resumeInterruptedTasks()).toEqual({ resumed: 0, deferred: 0 });
         await actions.listTasks();
         return 0;
       },

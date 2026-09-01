@@ -7,11 +7,14 @@ import { join } from "node:path";
 import {
   ALTITUDE_NODE_TICKET_PROTOCOL,
   IrohNodeClient,
+  bindPersistentIrohIdentity,
+  createIrohNodeClient,
   encodeAltitudeNodeTicket,
   handleIrohNodeStream,
   loadOrCreateIrohMaterial,
   parseAltitudeNodeTicket,
   parseNodeConnection,
+  serveIrohNode,
   type IrohBiStream,
   type IrohNodeHandlers,
 } from "./iroh.ts";
@@ -185,4 +188,58 @@ describe("Altitude Iroh route", () => {
     });
     await expect(client.health()).rejects.toThrow("pairing token was rejected");
   });
+
+  test.skipIf(process.env.ALTITUDE_ACCEPTANCE_IROH !== "1")(
+    "moves health and capsule bytes over two native Iroh endpoints",
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), "altitude-iroh-native-"));
+      roots.push(root);
+      const serverIdentity = await bindPersistentIrohIdentity(join(root, "server"));
+      const preparedPayloads: Uint8Array[] = [];
+      const server = await serveIrohNode({
+        nodeId: "remote",
+        identity: serverIdentity,
+        handlers: {
+          async health() { return { nodeId: "remote", version: "acceptance" }; },
+          async prepare(payload) {
+            preparedPayloads.push(payload);
+            return {
+              schema: "altitude.target-prepared/v1",
+              transferId: "transfer-native",
+              targetNodeId: "remote",
+              checkpoint: checkpoint(),
+            };
+          },
+          async activate(input) {
+            return {
+              schema: "altitude.target-activation/v1",
+              transferId: input.transferId,
+              targetNodeId: "remote",
+              checkpoint: input.checkpoint,
+            };
+          },
+        },
+      });
+      const clientIdentity = await bindPersistentIrohIdentity(join(root, "client"));
+      const client = await createIrohNodeClient(
+        clientIdentity.endpoint,
+        { nodeId: "remote", ticket: server.ticket },
+        async () => await clientIdentity.endpoint.close(),
+      );
+      try {
+        expect(await client.health()).toEqual({ nodeId: "remote", version: "acceptance" });
+        const payload = new TextEncoder().encode("native capsule bytes");
+        expect(await client.prepare(payload)).toMatchObject({
+          schema: "altitude.target-prepared/v1",
+          targetNodeId: "remote",
+        });
+        expect(preparedPayloads).toEqual([payload]);
+        expect(await client.activate({ transferId: "transfer-native", checkpoint: checkpoint() }))
+          .toMatchObject({ schema: "altitude.target-activation/v1", targetNodeId: "remote" });
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    },
+  );
 });

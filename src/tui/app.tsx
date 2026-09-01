@@ -14,6 +14,7 @@ import type { DecisionAttention, ReviewAttention, Task, TaskStatus } from "../co
 export interface AltitudeTuiActions {
   configured(): Promise<boolean>;
   configureClaude(): Promise<void>;
+  resumeInterruptedTasks(): Promise<Readonly<{ resumed: number; deferred: number }>>;
   listTasks(): Promise<readonly Task[]>;
   createTask(intent: string): Promise<Task>;
   runTask(taskId: string): Promise<void>;
@@ -48,6 +49,22 @@ export function orderedTasks(tasks: readonly Task[]): readonly Task[] {
     const group = GROUP_ORDER.indexOf(taskGroup(left.status)) - GROUP_ORDER.indexOf(taskGroup(right.status));
     return group !== 0 ? group : right.updatedAt - left.updatedAt || left.id.localeCompare(right.id);
   });
+}
+
+export function startupNotice(
+  restart: Readonly<{ resumed: number; deferred: number }>,
+  tasks: readonly Task[],
+): string | undefined {
+  if (restart.resumed > 0) {
+    return `Resumed ${restart.resumed} task${restart.resumed === 1 ? "" : "s"} interrupted when Altitude closed. Want them to keep working while it is closed? Add an Iroh node.`;
+  }
+  if (restart.deferred > 0) {
+    return `${restart.deferred} interrupted task${restart.deferred === 1 ? "" : "s"} could not resume yet; Altitude will retry next time it opens.`;
+  }
+  const scheduled = tasks.filter((task) => task.status === "waiting_external").length;
+  return scheduled > 0
+    ? `Resumed local workers for ${scheduled} scheduled task${scheduled === 1 ? "" : "s"}. Keep Altitude open, or add an Iroh node.`
+    : undefined;
 }
 
 function canTake(task: Task): boolean {
@@ -247,23 +264,19 @@ export function AltitudeApp({ actions }: { readonly actions: AltitudeTuiActions 
 
   useEffect(() => {
     void (async () => {
+      let configured = false;
       try {
-        if (!(await actions.configured())) {
+        configured = await actions.configured();
+        if (!configured) {
           setPhase("welcome");
           return;
         }
+        const restart = await actions.resumeInterruptedTasks();
         const restored = await actions.listTasks();
-        const resumable = restored.filter((task) => task.status === "paused").length;
-        const scheduled = restored.filter((task) => task.status === "waiting_external").length;
-        const message = resumable > 0
-          ? `Restored ${resumable} checkpointed task${resumable === 1 ? "" : "s"}. Want work to continue after Altitude closes? Add an Iroh node.`
-          : scheduled > 0
-            ? `Resumed local workers for ${scheduled} scheduled task${scheduled === 1 ? "" : "s"}. Keep Altitude open, or add an Iroh node.`
-            : undefined;
-        await refresh(message);
+        await refresh(startupNotice(restart, restored));
       } catch (error) {
         setNotice(error instanceof Error ? error.message : String(error));
-        setPhase("welcome");
+        setPhase(configured ? "board" : "welcome");
       }
     })();
   }, [actions, refresh]);

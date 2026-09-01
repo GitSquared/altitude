@@ -7,6 +7,7 @@ import {
   TaskBoardScreen,
   WelcomeScreen,
   orderedTasks,
+  startupNotice,
 } from "./app.tsx";
 
 function task(input: Partial<Task> & Pick<Task, "id" | "title" | "status">): Task {
@@ -77,5 +78,13 @@ describe("Ink factory overview", () => {
     expect(output.indexOf("NEEDS YOU")).toBeLessThan(output.indexOf("WORKING"));
     expect(output).toContain("waiting_decision · decision");
     expect(output).toContain("Add an Iroh node");
+  });
+
+  test("explains automatic local resume and the remote-node upgrade path", () => {
+    expect(startupNotice({ resumed: 2, deferred: 0 }, [])).toContain(
+      "Resumed 2 tasks interrupted when Altitude closed",
+    );
+    expect(startupNotice({ resumed: 2, deferred: 0 }, [])).toContain("Add an Iroh node");
+    expect(startupNotice({ resumed: 0, deferred: 1 }, [])).toContain("retry next time");
   });
 });
