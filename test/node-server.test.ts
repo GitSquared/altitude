@@ -29,11 +29,11 @@ describe("Altitude node service", () => {
       execute: async () => ({ schema: TASK_TOOL_PROTOCOL, ok: true, result: {} }),
     };
     const instanceId = nodeInstanceId("/state/altitude.db");
-    const service = createAltitudeNodeService({ runtime: "docker", store, grants, executor, instanceId });
+    const service = createAltitudeNodeService({ store, grants, executor, instanceId });
     const response = await service.fetch(new Request("http://localhost/healthz"));
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("no-store");
-    expect(await response.json()).toMatchObject({ ok: true, service: "altitude-node", runtime: "docker", instanceId });
+    expect(await response.json()).toMatchObject({ ok: true, service: "altitude-node", instanceId });
 
     const head = await service.fetch(new Request("http://localhost/healthz", { method: "HEAD" }));
     expect(head.status).toBe(200);
@@ -47,7 +47,7 @@ describe("Altitude node service", () => {
     const executor: TaskToolExecutor = {
       execute: async () => ({ schema: TASK_TOOL_PROTOCOL, ok: true, result: {} }),
     };
-    const service = createAltitudeNodeService({ runtime: "apple-container", store, grants, executor });
+    const service = createAltitudeNodeService({ store, grants, executor });
     const missing = await service.fetch(new Request("http://localhost/nope"));
     expect(missing.status).toBe(404);
     const mcp = await service.fetch(new Request("http://localhost/mcp", {
@@ -81,7 +81,6 @@ describe("Altitude node service", () => {
       execute: async () => ({ schema: TASK_TOOL_PROTOCOL, ok: true, result: {} }),
     };
     const service = createAltitudeNodeService({
-      runtime: "docker",
       store,
       grants,
       submissions,

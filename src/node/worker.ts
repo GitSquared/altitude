@@ -26,7 +26,7 @@ export interface ScheduledActionKindHandler<Payload> {
   ): Promise<"executed" | "skipped">;
 }
 
-export interface NodeScheduledActionWorkerOptions {
+export interface NodeWorkerOptions {
   readonly workerId?: string;
   readonly pollMs?: number;
   readonly leaseMs?: number;
@@ -222,7 +222,7 @@ export class NodeScheduledActionKindWorker<Payload> {
   constructor(
     private readonly store: ScheduledActionStore,
     private readonly handler: ScheduledActionKindHandler<Payload>,
-    options: NodeScheduledActionWorkerOptions = {},
+    options: NodeWorkerOptions = {},
   ) {
     if (!handler.kind.trim()) throw new Error("Scheduled action kind is required");
     this.workerId = options.workerId
@@ -360,14 +360,13 @@ export class NodeScheduledActionKindWorker<Payload> {
   }
 }
 
-/** Backward-compatible exact-session retry worker. */
-export class NodeScheduledActionWorker {
+export class AgentRetryWorker {
   readonly #worker: NodeScheduledActionKindWorker<AgentRetryPayload>;
 
   constructor(
     store: ScheduledActionStore,
     executeAgentRetry: AgentRetryExecutor,
-    options: NodeScheduledActionWorkerOptions = {},
+    options: NodeWorkerOptions = {},
   ) {
     this.#worker = new NodeScheduledActionKindWorker(store, {
       kind: AGENT_RETRY_ACTION_KIND,

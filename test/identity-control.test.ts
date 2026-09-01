@@ -53,7 +53,7 @@ describe("identity task control", () => {
   test("writes a private MCP config in a hashed identity-local control directory", async () => {
     const root = identityRoot();
     const config = {
-      mcpServers: { altitude: { url: "http://host.container.internal:43100/mcp", headers: { Authorization: `Bearer ${"a".repeat(64)}` } } },
+      mcpServers: { altitude: { url: "http://172.16.0.5:43100/mcp", headers: { Authorization: `Bearer ${"a".repeat(64)}` } } },
     };
     const response = await writeIdentityTaskMcpConfig(root, {
       schema: IDENTITY_CONTROL_PROTOCOL,

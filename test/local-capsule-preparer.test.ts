@@ -43,7 +43,6 @@ describe("local capsule preparation", () => {
     const first = await preparer.prepare({
       taskId: "task-1",
       taskImage: "altitude-task:dev",
-      network: "altitude-control",
       nodeId: "local",
       repositoryPath: repository,
     });
@@ -51,7 +50,6 @@ describe("local capsule preparation", () => {
     const retried = await preparer.prepare({
       taskId: "task-1",
       taskImage: "altitude-task:dev",
-      network: "altitude-control",
       nodeId: "local",
       repositoryPath: repository,
     });
@@ -62,7 +60,6 @@ describe("local capsule preparation", () => {
     expect(preparer.prepare({
       taskId: "task-1",
       taskImage: "altitude-task:dev",
-      network: "altitude-control",
       nodeId: "straylight",
     })).rejects.toThrow("owned by node local, not straylight");
     expect(bootstraps).toHaveLength(2);
@@ -70,7 +67,6 @@ describe("local capsule preparation", () => {
     const resumed = await preparer.prepare({
       taskId: "task-1",
       taskImage: "altitude-task:dev",
-      network: "altitude-control",
       nodeId: "local",
     });
     expect(resumed.checkpoint).toEqual(first.checkpoint);

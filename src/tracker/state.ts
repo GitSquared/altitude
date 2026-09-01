@@ -174,4 +174,14 @@ export class LinearTrackerStateStore {
       ORDER BY created_at, attention_id
     `).all(required(taskId, "Task id")).map(decodeCorrelation);
   }
+
+  getCorrelation(taskId: string, attentionId: string): TrackerAttentionCorrelation | undefined {
+    const row = this.database.query<CorrelationRow, [string, string]>(`
+      SELECT task_id, attention_id, attention_class, issue_id,
+             issue_comment_id, agent_session_id
+      FROM linear_attention_correlations
+      WHERE task_id = ?1 AND attention_id = ?2
+    `).get(required(taskId, "Task id"), required(attentionId, "Attention id"));
+    return row === null ? undefined : decodeCorrelation(row);
+  }
 }

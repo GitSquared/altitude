@@ -10,9 +10,11 @@ import {
 } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 
-import type { EventActor } from "../core/events.ts";
+import type { EventActor, NewEvent } from "../core/events.ts";
 import { INTENT_LEVELS, type AttentionEvidence } from "../core/model.ts";
 import type { TaskStore } from "../storage/task-store.ts";
+import { MICROSANDBOX_HOST_IPV4 } from "../runtime/microsandbox.ts";
+import { planLinearProjection } from "../tracker/projection.ts";
 import { VERSION } from "../version.ts";
 import {
   TASK_MCP_TOOL_NAMES,
@@ -234,13 +236,14 @@ function registerTaskTools(
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
   }, async (input) => {
     try {
-      const result = store.append({
+      const event = {
         taskId: grant.taskId,
         type: "attention.raised",
         payload: { attention: { id: attentionIdFor(grant, "trace", input.idempotencyKey), class: "trace", title: input.title, summary: input.summary, ...(input.evidence === undefined ? {} : { evidence: normalizedEvidence(input.evidence)! }) } },
         actor: actor(grant),
         ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: `mcp:trace:${input.idempotencyKey}` }),
-      });
+      } satisfies NewEvent<"attention.raised">;
+      const result = store.append(event, planLinearProjection(store, event));
       return textResult({ ok: true, task: result.task });
     } catch (error) {
       return errorResult(error);
@@ -260,13 +263,14 @@ function registerTaskTools(
   }, async (input) => {
     try {
       const attentionId = attentionIdFor(grant, "update", input.idempotencyKey);
-      const result = store.append({
+      const event = {
         taskId: grant.taskId,
         type: "attention.raised",
         payload: { attention: { id: attentionId, class: "update", title: input.title, summary: input.summary, ...(input.evidence === undefined ? {} : { evidence: normalizedEvidence(input.evidence)! }) } },
         actor: actor(grant),
         ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: `mcp:update:${input.idempotencyKey}` }),
-      });
+      } satisfies NewEvent<"attention.raised">;
+      const result = store.append(event, planLinearProjection(store, event));
       return textResult({ ok: true, attentionId, task: result.task });
     } catch (error) {
       return errorResult(error);
@@ -302,7 +306,7 @@ function registerTaskTools(
         value: item.value,
         ...(item.tradeoff === undefined ? {} : { tradeoff: item.tradeoff }),
       }));
-      const result = store.append({
+      const event = {
         taskId: grant.taskId,
         type: "attention.raised",
         payload: { attention: {
@@ -320,7 +324,8 @@ function registerTaskTools(
         } },
         actor: actor(grant),
         ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: `mcp:decision:${input.idempotencyKey}` }),
-      });
+      } satisfies NewEvent<"attention.raised">;
+      const result = store.append(event, planLinearProjection(store, event));
       return textResult({ ok: true, attentionId, task: result.task, instruction: "Yield this turn and wait for the operator's answer." });
     } catch (error) {
       return errorResult(error);
@@ -348,7 +353,7 @@ function registerTaskTools(
     try {
       const attentionId = attentionIdFor(grant, "review", input.idempotencyKey);
       const evidence = normalizedEvidence(input.evidence);
-      const result = store.append({
+      const event = {
         taskId: grant.taskId,
         type: "attention.raised",
         payload: { attention: {
@@ -363,7 +368,8 @@ function registerTaskTools(
         } },
         actor: actor(grant),
         ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: `mcp:review:${input.idempotencyKey}` }),
-      });
+      } satisfies NewEvent<"attention.raised">;
+      const result = store.append(event, planLinearProjection(store, event));
       return textResult({ ok: true, attentionId, task: result.task, instruction: "Yield this turn and wait for Review." });
     } catch (error) {
       return errorResult(error);
@@ -422,8 +428,7 @@ export function createTaskMcpEndpoint(input: {
     "127.0.0.1",
     "localhost",
     "[::1]",
-    "host.docker.internal",
-    "host.container.internal",
+    MICROSANDBOX_HOST_IPV4,
   ])];
   const path = input.path ?? "/mcp";
   const handler: McpHttpHandler = createMcpHandler(({ authInfo }) => {

@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 
-import { AGENT_RETRY_PAYLOAD_FORMAT } from "../src/run/retry.ts";
-import { NodeOutboxTopicWorker, NodeScheduledActionWorker } from "../src/node/worker.ts";
-import { TaskStore } from "../src/storage/task-store.ts";
+import { AGENT_RETRY_PAYLOAD_FORMAT } from "../run/retry.ts";
+import { AgentRetryWorker, NodeOutboxTopicWorker } from "./worker.ts";
+import { TaskStore } from "../storage/task-store.ts";
 
 function state(now: () => number): TaskStore {
   const store = new TaskStore(":memory:", { clock: now, createId: () => crypto.randomUUID() });
@@ -27,7 +27,7 @@ describe("node scheduled action worker", () => {
     using store = state(() => now);
     store.scheduleAction({ taskId: "task-1", kind: "agent.retry", payload, runAt: now });
     const executions: unknown[] = [];
-    const worker = new NodeScheduledActionWorker(store, async (taskId, retry) => {
+    const worker = new AgentRetryWorker(store, async (taskId, retry) => {
       executions.push({ taskId, retry });
       return "executed";
     }, { workerId: "worker-1", now: () => now });
@@ -44,7 +44,7 @@ describe("node scheduled action worker", () => {
     using store = state(() => now);
     store.scheduleAction({ taskId: "task-1", kind: "agent.retry", payload, runAt: now });
     let attempts = 0;
-    const worker = new NodeScheduledActionWorker(store, async () => {
+    const worker = new AgentRetryWorker(store, async () => {
       attempts += 1;
       if (attempts === 1) throw new Error("runtime temporarily unavailable");
       return "executed";
@@ -70,7 +70,7 @@ describe("node scheduled action worker", () => {
     store.scheduleAction({ taskId: "task-1", kind: "mystery", payload: {}, runAt: now });
     store.scheduleAction({ taskId: "task-1", kind: "agent.retry", payload: { schema: "wrong" }, runAt: now });
     let executions = 0;
-    const worker = new NodeScheduledActionWorker(store, async () => {
+    const worker = new AgentRetryWorker(store, async () => {
       executions += 1;
       return "executed";
     }, { workerId: "worker-1", now: () => now, onError: () => undefined });

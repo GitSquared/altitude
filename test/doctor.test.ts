@@ -20,16 +20,15 @@ class FakeRunner implements CommandRunner {
 }
 
 describe("doctor", () => {
-  test("accepts the preferred Apple runtime", async () => {
-    const findings = await runDoctor(new FakeRunner(new Set(["git", "container", "gh"])), {
+  test("accepts the embedded Microsandbox runtime", async () => {
+    const findings = await runDoctor(new FakeRunner(new Set(["git", "gh"])), {
       platform: "darwin",
       arch: "arm64",
       bunVersion: "1.4.0",
-    });
+    }, { probe: async () => ({ available: true, detail: "ready" }) });
 
     expect(findings.find((finding) => finding.id === "runtime")?.severity).toBe("ok");
-    expect(findings.find((finding) => finding.id === "pigeons")?.severity).toBe("warning");
-    expect(renderDoctor(findings)).toContain("Apple container runtime is ready");
+    expect(renderDoctor(findings)).toContain("Microsandbox is ready");
   });
 
   test("fails closed without a supported runtime", async () => {
@@ -37,7 +36,7 @@ describe("doctor", () => {
       platform: "darwin",
       arch: "arm64",
       bunVersion: "1.4.0",
-    });
+    }, { probe: async () => ({ available: false, detail: "hypervisor unavailable" }) });
 
     expect(findings.find((finding) => finding.id === "runtime")?.severity).toBe("error");
   });

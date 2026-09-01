@@ -17,7 +17,7 @@ type PendingCheckpointRecoverer = Readonly<{
 
 export interface PreparedLocalCapsule {
   readonly checkpoint: CapsuleCheckpointReference;
-  readonly capsuleState: "already_running" | "started" | "created";
+  readonly capsuleState: "already_running" | "resumed" | "created";
   readonly workspaceReused: boolean;
 }
 
@@ -33,7 +33,6 @@ export class LocalCapsulePreparer {
   async prepare(input: {
     readonly taskId: string;
     readonly taskImage: string;
-    readonly network: string;
     readonly nodeId: string;
     readonly repositoryPath?: string;
     readonly additionalMembers?: readonly CapsuleMemberContent[];
@@ -81,7 +80,6 @@ export class LocalCapsulePreparer {
     const capsule = await this.capsules.ensure({
       taskId: input.taskId,
       image: input.taskImage,
-      network: input.network,
     });
     const recovered = await this.pending?.recoverPending(input.taskId);
     if (recovered !== undefined) {

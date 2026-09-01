@@ -42,7 +42,7 @@ export interface RunningProcess {
 }
 
 /**
- * Implemented by a node runtime (Apple container, Docker, or a test double).
+ * Implemented by Altitude's Microsandbox adapter or a test double.
  * A launcher must honor `target`; silently falling back to the host would
  * cross Altitude's identity boundary.
  */

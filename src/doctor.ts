@@ -1,4 +1,6 @@
 import type { CommandRunner } from "./process/command.ts";
+import type { RuntimeProbe } from "./runtime/capsule-runtime.ts";
+import { MicrosandboxCapsuleRuntime } from "./runtime/microsandbox.ts";
 
 export type DoctorSeverity = "ok" | "warning" | "error";
 
@@ -15,7 +17,7 @@ export interface DoctorPlatform {
   readonly bunVersion: string;
 }
 
-const OPTIONAL_TOOLS = ["gh", "pigeons"] as const;
+const OPTIONAL_TOOLS = ["gh"] as const;
 
 async function probeExecutable(
   runner: CommandRunner,
@@ -36,6 +38,7 @@ export async function runDoctor(
     arch: process.arch,
     bunVersion: Bun.version,
   },
+  runtime: { probe(): Promise<RuntimeProbe> } = new MicrosandboxCapsuleRuntime(),
 ): Promise<readonly DoctorFinding[]> {
   const findings: DoctorFinding[] = [];
 
@@ -60,29 +63,13 @@ export async function runDoctor(
     summary: gitAvailable ? "Git is available" : "Git is required",
   });
 
-  if (platform.platform === "darwin") {
-    const appleRuntime = await probeExecutable(runner, "container", ["system", "status", "--format", "json"]);
-    const dockerRuntime = await probeExecutable(runner, "docker", ["info"]);
-    findings.push({
-      id: "runtime",
-      severity: appleRuntime || dockerRuntime ? "ok" : "error",
-      summary: appleRuntime
-        ? "Apple container runtime is ready"
-        : dockerRuntime
-          ? "Docker runtime is ready; Apple container remains the preferred v1 runtime"
-          : "No supported local capsule runtime is ready",
-      ...(appleRuntime || dockerRuntime
-        ? {}
-        : { detail: "Install Apple's container runtime before creating a capsule." }),
-    });
-  } else if (platform.platform === "linux") {
-    const dockerRuntime = await probeExecutable(runner, "docker", ["info"]);
-    findings.push({
-      id: "runtime",
-      severity: dockerRuntime ? "ok" : "error",
-      summary: dockerRuntime ? "Docker Engine is ready" : "Docker Engine is required on a v1 node",
-    });
-  }
+  const capsuleRuntime = await runtime.probe();
+  findings.push({
+    id: "runtime",
+    severity: capsuleRuntime.available ? "ok" : "error",
+    summary: capsuleRuntime.available ? "Microsandbox is ready" : "Microsandbox is unavailable",
+    ...(capsuleRuntime.available ? {} : { detail: capsuleRuntime.detail }),
+  });
 
   for (const executable of OPTIONAL_TOOLS) {
     const available = await probeExecutable(runner, executable, ["version"]);

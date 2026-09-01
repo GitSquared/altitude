@@ -1,2 +1,1 @@
-export * from "./app.ts";
-export * from "./terminal.ts";
+export * from "./app.tsx";

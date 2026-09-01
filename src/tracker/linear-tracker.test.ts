@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import type { Attention, AttentionResolution } from "../src/core/index.ts";
+import type { Attention, AttentionResolution } from "../core/index.ts";
 import {
   LinearTrackerAdapter,
   linearAttentionRoute,
@@ -8,7 +8,7 @@ import {
   type LinearAgentInputRequest,
   type LinearIssueCommentCreate,
   type LinearTrackerMutations,
-} from "../src/tracker/index.ts";
+} from "./index.ts";
 
 class FakeLinearMutations implements LinearTrackerMutations {
   readonly comments: LinearIssueCommentCreate[] = [];
@@ -44,11 +44,11 @@ const decision: Attention = {
   class: "decision",
   title: "Choose the handoff",
   summary: "Both transports preserve the capsule boundary.",
-  question: "Should the first remote use direct SSH or Pigeons?",
-  recommendation: "Start with direct SSH.",
+  question: "Should the first remote use an Iroh pairing ticket?",
+  recommendation: "Start with the native Iroh route.",
   options: [
-    { label: "SSH", value: "direct-ssh", tradeoff: "Least machinery." },
-    { label: "Pigeons", value: "pigeons", tradeoff: "Nicer roaming later." },
+    { label: "Iroh", value: "iroh", tradeoff: "One native, portable node route." },
+    { label: "Local only", value: "local", tradeoff: "No unattended remote work yet." },
   ],
   originalIntent: "Send small capsules away and bring them back.",
   requestedIntentLevel: "option_selection",
@@ -119,13 +119,13 @@ describe("Linear tracker projection", () => {
       binding: { taskId: "task-1", issueId: "issue-1", agentSessionId: "session-1" },
       attention: decision,
     });
-    const resolution: AttentionResolution = { kind: "answered", answer: "Use direct SSH first." };
+    const resolution: AttentionResolution = { kind: "answered", answer: "Use native Iroh first." };
 
     await adapter.projectResolution({ correlation: projection.correlation, resolution });
 
     expect(mutations.comments).toHaveLength(2);
     expect(mutations.comments[1]?.parentCommentId).toBe("comment-1");
-    expect(mutations.comments[1]?.body).toContain("Answered: Use direct SSH first.");
+    expect(mutations.comments[1]?.body).toContain("Answered: Use native Iroh first.");
     expect(mutations.comments[1]?.idempotencyKey).toStartWith("linear:attention:task-1:decision-1:resolution:");
   });
 
@@ -175,7 +175,7 @@ describe("Linear webhook normalization", () => {
         comment: {
           id: "reply-1",
           parentId: "decision-comment",
-          body: "Use direct SSH first.",
+          body: "Use native Iroh first.",
         },
       },
     }, {
@@ -197,7 +197,29 @@ describe("Linear webhook normalization", () => {
       attentionClass: "decision",
     });
     expect(input?.attention).toEqual({ id: "decision-1", class: "decision" });
-    expect(input?.text).toBe("Use direct SSH first.");
+    expect(input?.text).toBe("Use native Iroh first.");
+  });
+
+  test("accepts the documented Comment data-change webhook shape", () => {
+    const input = normalizeLinearWebhook({
+      type: "Comment",
+      action: "create",
+      webhookId: "delivery-comment-data",
+      webhookTimestamp: 1_787_913_600_000,
+      actor: { id: "operator-1", type: "user" },
+      data: {
+        id: "comment-data-1",
+        issueId: "issue-1",
+        body: "@altitude keep the issue history additive",
+      },
+    }, { binding, mentionTokens: ["@altitude"] });
+
+    expect(input).toMatchObject({
+      actorId: "operator-1",
+      text: "@altitude keep the issue history additive",
+      source: { surface: "issue_comment", externalId: "comment-data-1" },
+      route: { reason: "mention", blocking: false },
+    });
   });
 
   test("normalizes native Agent Session answers to the same semantic comment key", () => {
@@ -217,9 +239,9 @@ describe("Linear webhook normalization", () => {
       agentSession: {
         id: "session-1",
         issueId: "issue-1",
-        comment: { id: "reply-1", body: "Use direct SSH first." },
+        comment: { id: "reply-1", body: "Use native Iroh first." },
       },
-      agentActivity: { content: { body: "Use direct SSH first." } },
+      agentActivity: { body: "Use native Iroh first." },
     }, {
       binding,
       openAttention: [correlation],
@@ -230,7 +252,7 @@ describe("Linear webhook normalization", () => {
       webhookId: "delivery-comment",
       notification: {
         issueId: "issue-1",
-        comment: { id: "reply-1", parentId: "decision-comment", body: "Use direct SSH first." },
+        comment: { id: "reply-1", parentId: "decision-comment", body: "Use native Iroh first." },
       },
     }, { binding, openAttention: [correlation] });
 

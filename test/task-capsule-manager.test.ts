@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import type { CommandResult, CommandRunner, CommandSpec } from "../src/process/command.ts";
+import type { CapsuleExecSpec, CapsuleLaunchSpec, CapsuleRuntime } from "../src/runtime/capsule-runtime.ts";
 import {
   taskVolumeName,
   TaskCapsuleBootstrapProvisioner,
@@ -12,18 +12,6 @@ import { createCapsuleCheckpoint, capsuleManifestDigest } from "../src/capsule/m
 import { portableCapsulePath } from "../src/capsule/paths.ts";
 import { TASK_CHECKPOINT_PROTOCOL, decodeTaskCheckpointRequest } from "../src/capsule/task-checkpoint.ts";
 import { encodeCapsuleWire } from "../src/capsule/wire.ts";
-
-const ok: CommandResult = { exitCode: 0, stdout: "", stderr: "" };
-
-class SequenceRunner implements CommandRunner {
-  readonly commands: CommandSpec[] = [];
-  constructor(private readonly results: CommandResult[]) {}
-  run(spec: CommandSpec): Promise<CommandResult> {
-    this.commands.push(spec);
-    return Promise.resolve(this.results.shift()!);
-  }
-  runInteractive(): Promise<number> { throw new Error("unexpected"); }
-}
 
 class Bytes implements AsyncIterable<Uint8Array> {
   constructor(private readonly text: string) {}
@@ -65,18 +53,38 @@ class BinaryProcess implements RunningProcess {
 
 describe("task capsule manager", () => {
   test("initializes a private volume and launches a constrained disposable workspace", async () => {
-    const runner = new SequenceRunner([ok, ok, ok, { exitCode: 1, stdout: "", stderr: "missing" }, ok, ok]);
-    const result = await new TaskCapsuleManager("docker", runner).ensure({
+    const launches: CapsuleLaunchSpec[] = [];
+    const executions: CapsuleExecSpec[] = [];
+    const runtime: CapsuleRuntime = {
+      probe: async () => ({ available: true, detail: "ready" }),
+      prepare: async () => undefined,
+      ensure: async (spec) => { launches.push(spec); return "created"; },
+      exec: async (spec) => {
+        executions.push(spec);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      stop: async () => undefined,
+      destroy: async () => undefined,
+    };
+    const result = await new TaskCapsuleManager(runtime).ensure({
       taskId: "task-1",
       image: "altitude-task:dev",
-      network: "altitude-control",
     });
     expect(result).toMatchObject({ state: "created", volume: taskVolumeName("task-1") });
-    expect(runner.commands[2]?.args).toContain("ALTITUDE_TASK_INIT=1");
-    expect(runner.commands[4]?.args).toContain("host.docker.internal:host-gateway");
-    expect(runner.commands[4]?.args).toContain("HOME=/workspace/.altitude/environment/home");
-    expect(runner.commands[4]?.args).toContain("XDG_CACHE_HOME=/tmp/altitude-cache");
-    expect(runner.commands[4]?.args?.join(" ")).not.toContain("docker.sock");
+    expect(launches[0]).toMatchObject({
+      image: "altitude-task:dev",
+      volume: { name: taskVolumeName("task-1"), mountPath: "/workspace" },
+      environment: {
+        HOME: "/workspace/.altitude/environment/home",
+        XDG_CACHE_HOME: "/tmp/altitude-cache",
+      },
+    });
+    expect(executions[0]).toMatchObject({
+      command: ["altitude", "_task-init"],
+      environment: { ALTITUDE_TASK_INIT: "1" },
+      workdir: "/workspace",
+    });
+    expect(JSON.stringify(launches)).not.toMatch(/\.ssh/iu);
   });
 
   test("streams a typed checkpoint only to the bound task capsule", async () => {

@@ -4,11 +4,11 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { TaskStore } from "../src/storage/task-store.ts";
+import { TaskStore } from "../storage/task-store.ts";
 import {
   createLinearWebhookHandler,
   LinearTrackerStateStore,
-} from "../src/tracker/index.ts";
+} from "./index.ts";
 
 const directories: string[] = [];
 const now = 1_787_913_600_000;
@@ -125,7 +125,7 @@ describe("Linear webhook boundary", () => {
     const first = await handler(signed(mentionPayload()));
     const duplicateDelivery = await handler(signed(mentionPayload({ webhookId: "delivery-2" })));
 
-    expect(first.status).toBe(202);
+    expect(first.status).toBe(200);
     expect(await first.json()).toEqual({ accepted: true, routed: true, duplicate: false });
     expect(await duplicateDelivery.json()).toEqual({ accepted: true, routed: true, duplicate: true });
     expect(store.getEvents("task-1").at(-1)).toMatchObject({
@@ -193,12 +193,12 @@ describe("Linear webhook boundary", () => {
         comment: {
           id: "decision-reply",
           parentId: "decision-comment",
-          body: "Use direct SSH first.",
+          body: "Use native Iroh first.",
         },
       },
     };
 
-    expect((await handler(signed(payload))).status).toBe(202);
+    expect((await handler(signed(payload))).status).toBe(200);
     expect(await (await handler(signed(payload))).json()).toEqual({
       accepted: true,
       routed: false,
@@ -208,7 +208,7 @@ describe("Linear webhook boundary", () => {
       type: "attention.resolved",
       payload: {
         attentionId: "decision-1",
-        resolution: { kind: "answered", answer: "Use direct SSH first." },
+        resolution: { kind: "answered", answer: "Use native Iroh first." },
       },
     });
     expect(store.listOutbox()).toHaveLength(1);
@@ -239,7 +239,7 @@ describe("Linear webhook boundary", () => {
     const { store, state } = fixture();
     const handler = createLinearWebhookHandler({ secret, store, state, now: () => now });
     const response = await handler(signed(mentionPayload()));
-    expect(response.status).toBe(202);
+    expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ accepted: true, routed: false });
     expect(store.getEvents("task-1")).toHaveLength(1);
     store.close();

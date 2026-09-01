@@ -9,7 +9,7 @@ import {
   createIntentSubmissionHandler,
   IntentSubmissionStore,
 } from "../intent/submission.ts";
-import type { RuntimeKind } from "../runtime/capsule-runtime.ts";
+import { MICROSANDBOX_HOST_IPV4 } from "../runtime/microsandbox.ts";
 import type { TaskStore } from "../storage/task-store.ts";
 import { createLinearWebhookHandler } from "../tracker/webhook.ts";
 import type { TaskMcpGrantStore } from "../tools/grants.ts";
@@ -52,7 +52,6 @@ function json(value: unknown, init?: ResponseInit): Response {
  * the Bun listener is only a deployment detail.
  */
 export function createAltitudeNodeService(input: {
-  readonly runtime: RuntimeKind;
   readonly store: TaskStore;
   readonly grants: TaskMcpGrantStore;
   readonly executor: TaskToolExecutor;
@@ -65,8 +64,7 @@ export function createAltitudeNodeService(input: {
     "127.0.0.1",
     "localhost",
     "[::1]",
-    "host.docker.internal",
-    "host.container.internal",
+    MICROSANDBOX_HOST_IPV4,
   ])];
   const submissions = input.submissions ?? new IntentSubmissionStore(input.store);
   const submit = createIntentSubmissionHandler(submissions);
@@ -96,7 +94,6 @@ export function createAltitudeNodeService(input: {
               ok: true,
               service: "altitude-node",
               version: VERSION,
-              runtime: input.runtime,
               instanceId: input.instanceId ?? "unbound",
             });
         return new Response(body, {

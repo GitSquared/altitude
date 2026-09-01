@@ -280,7 +280,6 @@ export class TerminalSessionManager {
     allowDetach = true,
   ): Promise<TerminalAttachResult> {
     if (input.isTTY !== true || output.isTTY !== true) throw new Error("Attaching a terminal session requires an interactive terminal");
-    const directory = this.directory(taskId, kind);
     const status = await this.status(taskId, kind);
     if (status === undefined) throw new Error(`Task ${taskId} has no terminal session`);
     if (status.state !== "running") return { outcome: "exited", status };

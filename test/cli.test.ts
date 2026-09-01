@@ -2,18 +2,18 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { EndpointAddr, EndpointTicket, SecretKey } from "@number0/iroh";
 
 import type { CliOptions } from "../src/cli/main.ts";
 import { runCli } from "../src/cli/main.ts";
-import type {
-  CommandResult,
-  CommandRunner,
-  CommandSpec,
-} from "../src/process/command.ts";
 import { TaskStore } from "../src/storage/task-store.ts";
-import type { TuiTerminal } from "../src/tui/terminal.ts";
 import { defaultLocalConfig, writeLocalConfig } from "../src/config/local.ts";
 import { TerminalSessionManager } from "../src/terminal/session.ts";
+import {
+  ALTITUDE_NODE_TICKET_PROTOCOL,
+  encodeAltitudeNodeTicket,
+  type AltitudeNodeClient,
+} from "../src/node/iroh.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -55,57 +55,50 @@ function harness(): {
   };
 }
 
+function nodeTicket(nodeId: string): string {
+  const endpointId = SecretKey.generate().public();
+  return encodeAltitudeNodeTicket({
+    schema: ALTITUDE_NODE_TICKET_PROTOCOL,
+    nodeId,
+    endpointId: endpointId.toString(),
+    endpointTicket: EndpointTicket.fromAddr(new EndpointAddr(endpointId)).toString(),
+    pairingToken: "a".repeat(43),
+  });
+}
+
 describe("CLI", () => {
   test("bare altitude opens the capsule-first factory overview", async () => {
     const cli = harness();
-    const frames: string[] = [];
-    const terminal: TuiTerminal = {
-      interactive: true,
-      draw(content) { frames.push(content); },
-      async readKey() { return "quit"; },
-      async readLine() { return undefined; },
-      beforeExternal() {},
-      afterExternal() {},
-    };
-    expect(await runCli([], { ...cli.options, terminal })).toBe(0);
-    expect(frames).toHaveLength(1);
-    expect(frames[0]).toContain("delegated software factory");
-    expect(frames[0]).toContain("do not inherit this");
+    let configured: boolean | undefined;
+    expect(await runCli([], {
+      ...cli.options,
+      startTui: async (actions) => {
+        configured = await actions.configured();
+        return 0;
+      },
+    })).toBe(0);
+    expect(configured).toBeFalse();
   });
 
   test("bare altitude fails clearly instead of hanging without a terminal", async () => {
     const cli = harness();
-    const terminal: TuiTerminal = {
-      interactive: false,
-      draw() {},
-      async readKey() { return "quit"; },
-      async readLine() { return undefined; },
-      beforeExternal() {},
-      afterExternal() {},
-    };
-    expect(await runCli([], { ...cli.options, terminal })).toBe(2);
+    expect(await runCli([], cli.options)).toBe(2);
     expect(cli.stdout.value).toContain("requires an interactive terminal");
     expect(cli.stdout.value).toContain("task create <intent>");
   });
 
   test("configured bare altitude owns and closes the local control plane", async () => {
     const cli = harness();
-    const base = defaultLocalConfig("docker");
+    const base = defaultLocalConfig();
     await writeLocalConfig(join(cli.root, "config.json"), base);
     let starts = 0;
     let closes = 0;
-    const terminal: TuiTerminal = {
-      interactive: true,
-      draw() {},
-      async readKey() { return "quit"; },
-      async readLine() { return undefined; },
-      beforeExternal() {},
-      afterExternal() {},
-    };
-
     expect(await runCli([], {
       ...cli.options,
-      terminal,
+      startTui: async (actions) => {
+        await actions.listTasks();
+        return 0;
+      },
       startTuiControlPlane: async () => {
         starts += 1;
         return { close: async () => { closes += 1; } };
@@ -118,8 +111,9 @@ describe("CLI", () => {
   test("documents sandboxed first-run setup without touching a runtime", async () => {
     const cli = harness();
     expect(await runCli(["setup", "help"], cli.options)).toBe(0);
-    expect(cli.stdout.value).toContain("official Claude Code login");
-    expect(cli.stdout.value).toContain("source-free identity capsule");
+    expect(cli.stdout.value).toContain("Microsandbox");
+    expect(cli.stdout.value).toContain("private\nidentity capsule");
+    expect(cli.stdout.value).toContain("never\nimports credentials");
   });
 
   test("reads and changes only explicit non-secret configuration", async () => {
@@ -132,7 +126,7 @@ describe("CLI", () => {
     cli.stdout.value = "";
     expect(await runCli(["config", "path"], cli.options)).toBe(0);
     expect(cli.stdout.value.trim()).toBe(join(cli.root, "config.json"));
-    await writeLocalConfig(join(cli.root, "config.json"), defaultLocalConfig("docker"));
+    await writeLocalConfig(join(cli.root, "config.json"), defaultLocalConfig());
 
     cli.stdout.value = "";
     expect(await runCli(["config", "set", "node.port", "43210", "--json"], cli.options)).toBe(0);
@@ -201,62 +195,49 @@ describe("CLI", () => {
     )).toBeFalse();
   });
 
-  test("remembers and checks a remote node without touching user SSH config", async () => {
+  test("remembers and checks a remote node through its Iroh pairing ticket", async () => {
     const cli = harness();
+    const ticket = nodeTicket("straylight");
     expect(await runCli([
       "node",
       "add",
       "straylight",
-      "--host",
-      "straylight.example",
-      "--ssh-port",
-      "2222",
-      "--user",
-      "altitude",
-      "--identity-file",
-      "/state/id_ed25519",
-      "--known-hosts-file",
-      "/state/known_hosts",
-      "--remote-altitude",
-      "/opt/altitude",
+      "--ticket",
+      ticket,
       "--json",
     ], cli.options)).toBe(0);
     expect(JSON.parse(cli.stdout.value)).toMatchObject({
       connection: {
         nodeId: "straylight",
-        route: { kind: "ssh", host: "straylight.example", port: 2222 },
+        ticket,
       },
-      remoteAltitude: "/opt/altitude",
     });
 
     cli.stdout.value = "";
     expect(await runCli(["node", "list"], cli.options)).toBe(0);
-    expect(cli.stdout.value).toContain("straylight  altitude@straylight.example:2222");
+    expect(cli.stdout.value).toContain("straylight  iroh:");
 
-    let command: CommandSpec | undefined;
-    const runner: CommandRunner = {
-      async run(spec): Promise<CommandResult> {
-        command = spec;
-        return { exitCode: 0, stdout: "0.0.0\n", stderr: "" };
+    let closed = false;
+    const client: AltitudeNodeClient = {
+      async health() {
+        return { nodeId: "straylight", version: "0.0.0" };
       },
-      async runInteractive(): Promise<number> {
-        throw new Error("not used");
-      },
+      async prepare() { throw new Error("not used"); },
+      async activate() { throw new Error("not used"); },
+      async close() { closed = true; },
     };
     cli.stdout.value = "";
     expect(await runCli([
       "node",
       "check",
       "straylight",
-      "--accept-new-host-key",
       "--json",
-    ], { ...cli.options, commandRunner: runner })).toBe(0);
+    ], { ...cli.options, createNodeClient: async () => client })).toBe(0);
     expect(JSON.parse(cli.stdout.value)).toEqual({
       nodeId: "straylight",
       version: "0.0.0",
     });
-    expect(command?.args).toContain("StrictHostKeyChecking=accept-new");
-    expect(command?.args?.slice(-3)).toEqual(["--", "/opt/altitude", "version"]);
+    expect(closed).toBeTrue();
   });
 
   test("documents the capsule-first run and native take flow", async () => {
@@ -268,7 +249,7 @@ describe("CLI", () => {
     expect(cli.stdout.value).toContain("task take <task-id>");
     expect(cli.stdout.value).toContain("task shell <task-id>");
     expect(cli.stdout.value).toContain("task review <task-id> --url <loopback-url>");
-    expect(cli.stdout.value).toContain("task send <task-id> --node <id>");
+    expect(cli.stdout.value).toContain("task send <task-id> --node <registered-id>");
   });
 
   test("persists create, queue, list, show, and status across invocations", async () => {
@@ -342,7 +323,7 @@ describe("CLI", () => {
           class: "decision",
           title: "Choose a runtime",
           summary: "The portable boundary needs one local default.",
-          question: "Apple container or Docker?",
+          question: "Which capsule image should we use?",
         },
       },
       actor: { kind: "agent", adapter: "test" },
@@ -381,7 +362,7 @@ describe("CLI", () => {
 
   test("routes a resolved Decision into an already-running native Claude terminal", async () => {
     const cli = harness();
-    await writeLocalConfig(join(cli.root, "config.json"), defaultLocalConfig("docker"));
+    await writeLocalConfig(join(cli.root, "config.json"), defaultLocalConfig());
     await runCli(["task", "create", "Route an answer", "--json"], cli.options);
     const taskId = (JSON.parse(cli.stdout.value) as { id: string }).id;
     using store = new TaskStore(join(cli.root, "altitude.db"), {

@@ -192,18 +192,18 @@ export function createLinearWebhookHandler(input: Readonly<{
 
     const issueId = linearWebhookIssueId(payload);
     const binding = issueId === undefined ? undefined : state.getByIssueId(issueId);
-    if (binding === undefined) return response(202, { accepted: true, routed: false });
+    if (binding === undefined) return response(200, { accepted: true, routed: false });
     const task = input.store.getTask(binding.taskId);
-    if (task === undefined) return response(202, { accepted: true, routed: false });
+    if (task === undefined) return response(200, { accepted: true, routed: false });
     const normalized = normalizeLinearWebhook(payload, {
       binding,
       ...(binding.appUserId === undefined ? {} : { appUserId: binding.appUserId }),
       mentionTokens: binding.mentionTokens,
       openAttention: openCorrelations(task, state.listCorrelations(binding.taskId)),
     });
-    if (normalized === null) return response(202, { accepted: true, routed: false });
+    if (normalized === null) return response(200, { accepted: true, routed: false });
     const applied = applyLinearOperatorInput(input.store, normalized);
-    return response(202, {
+    return response(200, {
       accepted: true,
       routed: true,
       duplicate: applied.duplicate,

@@ -1,9 +1,11 @@
-import { posix } from "node:path";
+import { basename, posix } from "node:path";
+import {
+  AttachOptionsBuilder,
+  ExecOptionsBuilder,
+  Sandbox,
+} from "microsandbox/native";
 
 import type { CommandSpec } from "../process/command.ts";
-import { appleExecSpec } from "./apple-container.ts";
-import type { RuntimeKind } from "./capsule-runtime.ts";
-import { dockerExecSpec } from "./docker.ts";
 import { stableCapsuleName } from "./identity-capsule.ts";
 import type {
   ProcessExecutionTarget,
@@ -12,9 +14,16 @@ import type {
   RunningProcess,
 } from "./protocol.ts";
 
-export interface PipedCommandSpawner {
-  spawn(command: CommandSpec): RunningProcess;
-}
+const MICROSANDBOX_ATTACH_PROTOCOL = "altitude.microsandbox-attach/v1" as const;
+
+type MicrosandboxAttachPayload = Readonly<{
+  schema: typeof MICROSANDBOX_ATTACH_PROTOCOL;
+  capsuleId: string;
+  executable: string;
+  args: readonly string[];
+  cwd?: string;
+  env?: Readonly<Record<string, string>>;
+}>;
 
 function requireNormalizedDirectory(directory: string, root: string, label: string): void {
   if (!directory.startsWith("/") || posix.normalize(directory) !== directory) {
@@ -56,84 +65,177 @@ function targetContainer(target: Exclude<ProcessExecutionTarget, { readonly kind
     : stableCapsuleName("task", target.taskId);
 }
 
-/**
- * Translate a typed process boundary into a shell-free runtime CLI command.
- * `exec` cannot add mounts, so identity and source boundaries are fixed when
- * their capsules are created rather than being weakened per process.
- */
-export function runtimeProcessCommand(runtime: RuntimeKind, spec: ProcessLaunchSpec): CommandSpec {
+function selfInvocation(): readonly [string, ...string[]] {
+  const script = process.argv[1];
+  return basename(process.execPath).startsWith("bun") && script !== undefined
+    ? [process.execPath, script]
+    : [process.execPath];
+}
+
+function microsandboxAttachCommand(spec: ProcessLaunchSpec & { readonly io: "interactive" }): CommandSpec {
   validateLaunch(spec);
   if (spec.target.kind === "host") {
     throw new Error("A capsule process launcher cannot silently execute on the host");
   }
-  const execSpec = {
+  const payload: MicrosandboxAttachPayload = {
+    schema: MICROSANDBOX_ATTACH_PROTOCOL,
     capsuleId: targetContainer(spec.target),
-    command: [spec.executable, ...spec.args],
-    ...(spec.cwd === undefined ? {} : { workdir: spec.cwd }),
-    ...(spec.env === undefined ? {} : { environment: spec.env }),
-    interactive: spec.io === "interactive",
+    executable: spec.executable,
+    args: [...spec.args],
+    ...(spec.cwd === undefined ? {} : { cwd: spec.cwd }),
+    ...(spec.env === undefined ? {} : { env: { ...spec.env } }),
   };
-  return runtime === "apple-container" ? appleExecSpec(execSpec) : dockerExecSpec(execSpec);
+  const [executable, ...prefix] = selfInvocation();
+  return {
+    executable,
+    args: [
+      ...prefix,
+      "_microsandbox-attach",
+      Buffer.from(JSON.stringify(payload), "utf8").toString("base64url"),
+    ],
+  };
 }
 
-export class BunPipedCommandSpawner implements PipedCommandSpawner {
-  spawn(command: CommandSpec): RunningProcess {
-    const child = Bun.spawn([command.executable, ...(command.args ?? [])], {
-      ...(command.cwd === undefined ? {} : { cwd: command.cwd }),
-      env: { ...process.env, ...command.env },
-      stdin: "pipe",
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    let stdinClosed = false;
-    return {
-      stdout: streamBytes(child.stdout),
-      stderr: streamBytes(child.stderr),
-      exited: child.exited.then((exitCode) => ({
-        exitCode,
-        ...(child.signalCode === null ? {} : { signal: child.signalCode }),
-      })),
-      async writeStdin(chunk) {
-        if (stdinClosed) throw new Error("Process stdin is closed");
-        child.stdin.write(chunk);
-        await child.stdin.flush();
-      },
-      async closeStdin() {
-        if (stdinClosed) return;
-        stdinClosed = true;
-        await child.stdin.end();
-      },
-      async terminate(signal = "SIGTERM") {
-        child.kill(signal);
-      },
-    };
+function parseMicrosandboxAttachPayload(encoded: string | undefined): MicrosandboxAttachPayload {
+  if (encoded === undefined || encoded.length > 256 * 1024) {
+    throw new Error("Microsandbox attach payload is invalid");
   }
-}
-
-async function* streamBytes(stream: ReadableStream<Uint8Array>): AsyncIterable<Uint8Array> {
-  const reader = stream.getReader();
+  let value: unknown;
   try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) return;
-      yield value;
-    }
-  } finally {
-    reader.releaseLock();
+    value = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as unknown;
+  } catch (error) {
+    throw new Error("Microsandbox attach payload is invalid", { cause: error });
   }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Microsandbox attach payload is invalid");
+  }
+  const payload = value as Partial<MicrosandboxAttachPayload>;
+  if (payload.schema !== MICROSANDBOX_ATTACH_PROTOCOL
+    || typeof payload.capsuleId !== "string"
+    || !/^[a-z0-9][a-z0-9-]{0,127}$/u.test(payload.capsuleId)
+    || typeof payload.executable !== "string"
+    || !Array.isArray(payload.args)
+    || payload.args.some((argument) => typeof argument !== "string" || argument.includes("\0"))
+    || (payload.cwd !== undefined && typeof payload.cwd !== "string")
+    || (payload.env !== undefined && (typeof payload.env !== "object" || payload.env === null))) {
+    throw new Error("Microsandbox attach payload is invalid");
+  }
+  return payload as MicrosandboxAttachPayload;
+}
+
+export async function runMicrosandboxAttach(encoded: string | undefined): Promise<number> {
+  const payload = parseMicrosandboxAttachPayload(encoded);
+  const sandbox = await (await Sandbox.get(payload.capsuleId)).connectOrStart(true);
+  const options = new AttachOptionsBuilder()
+    .args([...payload.args])
+    .detachKeys("ctrl-g,d");
+  if (payload.cwd !== undefined) options.cwd(payload.cwd);
+  if (payload.env !== undefined) options.envs({ ...payload.env });
+  return await sandbox.attachWithBuilder(payload.executable, options);
+}
+
+class ByteQueue implements AsyncIterable<Uint8Array> {
+  readonly #values: Uint8Array[] = [];
+  readonly #waiters: Array<() => void> = [];
+  #closed = false;
+  #error: unknown;
+
+  push(value: Uint8Array): void {
+    if (this.#closed) return;
+    this.#values.push(value);
+    this.#wake();
+  }
+
+  close(error?: unknown): void {
+    this.#closed = true;
+    this.#error = error;
+    this.#wake();
+  }
+
+  async *[Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
+    while (true) {
+      const value = this.#values.shift();
+      if (value !== undefined) {
+        yield value;
+        continue;
+      }
+      if (this.#closed) {
+        if (this.#error !== undefined) throw this.#error;
+        return;
+      }
+      await new Promise<void>((resolve) => this.#waiters.push(resolve));
+    }
+  }
+
+  #wake(): void {
+    for (const waiter of this.#waiters.splice(0)) waiter();
+  }
+}
+
+async function launchMicrosandboxProcess(
+  spec: ProcessLaunchSpec & { readonly io: "piped" },
+): Promise<RunningProcess> {
+  validateLaunch(spec);
+  if (spec.target.kind === "host") {
+    throw new Error("A capsule process launcher cannot silently execute on the host");
+  }
+  const sandbox = await (await Sandbox.get(targetContainer(spec.target)))
+    .connectOrStart(true);
+  const options = new ExecOptionsBuilder().args([...spec.args]).stdinPipe();
+  if (spec.cwd !== undefined) options.cwd(spec.cwd);
+  if (spec.env !== undefined) options.envs({ ...spec.env });
+  const handle = await sandbox.execStreamWithBuilder(spec.executable, options);
+  const stdin = await handle.takeStdin();
+  if (stdin === null) throw new Error("Microsandbox did not expose process stdin");
+  const stdout = new ByteQueue();
+  const stderr = new ByteQueue();
+  const exited = (async () => {
+    let exitCode: number | undefined;
+    try {
+      while (true) {
+        const event = await handle.recv();
+        if (event === null) break;
+        if (event.eventType === "stdout" && event.data !== undefined) stdout.push(event.data);
+        else if (event.eventType === "stderr" && event.data !== undefined) stderr.push(event.data);
+        else if (event.eventType === "exited" && event.code !== undefined) exitCode = event.code;
+      }
+      if (exitCode === undefined) exitCode = (await handle.wait()).code;
+      stdout.close();
+      stderr.close();
+      return { exitCode };
+    } catch (error) {
+      stdout.close(error);
+      stderr.close(error);
+      throw error;
+    }
+  })();
+  let stdinClosed = false;
+  return {
+    stdout,
+    stderr,
+    exited,
+    async writeStdin(chunk) {
+      if (stdinClosed) throw new Error("Process stdin is closed");
+      await stdin.write(Buffer.from(chunk));
+    },
+    async closeStdin() {
+      if (stdinClosed) return;
+      stdinClosed = true;
+      await stdin.close();
+    },
+    async terminate(signal = "SIGTERM") {
+      if (signal === "SIGKILL") await handle.kill();
+      else await handle.signal(signal === "SIGINT" ? 2 : 15);
+    },
+  };
 }
 
 export class CapsuleProcessLauncher implements ProcessLauncher {
-  constructor(
-    readonly runtime: RuntimeKind,
-    private readonly spawner: PipedCommandSpawner = new BunPipedCommandSpawner(),
-  ) {}
-
   launch(spec: ProcessLaunchSpec & { readonly io: "piped" }): Promise<RunningProcess> {
-    return Promise.resolve(this.spawner.spawn(runtimeProcessCommand(this.runtime, spec)));
+    return launchMicrosandboxProcess(spec);
   }
 
   interactiveCommand(spec: ProcessLaunchSpec & { readonly io: "interactive" }): CommandSpec {
-    return runtimeProcessCommand(this.runtime, spec);
+    return microsandboxAttachCommand(spec);
   }
 }

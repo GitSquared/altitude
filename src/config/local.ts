@@ -2,34 +2,29 @@ import { randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import type { RuntimeKind } from "../runtime/capsule-runtime.ts";
 import { DEFAULT_NODE_PORT } from "../node/server.ts";
+import { MICROSANDBOX_HOST_IPV4 } from "../runtime/microsandbox.ts";
 
 export const LOCAL_CONFIG_PROTOCOL = "altitude.local-config/v1" as const;
+export const DEFAULT_IDENTITY_IMAGE = "ghcr.io/gitsquared/altitude-identity:edge";
+export const DEFAULT_TASK_IMAGE = "ghcr.io/gitsquared/altitude-task:edge";
 
 export interface AltitudeLocalConfig {
   readonly schema: typeof LOCAL_CONFIG_PROTOCOL;
-  readonly runtime: RuntimeKind;
   readonly identity: Readonly<{
     id: string;
     image: string;
   }>;
   readonly taskImage: string;
-  readonly network: string;
   readonly node: Readonly<{
     id: string;
     bindHost: string;
     port: number;
-    capsuleMcpEndpoint: string;
   }>;
 }
 
 function validId(value: unknown): value is string {
   return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(value);
-}
-
-function validRuntime(value: unknown): value is RuntimeKind {
-  return value === "apple-container" || value === "docker";
 }
 
 function validImage(value: unknown): value is string {
@@ -40,13 +35,11 @@ export function validateLocalConfig(value: unknown): AltitudeLocalConfig {
   if (typeof value !== "object" || value === null) throw new Error("Altitude config must be an object");
   const config = value as Partial<AltitudeLocalConfig>;
   if (config.schema !== LOCAL_CONFIG_PROTOCOL) throw new Error("Altitude config schema is unsupported");
-  if (!validRuntime(config.runtime)) throw new Error("Altitude config runtime is invalid");
   if (typeof config.identity !== "object" || config.identity === null
     || !validId(config.identity.id) || !validImage(config.identity.image)) {
     throw new Error("Altitude config identity is invalid");
   }
   if (!validImage(config.taskImage)) throw new Error("Altitude task image is invalid");
-  if (!validId(config.network)) throw new Error("Altitude network is invalid");
   if (typeof config.node !== "object" || config.node === null) throw new Error("Altitude node config is invalid");
   const nodeId = config.node.id ?? "local";
   if (!validId(nodeId)) throw new Error("Altitude node id is invalid");
@@ -56,29 +49,27 @@ export function validateLocalConfig(value: unknown): AltitudeLocalConfig {
   if (!Number.isSafeInteger(config.node.port) || config.node.port! < 1 || config.node.port! > 65_535) {
     throw new Error("Altitude node port is invalid");
   }
-  const endpoint = new URL(config.node.capsuleMcpEndpoint ?? "");
-  if (!['http:', 'https:'].includes(endpoint.protocol) || endpoint.username || endpoint.password || endpoint.pathname !== "/mcp") {
-    throw new Error("Altitude capsule MCP endpoint must be credential-free HTTP(S) ending in /mcp");
-  }
   return {
-    ...(config as AltitudeLocalConfig),
-    node: { ...config.node, id: nodeId } as AltitudeLocalConfig["node"],
+    schema: LOCAL_CONFIG_PROTOCOL,
+    identity: { id: config.identity.id, image: config.identity.image },
+    taskImage: config.taskImage,
+    node: { id: nodeId, bindHost: config.node.bindHost, port: config.node.port },
   };
 }
 
-export function defaultLocalConfig(runtime: RuntimeKind): AltitudeLocalConfig {
-  const capsuleHost = runtime === "apple-container" ? "host.container.internal" : "host.docker.internal";
+export function capsuleMcpEndpoint(config: AltitudeLocalConfig): string {
+  return `http://${MICROSANDBOX_HOST_IPV4}:${config.node.port}/mcp`;
+}
+
+export function defaultLocalConfig(): AltitudeLocalConfig {
   return {
     schema: LOCAL_CONFIG_PROTOCOL,
-    runtime,
-    identity: { id: "claude-personal", image: "altitude-identity:dev" },
-    taskImage: "altitude-task:dev",
-    network: "altitude-control",
+    identity: { id: "claude-personal", image: DEFAULT_IDENTITY_IMAGE },
+    taskImage: DEFAULT_TASK_IMAGE,
     node: {
       id: "local",
-      bindHost: process.platform === "linux" ? "0.0.0.0" : "127.0.0.1",
+      bindHost: "127.0.0.1",
       port: DEFAULT_NODE_PORT,
-      capsuleMcpEndpoint: `http://${capsuleHost}:${DEFAULT_NODE_PORT}/mcp`,
     },
   };
 }

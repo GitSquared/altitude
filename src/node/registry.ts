@@ -13,9 +13,8 @@ import { join } from "node:path";
 
 import {
   parseNodeConnection,
-  parseRemoteAltitudeExecutable,
   type NodeConnection,
-} from "./transport.ts";
+} from "./iroh.ts";
 
 export const REGISTERED_NODE_PROTOCOL = "altitude.registered-node/v1" as const;
 const MAX_RECORD_BYTES = 128 * 1024;
@@ -24,7 +23,6 @@ const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 export interface RegisteredNode {
   readonly schema: typeof REGISTERED_NODE_PROTOCOL;
   readonly connection: NodeConnection;
-  readonly remoteAltitude: string;
 }
 
 function notFound(error: unknown): boolean {
@@ -52,18 +50,13 @@ export function parseRegisteredNode(value: unknown): RegisteredNode {
   return {
     schema: REGISTERED_NODE_PROTOCOL,
     connection: parseNodeConnection(record.connection),
-    remoteAltitude: parseRemoteAltitudeExecutable(record.remoteAltitude),
   };
 }
 
-export function registeredNode(
-  connection: NodeConnection,
-  remoteAltitude = "altitude",
-): RegisteredNode {
+export function registeredNode(connection: NodeConnection): RegisteredNode {
   return parseRegisteredNode({
     schema: REGISTERED_NODE_PROTOCOL,
     connection,
-    remoteAltitude,
   });
 }
 

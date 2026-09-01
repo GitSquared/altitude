@@ -1,7 +1,7 @@
 import type { Writable } from "node:stream";
 import { join, resolve } from "node:path";
 
-import type { AttentionResolution, EventActor } from "../core/events.ts";
+import type { AttentionResolution, EventActor, NewEvent } from "../core/events.ts";
 import { ClaudeCliAdapter } from "../agent/claude-cli.ts";
 import type { AgentEvent } from "../agent/protocol.ts";
 import {
@@ -18,6 +18,7 @@ import {
 } from "../core/model.ts";
 import { resolveAltitudePaths, ensureAltitudePaths } from "../config/paths.ts";
 import {
+  capsuleMcpEndpoint,
   defaultLocalConfig,
   readLocalConfig,
   validateLocalConfig,
@@ -29,18 +30,20 @@ import { createAltitudeNodeService, nodeInstanceId, serveAltitudeNode } from "..
 import {
   NodeOutboxTopicWorker,
   NodeScheduledActionKindWorker,
-  NodeScheduledActionWorker,
+  AgentRetryWorker,
 } from "../node/worker.ts";
 import { RedmarkerIntentTool } from "../intent/redmarker.ts";
 import { IntentSubmissionStore } from "../intent/submission.ts";
 import { BunCommandRunner, type CommandRunner } from "../process/command.ts";
-import type { RuntimeKind } from "../runtime/capsule-runtime.ts";
-import { AppleContainerRuntime } from "../runtime/apple-container.ts";
-import { DockerCapsuleRuntime } from "../runtime/docker.ts";
-import { CapsuleImageBuilder } from "../runtime/images.ts";
 import { IdentityCapsuleManager } from "../runtime/identity-manager.ts";
-import { identityVolumeName } from "../runtime/identity-capsule.ts";
-import { CapsuleProcessLauncher } from "../runtime/process-launcher.ts";
+import {
+  MICROSANDBOX_HOST_IPV4,
+  MicrosandboxCapsuleRuntime,
+} from "../runtime/microsandbox.ts";
+import {
+  CapsuleProcessLauncher,
+  runMicrosandboxAttach,
+} from "../runtime/process-launcher.ts";
 import {
   TaskCapsuleBootstrapProvisioner,
   TaskCapsuleCheckpointProvisioner,
@@ -55,6 +58,13 @@ import {
   LINEAR_INPUT_ROUTE_TOPIC,
   parseLinearInputRoutePayload,
 } from "../tracker/webhook.ts";
+import {
+  planLinearProjection,
+} from "../tracker/projection.ts";
+import {
+  createLinearProjectionWorker,
+  linearAccessToken,
+} from "../tracker/worker.ts";
 import { IdentityControlProvisioner, runIdentityControlStdio } from "../identity/control.ts";
 import { runIdentityInit } from "../identity/init.ts";
 import {
@@ -74,14 +84,18 @@ import { capsuleManifestDigest } from "../capsule/manifest.ts";
 import {
   FilesystemCapsuleTransferReceiver,
   LocalToRemoteCapsuleTransfer,
-  MAX_CAPSULE_TRANSFER_PACKAGE_BYTES,
   type PreparedCapsuleTransfer,
 } from "../capsule/transfer-runtime.ts";
 import {
-  SshCapsuleTransferTransport,
-  buildRemoteCommandSpec,
+  bindPersistentIrohIdentity,
+  createIrohNodeClient,
+  nodeTicketFor,
+  parseAltitudeNodeTicket,
+  serveIrohNode,
+  type AltitudeNodeClient,
+  type IrohNodeHandlers,
   type NodeConnection,
-} from "../node/transport.ts";
+} from "../node/iroh.ts";
 import {
   FilesystemNodeRegistry,
   registeredNode,
@@ -105,10 +119,9 @@ import { TaskRunCoordinator } from "../run/task-runner.ts";
 import { reconcileExitedInteractiveAgent } from "../run/interactive-terminal.ts";
 import { VERSION } from "../version.ts";
 import {
-  isAltitudeSourceCheckout,
-  prepareStandaloneImageContext,
-} from "../runtime/standalone-images.ts";
-import { runAltitudeTui, ProcessTuiTerminal, type TuiTerminal } from "../tui/index.ts";
+  runAltitudeTui,
+  type AltitudeTuiActions,
+} from "../tui/index.ts";
 import { runTerminalSupervisor, TerminalSessionManager } from "../terminal/session.ts";
 
 const HELP = `altitude ${VERSION}
@@ -119,7 +132,7 @@ Usage:
   altitude <command> [options]
 
 Commands:
-  setup                       Build capsules and log in to managed Claude
+  setup                       Create the identity capsule and log in to Claude
   task create <intent>        Create a task at an explicit intention level
   task list                   List tasks
   task show <task-id>         Show task state and event history
@@ -161,10 +174,6 @@ const TASK_HELP = `Usage:
   altitude task shell <task-id>
   altitude task review <task-id> --url <loopback-url> [--redmarker <executable>] [--json]
   altitude task send <task-id> --node <registered-id> [--json]
-  altitude task send <task-id> --node <id> --user <user>
-                     --identity-file <path> --known-hosts-file <path>
-                     (--host <host> [--ssh-port <port>] | --pigeons-endpoint <id>)
-                     [--remote-altitude <executable>] [--json]
 
 Intent levels:
   ${INTENT_LEVELS.join(", ")}
@@ -191,42 +200,38 @@ const TRACKER_HELP = `Usage:
 
 The binding is node-local projection metadata; the task capsule remains the
 operational source of truth. Set ALTITUDE_LINEAR_WEBHOOK_SECRET only in the
-environment of the Altitude node process to enable the signed webhook endpoint.
+environment of the Altitude node process to enable the signed webhook endpoint;
+set ALTITUDE_LINEAR_ACCESS_TOKEN there as well to publish additive issue history
+and native Decision/Review prompts. Neither secret is written to capsule state.
 `;
 
 const NODE_HELP = `Usage:
-  altitude node add <id> --user <user> --identity-file <absolute-path>
-                    --known-hosts-file <absolute-path>
-                    (--host <host> [--ssh-port <port>] | --pigeons-endpoint <id>)
-                    [--pigeons <executable>] [--remote-altitude <executable>]
-                    [--json]
+  altitude node add <id> --ticket <altitude-node-ticket> [--json]
   altitude node list [--json]
   altitude node show <id> [--json]
-  altitude node check <id> [--accept-new-host-key] [--json]
-  altitude node serve [--host <address>] [--port <port>] [--runtime <runtime>]
+  altitude node check <id> [--json]
+  altitude node ticket [--json]
+  altitude node serve [--host <address>] [--port <port>]
 
-Runtimes:
-  apple-container, docker
-
-The listener defaults to loopback. Use --host deliberately when capsules on a
-native Linux node need to reach the service through the host gateway.
-With the saved runtime and listener settings, the node also resumes durable
+The listener defaults to loopback and remains reachable from its Microsandbox
+capsules. Use --host deliberately when placing a webhook listener behind a
+trusted reverse proxy.
+With the saved listener settings, the node also resumes durable
 rate-limit retries and starts tasks received from another node.
 Altitude does not install or manage an operating-system service; run this command
 under whichever process supervisor belongs to the node.
+Node pairing and capsule transfer use Altitude's native Iroh route.
 `;
 
 const SETUP_HELP = `Usage:
-  altitude setup [--runtime <runtime>] [--identity <id>] [--source <path>]
-                 [--identity-image <image>] [--task-image <image>]
-                 [--network <name>] [--node-url <url>]
+  altitude setup [--identity <id>] [--identity-image <image>]
+                 [--task-image <image>]
                  [--node-id <id>] [--node-host <address>] [--node-port <port>]
-                 [--skip-build] [--json]
+                 [--json]
 
-Setup builds the two OCI images, creates a source-free identity capsule, and
-opens the official Claude Code login there when authentication is needed.
-On Linux, an installed Altitude binary builds its capsules from itself; --source
-selects an Altitude checkout explicitly (and is currently required elsewhere).
+Setup pulls the configured OCI image through Microsandbox, creates a private
+identity capsule, and opens Claude Code login inside it when needed. It never
+imports credentials, configuration, or source code from the host.
 `;
 
 const CONFIG_HELP = `Usage:
@@ -235,15 +240,12 @@ const CONFIG_HELP = `Usage:
   altitude config path
 
 Keys:
-  runtime
   identity.id
   identity.image
   taskImage
-  network
   node.id
   node.bindHost
   node.port
-  node.capsuleMcpEndpoint
 
 This file contains only non-secret control-plane settings. Native logins and
 credentials stay inside their node-local identity capsules.
@@ -258,7 +260,10 @@ export interface CliOptions {
   readonly clock?: () => number;
   readonly createId?: () => string;
   readonly commandRunner?: CommandRunner;
-  readonly terminal?: TuiTerminal;
+  readonly createNodeClient?: (
+    connection: NodeConnection,
+  ) => Promise<AltitudeNodeClient>;
+  readonly startTui?: (actions: AltitudeTuiActions) => Promise<number>;
   readonly startTuiControlPlane?: () => Promise<Pick<NodeUse, "close">>;
 }
 
@@ -323,15 +328,12 @@ function wantsJson(parsed: ParsedArguments): boolean {
 }
 
 const CONFIG_KEYS = [
-  "runtime",
   "identity.id",
   "identity.image",
   "taskImage",
-  "network",
   "node.id",
   "node.bindHost",
   "node.port",
-  "node.capsuleMcpEndpoint",
 ] as const;
 
 type ConfigKey = (typeof CONFIG_KEYS)[number];
@@ -342,15 +344,12 @@ function isConfigKey(value: string): value is ConfigKey {
 
 function configValue(config: AltitudeLocalConfig, key: ConfigKey): string | number {
   switch (key) {
-    case "runtime": return config.runtime;
     case "identity.id": return config.identity.id;
     case "identity.image": return config.identity.image;
     case "taskImage": return config.taskImage;
-    case "network": return config.network;
     case "node.id": return config.node.id;
     case "node.bindHost": return config.node.bindHost;
     case "node.port": return config.node.port;
-    case "node.capsuleMcpEndpoint": return config.node.capsuleMcpEndpoint;
   }
 }
 
@@ -366,18 +365,12 @@ function withConfigValue(
       })()
     : rawValue;
   switch (key) {
-    case "runtime": return validateLocalConfig({ ...config, runtime: value });
     case "identity.id": return validateLocalConfig({ ...config, identity: { ...config.identity, id: value } });
     case "identity.image": return validateLocalConfig({ ...config, identity: { ...config.identity, image: value } });
     case "taskImage": return validateLocalConfig({ ...config, taskImage: value });
-    case "network": return validateLocalConfig({ ...config, network: value });
     case "node.id": return validateLocalConfig({ ...config, node: { ...config.node, id: value } });
     case "node.bindHost": return validateLocalConfig({ ...config, node: { ...config.node, bindHost: value } });
     case "node.port": return validateLocalConfig({ ...config, node: { ...config.node, port: value } });
-    case "node.capsuleMcpEndpoint": return validateLocalConfig({
-      ...config,
-      node: { ...config.node, capsuleMcpEndpoint: value },
-    });
   }
 }
 
@@ -574,13 +567,13 @@ async function useTaskNode(input: {
   readonly databasePath: string;
   readonly submissions?: IntentSubmissionStore;
   readonly linearWebhookSecret?: string;
+  readonly linearAccessToken?: string;
 }): Promise<NodeUse> {
   const instanceId = nodeInstanceId(input.databasePath);
   if (await existingNode(input.config.node.port, instanceId)) {
     return { external: true, close: async () => undefined };
   }
   const service = createAltitudeNodeService({
-    runtime: input.config.runtime,
     store: input.store,
     grants: input.grants,
     executor: new ProcessTaskToolExecutor(input.launcher),
@@ -593,9 +586,7 @@ async function useTaskNode(input: {
       "127.0.0.1",
       "localhost",
       "[::1]",
-      "host.docker.internal",
-      "host.container.internal",
-      new URL(input.config.node.capsuleMcpEndpoint).hostname,
+      MICROSANDBOX_HOST_IPV4,
     ])],
   });
   const server = serveAltitudeNode({
@@ -603,7 +594,18 @@ async function useTaskNode(input: {
     hostname: input.config.node.bindHost,
     port: input.config.node.port,
   });
-  return { external: false, close: () => server.close() };
+  const projectionWorker = createLinearProjectionWorker({
+    store: input.store,
+    ...(input.linearAccessToken === undefined ? {} : { accessToken: input.linearAccessToken }),
+  });
+  projectionWorker?.start();
+  return {
+    external: false,
+    close: async () => {
+      await projectionWorker?.close();
+      await server.close();
+    },
+  };
 }
 
 async function useTuiControlPlane(input: {
@@ -620,12 +622,11 @@ async function useTuiControlPlane(input: {
     ...(input.options.clock === undefined ? {} : { clock: input.options.clock }),
     ...(input.options.createId === undefined ? {} : { createId: input.options.createId }),
   });
-  const launcher = new CapsuleProcessLauncher(input.config.runtime);
+  const launcher = new CapsuleProcessLauncher();
   const grants = new TaskMcpGrantStore(store.database, input.options.clock);
   let server: ReturnType<typeof serveAltitudeNode> | undefined;
   try {
     const service = createAltitudeNodeService({
-      runtime: input.config.runtime,
       store,
       grants,
       executor: new ProcessTaskToolExecutor(launcher),
@@ -640,9 +641,7 @@ async function useTuiControlPlane(input: {
         "127.0.0.1",
         "localhost",
         "[::1]",
-        "host.docker.internal",
-        "host.container.internal",
-        new URL(input.config.node.capsuleMcpEndpoint).hostname,
+        MICROSANDBOX_HOST_IPV4,
       ])],
     });
     server = serveAltitudeNode({
@@ -659,7 +658,7 @@ async function useTuiControlPlane(input: {
   const onError = (component: string) => (error: unknown) => (
     input.options.stderr ?? process.stderr
   ).write(`Altitude ${component}: ${error instanceof Error ? error.message : String(error)}\n`);
-  const retryWorker = new NodeScheduledActionWorker(
+  const retryWorker = new AgentRetryWorker(
     store,
     createManagedAgentRetryExecutor({
       tasks: store,
@@ -725,15 +724,25 @@ async function useTuiControlPlane(input: {
     ...(input.options.clock === undefined ? {} : { now: input.options.clock }),
     onError: onError("Linear input worker"),
   });
+  const projectionWorker = createLinearProjectionWorker({
+    store,
+    ...(linearAccessToken(input.options.env ?? process.env) === undefined
+      ? {}
+      : { accessToken: linearAccessToken(input.options.env ?? process.env)! }),
+    ...(input.options.clock === undefined ? {} : { now: input.options.clock }),
+    onError: onError("Linear projection worker"),
+  });
   try {
     retryWorker.start();
     dispatchWorker.start();
     trackerInputWorker.start();
+    projectionWorker?.start();
   } catch (error) {
     await Promise.allSettled([
       retryWorker.close(),
       dispatchWorker.close(),
       trackerInputWorker.close(),
+      projectionWorker?.close(),
       server.close(),
     ]);
     store.close();
@@ -751,6 +760,7 @@ async function useTuiControlPlane(input: {
           retryWorker.close(),
           dispatchWorker.close(),
           trackerInputWorker.close(),
+          projectionWorker?.close(),
           server.close(),
         ]);
       } finally {
@@ -772,19 +782,31 @@ async function managedContext(options: CliOptions): Promise<{
   return { paths, config, runner: options.commandRunner ?? new BunCommandRunner() };
 }
 
+async function nodeClientFor(
+  paths: ReturnType<typeof resolveAltitudePaths>,
+  connection: NodeConnection,
+  options: CliOptions,
+): Promise<AltitudeNodeClient> {
+  if (options.createNodeClient !== undefined) {
+    return await options.createNodeClient(connection);
+  }
+  const identity = await bindPersistentIrohIdentity(join(paths.nodes, "identity"));
+  return await createIrohNodeClient(
+    identity.endpoint,
+    connection,
+    async () => await identity.endpoint.close(),
+  );
+}
+
 async function ensureManagedIdentity(
   config: AltitudeLocalConfig,
-  runner: CommandRunner,
   launcher: CapsuleProcessLauncher,
   store: TaskStore,
   options: CliOptions,
 ): Promise<ClaudeCliAdapter> {
-  await new IdentityCapsuleManager(config.runtime, runner).ensure({
+  await new IdentityCapsuleManager(new MicrosandboxCapsuleRuntime()).ensure({
     identityId: config.identity.id,
     image: config.identity.image,
-    identityVolume: identityVolumeName(config.identity.id),
-    network: config.network,
-    command: ["sleep", "infinity"],
     environment: { CLAUDE_CONFIG_DIR: "/identity/claude", DISABLE_AUTOUPDATER: "1" },
   });
   const agent = new ClaudeCliAdapter({
@@ -807,7 +829,6 @@ async function prepareTaskCapsule(input: {
   readonly repositoryPath?: string;
   readonly paths: ReturnType<typeof resolveAltitudePaths>;
   readonly config: AltitudeLocalConfig;
-  readonly runner: CommandRunner;
   readonly launcher: CapsuleProcessLauncher;
   readonly agentSessions?: TaskAgentSessionStore;
   readonly transcripts?: IdentityTranscriptProvisioner;
@@ -832,7 +853,7 @@ async function prepareTaskCapsule(input: {
   const preparer = new LocalCapsulePreparer(
     checkpoints,
     seeds,
-    new TaskCapsuleManager(input.config.runtime, input.runner),
+    new TaskCapsuleManager(new MicrosandboxCapsuleRuntime()),
     new TaskCapsuleBootstrapProvisioner(input.launcher),
     checkpointer,
   );
@@ -846,7 +867,6 @@ async function prepareTaskCapsule(input: {
     await preparer.prepare({
       taskId: input.task.id,
       taskImage: input.config.taskImage,
-      network: input.config.network,
       nodeId: input.config.node.id,
       ...(input.repositoryPath === undefined && factory === undefined
         ? {}
@@ -891,7 +911,7 @@ async function runManagedTask(args: readonly string[], options: CliOptions, stdo
   const parsed = parseArguments(args, new Set(["repository", "model"]));
   if (parsed.positionals.length !== 1) throw new CliUsageError("task run requires exactly one task id");
   const taskId = parsed.positionals[0]!;
-  const { paths, config, runner } = await managedContext(options);
+  const { paths, config } = await managedContext(options);
   await requireSettledWorkbench(paths, taskId);
   await requireSettledAgentTerminal(paths, taskId);
   using store = new TaskStore(paths.database, {
@@ -900,8 +920,8 @@ async function runManagedTask(args: readonly string[], options: CliOptions, stdo
   });
   const task = store.getTask(taskId);
   if (task === undefined) throw new Error(`Task ${taskId} does not exist`);
-  const launcher = new CapsuleProcessLauncher(config.runtime);
-  const agent = await ensureManagedIdentity(config, runner, launcher, store, options);
+  const launcher = new CapsuleProcessLauncher();
+  const agent = await ensureManagedIdentity(config, launcher, store, options);
   const agentSessions = new TaskAgentSessionStore(store.database, options.clock);
   const transcripts = new IdentityTranscriptProvisioner(
     launcher,
@@ -913,7 +933,6 @@ async function runManagedTask(args: readonly string[], options: CliOptions, stdo
     ...(option(parsed, "repository") === undefined ? {} : { repositoryPath: option(parsed, "repository")! }),
     paths,
     config,
-    runner,
     launcher,
     agentSessions,
     transcripts,
@@ -929,6 +948,9 @@ async function runManagedTask(args: readonly string[], options: CliOptions, stdo
     ...(linearWebhookSecret(options) === undefined
       ? {}
       : { linearWebhookSecret: linearWebhookSecret(options)! }),
+    ...(linearAccessToken(options.env ?? process.env) === undefined
+      ? {}
+      : { linearAccessToken: linearAccessToken(options.env ?? process.env)! }),
   });
   try {
     const coordinator = new TaskRunCoordinator(
@@ -942,7 +964,7 @@ async function runManagedTask(args: readonly string[], options: CliOptions, stdo
     const managed = await coordinator.start({
       taskId,
       identityId: config.identity.id,
-      mcpEndpoint: config.node.capsuleMcpEndpoint,
+      mcpEndpoint: capsuleMcpEndpoint(config),
       ...(option(parsed, "model") === undefined ? {} : { model: option(parsed, "model")! }),
     });
     const json = wantsJson(parsed);
@@ -997,7 +1019,6 @@ async function reconcileAgentTerminal(input: {
     store: input.store,
     paths: input.paths,
     config: input.config,
-    runner: input.runner,
     launcher: input.launcher,
     agentSessions: input.sessions,
     transcripts,
@@ -1028,7 +1049,7 @@ async function takeManagedTask(
   });
   const task = store.getTask(taskId);
   if (task === undefined) throw new Error(`Task ${taskId} does not exist`);
-  const launcher = new CapsuleProcessLauncher(config.runtime);
+  const launcher = new CapsuleProcessLauncher();
   const agentSessions = new TaskAgentSessionStore(store.database, options.clock);
   const grants = new TaskMcpGrantStore(store.database, options.clock);
   const terminals = new TerminalSessionManager(paths.terminals);
@@ -1059,17 +1080,19 @@ async function takeManagedTask(
     ...(linearWebhookSecret(options) === undefined
       ? {}
       : { linearWebhookSecret: linearWebhookSecret(options)! }),
+    ...(linearAccessToken(options.env ?? process.env) === undefined
+      ? {}
+      : { linearAccessToken: linearAccessToken(options.env ?? process.env)! }),
   });
   try {
     if (terminalStatus === undefined) {
-      const agent = await ensureManagedIdentity(config, runner, launcher, store, options);
+      const agent = await ensureManagedIdentity(config, launcher, store, options);
       const transcripts = new IdentityTranscriptProvisioner(launcher, config.identity.id);
       await prepareTaskCapsule({
         task,
         store,
         paths,
         config,
-        runner,
         launcher,
         agentSessions,
         transcripts,
@@ -1086,7 +1109,7 @@ async function takeManagedTask(
       const take = await coordinator.take({
         taskId,
         identityId: config.identity.id,
-        mcpEndpoint: config.node.capsuleMcpEndpoint,
+        mcpEndpoint: capsuleMcpEndpoint(config),
       });
       try {
         terminalStatus = await terminals.start({
@@ -1142,7 +1165,7 @@ async function openTaskShell(args: readonly string[], options: CliOptions, stdou
   const parsed = parseArguments(args);
   if (parsed.positionals.length !== 1) throw new CliUsageError("task shell requires exactly one task id");
   const taskId = parsed.positionals[0]!;
-  const { paths, config, runner } = await managedContext(options);
+  const { paths, config } = await managedContext(options);
   await requireSettledAgentTerminal(paths, taskId);
   using store = new TaskStore(paths.database, {
     ...(options.clock === undefined ? {} : { clock: options.clock }),
@@ -1150,14 +1173,13 @@ async function openTaskShell(args: readonly string[], options: CliOptions, stdou
   });
   const task = store.getTask(taskId);
   if (task === undefined) throw new Error(`Task ${taskId} does not exist`);
-  const launcher = new CapsuleProcessLauncher(config.runtime);
+  const launcher = new CapsuleProcessLauncher();
   const agentSessions = new TaskAgentSessionStore(store.database, options.clock);
   const checkpointer = await prepareTaskCapsule({
     task,
     store,
     paths,
     config,
-    runner,
     launcher,
     agentSessions,
     ...(options.clock === undefined ? {} : { clock: options.clock }),
@@ -1230,14 +1252,13 @@ async function reviewManagedTask(
     throw new Error(`Task ${taskId} has no reviewable capsule yet; run it once before visual review`);
   }
 
-  const launcher = new CapsuleProcessLauncher(config.runtime);
+  const launcher = new CapsuleProcessLauncher();
   const agentSessions = new TaskAgentSessionStore(store.database, options.clock);
   const checkpointer = await prepareTaskCapsule({
     task,
     store,
     paths,
     config,
-    runner,
     launcher,
     agentSessions,
     ...(options.clock === undefined ? {} : { clock: options.clock }),
@@ -1271,6 +1292,9 @@ async function reviewManagedTask(
       ...(linearWebhookSecret(options) === undefined
         ? {}
         : { linearWebhookSecret: linearWebhookSecret(options)! }),
+      ...(linearAccessToken(options.env ?? process.env) === undefined
+        ? {}
+        : { linearAccessToken: linearAccessToken(options.env ?? process.env)! }),
     });
     const submissionUrl = new URL(
       `/v1/intent-tools/redmarker/${grant.sessionId}`,
@@ -1335,17 +1359,7 @@ async function sendManagedTask(
   options: CliOptions,
   stdout: Output,
 ): Promise<number> {
-  const parsed = parseArguments(args, new Set([
-    "node",
-    "host",
-    "ssh-port",
-    "user",
-    "identity-file",
-    "known-hosts-file",
-    "pigeons-endpoint",
-    "pigeons",
-    "remote-altitude",
-  ]));
+  const parsed = parseArguments(args, new Set(["node"]));
   if (parsed.positionals.length !== 1) {
     throw new CliUsageError("task send requires exactly one task id");
   }
@@ -1355,67 +1369,17 @@ async function sendManagedTask(
     return value;
   };
   const targetNodeId = required("node");
-  const { paths, config, runner } = await managedContext(options);
+  const { paths, config } = await managedContext(options);
   const taskId = parsed.positionals[0]!;
   await requireSettledWorkbench(paths, taskId);
   await requireSettledAgentTerminal(paths, taskId);
-  const inlineConnection = [
-    "host",
-    "ssh-port",
-    "user",
-    "identity-file",
-    "known-hosts-file",
-    "pigeons-endpoint",
-    "pigeons",
-  ].some((name) => option(parsed, name) !== undefined);
-  let connection: NodeConnection;
-  let remoteAltitude: string;
-  if (!inlineConnection) {
-    const remembered = await new FilesystemNodeRegistry(paths.nodes).get(
-      targetNodeId,
+  const remembered = await new FilesystemNodeRegistry(paths.nodes).get(
+    targetNodeId,
+  );
+  if (remembered === undefined) {
+    throw new Error(
+      `Node ${targetNodeId} is not registered. Run \`altitude node add ${targetNodeId} --ticket <ticket>\` first.`,
     );
-    if (remembered === undefined) {
-      throw new Error(
-        `Node ${targetNodeId} is not registered. Run \`altitude node add ${targetNodeId} ...\` first.`,
-      );
-    }
-    connection = remembered.connection;
-    remoteAltitude = option(parsed, "remote-altitude")
-      ?? remembered.remoteAltitude;
-  } else {
-    const host = option(parsed, "host");
-    const pigeonsEndpoint = option(parsed, "pigeons-endpoint");
-    if ((host === undefined) === (pigeonsEndpoint === undefined)) {
-      throw new CliUsageError(
-        "task send requires exactly one of --host or --pigeons-endpoint",
-      );
-    }
-    if (pigeonsEndpoint !== undefined
-      && option(parsed, "ssh-port") !== undefined) {
-      throw new CliUsageError("--ssh-port is only valid with --host");
-    }
-    connection = {
-      nodeId: targetNodeId,
-      user: required("user"),
-      identityFile: resolve(required("identity-file")),
-      knownHostsFile: resolve(required("known-hosts-file")),
-      route: host !== undefined
-        ? {
-            kind: "ssh",
-            host,
-            ...(option(parsed, "ssh-port") === undefined
-              ? {}
-              : { port: portNumber(option(parsed, "ssh-port"))! }),
-          }
-        : {
-            kind: "pigeons",
-            endpointId: pigeonsEndpoint!,
-            ...(option(parsed, "pigeons") === undefined
-              ? {}
-              : { pigeonsExecutable: option(parsed, "pigeons")! }),
-          },
-    };
-    remoteAltitude = option(parsed, "remote-altitude") ?? "altitude";
   }
   using store = new TaskStore(paths.database, {
     ...(options.clock === undefined ? {} : { clock: options.clock }),
@@ -1462,50 +1426,51 @@ async function sendManagedTask(
   const seeds = new FilesystemRepositorySeedCache(
     join(paths.cache, "repository-seeds"),
   );
-  const coordinator = new LocalToRemoteCapsuleTransfer(
-    checkpoints,
-    seeds,
-    config.node.id,
-    new SshCapsuleTransferTransport(
-      runner,
-      connection,
-      remoteAltitude,
-    ),
-    {
-      ...(options.clock === undefined ? {} : { now: options.clock }),
-      ...(options.createId === undefined ? {} : { createId: options.createId }),
-    },
-  );
-  let prepared: PreparedCapsuleTransfer;
+  const nodeClient = await nodeClientFor(paths, remembered.connection, options);
   try {
-    prepared = await coordinator.prepare({
-      taskId,
-      targetNodeId,
-      additionalMembers: [portableTaskStateMember(
-        store,
-        taskId,
-        agentSessions,
-      )],
-    });
-  } catch (error) {
-    if (store.getTask(taskId)?.status === "transferring") {
-      store.append({
-        taskId,
-        type: "task.state_changed",
-        payload: { to: "paused", reason: "Capsule transfer preparation failed" },
-        actor: { kind: "system", component: "capsule-transfer" },
-      });
-    }
-    throw error;
-  }
-  const committed = await coordinator.commit(prepared);
-  if (wantsJson(parsed)) {
-    writeJson(stdout, { task: store.getTask(taskId), transfer: committed });
-  } else {
-    stdout.write(
-      "Moved task " + taskId + " to " + targetNodeId
-        + " at capsule revision " + committed.targetCheckpoint.revision + ".\n",
+    const coordinator = new LocalToRemoteCapsuleTransfer(
+      checkpoints,
+      seeds,
+      config.node.id,
+      nodeClient,
+      {
+        ...(options.clock === undefined ? {} : { now: options.clock }),
+        ...(options.createId === undefined ? {} : { createId: options.createId }),
+      },
     );
+    let prepared: PreparedCapsuleTransfer;
+    try {
+      prepared = await coordinator.prepare({
+        taskId,
+        targetNodeId,
+        additionalMembers: [portableTaskStateMember(
+          store,
+          taskId,
+          agentSessions,
+        )],
+      });
+    } catch (error) {
+      if (store.getTask(taskId)?.status === "transferring") {
+        store.append({
+          taskId,
+          type: "task.state_changed",
+          payload: { to: "paused", reason: "Capsule transfer preparation failed" },
+          actor: { kind: "system", component: "capsule-transfer" },
+        });
+      }
+      throw error;
+    }
+    const committed = await coordinator.commit(prepared);
+    if (wantsJson(parsed)) {
+      writeJson(stdout, { task: store.getTask(taskId), transfer: committed });
+    } else {
+      stdout.write(
+        "Moved task " + taskId + " to " + targetNodeId
+          + " at capsule revision " + committed.targetCheckpoint.revision + ".\n",
+      );
+    }
+  } finally {
+    await nodeClient.close();
   }
   return 0;
 }
@@ -1544,12 +1509,15 @@ async function persistAttentionResolution(
   attentionId: string,
   resolution: AttentionResolution,
 ): Promise<Task> {
-  return await withStore(options, (store) => store.append({
-    taskId,
-    type: "attention.resolved",
-    payload: { attentionId, resolution },
-    actor: OPERATOR,
-  }).task);
+  return await withStore(options, (store) => {
+    const event = {
+      taskId,
+      type: "attention.resolved",
+      payload: { attentionId, resolution },
+      actor: OPERATOR,
+    } satisfies NewEvent<"attention.resolved">;
+    return store.append(event, planLinearProjection(store, event)).task;
+  });
 }
 
 async function continueAfterOperatorInput(input: {
@@ -1650,12 +1618,13 @@ async function runAttentionCommand(
     } else {
       ({ attentionId, resolution } = resolutionFor(subcommand, current, words));
     }
-    const task = store.append({
+    const event = {
       taskId,
       type: "attention.resolved",
       payload: { attentionId, resolution },
       actor: OPERATOR,
-    }).task;
+    } satisfies NewEvent<"attention.resolved">;
+    const task = store.append(event, planLinearProjection(store, event)).task;
     return { task, resolution };
   });
   const json = wantsJson(parsed);
@@ -1784,14 +1753,6 @@ async function runStatus(options: CliOptions, stdout: Output, json: boolean): Pr
   return 0;
 }
 
-function runtimeKind(value: string | undefined): RuntimeKind {
-  const runtime = value ?? (process.platform === "darwin" ? "apple-container" : "docker");
-  if (runtime !== "apple-container" && runtime !== "docker") {
-    throw new CliUsageError(`Unknown capsule runtime: ${runtime}`);
-  }
-  return runtime;
-}
-
 function portNumber(value: string | undefined): number | undefined {
   if (value === undefined) return undefined;
   if (!/^[0-9]+$/u.test(value)) throw new CliUsageError("--port must be an integer");
@@ -1814,101 +1775,52 @@ async function waitForShutdownSignal(): Promise<void> {
   });
 }
 
-async function readStdinBytes(limit: number): Promise<Uint8Array> {
-  const reader = Bun.stdin.stream().getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > limit) {
-        await reader.cancel();
-        throw new Error(`Transfer input exceeds ${limit} bytes`);
-      }
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  const bytes = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return bytes;
-}
-
-async function runTransferReceiverCommand(
-  args: readonly string[],
+function irohTransferHandlers(
+  config: AltitudeLocalConfig,
+  paths: ReturnType<typeof resolveAltitudePaths>,
+  store: TaskStore,
   options: CliOptions,
-  stdout: Output,
-): Promise<number> {
-  const operation = args[0];
-  if ((operation !== "prepare" && operation !== "activate") || args.length !== 1) {
-    throw new CliUsageError("_transfer requires prepare or activate");
-  }
-  const paths = resolveAltitudePaths(options.env ?? process.env);
-  await ensureAltitudePaths(paths);
-  const config = await readLocalConfig(paths.config);
-  if (config === undefined) throw new Error("Target Altitude node is not set up");
+): IrohNodeHandlers {
   const checkpoints = new FilesystemCapsuleCheckpointStore(paths.capsules);
   const receiver = new FilesystemCapsuleTransferReceiver(
     checkpoints,
     new FilesystemRepositorySeedCache(join(paths.cache, "repository-seeds")),
     config.node.id,
   );
-  if (operation === "prepare") {
-    writeJson(stdout, await receiver.prepare(
-      await readStdinBytes(MAX_CAPSULE_TRANSFER_PACKAGE_BYTES),
-    ));
-    return 0;
-  }
-  const bytes = await readStdinBytes(64 * 1024);
-  let request: unknown;
-  try {
-    request = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
-  } catch (error) {
-    throw new Error("Target activation request is invalid JSON", { cause: error });
-  }
-  if (typeof request !== "object" || request === null) {
-    throw new Error("Target activation request is invalid");
-  }
-  const value = request as Parameters<typeof receiver.activate>[0];
-  const activation = await receiver.activate(value);
-  const checkpoint = await checkpoints.read(activation.checkpoint);
-  const stateMember = checkpoint.members.find(
-    (member) => member.path === PORTABLE_TASK_STATE_MEMBER,
-  );
-  if (stateMember === undefined) {
-    throw new Error("Transferred capsule has no portable task state");
-  }
-  using store = new TaskStore(paths.database, {
-    ...(options.clock === undefined ? {} : { clock: options.clock }),
-    ...(options.createId === undefined ? {} : { createId: options.createId }),
-  });
-  const portableState = decodePortableTaskState(stateMember.bytes);
-  activateTransferredTask({
-    store,
-    sessions: new TaskAgentSessionStore(store.database, options.clock),
-    portableState,
-    targetIdentityId: config.identity.id,
-    targetNodeId: config.node.id,
-    transferId: activation.transferId,
-    checkpoint: activation.checkpoint,
-    activatedAt: (options.clock ?? Date.now)(),
-  });
-  writeJson(stdout, activation);
-  return 0;
+  return {
+    async health() {
+      return { nodeId: config.node.id, version: VERSION };
+    },
+    async prepare(payload) {
+      return await receiver.prepare(payload);
+    },
+    async activate(input) {
+      const activation = await receiver.activate(input);
+      const checkpoint = await checkpoints.read(activation.checkpoint);
+      const stateMember = checkpoint.members.find(
+        (member) => member.path === PORTABLE_TASK_STATE_MEMBER,
+      );
+      if (stateMember === undefined) {
+        throw new Error("Transferred capsule has no portable task state");
+      }
+      activateTransferredTask({
+        store,
+        sessions: new TaskAgentSessionStore(store.database, options.clock),
+        portableState: decodePortableTaskState(stateMember.bytes),
+        targetIdentityId: config.identity.id,
+        targetNodeId: config.node.id,
+        transferId: activation.transferId,
+        checkpoint: activation.checkpoint,
+        activatedAt: (options.clock ?? Date.now)(),
+      });
+      return activation;
+    },
+  };
 }
 
 function registeredNodeRoute(record: RegisteredNode): string {
-  const route = record.connection.route;
-  return route.kind === "ssh"
-    ? `${record.connection.user}@${route.host}${route.port === undefined ? "" : `:${route.port}`}`
-    : `${record.connection.user}@pigeons:${route.endpointId.slice(0, 12)}`;
+  const ticket = parseAltitudeNodeTicket(record.connection.ticket);
+  return `iroh:${ticket.endpointId.slice(0, 12)}`;
 }
 
 async function runNodeRegistryCommand(
@@ -1931,7 +1843,7 @@ async function runNodeRegistryCommand(
     else {
       for (const node of nodes) {
         stdout.write(
-          `${node.connection.nodeId}  ${registeredNodeRoute(node)}  ${node.remoteAltitude}\n`,
+          `${node.connection.nodeId}  ${registeredNodeRoute(node)}\n`,
         );
       }
     }
@@ -1950,96 +1862,41 @@ async function runNodeRegistryCommand(
     else {
       stdout.write(`${node.connection.nodeId}\n`);
       stdout.write(`Route: ${registeredNodeRoute(node)}\n`);
-      stdout.write(`Identity: ${node.connection.identityFile}\n`);
-      stdout.write(`Known hosts: ${node.connection.knownHostsFile}\n`);
-      stdout.write(`Remote Altitude: ${node.remoteAltitude}\n`);
+      stdout.write(`Pairing ticket: ${node.connection.ticket}\n`);
     }
     return 0;
   }
 
   if (subcommand === "check") {
-    const parsed = parseArguments(
-      args,
-      new Set(),
-      new Set(["json", "accept-new-host-key"]),
-    );
+    const parsed = parseArguments(args);
     if (parsed.positionals.length !== 1) {
       throw new CliUsageError("node check requires exactly one node id");
     }
     const id = parsed.positionals[0]!;
     const node = await registry.get(id);
     if (node === undefined) throw new Error(`Node ${id} is not registered`);
-    const runner = options.commandRunner ?? new BunCommandRunner();
-    const result = await runner.run(buildRemoteCommandSpec(
-      node.connection,
-      [node.remoteAltitude, "version"],
-      { acceptNewHostKey: parsed.options.get("accept-new-host-key") === true },
-    ));
-    if (result.exitCode !== 0) {
-      throw new Error(
-        `Node ${id} check failed (${result.exitCode}): ${result.stderr.trim()}`,
-      );
+    const client = await nodeClientFor(paths, node.connection, options);
+    try {
+      const health = await client.health();
+      if (wantsJson(parsed)) writeJson(stdout, health);
+      else stdout.write(`${id} is reachable with Altitude ${health.version}.\n`);
+    } finally {
+      await client.close();
     }
-    const version = result.stdout.trim();
-    if (!version) throw new Error(`Node ${id} returned no Altitude version`);
-    if (wantsJson(parsed)) writeJson(stdout, { nodeId: id, version });
-    else stdout.write(`${id} is reachable with Altitude ${version}.\n`);
     return 0;
   }
 
-  const parsed = parseArguments(args, new Set([
-    "host",
-    "ssh-port",
-    "user",
-    "identity-file",
-    "known-hosts-file",
-    "pigeons-endpoint",
-    "pigeons",
-    "remote-altitude",
-  ]));
+  const parsed = parseArguments(args, new Set(["ticket"]));
   if (parsed.positionals.length !== 1) {
     throw new CliUsageError("node add requires exactly one node id");
   }
-  const required = (name: string): string => {
-    const value = option(parsed, name);
-    if (value === undefined) throw new CliUsageError("node add requires --" + name);
-    return value;
-  };
   const id = parsed.positionals[0]!;
-  const host = option(parsed, "host");
-  const pigeonsEndpoint = option(parsed, "pigeons-endpoint");
-  if ((host === undefined) === (pigeonsEndpoint === undefined)) {
-    throw new CliUsageError(
-      "node add requires exactly one of --host or --pigeons-endpoint",
-    );
-  }
-  if (pigeonsEndpoint !== undefined && option(parsed, "ssh-port") !== undefined) {
-    throw new CliUsageError("--ssh-port is only valid with --host");
-  }
-  if (host !== undefined && option(parsed, "pigeons") !== undefined) {
-    throw new CliUsageError("--pigeons is only valid with --pigeons-endpoint");
-  }
+  const ticket = option(parsed, "ticket");
+  if (ticket === undefined) throw new CliUsageError("node add requires --ticket");
   const node = await registry.put(registeredNode({
     nodeId: id,
-    user: required("user"),
-    identityFile: resolve(required("identity-file")),
-    knownHostsFile: resolve(required("known-hosts-file")),
-    route: host !== undefined
-      ? {
-          kind: "ssh",
-          host,
-          ...(option(parsed, "ssh-port") === undefined
-            ? {}
-            : { port: portNumber(option(parsed, "ssh-port"))! }),
-        }
-      : {
-          kind: "pigeons",
-          endpointId: pigeonsEndpoint!,
-          ...(option(parsed, "pigeons") === undefined
-            ? {}
-            : { pigeonsExecutable: option(parsed, "pigeons")! }),
-        },
-  }, option(parsed, "remote-altitude") ?? "altitude"));
+    ticket,
+  }));
   if (wantsJson(parsed)) writeJson(stdout, node);
   else {
     stdout.write(
@@ -2063,13 +1920,30 @@ async function runNodeCommand(
     || subcommand === "show" || subcommand === "check") {
     return await runNodeRegistryCommand(subcommand, args.slice(1), options, stdout);
   }
+  if (subcommand === "ticket") {
+    const parsed = parseArguments(args.slice(1));
+    if (parsed.positionals.length !== 0) throw new CliUsageError("node ticket does not take positional arguments");
+    const paths = resolveAltitudePaths(options.env ?? process.env);
+    await ensureAltitudePaths(paths);
+    const config = await readLocalConfig(paths.config);
+    if (config === undefined) throw new Error("Altitude is not set up yet. Run `altitude setup` first.");
+    const identity = await bindPersistentIrohIdentity(join(paths.nodes, "identity"));
+    try {
+      const ticket = await nodeTicketFor(config.node.id, identity);
+      if (wantsJson(parsed)) writeJson(stdout, { nodeId: config.node.id, ticket });
+      else stdout.write(`${ticket}\n`);
+    } finally {
+      await identity.endpoint.close();
+    }
+    return 0;
+  }
   if (subcommand !== "serve") throw new CliUsageError(`Unknown node command: ${subcommand}`);
-  const parsed = parseArguments(args.slice(1), new Set(["host", "port", "runtime"]), new Set());
+  const parsed = parseArguments(args.slice(1), new Set(["host", "port"]), new Set());
   if (parsed.positionals.length !== 0) throw new CliUsageError("node serve does not take positional arguments");
   const paths = resolveAltitudePaths(options.env ?? process.env);
   await ensureAltitudePaths(paths);
   const config = await readLocalConfig(paths.config);
-  const runtime = runtimeKind(option(parsed, "runtime") ?? config?.runtime);
+  if (config === undefined) throw new Error("Altitude is not set up yet. Run `altitude setup` first.");
   const port = portNumber(option(parsed, "port")) ?? config?.node.port;
   const hostname = option(parsed, "host") ?? config?.node.bindHost;
   using store = new TaskStore(paths.database, {
@@ -2077,9 +1951,8 @@ async function runNodeCommand(
     ...(options.createId === undefined ? {} : { createId: options.createId }),
   });
   const grants = new TaskMcpGrantStore(store.database, options.clock);
-  const launcher = new CapsuleProcessLauncher(runtime);
+  const launcher = new CapsuleProcessLauncher();
   const service = createAltitudeNodeService({
-    runtime,
     store,
     grants,
     executor: new ProcessTaskToolExecutor(launcher),
@@ -2095,9 +1968,7 @@ async function runNodeCommand(
         "127.0.0.1",
         "localhost",
         "[::1]",
-        "host.docker.internal",
-        "host.container.internal",
-        new URL(config.node.capsuleMcpEndpoint).hostname,
+        MICROSANDBOX_HOST_IPV4,
       ])],
     }),
   });
@@ -2106,12 +1977,23 @@ async function runNodeCommand(
     ...(hostname === undefined ? {} : { hostname }),
     ...(port === undefined ? {} : { port }),
   });
-  const workerCompatible = config !== undefined
-    && runtime === config.runtime
-    && port === config.node.port
+  const irohIdentity = await bindPersistentIrohIdentity(join(paths.nodes, "identity"));
+  let irohNode;
+  try {
+    irohNode = await serveIrohNode({
+      nodeId: config.node.id,
+      identity: irohIdentity,
+      handlers: irohTransferHandlers(config, paths, store, options),
+    });
+  } catch (error) {
+    await irohIdentity.endpoint.close().catch(() => undefined);
+    await server.close();
+    throw error;
+  }
+  const workersEnabled = port === config.node.port
     && hostname === config.node.bindHost;
   const retrySessions = new TaskAgentSessionStore(store.database, options.clock);
-  const retryWorker = !workerCompatible ? undefined : new NodeScheduledActionWorker(
+  const retryWorker = !workersEnabled ? undefined : new AgentRetryWorker(
     store,
     createManagedAgentRetryExecutor({
       tasks: store,
@@ -2129,7 +2011,7 @@ async function runNodeCommand(
       ),
     },
   );
-  const dispatchWorker = !workerCompatible || config === undefined
+  const dispatchWorker = !workersEnabled
     ? undefined
     : new NodeScheduledActionKindWorker(store, {
         kind: TASK_DISPATCH_ACTION_KIND,
@@ -2168,7 +2050,7 @@ async function runNodeCommand(
           `Altitude dispatch worker: ${error instanceof Error ? error.message : String(error)}\n`,
         ),
       });
-  const trackerInputWorker = !workerCompatible
+  const trackerInputWorker = !workersEnabled
     ? undefined
     : new NodeOutboxTopicWorker(store, {
         topic: LINEAR_INPUT_ROUTE_TOPIC,
@@ -2195,24 +2077,40 @@ async function runNodeCommand(
           `Altitude Linear input worker: ${error instanceof Error ? error.message : String(error)}\n`,
         ),
       });
+  const projectionWorker = !workersEnabled
+    ? undefined
+    : createLinearProjectionWorker({
+        store,
+        ...(linearAccessToken(options.env ?? process.env) === undefined
+          ? {}
+          : { accessToken: linearAccessToken(options.env ?? process.env)! }),
+        onError: (error) => (options.stderr ?? process.stderr).write(
+          `Altitude Linear projection worker: ${error instanceof Error ? error.message : String(error)}\n`,
+        ),
+      });
   stdout.write(
-    `Altitude node listening at ${server.url.toString()} (${runtime}`
-      + (retryWorker === undefined ? "" : ", retry, dispatch, and tracker workers active")
+    `Altitude node listening at ${server.url.toString()} (microsandbox`
+      + (retryWorker === undefined ? "" : ", retry, dispatch, and tracker-input workers active")
+      + (projectionWorker === undefined ? "" : ", Linear projection active")
       + ")\n",
   );
-  if (config !== undefined && !workerCompatible) {
-    stdout.write("Automatic retries are inactive because node runtime/listener overrides differ from the saved setup.\n");
+  stdout.write(`Iroh route active for ${config.node.id}; run \`altitude node ticket\` to pair it.\n`);
+  if (!workersEnabled) {
+    stdout.write("Automatic retries are inactive because listener overrides differ from the saved setup.\n");
   }
   try {
     retryWorker?.start();
     dispatchWorker?.start();
     trackerInputWorker?.start();
+    projectionWorker?.start();
     await waitForShutdownSignal();
   } finally {
     await Promise.all([
       retryWorker?.close(),
       dispatchWorker?.close(),
       trackerInputWorker?.close(),
+      projectionWorker?.close(),
+      irohNode.close(),
     ]);
     await server.close();
   }
@@ -2223,31 +2121,19 @@ function setupConfig(
   parsed: ParsedArguments,
   existing: AltitudeLocalConfig | undefined,
 ): AltitudeLocalConfig {
-  const runtime = runtimeKind(option(parsed, "runtime") ?? existing?.runtime);
-  const base = existing?.runtime === runtime ? existing : defaultLocalConfig(runtime);
+  const base = existing ?? defaultLocalConfig();
   const nodePort = portNumber(option(parsed, "node-port")) ?? base.node.port;
-  const capsuleMcpEndpoint = option(parsed, "node-url")
-    ?? (option(parsed, "node-port") === undefined
-      ? base.node.capsuleMcpEndpoint
-      : (() => {
-          const url = new URL(base.node.capsuleMcpEndpoint);
-          url.port = String(nodePort);
-          return url.toString();
-        })());
   return validateLocalConfig({
     ...base,
-    runtime,
     identity: {
       id: option(parsed, "identity") ?? base.identity.id,
       image: option(parsed, "identity-image") ?? base.identity.image,
     },
     taskImage: option(parsed, "task-image") ?? base.taskImage,
-    network: option(parsed, "network") ?? base.network,
     node: {
       id: option(parsed, "node-id") ?? base.node.id,
       bindHost: option(parsed, "node-host") ?? base.node.bindHost,
       port: nodePort,
-      capsuleMcpEndpoint,
     },
   });
 }
@@ -2264,28 +2150,22 @@ async function runSetupCommand(
   const parsed = parseArguments(
     args,
     new Set([
-      "runtime",
       "identity",
-      "source",
       "identity-image",
       "task-image",
-      "network",
-      "node-url",
       "node-id",
       "node-host",
       "node-port",
     ]),
-    new Set(["json", "skip-build"]),
+    new Set(["json"]),
   );
   if (parsed.positionals.length !== 0) throw new CliUsageError("setup does not take positional arguments");
   const paths = resolveAltitudePaths(options.env ?? process.env);
   await ensureAltitudePaths(paths);
   const config = setupConfig(parsed, await readLocalConfig(paths.config));
   const runner = options.commandRunner ?? new BunCommandRunner();
-  const runtime = config.runtime === "apple-container"
-    ? new AppleContainerRuntime(runner)
-    : new DockerCapsuleRuntime(runner);
-  const launcher = new CapsuleProcessLauncher(config.runtime);
+  const runtime = new MicrosandboxCapsuleRuntime();
+  const launcher = new CapsuleProcessLauncher();
   using store = new TaskStore(paths.database, {
     ...(options.clock === undefined ? {} : { clock: options.clock }),
     ...(options.createId === undefined ? {} : { createId: options.createId }),
@@ -2302,47 +2182,20 @@ async function runSetupCommand(
     ...(options.createId === undefined ? {} : { createId: options.createId }),
   });
   const json = wantsJson(parsed);
-  const buildImages = parsed.options.get("skip-build") !== true;
-  const requestedSource = option(parsed, "source");
-  const candidateSource = resolve(requestedSource ?? process.cwd());
-  const sourceAvailable = buildImages
-    ? await isAltitudeSourceCheckout(candidateSource)
-    : false;
-  if (buildImages && requestedSource !== undefined && !sourceAvailable) {
-    throw new Error(`${candidateSource} is not an Altitude source checkout`);
-  }
-  const standalone = buildImages && !sourceAvailable
-    ? await prepareStandaloneImageContext({
-        parentDirectory: join(paths.cache, "image-builds"),
-        executable: process.execPath,
-      })
-    : undefined;
-  let result;
-  try {
-    result = await setupAltitude({
-      config,
-      sourceDirectory: standalone?.directory
-        ?? candidateSource,
-      buildImages,
-      ...(json ? {} : { progress: (item) => stdout.write(`→ ${item.message}\n`) }),
-    }, {
-      runtimeProbe: runtime,
-      images: new CapsuleImageBuilder(config.runtime, runner),
-      identity: new IdentityCapsuleManager(config.runtime, runner),
-      claude,
-      interactiveCommand: (spec) => launcher.interactiveCommand(spec),
-      runner,
-    });
-  } finally {
-    await standalone?.cleanup();
-  }
+  const result = await setupAltitude({
+    config,
+    ...(json ? {} : { progress: (item) => stdout.write(`→ ${item.message}\n`) }),
+  }, {
+    runtimeProbe: runtime,
+    identity: new IdentityCapsuleManager(runtime),
+    claude,
+    interactiveCommand: (spec) => launcher.interactiveCommand(spec),
+    runner,
+  });
   await writeLocalConfig(paths.config, config);
   if (json) writeJson(stdout, { config, result });
   else {
     stdout.write(`Altitude is ready with Claude Code ${result.claude.version ?? "(version unknown)"}.\n`);
-    if (config.runtime === "apple-container" && new URL(config.node.capsuleMcpEndpoint).hostname === "host.container.internal") {
-      stdout.write("! Apple container host access still needs its explicit host.container.internal DNS rule before the first task run.\n");
-    }
   }
   return 0;
 }
@@ -2415,8 +2268,8 @@ async function runConfigCommand(
 }
 
 async function runTuiCommand(options: CliOptions, stdout: Output): Promise<number> {
-  const terminal = options.terminal ?? new ProcessTuiTerminal();
-  if (!terminal.interactive) {
+  if (options.startTui === undefined
+    && (process.stdin.isTTY !== true || process.stdout.isTTY !== true)) {
     stdout.write(`Altitude's factory overview requires an interactive terminal.\n\n${HELP}`);
     return 2;
   }
@@ -2435,7 +2288,7 @@ async function runTuiCommand(options: CliOptions, stdout: Output): Promise<numbe
     };
   };
   try {
-    return await runAltitudeTui(terminal, {
+    const actions: AltitudeTuiActions = {
       configured: async () => await readLocalConfig(paths.config) !== undefined,
       configureClaude: async () => {
         const exitCode = await runSetupCommand([], options, stdout);
@@ -2509,7 +2362,8 @@ async function runTuiCommand(options: CliOptions, stdout: Output): Promise<numbe
         }
         return continued.notice;
       },
-    });
+    };
+    return await (options.startTui ?? runAltitudeTui)(actions);
   } finally {
     try {
       if (controlPlane !== undefined) {
@@ -2589,8 +2443,8 @@ export async function runCli(args: readonly string[], options: CliOptions = {}):
         return await runIdentityTranscriptStdio(args[1]);
       case "_terminal-supervisor":
         return await runTerminalSupervisor(args[1]);
-      case "_transfer":
-        return await runTransferReceiverCommand(args.slice(1), options, stdout);
+      case "_microsandbox-attach":
+        return await runMicrosandboxAttach(args[1]);
       default:
         throw new CliUsageError(`Unknown command: ${command}`);
     }

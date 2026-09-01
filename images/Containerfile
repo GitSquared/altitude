@@ -7,7 +7,30 @@ RUN bun install --frozen-lockfile
 COPY src ./src
 RUN bun build ./src/cli.ts --compile --outfile /out/altitude
 
-FROM oven/bun:1.4.0-debian
+FROM node:24.6.0-bookworm-slim AS identity
+
+ARG CLAUDE_CODE_VERSION=2.1.248
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git \
+    && npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    && npm cache clean --force \
+    && rm -rf /var/lib/apt/lists/* \
+    && install -d -o 1000 -g 1000 -m 0700 /identity /identity/control /identity/claude /identity/home \
+    && install -d -o 1000 -g 1000 -m 0755 /opt/altitude/bin
+
+COPY --from=altitude-build --chown=1000:1000 /out/altitude /opt/altitude/bin/altitude
+
+ENV PATH="/opt/altitude/bin:${PATH}" \
+    CLAUDE_CONFIG_DIR=/identity/claude \
+    DISABLE_AUTOUPDATER=1 \
+    HOME=/identity/home
+
+USER 1000:1000
+WORKDIR /identity
+CMD ["sleep", "infinity"]
+
+FROM oven/bun:1.4.0-debian AS task
 
 USER root
 RUN apt-get update \
@@ -31,5 +54,4 @@ ENV ALTITUDE_CAPSULE=task \
 
 USER 1000:1000
 WORKDIR /workspace
-
 CMD ["sleep", "infinity"]

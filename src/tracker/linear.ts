@@ -316,10 +316,14 @@ function externalIssueId(payload: Record<string, unknown>): string | undefined {
   const notificationIssue = record(notification?.issue);
   const session = record(payload.agentSession);
   const sessionIssue = record(session?.issue);
+  const data = record(payload.data);
+  const dataIssue = record(data?.issue);
   return text(notification?.issueId)
     ?? text(notificationIssue?.id)
     ?? text(session?.issueId)
-    ?? text(sessionIssue?.id);
+    ?? text(sessionIssue?.id)
+    ?? text(data?.issueId)
+    ?? text(dataIssue?.id);
 }
 
 export function linearWebhookIssueId(value: unknown): string | undefined {
@@ -383,7 +387,10 @@ export function normalizeLinearWebhook(
   const sessionComment = record(session?.comment);
   const activity = record(payload.agentActivity);
   const activityContent = record(activity?.content);
-  const actorId = text(notification?.actorId) ?? text(session?.creatorId);
+  const webhookActor = record(payload.actor);
+  const actorId = text(notification?.actorId)
+    ?? text(session?.creatorId)
+    ?? text(webhookActor?.id);
   if (context.appUserId && actorId === context.appUserId) return null;
 
   const dedupeKey = webhookDedupeKey(payload);
@@ -394,7 +401,8 @@ export function normalizeLinearWebhook(
     const sessionId = text(session?.id);
     if (!sessionId || (context.binding.agentSessionId && sessionId !== context.binding.agentSessionId)) return null;
     const commentId = text(sessionComment?.id) ?? text(session?.sourceCommentId);
-    const body = inputText(activityContent?.body)
+    const body = inputText(activity?.body)
+      ?? inputText(activityContent?.body)
       ?? inputText(sessionComment?.body)
       ?? inputText(payload.promptContext)
       ?? inputText(session?.promptContext);
@@ -429,6 +437,48 @@ export function normalizeLinearWebhook(
         issueId,
         sourceKind: commentId ? "comment" : "agent-session",
         sourceId,
+      }),
+    };
+  }
+
+  if (type === "Comment" && action === "create") {
+    const data = record(payload.data);
+    const commentId = text(data?.id);
+    const parentCommentId = text(data?.parentId);
+    const body = inputText(data?.body);
+    if (!commentId || !body) return null;
+    const correlation = correlationForComment(context, parentCommentId);
+    const mentioned = includesMention(body, context.mentionTokens ?? ["@altitude"]);
+    if (correlation === undefined && !mentioned) return null;
+    return {
+      schema: "altitude.tracker-input/v1",
+      provider: "linear",
+      taskId: context.binding.taskId,
+      text: body,
+      ...(actorId === undefined ? {} : { actorId }),
+      ...(occurredAt === undefined ? {} : { occurredAt }),
+      source: {
+        provider: "linear",
+        surface: parentCommentId ? "issue_comment_reply" : "issue_comment",
+        externalId: commentId,
+        ...(parentCommentId === undefined ? {} : { parentExternalId: parentCommentId }),
+      },
+      route: correlation === undefined
+        ? { reason: "mention", blocking: false }
+        : {
+            reason: "tracked_comment_reply",
+            blocking: isBlockingAttentionClass(correlation.attentionClass),
+            attentionClass: correlation.attentionClass,
+          },
+      ...(correlation === undefined ? {} : {
+        attention: { id: correlation.attentionId, class: correlation.attentionClass },
+      }),
+      dedupeKey,
+      idempotencyKey: semanticInputKey({
+        taskId: context.binding.taskId,
+        issueId,
+        sourceKind: "comment",
+        sourceId: commentId,
       }),
     };
   }

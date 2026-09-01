@@ -123,7 +123,7 @@ describe("task run coordinator", () => {
     const managed = await coordinator.start({
       taskId: "task-1",
       identityId: "claude-personal",
-      mcpEndpoint: "http://host.docker.internal:43100/mcp",
+      mcpEndpoint: "http://172.16.0.5:43100/mcp",
     });
     expect(store.getTask("task-1")?.status).toBe("running");
     expect(agent.requests[0]).toMatchObject({
@@ -161,7 +161,7 @@ describe("task run coordinator", () => {
     const managed = await coordinator.start({
       taskId: "task-1",
       identityId: "claude-personal",
-      mcpEndpoint: "http://host.docker.internal:43100/mcp",
+      mcpEndpoint: "http://172.16.0.5:43100/mcp",
     });
     store.append({
       taskId: "task-1",
@@ -208,7 +208,7 @@ describe("task run coordinator", () => {
     const managed = await coordinator.start({
       taskId: "task-1",
       identityId: "claude-personal",
-      mcpEndpoint: "http://host.docker.internal:43100/mcp",
+      mcpEndpoint: "http://172.16.0.5:43100/mcp",
       model: "claude-sonnet",
     });
     await managed.settle();
@@ -249,14 +249,14 @@ describe("task run coordinator", () => {
     const run = await coordinator.start({
       taskId: "task-1",
       identityId: "claude-personal",
-      mcpEndpoint: "http://host.docker.internal:43100/mcp",
+      mcpEndpoint: "http://172.16.0.5:43100/mcp",
     });
     await run.settle();
     const oldGrant = sessions.get("task-1")?.grantId;
     const take = await coordinator.take({
       taskId: "task-1",
       identityId: "claude-personal",
-      mcpEndpoint: "http://host.docker.internal:43100/mcp",
+      mcpEndpoint: "http://172.16.0.5:43100/mcp",
     });
     expect(store.getTask("task-1")?.status).toBe("taken");
     expect(agent.takes[0]?.sessionId).toBe(run.session.sessionId);
@@ -285,7 +285,7 @@ describe("task run coordinator", () => {
     const first = await coordinator.take({
       taskId: "task-1",
       identityId: "claude-personal",
-      mcpEndpoint: "http://host.docker.internal:43100/mcp",
+      mcpEndpoint: "http://172.16.0.5:43100/mcp",
     });
     expect(store.getTask("task-1")?.status).toBe("taken");
     expect(agent.interactiveStarts).toHaveLength(1);
@@ -301,7 +301,7 @@ describe("task run coordinator", () => {
     const resumed = await coordinator.take({
       taskId: "task-1",
       identityId: "claude-personal",
-      mcpEndpoint: "http://host.docker.internal:43100/mcp",
+      mcpEndpoint: "http://172.16.0.5:43100/mcp",
     });
     expect(agent.takes).toHaveLength(1);
     expect(agent.takes[0]?.sessionId).toBe(first.session.sessionId);
@@ -332,7 +332,7 @@ describe("task run coordinator", () => {
     const failedSpawn = await coordinator.take({
       taskId: "task-1",
       identityId: "claude-personal",
-      mcpEndpoint: "http://host.docker.internal:43100/mcp",
+      mcpEndpoint: "http://172.16.0.5:43100/mcp",
     });
     await failedSpawn.finish();
     expect(sessions.get("task-1")?.runCount).toBe(0);
@@ -340,7 +340,7 @@ describe("task run coordinator", () => {
     const retry = await coordinator.take({
       taskId: "task-1",
       identityId: "claude-personal",
-      mcpEndpoint: "http://host.docker.internal:43100/mcp",
+      mcpEndpoint: "http://172.16.0.5:43100/mcp",
     });
     expect(agent.interactiveStarts).toHaveLength(2);
     expect(agent.takes).toHaveLength(0);

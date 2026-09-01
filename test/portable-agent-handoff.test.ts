@@ -244,7 +244,7 @@ test("a transferred capsule resumes the exact Claude session in another node-loc
   const resumed = await coordinator.start({
     taskId: "task-1",
     identityId: "target-identity",
-    mcpEndpoint: "http://host.docker.internal:4317/mcp",
+    mcpEndpoint: "http://172.16.0.5:4317/mcp",
   });
   expect(requests[0]).toMatchObject({
     taskId: "task-1",

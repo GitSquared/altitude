@@ -95,7 +95,7 @@ describe("task MCP grants", () => {
 
   test("renders a Claude HTTP config while keeping the bearer out of the URL", () => {
     const token = "a".repeat(64);
-    const config = claudeTaskMcpConfig("http://host.container.internal:43100/mcp", token) as {
+    const config = claudeTaskMcpConfig("http://172.16.0.5:43100/mcp", token) as {
       mcpServers: { altitude: { url: string; headers: { Authorization: string } } };
     };
     expect(config.mcpServers.altitude.url).not.toContain(token);

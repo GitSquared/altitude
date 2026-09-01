@@ -2,13 +2,19 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { lstatSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { EndpointAddr, EndpointTicket, SecretKey } from "@number0/iroh";
 
 import {
   FilesystemNodeRegistry,
   registeredNode,
 } from "../src/node/registry.ts";
+import {
+  ALTITUDE_NODE_TICKET_PROTOCOL,
+  encodeAltitudeNodeTicket,
+} from "../src/node/iroh.ts";
 
 const roots: string[] = [];
+const tickets = new Map<string, string>();
 
 afterEach(() => {
   for (const root of roots.splice(0)) {
@@ -17,13 +23,22 @@ afterEach(() => {
 });
 
 function direct(id: string) {
+  let ticket = tickets.get(id);
+  if (ticket === undefined) {
+    const endpointId = SecretKey.generate().public();
+    ticket = encodeAltitudeNodeTicket({
+      schema: ALTITUDE_NODE_TICKET_PROTOCOL,
+      nodeId: id,
+      endpointId: endpointId.toString(),
+      endpointTicket: EndpointTicket.fromAddr(new EndpointAddr(endpointId)).toString(),
+      pairingToken: "a".repeat(43),
+    });
+    tickets.set(id, ticket);
+  }
   return registeredNode({
     nodeId: id,
-    user: "altitude",
-    identityFile: `/state/nodes/${id}/id_ed25519`,
-    knownHostsFile: `/state/nodes/${id}/known_hosts`,
-    route: { kind: "ssh", host: `${id}.example`, port: 2222 },
-  }, "/opt/altitude/bin/altitude");
+    ticket,
+  });
 }
 
 describe("filesystem node registry", () => {
@@ -55,6 +70,6 @@ describe("filesystem node registry", () => {
     expect(() => registeredNode({
       ...direct("straylight").connection,
       nodeId: "unsafe/id",
-    })).toThrow("Unsafe node id");
+    })).toThrow("node id is invalid");
   });
 });

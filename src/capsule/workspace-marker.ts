@@ -7,7 +7,6 @@ import { MAX_CAPSULE_WIRE_BYTES } from "./wire.ts";
 
 export const TASK_WORKSPACE_FORMAT = "altitude.task-workspace/v1" as const;
 export const TASK_WORKSPACE_PENDING_FORMAT = "altitude.task-workspace-pending/v1" as const;
-const LEGACY_TASK_WORKSPACE_FORMAT = "altitude.task-bootstrap/v1";
 
 export interface TaskWorkspaceCheckpointMarker {
   readonly schema: typeof TASK_WORKSPACE_FORMAT;
@@ -44,7 +43,7 @@ function record(value: unknown, label: string): Record<string, unknown> {
 
 function parseMarker(value: unknown): TaskWorkspaceCheckpointMarker {
   const marker = record(value, "Task workspace checkpoint marker");
-  if (marker.schema !== TASK_WORKSPACE_FORMAT && marker.schema !== LEGACY_TASK_WORKSPACE_FORMAT) {
+  if (marker.schema !== TASK_WORKSPACE_FORMAT) {
     throw new Error("Task workspace checkpoint marker schema is invalid");
   }
   requireId(marker.capsuleId, "Task workspace capsule id");

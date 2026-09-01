@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { EndpointAddr, EndpointTicket, SecretKey } from "@number0/iroh";
 
 import {
   FilesystemCapsuleCheckpointStore,
@@ -22,15 +23,15 @@ import {
   writeLocalConfig,
 } from "../src/config/local.ts";
 import { resolveAltitudePaths } from "../src/config/paths.ts";
-import type {
-  CommandResult,
-  CommandRunner,
-  CommandSpec,
-} from "../src/process/command.ts";
 import {
   FilesystemNodeRegistry,
   registeredNode,
 } from "../src/node/registry.ts";
+import {
+  ALTITUDE_NODE_TICKET_PROTOCOL,
+  encodeAltitudeNodeTicket,
+  type AltitudeNodeClient,
+} from "../src/node/iroh.ts";
 import {
   PORTABLE_TASK_STATE_MEMBER,
   decodePortableTaskState,
@@ -63,22 +64,26 @@ function output(): {
   };
 }
 
-test("task send moves a paused capsule through the remote command boundary", async () => {
+test("task send moves a paused capsule through the native node boundary", async () => {
   const sourceRoot = mkdtempSync(join(tmpdir(), "altitude-cli-send-source-"));
   const targetRoot = mkdtempSync(join(tmpdir(), "altitude-cli-send-target-"));
   roots.push(sourceRoot, targetRoot);
   const paths = resolveAltitudePaths({ ALTITUDE_HOME: sourceRoot });
   const config = {
-    ...defaultLocalConfig("docker"),
-    node: { ...defaultLocalConfig("docker").node, id: "macbook" },
+    ...defaultLocalConfig(),
+    node: { ...defaultLocalConfig().node, id: "macbook" },
   };
   await writeLocalConfig(paths.config, config);
+  const endpointId = SecretKey.generate().public();
   await new FilesystemNodeRegistry(paths.nodes).put(registeredNode({
     nodeId: "straylight",
-    user: "altitude",
-    identityFile: "/private/state/id_ed25519",
-    knownHostsFile: "/private/state/known_hosts",
-    route: { kind: "ssh", host: "straylight.example" },
+    ticket: encodeAltitudeNodeTicket({
+      schema: ALTITUDE_NODE_TICKET_PROTOCOL,
+      nodeId: "straylight",
+      endpointId: endpointId.toString(),
+      endpointTicket: EndpointTicket.fromAddr(new EndpointAddr(endpointId)).toString(),
+      pairingToken: "a".repeat(43),
+    }),
   }));
 
   const store = new TaskStore(paths.database, { clock: () => 1_000 });
@@ -175,45 +180,39 @@ test("task send moves a paused capsule through the remote command boundary", asy
     clock: () => Date.parse("2026-08-29T10:05:00.000Z"),
   });
   const targetSessions = new TaskAgentSessionStore(targetStore.database);
-  const commands: CommandSpec[] = [];
-  const runner: CommandRunner = {
-    async run(spec): Promise<CommandResult> {
-      commands.push(spec);
-      if (spec.args?.at(-1) === "prepare" && spec.stdin instanceof Uint8Array) {
-        const receipt = await receiver.prepare(spec.stdin);
-        return {
-          exitCode: 0,
-          stdout: JSON.stringify(receipt) + "\n",
-          stderr: "",
-        };
-      }
-      if (spec.args?.at(-1) === "activate" && typeof spec.stdin === "string") {
-        const receipt = await receiver.activate(JSON.parse(spec.stdin));
-        const checkpoint = await targetCheckpoints.read(receipt.checkpoint);
-        const state = checkpoint.members.find(
-          (member) => member.path === PORTABLE_TASK_STATE_MEMBER,
-        );
-        if (state === undefined) throw new Error("missing portable task state");
-        activateTransferredTask({
-          store: targetStore,
-          sessions: targetSessions,
-          portableState: decodePortableTaskState(state.bytes),
-          targetIdentityId: "claude-remote",
-          targetNodeId: "straylight",
-          transferId: receipt.transferId,
-          checkpoint: receipt.checkpoint,
-          activatedAt: Date.parse("2026-08-29T10:05:00.000Z"),
-        });
-        return {
-          exitCode: 0,
-          stdout: JSON.stringify(receipt) + "\n",
-          stderr: "",
-        };
-      }
-      return { exitCode: 1, stdout: "", stderr: "unexpected command" };
+  const operations: string[] = [];
+  let closed = false;
+  const client: AltitudeNodeClient = {
+    async health() {
+      operations.push("health");
+      return { nodeId: "straylight", version: "0.0.0" };
     },
-    async runInteractive(): Promise<number> {
-      throw new Error("not used");
+    async prepare(payload) {
+      operations.push("prepare");
+      return await receiver.prepare(payload);
+    },
+    async activate(input) {
+      operations.push("activate");
+      const receipt = await receiver.activate(input);
+      const checkpoint = await targetCheckpoints.read(receipt.checkpoint);
+      const state = checkpoint.members.find(
+        (member) => member.path === PORTABLE_TASK_STATE_MEMBER,
+      );
+      if (state === undefined) throw new Error("missing portable task state");
+      activateTransferredTask({
+        store: targetStore,
+        sessions: targetSessions,
+        portableState: decodePortableTaskState(state.bytes),
+        targetIdentityId: "claude-remote",
+        targetNodeId: "straylight",
+        transferId: receipt.transferId,
+        checkpoint: receipt.checkpoint,
+        activatedAt: Date.parse("2026-08-29T10:05:00.000Z"),
+      });
+      return receipt;
+    },
+    async close() {
+      closed = true;
     },
   };
   const stdout = output();
@@ -222,7 +221,7 @@ test("task send moves a paused capsule through the remote command boundary", asy
     env: { ALTITUDE_HOME: sourceRoot },
     stdout,
     stderr,
-    commandRunner: runner,
+    createNodeClient: async () => client,
     clock: () => Date.parse("2026-08-29T10:05:00.000Z"),
   };
   expect(await runCli([
@@ -234,8 +233,8 @@ test("task send moves a paused capsule through the remote command boundary", asy
   ], options)).toBe(0);
   expect(stderr.value).toBe("");
   expect(stdout.value).toContain("Moved task task-send to straylight");
-  expect(commands).toHaveLength(2);
-  expect(commands.every((command) => command.executable === "ssh")).toBeTrue();
+  expect(operations).toEqual(["prepare", "activate"]);
+  expect(closed).toBeTrue();
 
   using sourceAfter = new TaskStore(paths.database);
   expect(sourceAfter.getTask("task-send")?.status).toBe("transferring");
