@@ -1,3 +1,6 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import type { ReadStream } from "node:tty";
+
 export interface CommandSpec {
   readonly executable: string;
   readonly args?: readonly string[];
@@ -23,6 +26,19 @@ export interface CommandRunner {
     spec: Omit<CommandSpec, "stdin">,
     hooks?: InteractiveCommandHooks,
   ): Promise<number>;
+}
+
+const interactiveInput = new AsyncLocalStorage<ReadStream>();
+
+/**
+ * Bind the TUI's existing stdin reader to interactive children. The child gets
+ * a pipe rather than racing Bun for the terminal's file descriptor.
+ */
+export async function withInteractiveInput<T>(
+  input: ReadStream,
+  action: () => Promise<T>,
+): Promise<T> {
+  return await interactiveInput.run(input, action);
 }
 
 function commandEnvironment(
@@ -54,22 +70,51 @@ export class BunCommandRunner implements CommandRunner {
     spec: Omit<CommandSpec, "stdin">,
     hooks?: InteractiveCommandHooks,
   ): Promise<number> {
+    const input = interactiveInput.getStore();
     const subprocess = Bun.spawn([spec.executable, ...(spec.args ?? [])], {
       ...(spec.cwd === undefined ? {} : { cwd: spec.cwd }),
       env: commandEnvironment(spec.env),
-      stdin: "inherit",
+      stdin: input === undefined ? "inherit" : "pipe",
       stdout: "inherit",
       stderr: "inherit",
     });
-    try {
-      hooks?.started?.();
-    } catch (error) {
-      subprocess.kill("SIGTERM");
-      await subprocess.exited.catch(() => undefined);
-      throw error;
+    const wasRaw = input?.isRaw === true;
+    let inputFailure: unknown;
+    const sink = input === undefined ? undefined : subprocess.stdin;
+    const forward = (chunk: Buffer | string): void => {
+      if (sink === undefined || typeof sink === "number") return;
+      try {
+        sink.write(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+        sink.flush();
+      } catch (error) {
+        inputFailure ??= error;
+        subprocess.kill("SIGTERM");
+      }
+    };
+    if (input !== undefined) {
+      input.setRawMode(true);
+      input.on("data", forward);
+      input.resume();
     }
+    try {
+      try {
+        hooks?.started?.();
+      } catch (error) {
+        subprocess.kill("SIGTERM");
+        await subprocess.exited.catch(() => undefined);
+        throw error;
+      }
 
-    return await subprocess.exited;
+      const exitCode = await subprocess.exited;
+      if (inputFailure !== undefined) throw inputFailure;
+      return exitCode;
+    } finally {
+      if (input !== undefined) {
+        input.removeListener("data", forward);
+        input.setRawMode(wasRaw);
+      }
+      if (sink !== undefined && typeof sink !== "number") sink.end();
+    }
   }
 }
 

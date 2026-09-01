@@ -2168,6 +2168,7 @@ async function runSetupCommand(
   const paths = resolveAltitudePaths(options.env ?? process.env);
   await ensureAltitudePaths(paths);
   const config = setupConfig(parsed, await readLocalConfig(paths.config));
+  const runner = options.commandRunner ?? new BunCommandRunner();
   const runtime = new MicrosandboxCapsuleRuntime();
   const launcher = new CapsuleProcessLauncher();
   using store = new TaskStore(paths.database, {
@@ -2193,7 +2194,8 @@ async function runSetupCommand(
     runtimeProbe: runtime,
     identity: new IdentityCapsuleManager(runtime),
     claude,
-    login: (spec) => launcher.attach(spec),
+    interactiveCommand: (spec) => launcher.interactiveCommand(spec),
+    runner,
   });
   await writeLocalConfig(paths.config, config);
   if (json) writeJson(stdout, { config, result });

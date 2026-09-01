@@ -1,14 +1,17 @@
 import { describe, expect, test } from "bun:test";
 
-import type { AgentAdapter, AgentProbe } from "../src/agent/protocol.ts";
+import type { AgentProbe } from "../src/agent/protocol.ts";
 import { defaultLocalConfig } from "../src/config/local.ts";
+import type { CommandRunner, CommandSpec } from "../src/process/command.ts";
 import { setupAltitude, type SetupProgress } from "../src/setup.ts";
 
-class InteractiveLogin {
+class InteractiveLogin implements CommandRunner {
   interactive = 0;
-  run(spec: ReturnType<AgentAdapter["loginLaunchSpec"]>): Promise<number> {
+  run(): Promise<never> {
+    throw new Error("Unexpected non-interactive command");
+  }
+  runInteractive(spec: Omit<CommandSpec, "stdin">): Promise<number> {
     this.interactive += 1;
-    expect(spec.target).toEqual({ kind: "identity-capsule", identityId: "claude-personal" });
     expect(spec.args).toEqual([]);
     return Promise.resolve(0);
   }
@@ -46,7 +49,11 @@ describe("Altitude first-run setup", () => {
           purpose: "login",
         }),
       },
-      login: (spec) => login.run(spec),
+      interactiveCommand: (spec) => {
+        expect(spec.target).toEqual({ kind: "identity-capsule", identityId: "claude-personal" });
+        return { executable: spec.executable, args: spec.args };
+      },
+      runner: login,
     });
     expect(identities).toHaveLength(1);
     expect(JSON.stringify(identities[0])).not.toContain("workspace");
@@ -71,7 +78,8 @@ describe("Altitude first-run setup", () => {
         probe: async () => ({ installed: true, auth: "authenticated" }),
         loginLaunchSpec: () => { throw new Error("must not login"); },
       },
-      login: () => { throw new Error("must not open login"); },
+      interactiveCommand: () => { throw new Error("must not plan login"); },
+      runner: login,
     });
     expect(login.interactive).toBe(0);
   });
@@ -86,7 +94,8 @@ describe("Altitude first-run setup", () => {
         probe: async () => { throw new Error("must not probe"); },
         loginLaunchSpec: () => { throw new Error("must not login"); },
       },
-      login: () => { throw new Error("must not open login"); },
+      interactiveCommand: () => { throw new Error("must not plan login"); },
+      runner: new InteractiveLogin(),
     })).rejects.toThrow("engine stopped");
   });
 });

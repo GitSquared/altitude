@@ -6,10 +6,12 @@ import {
   render,
   useApp,
   useInput,
+  useStdin,
 } from "ink";
 
 import type { AttentionResolution } from "../core/events.ts";
 import type { DecisionAttention, ReviewAttention, Task, TaskStatus } from "../core/model.ts";
+import { withInteractiveInput } from "../process/command.ts";
 
 export interface AltitudeTuiActions {
   configured(): Promise<boolean>;
@@ -265,6 +267,7 @@ function PromptScreen(props: {
 
 export function AltitudeApp({ actions }: { readonly actions: AltitudeTuiActions }) {
   const { exit, suspendTerminal } = useApp();
+  const { stdin } = useStdin();
   const [phase, setPhase] = useState<"loading" | "welcome" | "board">("loading");
   const [tasks, setTasks] = useState<readonly Task[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -307,7 +310,7 @@ export function AltitudeApp({ actions }: { readonly actions: AltitudeTuiActions 
     let failed = false;
     try {
       await suspendTerminal(async () => {
-        message = await action();
+        message = await withInteractiveInput(stdin, action);
       });
     } catch (error) {
       failed = true;
@@ -320,7 +323,7 @@ export function AltitudeApp({ actions }: { readonly actions: AltitudeTuiActions 
       return;
     }
     await refresh(message);
-  }, [busy, phase, refresh, suspendTerminal]);
+  }, [busy, phase, refresh, stdin, suspendTerminal]);
 
   const selected = useMemo(() => orderedTasks(tasks)[selectedIndex], [selectedIndex, tasks]);
 

@@ -1,4 +1,5 @@
 import type { AgentAdapter, AgentProbe } from "./agent/protocol.ts";
+import type { CommandRunner, CommandSpec } from "./process/command.ts";
 import type { AltitudeLocalConfig } from "./config/local.ts";
 import type { RuntimeProbe } from "./runtime/capsule-runtime.ts";
 import type { IdentityCapsuleManager, IdentityCapsuleEnsureResult } from "./runtime/identity-manager.ts";
@@ -12,7 +13,8 @@ export interface AltitudeSetupDependencies {
   readonly runtimeProbe: { probe(): Promise<RuntimeProbe> };
   readonly identity: Pick<IdentityCapsuleManager, "ensure">;
   readonly claude: Pick<AgentAdapter, "probe" | "loginLaunchSpec">;
-  login(spec: ReturnType<AgentAdapter["loginLaunchSpec"]>): Promise<number>;
+  interactiveCommand(spec: ReturnType<AgentAdapter["loginLaunchSpec"]>): CommandSpec;
+  readonly runner: CommandRunner;
 }
 
 export interface AltitudeSetupResult {
@@ -52,7 +54,9 @@ export async function setupAltitude(input: {
       step: "claude_login",
       message: "Opening Claude inside the persistent identity capsule; finish setup, then exit Claude",
     });
-    const exitCode = await dependencies.login(dependencies.claude.loginLaunchSpec());
+    const exitCode = await dependencies.runner.runInteractive(
+      dependencies.interactiveCommand(dependencies.claude.loginLaunchSpec()),
+    );
     if (exitCode !== 0) throw new Error(`Claude setup exited with status ${exitCode}`);
     claude = await dependencies.claude.probe();
     if (claude.auth !== "authenticated") {

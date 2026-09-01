@@ -4,6 +4,7 @@ import { Volume } from "microsandbox/native";
 
 import { ClaudeCliAdapter } from "../agent/claude-cli.ts";
 import { defaultLocalConfig, DEFAULT_IDENTITY_IMAGE, DEFAULT_TASK_IMAGE } from "../config/local.ts";
+import type { CommandSpec } from "../process/command.ts";
 import { setupAltitude } from "../setup.ts";
 import { SqliteAgentWriterLeaseStore } from "../storage/agent-writer-lease-store.ts";
 import { TaskStore } from "../storage/task-store.ts";
@@ -81,9 +82,13 @@ describe("Microsandbox capsule images", () => {
         runtimeProbe: runtime,
         identity: new IdentityCapsuleManager(runtime),
         claude,
-        login: async (launch) => {
+        interactiveCommand: (launch) => {
           loginLaunches.push(launch);
-          return 17;
+          return { executable: "acceptance-login-boundary" };
+        },
+        runner: {
+          async run(): Promise<never> { throw new Error("setup must not run a host command"); },
+          async runInteractive(_spec: Omit<CommandSpec, "stdin">): Promise<number> { return 17; },
         },
       })).rejects.toThrow("Claude setup exited with status 17");
       expect(progress).toEqual(["runtime", "identity", "claude_probe", "claude_login"]);

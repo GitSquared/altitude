@@ -1,6 +1,5 @@
 import { basename, posix } from "node:path";
 import {
-  AttachOptionsBuilder,
   ExecOptionsBuilder,
   Sandbox,
 } from "microsandbox/native";
@@ -126,26 +125,67 @@ function parseMicrosandboxAttachPayload(encoded: string | undefined): Microsandb
 export async function runMicrosandboxAttach(encoded: string | undefined): Promise<number> {
   const payload = parseMicrosandboxAttachPayload(encoded);
   const sandbox = await (await Sandbox.get(payload.capsuleId)).connectOrStart(true);
-  const options = new AttachOptionsBuilder()
+  const options = new ExecOptionsBuilder()
     .args([...payload.args])
-    .detachKeys("ctrl-g,d");
+    .stdinPipe()
+    .tty(true);
   if (payload.cwd !== undefined) options.cwd(payload.cwd);
   if (payload.env !== undefined) options.envs({ ...payload.env });
-  return await sandbox.attachWithBuilder(payload.executable, options);
-}
+  const handle = await sandbox.execStreamWithBuilder(payload.executable, options);
+  const sink = await handle.takeStdin();
+  if (sink === null) throw new Error("Microsandbox did not expose interactive stdin");
 
-async function attachMicrosandboxProcess(
-  spec: ProcessLaunchSpec & { readonly io: "interactive" },
-): Promise<number> {
-  validateLaunch(spec);
-  if (spec.target.kind === "host") {
-    throw new Error("A capsule process launcher cannot silently execute on the host");
+  const input = process.stdin;
+  const output = process.stdout;
+  const errorOutput = process.stderr;
+  const wasRaw = input.isRaw === true;
+  let inputFailure: unknown;
+  let pendingInput = Promise.resolve();
+  const forwardInput = (chunk: Buffer | string): void => {
+    const bytes = typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk);
+    pendingInput = pendingInput
+      .then(async () => await sink.write(bytes))
+      .catch(async (error) => {
+        inputFailure ??= error;
+        await handle.kill().catch(() => undefined);
+      });
+  };
+  const resize = (): void => {
+    const rows = output.rows;
+    const columns = output.columns;
+    if (Number.isInteger(rows) && rows > 0 && Number.isInteger(columns) && columns > 0) {
+      void handle.resize(rows, columns).catch(() => undefined);
+    }
+  };
+  const terminate = (): void => { void handle.signal(15).catch(() => undefined); };
+
+  if (input.isTTY === true) input.setRawMode(true);
+  input.on("data", forwardInput);
+  output.on("resize", resize);
+  process.on("SIGTERM", terminate);
+  input.resume();
+  resize();
+
+  let exitCode: number | undefined;
+  try {
+    while (true) {
+      const event = await handle.recv();
+      if (event === null) break;
+      if (event.eventType === "stdout" && event.data !== undefined) output.write(event.data);
+      else if (event.eventType === "stderr" && event.data !== undefined) errorOutput.write(event.data);
+      else if (event.eventType === "exited" && event.code !== undefined) exitCode = event.code;
+    }
+    await pendingInput;
+    if (inputFailure !== undefined) throw inputFailure;
+    if (exitCode === undefined) exitCode = (await handle.wait()).code;
+    return exitCode;
+  } finally {
+    input.removeListener("data", forwardInput);
+    output.removeListener("resize", resize);
+    process.removeListener("SIGTERM", terminate);
+    input.pause();
+    if (input.isTTY === true) input.setRawMode(wasRaw);
   }
-  const sandbox = await (await Sandbox.get(targetContainer(spec.target))).connectOrStart(true);
-  const options = new AttachOptionsBuilder().args([...spec.args]);
-  if (spec.cwd !== undefined) options.cwd(spec.cwd);
-  if (spec.env !== undefined) options.envs({ ...spec.env });
-  return await sandbox.attachWithBuilder(spec.executable, options);
 }
 
 class ByteQueue implements AsyncIterable<Uint8Array> {
@@ -251,13 +291,5 @@ export class CapsuleProcessLauncher implements ProcessLauncher {
 
   interactiveCommand(spec: ProcessLaunchSpec & { readonly io: "interactive" }): CommandSpec {
     return microsandboxAttachCommand(spec);
-  }
-
-  /**
-   * Attach the current process directly to a capsule. Setup uses this path so
-   * native login input does not cross Altitude's detached-session relay.
-   */
-  attach(spec: ProcessLaunchSpec & { readonly io: "interactive" }): Promise<number> {
-    return attachMicrosandboxProcess(spec);
   }
 }
