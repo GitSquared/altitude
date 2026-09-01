@@ -20,6 +20,7 @@ export interface AltitudeTuiActions {
   runTask(taskId: string): Promise<void>;
   takeTask(taskId: string): Promise<string | undefined>;
   openShell(taskId: string): Promise<string | undefined>;
+  reviewTask(taskId: string, targetUrl: string): Promise<string | undefined>;
   resolveAttention(
     taskId: string,
     attentionId: string,
@@ -30,6 +31,7 @@ export interface AltitudeTuiActions {
 type TaskGroup = "Needs you" | "Working" | "Ready" | "Done";
 type PromptState =
   | Readonly<{ kind: "new" }>
+  | Readonly<{ kind: "visual"; task: Task }>
   | Readonly<{ kind: "decision"; task: Task; attention: DecisionAttention }>
   | Readonly<{ kind: "review"; task: Task; attention: ReviewAttention }>
   | Readonly<{ kind: "ack"; task: Task; attentionId: string; title: string; summary: string }>;
@@ -148,8 +150,9 @@ export function TaskBoardScreen(props: {
       })}
       {props.notice === undefined ? null : <Notice message={props.notice} />}
       {props.busy ? <Box marginTop={1}><Text color="cyan">Working…</Text></Box> : null}
-      <Box marginTop={1}>
-        <Text dimColor>↑↓ select   enter open/respond   u ack update   r run   s setup   n new   q quit</Text>
+      <Box marginTop={1} flexDirection="column">
+        <Text dimColor>↑↓ select   enter open/respond   u ack update   r run</Text>
+        <Text dimColor>s setup   v visual review   n new   q quit</Text>
       </Box>
     </Box>
   );
@@ -192,6 +195,22 @@ function PromptScreen(props: {
   const prompt = props.prompt;
   if (prompt.kind === "new") {
     return <TextEntry label="What would you like to delegate?" onSubmit={props.onSubmit} onCancel={props.onCancel} />;
+  }
+  if (prompt.kind === "visual") {
+    return (
+      <Box flexDirection="column">
+        <Header subtitle="visual review" />
+        <Text bold>{prompt.task.title}</Text>
+        <Text>Redmarker will open over an already-running local preview.</Text>
+        <Box marginTop={1}>
+          <TextEntry
+            label="Preview origin (for example http://localhost:4173)"
+            onSubmit={props.onSubmit}
+            onCancel={props.onCancel}
+          />
+        </Box>
+      </Box>
+    );
   }
   if (prompt.kind === "ack") {
     return (
@@ -331,6 +350,11 @@ export function AltitudeApp({ actions }: { readonly actions: AltitudeTuiActions 
       void runExternal(async () => await actions.openShell(selected.id));
       return;
     }
+    if (input === "v") {
+      setNotice(undefined);
+      setPrompt({ kind: "visual", task: selected });
+      return;
+    }
     if (input === "u") {
       const update = selected.openUpdates[0];
       setNotice(undefined);
@@ -372,6 +396,9 @@ export function AltitudeApp({ actions }: { readonly actions: AltitudeTuiActions 
       if (active.kind === "new") {
         const created = await actions.createTask(value);
         return await actions.takeTask(created.id);
+      }
+      if (active.kind === "visual") {
+        return await actions.reviewTask(active.task.id, value);
       }
       if (active.kind === "decision") {
         return await actions.resolveAttention(

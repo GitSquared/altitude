@@ -5,6 +5,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  FilesystemCapsuleCheckpointStore,
+  FilesystemCapsuleTransferReceiver,
+  FilesystemRepositorySeedCache,
+  LocalToRemoteCapsuleTransfer,
+  capsuleManifestDigest,
+  createCapsuleCheckpoint,
+  portableCapsulePath,
+  utf8,
+} from "../capsule/index.ts";
+
+import {
   ALTITUDE_NODE_TICKET_PROTOCOL,
   IrohNodeClient,
   bindPersistentIrohIdentity,
@@ -190,34 +201,60 @@ describe("Altitude Iroh route", () => {
   });
 
   test.skipIf(process.env.ALTITUDE_ACCEPTANCE_IROH !== "1")(
-    "moves health and capsule bytes over two native Iroh endpoints",
+    "moves and activates a verified capsule over two native Iroh endpoints",
     async () => {
       const root = mkdtempSync(join(tmpdir(), "altitude-iroh-native-"));
       roots.push(root);
+      const sourceCheckpoints = new FilesystemCapsuleCheckpointStore(join(root, "source-capsules"));
+      const sourceSeeds = new FilesystemRepositorySeedCache(join(root, "source-seeds"));
+      const targetCheckpoints = new FilesystemCapsuleCheckpointStore(join(root, "target-capsules"));
+      const targetSeeds = new FilesystemRepositorySeedCache(join(root, "target-seeds"));
+      const source = createCapsuleCheckpoint({
+        capsuleId: "task-native",
+        taskId: "task-native",
+        revision: 1,
+        checkpointedAt: "2026-09-01T10:00:00.000Z",
+        ownership: {
+          epoch: 1,
+          leaseId: "lease-local",
+          ownerNodeId: "local",
+          status: "active",
+        },
+        repository: {
+          kind: "git",
+          remoteUrl: "https://github.com/gitsquared/altitude.git",
+          defaultBranch: "main",
+          branch: "gaby/native-acceptance",
+          baseCommit: "a".repeat(40),
+          headCommit: "b".repeat(40),
+          bundleMember: null,
+          stagedPatchMember: portableCapsulePath("git/staged.patch"),
+          unstagedPatchMember: portableCapsulePath("git/unstaged.patch"),
+          untracked: [],
+        },
+        members: [
+          { path: portableCapsulePath("git/staged.patch"), bytes: new Uint8Array() },
+          { path: portableCapsulePath("git/unstaged.patch"), bytes: new Uint8Array() },
+          { path: portableCapsulePath("state/acceptance.txt"), bytes: utf8("native Iroh capsule\n") },
+        ],
+      });
+      const sourceReference = await sourceCheckpoints.publish(source);
+      await sourceCheckpoints.activate(sourceReference);
+      const seed = utf8("native Iroh repository seed");
+      await sourceSeeds.put(sourceReference.digest, seed);
+      const receiver = new FilesystemCapsuleTransferReceiver(
+        targetCheckpoints,
+        targetSeeds,
+        "remote",
+      );
       const serverIdentity = await bindPersistentIrohIdentity(join(root, "server"));
-      const preparedPayloads: Uint8Array[] = [];
       const server = await serveIrohNode({
         nodeId: "remote",
         identity: serverIdentity,
         handlers: {
           async health() { return { nodeId: "remote", version: "acceptance" }; },
-          async prepare(payload) {
-            preparedPayloads.push(payload);
-            return {
-              schema: "altitude.target-prepared/v1",
-              transferId: "transfer-native",
-              targetNodeId: "remote",
-              checkpoint: checkpoint(),
-            };
-          },
-          async activate(input) {
-            return {
-              schema: "altitude.target-activation/v1",
-              transferId: input.transferId,
-              targetNodeId: "remote",
-              checkpoint: input.checkpoint,
-            };
-          },
+          prepare: async (payload) => await receiver.prepare(payload),
+          activate: async (input) => await receiver.activate(input),
         },
       });
       const clientIdentity = await bindPersistentIrohIdentity(join(root, "client"));
@@ -228,18 +265,44 @@ describe("Altitude Iroh route", () => {
       );
       try {
         expect(await client.health()).toEqual({ nodeId: "remote", version: "acceptance" });
-        const payload = new TextEncoder().encode("native capsule bytes");
-        expect(await client.prepare(payload)).toMatchObject({
-          schema: "altitude.target-prepared/v1",
+        const coordinator = new LocalToRemoteCapsuleTransfer(
+          sourceCheckpoints,
+          sourceSeeds,
+          "local",
+          client,
+          { now: () => Date.parse("2026-09-01T10:05:00.000Z") },
+        );
+        const prepared = await coordinator.prepare({
+          taskId: "task-native",
+          transferId: "transfer-native",
+          targetNodeId: "remote",
+          targetLeaseId: "lease-remote",
+        });
+        await expect(targetCheckpoints.readActive("task-native")).rejects.toThrow();
+        const committed = await coordinator.commit(prepared);
+        expect(committed.activation).toMatchObject({
+          schema: "altitude.target-activation/v1",
           targetNodeId: "remote",
         });
-        expect(preparedPayloads).toEqual([payload]);
-        expect(await client.activate({ transferId: "transfer-native", checkpoint: checkpoint() }))
-          .toMatchObject({ schema: "altitude.target-activation/v1", targetNodeId: "remote" });
+        for (const checkpoints of [sourceCheckpoints, targetCheckpoints]) {
+          const active = await checkpoints.readActive("task-native");
+          expect(capsuleManifestDigest(active.manifest)).toBe(prepared.targetCheckpoint.digest);
+          expect(active.manifest.ownership).toMatchObject({
+            ownerNodeId: "remote",
+            leaseId: "lease-remote",
+            epoch: 2,
+            status: "active",
+          });
+          expect(new TextDecoder().decode(active.members.find(
+            (member) => member.path === portableCapsulePath("state/acceptance.txt"),
+          )?.bytes)).toBe("native Iroh capsule\n");
+        }
+        expect(await targetSeeds.read(prepared.targetCheckpoint.digest)).toEqual(seed);
       } finally {
         await client.close();
         await server.close();
       }
     },
+    20_000,
   );
 });

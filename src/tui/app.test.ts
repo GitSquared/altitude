@@ -41,6 +41,7 @@ describe("Ink factory overview", () => {
     }));
     expect(output).toContain("The factory is quiet");
     expect(output).toContain("n new");
+    expect(output).toContain("v visual review");
     expect(output).toContain("q quit");
   });
 

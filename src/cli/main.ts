@@ -514,7 +514,7 @@ async function runTaskCommand(
     case "shell":
       return await openTaskShell(args.slice(1), options, stdout);
     case "review":
-      return await reviewManagedTask(args.slice(1), options, stdout);
+      return (await reviewManagedTask(args.slice(1), options, stdout)).exitCode;
     case "send":
       return await sendManagedTask(args.slice(1), options, stdout);
     default:
@@ -1236,7 +1236,7 @@ async function reviewManagedTask(
   args: readonly string[],
   options: CliOptions,
   stdout: Output,
-): Promise<number> {
+): Promise<Readonly<{ exitCode: number; submitted: boolean }>> {
   const parsed = parseArguments(args, new Set(["url", "redmarker"]));
   if (parsed.positionals.length !== 1) {
     throw new CliUsageError("task review requires exactly one task id");
@@ -1336,7 +1336,7 @@ async function reviewManagedTask(
           "No managed visual artifact was received; keep the Redmarker clipboard fallback if you made one.\n",
         );
       }
-      return exitCode;
+      return { exitCode, submitted: false };
     }
     const durableCheckpoint = await checkpointer.capture(taskId);
     if (wantsJson(parsed)) {
@@ -1352,7 +1352,7 @@ async function reviewManagedTask(
         `Added Redmarker artifact ${artifact.artifactId} to task ${taskId}; capsule revision ${durableCheckpoint.revision} is durable.\n`,
       );
     }
-    return exitCode;
+    return { exitCode, submitted: true };
   } finally {
     submissions.revoke(grant.sessionId);
     await node?.close();
@@ -2398,6 +2398,14 @@ async function runTuiCommand(options: CliOptions, stdout: Output): Promise<numbe
         return status?.state === "running"
           ? "Workbench is still running. Press s to reattach; exit it before running or sending this task."
           : "Portable workbench checkpointed.";
+      },
+      reviewTask: async (taskId, targetUrl) => {
+        await ensureControlPlane();
+        const result = await reviewManagedTask([taskId, "--url", targetUrl], options, stdout);
+        if (result.exitCode !== 0) throw new Error(`Redmarker exited with status ${result.exitCode}`);
+        return result.submitted
+          ? "Visual intent added to the portable task capsule."
+          : "Redmarker closed without submitting visual intent.";
       },
       resolveAttention: async (taskId, attentionId, resolution) => {
         await ensureControlPlane();
