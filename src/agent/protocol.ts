@@ -161,7 +161,6 @@ export type AgentTranscriptTransferPlan =
 export interface AgentAdapter {
   readonly capabilities: AgentCapabilities;
   probe(): Promise<AgentProbe>;
-  loginLaunchSpec(): ProcessLaunchSpec & { readonly io: "interactive" };
   start(request: AgentRunRequest): Promise<AgentRun>;
   prepareInteractiveStart(request: AgentInteractiveStartRequest): Promise<AgentInteractiveSession>;
   prepareInteractiveTake(request: AgentTakeRequest): Promise<AgentInteractiveSession>;

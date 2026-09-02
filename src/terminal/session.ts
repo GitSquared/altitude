@@ -287,7 +287,6 @@ export class TerminalSessionManager {
     const socket = createConnection(socketPath);
     const wasRaw = input.isRaw;
     let detached = false;
-    let prefix = false;
     const dimensions = () => ({ cols: output.columns ?? 80, rows: output.rows ?? 24 });
     const resize = () => {
       const connection = createConnection(socketPath, () => {
@@ -299,19 +298,12 @@ export class TerminalSessionManager {
       const bytes = Buffer.from(chunk);
       const forwarded: number[] = [];
       for (const byte of bytes) {
-        if (prefix) {
-          prefix = false;
-          if (byte === 0x64 && allowDetach) {
-            detached = true;
-            socket.end();
-            break;
-          }
-          forwarded.push(0x07, byte);
-        } else if (byte === 0x07) {
-          prefix = true;
-        } else {
-          forwarded.push(byte);
+        if (byte === 0x01 && allowDetach) {
+          detached = true;
+          socket.end();
+          break;
         }
+        forwarded.push(byte);
       }
       if (forwarded.length > 0) socket.write(Buffer.from(forwarded));
     };

@@ -175,7 +175,7 @@ export class MicrosandboxCapsuleRuntime implements CapsuleRuntime {
     const [executable, ...args] = spec.command;
     const sandbox = await runningSandbox(spec.capsuleId);
     if (spec.interactive === true) {
-      const options = new AttachOptionsBuilder().args(args).detachKeys("ctrl-g,d");
+      const options = new AttachOptionsBuilder().args(args).detachKeys("ctrl-a,d");
       if (spec.workdir !== undefined) options.cwd(spec.workdir);
       if (spec.environment !== undefined) options.envs({ ...spec.environment });
       return await sandbox.attachWithBuilder(executable!, options);

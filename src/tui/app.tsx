@@ -7,6 +7,7 @@ import {
   useApp,
   useInput,
   useStdin,
+  useWindowSize,
 } from "ink";
 
 import type { AttentionResolution } from "../core/events.ts";
@@ -19,6 +20,7 @@ export interface AltitudeTuiActions {
   resumeInterruptedTasks(): Promise<Readonly<{ resumed: number; deferred: number }>>;
   listTasks(): Promise<readonly Task[]>;
   createTask(intent: string): Promise<Task>;
+  delegateTask(taskId: string): Promise<string | undefined>;
   runTask(taskId: string): Promise<void>;
   takeTask(taskId: string): Promise<string | undefined>;
   openShell(taskId: string): Promise<string | undefined>;
@@ -28,6 +30,14 @@ export interface AltitudeTuiActions {
     attentionId: string,
     resolution: AttentionResolution,
   ): Promise<string | undefined>;
+}
+
+export async function delegateNewTask(
+  actions: Pick<AltitudeTuiActions, "createTask" | "delegateTask">,
+  intent: string,
+): Promise<string | undefined> {
+  const created = await actions.createTask(intent);
+  return await actions.delegateTask(created.id);
 }
 
 type TaskGroup = "Needs you" | "Working" | "Ready" | "Done";
@@ -76,31 +86,53 @@ function canTake(task: Task): boolean {
     || task.status === "waiting_external" || task.status === "taken";
 }
 
-function Header({ subtitle }: { readonly subtitle: string }) {
+function Header(props: {
+  readonly subtitle: string;
+  readonly meta?: string;
+}) {
   return (
-    <Box flexDirection="column" marginBottom={1}>
-      <Text bold color="cyan">ALTITUDE</Text>
-      <Text dimColor>{subtitle}</Text>
+    <Box justifyContent="space-between" marginBottom={1}>
+      <Text><Text bold color="cyan">ALTITUDE</Text> <Text dimColor>{props.subtitle}</Text></Text>
+      {props.meta === undefined ? null : <Text dimColor>{props.meta}</Text>}
     </Box>
   );
 }
 
-export function WelcomeScreen({ notice }: { readonly notice?: string }) {
+type ScreenDimensions = Readonly<{
+  width?: number;
+  height?: number;
+}>;
+
+function screenBox(dimensions: ScreenDimensions): Readonly<{ width?: number; height?: number }> {
+  return {
+    ...(dimensions.width === undefined ? {} : { width: dimensions.width }),
+    ...(dimensions.height === undefined ? {} : { height: dimensions.height }),
+  };
+}
+
+export function WelcomeScreen(props: ScreenDimensions & { readonly notice?: string }) {
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" paddingX={1} paddingY={1} {...screenBox(props)}>
       <Header subtitle="delegated software factory" />
-      <Text>Your agents work inside isolated capsules. They do not inherit this</Text>
-      <Text>machine&apos;s files, tools, credentials, configuration, or current directory.</Text>
-      <Text>You oversee the work; they operate the factory floor.</Text>
-      <Box flexDirection="column" marginTop={1}>
-        <Text bold>Choose a coding harness</Text>
-        <Text color="cyan">  › Claude Code   <Text dimColor>managed, resumable, sandboxed</Text></Text>
+      <Box borderStyle="round" borderColor="cyan" flexDirection="column" paddingX={2} paddingY={1}>
+        <Text bold>Welcome above the factory floor.</Text>
+        <Box marginTop={1} flexDirection="column">
+          <Text>Your agents work inside isolated capsules. They do not inherit this</Text>
+          <Text>machine&apos;s files, tools, credentials, configuration, or current directory.</Text>
+          <Text>You oversee the work; they operate the factory floor.</Text>
+        </Box>
+        <Box flexDirection="column" marginTop={1}>
+          <Text bold>Choose a coding harness</Text>
+          <Text color="cyan">  › Claude Code   <Text dimColor>managed, resumable, sandboxed</Text></Text>
+        </Box>
+        <Box marginTop={1} flexDirection="column">
+          <Text>Your first real task opens interactively inside the persistent identity capsule.</Text>
+          <Text>Claude can sign in there; later tasks delegate in the background.</Text>
+        </Box>
       </Box>
-      <Box marginTop={1}>
-        <Text>Claude&apos;s native login will open inside a node-local identity capsule.</Text>
-      </Box>
-      {notice === undefined ? null : <Notice message={notice} />}
-      <Box marginTop={1}><Text dimColor>enter continue   q quit</Text></Box>
+      {props.notice === undefined ? null : <Notice message={props.notice} />}
+      <Box flexGrow={1} />
+      <Text dimColor>enter continue   q quit</Text>
     </Box>
   );
 }
@@ -114,48 +146,180 @@ export function TaskBoardScreen(props: {
   readonly selectedIndex: number;
   readonly notice?: string;
   readonly busy?: boolean;
-}) {
+} & ScreenDimensions) {
   const tasks = orderedTasks(props.tasks);
+  const selected = tasks[props.selectedIndex];
+  const needsYou = tasks.filter((task) => taskGroup(task.status) === "Needs you").length;
+  const working = tasks.filter((task) => taskGroup(task.status) === "Working").length;
+  const availableRows = Math.max(3, (props.height ?? 24) - 10);
+  const firstVisible = Math.max(
+    0,
+    Math.min(props.selectedIndex - Math.floor(availableRows / 2), tasks.length - availableRows),
+  );
+  const visible = tasks.slice(firstVisible, firstVisible + availableRows);
+  const wide = (props.width ?? 100) >= 88;
+
+  return (
+    <Box flexDirection="column" paddingX={1} {...screenBox(props)}>
+      <Header
+        subtitle="factory overview"
+        meta={`${tasks.length} capsule${tasks.length === 1 ? "" : "s"} · ${working} working · ${needsYou} need you`}
+      />
+      <Box flexDirection={wide ? "row" : "column"} flexGrow={1} overflow="hidden">
+        <TaskList
+          tasks={tasks}
+          visible={visible}
+          selectedIndex={props.selectedIndex}
+          firstVisible={firstVisible}
+          wide={wide}
+        />
+        <TaskDetails task={selected} wide={wide} />
+      </Box>
+      {props.notice === undefined ? null : <Notice message={props.notice} />}
+      <BoardFooter busy={props.busy === true} wide={wide} />
+    </Box>
+  );
+}
+
+function TaskList(props: {
+  readonly tasks: readonly Task[];
+  readonly visible: readonly Task[];
+  readonly selectedIndex: number;
+  readonly firstVisible: number;
+  readonly wide: boolean;
+}) {
+  return (
+    <Box
+      borderStyle="round"
+      borderColor="gray"
+      flexDirection="column"
+      flexGrow={1}
+      paddingX={1}
+      width={props.wide ? "44%" : "100%"}
+      {...(props.wide ? { marginRight: 1 } : {})}
+      overflow="hidden"
+    >
+      <Text bold>CAPSULES</Text>
+      {props.tasks.length === 0 ? (
+        <Box flexDirection="column" marginTop={1}>
+          <Text>The factory is quiet.</Text>
+          <Text dimColor>Press n to delegate your first task.</Text>
+        </Box>
+      ) : (
+        <>
+          {props.firstVisible > 0 ? <Text dimColor>↑ {props.firstVisible} more</Text> : null}
+          {GROUP_ORDER.map((group) => {
+            const grouped = props.visible.filter((task) => taskGroup(task.status) === group);
+            if (grouped.length === 0) return null;
+            const total = props.tasks.filter((task) => taskGroup(task.status) === group).length;
+            return (
+              <Box key={group} flexDirection="column" marginTop={1}>
+                <Text bold dimColor>{group.toUpperCase()}  {total}</Text>
+                {grouped.map((task) => {
+                  const index = props.tasks.indexOf(task);
+                  const selected = index === props.selectedIndex;
+                  return (
+                    <Text
+                      key={task.id}
+                      {...(selected ? { color: "cyan" as const } : {})}
+                      bold={selected}
+                      wrap="truncate-end"
+                    >
+                      {selected ? "›" : " "} {task.id}  {task.title}
+                    </Text>
+                  );
+                })}
+              </Box>
+            );
+          })}
+          {props.firstVisible + props.visible.length < props.tasks.length ? (
+            <Text dimColor>↓ {props.tasks.length - props.firstVisible - props.visible.length} more</Text>
+          ) : null}
+        </>
+      )}
+    </Box>
+  );
+}
+
+function BoardFooter({ busy, wide }: { readonly busy: boolean; readonly wide: boolean }) {
+  const state = <Text {...(busy ? { color: "cyan" as const } : {})}>{busy ? "● working" : "● ready"}</Text>;
+  if (wide) {
+    return (
+      <>
+        <Box justifyContent="space-between">
+          {state}
+          <Text dimColor>↑↓ select   enter open/respond   n new   s setup   v visual review   q quit</Text>
+        </Box>
+        <Text dimColor>inside a capsule: ctrl-a returns to Altitude without stopping the work</Text>
+      </>
+    );
+  }
   return (
     <Box flexDirection="column">
-      <Header subtitle="factory overview" />
-      {tasks.length === 0 ? (
+      <Box>{state}<Text dimColor>   ↑↓ select   enter open/respond   n new</Text></Box>
+      <Text dimColor>s setup   v visual review   q quit   ctrl-a back from capsule</Text>
+    </Box>
+  );
+}
+
+function statusColor(status: TaskStatus): "cyan" | "green" | "red" | "yellow" | "gray" {
+  if (status === "running" || status === "taken" || status === "provisioning") return "cyan";
+  if (status === "completed") return "green";
+  if (status === "failed" || status === "stopped") return "red";
+  if (status === "waiting_decision" || status === "waiting_review") return "yellow";
+  return "gray";
+}
+
+function TaskDetails({ task, wide }: { readonly task: Task | undefined; readonly wide: boolean }) {
+  if (!wide) return task === undefined ? null : (
+    <Box borderStyle="round" borderColor="cyan" flexDirection="column" paddingX={1} marginTop={1} height={7}>
+      <Text bold color="cyan">{task.id}</Text>
+      <Text wrap="truncate-end">{task.title}</Text>
+      <Text color={statusColor(task.status)}>{task.status} · {task.intentLevel}</Text>
+      {task.activeAttention === null
+        ? <Text dimColor>No blocking attention.</Text>
+        : <Text color="yellow" wrap="truncate-end">{task.activeAttention.class}: {task.activeAttention.title}</Text>}
+    </Box>
+  );
+  return (
+    <Box borderStyle="round" borderColor="cyan" flexDirection="column" paddingX={2} flexGrow={1} overflow="hidden">
+      {task === undefined ? (
         <Box flexDirection="column">
-          <Text>The factory is quiet.</Text>
-          <Text>Press n to delegate your first task.</Text>
+          <Text bold>NO CAPSULE SELECTED</Text>
+          <Text dimColor>Delegate a task to start the factory.</Text>
         </Box>
-      ) : GROUP_ORDER.map((group) => {
-        const grouped = tasks
-          .map((task, index) => ({ task, index }))
-          .filter(({ task }) => taskGroup(task.status) === group);
-        if (grouped.length === 0) return null;
-        return (
-          <Box key={group} flexDirection="column" marginBottom={1}>
-            <Text bold dimColor>{group.toUpperCase()}</Text>
-            {grouped.map(({ task, index }) => (
-              <Box key={task.id} flexDirection="column">
-                <Text {...(index === props.selectedIndex ? { color: "cyan" as const } : {})}>
-                  {index === props.selectedIndex ? "›" : " "} {task.title}
-                </Text>
-                <Text dimColor>
-                  {"    "}{task.status}
-                  {task.activeAttention === null ? "" : ` · ${task.activeAttention.class}`}
-                  {task.openUpdates.length === 0 ? "" : ` · ${task.openUpdates.length} update${task.openUpdates.length === 1 ? "" : "s"}`}
-                </Text>
-                {task.activeAttention === null ? null : (
-                  <Text color="yellow">    ↳ {task.activeAttention.title}: {task.activeAttention.summary}</Text>
-                )}
-              </Box>
-            ))}
+      ) : (
+        <>
+          <Box justifyContent="space-between">
+            <Text bold color="cyan">{task.id}</Text>
+            <Text color={statusColor(task.status)}>{task.status}</Text>
           </Box>
-        );
-      })}
-      {props.notice === undefined ? null : <Notice message={props.notice} />}
-      {props.busy ? <Box marginTop={1}><Text color="cyan">Working…</Text></Box> : null}
-      <Box marginTop={1} flexDirection="column">
-        <Text dimColor>↑↓ select   enter open/respond   u ack update   r run</Text>
-        <Text dimColor>s setup   v visual review   n new   q quit</Text>
-      </Box>
+          <Box marginTop={1} flexDirection="column">
+            <Text bold>{task.title}</Text>
+            <Text dimColor>intent level · {task.intentLevel.replaceAll("_", " ")}</Text>
+          </Box>
+          <Box marginTop={1} flexDirection="column">
+            <Text bold>INTENT</Text>
+            <Text>{task.intent}</Text>
+          </Box>
+          <Box marginTop={1} flexDirection="column">
+            <Text bold>ATTENTION</Text>
+            {task.activeAttention === null ? (
+              <Text dimColor>No blocking attention. The agent can keep moving.</Text>
+            ) : (
+              <>
+                <Text color="yellow" bold>{task.activeAttention.class.toUpperCase()} · {task.activeAttention.title}</Text>
+                <Text>{task.activeAttention.summary}</Text>
+              </>
+            )}
+            {task.openUpdates.length === 0 ? null : (
+              <Text color="cyan">{task.openUpdates.length} open update{task.openUpdates.length === 1 ? "" : "s"}</Text>
+            )}
+          </Box>
+          <Box flexGrow={1} />
+          <Text dimColor>{task.activeAttention === null ? "enter look in · r run headless" : "enter respond"}</Text>
+        </>
+      )}
     </Box>
   );
 }
@@ -193,10 +357,17 @@ function PromptScreen(props: {
   readonly prompt: PromptState;
   readonly onSubmit: (value: string) => void;
   readonly onCancel: () => void;
-}) {
+} & ScreenDimensions) {
   const prompt = props.prompt;
   if (prompt.kind === "new") {
-    return <TextEntry label="What would you like to delegate?" onSubmit={props.onSubmit} onCancel={props.onCancel} />;
+    return (
+      <Box flexDirection="column" paddingX={1} paddingY={1} {...screenBox(props)}>
+        <Header subtitle="new delegation" />
+        <Box borderStyle="round" borderColor="cyan" flexDirection="column" paddingX={2} paddingY={1}>
+          <TextEntry label="What would you like to delegate?" onSubmit={props.onSubmit} onCancel={props.onCancel} />
+        </Box>
+      </Box>
+    );
   }
   if (prompt.kind === "visual") {
     return (
@@ -268,6 +439,7 @@ function PromptScreen(props: {
 export function AltitudeApp({ actions }: { readonly actions: AltitudeTuiActions }) {
   const { exit, suspendTerminal } = useApp();
   const { stdin } = useStdin();
+  const { columns, rows } = useWindowSize();
   const [phase, setPhase] = useState<"loading" | "welcome" | "board">("loading");
   const [tasks, setTasks] = useState<readonly Task[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -303,8 +475,20 @@ export function AltitudeApp({ actions }: { readonly actions: AltitudeTuiActions 
     })();
   }, [actions, refresh]);
 
+  useEffect(() => {
+    if (phase !== "board" || busy || prompt !== undefined) return;
+    const timer = setInterval(() => {
+      void actions.listTasks().then((next) => {
+        const ordered = orderedTasks(next);
+        setTasks(ordered);
+        setSelectedIndex((index) => ordered.length === 0 ? 0 : Math.min(index, ordered.length - 1));
+      }).catch(() => undefined);
+    }, 1_000);
+    return () => clearInterval(timer);
+  }, [actions, busy, phase, prompt]);
+
   const runExternal = useCallback(async (action: () => Promise<string | undefined>) => {
-    if (busy) return;
+    if (busy) return false;
     setBusy(true);
     let message: string | undefined;
     let failed = false;
@@ -320,9 +504,10 @@ export function AltitudeApp({ actions }: { readonly actions: AltitudeTuiActions 
     }
     if (failed && phase === "welcome") {
       setNotice(message);
-      return;
+      return false;
     }
     await refresh(message);
+    return !failed;
   }, [busy, phase, refresh, stdin, suspendTerminal]);
 
   const selected = useMemo(() => orderedTasks(tasks)[selectedIndex], [selectedIndex, tasks]);
@@ -332,10 +517,13 @@ export function AltitudeApp({ actions }: { readonly actions: AltitudeTuiActions 
     if (input === "q" || key.escape) return exit();
     if (phase === "welcome") {
       if (key.return) {
-        void runExternal(async () => {
-          await actions.configureClaude();
-          return undefined;
-        });
+        void (async () => {
+          const configured = await runExternal(async () => {
+            await actions.configureClaude();
+            return undefined;
+          });
+          if (configured) setPrompt({ kind: "new" });
+        })();
       }
       return;
     }
@@ -397,8 +585,7 @@ export function AltitudeApp({ actions }: { readonly actions: AltitudeTuiActions 
     if (active === undefined) return;
     void runExternal(async () => {
       if (active.kind === "new") {
-        const created = await actions.createTask(value);
-        return await actions.takeTask(created.id);
+        return await delegateNewTask(actions, value);
       }
       if (active.kind === "visual") {
         return await actions.reviewTask(active.task.id, value);
@@ -425,14 +612,26 @@ export function AltitudeApp({ actions }: { readonly actions: AltitudeTuiActions 
 
   if (phase === "loading") return <Text color="cyan">Starting Altitude…</Text>;
   if (prompt !== undefined) {
-    return <PromptScreen prompt={prompt} onSubmit={submitPrompt} onCancel={() => setPrompt(undefined)} />;
+    return (
+      <PromptScreen
+        prompt={prompt}
+        onSubmit={submitPrompt}
+        onCancel={() => setPrompt(undefined)}
+        width={columns}
+        height={rows}
+      />
+    );
   }
-  if (phase === "welcome") return <WelcomeScreen {...(notice === undefined ? {} : { notice })} />;
+  if (phase === "welcome") {
+    return <WelcomeScreen width={columns} height={rows} {...(notice === undefined ? {} : { notice })} />;
+  }
   return (
     <TaskBoardScreen
       tasks={tasks}
       selectedIndex={selectedIndex}
       busy={busy}
+      width={columns}
+      height={rows}
       {...(notice === undefined ? {} : { notice })}
     />
   );
@@ -457,6 +656,7 @@ export async function runAltitudeTui(
     stdin,
     stdout,
     stderr,
+    alternateScreen: true,
     exitOnCtrlC: true,
   });
   await instance.waitUntilExit();

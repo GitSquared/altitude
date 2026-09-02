@@ -4,7 +4,6 @@ import { Volume } from "microsandbox/native";
 
 import { ClaudeCliAdapter } from "../agent/claude-cli.ts";
 import { defaultLocalConfig, DEFAULT_IDENTITY_IMAGE, DEFAULT_TASK_IMAGE } from "../config/local.ts";
-import type { CommandSpec } from "../process/command.ts";
 import { setupAltitude } from "../setup.ts";
 import { SqliteAgentWriterLeaseStore } from "../storage/agent-writer-lease-store.ts";
 import { TaskStore } from "../storage/task-store.ts";
@@ -12,7 +11,6 @@ import { identityVolumeName, stableCapsuleName } from "./identity-capsule.ts";
 import { IdentityCapsuleManager } from "./identity-manager.ts";
 import { MicrosandboxCapsuleRuntime } from "./microsandbox.ts";
 import { CapsuleProcessLauncher } from "./process-launcher.ts";
-import type { ProcessLaunchSpec } from "./protocol.ts";
 import { taskVolumeName, TaskCapsuleManager } from "./task-manager.ts";
 
 const enabled = process.env.ALTITUDE_ACCEPTANCE_MICROSANDBOX === "1";
@@ -70,9 +68,8 @@ describe("Microsandbox capsule images", () => {
         installed: true,
         auth: "unauthenticated",
       });
-      const loginLaunches: ProcessLaunchSpec[] = [];
       const progress: string[] = [];
-      await expect(setupAltitude({
+      const prepared = await setupAltitude({
         config: {
           ...defaultLocalConfig(),
           identity: { id: identityId, image: DEFAULT_IDENTITY_IMAGE },
@@ -82,23 +79,9 @@ describe("Microsandbox capsule images", () => {
         runtimeProbe: runtime,
         identity: new IdentityCapsuleManager(runtime),
         claude,
-        interactiveCommand: (launch) => {
-          loginLaunches.push(launch);
-          return { executable: "acceptance-login-boundary" };
-        },
-        runner: {
-          async run(): Promise<never> { throw new Error("setup must not run a host command"); },
-          async runInteractive(_spec: Omit<CommandSpec, "stdin">): Promise<number> { return 17; },
-        },
-      })).rejects.toThrow("Claude setup exited with status 17");
-      expect(progress).toEqual(["runtime", "identity", "claude_probe", "claude_login"]);
-      expect(loginLaunches).toEqual([expect.objectContaining({
-        target: { kind: "identity-capsule", identityId },
-        executable: "claude",
-        args: [],
-        cwd: "/identity",
-        io: "interactive",
-      })]);
+      });
+      expect(prepared.claude.auth).toBe("unauthenticated");
+      expect(progress).toEqual(["runtime", "identity", "claude_probe"]);
 
       expect(await new TaskCapsuleManager(runtime).ensure({
         taskId,

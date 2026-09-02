@@ -158,6 +158,7 @@ export class TaskRunCoordinator {
     readonly taskId: string;
     readonly identityId: string;
     readonly mcpEndpoint: string;
+    readonly background?: boolean;
   }): Promise<ManagedInteractiveTake> {
     let task = this.store.getTask(input.taskId);
     if (task === undefined) throw new Error(`Task ${input.taskId} does not exist`);
@@ -210,7 +211,13 @@ export class TaskRunCoordinator {
           displayName: task.title,
         });
     try {
-      this.#transition(task.id, "taken", "Operator entered the native Claude Code session");
+      this.#transition(
+        task.id,
+        "taken",
+        input.background === true
+          ? "Claude started in a detached native session"
+          : "Operator entered the native Claude Code session",
+      );
     } catch (error) {
       await interactive.release();
       throw error;

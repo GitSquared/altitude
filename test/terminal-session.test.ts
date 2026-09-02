@@ -60,7 +60,7 @@ describe("detachable terminal supervisor", () => {
       output as unknown as WriteStream,
     );
     for (let attempt = 0; attempt < 100 && !output.value.includes("READY"); attempt += 1) await Bun.sleep(10);
-    input.emit("data", Buffer.from([0x07, 0x64]));
+    input.emit("data", Buffer.from([0x01]));
     expect(await attaching).toMatchObject({ outcome: "detached", status: { state: "running" } });
     expect(output.value).toContain("READY");
     expect(input.isRaw).toBeFalse();

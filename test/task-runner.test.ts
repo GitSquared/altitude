@@ -286,8 +286,13 @@ describe("task run coordinator", () => {
       taskId: "task-1",
       identityId: "claude-personal",
       mcpEndpoint: "http://172.16.0.5:43100/mcp",
+      background: true,
     });
     expect(store.getTask("task-1")?.status).toBe("taken");
+    expect(store.getEvents("task-1").at(-1)).toMatchObject({
+      type: "task.state_changed",
+      payload: { to: "taken", reason: "Claude started in a detached native session" },
+    });
     expect(agent.interactiveStarts).toHaveLength(1);
     expect(agent.interactiveStarts[0]?.prompt).toContain("Canonical intent (principles)");
     expect(sessions.get("task-1")?.runCount).toBe(0);

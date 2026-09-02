@@ -50,6 +50,7 @@ import {
   TaskCapsuleManager,
 } from "../runtime/task-manager.ts";
 import { setupAltitude } from "../setup.ts";
+import { createTaskId } from "../core/task-id.ts";
 import { SqliteAgentWriterLeaseStore } from "../storage/agent-writer-lease-store.ts";
 import { TaskAgentSessionStore } from "../storage/task-agent-session-store.ts";
 import { TaskStore } from "../storage/task-store.ts";
@@ -136,7 +137,7 @@ Usage:
   altitude <command> [options]
 
 Commands:
-  setup                       Create the identity capsule and log in to Claude
+  setup                       Prepare the local runtime and identity capsule
   task create <intent>        Create a task at an explicit intention level
   task list                   List tasks
   task show <task-id>         Show task state and event history
@@ -233,9 +234,10 @@ const SETUP_HELP = `Usage:
                  [--node-id <id>] [--node-host <address>] [--node-port <port>]
                  [--json]
 
-Setup pulls the configured OCI image through Microsandbox, creates a private
-identity capsule, and opens Claude Code login inside it when needed. It never
-imports credentials, configuration, or source code from the host.
+Setup pulls the configured OCI image through Microsandbox and creates a private
+identity capsule. Login happens inside the first real task's interactive Claude
+session, never as a separate disposable setup session. Altitude never imports
+credentials, configuration, or source code from the host.
 `;
 
 const CONFIG_HELP = `Usage:
@@ -432,7 +434,8 @@ async function runTaskCommand(
       if (!isIntentLevel(level)) throw new CliUsageError(`Unknown intent level: ${level}`);
       const title = option(parsed, "title")?.trim() || generatedTitle(intent);
       const task = await withStore(options, (store) => store.append({
-        taskId: options.createId?.() ?? crypto.randomUUID(),
+        taskId: options.createId?.()
+          ?? createTaskId((candidate) => store.getTask(candidate) !== undefined),
         type: "task.created",
         payload: { title, intent, intentLevel: level },
         actor: OPERATOR,
@@ -786,6 +789,13 @@ async function managedContext(options: CliOptions): Promise<{
   return { paths, config, runner: options.commandRunner ?? new BunCommandRunner() };
 }
 
+class ManagedClaudeLoginRequiredError extends Error {
+  constructor() {
+    super("Managed Claude needs an interactive login");
+    this.name = "ManagedClaudeLoginRequiredError";
+  }
+}
+
 async function nodeClientFor(
   paths: ReturnType<typeof resolveAltitudePaths>,
   connection: NodeConnection,
@@ -807,6 +817,7 @@ async function ensureManagedIdentity(
   launcher: CapsuleProcessLauncher,
   store: TaskStore,
   options: CliOptions,
+  requireAuthentication = true,
 ): Promise<ClaudeCliAdapter> {
   await new IdentityCapsuleManager(new MicrosandboxCapsuleRuntime()).ensure({
     identityId: config.identity.id,
@@ -821,8 +832,11 @@ async function ensureManagedIdentity(
     ...(options.createId === undefined ? {} : { createId: options.createId }),
   });
   const probe = await agent.probe();
-  if (!probe.installed || probe.auth !== "authenticated") {
-    throw new Error("Managed Claude is not authenticated. Run `altitude setup` to log in inside the identity capsule.");
+  if (!probe.installed) {
+    throw new Error("Claude Code is not installed in the managed identity image.");
+  }
+  if (requireAuthentication && probe.auth !== "authenticated") {
+    throw new ManagedClaudeLoginRequiredError();
   }
   return agent;
 }
@@ -1090,7 +1104,13 @@ async function takeManagedTask(
   });
   try {
     if (terminalStatus === undefined) {
-      const agent = await ensureManagedIdentity(config, launcher, store, options);
+      const agent = await ensureManagedIdentity(
+        config,
+        launcher,
+        store,
+        options,
+        behavior.attach === false,
+      );
       const transcripts = new IdentityTranscriptProvisioner(launcher, config.identity.id);
       await prepareTaskCapsule({
         task,
@@ -1114,6 +1134,7 @@ async function takeManagedTask(
         taskId,
         identityId: config.identity.id,
         mcpEndpoint: capsuleMcpEndpoint(config),
+        background: behavior.attach === false,
       });
       try {
         terminalStatus = await terminals.start({
@@ -1143,7 +1164,7 @@ async function takeManagedTask(
     }
     if (behavior.attach === false) return 0;
     const canDetach = behavior.detachable === true && node.external;
-    if (canDetach) stdout.write("Press Ctrl-G, then d to return to Altitude without stopping Claude.\n");
+    if (canDetach) stdout.write("Press Ctrl-A to return to Altitude without stopping Claude. Use /exit to stop Claude.\n");
     const attached = await terminals.attach(
       taskId,
       process.stdin,
@@ -1220,7 +1241,7 @@ async function openTaskShell(args: readonly string[], options: CliOptions, stdou
     stdout.write(`Workbench checkpointed in capsule revision ${checkpoint.revision}.\n`);
     return status.exitCode;
   }
-  stdout.write("Press Ctrl-G, then d to return to Altitude without stopping this workbench.\n");
+  stdout.write("Press Ctrl-A to return to Altitude without stopping this workbench.\n");
   const attached = await terminals.attach(taskId);
   if (attached.outcome === "detached") {
     stdout.write(`Workbench for ${taskId} is still running; open it again with [s] or \`altitude task shell ${taskId}\`.\n`);
@@ -2168,7 +2189,6 @@ async function runSetupCommand(
   const paths = resolveAltitudePaths(options.env ?? process.env);
   await ensureAltitudePaths(paths);
   const config = setupConfig(parsed, await readLocalConfig(paths.config));
-  const runner = options.commandRunner ?? new BunCommandRunner();
   const runtime = new MicrosandboxCapsuleRuntime();
   const launcher = new CapsuleProcessLauncher();
   using store = new TaskStore(paths.database, {
@@ -2194,13 +2214,16 @@ async function runSetupCommand(
     runtimeProbe: runtime,
     identity: new IdentityCapsuleManager(runtime),
     claude,
-    interactiveCommand: (spec) => launcher.interactiveCommand(spec),
-    runner,
   });
   await writeLocalConfig(paths.config, config);
   if (json) writeJson(stdout, { config, result });
   else {
-    stdout.write(`Altitude is ready with Claude Code ${result.claude.version ?? "(version unknown)"}.\n`);
+    stdout.write(
+      `Altitude is ready with Claude Code ${result.claude.version ?? "(version unknown)"}. `
+        + (result.claude.auth === "authenticated"
+          ? "Your managed identity is signed in.\n"
+          : "Your first task will open interactively so you can sign in there.\n"),
+    );
   }
   return 0;
 }
@@ -2340,7 +2363,7 @@ async function runTuiCommand(options: CliOptions, stdout: Output): Promise<numbe
       configured: async () => await readLocalConfig(paths.config) !== undefined,
       configureClaude: async () => {
         const exitCode = await runSetupCommand([], options, stdout);
-        if (exitCode !== 0) throw new Error(`Claude capsule setup exited with status ${exitCode}`);
+        if (exitCode !== 0) throw new Error(`Claude capsule preparation exited with status ${exitCode}`);
       },
       resumeInterruptedTasks: async () => {
         await ensureControlPlane();
@@ -2353,7 +2376,8 @@ async function runTuiCommand(options: CliOptions, stdout: Output): Promise<numbe
       createTask: async (intent) => {
         await ensureControlPlane();
         return await withStore(options, (store) => {
-          const taskId = options.createId?.() ?? crypto.randomUUID();
+          const taskId = options.createId?.()
+            ?? createTaskId((candidate) => store.getTask(candidate) !== undefined);
           store.append({
             taskId,
             type: "task.created",
@@ -2379,6 +2403,37 @@ async function runTuiCommand(options: CliOptions, stdout: Output): Promise<numbe
         if (exitCode !== 0 && exitCode !== 75) {
           throw new Error(`Managed task exited with status ${exitCode}`);
         }
+      },
+      delegateTask: async (taskId) => {
+        await ensureControlPlane();
+        const firstTask = await withStore(options, (store) => store.listTasks().length === 1);
+        let interactive = firstTask;
+        let exitCode: number;
+        try {
+          exitCode = await takeManagedTask(
+            [taskId],
+            options,
+            stdout,
+            { detachable: true, attach: interactive },
+          );
+        } catch (error) {
+          if (interactive || !(error instanceof ManagedClaudeLoginRequiredError)) throw error;
+          interactive = true;
+          exitCode = await takeManagedTask(
+            [taskId],
+            options,
+            stdout,
+            { detachable: true, attach: true },
+          );
+        }
+        if (exitCode !== 0) throw new Error(`Claude Code exited with status ${exitCode}`);
+        if (interactive) {
+          const status = await new TerminalSessionManager(paths.terminals).status(taskId, "agent");
+          return status?.state === "running"
+            ? "This task is running. Press enter to look in; Ctrl-A returns here without stopping Claude."
+            : "This task is saved. Press r to continue it headlessly or enter to reopen Claude.";
+        }
+        return "Delegated in the background. Press enter to look in; Ctrl-A returns here without stopping Claude.";
       },
       takeTask: async (taskId) => {
         await ensureControlPlane();

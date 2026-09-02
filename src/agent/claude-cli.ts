@@ -28,6 +28,35 @@ const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-
 const PROJECT_DIRECTORY = /^[A-Za-z0-9._-]+$/;
 const MAX_CAPTURE_BYTES = 64 * 1024;
 
+const SAFE_IDENTITY_TOOLS = [
+  "Agent",
+  "AskUserQuestion",
+  "CronCreate",
+  "CronDelete",
+  "CronList",
+  "EndConversation",
+  "EnterPlanMode",
+  "ExitPlanMode",
+  "ListAgents",
+  "ListMcpResourcesTool",
+  "ReadMcpResourceTool",
+  "ReportFindings",
+  "SendMessage",
+  "Skill",
+  "TaskCreate",
+  "TaskGet",
+  "TaskList",
+  "TaskStop",
+  "TaskUpdate",
+  "ToolSearch",
+  "WaitForMcpServers",
+  "WebFetch",
+  "WebSearch",
+  "Workflow",
+] as const;
+
+const PREAPPROVED_IDENTITY_TOOLS = ["Skill", "WebFetch", "WebSearch", "Workflow"] as const;
+
 function insideIdentity(path: string): boolean {
   const normalized = posix.normalize(path);
   return normalized === path && (path === "/identity" || path.startsWith("/identity/"));
@@ -122,11 +151,12 @@ function strictMcpArgs(session: AgentTaskSession): readonly string[] {
     session.mcp.configPath,
     "--strict-mcp-config",
     "--tools",
-    "",
+    SAFE_IDENTITY_TOOLS.join(","),
     "--allowedTools",
-    session.mcp.allowedTools.join(","),
+    [...session.mcp.allowedTools, ...PREAPPROVED_IDENTITY_TOOLS].join(","),
+    "--permission-mode",
+    "dontAsk",
     "--disable-slash-commands",
-    "--dangerously-skip-permissions",
     "--no-chrome",
   ];
 }
@@ -249,18 +279,6 @@ export class ClaudeCliAdapter implements AgentAdapter {
       installed: true,
       ...(parsedVersion === undefined ? {} : { version: parsedVersion }),
       auth,
-    };
-  }
-
-  loginLaunchSpec(): ProcessLaunchSpec & { readonly io: "interactive" } {
-    return {
-      target: { kind: "identity-capsule", identityId: this.#identity.id },
-      executable: this.#executable,
-      args: [],
-      cwd: this.#identity.loginDirectory,
-      env: claudeEnvironment(this.#identity),
-      io: "interactive",
-      purpose: "Open Claude inside the node-local identity capsule for native login",
     };
   }
 

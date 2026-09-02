@@ -114,7 +114,8 @@ describe("CLI", () => {
     expect(await runCli(["setup", "help"], cli.options)).toBe(0);
     expect(cli.stdout.value).toContain("Microsandbox");
     expect(cli.stdout.value).toContain("private\nidentity capsule");
-    expect(cli.stdout.value).toContain("never\nimports credentials");
+    expect(cli.stdout.value).toContain("never imports\ncredentials");
+    expect(cli.stdout.value).toContain("first real task's interactive Claude\nsession");
   });
 
   test("reads and changes only explicit non-secret configuration", async () => {

@@ -175,13 +175,9 @@ describe("Claude CLI adapter", () => {
     expect((await adapter(launcher).probe()).auth).toBe("authenticated");
   });
 
-  test("builds official login and strict native take specs", async () => {
+  test("builds a useful but identity-safe native take spec", async () => {
     const leases = new InMemoryAgentWriterLeaseStore();
     const claude = adapter(new FakeLauncher([]), leases);
-    const login = claude.loginLaunchSpec();
-    expect(login.target).toEqual({ kind: "identity-capsule", identityId: "claude-personal" });
-    expect(login.args).toEqual([]);
-    expect(login.env).toEqual({ CLAUDE_CONFIG_DIR: "/identity/claude" });
 
     const take = await claude.prepareInteractiveTake(request());
     expect(take.launch.target).toEqual({
@@ -191,8 +187,17 @@ describe("Claude CLI adapter", () => {
     });
     expect(take.launch.args).toContain("--resume");
     expect(take.launch.args).toContain("--strict-mcp-config");
-    expect(take.launch.args).toContain("--dangerously-skip-permissions");
-    expect(take.launch.args).toContain("mcp__altitude__bash,mcp__altitude__request_review");
+    expect(take.launch.args).toContain("dontAsk");
+    expect(take.launch.args).not.toContain("--dangerously-skip-permissions");
+    const toolsIndex = take.launch.args.indexOf("--tools");
+    expect(take.launch.args[toolsIndex + 1]).toContain("Agent");
+    expect(take.launch.args[toolsIndex + 1]).toContain("WebSearch");
+    expect(take.launch.args[toolsIndex + 1]).not.toContain("Bash");
+    expect(take.launch.args[toolsIndex + 1]).not.toContain("Read,");
+    const allowedIndex = take.launch.args.indexOf("--allowedTools");
+    expect(take.launch.args[allowedIndex + 1]).toContain(
+      "mcp__altitude__bash,mcp__altitude__request_review",
+    );
     expect(take.launch.env).toEqual({
       CLAUDE_CONFIG_DIR: "/identity/claude",
       CLAUDE_CODE_PROJECT_DIR_NAME: "altitude-task-1",
