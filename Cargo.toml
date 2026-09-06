@@ -1,0 +1,11 @@
+[package]
+name = "altitude"
+version = "0.1.0"
+edition = "2024"
+authors = ["Gabriel Saillard <gabriel@saillard.dev>"]
+description = "A personal, headless intent control plane for delegated coding work."
+license-file = "LICENSE"
+readme = "README.md"
+publish = false
+
+[dependencies]

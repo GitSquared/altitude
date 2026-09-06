@@ -16,6 +16,21 @@ it might not be a good fit if:
 
 altitude comes from my own frustrations with scaling up agentic engineering work, and the belief that agents should empower and accelerate the execution of human intent, rather than steal our attention away.
 
+## Development
+
+The active implementation is a Rust binary at the repository root.
+
+```sh
+cargo run
+```
+
+Check changes with `cargo fmt --check`, `cargo check`, `cargo test`, and
+`cargo clippy -- -D warnings`.
+
+Earlier experiments live in `previous/gpt-v1/` (capabilities) and
+`previous/handwritten-v2/` (UX). They are reference material and are not part
+of the Rust build.
+
 ## License
 
 [Business Source License 1.1](LICENSE) — source available, non-commercial self-hosting permitted. Converts to MIT on 2050-01-01. Commercial use requires a license from the author.
