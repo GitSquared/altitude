@@ -1,0 +1,38 @@
+{
+  "name": "altitude",
+  "version": "0.0.0",
+  "private": true,
+  "description": "An intent control plane for delegated agentic development",
+  "type": "module",
+  "packageManager": "bun@1.4.0",
+  "bin": {
+    "altitude": "./dist/altitude"
+  },
+  "scripts": {
+    "acceptance:iroh": "ALTITUDE_ACCEPTANCE_IROH=1 bun test src/node/iroh.test.ts",
+    "acceptance:microsandbox": "ALTITUDE_ACCEPTANCE_MICROSANDBOX=1 bun test src/runtime/microsandbox.acceptance.test.ts",
+    "build": "bun build ./src/cli.ts --compile --outfile ./dist/altitude",
+    "check": "bun run typecheck && bun run test",
+    "dev": "bun run ./src/cli.ts",
+    "test": "bun run build && bun test test/e2e && bun run test:invariants",
+    "test:e2e": "bun run build && bun test test/e2e",
+    "test:invariants": "bun test test/agent-claude-cli.test.ts test/capsule-bootstrap.test.ts test/capsule-filesystem.test.ts test/capsule-local-git.test.ts test/capsule-transfer-runtime.test.ts test/cli-transfer.test.ts test/core-reducer.test.ts test/identity-control.test.ts test/identity-transcript.test.ts test/intent-submission.test.ts test/interactive-terminal.test.ts test/local-checkpoint.test.ts test/portable-agent-handoff.test.ts test/storage-task-store.test.ts test/task-environment.test.ts test/task-mcp.test.ts test/task-runner.test.ts test/terminal-session.test.ts src/node/iroh.test.ts src/runtime/microsandbox.acceptance.test.ts src/tracker/linear-webhook.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.0.0",
+    "@types/bun": "1.3.11",
+    "@types/react": "19.2.18",
+    "typescript": "6.0.3"
+  },
+  "dependencies": {
+    "@linear/sdk": "92.0.0",
+    "@modelcontextprotocol/server": "2.0.0",
+    "@number0/iroh": "1.1.0",
+    "ink": "7.1.1",
+    "microsandbox": "0.6.16",
+    "react": "19.2.8",
+    "react-devtools-core": "7.0.1",
+    "zod": "4"
+  }
+}
