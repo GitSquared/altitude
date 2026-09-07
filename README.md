@@ -24,6 +24,19 @@ The active implementation is a Rust binary at the repository root.
 cargo run
 ```
 
+For automatic rebuilds and restarts on save (macOS):
+
+```sh
+brew install just watchexec
+just dev
+```
+
+This restarts the app and resets its in-memory state. Press `q` to close the
+TUI; the watcher stays ready for another save. Press Ctrl-C after closing the
+TUI to stop the watcher. Build errors appear in the terminal and the next save
+retries the build. On restart, Watchexec sends SIGTERM and waits for the app
+to restore the terminal and exit.
+
 Check changes with `cargo fmt --check`, `cargo check`, `cargo test`, and
 `cargo clippy -- -D warnings`.
 
