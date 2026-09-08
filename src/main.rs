@@ -12,7 +12,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
     let isolation = MicrosandboxIsolation::new()?;
-    let isolation_status = isolation::prepare(isolation);
+    let isolation_status = isolation::prepare(isolation.clone());
     let mut terminal = ratatui::init();
 
     let result = tui::run(
@@ -20,6 +20,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &mut terminate,
         &mut interrupt,
         isolation_status,
+        isolation,
     )
     .await;
     ratatui::restore();

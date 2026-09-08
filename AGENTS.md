@@ -91,3 +91,6 @@ and implementer of bounded pieces—not an autonomous author of the whole v1.
 - Report the limits of verification explicitly: compilation, simulated
   integration, live sandbox behavior, and remote acceptance are different
   evidence. Do not claim deployment from a local test.
+- Keep automated checks focused: run one relevant compile or lint pass per
+  iteration unless a specific failure calls for more. Gabriel owns interactive
+  QA and will say when broader verification is useful.

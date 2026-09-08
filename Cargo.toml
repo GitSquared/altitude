@@ -21,3 +21,4 @@ microsandbox-filesystem = { version = "0.6.17", default-features = false, featur
 ratatui = "0.30.2"
 throbber-widgets-tui = { version = "0.11.1", default-features = false }
 tokio = { version = "1.45.1", features = ["rt", "macros", "signal", "sync", "time"] }
+tui-term = { version = "0.3.4", default-features = false, features = ["vt100"] }
