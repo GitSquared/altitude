@@ -1,6 +1,43 @@
 # Rebuild and restart the TUI when active Rust sources change.
 dev:
-    watchexec --restart --stop-signal SIGTERM --stop-timeout 2s --wrap-process=none --watch src --watch Cargo.toml --watch Cargo.lock --shell=none -- sh -c 'cargo build && exec ./target/debug/altitude'
+    watchexec --restart --stop-signal SIGTERM --stop-timeout 2s --wrap-process=none --watch src --watch migrations --watch Cargo.toml --watch Cargo.lock --shell=none -- sh -c 'cargo build && exec ./target/debug/altitude'
+
+# Create an immutable, forward-only SQL migration.
+[positional-arguments]
+migration name:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    name="{{name}}"
+    if [[ ! "$name" =~ ^[a-z][a-z0-9_]*$ ]]; then
+        echo "migration names must be lower_snake_case" >&2
+        exit 1
+    fi
+
+    file="migrations/$(date -u +%Y%m%d%H%M%S)_${name}.sql"
+    touch "$file"
+    echo "created $file"
+
+# Open Altitude's local database with sqlite3.
+db:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    case "$(uname -s)" in
+        Darwin) database="$HOME/Library/Application Support/altitude/altitude.db" ;;
+        Linux) database="${XDG_DATA_HOME:-$HOME/.local/share}/altitude/altitude.db" ;;
+        *)
+            echo "just db does not support $(uname -s) yet" >&2
+            exit 1
+            ;;
+    esac
+
+    if [[ ! -f "$database" ]]; then
+        echo "altitude has not created its database yet; run altitude once first" >&2
+        exit 1
+    fi
+
+    exec sqlite3 "$database"
 
 # Run the msb CLI against altitude's isolation state.
 [positional-arguments]

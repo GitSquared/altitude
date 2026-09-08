@@ -1,6 +1,5 @@
 use std::{fs, io::ErrorKind, os::unix::fs::symlink, path::PathBuf};
 
-use directories::ProjectDirs;
 use microsandbox::{
     LocalBackend, Sandbox,
     sandbox::{PullPolicy, SandboxStatus as MicrosandboxStatus, exec::ExecEvent},
@@ -8,6 +7,8 @@ use microsandbox::{
     setup::Setup,
 };
 use tokio::sync::{mpsc, watch};
+
+use crate::config::Config;
 
 use super::{
     IsolationEngine, IsolationError, IsolationStatus, Sandbox as AltitudeSandbox, SandboxStatus,
@@ -25,14 +26,11 @@ pub struct MicrosandboxIsolation {
 }
 
 impl MicrosandboxIsolation {
-    pub fn new() -> Result<Self, IsolationError> {
-        let project_dirs = ProjectDirs::from("", "", "altitude")
-            .ok_or_else(|| IsolationError::new("could not determine altitude's data directory"))?;
-
-        Ok(Self {
-            data_home: project_dirs.data_dir().join("isolation"),
-            socket_safe_home: project_dirs.cache_dir().join("msb"),
-        })
+    pub fn new(config: &Config) -> Self {
+        Self {
+            data_home: config.isolation_data_dir(),
+            socket_safe_home: config.microsandbox_socket_dir(),
+        }
     }
 
     fn ensure_socket_safe_home(&self) -> Result<PathBuf, IsolationError> {

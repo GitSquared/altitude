@@ -4,20 +4,13 @@ use ratatui::{
     Frame,
     layout::{Constraint, HorizontalAlignment, Layout, Rect},
     style::{Style, Stylize},
-    text::{Line, Span},
+    text::Line,
     widgets::{Block, BorderType, Padding, Paragraph},
 };
-use throbber_widgets_tui::{BRAILLE_ONE, Throbber, ThrobberState};
 
-use crate::isolation::{IsolationStatus, Sandbox, SandboxStatus};
+use crate::isolation::{Sandbox, SandboxStatus};
 
-pub fn draw(
-    frame: &mut Frame,
-    isolation_status: &IsolationStatus,
-    spinner: &ThrobberState,
-    sandboxes: &[Sandbox],
-    selected: usize,
-) {
+pub fn draw(frame: &mut Frame, sandboxes: &[Sandbox], selected: usize) {
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
@@ -36,13 +29,10 @@ pub fn draw(
     );
     draw_sandboxes(frame, body, sandboxes, selected);
 
-    let [status, controls] =
-        Layout::horizontal([Constraint::Min(0), Constraint::Min(0)]).areas(footer);
-    frame.render_widget(status_line(isolation_status, spinner), status);
     frame.render_widget(
         Line::from("c create · tab select · enter shell · delete remove · q quit".dim())
             .alignment(HorizontalAlignment::Right),
-        controls,
+        footer,
     );
 }
 
@@ -94,27 +84,4 @@ fn draw_sandboxes(frame: &mut Frame, area: Rect, sandboxes: &[Sandbox], selected
             *area,
         );
     }
-}
-
-fn status_line(status: &IsolationStatus, spinner: &ThrobberState) -> Line<'static> {
-    match status {
-        IsolationStatus::Starting => pending_status("Preparing isolation…", spinner),
-        IsolationStatus::InstallingRuntime => {
-            pending_status("Installing isolation runtime…", spinner)
-        }
-        IsolationStatus::PreparingBaseImage => pending_status("Downloading base image…", spinner),
-        IsolationStatus::Ready => Line::from("Isolation ready".dim()),
-        IsolationStatus::Failed(error) => Line::from(vec![
-            Span::styled("Isolation failed: ", Style::new().red()),
-            Span::from(error.clone()).dim(),
-        ]),
-    }
-}
-
-fn pending_status(label: &'static str, spinner: &ThrobberState) -> Line<'static> {
-    Throbber::default()
-        .label(Span::from(label).dim())
-        .throbber_set(BRAILLE_ONE)
-        .throbber_style(Style::new().cyan())
-        .to_line(spinner)
 }

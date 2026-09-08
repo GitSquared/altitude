@@ -48,15 +48,6 @@ pub enum ShellEvent {
     Failed(String),
 }
 
-impl IsolationStatus {
-    pub fn is_pending(&self) -> bool {
-        matches!(
-            self,
-            Self::Starting | Self::InstallingRuntime | Self::PreparingBaseImage
-        )
-    }
-}
-
 #[derive(Debug)]
 pub struct IsolationError(String);
 

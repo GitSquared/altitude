@@ -6,17 +6,19 @@ use crate::isolation::{
 use crossterm::event::{Event, EventStream, KeyCode, KeyModifiers};
 use futures_util::StreamExt;
 use ratatui::DefaultTerminal;
-use throbber_widgets_tui::ThrobberState;
 use tokio::{
     signal::unix::Signal,
     sync::{mpsc, watch},
     time,
 };
 
+mod boot;
 mod overview;
 mod shell;
 
 use shell::Shell;
+
+pub use boot::{database as boot_database, isolation as boot_isolation};
 
 struct App {
     next_sandbox: usize,
@@ -149,22 +151,13 @@ where
     E: IsolationEngine + Clone + 'static,
 {
     let mut events = EventStream::new();
-    let mut animation = time::interval(Duration::from_millis(80));
     let mut status_refresh = time::interval(Duration::from_secs(2));
-    let mut spinner = ThrobberState::default();
-    let mut status_open = true;
     let mut app = App::new();
     let (app_tx, mut app_rx) = mpsc::unbounded_channel();
 
     loop {
         terminal.draw(|frame| {
-            overview::draw(
-                frame,
-                &isolation_status.borrow(),
-                &spinner,
-                &app.sandboxes,
-                app.selected,
-            );
+            overview::draw(frame, &app.sandboxes, app.selected);
             if let Some(shell) = &app.shell {
                 shell.draw(frame);
             }
@@ -173,12 +166,6 @@ where
         tokio::select! {
             _ = terminate.recv() => return Ok(()),
             _ = interrupt.recv() => return Ok(()),
-            changed = isolation_status.changed(), if status_open => {
-                status_open = changed.is_ok();
-            }
-            _ = animation.tick(), if isolation_status.borrow().is_pending() => {
-                spinner.calc_next();
-            }
             _ = status_refresh.tick(), if !app.sandboxes.is_empty() && app.shell.is_none() => {
                 let ids = app.sandboxes.iter().map(|sandbox| sandbox.id.clone()).collect();
                 if let Ok(sandboxes) = isolation.statuses(ids).await {
