@@ -34,6 +34,10 @@ impl Config {
         self.data_dir.join("isolation")
     }
 
+    pub fn isolation_cache_dir(&self) -> PathBuf {
+        self.cache_dir.join("isolation")
+    }
+
     pub fn microsandbox_socket_dir(&self) -> PathBuf {
         self.cache_dir.join("msb")
     }
