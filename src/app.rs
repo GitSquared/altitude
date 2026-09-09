@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -27,6 +27,7 @@ pub struct TaskRuntime<E> {
     service: TaskService<E>,
     events: mpsc::UnboundedSender<TaskEvent>,
     commands: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<Command>>>>,
+    suspending: Arc<Mutex<HashSet<String>>>,
 }
 
 impl<E> TaskRuntime<E>
@@ -40,6 +41,7 @@ where
                 service,
                 events,
                 commands: Arc::new(Mutex::new(HashMap::new())),
+                suspending: Arc::new(Mutex::new(HashSet::new())),
             },
             receiver,
         )
@@ -105,7 +107,17 @@ where
     }
 
     pub async fn suspend_all(&self) -> Result<(), TaskServiceError> {
-        for result in self.service.suspend_all(self.list().await?).await {
+        let tasks = self.list().await?;
+        let suspending: Vec<_> = tasks
+            .iter()
+            .filter(|task| task.is_resumable())
+            .map(|task| task.id.clone())
+            .collect();
+        self.suspending
+            .lock()
+            .expect("task suspension lock poisoned")
+            .extend(suspending);
+        for result in self.service.suspend_all(tasks).await {
             result?;
         }
         Ok(())
@@ -128,6 +140,7 @@ where
         let service = self.service.clone();
         let events = self.events.clone();
         let commands = Arc::clone(&self.commands);
+        let suspending = Arc::clone(&self.suspending);
         tokio::spawn(async move {
             let mut chunks = Vec::new();
             let mut sequence = 0;
@@ -161,6 +174,18 @@ where
                                 let _ = events.send(TaskEvent::Output { task_id: task.id.clone(), stream, bytes });
                             }
                             event => {
+                                if suspending
+                                    .lock()
+                                    .expect("task suspension lock poisoned")
+                                    .contains(&task.id)
+                                {
+                                    tracing::debug!(task_id = %task.id, "command ended during intentional suspension");
+                                    commands
+                                        .lock()
+                                        .expect("task command lock poisoned")
+                                        .remove(&task.id);
+                                    return;
+                                }
                                 if !chunks.is_empty()
                                     && let Err(error) = service.append_output(&run, &chunks).await
                                 {
