@@ -8,9 +8,9 @@ use ratatui::{
     widgets::{Block, BorderType, Padding, Paragraph},
 };
 
-use crate::isolation::{Sandbox, SandboxStatus};
+use crate::tasks::{Task, TaskStatus};
 
-pub fn draw(frame: &mut Frame, sandboxes: &[Sandbox], selected: usize) {
+pub fn draw(frame: &mut Frame, tasks: &[Task], selected: usize) {
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
@@ -27,7 +27,7 @@ pub fn draw(frame: &mut Frame, sandboxes: &[Sandbox], selected: usize) {
         Line::from(concat!("v", env!("CARGO_PKG_VERSION")).dim()).right_aligned(),
         version,
     );
-    draw_sandboxes(frame, body, sandboxes, selected);
+    draw_tasks(frame, body, tasks, selected);
 
     frame.render_widget(
         Line::from("c create · tab select · enter shell · delete remove · q quit".dim())
@@ -36,10 +36,10 @@ pub fn draw(frame: &mut Frame, sandboxes: &[Sandbox], selected: usize) {
     );
 }
 
-fn draw_sandboxes(frame: &mut Frame, area: Rect, sandboxes: &[Sandbox], selected: usize) {
-    if sandboxes.is_empty() {
+fn draw_tasks(frame: &mut Frame, area: Rect, tasks: &[Task], selected: usize) {
+    if tasks.is_empty() {
         frame.render_widget(
-            Paragraph::new("No sandboxes running".dim()).block(
+            Paragraph::new("No tasks yet".dim()).block(
                 Block::bordered()
                     .border_type(BorderType::Rounded)
                     .padding(Padding::uniform(1)),
@@ -50,7 +50,7 @@ fn draw_sandboxes(frame: &mut Frame, area: Rect, sandboxes: &[Sandbox], selected
     }
 
     let cards = Layout::vertical(
-        sandboxes
+        tasks
             .iter()
             .map(|_| Constraint::Length(4))
             .chain(iter::once(Constraint::Min(0))),
@@ -58,15 +58,17 @@ fn draw_sandboxes(frame: &mut Frame, area: Rect, sandboxes: &[Sandbox], selected
     .spacing(1)
     .split(area);
 
-    for (index, (sandbox, area)) in sandboxes.iter().zip(cards.iter()).enumerate() {
+    for (index, (task, area)) in tasks.iter().zip(cards.iter()).enumerate() {
         let selected = index == selected;
-        let status = match &sandbox.status {
-            SandboxStatus::Starting => Line::from("starting").yellow(),
-            SandboxStatus::Running => Line::from("running").green(),
-            SandboxStatus::Stopping => Line::from("stopping").yellow(),
-            SandboxStatus::Stopped => Line::from("stopped").dim(),
-            SandboxStatus::Paused => Line::from("paused").yellow(),
-            SandboxStatus::Failed(error) => Line::from(format!("failed · {error}")).red(),
+        let status = match &task.status {
+            TaskStatus::Pending => Line::from("pending").yellow(),
+            TaskStatus::InProgress => Line::from("in progress").green(),
+            TaskStatus::Completed => Line::from("completed").dim(),
+            TaskStatus::Errored => Line::from(task.last_error.as_deref().map_or_else(
+                || "errored".to_owned(),
+                |error| format!("errored · {error}"),
+            ))
+            .red(),
         };
         let style = if selected {
             Style::new().white().bold()
@@ -76,7 +78,7 @@ fn draw_sandboxes(frame: &mut Frame, area: Rect, sandboxes: &[Sandbox], selected
         frame.render_widget(
             Paragraph::new(status).style(style).block(
                 Block::bordered()
-                    .title(format!(" {} ", sandbox.id))
+                    .title(format!(" {} ", task.command))
                     .border_type(BorderType::Rounded)
                     .border_style(style)
                     .padding(Padding::horizontal(1)),

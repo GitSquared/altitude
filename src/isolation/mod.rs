@@ -1,4 +1,4 @@
-use std::{error::Error as StdError, fmt, future::Future};
+use std::{error::Error as StdError, fmt, future::Future, path::PathBuf};
 
 use tokio::sync::{mpsc, watch};
 
@@ -15,25 +15,18 @@ pub enum IsolationStatus {
     Failed(String),
 }
 
-#[derive(Clone, Debug)]
-pub struct Sandbox {
-    pub id: String,
-    pub status: SandboxStatus,
-}
-
-#[derive(Clone, Debug)]
-pub enum SandboxStatus {
-    Starting,
-    Running,
-    Stopping,
-    Stopped,
-    Paused,
-    Failed(String),
-}
-
 pub struct ShellSession {
     pub commands: mpsc::UnboundedSender<ShellCommand>,
     pub events: mpsc::UnboundedReceiver<ShellEvent>,
+}
+
+pub struct CommandSession {
+    pub events: mpsc::UnboundedReceiver<CommandEvent>,
+}
+
+pub enum CommandEvent {
+    Exited(i32),
+    Failed(String),
 }
 
 pub enum ShellCommand {
@@ -71,12 +64,17 @@ pub trait IsolationEngine: Send + Sync {
         status: &watch::Sender<IsolationStatus>,
     ) -> impl Future<Output = Result<(), IsolationError>> + Send;
 
-    fn create(&self, id: String) -> impl Future<Output = Result<Sandbox, IsolationError>> + Send;
-
-    fn statuses(
+    fn create(
         &self,
-        ids: Vec<String>,
-    ) -> impl Future<Output = Result<Vec<Sandbox>, IsolationError>> + Send;
+        id: String,
+        snapshot_path: Option<String>,
+    ) -> impl Future<Output = Result<(), IsolationError>> + Send;
+
+    fn run_command(
+        &self,
+        id: String,
+        command: String,
+    ) -> impl Future<Output = Result<CommandSession, IsolationError>> + Send;
 
     fn open_shell(
         &self,
@@ -87,7 +85,17 @@ pub trait IsolationEngine: Send + Sync {
 
     fn remove(&self, id: String) -> impl Future<Output = Result<(), IsolationError>> + Send;
 
-    fn stop_all(&self) -> impl Future<Output = Result<(), IsolationError>> + Send;
+    fn suspend(
+        &self,
+        id: String,
+        snapshot_name: String,
+        snapshots_dir: PathBuf,
+    ) -> impl Future<Output = Result<PathBuf, IsolationError>> + Send;
+
+    fn remove_snapshot(
+        &self,
+        path: PathBuf,
+    ) -> impl Future<Output = Result<(), IsolationError>> + Send;
 }
 
 pub fn prepare(engine: impl IsolationEngine + 'static) -> watch::Receiver<IsolationStatus> {

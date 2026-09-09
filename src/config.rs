@@ -41,4 +41,8 @@ impl Config {
     pub fn microsandbox_socket_dir(&self) -> PathBuf {
         self.cache_dir.join("msb")
     }
+
+    pub fn task_snapshots_dir(&self) -> PathBuf {
+        self.data_dir.join("snapshots")
+    }
 }

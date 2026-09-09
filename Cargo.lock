@@ -57,6 +57,7 @@ dependencies = [
  "throbber-widgets-tui",
  "tokio",
  "tui-term",
+ "uuid",
 ]
 
 [[package]]

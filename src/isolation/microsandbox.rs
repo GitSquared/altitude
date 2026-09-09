@@ -1,18 +1,19 @@
-use std::{fs, io::ErrorKind, os::unix::fs::symlink, path::PathBuf};
+use std::{fs, io::ErrorKind, os::unix::fs::symlink, path::PathBuf, time::Duration};
 
 use microsandbox::{
     LocalBackend, Sandbox,
-    sandbox::{PullPolicy, SandboxStatus as MicrosandboxStatus, exec::ExecEvent},
+    sandbox::{PullPolicy, exec::ExecEvent},
     set_default_backend,
     setup::Setup,
+    snapshot::Snapshot,
 };
 use tokio::sync::{mpsc, watch};
 
 use crate::config::Config;
 
 use super::{
-    IsolationEngine, IsolationError, IsolationStatus, Sandbox as AltitudeSandbox, SandboxStatus,
-    ShellCommand, ShellEvent, ShellSession,
+    CommandEvent, CommandSession, IsolationEngine, IsolationError, IsolationStatus, ShellCommand,
+    ShellEvent, ShellSession,
 };
 
 const BASE_IMAGE: &str = "alpine";
@@ -97,45 +98,49 @@ impl IsolationEngine for MicrosandboxIsolation {
         Ok(())
     }
 
-    async fn create(&self, id: String) -> Result<AltitudeSandbox, IsolationError> {
-        Sandbox::builder(&id)
-            .image(BASE_IMAGE)
-            .pull_policy(PullPolicy::Never)
-            .disable_network()
-            .create()
-            .await
-            .map_err(|error| IsolationError::new(error.to_string()))?;
+    async fn create(
+        &self,
+        id: String,
+        snapshot_path: Option<String>,
+    ) -> Result<(), IsolationError> {
+        let builder = Sandbox::builder(&id).disable_network();
+        match snapshot_path {
+            Some(snapshot_path) => builder.from_snapshot(snapshot_path).create_detached().await,
+            None => {
+                builder
+                    .image(BASE_IMAGE)
+                    .pull_policy(PullPolicy::Never)
+                    .create_detached()
+                    .await
+            }
+        }
+        .map_err(|error| IsolationError::new(error.to_string()))?;
 
-        Ok(AltitudeSandbox {
-            id,
-            status: SandboxStatus::Running,
-        })
+        Ok(())
     }
 
-    async fn statuses(&self, ids: Vec<String>) -> Result<Vec<AltitudeSandbox>, IsolationError> {
-        let mut sandboxes = Vec::with_capacity(ids.len());
+    async fn run_command(
+        &self,
+        id: String,
+        command: String,
+    ) -> Result<CommandSession, IsolationError> {
+        let sandbox = Sandbox::get(&id)
+            .await
+            .map_err(|error| IsolationError::new(error.to_string()))?
+            .connect_or_start()
+            .await
+            .map_err(|error| IsolationError::new(error.to_string()))?;
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
 
-        for id in ids {
-            let status = Sandbox::get(&id)
-                .await
-                .map_err(|error| IsolationError::new(error.to_string()))?
-                .status_snapshot();
-            sandboxes.push(AltitudeSandbox {
-                id,
-                status: match status {
-                    MicrosandboxStatus::Created | MicrosandboxStatus::Stopped => {
-                        SandboxStatus::Stopped
-                    }
-                    MicrosandboxStatus::Starting => SandboxStatus::Starting,
-                    MicrosandboxStatus::Running => SandboxStatus::Running,
-                    MicrosandboxStatus::Draining => SandboxStatus::Stopping,
-                    MicrosandboxStatus::Paused => SandboxStatus::Paused,
-                    MicrosandboxStatus::Crashed => SandboxStatus::Failed("sandbox crashed".into()),
-                },
-            });
-        }
+        tokio::spawn(async move {
+            let event = match sandbox.shell(command).await {
+                Ok(output) => CommandEvent::Exited(output.status().code),
+                Err(error) => CommandEvent::Failed(error.to_string()),
+            };
+            let _ = event_tx.send(event);
+        });
 
-        Ok(sandboxes)
+        Ok(CommandSession { events: event_rx })
     }
 
     async fn open_shell(
@@ -226,7 +231,7 @@ impl IsolationEngine for MicrosandboxIsolation {
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
         sandbox
-            .stop()
+            .stop_with_timeout(Duration::from_secs(10))
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
         sandbox
@@ -235,42 +240,38 @@ impl IsolationEngine for MicrosandboxIsolation {
             .map_err(|error| IsolationError::new(error.to_string()))
     }
 
-    async fn stop_all(&self) -> Result<(), IsolationError> {
-        let mut cursor = None;
-        let mut first_error = None;
-
-        loop {
-            let page = Sandbox::list_with(|list| match &cursor {
-                Some(cursor) => list.limit(100).cursor(cursor),
-                None => list.limit(100),
-            })
+    async fn suspend(
+        &self,
+        id: String,
+        snapshot_name: String,
+        snapshots_dir: PathBuf,
+    ) -> Result<PathBuf, IsolationError> {
+        fs::create_dir_all(&snapshots_dir)
+            .map_err(|error| IsolationError::new(error.to_string()))?;
+        let sandbox = Sandbox::get(&id)
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
+        sandbox
+            .stop_with_timeout(Duration::from_secs(10))
+            .await
+            .map_err(|error| IsolationError::new(error.to_string()))?;
+        let snapshot = Snapshot::builder(snapshot_name)
+            .from_sandbox(&id)
+            .dest_dir(snapshots_dir)
+            .force()
+            .create()
+            .await
+            .map_err(|error| IsolationError::new(error.to_string()))?;
+        sandbox
+            .remove()
+            .await
+            .map_err(|error| IsolationError::new(error.to_string()))?;
+        Ok(snapshot.path().to_owned())
+    }
 
-            for sandbox in page
-                .sandboxes
-                .into_iter()
-                .filter(|sandbox| sandbox.name().starts_with("altitude-"))
-            {
-                if sandbox.status_snapshot().has_active_runtime_state()
-                    && let Err(error) = sandbox.stop().await
-                    && first_error.is_none()
-                {
-                    first_error = Some(IsolationError::new(error.to_string()));
-                }
-                if let Err(error) = sandbox.remove().await
-                    && first_error.is_none()
-                {
-                    first_error = Some(IsolationError::new(error.to_string()));
-                }
-            }
-
-            cursor = page.next_cursor;
-            if cursor.is_none() {
-                break;
-            }
-        }
-
-        first_error.map_or(Ok(()), Err)
+    async fn remove_snapshot(&self, path: PathBuf) -> Result<(), IsolationError> {
+        Snapshot::remove(&path.to_string_lossy(), false)
+            .await
+            .map_err(|error| IsolationError::new(error.to_string()))
     }
 }

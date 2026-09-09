@@ -25,31 +25,14 @@ pub async fn database<T, E>(
 where
     E: Error + Send + Sync + 'static,
 {
-    let mut events = EventStream::new();
-    let mut animation = time::interval(Duration::from_millis(80));
-    let mut shimmer = 0;
-    tokio::pin!(initialize);
-
-    loop {
-        terminal.draw(|frame| draw(frame, "migrating database...", shimmer))?;
-
-        tokio::select! {
-            _ = terminate.recv() => return Ok(None),
-            _ = interrupt.recv() => return Ok(None),
-            result = &mut initialize => return result.map(Some).map_err(io::Error::other),
-            _ = animation.tick() => shimmer = shimmer.wrapping_add(1),
-            event = events.next() => {
-                let Some(event) = event else { return Ok(None) };
-                if let Some(key) = event?.as_key_press_event()
-                    && (key.code == KeyCode::Char('q')
-                        || (key.code == KeyCode::Char('c')
-                            && key.modifiers.contains(KeyModifiers::CONTROL)))
-                {
-                    return Ok(None);
-                }
-            }
-        }
-    }
+    run_future(
+        terminal,
+        terminate,
+        interrupt,
+        "migrating database...",
+        async { initialize.await.map_err(io::Error::other) },
+    )
+    .await
 }
 
 pub async fn isolation(
@@ -88,6 +71,50 @@ pub async fn isolation(
                         || (key.code == KeyCode::Char('c')
                             && key.modifiers.contains(KeyModifiers::CONTROL)))
                 {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+}
+
+pub async fn task_resume<T>(
+    terminal: &mut DefaultTerminal,
+    terminate: &mut Signal,
+    interrupt: &mut Signal,
+    resume: impl Future<Output = T>,
+) -> io::Result<Option<T>> {
+    run_future(terminal, terminate, interrupt, "resuming tasks...", async {
+        Ok(resume.await)
+    })
+    .await
+}
+
+async fn run_future<T>(
+    terminal: &mut DefaultTerminal,
+    terminate: &mut Signal,
+    interrupt: &mut Signal,
+    label: &'static str,
+    operation: impl Future<Output = io::Result<T>>,
+) -> io::Result<Option<T>> {
+    let mut events = EventStream::new();
+    let mut animation = time::interval(Duration::from_millis(80));
+    let mut shimmer = 0;
+    tokio::pin!(operation);
+
+    loop {
+        terminal.draw(|frame| draw(frame, label, shimmer))?;
+        tokio::select! {
+            _ = terminate.recv() => return Ok(None),
+            _ = interrupt.recv() => return Ok(None),
+            result = &mut operation => return result.map(Some),
+            _ = animation.tick() => shimmer = shimmer.wrapping_add(1),
+            event = events.next() => {
+                let Some(event) = event else { return Ok(None) };
+                if let Some(key) = event?.as_key_press_event()
+                    && (key.code == KeyCode::Char('q')
+                        || (key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL))) {
                     return Ok(None);
                 }
             }
