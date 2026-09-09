@@ -1,28 +1,57 @@
+use std::{
+    sync::mpsc::{self, Receiver, Sender},
+    time::{Duration, Instant},
+};
+
+use base64::{Engine, engine::general_purpose::STANDARD};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
     layout::{Constraint, Flex, Layout, Rect},
-    style::Style,
+    style::{Style, Stylize},
     text::Line,
     widgets::{Block, BorderType, Clear},
 };
 use tui_term::{vt100, widget::PseudoTerminal};
 
 pub struct Shell {
-    parser: vt100::Parser,
+    parser: vt100::Parser<ClipboardCallbacks>,
+    clipboard: Receiver<String>,
+    clipboard_notice_until: Option<Instant>,
 }
 
 impl Shell {
     pub fn new(rows: u16, cols: u16, history: Vec<Vec<u8>>) -> Self {
-        let mut parser = vt100::Parser::new(rows, cols, 1_000);
+        let (clipboard_sender, clipboard) = mpsc::channel();
+        let mut parser = vt100::Parser::new_with_callbacks(
+            rows,
+            cols,
+            1_000,
+            ClipboardCallbacks { clipboard_sender },
+        );
         for bytes in history {
             parser.process(&bytes);
         }
-        Self { parser }
+        while clipboard.try_recv().is_ok() {}
+        Self {
+            parser,
+            clipboard,
+            clipboard_notice_until: None,
+        }
     }
 
-    pub fn process(&mut self, bytes: Vec<u8>) {
+    pub fn process(&mut self, bytes: Vec<u8>) -> Option<String> {
         self.parser.process(&bytes);
+        self.clipboard.try_recv().ok()
+    }
+
+    pub fn show_clipboard_confirmation(&mut self) {
+        self.clipboard_notice_until = Some(Instant::now() + Duration::from_secs(2));
+    }
+
+    pub fn has_active_notice(&self) -> bool {
+        self.clipboard_notice_until
+            .is_some_and(|until| Instant::now() < until)
     }
 
     pub fn key_bytes(&self, key: KeyEvent) -> Option<Vec<u8>> {
@@ -50,8 +79,29 @@ impl Shell {
             .border_style(Style::new().cyan())
             .title(" shell ")
             .title_bottom(Line::from(" pgup/pgdn history · ctrl-a back ").right_aligned());
+        let block = if self.has_active_notice() {
+            block.title_bottom(Line::from(" copied to clipboard ").cyan())
+        } else {
+            block
+        };
         frame.render_widget(Clear, area);
         frame.render_widget(PseudoTerminal::new(self.parser.screen()).block(block), area);
+    }
+}
+
+struct ClipboardCallbacks {
+    clipboard_sender: Sender<String>,
+}
+
+impl vt100::Callbacks for ClipboardCallbacks {
+    fn copy_to_clipboard(&mut self, _: &mut vt100::Screen, _: &[u8], data: &[u8]) {
+        let Ok(bytes) = STANDARD.decode(data) else {
+            return;
+        };
+        let Ok(text) = String::from_utf8(bytes) else {
+            return;
+        };
+        let _ = self.clipboard_sender.send(text);
     }
 }
 

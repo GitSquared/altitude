@@ -165,6 +165,7 @@ where
 {
     let mut events = EventStream::new();
     let mut refresh = time::interval(Duration::from_secs(2));
+    let mut shell_notice = time::interval(Duration::from_millis(100));
     let mut app = App::new(tasks);
     loop {
         terminal.draw(|frame| {
@@ -185,6 +186,7 @@ where
                     app.selected = app.selected.min(app.tasks.len().saturating_sub(1));
                 }
             }
+            _ = shell_notice.tick(), if app.shell_has_active_notice() => {}
             Some(event) = task_events.recv() => match event {
                 TaskEvent::Started(Ok(task)) => app.replace_task(task),
                 TaskEvent::Started(Err(_)) => {}
@@ -198,7 +200,15 @@ where
                 TaskEvent::Output { task_id, stream, bytes } => {
                     app.append_output(task_id.clone(), stream, bytes.clone());
                     if let Some(shell) = app.shells.get_mut(&task_id) {
-                        shell.process(bytes);
+                        if let Some(text) = shell.process(bytes) {
+                            match copy_to_clipboard(text) {
+                                Ok(()) => {
+                                    shell.show_clipboard_confirmation();
+                                    tracing::info!(task_id = %task_id, "copied terminal text to clipboard");
+                                }
+                                Err(error) => tracing::error!(task_id = %task_id, %error, "could not copy terminal text"),
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -209,6 +219,20 @@ where
             }
         }
     }
+}
+
+impl App {
+    fn shell_has_active_notice(&self) -> bool {
+        self.open_shell
+            .as_ref()
+            .and_then(|id| self.shells.get(id))
+            .is_some_and(Shell::has_active_notice)
+    }
+}
+
+fn copy_to_clipboard(text: String) -> Result<(), arboard::Error> {
+    let mut clipboard = arboard::Clipboard::new()?;
+    clipboard.set_text(text)
 }
 
 fn set_error(app: &mut App, id: &str, error: TaskServiceError) {
