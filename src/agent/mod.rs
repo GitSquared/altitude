@@ -7,7 +7,7 @@ use std::{
 
 use sqlx::Type;
 
-use crate::isolation::{IsolationEngine, SandboxOptions};
+use crate::isolation::{AgentBaseSandboxSnapshot, IsolationEngine};
 
 mod claude;
 
@@ -56,14 +56,23 @@ impl StdError for AgentError {}
 /// Agent implementations never read the host user's configuration. They expose the
 /// one Altitude-owned directory that may be mounted into their sandboxes instead.
 pub trait AgentEngine: Send + Sync {
-    fn sandbox_options(&self, task_snapshot: Option<String>) -> SandboxOptions;
-
     fn new_conversation_id(&self) -> String;
 
     fn command(&self, conversation_id: &str, prompt: &str, resume: bool) -> String;
 
+    /// Prepares agent-owned profile state, then asks isolation to provision the
+    /// reusable environment described by the implementation's own recipe.
     fn prepare<E: IsolationEngine>(
         &self,
         isolation: &E,
+    ) -> impl Future<Output = Result<AgentBaseSandboxSnapshot, AgentError>> + Send;
+
+    /// Creates one task sandbox, restoring a task snapshot when available or
+    /// using the current agent environment for a fresh task.
+    fn provision_sandbox<E: IsolationEngine>(
+        &self,
+        isolation: &E,
+        sandbox_id: String,
+        task_snapshot: Option<String>,
     ) -> impl Future<Output = Result<(), AgentError>> + Send;
 }

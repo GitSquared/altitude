@@ -1,11 +1,12 @@
-use std::{fs, path::PathBuf, sync::Arc};
-
-use tokio::sync::Mutex;
+use std::{fs, time::Duration};
 use uuid::Uuid;
 
 use crate::{
     config::Config,
-    isolation::{CommandEvent, IsolationEngine, SandboxMount, SandboxOptions},
+    isolation::{
+        AgentBaseSandboxRecipe, AgentBaseSandboxSnapshot, ImagePullPolicy, IsolationEngine,
+        SandboxMount, SandboxOptions,
+    },
 };
 
 use super::{AgentEngine, AgentError, AgentProfile};
@@ -13,12 +14,10 @@ use super::{AgentEngine, AgentError, AgentProfile};
 #[derive(Clone)]
 pub struct ClaudeCode {
     profile: AgentProfile,
-    snapshots_dir: PathBuf,
-    preparation_lock: Arc<Mutex<()>>,
+    base_recipe: AgentBaseSandboxRecipe,
 }
 
-const PREPARATION_SANDBOX: &str = "altitude-claude-setup";
-const SNAPSHOT_NAME: &str = "claude-base";
+const BASE_REFRESH_AFTER: Duration = Duration::from_secs(72 * 60 * 60);
 const DEFAULT_SETTINGS: &str = r#"{
   "tui": "fullscreen",
   "theme": "dark",
@@ -32,14 +31,19 @@ impl ClaudeCode {
     pub fn new(config: &Config) -> Self {
         Self {
             profile: AgentProfile::new(config.agent_profile_dir("claude")),
-            snapshots_dir: config.agent_snapshots_dir("claude"),
-            preparation_lock: Arc::new(Mutex::new(())),
+            base_recipe: AgentBaseSandboxRecipe::new(
+                "claude",
+                config.agent_snapshots_dir("claude"),
+                BASE_REFRESH_AFTER,
+                Self::install_command(),
+            ),
         }
     }
 
-    fn base_sandbox_options(&self, snapshot_path: Option<String>) -> SandboxOptions {
+    fn task_sandbox_options(&self, snapshot_path: Option<String>) -> SandboxOptions {
         SandboxOptions {
             snapshot_path,
+            image_pull_policy: ImagePullPolicy::Never,
             network_enabled: true,
             mounts: vec![SandboxMount {
                 host_path: self.profile.host_config_dir().to_owned(),
@@ -56,14 +60,15 @@ impl ClaudeCode {
         }
     }
 
-    fn snapshot_path(&self) -> PathBuf {
-        self.snapshots_dir.join(SNAPSHOT_NAME)
-    }
-
-    fn install_command(&self) -> &'static str {
+    fn install_command() -> &'static str {
         "wget -qO /etc/apk/keys/claude-code.rsa.pub https://downloads.claude.ai/keys/claude-code.rsa.pub && \\
          printf '%s\\n' https://downloads.claude.ai/claude-code/apk/stable >> /etc/apk/repositories && \\
+         apk upgrade --no-cache && \\
          apk add --no-cache claude-code libgcc libstdc++ ripgrep"
+    }
+
+    fn base_recipe(&self) -> AgentBaseSandboxRecipe {
+        self.base_recipe.clone()
     }
 }
 
@@ -72,12 +77,6 @@ fn shell_quote(value: &str) -> String {
 }
 
 impl AgentEngine for ClaudeCode {
-    fn sandbox_options(&self, task_snapshot: Option<String>) -> SandboxOptions {
-        self.base_sandbox_options(
-            task_snapshot.or_else(|| Some(self.snapshot_path().to_string_lossy().into_owned())),
-        )
-    }
-
     fn new_conversation_id(&self) -> String {
         Uuid::new_v4().to_string()
     }
@@ -97,8 +96,10 @@ impl AgentEngine for ClaudeCode {
         }
     }
 
-    async fn prepare<E: IsolationEngine>(&self, isolation: &E) -> Result<(), AgentError> {
-        let _preparation = self.preparation_lock.lock().await;
+    async fn prepare<E: IsolationEngine>(
+        &self,
+        isolation: &E,
+    ) -> Result<AgentBaseSandboxSnapshot, AgentError> {
         tracing::info!(path = %self.profile.host_config_dir().display(), "preparing Claude profile");
         fs::create_dir_all(self.profile.host_config_dir())
             .map_err(|error| AgentError::new(error.to_string()))?;
@@ -107,61 +108,30 @@ impl AgentEngine for ClaudeCode {
             fs::write(settings_path, DEFAULT_SETTINGS)
                 .map_err(|error| AgentError::new(error.to_string()))?;
         }
-        if self.snapshot_path().exists() {
-            return Ok(());
-        }
-
-        tracing::info!("building Claude base sandbox snapshot");
         isolation
-            .create(
-                PREPARATION_SANDBOX.to_owned(),
-                self.base_sandbox_options(None),
-            )
+            .ensure_base(self.base_recipe())
             .await
-            .map_err(|error| AgentError::new(error.to_string()))?;
-        let result = async {
-            let mut session = isolation
-                .run_command(
-                    PREPARATION_SANDBOX.to_owned(),
-                    self.install_command().to_owned(),
-                )
-                .await
-                .map_err(|error| AgentError::new(error.to_string()))?;
-            loop {
-                let Some(event) = session.events.recv().await else {
-                    return Err(AgentError::new(
-                        "Claude setup connection closed without an exit status",
-                    ));
-                };
-                match event {
-                    CommandEvent::Output { .. } => {}
-                    CommandEvent::Exited(0) => break,
-                    CommandEvent::Exited(code) => {
-                        return Err(AgentError::new(format!(
-                            "Claude setup exited with code {code}"
-                        )));
-                    }
-                    CommandEvent::Failed(error) => return Err(AgentError::new(error)),
-                }
-            }
-            isolation
-                .suspend(
-                    PREPARATION_SANDBOX.to_owned(),
-                    SNAPSHOT_NAME.to_owned(),
-                    self.snapshots_dir.clone(),
-                )
-                .await
-                .map_err(|error| AgentError::new(error.to_string()))
-        }
-        .await;
-        if let Err(error) = &result {
-            tracing::warn!(error = %error, "Claude base sandbox setup failed");
-            if let Err(remove_error) = isolation.remove(PREPARATION_SANDBOX.to_owned()).await {
-                tracing::warn!(error = %remove_error, "could not remove failed Claude setup sandbox");
-            }
-        }
-        result?;
-        tracing::info!(snapshot = %self.snapshot_path().display(), "Claude base sandbox ready");
-        Ok(())
+            .map_err(|error| AgentError::new(error.to_string()))
+    }
+
+    async fn provision_sandbox<E: IsolationEngine>(
+        &self,
+        isolation: &E,
+        sandbox_id: String,
+        task_snapshot: Option<String>,
+    ) -> Result<(), AgentError> {
+        let snapshot_path = match task_snapshot {
+            Some(snapshot_path) => snapshot_path,
+            None => self
+                .prepare(isolation)
+                .await?
+                .path
+                .to_string_lossy()
+                .into_owned(),
+        };
+        isolation
+            .create(sandbox_id, self.task_sandbox_options(Some(snapshot_path)))
+            .await
+            .map_err(|error| AgentError::new(error.to_string()))
     }
 }

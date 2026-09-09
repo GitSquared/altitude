@@ -315,15 +315,6 @@ where
         let sandbox_id = format!("altitude-{}", Uuid::new_v4());
         let resuming_agent_session = task.snapshot_path.is_some();
         tracing::info!(task_id = %task.id, sandbox_id = %sandbox_id, agent = ?task.agent_kind, "starting task");
-        if matches!(task.agent_kind, Some(AgentKind::Claude))
-            && let Err(error) = self.claude.prepare(&self.isolation).await
-        {
-            self.store
-                .mark_errored(&task.id, &error.to_string())
-                .await
-                .map_err(TaskServiceError::Task)?;
-            return Err(TaskServiceError::Agent(error));
-        }
         let command = match task.agent_kind {
             Some(AgentKind::Claude) => {
                 let Some(conversation_id) = task.agent_conversation_id.as_deref() else {
@@ -339,24 +330,31 @@ where
             }
             None => task.command.clone(),
         };
-        if let Err(error) = self
-            .isolation
-            .create(
-                sandbox_id.clone(),
-                match task.agent_kind {
-                    Some(AgentKind::Claude) => {
-                        self.claude.sandbox_options(task.snapshot_path.clone())
-                    }
-                    None => SandboxOptions::isolated(task.snapshot_path.clone()),
-                },
-            )
-            .await
-        {
+        let create = match task.agent_kind {
+            Some(AgentKind::Claude) => self
+                .claude
+                .provision_sandbox(
+                    &self.isolation,
+                    sandbox_id.clone(),
+                    task.snapshot_path.clone(),
+                )
+                .await
+                .map_err(TaskServiceError::Agent),
+            None => self
+                .isolation
+                .create(
+                    sandbox_id.clone(),
+                    SandboxOptions::isolated(task.snapshot_path.clone()),
+                )
+                .await
+                .map_err(TaskServiceError::Isolation),
+        };
+        if let Err(error) = create {
             self.store
                 .mark_errored(&task.id, &error.to_string())
                 .await
                 .map_err(TaskServiceError::Task)?;
-            return Err(TaskServiceError::Isolation(error));
+            return Err(error);
         }
         self.store
             .mark_in_progress(&task.id, &sandbox_id)
