@@ -39,6 +39,22 @@ db:
 
     exec sqlite3 "$database"
 
+# Tail Altitude's application log.
+logs:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    case "$(uname -s)" in
+        Darwin) logs_dir="$HOME/Library/Caches/altitude/logs" ;;
+        Linux) logs_dir="${XDG_CACHE_HOME:-$HOME/.cache}/altitude/logs" ;;
+        *)
+            echo "just logs does not support $(uname -s) yet" >&2
+            exit 1
+            ;;
+    esac
+
+    exec tail -n 100 -F "$logs_dir/altitude.log"
+
 # Run the msb CLI against altitude's isolation state.
 [positional-arguments]
 msb *args:

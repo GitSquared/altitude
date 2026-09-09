@@ -10,6 +10,7 @@ pub struct Database {
 
 impl Database {
     pub async fn open(config: &Config) -> Result<Self, DatabaseError> {
+        tracing::info!(path = %config.database_path().display(), "opening database");
         fs::create_dir_all(config.data_dir()).map_err(DatabaseError::CreateDirectory)?;
 
         let options = SqliteConnectOptions::new()
@@ -24,6 +25,8 @@ impl Database {
             .run(&pool)
             .await
             .map_err(DatabaseError::Migrate)?;
+
+        tracing::info!("database migrations complete");
 
         Ok(Self { pool })
     }

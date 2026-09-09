@@ -14,6 +14,7 @@ mod app;
 mod config;
 mod db;
 mod isolation;
+mod logging;
 mod tasks;
 mod tui;
 
@@ -22,6 +23,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
     let config = Config::load()?;
+    let _log_guard = logging::init(&config)?;
+    tracing::info!("starting altitude");
     let mut terminal = ratatui::init();
 
     let result = async {
