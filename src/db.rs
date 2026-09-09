@@ -1,6 +1,6 @@
-use std::{fmt, fs, io};
+use std::{error::Error, fmt, fs, io};
 
-use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
+use sqlx::{SqlitePool, migrate::MigrateError, sqlite::SqliteConnectOptions};
 
 use crate::config::Config;
 
@@ -40,7 +40,7 @@ impl Database {
 pub enum DatabaseError {
     CreateDirectory(io::Error),
     Open(sqlx::Error),
-    Migrate(sqlx::migrate::MigrateError),
+    Migrate(MigrateError),
 }
 
 impl fmt::Display for DatabaseError {
@@ -58,4 +58,4 @@ impl fmt::Display for DatabaseError {
     }
 }
 
-impl std::error::Error for DatabaseError {}
+impl Error for DatabaseError {}

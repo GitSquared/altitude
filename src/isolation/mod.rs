@@ -20,6 +20,31 @@ pub struct CommandSession {
     pub events: mpsc::UnboundedReceiver<CommandEvent>,
 }
 
+#[derive(Clone, Debug)]
+pub struct SandboxOptions {
+    pub snapshot_path: Option<String>,
+    pub network_enabled: bool,
+    pub mounts: Vec<SandboxMount>,
+    pub environment: Vec<(String, String)>,
+}
+
+impl SandboxOptions {
+    pub fn isolated(snapshot_path: Option<String>) -> Self {
+        Self {
+            snapshot_path,
+            network_enabled: false,
+            mounts: Vec::new(),
+            environment: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SandboxMount {
+    pub host_path: PathBuf,
+    pub guest_path: String,
+}
+
 pub enum Command {
     Input(Vec<u8>),
     Resize { rows: u16, cols: u16 },
@@ -66,7 +91,7 @@ pub trait IsolationEngine: Send + Sync {
     fn create(
         &self,
         id: String,
-        snapshot_path: Option<String>,
+        options: SandboxOptions,
     ) -> impl Future<Output = Result<(), IsolationError>> + Send;
 
     fn run_command(

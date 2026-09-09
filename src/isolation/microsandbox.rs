@@ -13,7 +13,7 @@ use crate::config::Config;
 
 use super::{
     Command, CommandEvent, CommandSession, IsolationEngine, IsolationError, IsolationStatus,
-    OutputStream,
+    OutputStream, SandboxOptions,
 };
 
 const BASE_IMAGE: &str = "alpine";
@@ -63,6 +63,7 @@ impl MicrosandboxIsolation {
 
 impl IsolationEngine for MicrosandboxIsolation {
     async fn prepare(&self, status: &watch::Sender<IsolationStatus>) -> Result<(), IsolationError> {
+        tracing::info!("installing Microsandbox runtime");
         status.send_replace(IsolationStatus::InstallingRuntime);
         Setup::builder()
             .base_dir(&self.data_home)
@@ -80,6 +81,8 @@ impl IsolationEngine for MicrosandboxIsolation {
             .map_err(|error| IsolationError::new(error.to_string()))?;
         set_default_backend(backend);
 
+        tracing::info!("Microsandbox runtime ready");
+
         status.send_replace(IsolationStatus::PreparingBaseImage);
         let sandbox = Sandbox::builder(PREPARATION_SANDBOX)
             .image(BASE_IMAGE)
@@ -95,16 +98,24 @@ impl IsolationEngine for MicrosandboxIsolation {
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
 
+        tracing::info!("base sandbox image ready");
+
         Ok(())
     }
 
-    async fn create(
-        &self,
-        id: String,
-        snapshot_path: Option<String>,
-    ) -> Result<(), IsolationError> {
-        let builder = Sandbox::builder(&id).disable_network();
-        match snapshot_path {
+    async fn create(&self, id: String, options: SandboxOptions) -> Result<(), IsolationError> {
+        tracing::info!(sandbox_id = %id, network_enabled = options.network_enabled, "creating sandbox");
+        let mut builder = Sandbox::builder(&id);
+        if !options.network_enabled {
+            builder = builder.disable_network();
+        }
+        for mount in options.mounts {
+            builder = builder.volume(mount.guest_path, |volume| volume.bind(mount.host_path));
+        }
+        for (key, value) in options.environment {
+            builder = builder.env(key, value);
+        }
+        match options.snapshot_path {
             Some(snapshot_path) => builder.from_snapshot(snapshot_path).create_detached().await,
             None => {
                 builder
@@ -116,6 +127,8 @@ impl IsolationEngine for MicrosandboxIsolation {
         }
         .map_err(|error| IsolationError::new(error.to_string()))?;
 
+        tracing::info!(sandbox_id = %id, "sandbox created");
+
         Ok(())
     }
 
@@ -124,6 +137,7 @@ impl IsolationEngine for MicrosandboxIsolation {
         id: String,
         command: String,
     ) -> Result<CommandSession, IsolationError> {
+        tracing::info!(sandbox_id = %id, "starting sandbox command");
         let sandbox = Sandbox::get(&id)
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?
@@ -190,6 +204,7 @@ impl IsolationEngine for MicrosandboxIsolation {
     }
 
     async fn remove(&self, id: String) -> Result<(), IsolationError> {
+        tracing::info!(sandbox_id = %id, "removing sandbox");
         let sandbox = Sandbox::get(&id)
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
@@ -209,6 +224,7 @@ impl IsolationEngine for MicrosandboxIsolation {
         snapshot_name: String,
         snapshots_dir: PathBuf,
     ) -> Result<PathBuf, IsolationError> {
+        tracing::info!(sandbox_id = %id, "suspending sandbox");
         fs::create_dir_all(&snapshots_dir)
             .map_err(|error| IsolationError::new(error.to_string()))?;
         let sandbox = Sandbox::get(&id)
@@ -229,6 +245,7 @@ impl IsolationEngine for MicrosandboxIsolation {
             .remove()
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
+        tracing::info!(sandbox_id = %id, snapshot = %snapshot.path().display(), "sandbox suspended");
         Ok(snapshot.path().to_owned())
     }
 

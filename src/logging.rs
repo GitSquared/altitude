@@ -1,4 +1,4 @@
-use std::io;
+use std::{fs, io};
 
 use tracing_appender::{non_blocking::WorkerGuard, rolling};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
@@ -6,7 +6,7 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 use crate::config::Config;
 
 pub fn init(config: &Config) -> io::Result<WorkerGuard> {
-    std::fs::create_dir_all(config.logs_dir())?;
+    fs::create_dir_all(config.logs_dir())?;
     let appender = rolling::never(config.logs_dir(), "altitude.log");
     let (writer, guard) = tracing_appender::non_blocking(appender);
     let filter =

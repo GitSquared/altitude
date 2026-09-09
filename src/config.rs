@@ -49,4 +49,12 @@ impl Config {
     pub fn task_snapshots_dir(&self) -> PathBuf {
         self.data_dir.join("snapshots")
     }
+
+    pub fn agent_profile_dir(&self, agent: &str) -> PathBuf {
+        self.data_dir.join("agents").join(agent).join("profile")
+    }
+
+    pub fn agent_snapshots_dir(&self, agent: &str) -> PathBuf {
+        self.data_dir.join("agents").join(agent).join("snapshots")
+    }
 }

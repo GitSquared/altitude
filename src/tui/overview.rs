@@ -15,6 +15,7 @@ pub fn draw(
     tasks: &[Task],
     selected: usize,
     latest_output: &HashMap<String, String>,
+    notice: Option<&str>,
 ) {
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(1),
@@ -34,6 +35,9 @@ pub fn draw(
     );
     draw_tasks(frame, body, tasks, selected, latest_output);
 
+    if let Some(notice) = notice {
+        frame.render_widget(Line::from(notice).red(), footer);
+    }
     frame.render_widget(
         Line::from("c create · tab select · enter shell · delete remove · q quit".dim())
             .alignment(HorizontalAlignment::Right),
@@ -48,15 +52,14 @@ fn draw_tasks(
     selected: usize,
     latest_output: &HashMap<String, String>,
 ) {
+    let panel = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .padding(Padding::uniform(1));
+    let content = panel.inner(area);
+    frame.render_widget(panel, area);
+
     if tasks.is_empty() {
-        frame.render_widget(
-            Paragraph::new("No tasks yet".dim()).block(
-                Block::bordered()
-                    .border_type(BorderType::Rounded)
-                    .padding(Padding::uniform(1)),
-            ),
-            area,
-        );
+        frame.render_widget(Paragraph::new("No tasks yet".dim()), content);
         return;
     }
 
@@ -67,7 +70,7 @@ fn draw_tasks(
             .chain(iter::once(Constraint::Min(0))),
     )
     .spacing(1)
-    .split(area);
+    .split(content);
 
     for (index, (task, area)) in tasks.iter().zip(cards.iter()).enumerate() {
         let selected = index == selected;

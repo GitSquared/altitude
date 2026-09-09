@@ -1,8 +1,9 @@
-use std::error::Error;
+use std::{error::Error, io};
 
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::{
+    agent::ClaudeCode,
     app::TaskRuntime,
     config::Config,
     db::Database,
@@ -10,6 +11,7 @@ use crate::{
     tasks::{TaskService, TaskStore},
 };
 
+mod agent;
 mod app;
 mod config;
 mod db;
@@ -50,11 +52,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         else {
             return Ok(());
         };
+        let claude = ClaudeCode::new(&config);
 
         let tasks = TaskService::new(
             TaskStore::new(&database),
             isolation,
             config.task_snapshots_dir(),
+            claude,
         );
         let Some(resumed) = tui::boot_task_resume(
             &mut terminal,
@@ -66,7 +70,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         else {
             return Ok(());
         };
-        let task_rows = tasks.list().await.map_err(std::io::Error::other)?;
+        let task_rows = tasks.list().await.map_err(io::Error::other)?;
         let (runtime, task_events) = TaskRuntime::new(tasks);
         runtime.resume(resumed);
 

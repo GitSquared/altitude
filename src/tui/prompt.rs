@@ -8,6 +8,7 @@ use ratatui::{
 };
 
 pub struct Prompt {
+    title: &'static str,
     value: String,
     cursor: usize,
 }
@@ -18,8 +19,9 @@ pub enum PromptAction {
 }
 
 impl Prompt {
-    pub fn new() -> Self {
+    pub fn new(title: &'static str) -> Self {
         Self {
+            title,
             value: String::new(),
             cursor: 0,
         }
@@ -70,7 +72,7 @@ impl Prompt {
         let area = centered_rect(70, 7, frame.area());
         frame.render_widget(Clear, area);
         let block = Block::bordered()
-            .title(" what do you want to do? ")
+            .title(format!(" {} ", self.title))
             .border_type(BorderType::Rounded)
             .padding(Padding::horizontal(1));
         let input_area = block.inner(area);

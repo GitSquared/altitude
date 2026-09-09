@@ -7,11 +7,12 @@ use std::{
 use tokio::{sync::mpsc, time};
 
 use crate::{
-    isolation::{Command, CommandSession, IsolationEngine, OutputStream},
+    isolation::{Command, CommandEvent, CommandSession, IsolationEngine, OutputStream},
     tasks::{OutputChunk, Task, TaskRun, TaskService, TaskServiceError},
 };
 
 pub enum TaskEvent {
+    Created(Result<Task, TaskServiceError>),
     Started(Result<Task, TaskServiceError>),
     Finished(String, Result<Task, TaskServiceError>),
     Removed(String, Result<(), TaskServiceError>),
@@ -90,10 +91,19 @@ where
         }
     }
 
-    pub fn create(&self, command: String) {
+    pub fn create_claude(&self, prompt: String) {
+        tracing::info!("creating Claude task");
         let runtime = self.clone();
         tokio::spawn(async move {
-            runtime.observe(runtime.service.create_and_start(command).await);
+            let task = match runtime.service.create_claude(prompt).await {
+                Ok(task) => task,
+                Err(error) => {
+                    let _ = runtime.events.send(TaskEvent::Created(Err(error)));
+                    return;
+                }
+            };
+            let _ = runtime.events.send(TaskEvent::Created(Ok(task.clone())));
+            runtime.observe(runtime.service.start(task).await);
         });
     }
 
@@ -127,6 +137,7 @@ where
         let (task, run, mut session) = match result {
             Ok(result) => result,
             Err(error) => {
+                tracing::error!(error = %error, "task failed to start");
                 let _ = self.events.send(TaskEvent::Started(Err(error)));
                 return;
             }
@@ -149,11 +160,12 @@ where
                 tokio::select! {
                     _ = flush.tick(), if !chunks.is_empty() => {
                         if let Err(error) = service.append_output(&run, &chunks).await {
+                            tracing::error!(task_id = %task.id, error = %error, "could not persist task output");
                             let result = service
                                 .finish(
                                     &task,
                                     &run,
-                                    crate::isolation::CommandEvent::Failed(error.to_string()),
+                                    CommandEvent::Failed(error.to_string()),
                                 )
                                 .await;
                             commands
@@ -168,7 +180,7 @@ where
                     event = session.events.recv() => {
                         let Some(event) = event else { return };
                         match event {
-                            crate::isolation::CommandEvent::Output { stream, bytes } => {
+                            CommandEvent::Output { stream, bytes } => {
                                 chunks.push(OutputChunk::new(sequence, stream, bytes.clone()));
                                 sequence += 1;
                                 let _ = events.send(TaskEvent::Output { task_id: task.id.clone(), stream, bytes });
@@ -189,11 +201,12 @@ where
                                 if !chunks.is_empty()
                                     && let Err(error) = service.append_output(&run, &chunks).await
                                 {
+                                    tracing::error!(task_id = %task.id, error = %error, "could not persist final task output");
                                     let result = service
                                         .finish(
                                             &task,
                                             &run,
-                                            crate::isolation::CommandEvent::Failed(error.to_string()),
+                                            CommandEvent::Failed(error.to_string()),
                                         )
                                         .await;
                                     commands

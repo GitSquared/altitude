@@ -30,6 +30,7 @@ pub use boot::{
 struct App {
     tasks: Vec<Task>,
     latest_output: HashMap<String, String>,
+    notice: Option<String>,
     removing: HashSet<String>,
     selected: usize,
     prompt: Option<Prompt>,
@@ -53,6 +54,7 @@ impl App {
         Self {
             tasks,
             latest_output,
+            notice: None,
             removing: HashSet::new(),
             selected: 0,
             prompt: None,
@@ -112,11 +114,16 @@ impl App {
         }
         output.push_str(&String::from_utf8_lossy(&bytes));
         if output.len() > 240 {
-            output.drain(..output.len() - 240);
+            let mut start = output.len() - 240;
+            while !output.is_char_boundary(start) {
+                start += 1;
+            }
+            output.drain(..start);
         }
     }
 
     fn hide_shell(&mut self) {
+        tracing::info!(task_id = ?self.open_shell, "detaching terminal");
         self.open_shell = None;
     }
 
@@ -169,7 +176,13 @@ where
     let mut app = App::new(tasks);
     loop {
         terminal.draw(|frame| {
-            overview::draw(frame, &app.tasks, app.selected, &app.latest_output);
+            overview::draw(
+                frame,
+                &app.tasks,
+                app.selected,
+                &app.latest_output,
+                app.notice.as_deref(),
+            );
             if let Some(prompt) = &app.prompt {
                 prompt.draw(frame);
             }
@@ -188,9 +201,16 @@ where
             }
             _ = shell_notice.tick(), if app.shell_has_active_notice() => {}
             Some(event) = task_events.recv() => match event {
+                TaskEvent::Created(Ok(task)) => app.replace_task(task),
+                TaskEvent::Created(Err(error)) => app.notice = Some(error.to_string()),
                 TaskEvent::Started(Ok(task)) => app.replace_task(task),
-                TaskEvent::Started(Err(_)) => {}
-                TaskEvent::Finished(id, Ok(task)) if !app.is_removing(&id) => app.replace_task(task),
+                TaskEvent::Started(Err(error)) => app.notice = Some(error.to_string()),
+                TaskEvent::Finished(id, Ok(task)) if !app.is_removing(&id) => {
+                    if matches!(task.status, TaskStatus::Completed) {
+                        app.remove_shell(&id);
+                    }
+                    app.replace_task(task);
+                }
                 TaskEvent::Finished(id, Err(error)) if !app.is_removing(&id) => set_error(&mut app, &id, error),
                 TaskEvent::Removed(id, Ok(())) => app.remove_task(&id),
                 TaskEvent::Removed(id, Err(error)) => {
@@ -199,15 +219,15 @@ where
                 }
                 TaskEvent::Output { task_id, stream, bytes } => {
                     app.append_output(task_id.clone(), stream, bytes.clone());
-                    if let Some(shell) = app.shells.get_mut(&task_id) {
-                        if let Some(text) = shell.process(bytes) {
-                            match copy_to_clipboard(text) {
-                                Ok(()) => {
-                                    shell.show_clipboard_confirmation();
-                                    tracing::info!(task_id = %task_id, "copied terminal text to clipboard");
-                                }
-                                Err(error) => tracing::error!(task_id = %task_id, %error, "could not copy terminal text"),
+                    if let Some(shell) = app.shells.get_mut(&task_id)
+                        && let Some(text) = shell.process(bytes)
+                    {
+                        match copy_to_clipboard(text) {
+                            Ok(()) => {
+                                shell.show_clipboard_confirmation();
+                                tracing::info!(task_id = %task_id, "copied terminal text to clipboard");
                             }
+                            Err(error) => tracing::error!(task_id = %task_id, %error, "could not copy terminal text"),
                         }
                     }
                 }
@@ -269,7 +289,7 @@ where
             Some(PromptAction::Cancel) => app.prompt = None,
             Some(PromptAction::Submit(command)) => {
                 app.prompt = None;
-                runtime.create(command);
+                runtime.create_claude(command);
             }
             None => {}
         }
@@ -294,11 +314,12 @@ where
     match key.code {
         KeyCode::Char('q') => return Ok(true),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
-        KeyCode::Char('c') => app.prompt = Some(Prompt::new()),
+        KeyCode::Char('c') => app.prompt = Some(Prompt::new("what should Claude do?")),
         KeyCode::Tab => app.select_next(),
         KeyCode::BackTab => app.select_previous(),
         KeyCode::Backspace | KeyCode::Delete => {
             if let Some(task) = app.selected_task() {
+                tracing::info!(task_id = %task.id, "removing task from overview");
                 app.begin_removing(&task.id);
                 app.remove_shell(&task.id);
                 runtime.remove(task);
@@ -309,6 +330,7 @@ where
                 && matches!(task.status, TaskStatus::InProgress)
             {
                 if app.shells.contains_key(&task.id) {
+                    tracing::info!(task_id = %task.id, "reattaching terminal");
                     app.open_shell = Some(task.id);
                     return Ok(false);
                 }
@@ -324,6 +346,7 @@ where
                 app.shells
                     .insert(task.id.clone(), Shell::new(rows, cols, history));
                 app.open_shell = Some(task.id);
+                tracing::info!("attached terminal");
             }
         }
         _ => {}
