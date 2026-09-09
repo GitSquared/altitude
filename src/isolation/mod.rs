@@ -15,30 +15,29 @@ pub enum IsolationStatus {
     Failed(String),
 }
 
-pub struct ShellSession {
-    pub commands: mpsc::UnboundedSender<ShellCommand>,
-    pub events: mpsc::UnboundedReceiver<ShellEvent>,
-}
-
 pub struct CommandSession {
+    pub commands: mpsc::UnboundedSender<Command>,
     pub events: mpsc::UnboundedReceiver<CommandEvent>,
 }
 
-pub enum CommandEvent {
-    Exited(i32),
-    Failed(String),
-}
-
-pub enum ShellCommand {
+pub enum Command {
     Input(Vec<u8>),
     Resize { rows: u16, cols: u16 },
-    Close,
 }
 
-pub enum ShellEvent {
-    Output(Vec<u8>),
+pub enum CommandEvent {
+    Output {
+        stream: OutputStream,
+        bytes: Vec<u8>,
+    },
     Exited(i32),
     Failed(String),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum OutputStream {
+    Stdout,
+    Stderr,
 }
 
 #[derive(Debug)]
@@ -75,13 +74,6 @@ pub trait IsolationEngine: Send + Sync {
         id: String,
         command: String,
     ) -> impl Future<Output = Result<CommandSession, IsolationError>> + Send;
-
-    fn open_shell(
-        &self,
-        id: String,
-        rows: u16,
-        cols: u16,
-    ) -> impl Future<Output = Result<ShellSession, IsolationError>> + Send;
 
     fn remove(&self, id: String) -> impl Future<Output = Result<(), IsolationError>> + Send;
 

@@ -1,4 +1,8 @@
-use std::{fmt, path::PathBuf};
+use std::{
+    fmt,
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use futures_util::future::join_all;
 use sqlx::{FromRow, SqlitePool, Type};
@@ -6,7 +10,7 @@ use uuid::Uuid;
 
 use crate::{
     db::Database,
-    isolation::{CommandEvent, CommandSession, IsolationEngine, IsolationError, ShellSession},
+    isolation::{CommandEvent, CommandSession, IsolationEngine, IsolationError, OutputStream},
 };
 
 #[derive(Clone, Debug, FromRow)]
@@ -17,6 +21,31 @@ pub struct Task {
     pub sandbox_id: Option<String>,
     pub snapshot_path: Option<String>,
     pub last_error: Option<String>,
+    pub last_output: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TaskRun {
+    pub id: String,
+    pub task_id: String,
+}
+
+pub struct OutputChunk {
+    pub sequence: i64,
+    pub recorded_at_ms: i64,
+    pub stream: OutputStream,
+    pub bytes: Vec<u8>,
+}
+
+impl OutputChunk {
+    pub fn new(sequence: i64, stream: OutputStream, bytes: Vec<u8>) -> Self {
+        Self {
+            sequence,
+            recorded_at_ms: now_ms(),
+            stream,
+            bytes,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Type)]
@@ -45,7 +74,11 @@ impl TaskStore {
 
     pub async fn list(&self) -> Result<Vec<Task>, TaskError> {
         sqlx::query_as(
-            "SELECT id, command, status, sandbox_id, snapshot_path, last_error \
+            "SELECT tasks.id, command, status, sandbox_id, snapshot_path, last_error, \
+             (SELECT bytes FROM run_output WHERE run_id = \
+                 (SELECT id FROM task_runs WHERE task_id = tasks.id \
+                  ORDER BY started_at_ms DESC LIMIT 1) \
+              ORDER BY sequence DESC LIMIT 1) AS last_output \
              FROM tasks ORDER BY updated_at DESC",
         )
         .fetch_all(&self.pool)
@@ -61,6 +94,7 @@ impl TaskStore {
             sandbox_id: None,
             snapshot_path: None,
             last_error: None,
+            last_output: None,
         };
         sqlx::query(
             "INSERT INTO tasks (id, title, command, status, created_at, updated_at) \
@@ -117,6 +151,78 @@ impl TaskStore {
         Ok(())
     }
 
+    pub async fn begin_run(&self, task_id: &str) -> Result<TaskRun, TaskError> {
+        let run = TaskRun {
+            id: Uuid::new_v4().to_string(),
+            task_id: task_id.to_owned(),
+        };
+        sqlx::query("INSERT INTO task_runs (id, task_id, started_at_ms) VALUES (?, ?, ?)")
+            .bind(&run.id)
+            .bind(&run.task_id)
+            .bind(now_ms())
+            .execute(&self.pool)
+            .await
+            .map_err(TaskError::Database)?;
+        Ok(run)
+    }
+
+    pub async fn append_output(
+        &self,
+        run_id: &str,
+        chunks: &[OutputChunk],
+    ) -> Result<(), TaskError> {
+        let mut transaction = self.pool.begin().await.map_err(TaskError::Database)?;
+        for chunk in chunks {
+            sqlx::query(
+                "INSERT INTO run_output (run_id, sequence, recorded_at_ms, stream, bytes) \
+                 VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(run_id)
+            .bind(chunk.sequence)
+            .bind(chunk.recorded_at_ms)
+            .bind(match chunk.stream {
+                OutputStream::Stdout => "stdout",
+                OutputStream::Stderr => "stderr",
+            })
+            .bind(&chunk.bytes)
+            .execute(&mut *transaction)
+            .await
+            .map_err(TaskError::Database)?;
+        }
+        transaction.commit().await.map_err(TaskError::Database)
+    }
+
+    pub async fn output_history(&self, task_id: &str) -> Result<Vec<Vec<u8>>, TaskError> {
+        sqlx::query_scalar(
+            "SELECT bytes FROM run_output WHERE run_id = \
+             (SELECT id FROM task_runs WHERE task_id = ? ORDER BY started_at_ms DESC LIMIT 1) \
+             ORDER BY sequence",
+        )
+        .bind(task_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(TaskError::Database)
+    }
+
+    pub async fn finish_run(
+        &self,
+        run_id: &str,
+        outcome: &str,
+        exit_code: Option<i32>,
+    ) -> Result<(), TaskError> {
+        sqlx::query(
+            "UPDATE task_runs SET ended_at_ms = ?, outcome = ?, exit_code = ? WHERE id = ?",
+        )
+        .bind(now_ms())
+        .bind(outcome)
+        .bind(exit_code)
+        .bind(run_id)
+        .execute(&self.pool)
+        .await
+        .map_err(TaskError::Database)?;
+        Ok(())
+    }
+
     async fn update(
         &self,
         id: &str,
@@ -139,6 +245,15 @@ impl TaskStore {
         .map_err(TaskError::Database)?;
         Ok(())
     }
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is before the Unix epoch")
+        .as_millis()
+        .try_into()
+        .expect("millisecond timestamp does not fit in i64")
 }
 
 #[derive(Clone)]
@@ -167,7 +282,7 @@ where
     pub async fn create_and_start(
         &self,
         command: String,
-    ) -> Result<(Task, CommandSession), TaskServiceError> {
+    ) -> Result<(Task, TaskRun, CommandSession), TaskServiceError> {
         let task = self
             .store
             .create(command)
@@ -176,19 +291,10 @@ where
         self.start(task).await
     }
 
-    pub async fn open_shell(
+    pub async fn start(
         &self,
-        sandbox_id: String,
-        rows: u16,
-        cols: u16,
-    ) -> Result<ShellSession, TaskServiceError> {
-        self.isolation
-            .open_shell(sandbox_id, rows, cols)
-            .await
-            .map_err(TaskServiceError::Isolation)
-    }
-
-    pub async fn start(&self, mut task: Task) -> Result<(Task, CommandSession), TaskServiceError> {
+        mut task: Task,
+    ) -> Result<(Task, TaskRun, CommandSession), TaskServiceError> {
         let sandbox_id = format!("altitude-{}", Uuid::new_v4());
         if let Err(error) = self
             .isolation
@@ -203,6 +309,11 @@ where
         }
         self.store
             .mark_in_progress(&task.id, &sandbox_id)
+            .await
+            .map_err(TaskServiceError::Task)?;
+        let run = self
+            .store
+            .begin_run(&task.id)
             .await
             .map_err(TaskServiceError::Task)?;
         let session = match self
@@ -222,12 +333,39 @@ where
         task.status = TaskStatus::InProgress;
         task.sandbox_id = Some(sandbox_id);
         task.last_error = None;
-        Ok((task, session))
+        Ok((task, run, session))
     }
 
-    pub async fn finish(&self, task: &Task, event: CommandEvent) -> Result<Task, TaskServiceError> {
+    pub async fn append_output(
+        &self,
+        run: &TaskRun,
+        chunks: &[OutputChunk],
+    ) -> Result<(), TaskServiceError> {
+        self.store
+            .append_output(&run.id, chunks)
+            .await
+            .map_err(TaskServiceError::Task)
+    }
+
+    pub async fn output_history(&self, task_id: &str) -> Result<Vec<Vec<u8>>, TaskServiceError> {
+        self.store
+            .output_history(task_id)
+            .await
+            .map_err(TaskServiceError::Task)
+    }
+
+    pub async fn finish(
+        &self,
+        task: &Task,
+        run: &TaskRun,
+        event: CommandEvent,
+    ) -> Result<Task, TaskServiceError> {
         match event {
             CommandEvent::Exited(0) => {
+                self.store
+                    .finish_run(&run.id, "completed", Some(0))
+                    .await
+                    .map_err(TaskServiceError::Task)?;
                 self.store
                     .mark_completed(&task.id)
                     .await
@@ -247,10 +385,21 @@ where
                 })
             }
             CommandEvent::Exited(code) => {
+                self.store
+                    .finish_run(&run.id, "errored", Some(code))
+                    .await
+                    .map_err(TaskServiceError::Task)?;
                 self.fail(task, format!("command exited with code {code}"))
                     .await
             }
-            CommandEvent::Failed(error) => self.fail(task, error).await,
+            CommandEvent::Failed(error) => {
+                self.store
+                    .finish_run(&run.id, "errored", None)
+                    .await
+                    .map_err(TaskServiceError::Task)?;
+                self.fail(task, error).await
+            }
+            CommandEvent::Output { .. } => unreachable!("output is handled while the command runs"),
         }
     }
 
@@ -273,7 +422,9 @@ where
             .map_err(TaskServiceError::Task)
     }
 
-    pub async fn resume_all(&self) -> Vec<Result<(Task, CommandSession), TaskServiceError>> {
+    pub async fn resume_all(
+        &self,
+    ) -> Vec<Result<(Task, TaskRun, CommandSession), TaskServiceError>> {
         let tasks = match self.list().await {
             Ok(tasks) => tasks,
             Err(error) => return vec![Err(error)],

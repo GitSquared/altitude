@@ -1,20 +1,32 @@
-use tokio::sync::mpsc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+use tokio::{sync::mpsc, time};
 
 use crate::{
-    isolation::{CommandSession, IsolationEngine, ShellSession},
-    tasks::{Task, TaskService, TaskServiceError},
+    isolation::{Command, CommandSession, IsolationEngine, OutputStream},
+    tasks::{OutputChunk, Task, TaskRun, TaskService, TaskServiceError},
 };
 
 pub enum TaskEvent {
     Started(Result<Task, TaskServiceError>),
     Finished(String, Result<Task, TaskServiceError>),
     Removed(String, Result<(), TaskServiceError>),
+    Output {
+        task_id: String,
+        stream: OutputStream,
+        bytes: Vec<u8>,
+    },
 }
 
 #[derive(Clone)]
 pub struct TaskRuntime<E> {
     service: TaskService<E>,
     events: mpsc::UnboundedSender<TaskEvent>,
+    commands: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<Command>>>>,
 }
 
 impl<E> TaskRuntime<E>
@@ -23,23 +35,54 @@ where
 {
     pub fn new(service: TaskService<E>) -> (Self, mpsc::UnboundedReceiver<TaskEvent>) {
         let (events, receiver) = mpsc::unbounded_channel();
-        (Self { service, events }, receiver)
+        (
+            Self {
+                service,
+                events,
+                commands: Arc::new(Mutex::new(HashMap::new())),
+            },
+            receiver,
+        )
     }
 
     pub async fn list(&self) -> Result<Vec<Task>, TaskServiceError> {
         self.service.list().await
     }
 
-    pub async fn open_shell(
-        &self,
-        sandbox_id: String,
-        rows: u16,
-        cols: u16,
-    ) -> Result<ShellSession, TaskServiceError> {
-        self.service.open_shell(sandbox_id, rows, cols).await
+    pub async fn output_history(&self, task_id: &str) -> Result<Vec<Vec<u8>>, TaskServiceError> {
+        self.service.output_history(task_id).await
     }
 
-    pub fn resume(&self, results: Vec<Result<(Task, CommandSession), TaskServiceError>>) {
+    pub fn has_command(&self, task_id: &str) -> bool {
+        self.commands
+            .lock()
+            .expect("task command lock poisoned")
+            .contains_key(task_id)
+    }
+
+    pub fn send_input(&self, task_id: &str, bytes: Vec<u8>) {
+        if let Some(commands) = self
+            .commands
+            .lock()
+            .expect("task command lock poisoned")
+            .get(task_id)
+        {
+            let _ = commands.send(Command::Input(bytes));
+        }
+    }
+
+    pub fn resize(&self, task_id: &str, rows: u16, cols: u16) {
+        if let Some(commands) = self
+            .commands
+            .lock()
+            .expect("task command lock poisoned")
+            .get(task_id)
+        {
+            let _ = commands.send(Command::Resize { rows, cols });
+        }
+    }
+
+    pub fn resume(&self, results: Vec<Result<(Task, TaskRun, CommandSession), TaskServiceError>>) {
         for result in results {
             self.observe(result);
         }
@@ -68,8 +111,8 @@ where
         Ok(())
     }
 
-    fn observe(&self, result: Result<(Task, CommandSession), TaskServiceError>) {
-        let (task, mut session) = match result {
+    fn observe(&self, result: Result<(Task, TaskRun, CommandSession), TaskServiceError>) {
+        let (task, run, mut session) = match result {
             Ok(result) => result,
             Err(error) => {
                 let _ = self.events.send(TaskEvent::Started(Err(error)));
@@ -77,13 +120,75 @@ where
             }
         };
         let _ = self.events.send(TaskEvent::Started(Ok(task.clone())));
+        self.commands
+            .lock()
+            .expect("task command lock poisoned")
+            .insert(task.id.clone(), session.commands.clone());
 
         let service = self.service.clone();
         let events = self.events.clone();
+        let commands = Arc::clone(&self.commands);
         tokio::spawn(async move {
-            if let Some(event) = session.events.recv().await {
-                let result = service.finish(&task, event).await;
-                let _ = events.send(TaskEvent::Finished(task.id, result));
+            let mut chunks = Vec::new();
+            let mut sequence = 0;
+            let mut flush = time::interval(Duration::from_millis(100));
+            loop {
+                tokio::select! {
+                    _ = flush.tick(), if !chunks.is_empty() => {
+                        if let Err(error) = service.append_output(&run, &chunks).await {
+                            let result = service
+                                .finish(
+                                    &task,
+                                    &run,
+                                    crate::isolation::CommandEvent::Failed(error.to_string()),
+                                )
+                                .await;
+                            commands
+                                .lock()
+                                .expect("task command lock poisoned")
+                                .remove(&task.id);
+                            let _ = events.send(TaskEvent::Finished(task.id.clone(), result));
+                            return;
+                        }
+                        chunks.clear();
+                    }
+                    event = session.events.recv() => {
+                        let Some(event) = event else { return };
+                        match event {
+                            crate::isolation::CommandEvent::Output { stream, bytes } => {
+                                chunks.push(OutputChunk::new(sequence, stream, bytes.clone()));
+                                sequence += 1;
+                                let _ = events.send(TaskEvent::Output { task_id: task.id.clone(), stream, bytes });
+                            }
+                            event => {
+                                if !chunks.is_empty()
+                                    && let Err(error) = service.append_output(&run, &chunks).await
+                                {
+                                    let result = service
+                                        .finish(
+                                            &task,
+                                            &run,
+                                            crate::isolation::CommandEvent::Failed(error.to_string()),
+                                        )
+                                        .await;
+                                    commands
+                                        .lock()
+                                        .expect("task command lock poisoned")
+                                        .remove(&task.id);
+                                    let _ = events.send(TaskEvent::Finished(task.id.clone(), result));
+                                    return;
+                                }
+                                let result = service.finish(&task, &run, event).await;
+                                commands
+                                    .lock()
+                                    .expect("task command lock poisoned")
+                                    .remove(&task.id);
+                                let _ = events.send(TaskEvent::Finished(task.id, result));
+                                return;
+                            }
+                        }
+                    }
+                }
             }
         });
     }

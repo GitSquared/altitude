@@ -12,8 +12,8 @@ use tokio::sync::{mpsc, watch};
 use crate::config::Config;
 
 use super::{
-    CommandEvent, CommandSession, IsolationEngine, IsolationError, IsolationStatus, ShellCommand,
-    ShellEvent, ShellSession,
+    Command, CommandEvent, CommandSession, IsolationEngine, IsolationError, IsolationStatus,
+    OutputStream,
 };
 
 const BASE_IMAGE: &str = "alpine";
@@ -130,47 +130,13 @@ impl IsolationEngine for MicrosandboxIsolation {
             .connect_or_start()
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
-
-        tokio::spawn(async move {
-            let event = match sandbox.shell(command).await {
-                Ok(output) => CommandEvent::Exited(output.status().code),
-                Err(error) => CommandEvent::Failed(error.to_string()),
-            };
-            let _ = event_tx.send(event);
-        });
-
-        Ok(CommandSession { events: event_rx })
-    }
-
-    async fn open_shell(
-        &self,
-        id: String,
-        rows: u16,
-        cols: u16,
-    ) -> Result<ShellSession, IsolationError> {
-        let sandbox = Sandbox::get(&id)
-            .await
-            .map_err(|error| IsolationError::new(error.to_string()))?
-            .connect_or_start_detached()
-            .await
-            .map_err(|error| IsolationError::new(error.to_string()))?;
         let mut process = sandbox
-            .exec_stream_with("sh", |exec| {
-                exec.arg("-i")
-                    .env("TERM", "xterm-256color")
-                    .stdin_pipe()
-                    .tty(true)
-            })
-            .await
-            .map_err(|error| IsolationError::new(error.to_string()))?;
-        process
-            .resize(rows, cols)
+            .shell_stream_with(command, |exec| exec.stdin_pipe().tty(true))
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
         let stdin = process
             .take_stdin()
-            .ok_or_else(|| IsolationError::new("shell stdin was not available"))?;
+            .ok_or_else(|| IsolationError::new("task stdin was not available"))?;
         let (command_tx, mut command_rx) = mpsc::unbounded_channel();
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
@@ -179,48 +145,45 @@ impl IsolationEngine for MicrosandboxIsolation {
             loop {
                 tokio::select! {
                     command = command_rx.recv() => match command {
-                        Some(ShellCommand::Input(bytes)) => {
+                        Some(Command::Input(bytes)) => {
                             if let Err(error) = stdin.write(bytes).await {
-                                let _ = event_tx.send(ShellEvent::Failed(error.to_string()));
+                                let _ = event_tx.send(CommandEvent::Failed(error.to_string()));
                                 break;
                             }
                         }
-                        Some(ShellCommand::Resize { rows, cols }) => {
+                        Some(Command::Resize { rows, cols }) => {
                             let _ = process.resize(rows, cols).await;
                         }
-                        Some(ShellCommand::Close) | None => {
-                            let _ = process.kill().await;
-                            break;
-                        }
+                        None => break,
                     },
-                    event = process.recv() => match event {
-                        Some(ExecEvent::Stdout(bytes) | ExecEvent::Stderr(bytes)) => {
-                            let _ = event_tx.send(ShellEvent::Output(bytes.to_vec()));
-                        }
-                        Some(ExecEvent::Exited { code }) => {
-                            let _ = event_tx.send(ShellEvent::Exited(code));
+                    event = process.recv() => {
+                        let event = match event {
+                            Some(ExecEvent::Stdout(bytes)) => CommandEvent::Output {
+                                stream: OutputStream::Stdout,
+                                bytes: bytes.to_vec(),
+                            },
+                            Some(ExecEvent::Stderr(bytes)) => CommandEvent::Output {
+                                stream: OutputStream::Stderr,
+                                bytes: bytes.to_vec(),
+                            },
+                            Some(ExecEvent::Exited { code }) => CommandEvent::Exited(code),
+                            Some(ExecEvent::Failed(error)) => CommandEvent::Failed(error.message),
+                            Some(ExecEvent::Started { .. } | ExecEvent::StdinError(_)) => continue,
+                            None => CommandEvent::Failed(
+                                "command connection closed without an exit status".into(),
+                            ),
+                        };
+                        let terminal = !matches!(event, CommandEvent::Output { .. });
+                        let _ = event_tx.send(event);
+                        if terminal {
                             break;
-                        }
-                        None => {
-                            let _ = event_tx.send(ShellEvent::Failed(
-                                "shell connection closed without an exit status".into(),
-                            ));
-                            break;
-                        }
-                        Some(ExecEvent::Failed(error)) => {
-                            let _ = event_tx.send(ShellEvent::Failed(error.message));
-                            break;
-                        }
-                        Some(ExecEvent::Started { .. }) => {}
-                        Some(ExecEvent::StdinError(error)) => {
-                            let _ = event_tx.send(ShellEvent::Failed(format!("shell stdin failed: {error:?}")));
                         }
                     }
                 }
             }
         });
 
-        Ok(ShellSession {
+        Ok(CommandSession {
             commands: command_tx,
             events: event_rx,
         })

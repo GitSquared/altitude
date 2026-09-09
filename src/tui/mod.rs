@@ -1,4 +1,8 @@
-use std::{collections::HashSet, io, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    io,
+    time::Duration,
+};
 
 use crossterm::event::{Event, EventStream, KeyCode, KeyModifiers};
 use futures_util::StreamExt;
@@ -7,7 +11,7 @@ use tokio::{signal::unix::Signal, sync::mpsc, time};
 
 use crate::{
     app::{TaskEvent, TaskRuntime},
-    isolation::{IsolationEngine, ShellEvent},
+    isolation::{IsolationEngine, OutputStream},
     tasks::{Task, TaskServiceError, TaskStatus},
 };
 
@@ -25,20 +29,35 @@ pub use boot::{
 
 struct App {
     tasks: Vec<Task>,
+    latest_output: HashMap<String, String>,
     removing: HashSet<String>,
     selected: usize,
     prompt: Option<Prompt>,
-    shell: Option<Shell>,
+    shells: HashMap<String, Shell>,
+    open_shell: Option<String>,
 }
 
 impl App {
     fn new(tasks: Vec<Task>) -> Self {
+        let latest_output = tasks
+            .iter()
+            .filter_map(|task| {
+                task.last_output.as_ref().map(|output| {
+                    (
+                        task.id.clone(),
+                        String::from_utf8_lossy(output).into_owned(),
+                    )
+                })
+            })
+            .collect();
         Self {
             tasks,
+            latest_output,
             removing: HashSet::new(),
             selected: 0,
             prompt: None,
-            shell: None,
+            shells: HashMap::new(),
+            open_shell: None,
         }
     }
 
@@ -86,9 +105,25 @@ impl App {
         self.removing.contains(id)
     }
 
-    fn close_shell(&mut self) {
-        if let Some(shell) = self.shell.take() {
-            shell.close();
+    fn append_output(&mut self, id: String, stream: OutputStream, bytes: Vec<u8>) {
+        let output = self.latest_output.entry(id).or_default();
+        if matches!(stream, OutputStream::Stderr) {
+            output.push_str("stderr · ");
+        }
+        output.push_str(&String::from_utf8_lossy(&bytes));
+        if output.len() > 240 {
+            output.drain(..output.len() - 240);
+        }
+    }
+
+    fn hide_shell(&mut self) {
+        self.open_shell = None;
+    }
+
+    fn remove_shell(&mut self, id: &str) {
+        self.shells.remove(id);
+        if self.open_shell.as_deref() == Some(id) {
+            self.open_shell = None;
         }
     }
 }
@@ -131,22 +166,20 @@ where
     let mut events = EventStream::new();
     let mut refresh = time::interval(Duration::from_secs(2));
     let mut app = App::new(tasks);
-    let (shell_tx, mut shell_events) = mpsc::unbounded_channel();
-
     loop {
         terminal.draw(|frame| {
-            overview::draw(frame, &app.tasks, app.selected);
+            overview::draw(frame, &app.tasks, app.selected, &app.latest_output);
             if let Some(prompt) = &app.prompt {
                 prompt.draw(frame);
             }
-            if let Some(shell) = &app.shell {
+            if let Some(shell) = app.open_shell.as_ref().and_then(|id| app.shells.get(id)) {
                 shell.draw(frame);
             }
         })?;
         tokio::select! {
             _ = terminate.recv() => return Ok(()),
             _ = interrupt.recv() => return Ok(()),
-            _ = refresh.tick(), if app.shell.is_none() => {
+            _ = refresh.tick(), if app.open_shell.is_none() => {
                 if let Ok(tasks) = runtime.list().await {
                     app.tasks = tasks;
                     app.selected = app.selected.min(app.tasks.len().saturating_sub(1));
@@ -162,12 +195,17 @@ where
                     app.cancel_removing(&id);
                     set_error(&mut app, &id, error);
                 }
+                TaskEvent::Output { task_id, stream, bytes } => {
+                    app.append_output(task_id.clone(), stream, bytes.clone());
+                    if let Some(shell) = app.shells.get_mut(&task_id) {
+                        shell.process(bytes);
+                    }
+                }
                 _ => {}
             },
-            Some(event) = shell_events.recv() => if let Some(shell) = &mut app.shell { shell.process(event); },
             event = events.next() => {
                 let Some(event) = event else { return Ok(()) };
-                if handle_event(event?, terminal, &runtime, &shell_tx, &mut app).await? { return Ok(()); }
+                if handle_event(event?, terminal, &runtime, &mut app).await? { return Ok(()); }
             }
         }
     }
@@ -184,16 +222,16 @@ async fn handle_event<E>(
     event: Event,
     terminal: &DefaultTerminal,
     runtime: &TaskRuntime<E>,
-    shell_tx: &mpsc::UnboundedSender<ShellEvent>,
     app: &mut App,
 ) -> io::Result<bool>
 where
     E: IsolationEngine + Clone + 'static,
 {
     if let Event::Resize(_, _) = event
-        && let Some(shell) = &app.shell
+        && let Some(id) = &app.open_shell
     {
-        shell.resize(terminal.size()?.into());
+        let (rows, cols) = shell::size(terminal.size()?.into());
+        runtime.resize(id, rows, cols);
         return Ok(false);
     }
     let Event::Key(key) = event else {
@@ -213,11 +251,19 @@ where
         }
         return Ok(false);
     }
-    if app.shell.is_some() {
+    if let Some(id) = app.open_shell.clone() {
         if shell::is_exit_key(key) {
-            app.close_shell();
-        } else if let Some(shell) = &app.shell {
-            shell.send_key(key);
+            app.hide_shell();
+        } else if let Some(shell) = app.shells.get_mut(&id) {
+            match key.code {
+                KeyCode::PageUp => shell.scroll_up(),
+                KeyCode::PageDown => shell.scroll_down(),
+                _ => {
+                    if let Some(bytes) = shell.key_bytes(key) {
+                        runtime.send_input(&id, bytes);
+                    }
+                }
+            }
         }
         return Ok(false);
     }
@@ -230,29 +276,30 @@ where
         KeyCode::Backspace | KeyCode::Delete => {
             if let Some(task) = app.selected_task() {
                 app.begin_removing(&task.id);
+                app.remove_shell(&task.id);
                 runtime.remove(task);
             }
         }
         KeyCode::Enter => {
             if let Some(task) = app.selected_task()
-                && let Some(sandbox_id) = task.sandbox_id
-                && matches!(task.status, TaskStatus::InProgress | TaskStatus::Errored)
+                && matches!(task.status, TaskStatus::InProgress)
             {
+                if app.shells.contains_key(&task.id) {
+                    app.open_shell = Some(task.id);
+                    return Ok(false);
+                }
+                if !runtime.has_command(&task.id) {
+                    return Ok(false);
+                }
                 let (rows, cols) = shell::size(terminal.size()?.into());
-                let session = runtime
-                    .open_shell(sandbox_id, rows, cols)
+                let history = runtime
+                    .output_history(&task.id)
                     .await
                     .map_err(io::Error::other)?;
-                let mut shell_events = session.events;
-                let shell_tx = shell_tx.clone();
-                tokio::spawn(async move {
-                    while let Some(event) = shell_events.recv().await {
-                        if shell_tx.send(event).is_err() {
-                            break;
-                        }
-                    }
-                });
-                app.shell = Some(Shell::new(rows, cols, session.commands));
+                runtime.resize(&task.id, rows, cols);
+                app.shells
+                    .insert(task.id.clone(), Shell::new(rows, cols, history));
+                app.open_shell = Some(task.id);
             }
         }
         _ => {}

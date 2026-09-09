@@ -6,49 +6,41 @@ use ratatui::{
     text::Line,
     widgets::{Block, BorderType, Clear},
 };
-use tokio::sync::mpsc;
 use tui_term::{vt100, widget::PseudoTerminal};
-
-use crate::isolation::{ShellCommand, ShellEvent};
 
 pub struct Shell {
     parser: vt100::Parser,
-    commands: mpsc::UnboundedSender<ShellCommand>,
-    message: Option<String>,
 }
 
 impl Shell {
-    pub fn new(rows: u16, cols: u16, commands: mpsc::UnboundedSender<ShellCommand>) -> Self {
-        Self {
-            parser: vt100::Parser::new(rows, cols, 1_000),
-            commands,
-            message: None,
+    pub fn new(rows: u16, cols: u16, history: Vec<Vec<u8>>) -> Self {
+        let mut parser = vt100::Parser::new(rows, cols, 1_000);
+        for bytes in history {
+            parser.process(&bytes);
         }
+        Self { parser }
     }
 
-    pub fn process(&mut self, event: ShellEvent) {
-        match event {
-            ShellEvent::Output(bytes) => self.parser.process(&bytes),
-            ShellEvent::Exited(code) => {
-                self.message = Some(format!("shell exited with status {code}"));
-            }
-            ShellEvent::Failed(error) => self.message = Some(format!("shell failed: {error}")),
-        }
+    pub fn process(&mut self, bytes: Vec<u8>) {
+        self.parser.process(&bytes);
     }
 
-    pub fn resize(&self, area: Rect) {
-        let (rows, cols) = size(area);
-        let _ = self.commands.send(ShellCommand::Resize { rows, cols });
+    pub fn key_bytes(&self, key: KeyEvent) -> Option<Vec<u8>> {
+        key_bytes(key)
     }
 
-    pub fn send_key(&self, key: KeyEvent) {
-        if let Some(bytes) = key_bytes(key) {
-            let _ = self.commands.send(ShellCommand::Input(bytes));
-        }
+    pub fn scroll_up(&mut self) {
+        let rows = usize::from(self.parser.screen().size().0.saturating_sub(1));
+        let scrollback = self.parser.screen().scrollback();
+        self.parser.screen_mut().set_scrollback(scrollback + rows);
     }
 
-    pub fn close(&self) {
-        let _ = self.commands.send(ShellCommand::Close);
+    pub fn scroll_down(&mut self) {
+        let rows = usize::from(self.parser.screen().size().0.saturating_sub(1));
+        let scrollback = self.parser.screen().scrollback();
+        self.parser
+            .screen_mut()
+            .set_scrollback(scrollback.saturating_sub(rows));
     }
 
     pub fn draw(&self, frame: &mut Frame) {
@@ -56,11 +48,8 @@ impl Shell {
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(Style::new().cyan())
-            .title(match &self.message {
-                Some(message) => format!(" shell · {message} "),
-                None => " shell ".into(),
-            })
-            .title_bottom(Line::from(" ctrl-a back ").right_aligned());
+            .title(" shell ")
+            .title_bottom(Line::from(" pgup/pgdn history · ctrl-a back ").right_aligned());
         frame.render_widget(Clear, area);
         frame.render_widget(PseudoTerminal::new(self.parser.screen()).block(block), area);
     }
