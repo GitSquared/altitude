@@ -55,6 +55,38 @@ logs:
 
     exec tail -n 100 -F "$logs_dir/altitude.log"
 
+# Remove all local Altitude state for a fresh development start.
+nuke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    case "$(uname -s)" in
+        Darwin)
+            data_dir="$HOME/Library/Application Support/altitude"
+            cache_dir="$HOME/Library/Caches/altitude"
+            ;;
+        Linux)
+            data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/altitude"
+            cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/altitude"
+            ;;
+        *)
+            echo "just nuke does not support $(uname -s) yet" >&2
+            exit 1
+            ;;
+    esac
+
+    echo "This removes Altitude's local data and cache:"
+    echo "  $data_dir"
+    echo "  $cache_dir"
+    read -r -p "Make sure Altitude is not running. Continue? [y/N] " answer
+    if [[ "$answer" != "y" && "$answer" != "Y" ]]; then
+        echo "cancelled"
+        exit 0
+    fi
+
+    rm -rf -- "$data_dir" "$cache_dir"
+    echo "Altitude local state removed"
+
 # Run the msb CLI against altitude's isolation state.
 [positional-arguments]
 msb *args:
