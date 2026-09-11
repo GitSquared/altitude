@@ -9,7 +9,3 @@ pre-commit:
     - name: typecheck
       glob: '*.{ts,tsx,svelte}'
       run: bun run typecheck
-
-    - name: test-related
-      glob: '*.{ts,tsx,svelte}'
-      run: bun test --changed=HEAD --pass-with-no-tests

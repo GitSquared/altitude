@@ -35,7 +35,7 @@ This restarts the app and resets its in-memory state. Press `q` to close the TUI
 Build errors appear in the terminal and the next save retries the build.
 On restart, Watchexec sends SIGTERM and waits for the app to restore the terminal and exit.
 
-Check changes with `cargo fmt --check`, `cargo check`, `cargo test`, and `cargo clippy -- -D warnings`.
+Check changes with `cargo fmt --check`, `cargo check`, and `cargo clippy -- -D warnings`.
 
 Earlier experiments live in `previous/gpt-v1/` (capabilities) and `previous/handwritten-v2/` (UX). They are reference material and are not part of the Rust build.
 

@@ -50,11 +50,14 @@ impl Config {
         self.data_dir.join("snapshots")
     }
 
-    pub fn agent_profile_dir(&self, agent: &str) -> PathBuf {
-        self.data_dir.join("agents").join(agent).join("profile")
+    pub fn profile_dir(&self, profile: &str) -> PathBuf {
+        self.data_dir.join(profile).join("profile")
     }
 
-    pub fn agent_snapshots_dir(&self, agent: &str) -> PathBuf {
-        self.data_dir.join("agents").join(agent).join("snapshots")
+    pub fn environment_snapshots_dir(&self, name: &str) -> PathBuf {
+        self.data_dir
+            .join("environments")
+            .join(name)
+            .join("snapshots")
     }
 }

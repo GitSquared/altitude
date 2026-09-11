@@ -1,3 +1,4 @@
+use crate::vcs::GitHub;
 use std::{
     error::Error,
     fmt,
@@ -332,14 +333,17 @@ where
         };
         let create = match task.agent_kind {
             Some(AgentKind::Claude) => self
-                .claude
-                .provision_sandbox(
-                    &self.isolation,
+                .isolation
+                .provision(
                     sandbox_id.clone(),
                     task.snapshot_path.clone(),
+                    vec![
+                        self.claude.environment_recipe(),
+                        GitHub::environment_recipe(),
+                    ],
                 )
                 .await
-                .map_err(TaskServiceError::Agent),
+                .map_err(TaskServiceError::Isolation),
             None => self
                 .isolation
                 .create(

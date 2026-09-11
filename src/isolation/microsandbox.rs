@@ -20,9 +20,10 @@ use tokio::sync::{Mutex, mpsc, watch};
 use crate::config::Config;
 
 use super::{
-    AgentBaseSandboxRecipe, AgentBaseSandboxSnapshot, Command, CommandEvent, CommandSession,
-    ImagePullPolicy, IsolationEngine, IsolationError, IsolationStatus, OutputStream,
-    SandboxOptions,
+    BaseSandboxRecipe, BaseSandboxSnapshot, Command, CommandEvent, CommandSession,
+    EnvironmentRecipe, ImagePullPolicy, IsolationEngine, IsolationError, IsolationStatus,
+    OutputStream, SandboxOptions,
+    environment::{self, private_directory},
 };
 
 const BASE_IMAGE: &str = "alpine";
@@ -30,6 +31,7 @@ const PREPARATION_SANDBOX: &str = "altitude-base-image-setup";
 
 #[derive(Clone)]
 pub struct MicrosandboxIsolation {
+    config: Config,
     data_home: PathBuf,
     cache_home: PathBuf,
     // Microsandbox's Unix sockets exceed macOS path limits under the longer data home.
@@ -40,6 +42,7 @@ pub struct MicrosandboxIsolation {
 impl MicrosandboxIsolation {
     pub fn new(config: &Config) -> Self {
         Self {
+            config: config.clone(),
             data_home: config.isolation_data_dir(),
             cache_home: config.isolation_cache_dir(),
             socket_safe_home: config.microsandbox_socket_dir(),
@@ -72,26 +75,26 @@ impl MicrosandboxIsolation {
     }
 }
 
-struct AgentBaseSandboxSnapshotStore {
+struct BaseSandboxSnapshotStore {
     snapshots_dir: PathBuf,
     refresh_after: Duration,
 }
 
-impl AgentBaseSandboxSnapshotStore {
-    fn new(recipe: &AgentBaseSandboxRecipe) -> Self {
+impl BaseSandboxSnapshotStore {
+    fn new(recipe: &BaseSandboxRecipe) -> Self {
         Self {
             snapshots_dir: recipe.snapshots_dir.clone(),
             refresh_after: recipe.refresh_after,
         }
     }
 
-    fn current(&self) -> Result<Option<AgentBaseSandboxSnapshot>, IsolationError> {
+    fn current(&self) -> Result<Option<BaseSandboxSnapshot>, IsolationError> {
         let manifest = match fs::read_to_string(self.snapshots_dir.join("current")) {
             Ok(manifest) => manifest,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(IsolationError::new(error.to_string())),
         };
-        let mut fields = manifest.trim().splitn(2, '\n');
+        let mut fields = manifest.splitn(3, '\n');
         let Some(name) = fields.next().filter(|name| !name.is_empty()) else {
             return Err(IsolationError::new(
                 "base snapshot manifest has no snapshot name",
@@ -112,33 +115,36 @@ impl AgentBaseSandboxSnapshotStore {
                 path.display()
             )));
         }
-        Ok(Some(AgentBaseSandboxSnapshot {
+        Ok(Some(BaseSandboxSnapshot {
             path,
             created_at_ms,
+            setup_command: fields.next().unwrap_or_default().to_owned(),
         }))
     }
 
-    fn needs_refresh(&self, current: Option<&AgentBaseSandboxSnapshot>) -> bool {
+    fn needs_refresh(&self, current: Option<&BaseSandboxSnapshot>, setup_command: &str) -> bool {
         let Some(current) = current else {
             return true;
         };
-        now_ms().saturating_sub(current.created_at_ms)
-            >= self
-                .refresh_after
-                .as_millis()
-                .try_into()
-                .unwrap_or(i64::MAX)
+        current.setup_command != setup_command
+            || now_ms().saturating_sub(current.created_at_ms)
+                >= self
+                    .refresh_after
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(i64::MAX)
     }
 
-    fn next_snapshot(&self) -> AgentBaseSandboxSnapshot {
+    fn next_snapshot(&self, setup_command: &str) -> BaseSandboxSnapshot {
         let created_at_ms = now_ms();
-        AgentBaseSandboxSnapshot {
+        BaseSandboxSnapshot {
             path: self.snapshots_dir.join(format!("base-{created_at_ms}")),
             created_at_ms,
+            setup_command: setup_command.to_owned(),
         }
     }
 
-    fn publish(&self, snapshot: &AgentBaseSandboxSnapshot) -> Result<(), IsolationError> {
+    fn publish(&self, snapshot: &BaseSandboxSnapshot) -> Result<(), IsolationError> {
         fs::create_dir_all(&self.snapshots_dir)
             .map_err(|error| IsolationError::new(error.to_string()))?;
         let name = snapshot
@@ -152,7 +158,10 @@ impl AgentBaseSandboxSnapshotStore {
             .join(format!("current-{}.tmp", process::id()));
         fs::write(
             &temporary_path,
-            format!("{name}\n{}\n", snapshot.created_at_ms),
+            format!(
+                "{name}\n{}\n{}",
+                snapshot.created_at_ms, snapshot.setup_command
+            ),
         )
         .map_err(|error| IsolationError::new(error.to_string()))?;
         fs::rename(temporary_path, manifest_path)
@@ -185,7 +194,19 @@ fn now_ms() -> i64 {
 }
 
 impl IsolationEngine for MicrosandboxIsolation {
+    async fn provision(
+        &self,
+        id: String,
+        task_snapshot: Option<String>,
+        recipes: Vec<EnvironmentRecipe>,
+    ) -> Result<(), IsolationError> {
+        environment::provision(self, &self.config, id, task_snapshot, recipes).await
+    }
+
     async fn prepare(&self, status: &watch::Sender<IsolationStatus>) -> Result<(), IsolationError> {
+        private_directory(self.config.data_dir())?;
+        private_directory(&self.data_home)?;
+        private_directory(&self.cache_home)?;
         tracing::info!("installing Microsandbox runtime");
         status.send_replace(IsolationStatus::InstallingRuntime);
         Setup::builder()
@@ -260,19 +281,19 @@ impl IsolationEngine for MicrosandboxIsolation {
 
     async fn ensure_base(
         &self,
-        recipe: AgentBaseSandboxRecipe,
-    ) -> Result<AgentBaseSandboxSnapshot, IsolationError> {
+        recipe: BaseSandboxRecipe,
+    ) -> Result<BaseSandboxSnapshot, IsolationError> {
         let _preparation = self.base_preparation_lock.lock().await;
-        let store = AgentBaseSandboxSnapshotStore::new(&recipe);
+        let store = BaseSandboxSnapshotStore::new(&recipe);
         let current = store.current()?;
-        if !store.needs_refresh(current.as_ref()) {
+        if !store.needs_refresh(current.as_ref(), &recipe.setup_command) {
             return Ok(current.expect("a base snapshot was present"));
         }
 
         let sandbox_id = format!("altitude-{}-setup", recipe.name);
-        let snapshot = store.next_snapshot();
-        tracing::info!(agent = %recipe.name, snapshot = %snapshot.path.display(), "building agent base sandbox snapshot");
-        self.create(sandbox_id.clone(), SandboxOptions::agent_base())
+        let snapshot = store.next_snapshot(&recipe.setup_command);
+        tracing::info!(environment = %recipe.name, snapshot = %snapshot.path.display(), "building environment base sandbox snapshot");
+        self.create(sandbox_id.clone(), SandboxOptions::base())
             .await?;
         let result = async {
             let mut session = self
@@ -281,7 +302,7 @@ impl IsolationEngine for MicrosandboxIsolation {
             loop {
                 let Some(event) = session.events.recv().await else {
                     return Err(IsolationError::new(
-                        "agent setup connection closed without an exit status",
+                        "environment setup connection closed without an exit status",
                     ));
                 };
                 match event {
@@ -289,7 +310,7 @@ impl IsolationEngine for MicrosandboxIsolation {
                     CommandEvent::Exited(0) => break,
                     CommandEvent::Exited(code) => {
                         return Err(IsolationError::new(format!(
-                            "agent setup exited with code {code}"
+                            "environment setup exited with code {code}"
                         )));
                     }
                     CommandEvent::Failed(error) => return Err(IsolationError::new(error)),
@@ -312,20 +333,20 @@ impl IsolationEngine for MicrosandboxIsolation {
             .await?;
             store.publish(&snapshot)?;
             for stale_snapshot in store.stale_snapshots()? {
-                tracing::info!(snapshot = %stale_snapshot.display(), "removing stale agent base sandbox snapshot");
+                tracing::info!(snapshot = %stale_snapshot.display(), "removing stale environment base sandbox snapshot");
                 self.remove_snapshot(stale_snapshot).await?;
             }
             Ok(())
         }
         .await;
         if let Err(error) = &result {
-            tracing::warn!(agent = %recipe.name, error = %error, "agent base sandbox setup failed");
+            tracing::warn!(environment = %recipe.name, error = %error, "environment base sandbox setup failed");
             if let Err(remove_error) = self.remove(sandbox_id).await {
-                tracing::warn!(agent = %recipe.name, error = %remove_error, "could not remove failed agent setup sandbox");
+                tracing::warn!(environment = %recipe.name, error = %remove_error, "could not remove failed environment setup sandbox");
             }
         }
         result?;
-        tracing::info!(agent = %recipe.name, snapshot = %snapshot.path.display(), "agent base sandbox ready");
+        tracing::info!(environment = %recipe.name, snapshot = %snapshot.path.display(), "environment base sandbox ready");
         Ok(snapshot)
     }
 
@@ -422,8 +443,7 @@ impl IsolationEngine for MicrosandboxIsolation {
         snapshots_dir: PathBuf,
     ) -> Result<PathBuf, IsolationError> {
         tracing::info!(sandbox_id = %id, "suspending sandbox");
-        fs::create_dir_all(&snapshots_dir)
-            .map_err(|error| IsolationError::new(error.to_string()))?;
+        private_directory(&snapshots_dir)?;
         let sandbox = Sandbox::get(&id)
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;

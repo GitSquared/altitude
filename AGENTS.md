@@ -25,7 +25,7 @@ and implementer of bounded pieces—not an autonomous author of the whole v1.
   leave room for Gabriel to implement the next similar piece. Avoid unsolicited
   lectures or narrating every line.
 - Take on dependency research, packaging experiments, compatibility debugging,
-  repetitive integration work, and testing when useful. An independently
+  repetitive integration work, and manual verification when useful. An independently
   delegated task should have a concrete deliverable and a narrow scope.
 - Use ordinary conversational cues to choose the collaboration mode:
   - "Help me understand this": explain and offer hints; do not edit.
@@ -74,18 +74,27 @@ and implementer of bounded pieces—not an autonomous author of the whole v1.
 - Extensions and companion tools need not all be written in Rust.
 - Use Conventional Commits.
 
+## Documentation
+
+- Keep README focused on the project introduction and minimal development entry
+  points. Do not add feature documentation, configuration guides, architecture
+  explanations, or verification walkthroughs to it during implementation.
+- Write proper documentation later as an explicitly agreed, scoped task.
+  Do not create separate documentation files to bypass this boundary.
+
 ## Verification
 
 - Judge progress through working user journeys: delegation, switching views,
   keyboard ownership, attention requests and replies, restart, and recovery.
 - Exercise changed interactive behavior in a real terminal. Tests that assert
   shortcut labels or mock a successful resume do not establish that they work.
-- Keep focused tests for meaningful durable-state and boundary guarantees. Add
-  failure/restart coverage when changing persistence or lifecycle behavior.
-  Avoid test volume as a goal and tests that merely mirror implementation.
-- Before committing Rust code, run `cargo fmt --check`, `cargo check`, and the
-  relevant tests. Run Clippy when available. Documentation-only edits need a
-  diff review, not an unrelated runtime suite.
+- Do not add automated tests, test fixtures, or test infrastructure for now.
+  First demonstrate useful functionality through working user journeys.
+  Reintroduce tests only when Gabriel explicitly agrees to a narrowly scoped
+  testing task; do not accumulate unit tests as part of ordinary implementation.
+- Before committing Rust code, run `cargo fmt --check` and `cargo check`.
+  Run Clippy when available. Documentation-only edits need a diff review,
+  not an unrelated runtime suite.
 - Until the TypeScript implementation is archived, changes to its executable
   code still require `bun run check` before committing.
 - Report the limits of verification explicitly: compilation, simulated

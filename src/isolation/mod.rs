@@ -2,7 +2,9 @@ use std::{error::Error as StdError, fmt, future::Future, path::PathBuf, time::Du
 
 use tokio::sync::{mpsc, watch};
 
+mod environment;
 mod microsandbox;
+pub use environment::{DefaultFile, EnvironmentRecipe, GuestPath, PersistentDirectory};
 
 pub use microsandbox::MicrosandboxIsolation;
 
@@ -20,19 +22,19 @@ pub struct CommandSession {
     pub events: mpsc::UnboundedReceiver<CommandEvent>,
 }
 
-/// The agent-supplied part of preparing a reusable sandbox environment.
+/// The composed recipe for a reusable sandbox environment.
 ///
 /// Isolation owns image refreshes, snapshot promotion, and cleanup. An agent
-/// supplies only its identity, refresh cadence, and package-install command.
+/// contributes package installation and persistent configuration requirements.
 #[derive(Clone, Debug)]
-pub struct AgentBaseSandboxRecipe {
+pub struct BaseSandboxRecipe {
     pub name: String,
     pub snapshots_dir: PathBuf,
     pub refresh_after: Duration,
     pub setup_command: String,
 }
 
-impl AgentBaseSandboxRecipe {
+impl BaseSandboxRecipe {
     pub fn new(
         name: impl Into<String>,
         snapshots_dir: PathBuf,
@@ -49,9 +51,10 @@ impl AgentBaseSandboxRecipe {
 }
 
 #[derive(Clone, Debug)]
-pub struct AgentBaseSandboxSnapshot {
+pub struct BaseSandboxSnapshot {
     pub path: PathBuf,
     pub created_at_ms: i64,
+    pub setup_command: String,
 }
 
 #[derive(Clone, Debug)]
@@ -80,11 +83,10 @@ impl SandboxOptions {
         }
     }
 
-    /// A fresh, networked sandbox for preparing an agent environment.
+    /// A fresh, networked sandbox for preparing a composed environment.
     ///
-    /// It always refreshes Alpine first; agent-specific setup can then update
-    /// its own packages on top.
-    pub fn agent_base() -> Self {
+    /// It refreshes Alpine first, then runs installation without profile mounts.
+    pub fn base() -> Self {
         Self {
             snapshot_path: None,
             image_pull_policy: ImagePullPolicy::Always,
@@ -139,6 +141,13 @@ impl fmt::Display for IsolationError {
 impl StdError for IsolationError {}
 
 pub trait IsolationEngine: Send + Sync {
+    fn provision(
+        &self,
+        id: String,
+        task_snapshot: Option<String>,
+        recipes: Vec<EnvironmentRecipe>,
+    ) -> impl Future<Output = Result<(), IsolationError>> + Send;
+
     fn prepare(
         &self,
         status: &watch::Sender<IsolationStatus>,
@@ -152,8 +161,8 @@ pub trait IsolationEngine: Send + Sync {
 
     fn ensure_base(
         &self,
-        recipe: AgentBaseSandboxRecipe,
-    ) -> impl Future<Output = Result<AgentBaseSandboxSnapshot, IsolationError>> + Send;
+        recipe: BaseSandboxRecipe,
+    ) -> impl Future<Output = Result<BaseSandboxSnapshot, IsolationError>> + Send;
 
     fn run_command(
         &self,

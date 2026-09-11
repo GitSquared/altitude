@@ -19,6 +19,7 @@ mod isolation;
 mod logging;
 mod tasks;
 mod tui;
+mod vcs;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -52,7 +53,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         else {
             return Ok(());
         };
-        let claude = ClaudeCode::new(&config);
+        let claude = ClaudeCode;
 
         let tasks = TaskService::new(
             TaskStore::new(&database),
