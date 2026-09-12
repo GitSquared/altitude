@@ -18,8 +18,7 @@ impl ClaudeCode {
     fn install_command() -> &'static str {
         "wget -qO /etc/apk/keys/claude-code.rsa.pub https://downloads.claude.ai/keys/claude-code.rsa.pub && \\
          printf '%s\\n' https://downloads.claude.ai/claude-code/apk/stable >> /etc/apk/repositories && \\
-         apk upgrade --no-cache && \\
-         apk add --no-cache claude-code libgcc libstdc++ ripgrep"
+         apk add --no-cache claude-code"
     }
 }
 
@@ -32,17 +31,16 @@ impl AgentEngine for ClaudeCode {
         EnvironmentRecipe {
             profile: "agents/claude",
             setup_command: Self::install_command(),
-            directories: vec![PersistentDirectory {
-                name: "",
-                guest_path: GuestPath::Absolute("/altitude/claude"),
-                defaults: vec![DefaultFile {
+            directories: vec![PersistentDirectory::root(
+                GuestPath::Absolute("/altitude/claude"),
+                include_str!("assets/claude.md"),
+                vec![DefaultFile {
                     path: "settings.json",
                     contents: DEFAULT_SETTINGS,
                 }],
-            }],
+            )],
             environment: vec![
                 ("CLAUDE_CONFIG_DIR", "/altitude/claude"),
-                ("SHELL", "/bin/sh"),
                 ("DISABLE_AUTOUPDATER", "1"),
             ],
         }

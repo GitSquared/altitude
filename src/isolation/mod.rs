@@ -13,6 +13,7 @@ pub enum IsolationStatus {
     Starting,
     InstallingRuntime,
     PreparingBaseImage,
+    PreparingWorkspacePackages,
     Ready,
     Failed(String),
 }
@@ -60,37 +61,16 @@ pub struct BaseSandboxSnapshot {
 #[derive(Clone, Debug)]
 pub struct SandboxOptions {
     pub snapshot_path: Option<String>,
-    pub image_pull_policy: ImagePullPolicy,
     pub network_enabled: bool,
     pub mounts: Vec<SandboxMount>,
     pub environment: Vec<(String, String)>,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum ImagePullPolicy {
-    Never,
-    Always,
 }
 
 impl SandboxOptions {
     pub fn isolated(snapshot_path: Option<String>) -> Self {
         Self {
             snapshot_path,
-            image_pull_policy: ImagePullPolicy::Never,
             network_enabled: false,
-            mounts: Vec::new(),
-            environment: Vec::new(),
-        }
-    }
-
-    /// A fresh, networked sandbox for preparing a composed environment.
-    ///
-    /// It refreshes Alpine first, then runs installation without profile mounts.
-    pub fn base() -> Self {
-        Self {
-            snapshot_path: None,
-            image_pull_policy: ImagePullPolicy::Always,
-            network_enabled: true,
             mounts: Vec::new(),
             environment: Vec::new(),
         }

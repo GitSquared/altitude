@@ -22,6 +22,8 @@ microsandbox = { version = "0.6.17", default-features = false, features = ["net"
 microsandbox-filesystem = { version = "0.6.17", default-features = false, features = ["prebuilt"] }
 ratatui = "0.30.2"
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
+terminput = "0.5.15"
+terminput-crossterm = "0.4.11"
 throbber-widgets-tui = { version = "0.11.1", default-features = false }
 tokio = { version = "1.45.1", features = ["rt", "macros", "signal", "sync", "time"] }
 tracing = "0.1"

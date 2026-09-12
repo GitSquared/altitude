@@ -128,6 +128,7 @@ fn isolation_label(status: &IsolationStatus) -> &'static str {
             "setting up isolation runtime..."
         }
         IsolationStatus::PreparingBaseImage => "fetching base sandbox image...",
+        IsolationStatus::PreparingWorkspacePackages => "preparing workspace packages...",
         IsolationStatus::Ready | IsolationStatus::Failed(_) => "setting up isolation runtime...",
     }
 }

@@ -8,10 +8,26 @@ impl GitHub {
             profile: "vcs/github",
             setup_command: "apk add --no-cache git openssh-client-default github-cli gnupg",
             directories: vec![
-                PersistentDirectory::new("git", GuestPath::Absolute("/altitude/git")),
-                PersistentDirectory::new("ssh", GuestPath::HomeRelative(".ssh")),
-                PersistentDirectory::new("gh", GuestPath::HomeRelative(".config/gh")),
-                PersistentDirectory::new("gnupg", GuestPath::HomeRelative(".gnupg")),
+                PersistentDirectory::at(
+                    "git",
+                    GuestPath::Absolute("/altitude/git"),
+                    include_str!("assets/git.md"),
+                ),
+                PersistentDirectory::at(
+                    "ssh",
+                    GuestPath::HomeRelative(".ssh"),
+                    include_str!("assets/ssh.md"),
+                ),
+                PersistentDirectory::at(
+                    "gh",
+                    GuestPath::HomeRelative(".config/gh"),
+                    include_str!("assets/github.md"),
+                ),
+                PersistentDirectory::at(
+                    "gnupg",
+                    GuestPath::HomeRelative(".gnupg"),
+                    include_str!("assets/gnupg.md"),
+                ),
             ],
             // A directory mount lets `git config --global` atomically replace its file.
             environment: vec![("GIT_CONFIG_GLOBAL", "/altitude/git/config")],

@@ -27,6 +27,11 @@ impl Prompt {
         }
     }
 
+    pub fn paste(&mut self, text: &str) {
+        self.value.insert_str(self.byte_index(), text);
+        self.cursor += text.chars().count();
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<PromptAction> {
         match key.code {
             KeyCode::Esc => Some(PromptAction::Cancel),
@@ -76,7 +81,7 @@ impl Prompt {
             .border_type(BorderType::Rounded)
             .padding(Padding::horizontal(1));
         let input_area = block.inner(area);
-        let input = format!("❯ {}", self.value);
+        let input = format!("❯ {}", self.value.replace(['\r', '\n'], "↵"));
         frame.render_widget(Paragraph::new(Line::from(input).white()).block(block), area);
         let input_width = self.value[..self.byte_index()].chars().count() as u16;
         frame.set_cursor_position((input_area.x + 2 + input_width, input_area.y));

@@ -43,6 +43,14 @@ and implementer of bounded pieces—not an autonomous author of the whole v1.
 
 ## Repository direction
 
+- Altitude is unreleased and iterating quickly. Implement the current design
+  directly; do not preserve compatibility with intermediate development states
+  unless Gabriel explicitly requests it.
+- Do not add migrations, fallback paths, version detection, or automatic repair
+  solely to support earlier unreleased iterations. If local development state
+  needs a one-off reset or rebuild, surface that need instead of embedding the
+  transition in the product. Preserve user work; this rule does not authorize
+  silently deleting state or removing normal persistence and recovery behavior.
 - The active implementation is moving to Rust at the repository root, starting
   from the handwritten Rust starter. Until that move is complete, do not assume
   the existing TypeScript files are the new implementation.

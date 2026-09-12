@@ -4,7 +4,13 @@ use std::{
     time::Duration,
 };
 
-use crossterm::event::{Event, EventStream, KeyCode, KeyModifiers};
+use crossterm::{
+    event::{
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, EventStream, KeyCode, KeyModifiers,
+    },
+    execute,
+};
 use futures_util::StreamExt;
 use ratatui::DefaultTerminal;
 use tokio::{signal::unix::Signal, sync::mpsc, time};
@@ -155,7 +161,9 @@ where
         task_events,
     )
     .await;
+    let mouse_cleanup = execute!(io::stdout(), DisableMouseCapture, DisableBracketedPaste);
     runtime.suspend_all().await.map_err(io::Error::other)?;
+    mouse_cleanup?;
     result
 }
 
@@ -170,11 +178,21 @@ async fn run_loop<E>(
 where
     E: IsolationEngine + Clone + 'static,
 {
+    execute!(io::stdout(), EnableBracketedPaste)?;
     let mut events = EventStream::new();
     let mut refresh = time::interval(Duration::from_secs(2));
     let mut shell_notice = time::interval(Duration::from_millis(100));
     let mut app = App::new(tasks);
+    let mut mouse_captured = false;
     loop {
+        if mouse_captured != app.open_shell.is_some() {
+            mouse_captured = app.open_shell.is_some();
+            if mouse_captured {
+                execute!(io::stdout(), EnableMouseCapture)?;
+            } else {
+                execute!(io::stdout(), DisableMouseCapture)?;
+            }
+        }
         terminal.draw(|frame| {
             overview::draw(
                 frame,
@@ -206,9 +224,7 @@ where
                 TaskEvent::Started(Ok(task)) => app.replace_task(task),
                 TaskEvent::Started(Err(error)) => app.notice = Some(error.to_string()),
                 TaskEvent::Finished(id, Ok(task)) if !app.is_removing(&id) => {
-                    if matches!(task.status, TaskStatus::Completed) {
-                        app.remove_shell(&id);
-                    }
+                    app.remove_shell(&id);
                     app.replace_task(task);
                 }
                 TaskEvent::Finished(id, Err(error)) if !app.is_removing(&id) => set_error(&mut app, &id, error),
@@ -276,6 +292,29 @@ where
     {
         let (rows, cols) = shell::size(terminal.size()?.into());
         runtime.resize(id, rows, cols);
+        if let Some(shell) = app.shells.get_mut(id) {
+            shell.resize(rows, cols);
+        }
+        return Ok(false);
+    }
+    if let Event::Paste(text) = event {
+        if let Some(prompt) = &mut app.prompt {
+            prompt.paste(&text);
+        } else if let Some(id) = &app.open_shell
+            && let Some(shell) = app.shells.get(id)
+            && let Some(bytes) = shell.paste_bytes(text)
+        {
+            runtime.send_input(id, bytes);
+        }
+        return Ok(false);
+    }
+    if let Event::Mouse(mouse) = event {
+        if let Some(id) = &app.open_shell
+            && let Some(shell) = app.shells.get_mut(id)
+            && let Some(bytes) = shell.mouse_bytes(mouse, terminal.size()?.into())
+        {
+            runtime.send_input(id, bytes);
+        }
         return Ok(false);
     }
     let Event::Key(key) = event else {
@@ -298,16 +337,10 @@ where
     if let Some(id) = app.open_shell.clone() {
         if shell::is_exit_key(key) {
             app.hide_shell();
-        } else if let Some(shell) = app.shells.get_mut(&id) {
-            match key.code {
-                KeyCode::PageUp => shell.scroll_up(),
-                KeyCode::PageDown => shell.scroll_down(),
-                _ => {
-                    if let Some(bytes) = shell.key_bytes(key) {
-                        runtime.send_input(&id, bytes);
-                    }
-                }
-            }
+        } else if let Some(shell) = app.shells.get_mut(&id)
+            && let Some(bytes) = shell.key_bytes(key)
+        {
+            runtime.send_input(&id, bytes);
         }
         return Ok(false);
     }
@@ -330,6 +363,11 @@ where
                 && matches!(task.status, TaskStatus::InProgress)
             {
                 if app.shells.contains_key(&task.id) {
+                    let (rows, cols) = shell::size(terminal.size()?.into());
+                    runtime.resize(&task.id, rows, cols);
+                    if let Some(shell) = app.shells.get_mut(&task.id) {
+                        shell.resize(rows, cols);
+                    }
                     tracing::info!(task_id = %task.id, "reattaching terminal");
                     app.open_shell = Some(task.id);
                     return Ok(false);

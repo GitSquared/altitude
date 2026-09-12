@@ -4,7 +4,7 @@ use std::{
 };
 
 use base64::{Engine, engine::general_purpose::STANDARD};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::{
     Frame,
     layout::{Constraint, Flex, Layout, Rect},
@@ -12,6 +12,8 @@ use ratatui::{
     text::Line,
     widgets::{Block, BorderType, Clear},
 };
+use terminput::Encoding;
+use terminput_crossterm::to_terminput;
 use tui_term::{vt100, widget::PseudoTerminal};
 
 pub struct Shell {
@@ -54,8 +56,74 @@ impl Shell {
             .is_some_and(|until| Instant::now() < until)
     }
 
-    pub fn key_bytes(&self, key: KeyEvent) -> Option<Vec<u8>> {
-        key_bytes(key)
+    pub fn resize(&mut self, rows: u16, cols: u16) {
+        self.parser.screen_mut().set_size(rows, cols);
+    }
+
+    pub fn key_bytes(&mut self, key: KeyEvent) -> Option<Vec<u8>> {
+        if !self.parser.screen().alternate_screen() {
+            match key.code {
+                KeyCode::PageUp => {
+                    self.scroll_up();
+                    return None;
+                }
+                KeyCode::PageDown => {
+                    self.scroll_down();
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        encode_input(Event::Key(key))
+    }
+
+    pub fn paste_bytes(&self, text: String) -> Option<Vec<u8>> {
+        if self.parser.screen().bracketed_paste() {
+            encode_input(Event::Paste(text))
+        } else {
+            Some(text.into_bytes())
+        }
+    }
+
+    pub fn mouse_bytes(&mut self, mut mouse: MouseEvent, area: Rect) -> Option<Vec<u8>> {
+        let inner = Block::bordered().inner(popup_area(area));
+        if !inner.contains((mouse.column, mouse.row).into()) {
+            return None;
+        }
+        let screen = self.parser.screen();
+        let mode = screen.mouse_protocol_mode();
+        if mode == vt100::MouseProtocolMode::None {
+            if !screen.alternate_screen() {
+                let offset = screen.scrollback();
+                let offset = match mouse.kind {
+                    MouseEventKind::ScrollUp => offset + 3,
+                    MouseEventKind::ScrollDown => offset.saturating_sub(3),
+                    _ => return None,
+                };
+                self.parser.screen_mut().set_scrollback(offset);
+            }
+            return None;
+        }
+        // terminput emits SGR mouse reports; do not send them to legacy-mode apps.
+        if screen.mouse_protocol_encoding() != vt100::MouseProtocolEncoding::Sgr {
+            return None;
+        }
+        match mouse.kind {
+            MouseEventKind::Up(_) if mode == vt100::MouseProtocolMode::Press => return None,
+            MouseEventKind::Drag(_)
+                if !matches!(
+                    mode,
+                    vt100::MouseProtocolMode::ButtonMotion | vt100::MouseProtocolMode::AnyMotion
+                ) =>
+            {
+                return None;
+            }
+            MouseEventKind::Moved if mode != vt100::MouseProtocolMode::AnyMotion => return None,
+            _ => {}
+        }
+        mouse.column -= inner.x;
+        mouse.row -= inner.y;
+        encode_input(Event::Mouse(mouse))
     }
 
     pub fn scroll_up(&mut self) {
@@ -78,7 +146,14 @@ impl Shell {
             .border_type(BorderType::Rounded)
             .border_style(Style::new().cyan())
             .title(" shell ")
-            .title_bottom(Line::from(" pgup/pgdn history · ctrl-a back ").right_aligned());
+            .title_bottom(
+                Line::from(if self.parser.screen().alternate_screen() {
+                    " ctrl-a back "
+                } else {
+                    " pgup/pgdn history · ctrl-a back "
+                })
+                .right_aligned(),
+            );
         let block = if self.has_active_notice() {
             block.title_bottom(Line::from(" copied to clipboard ").cyan())
         } else {
@@ -127,27 +202,13 @@ fn popup_area(area: Rect) -> Rect {
     horizontal
 }
 
-fn key_bytes(key: KeyEvent) -> Option<Vec<u8>> {
-    let bytes = match key.code {
-        KeyCode::Char(character) if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            vec![(character.to_ascii_lowercase() as u8) & 0x1f]
-        }
-        KeyCode::Char(character) => character.to_string().into_bytes(),
-        KeyCode::Enter => vec![b'\r'],
-        KeyCode::Backspace => vec![0x7f],
-        KeyCode::Tab => vec![b'\t'],
-        KeyCode::BackTab => b"\x1b[Z".to_vec(),
-        KeyCode::Esc => vec![0x1b],
-        KeyCode::Up => b"\x1b[A".to_vec(),
-        KeyCode::Down => b"\x1b[B".to_vec(),
-        KeyCode::Right => b"\x1b[C".to_vec(),
-        KeyCode::Left => b"\x1b[D".to_vec(),
-        KeyCode::Home => b"\x1b[H".to_vec(),
-        KeyCode::End => b"\x1b[F".to_vec(),
-        KeyCode::Delete => b"\x1b[3~".to_vec(),
-        KeyCode::PageUp => b"\x1b[5~".to_vec(),
-        KeyCode::PageDown => b"\x1b[6~".to_vec(),
-        _ => return None,
+fn encode_input(event: Event) -> Option<Vec<u8>> {
+    let event = to_terminput(event).ok()?;
+    let capacity = match &event {
+        terminput::Event::Paste(text) => text.len() + 12,
+        _ => 64,
     };
-    Some(bytes)
+    let mut bytes = vec![0; capacity];
+    let len = event.encode(&mut bytes, Encoding::Xterm).ok()?;
+    Some(bytes[..len].to_vec())
 }

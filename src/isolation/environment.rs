@@ -9,10 +9,7 @@ use std::{
 
 use crate::config::Config;
 
-use super::{
-    BaseSandboxRecipe, ImagePullPolicy, IsolationEngine, IsolationError, SandboxMount,
-    SandboxOptions,
-};
+use super::{BaseSandboxRecipe, IsolationEngine, IsolationError, SandboxMount, SandboxOptions};
 
 // The current Alpine environment runs as root. Resolve home-relative requirements here.
 const GUEST_HOME: &str = "/root";
@@ -33,18 +30,37 @@ pub enum GuestPath {
 }
 
 pub struct PersistentDirectory {
-    /// Relative name inside the profile; empty means the profile root itself.
-    pub name: &'static str,
+    /// Relative path inside the profile.
+    pub relative_path: &'static str,
     pub guest_path: GuestPath,
     pub defaults: Vec<DefaultFile>,
+    pub instructions: &'static str,
 }
 
 impl PersistentDirectory {
-    pub fn new(name: &'static str, guest_path: GuestPath) -> Self {
+    pub fn at(
+        relative_path: &'static str,
+        guest_path: GuestPath,
+        instructions: &'static str,
+    ) -> Self {
         Self {
-            name,
+            relative_path,
             guest_path,
             defaults: Vec::new(),
+            instructions,
+        }
+    }
+
+    pub fn root(
+        guest_path: GuestPath,
+        instructions: &'static str,
+        defaults: Vec<DefaultFile>,
+    ) -> Self {
+        Self {
+            relative_path: "",
+            guest_path,
+            defaults,
+            instructions,
         }
     }
 }
@@ -58,6 +74,7 @@ struct EnvironmentPlan {
     recipe: BaseSandboxRecipe,
     options: SandboxOptions,
     defaults: Vec<(PathBuf, &'static str)>,
+    readmes: Vec<(PathBuf, String)>,
 }
 
 impl EnvironmentPlan {
@@ -71,12 +88,15 @@ impl EnvironmentPlan {
             ),
             options: SandboxOptions {
                 snapshot_path: None,
-                image_pull_policy: ImagePullPolicy::Never,
                 network_enabled: true,
                 mounts: Vec::new(),
-                environment: vec![("HOME".into(), GUEST_HOME.into())],
+                environment: vec![
+                    ("HOME".into(), GUEST_HOME.into()),
+                    ("SHELL".into(), "/bin/bash".into()),
+                ],
             },
             defaults: Vec::new(),
+            readmes: Vec::new(),
         };
         let mut profiles = HashSet::new();
         for recipe in recipes {
@@ -87,8 +107,10 @@ impl EnvironmentPlan {
             plan.recipe.setup_command.push_str(recipe.setup_command);
             plan.recipe.setup_command.push('\n');
             for directory in recipe.directories {
-                relative_path(directory.name, true)?;
-                let host_path = config.profile_dir(recipe.profile).join(directory.name);
+                relative_path(directory.relative_path, true)?;
+                let host_path = config
+                    .profile_dir(recipe.profile)
+                    .join(directory.relative_path);
                 let guest_path = match directory.guest_path {
                     GuestPath::Absolute(path) => {
                         if !path.starts_with('/') {
@@ -112,6 +134,11 @@ impl EnvironmentPlan {
                         return Err(IsolationError::new("persistent mount paths overlap"));
                     }
                 }
+                let readme = include_str!("assets/mount.md")
+                    .replace("{{guest_path}}", &guest_path.to_string_lossy())
+                    .replace("{{host_path}}", &host_path.to_string_lossy())
+                    .replace("{{instructions}}", directory.instructions);
+                plan.readmes.push((host_path.join("README.md"), readme));
                 for default in directory.defaults {
                     relative_path(default.path, false)?;
                     plan.defaults
@@ -143,6 +170,18 @@ impl EnvironmentPlan {
         private_directory(config.data_dir())?;
         for mount in &self.options.mounts {
             private_directory(&mount.host_path)?;
+        }
+        for (path, readme) in &self.readmes {
+            // Replace the managed note without following a guest-created symlink.
+            let temporary = path.with_file_name(format!(".README-{}", uuid::Uuid::new_v4()));
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temporary)
+                .map_err(io_error)?;
+            file.write_all(readme.as_bytes()).map_err(io_error)?;
+            fs::rename(&temporary, path).map_err(io_error)?;
         }
         for (path, contents) in &self.defaults {
             private_directory(path.parent().expect("default has a parent"))?;

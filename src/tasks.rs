@@ -136,7 +136,7 @@ impl TaskStore {
 
     pub async fn mark_errored(&self, id: &str, error: &str) -> Result<(), TaskError> {
         sqlx::query(
-            "UPDATE tasks SET status = 'errored', sandbox_id = NULL, last_error = ?, updated_at = datetime('now') \
+            "UPDATE tasks SET status = 'errored', last_error = ?, updated_at = datetime('now') \
              WHERE id = ?",
         )
         .bind(error)
