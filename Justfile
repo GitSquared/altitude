@@ -18,7 +18,7 @@ migration name:
     touch "$file"
     echo "created $file"
 
-# Open Altitude's local database with sqlite3.
+# Open altitude's local database with sqlite3.
 db:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -39,7 +39,7 @@ db:
 
     exec sqlite3 "$database"
 
-# Tail Altitude's application log.
+# Tail altitude's application log.
 logs:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -55,7 +55,7 @@ logs:
 
     exec tail -n 100 -F "$logs_dir/altitude.log"
 
-# Remove all local Altitude state for a fresh development start.
+# Remove all local altitude state for a fresh development start.
 nuke:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -75,17 +75,17 @@ nuke:
             ;;
     esac
 
-    echo "This removes Altitude's local data and cache:"
+    echo "This removes altitude's local data and cache:"
     echo "  $data_dir"
     echo "  $cache_dir"
-    read -r -p "Make sure Altitude is not running. Continue? [y/N] " answer
+    read -r -p "Make sure altitude is not running. Continue? [y/N] " answer
     if [[ "$answer" != "y" && "$answer" != "Y" ]]; then
         echo "cancelled"
         exit 0
     fi
 
     rm -rf -- "$data_dir" "$cache_dir"
-    echo "Altitude local state removed"
+    echo "altitude local state removed"
 
 # Run the msb CLI against altitude's isolation state.
 [positional-arguments]
