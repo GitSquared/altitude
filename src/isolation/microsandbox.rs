@@ -424,6 +424,7 @@ impl IsolationEngine for MicrosandboxIsolation {
         let stdin = process
             .take_stdin()
             .ok_or_else(|| IsolationError::new("task stdin was not available"))?;
+        let control = process.control();
         let (command_tx, mut command_rx) = mpsc::unbounded_channel();
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
@@ -440,6 +441,12 @@ impl IsolationEngine for MicrosandboxIsolation {
                         }
                         Some(Command::Resize { rows, cols }) => {
                             let _ = process.resize(rows, cols).await;
+                        }
+                        Some(Command::Interrupt) => {
+                            if let Err(error) = control.signal(2).await {
+                                let _ = event_tx.send(CommandEvent::Failed(error.to_string()));
+                                break;
+                            }
                         }
                         None => break,
                     },

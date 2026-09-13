@@ -8,7 +8,7 @@ use ratatui::{
     widgets::{Block, BorderType, Padding, Paragraph},
 };
 
-use crate::tasks::{Task, TaskStatus};
+use crate::tasks::{Task, TaskCustody, TaskStatus};
 
 pub fn draw(
     frame: &mut Frame,
@@ -39,7 +39,8 @@ pub fn draw(
         frame.render_widget(Line::from(notice).red(), footer);
     }
     frame.render_widget(
-        Line::from("c create · tab select · enter shell · delete remove · q quit".dim())
+        Line::from("c create · tab select · enter shell · delete remove · q quit")
+            .dim()
             .alignment(HorizontalAlignment::Right),
         footer,
     );
@@ -76,7 +77,12 @@ fn draw_tasks(
         let selected = index == selected;
         let status = match &task.status {
             TaskStatus::Pending => Line::from("pending").yellow(),
-            TaskStatus::InProgress => Line::from("in progress").green(),
+            TaskStatus::InProgress => Line::from(match task.custody {
+                TaskCustody::Autopilot => "autopilot · working",
+                TaskCustody::Operator => "operator override",
+            })
+            .green(),
+            TaskStatus::Awaiting => Line::from("awaiting operator").yellow(),
             TaskStatus::Completed => Line::from("completed").dim(),
             TaskStatus::Errored => Line::from(task.last_error.as_deref().map_or_else(
                 || "errored".to_owned(),

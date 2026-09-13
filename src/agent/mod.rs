@@ -2,7 +2,7 @@ use crate::isolation::EnvironmentRecipe;
 use sqlx::Type;
 use std::{error::Error as StdError, fmt};
 mod claude;
-pub use claude::ClaudeCode;
+pub use claude::{AutopilotNext, ClaudeCode, ClaudeStream};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Type)]
 #[sqlx(type_name = "TEXT", rename_all = "lowercase")]
@@ -31,5 +31,4 @@ impl StdError for AgentError {}
 pub trait AgentEngine: Send + Sync {
     fn environment_recipe(&self) -> EnvironmentRecipe;
     fn new_conversation_id(&self) -> String;
-    fn command(&self, conversation_id: &str, prompt: &str, resume: bool) -> String;
 }

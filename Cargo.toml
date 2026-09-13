@@ -21,6 +21,8 @@ microsandbox = { version = "0.6.17", default-features = false, features = ["net"
 # Embed Microsandbox's guest helper without running its host-runtime installer at build time.
 microsandbox-filesystem = { version = "0.6.17", default-features = false, features = ["prebuilt"] }
 ratatui = "0.30.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
 terminput = "0.5.15"
 terminput-crossterm = "0.4.11"

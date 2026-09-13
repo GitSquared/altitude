@@ -7,8 +7,9 @@ use std::{
 use tokio::{sync::mpsc, time};
 
 use crate::{
+    agent::{AutopilotNext, ClaudeStream},
     isolation::{Command, CommandEvent, CommandSession, IsolationEngine, OutputStream},
-    tasks::{OutputChunk, Task, TaskRun, TaskService, TaskServiceError},
+    tasks::{OutputChunk, Task, TaskRun, TaskRunMode, TaskService, TaskServiceError},
 };
 
 pub enum TaskEvent {
@@ -21,6 +22,11 @@ pub enum TaskEvent {
         stream: OutputStream,
         bytes: Vec<u8>,
     },
+    OperatorReady(Task),
+    Decision {
+        task_id: String,
+        summary: String,
+    },
 }
 
 #[derive(Clone)]
@@ -29,6 +35,7 @@ pub struct TaskRuntime<E> {
     events: mpsc::UnboundedSender<TaskEvent>,
     commands: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<Command>>>>,
     suspending: Arc<Mutex<HashSet<String>>>,
+    handoffs: Arc<Mutex<HashMap<String, TaskRunMode>>>,
 }
 
 impl<E> TaskRuntime<E>
@@ -43,6 +50,7 @@ where
                 events,
                 commands: Arc::new(Mutex::new(HashMap::new())),
                 suspending: Arc::new(Mutex::new(HashSet::new())),
+                handoffs: Arc::new(Mutex::new(HashMap::new())),
             },
             receiver,
         )
@@ -85,9 +93,44 @@ where
         }
     }
 
+    pub fn take_control(&self, task_id: &str) {
+        self.request_handoff(task_id, TaskRunMode::Operator);
+    }
+
+    pub fn take_awaiting_control(&self, task: Task) {
+        let runtime = self.clone();
+        tokio::spawn(async move {
+            let result = runtime.service.start_operator(task).await;
+            let operator_task = result.as_ref().ok().map(|(task, _, _)| task.clone());
+            runtime.observe(TaskRunMode::Operator, result);
+            if let Some(task) = operator_task {
+                let _ = runtime.events.send(TaskEvent::OperatorReady(task));
+            }
+        });
+    }
+
+    pub fn return_to_autopilot(&self, task_id: &str) {
+        self.request_handoff(task_id, TaskRunMode::Autopilot);
+    }
+
+    fn request_handoff(&self, task_id: &str, target: TaskRunMode) {
+        self.handoffs
+            .lock()
+            .expect("task handoff lock poisoned")
+            .insert(task_id.to_owned(), target);
+        if let Some(command) = self
+            .commands
+            .lock()
+            .expect("task command lock poisoned")
+            .get(task_id)
+        {
+            let _ = command.send(Command::Interrupt);
+        }
+    }
+
     pub fn resume(&self, results: Vec<Result<(Task, TaskRun, CommandSession), TaskServiceError>>) {
         for result in results {
-            self.observe(result);
+            self.observe(TaskRunMode::Autopilot, result);
         }
     }
 
@@ -103,7 +146,7 @@ where
                 }
             };
             let _ = runtime.events.send(TaskEvent::Created(Ok(task.clone())));
-            runtime.observe(runtime.service.start(task).await);
+            runtime.observe(TaskRunMode::Autopilot, runtime.service.start(task).await);
         });
     }
 
@@ -120,7 +163,7 @@ where
         let tasks = self.list().await?;
         let suspending: Vec<_> = tasks
             .iter()
-            .filter(|task| task.is_resumable())
+            .filter(|task| task.should_suspend())
             .map(|task| task.id.clone())
             .collect();
         self.suspending
@@ -133,7 +176,11 @@ where
         Ok(())
     }
 
-    fn observe(&self, result: Result<(Task, TaskRun, CommandSession), TaskServiceError>) {
+    fn observe(
+        &self,
+        mode: TaskRunMode,
+        result: Result<(Task, TaskRun, CommandSession), TaskServiceError>,
+    ) {
         let (task, run, mut session) = match result {
             Ok(result) => result,
             Err(error) => {
@@ -152,9 +199,12 @@ where
         let events = self.events.clone();
         let commands = Arc::clone(&self.commands);
         let suspending = Arc::clone(&self.suspending);
+        let handoffs = Arc::clone(&self.handoffs);
+        let runtime = self.clone();
         tokio::spawn(async move {
             let mut chunks = Vec::new();
             let mut sequence = 0;
+            let mut claude_stream = matches!(mode, TaskRunMode::Autopilot).then(ClaudeStream::new);
             let mut flush = time::interval(Duration::from_millis(100));
             loop {
                 tokio::select! {
@@ -181,6 +231,9 @@ where
                         let Some(event) = event else { return };
                         match event {
                             CommandEvent::Output { stream, bytes } => {
+                                if let Some(parser) = &mut claude_stream {
+                                    parser.process(&bytes);
+                                }
                                 chunks.push(OutputChunk::new(sequence, stream, bytes.clone()));
                                 sequence += 1;
                                 let _ = events.send(TaskEvent::Output { task_id: task.id.clone(), stream, bytes });
@@ -198,6 +251,10 @@ where
                                         .remove(&task.id);
                                     return;
                                 }
+                                let handoff = handoffs
+                                    .lock()
+                                    .expect("task handoff lock poisoned")
+                                    .remove(&task.id);
                                 if !chunks.is_empty()
                                     && let Err(error) = service.append_output(&run, &chunks).await
                                 {
@@ -216,11 +273,79 @@ where
                                     let _ = events.send(TaskEvent::Finished(task.id.clone(), result));
                                     return;
                                 }
-                                let result = service.finish(&task, &run, event).await;
                                 commands
                                     .lock()
                                     .expect("task command lock poisoned")
                                     .remove(&task.id);
+                                if let Some(target) = handoff {
+                                    if let Err(error) = service.continue_turn(&run).await {
+                                        let _ = events.send(TaskEvent::Finished(task.id.clone(), Err(error)));
+                                        return;
+                                    }
+                                    let result = match target {
+                                        TaskRunMode::Autopilot => service.continue_autopilot(task).await,
+                                        TaskRunMode::Operator => service.start_operator(task).await,
+                                    };
+                                    let operator_task = matches!(target, TaskRunMode::Operator)
+                                        .then(|| result.as_ref().ok().map(|(task, _, _)| task.clone()))
+                                        .flatten();
+                                    runtime.observe(target, result);
+                                    if let Some(task) = operator_task {
+                                        let _ = events.send(TaskEvent::OperatorReady(task));
+                                    }
+                                    return;
+                                }
+                                if matches!(mode, TaskRunMode::Autopilot)
+                                    && matches!(event, CommandEvent::Exited(0))
+                                {
+                                    match claude_stream.and_then(ClaudeStream::decision) {
+                                        Some(decision) => {
+                                            let _ = events.send(TaskEvent::Decision {
+                                                task_id: task.id.clone(),
+                                                summary: decision.summary.clone(),
+                                            });
+                                            match decision.next {
+                                            AutopilotNext::Continue => {
+                                                if let Err(error) = service.continue_turn(&run).await {
+                                                    let _ = events.send(TaskEvent::Finished(task.id.clone(), Err(error)));
+                                                    return;
+                                                }
+                                                runtime.observe(
+                                                    TaskRunMode::Autopilot,
+                                                    service.continue_autopilot(task).await,
+                                                );
+                                            }
+                                            AutopilotNext::AwaitOperator => {
+                                                let result = service.await_operator(&task, &run).await;
+                                                let _ = events.send(TaskEvent::Finished(task.id, result));
+                                            }
+                                            AutopilotNext::Complete => {
+                                                let result = service.complete(&task, &run).await;
+                                                let _ = events.send(TaskEvent::Finished(task.id, result));
+                                            }
+                                        }
+                                        }
+                                        None => {
+                                            let result = service
+                                                .finish(
+                                                    &task,
+                                                    &run,
+                                                    CommandEvent::Failed("Claude ended without an autopilot decision".into()),
+                                                )
+                                                .await;
+                                            let _ = events.send(TaskEvent::Finished(task.id, result));
+                                        }
+                                    }
+                                    return;
+                                }
+                                if matches!(mode, TaskRunMode::Operator)
+                                    && matches!(event, CommandEvent::Exited(0))
+                                {
+                                    let result = service.complete(&task, &run).await;
+                                    let _ = events.send(TaskEvent::Finished(task.id, result));
+                                    return;
+                                }
+                                let result = service.finish(&task, &run, event).await;
                                 let _ = events.send(TaskEvent::Finished(task.id, result));
                                 return;
                             }

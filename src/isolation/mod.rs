@@ -86,6 +86,7 @@ pub struct SandboxMount {
 pub enum Command {
     Input(Vec<u8>),
     Resize { rows: u16, cols: u16 },
+    Interrupt,
 }
 
 pub enum CommandEvent {

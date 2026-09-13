@@ -18,7 +18,7 @@ use tokio::{signal::unix::Signal, sync::mpsc, time};
 use crate::{
     app::{TaskEvent, TaskRuntime},
     isolation::{IsolationEngine, OutputStream},
-    tasks::{Task, TaskServiceError, TaskStatus},
+    tasks::{Task, TaskCustody, TaskServiceError, TaskStatus},
 };
 
 mod boot;
@@ -247,6 +247,18 @@ where
                         }
                     }
                 }
+                TaskEvent::OperatorReady(task) => {
+                    let id = task.id.clone();
+                    app.replace_task(task);
+                    let (rows, cols) = shell::size(terminal.size()?.into());
+                    let history = runtime.output_history(&id).await.map_err(io::Error::other)?;
+                    runtime.resize(&id, rows, cols);
+                    app.shells.insert(id.clone(), Shell::new(rows, cols, history));
+                    app.open_shell = Some(id);
+                }
+                TaskEvent::Decision { task_id, summary } => {
+                    app.latest_output.insert(task_id, summary);
+                }
                 _ => {}
             },
             event = events.next() => {
@@ -336,6 +348,7 @@ where
     }
     if let Some(id) = app.open_shell.clone() {
         if shell::is_exit_key(key) {
+            runtime.return_to_autopilot(&id);
             app.hide_shell();
         } else if let Some(shell) = app.shells.get_mut(&id)
             && let Some(bytes) = shell.key_bytes(key)
@@ -359,9 +372,20 @@ where
             }
         }
         KeyCode::Enter => {
-            if let Some(task) = app.selected_task()
-                && matches!(task.status, TaskStatus::InProgress)
-            {
+            if let Some(task) = app.selected_task() {
+                if matches!(task.status, TaskStatus::Awaiting) {
+                    runtime.take_awaiting_control(task);
+                    app.notice = Some("restoring Claude in the terminal…".into());
+                    return Ok(false);
+                }
+                if !matches!(task.status, TaskStatus::InProgress) {
+                    return Ok(false);
+                }
+                if matches!(task.custody, TaskCustody::Autopilot) {
+                    runtime.take_control(&task.id);
+                    app.notice = Some("bringing Claude to the terminal…".into());
+                    return Ok(false);
+                }
                 if app.shells.contains_key(&task.id) {
                     let (rows, cols) = shell::size(terminal.size()?.into());
                     runtime.resize(&task.id, rows, cols);

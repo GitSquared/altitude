@@ -2,7 +2,7 @@ use crate::vcs::GitHub;
 use std::{
     error::Error,
     fmt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -25,6 +25,7 @@ pub struct Task {
     pub agent_kind: Option<AgentKind>,
     pub agent_conversation_id: Option<String>,
     pub status: TaskStatus,
+    pub custody: TaskCustody,
     pub sandbox_id: Option<String>,
     pub snapshot_path: Option<String>,
     pub last_error: Option<String>,
@@ -35,6 +36,12 @@ pub struct Task {
 pub struct TaskRun {
     pub id: String,
     pub task_id: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskRunMode {
+    Autopilot,
+    Operator,
 }
 
 pub struct OutputChunk {
@@ -61,10 +68,20 @@ pub enum TaskStatus {
     Pending,
     #[sqlx(rename = "in-progress")]
     InProgress,
+    #[sqlx(rename = "awaiting")]
+    Awaiting,
     #[sqlx(rename = "completed")]
     Completed,
     #[sqlx(rename = "errored")]
     Errored,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Type)]
+pub enum TaskCustody {
+    #[sqlx(rename = "autopilot")]
+    Autopilot,
+    #[sqlx(rename = "operator")]
+    Operator,
 }
 
 #[derive(Clone)]
@@ -81,7 +98,7 @@ impl TaskStore {
 
     pub async fn list(&self) -> Result<Vec<Task>, TaskError> {
         sqlx::query_as(
-            "SELECT tasks.id, command, agent_kind, agent_conversation_id, status, sandbox_id, snapshot_path, last_error, \
+            "SELECT tasks.id, command, agent_kind, agent_conversation_id, status, custody, sandbox_id, snapshot_path, last_error, \
              (SELECT bytes FROM run_output WHERE run_id = \
                  (SELECT id FROM task_runs WHERE task_id = tasks.id \
                   ORDER BY started_at_ms DESC LIMIT 1) \
@@ -105,14 +122,15 @@ impl TaskStore {
             agent_kind,
             agent_conversation_id,
             status: TaskStatus::Pending,
+            custody: TaskCustody::Autopilot,
             sandbox_id: None,
             snapshot_path: None,
             last_error: None,
             last_output: None,
         };
         sqlx::query(
-            "INSERT INTO tasks (id, title, command, agent_kind, agent_conversation_id, status, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))",
+            "INSERT INTO tasks (id, title, command, agent_kind, agent_conversation_id, status, custody, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, 'pending', 'autopilot', datetime('now'), datetime('now'))",
         )
         .bind(&task.id)
         .bind(&task.command)
@@ -132,6 +150,22 @@ impl TaskStore {
 
     pub async fn mark_completed(&self, id: &str) -> Result<(), TaskError> {
         self.update(id, "completed", None, None, None).await
+    }
+
+    pub async fn mark_awaiting(&self, id: &str, snapshot_path: &Path) -> Result<(), TaskError> {
+        let snapshot_path = snapshot_path.to_string_lossy();
+        self.update(id, "awaiting", None, Some(&snapshot_path), None)
+            .await
+    }
+
+    pub async fn set_custody(&self, id: &str, custody: TaskCustody) -> Result<(), TaskError> {
+        sqlx::query("UPDATE tasks SET custody = ?, updated_at = datetime('now') WHERE id = ?")
+            .bind(custody)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(TaskError::Database)?;
+        Ok(())
     }
 
     pub async fn mark_errored(&self, id: &str, error: &str) -> Result<(), TaskError> {
@@ -155,6 +189,18 @@ impl TaskStore {
     ) -> Result<(), TaskError> {
         let snapshot_path = snapshot_path.map(|path| path.to_string_lossy().into_owned());
         self.update(id, "pending", None, snapshot_path.as_deref(), error)
+            .await
+    }
+
+    pub async fn mark_suspended(
+        &self,
+        id: &str,
+        status: TaskStatus,
+        snapshot_path: Option<&PathBuf>,
+        error: Option<&str>,
+    ) -> Result<(), TaskError> {
+        let snapshot_path = snapshot_path.map(|path| path.to_string_lossy().into_owned());
+        self.update(id, status.as_str(), None, snapshot_path.as_deref(), error)
             .await
     }
 
@@ -311,11 +357,9 @@ where
 
     pub async fn start(
         &self,
-        mut task: Task,
+        task: Task,
     ) -> Result<(Task, TaskRun, CommandSession), TaskServiceError> {
-        let sandbox_id = format!("altitude-{}", Uuid::new_v4());
         let resuming_agent_session = task.snapshot_path.is_some();
-        tracing::info!(task_id = %task.id, sandbox_id = %sandbox_id, agent = ?task.agent_kind, "starting task");
         let command = match task.agent_kind {
             Some(AgentKind::Claude) => {
                 let Some(conversation_id) = task.agent_conversation_id.as_deref() else {
@@ -326,11 +370,30 @@ where
                         .map_err(TaskServiceError::Task)?;
                     return Err(TaskServiceError::Agent(error));
                 };
-                self.claude
-                    .command(conversation_id, &task.command, resuming_agent_session)
+                self.claude.autopilot_command(
+                    conversation_id,
+                    if resuming_agent_session {
+                        "Resume the task and continue making progress."
+                    } else {
+                        &task.command
+                    },
+                    resuming_agent_session,
+                )
             }
             None => task.command.clone(),
         };
+        let mut task = self.provision(task).await?;
+        self.store
+            .set_custody(&task.id, TaskCustody::Autopilot)
+            .await
+            .map_err(TaskServiceError::Task)?;
+        task.custody = TaskCustody::Autopilot;
+        self.launch(task, command).await
+    }
+
+    async fn provision(&self, mut task: Task) -> Result<Task, TaskServiceError> {
+        let sandbox_id = format!("altitude-{}", Uuid::new_v4());
+        tracing::info!(task_id = %task.id, sandbox_id = %sandbox_id, agent = ?task.agent_kind, "provisioning task sandbox");
         let create = match task.agent_kind {
             Some(AgentKind::Claude) => self
                 .isolation
@@ -360,8 +423,66 @@ where
                 .map_err(TaskServiceError::Task)?;
             return Err(error);
         }
+        task.sandbox_id = Some(sandbox_id);
+        Ok(task)
+    }
+
+    pub async fn continue_autopilot(
+        &self,
+        mut task: Task,
+    ) -> Result<(Task, TaskRun, CommandSession), TaskServiceError> {
+        let Some(conversation_id) = task.agent_conversation_id.clone() else {
+            return Err(TaskServiceError::Agent(AgentError::new(
+                "Claude task has no conversation ID",
+            )));
+        };
         self.store
-            .mark_in_progress(&task.id, &sandbox_id)
+            .set_custody(&task.id, TaskCustody::Autopilot)
+            .await
+            .map_err(TaskServiceError::Task)?;
+        task.custody = TaskCustody::Autopilot;
+        self.launch(
+            task,
+            self.claude.autopilot_command(
+                &conversation_id,
+                "Continue the task autonomously from the current state.",
+                true,
+            ),
+        )
+        .await
+    }
+
+    pub async fn start_operator(
+        &self,
+        mut task: Task,
+    ) -> Result<(Task, TaskRun, CommandSession), TaskServiceError> {
+        let Some(conversation_id) = task.agent_conversation_id.clone() else {
+            return Err(TaskServiceError::Agent(AgentError::new(
+                "Claude task has no conversation ID",
+            )));
+        };
+        if task.sandbox_id.is_none() {
+            task = self.provision(task).await?;
+        }
+        self.store
+            .set_custody(&task.id, TaskCustody::Operator)
+            .await
+            .map_err(TaskServiceError::Task)?;
+        task.custody = TaskCustody::Operator;
+        self.launch(task, self.claude.operator_command(&conversation_id))
+            .await
+    }
+
+    async fn launch(
+        &self,
+        mut task: Task,
+        command: String,
+    ) -> Result<(Task, TaskRun, CommandSession), TaskServiceError> {
+        let Some(sandbox_id) = task.sandbox_id.as_deref() else {
+            return Err(TaskServiceError::Task(TaskError::MissingSandbox));
+        };
+        self.store
+            .mark_in_progress(&task.id, sandbox_id)
             .await
             .map_err(TaskServiceError::Task)?;
         let run = self
@@ -371,12 +492,12 @@ where
             .map_err(TaskServiceError::Task)?;
         let session = match self
             .isolation
-            .run_command(sandbox_id.clone(), command)
+            .run_command(sandbox_id.to_owned(), command)
             .await
         {
             Ok(session) => session,
             Err(error) => {
-                if let Err(remove_error) = self.isolation.remove(sandbox_id).await {
+                if let Err(remove_error) = self.isolation.remove(sandbox_id.to_owned()).await {
                     tracing::warn!(task_id = %task.id, error = %remove_error, "could not remove sandbox after command launch failure");
                 }
                 self.store
@@ -387,10 +508,80 @@ where
             }
         };
         task.status = TaskStatus::InProgress;
-        task.sandbox_id = Some(sandbox_id);
         task.last_error = None;
         tracing::info!(task_id = %task.id, sandbox_id = ?task.sandbox_id, "task started");
         Ok((task, run, session))
+    }
+
+    pub async fn await_operator(
+        &self,
+        task: &Task,
+        run: &TaskRun,
+    ) -> Result<Task, TaskServiceError> {
+        self.store
+            .finish_run(&run.id, "awaiting-operator", Some(0))
+            .await
+            .map_err(TaskServiceError::Task)?;
+        let sandbox_id = task
+            .sandbox_id
+            .as_ref()
+            .ok_or(TaskServiceError::Task(TaskError::MissingSandbox))?;
+        let snapshot_path = self
+            .isolation
+            .suspend(
+                sandbox_id.to_owned(),
+                snapshot_name(&task.id),
+                self.snapshots_dir.clone(),
+            )
+            .await
+            .map_err(TaskServiceError::Isolation)?;
+        self.store
+            .mark_awaiting(&task.id, &snapshot_path)
+            .await
+            .map_err(TaskServiceError::Task)?;
+        Ok(Task {
+            status: TaskStatus::Awaiting,
+            sandbox_id: None,
+            snapshot_path: Some(snapshot_path.to_string_lossy().into_owned()),
+            ..task.clone()
+        })
+    }
+
+    pub async fn continue_turn(&self, run: &TaskRun) -> Result<(), TaskServiceError> {
+        self.store
+            .finish_run(&run.id, "continued", Some(0))
+            .await
+            .map_err(TaskServiceError::Task)
+    }
+
+    pub async fn complete(&self, task: &Task, run: &TaskRun) -> Result<Task, TaskServiceError> {
+        self.store
+            .finish_run(&run.id, "completed", Some(0))
+            .await
+            .map_err(TaskServiceError::Task)?;
+        if let Some(sandbox_id) = &task.sandbox_id {
+            self.isolation
+                .remove(sandbox_id.clone())
+                .await
+                .map_err(TaskServiceError::Isolation)?;
+        }
+        if let Some(snapshot_path) = &task.snapshot_path {
+            self.isolation
+                .remove_snapshot(PathBuf::from(snapshot_path))
+                .await
+                .map_err(TaskServiceError::Isolation)?;
+        }
+        self.store
+            .mark_completed(&task.id)
+            .await
+            .map_err(TaskServiceError::Task)?;
+        Ok(Task {
+            status: TaskStatus::Completed,
+            sandbox_id: None,
+            snapshot_path: None,
+            last_error: None,
+            ..task.clone()
+        })
     }
 
     pub async fn append_output(
@@ -419,29 +610,7 @@ where
     ) -> Result<Task, TaskServiceError> {
         tracing::info!(task_id = %task.id, event = command_event_name(&event), "finishing task run");
         match event {
-            CommandEvent::Exited(0) => {
-                self.store
-                    .finish_run(&run.id, "completed", Some(0))
-                    .await
-                    .map_err(TaskServiceError::Task)?;
-                self.store
-                    .mark_completed(&task.id)
-                    .await
-                    .map_err(TaskServiceError::Task)?;
-                if let Some(sandbox_id) = &task.sandbox_id {
-                    self.isolation
-                        .remove(sandbox_id.clone())
-                        .await
-                        .map_err(TaskServiceError::Isolation)?;
-                }
-                Ok(Task {
-                    status: TaskStatus::Completed,
-                    sandbox_id: None,
-                    snapshot_path: None,
-                    last_error: None,
-                    ..task.clone()
-                })
-            }
+            CommandEvent::Exited(0) => self.complete(task, run).await,
             CommandEvent::Exited(code) => {
                 self.store
                     .finish_run(&run.id, "errored", Some(code))
@@ -491,7 +660,7 @@ where
         join_all(
             tasks
                 .into_iter()
-                .filter(|task| task.is_resumable())
+                .filter(|task| task.should_resume())
                 .map(|task| {
                     let service = self.clone();
                     async move {
@@ -526,18 +695,18 @@ where
 
     pub async fn suspend_all(&self, tasks: Vec<Task>) -> Vec<Result<(), TaskServiceError>> {
         tracing::info!(count = tasks.len(), "suspending resumable tasks");
-        let resumable: Vec<_> = tasks.into_iter().filter(Task::is_resumable).collect();
-        for task in &resumable {
+        let suspendable: Vec<_> = tasks.into_iter().filter(Task::should_suspend).collect();
+        for task in &suspendable {
             let snapshot_path = task.snapshot_path.as_ref().map(PathBuf::from);
             if let Err(error) = self
                 .store
-                .mark_pending(&task.id, snapshot_path.as_ref(), None)
+                .mark_suspended(&task.id, task.status.clone(), snapshot_path.as_ref(), None)
                 .await
             {
                 return vec![Err(TaskServiceError::Task(error))];
             }
         }
-        join_all(resumable.into_iter().map(|task| {
+        join_all(suspendable.into_iter().map(|task| {
             let service = self.clone();
             async move {
                 let Some(sandbox_id) = task.sandbox_id else {
@@ -554,13 +723,14 @@ where
                 {
                     Ok(snapshot_path) => service
                         .store
-                        .mark_pending(&task.id, Some(&snapshot_path), None)
+                        .mark_suspended(&task.id, task.status.clone(), Some(&snapshot_path), None)
                         .await
                         .map_err(TaskServiceError::Task),
                     Err(error) => service
                         .store
-                        .mark_pending(
+                        .mark_suspended(
                             &task.id,
+                            task.status.clone(),
                             task.snapshot_path.as_ref().map(PathBuf::from).as_ref(),
                             Some(&error.to_string()),
                         )
@@ -587,8 +757,24 @@ where
 }
 
 impl Task {
-    pub fn is_resumable(&self) -> bool {
+    pub fn should_resume(&self) -> bool {
         matches!(self.status, TaskStatus::Pending | TaskStatus::InProgress)
+    }
+
+    pub fn should_suspend(&self) -> bool {
+        matches!(self.status, TaskStatus::InProgress | TaskStatus::Awaiting)
+    }
+}
+
+impl TaskStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::InProgress => "in-progress",
+            Self::Awaiting => "awaiting",
+            Self::Completed => "completed",
+            Self::Errored => "errored",
+        }
     }
 }
 
@@ -607,12 +793,14 @@ fn command_event_name(event: &CommandEvent) -> &'static str {
 #[derive(Debug)]
 pub enum TaskError {
     Database(sqlx::Error),
+    MissingSandbox,
 }
 
 impl fmt::Display for TaskError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Database(error) => write!(formatter, "task database error: {error}"),
+            Self::MissingSandbox => formatter.write_str("task has no running sandbox"),
         }
     }
 }
