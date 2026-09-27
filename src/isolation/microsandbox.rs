@@ -12,7 +12,7 @@ use microsandbox::{
     LocalBackend, Sandbox,
     sandbox::{PullPolicy, exec::ExecEvent},
     set_default_backend,
-    setup::Setup,
+    setup::{InstallOptions, ensure_runtime},
     snapshot::Snapshot,
 };
 use tokio::sync::{Mutex, mpsc, watch};
@@ -67,32 +67,55 @@ impl MicrosandboxIsolation {
         pull_policy: PullPolicy,
     ) -> Result<(), IsolationError> {
         tracing::info!(sandbox_id = %id, network_enabled = options.network_enabled, cpus = TASK_CPUS, memory_mib = TASK_MEMORY_MIB, "creating sandbox");
-        let mut builder = Sandbox::builder(&id)
-            .cpus(TASK_CPUS)
-            .memory(TASK_MEMORY_MIB);
-        if !options.network_enabled {
-            builder = builder.disable_network();
-        }
-        for mount in options.mounts {
-            builder = builder.volume(mount.guest_path, |volume| volume.bind(mount.host_path));
-        }
-        for (key, value) in options.environment {
-            builder = builder.env(key, value);
-        }
         let result = match options.snapshot_path {
-            Some(snapshot_path) => builder.from_snapshot(snapshot_path).create_detached().await,
+            Some(snapshot_path) => {
+                let mut restore = Sandbox::restore(snapshot_path)
+                    .name(&id)
+                    .cpus(TASK_CPUS)
+                    .memory(TASK_MEMORY_MIB);
+                if !options.network_enabled {
+                    restore = restore.disable_network();
+                }
+                for mount in options.mounts {
+                    restore =
+                        restore.volume(mount.guest_path, |volume| volume.bind(mount.host_path));
+                }
+                match restore.restore().await {
+                    Ok(_) if options.environment.is_empty() => Ok(()),
+                    Ok(sandbox) => {
+                        // Restore preserves captured env; supply this environment's values for future execs.
+                        let mut modification = sandbox.modify().restart();
+                        for (key, value) in options.environment {
+                            modification = modification.env(key, value);
+                        }
+                        modification.apply().await.map(|_| ())
+                    }
+                    Err(error) => Err(error),
+                }
+            }
             None => {
-                builder
+                let mut builder = Sandbox::builder(&id)
+                    .cpus(TASK_CPUS)
+                    .memory(TASK_MEMORY_MIB)
                     .image(BASE_IMAGE)
                     .root_disk(TASK_DISK_MIB)
-                    .pull_policy(pull_policy)
-                    .create_detached()
-                    .await
+                    .pull_policy(pull_policy);
+                if !options.network_enabled {
+                    builder = builder.disable_network();
+                }
+                for mount in options.mounts {
+                    builder =
+                        builder.volume(mount.guest_path, |volume| volume.bind(mount.host_path));
+                }
+                for (key, value) in options.environment {
+                    builder = builder.env(key, value);
+                }
+                builder.create_detached().await.map(|_| ())
             }
         };
         if let Err(error) = result {
-            if let Ok(sandbox) = Sandbox::get(&id).await
-                && let Err(cleanup_error) = sandbox.remove().await
+            if Sandbox::get(&id).await.is_ok()
+                && let Err(cleanup_error) = self.remove(id.clone()).await
             {
                 tracing::warn!(sandbox_id = %id, %cleanup_error, "could not remove failed sandbox creation");
             }
@@ -135,8 +158,8 @@ impl MicrosandboxIsolation {
         }
 
         let sandbox_id = format!("altitude-{}-setup", recipe.name);
-        let snapshot = store.next_snapshot(&recipe.setup_command);
-        tracing::info!(environment = %recipe.name, snapshot = %snapshot.path.display(), "building environment base sandbox snapshot");
+        let created_at_ms = now_ms();
+        tracing::info!(environment = %recipe.name, "building environment base sandbox snapshot");
         let mut options = SandboxOptions::isolated(
             parent.map(|snapshot| snapshot.path.to_string_lossy().into_owned()),
         );
@@ -145,7 +168,7 @@ impl MicrosandboxIsolation {
             .await?;
         let result = async {
             let mut session = self
-                .run_command(sandbox_id.clone(), recipe.setup_command)
+                .run_command(sandbox_id.clone(), recipe.setup_command.clone())
                 .await?;
             loop {
                 let Some(event) = session.events.recv().await else {
@@ -164,27 +187,24 @@ impl MicrosandboxIsolation {
                     CommandEvent::Failed(error) => return Err(IsolationError::new(error)),
                 }
             }
-            self.suspend(
+            let path = self.suspend(
                 sandbox_id.clone(),
-                snapshot
-                    .path
-                    .file_name()
-                    .expect("base snapshot has a file name")
-                    .to_string_lossy()
-                    .into_owned(),
-                snapshot
-                    .path
-                    .parent()
-                    .expect("base snapshot has a parent")
-                    .to_owned(),
-            )
-            .await?;
+                format!("base-{created_at_ms}"),
+                recipe.snapshots_dir.clone(),
+            ).await?;
+            let snapshot = BaseSandboxSnapshot {
+                path,
+                created_at_ms,
+                setup_command: recipe.setup_command.clone(),
+            };
             store.publish(&snapshot)?;
-            for stale_snapshot in store.stale_snapshots()? {
+            for stale_snapshot in store.stale_snapshots().await? {
                 tracing::info!(snapshot = %stale_snapshot.display(), "removing stale environment base sandbox snapshot");
-                self.remove_snapshot(stale_snapshot).await?;
+                if let Err(error) = self.remove_snapshot(stale_snapshot).await {
+                    tracing::warn!(%error, "could not remove stale environment base sandbox snapshot");
+                }
             }
-            Ok(())
+            Ok(snapshot)
         }
         .await;
         if let Err(error) = &result {
@@ -193,7 +213,7 @@ impl MicrosandboxIsolation {
                 tracing::warn!(environment = %recipe.name, error = %remove_error, "could not remove failed environment setup sandbox");
             }
         }
-        result?;
+        let snapshot = result?;
         tracing::info!(environment = %recipe.name, snapshot = %snapshot.path.display(), "environment base sandbox ready");
         Ok(snapshot)
     }
@@ -243,9 +263,9 @@ impl BaseSandboxSnapshotStore {
             Err(error) => return Err(IsolationError::new(error.to_string())),
         };
         let mut fields = manifest.splitn(3, '\n');
-        let Some(name) = fields.next().filter(|name| !name.is_empty()) else {
+        let Some(relative_path) = fields.next().filter(|path| !path.is_empty()) else {
             return Err(IsolationError::new(
-                "base snapshot manifest has no snapshot name",
+                "base snapshot manifest has no snapshot path",
             ));
         };
         let Some(created_at_ms) = fields.next() else {
@@ -256,7 +276,7 @@ impl BaseSandboxSnapshotStore {
         let created_at_ms = created_at_ms.parse().map_err(|_| {
             IsolationError::new("base snapshot manifest has an invalid creation time")
         })?;
-        let path = self.snapshots_dir.join(name);
+        let path = self.snapshots_dir.join(relative_path);
         if !path.exists() {
             return Err(IsolationError::new(format!(
                 "base snapshot is missing: {}",
@@ -283,22 +303,13 @@ impl BaseSandboxSnapshotStore {
                     .unwrap_or(i64::MAX)
     }
 
-    fn next_snapshot(&self, setup_command: &str) -> BaseSandboxSnapshot {
-        let created_at_ms = now_ms();
-        BaseSandboxSnapshot {
-            path: self.snapshots_dir.join(format!("base-{created_at_ms}")),
-            created_at_ms,
-            setup_command: setup_command.to_owned(),
-        }
-    }
-
     fn publish(&self, snapshot: &BaseSandboxSnapshot) -> Result<(), IsolationError> {
         fs::create_dir_all(&self.snapshots_dir)
             .map_err(|error| IsolationError::new(error.to_string()))?;
-        let name = snapshot
+        let relative_path = snapshot
             .path
-            .file_name()
-            .ok_or_else(|| IsolationError::new("base snapshot has no file name"))?
+            .strip_prefix(&self.snapshots_dir)
+            .map_err(|_| IsolationError::new("base snapshot is outside its environment store"))?
             .to_string_lossy();
         let manifest_path = self.snapshots_dir.join("current");
         let temporary_path = self
@@ -307,7 +318,7 @@ impl BaseSandboxSnapshotStore {
         fs::write(
             &temporary_path,
             format!(
-                "{name}\n{}\n{}",
+                "{relative_path}\n{}\n{}",
                 snapshot.created_at_ms, snapshot.setup_command
             ),
         )
@@ -316,19 +327,21 @@ impl BaseSandboxSnapshotStore {
             .map_err(|error| IsolationError::new(error.to_string()))
     }
 
-    fn stale_snapshots(&self) -> Result<Vec<PathBuf>, IsolationError> {
+    async fn stale_snapshots(&self) -> Result<Vec<PathBuf>, IsolationError> {
         let current = self.current()?.map(|snapshot| snapshot.path);
-        let entries = match fs::read_dir(&self.snapshots_dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(IsolationError::new(error.to_string())),
-        };
-        Ok(entries
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| path.is_dir())
-            .filter(|path| current.as_ref() != Some(path))
-            .collect())
+        let snapshots = Snapshot::list_dir(&self.snapshots_dir)
+            .await
+            .map_err(|error| IsolationError::new(error.to_string()))?;
+        let mut stale = Vec::new();
+        for snapshot in snapshots {
+            let path = snapshot
+                .path()
+                .map_err(|error| IsolationError::new(error.to_string()))?;
+            if Some(path) != current.as_deref() {
+                stale.push(path.to_owned());
+            }
+        }
+        Ok(stale)
     }
 }
 
@@ -357,18 +370,14 @@ impl IsolationEngine for MicrosandboxIsolation {
         private_directory(&self.cache_home)?;
         tracing::info!("installing Microsandbox runtime");
         status.send_replace(IsolationStatus::InstallingRuntime);
-        Setup::builder()
-            .base_dir(&self.data_home)
-            .build()
-            .install()
-            .await
-            .map_err(|error| IsolationError::new(error.to_string()))?;
-
         let socket_safe_home = self.ensure_socket_safe_home()?;
         let backend = LocalBackend::builder()
             .home(socket_safe_home)
             .cache_dir(&self.cache_home)
             .build()
+            .await
+            .map_err(|error| IsolationError::new(error.to_string()))?;
+        ensure_runtime(backend.config(), InstallOptions::default())
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
         set_default_backend(backend);
@@ -520,10 +529,11 @@ impl IsolationEngine for MicrosandboxIsolation {
             .stop_with_timeout(Duration::from_secs(10))
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
-        let snapshot = Snapshot::builder(snapshot_name)
+        // Altitude keeps one checkpoint per capsule; each capture owns its snapshot group.
+        let snapshot = Snapshot::builder(&snapshot_name)
+            .group(snapshot_name)
             .from_sandbox(&id)
             .dest_dir(snapshots_dir)
-            .force()
             .create()
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
@@ -531,12 +541,17 @@ impl IsolationEngine for MicrosandboxIsolation {
             .remove()
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
-        tracing::info!(sandbox_id = %id, snapshot = %snapshot.path().display(), "sandbox suspended");
-        Ok(snapshot.path().to_owned())
+        let path = snapshot
+            .path()
+            .map_err(|error| IsolationError::new(error.to_string()))?
+            .to_owned();
+        tracing::info!(sandbox_id = %id, snapshot = %path.display(), "sandbox suspended");
+        Ok(path)
     }
 
     async fn remove_snapshot(&self, path: PathBuf) -> Result<(), IsolationError> {
-        Snapshot::remove(&path.to_string_lossy(), false)
+        // Successors contain their own disk layers; retained ancestry is not our storage policy.
+        Snapshot::remove(&path.to_string_lossy(), true)
             .await
             .map_err(|error| IsolationError::new(error.to_string()))
     }

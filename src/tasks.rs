@@ -288,8 +288,8 @@ where
                 return Err(TaskServiceError::Isolation(error));
             }
         };
-        self.record(
-            &task.id,
+        self.record_snapshot(
+            task,
             &[
                 run_ended(agent_run, TaskAgentRunOutcome::AwaitingOperator, Some(0)),
                 TaskHistoryEvent::ExecutionPaused {
@@ -408,8 +408,8 @@ where
                     {
                         Ok(path) => {
                             task = service
-                                .record(
-                                    &task.id,
+                                .record_snapshot(
+                                    &task,
                                     &[TaskHistoryEvent::ExecutionRecovered {
                                         snapshot_path: path.to_string_lossy().into_owned(),
                                     }],
@@ -462,7 +462,7 @@ where
                                     snapshot_path,
                                 }
                             };
-                        service.record(&task.id, &[event]).await?;
+                        service.record_snapshot(&task, &[event]).await?;
                         Ok(())
                     }
                     Err(error) => {
@@ -475,6 +475,24 @@ where
             }
         }))
         .await
+    }
+
+    async fn record_snapshot(
+        &self,
+        task: &Task,
+        events: &[TaskHistoryEvent],
+    ) -> Result<Task, TaskServiceError> {
+        let updated = self.record(&task.id, events).await?;
+        if let Some(previous) = &task.current_state.snapshot_path
+            && updated.current_state.snapshot_path.as_ref() != Some(previous)
+            && let Err(error) = self
+                .isolation
+                .remove_snapshot(PathBuf::from(previous))
+                .await
+        {
+            tracing::warn!(task_id = %task.id, %error, "could not remove superseded task snapshot");
+        }
+        Ok(updated)
     }
 
     async fn fail(&self, task: &Task, error: String) -> Result<Task, TaskServiceError> {
@@ -521,7 +539,7 @@ where
 }
 
 fn snapshot_name(task_id: &str) -> String {
-    format!("task-{task_id}")
+    format!("task-{task_id}-{}", Uuid::new_v4())
 }
 
 fn run_ended(
