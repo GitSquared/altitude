@@ -18,9 +18,9 @@ crossterm = { version = "0.29.0", features = ["event-stream"] }
 chrono = "0.4"
 directories = "6"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
-microsandbox = { version = "0.6.17", default-features = false, features = ["net"] }
+microsandbox = { version = "0.6.18", default-features = false, features = ["net"] }
 # Embed Microsandbox's guest helper without running its host-runtime installer at build time.
-microsandbox-filesystem = { version = "0.6.17", default-features = false, features = ["prebuilt"] }
+microsandbox-filesystem = { version = "0.6.18", default-features = false, features = ["prebuilt"] }
 ratatui = "0.30.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -28,7 +28,7 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 terminput = "0.5.15"
 terminput-crossterm = "0.4.11"
 throbber-widgets-tui = { version = "0.11.1", default-features = false }
-tokio = { version = "1.45.1", features = ["rt", "macros", "signal", "sync", "time"] }
+tokio = { version = "1.53.1", features = ["rt", "macros", "signal", "sync", "time"] }
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
