@@ -1,4 +1,5 @@
 use crate::vcs::GitHub;
+use chrono::{Local, SecondsFormat};
 use std::{
     error::Error,
     fmt,
@@ -18,6 +19,59 @@ use crate::{
     },
 };
 
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct TurnReport {
+    pub disposition: TurnDisposition,
+    pub operator_attention: Option<OperatorAttention>,
+    pub summary: String,
+    #[serde(default)]
+    pub signals: Vec<Signal>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnDisposition {
+    Continue,
+    AwaitOperator,
+    Complete,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct Signal {
+    pub level: SignalLevel,
+    pub title: String,
+    pub body: String,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalLevel {
+    Info,
+    Attention,
+    Alarm,
+}
+
+impl SignalLevel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Attention => "attention",
+            Self::Alarm => "alarm",
+        }
+    }
+}
+
+#[derive(Clone, Debug, serde::Deserialize, PartialEq, Eq, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorAttention {
+    #[sqlx(rename = "nominal")]
+    Nominal,
+    #[sqlx(rename = "attention")]
+    Attention,
+    #[sqlx(rename = "alarm")]
+    Alarm,
+}
+
 #[derive(Clone, Debug, FromRow)]
 pub struct Task {
     pub id: String,
@@ -26,6 +80,7 @@ pub struct Task {
     pub agent_conversation_id: Option<String>,
     pub status: TaskStatus,
     pub custody: TaskCustody,
+    pub operator_attention: OperatorAttention,
     pub sandbox_id: Option<String>,
     pub snapshot_path: Option<String>,
     pub last_error: Option<String>,
@@ -38,9 +93,36 @@ pub struct TaskRun {
     pub task_id: String,
 }
 
+#[derive(Clone, Debug, FromRow)]
+pub struct TaskSignal {
+    pub id: String,
+    pub level: String,
+    pub title: String,
+    pub body: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct AgentTaskContext {
+    execution: TaskStatus,
+    custody: TaskCustody,
+    operator_attention: OperatorAttention,
+    datetime: String,
+}
+
+impl fmt::Display for AgentTaskContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "execution={:?}; custody={:?}; operator_attention={:?}; current_datetime={}",
+            self.execution, self.custody, self.operator_attention, self.datetime
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TaskRunMode {
     Autopilot,
+    AutopilotReport,
     Operator,
 }
 
@@ -98,7 +180,7 @@ impl TaskStore {
 
     pub async fn list(&self) -> Result<Vec<Task>, TaskError> {
         sqlx::query_as(
-            "SELECT tasks.id, command, agent_kind, agent_conversation_id, status, custody, sandbox_id, snapshot_path, last_error, \
+            "SELECT tasks.id, command, agent_kind, agent_conversation_id, status, custody, operator_attention, sandbox_id, snapshot_path, last_error, \
              (SELECT bytes FROM run_output WHERE run_id = \
                  (SELECT id FROM task_runs WHERE task_id = tasks.id \
                   ORDER BY started_at_ms DESC LIMIT 1) \
@@ -123,6 +205,7 @@ impl TaskStore {
             agent_conversation_id,
             status: TaskStatus::Pending,
             custody: TaskCustody::Autopilot,
+            operator_attention: OperatorAttention::Nominal,
             sandbox_id: None,
             snapshot_path: None,
             last_error: None,
@@ -161,6 +244,76 @@ impl TaskStore {
     pub async fn set_custody(&self, id: &str, custody: TaskCustody) -> Result<(), TaskError> {
         sqlx::query("UPDATE tasks SET custody = ?, updated_at = datetime('now') WHERE id = ?")
             .bind(custody)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(TaskError::Database)?;
+        Ok(())
+    }
+
+    pub async fn record_signals(
+        &self,
+        task_id: &str,
+        run_id: &str,
+        operator_attention: Option<&OperatorAttention>,
+        signals: &[Signal],
+    ) -> Result<Vec<TaskSignal>, TaskError> {
+        let mut transaction = self.pool.begin().await.map_err(TaskError::Database)?;
+        let mut recorded = Vec::with_capacity(signals.len());
+        for signal in signals {
+            let item = TaskSignal {
+                id: Uuid::new_v4().to_string(),
+                level: signal.level.as_str().to_owned(),
+                title: signal.title.clone(),
+                body: signal.body.clone(),
+            };
+            sqlx::query(
+                "INSERT INTO task_signals (id, task_id, run_id, level, title, body, created_at_ms) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&item.id)
+            .bind(task_id)
+            .bind(run_id)
+            .bind(&item.level)
+            .bind(&item.title)
+            .bind(&item.body)
+            .bind(now_ms())
+            .execute(&mut *transaction)
+            .await
+            .map_err(TaskError::Database)?;
+            recorded.push(item);
+        }
+        if let Some(operator_attention) = operator_attention {
+            sqlx::query(
+                "UPDATE tasks SET operator_attention = ?, updated_at = datetime('now') WHERE id = ?",
+            )
+            .bind(operator_attention)
+            .bind(task_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(TaskError::Database)?;
+        }
+        transaction.commit().await.map_err(TaskError::Database)?;
+        Ok(recorded)
+    }
+
+    pub async fn unacknowledged_signals(
+        &self,
+        level: SignalLevel,
+    ) -> Result<Vec<TaskSignal>, TaskError> {
+        sqlx::query_as(
+            "SELECT id, level, title, body FROM task_signals \
+             WHERE level = ? AND acknowledged_at_ms IS NULL ORDER BY created_at_ms DESC",
+        )
+        .bind(level.as_str())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(TaskError::Database)
+    }
+
+    pub async fn acknowledge_signal(&self, id: &str) -> Result<(), TaskError> {
+        sqlx::query("UPDATE task_signals SET acknowledged_at_ms = ? WHERE id = ?")
+            .bind(now_ms())
             .bind(id)
             .execute(&self.pool)
             .await
@@ -355,6 +508,62 @@ where
             .map_err(TaskServiceError::Task)
     }
 
+    pub async fn apply_report(
+        &self,
+        task: &Task,
+        run: &TaskRun,
+        report: &TurnReport,
+    ) -> Result<(Task, Vec<TaskSignal>), TaskServiceError> {
+        let operator_attention = report
+            .operator_attention
+            .as_ref()
+            .unwrap_or(&task.operator_attention);
+        if (matches!(operator_attention, OperatorAttention::Attention)
+            && !matches!(report.disposition, TurnDisposition::AwaitOperator))
+            || (matches!(report.disposition, TurnDisposition::AwaitOperator)
+                && matches!(operator_attention, OperatorAttention::Nominal))
+        {
+            return Err(TaskServiceError::InvalidReport(
+                "attention requires await_operator; await_operator requires attention or alarm"
+                    .into(),
+            ));
+        }
+        let signals = self
+            .store
+            .record_signals(
+                &task.id,
+                &run.id,
+                report.operator_attention.as_ref(),
+                &report.signals,
+            )
+            .await
+            .map_err(TaskServiceError::Task)?;
+        Ok((
+            Task {
+                operator_attention: operator_attention.clone(),
+                ..task.clone()
+            },
+            signals,
+        ))
+    }
+
+    pub async fn unacknowledged_signals(
+        &self,
+        level: SignalLevel,
+    ) -> Result<Vec<TaskSignal>, TaskServiceError> {
+        self.store
+            .unacknowledged_signals(level)
+            .await
+            .map_err(TaskServiceError::Task)
+    }
+
+    pub async fn acknowledge_signal(&self, id: &str) -> Result<(), TaskServiceError> {
+        self.store
+            .acknowledge_signal(id)
+            .await
+            .map_err(TaskServiceError::Task)
+    }
+
     pub async fn start(
         &self,
         task: Task,
@@ -362,21 +571,17 @@ where
         let resuming_agent_session = task.snapshot_path.is_some();
         let command = match task.agent_kind {
             Some(AgentKind::Claude) => {
-                let Some(conversation_id) = task.agent_conversation_id.as_deref() else {
-                    let error = AgentError::new("Claude task has no conversation ID");
-                    self.store
-                        .mark_errored(&task.id, &error.to_string())
-                        .await
-                        .map_err(TaskServiceError::Task)?;
-                    return Err(TaskServiceError::Agent(error));
-                };
+                let conversation_id = self
+                    .claude_conversation(&task, resuming_agent_session)
+                    .await?;
                 self.claude.autopilot_command(
-                    conversation_id,
+                    &conversation_id,
                     if resuming_agent_session {
                         "Resume the task and continue making progress."
                     } else {
                         &task.command
                     },
+                    &task.autopilot_context(),
                     resuming_agent_session,
                 )
             }
@@ -429,38 +634,60 @@ where
 
     pub async fn continue_autopilot(
         &self,
-        mut task: Task,
+        task: Task,
     ) -> Result<(Task, TaskRun, CommandSession), TaskServiceError> {
-        let Some(conversation_id) = task.agent_conversation_id.clone() else {
-            return Err(TaskServiceError::Agent(AgentError::new(
-                "Claude task has no conversation ID",
-            )));
-        };
+        self.start_autopilot_turn(
+            task,
+            "Continue the task autonomously from the current state.",
+        )
+        .await
+    }
+
+    pub async fn resume_autopilot_after_operator(
+        &self,
+        task: Task,
+    ) -> Result<(Task, TaskRun, CommandSession), TaskServiceError> {
+        self.start_autopilot_turn(
+            task,
+            "The operator has returned control to Altitude. Review the preceding conversation and current workspace state, then continue the task autonomously wherever the original intent reasonably permits. Do not wait for routine confirmation.",
+        )
+        .await
+    }
+
+    async fn start_autopilot_turn(
+        &self,
+        mut task: Task,
+        prompt: &str,
+    ) -> Result<(Task, TaskRun, CommandSession), TaskServiceError> {
+        let conversation_id = self.claude_conversation(&task, true).await?;
         self.store
             .set_custody(&task.id, TaskCustody::Autopilot)
             .await
             .map_err(TaskServiceError::Task)?;
         task.custody = TaskCustody::Autopilot;
-        self.launch(
-            task,
-            self.claude.autopilot_command(
-                &conversation_id,
-                "Continue the task autonomously from the current state.",
-                true,
-            ),
-        )
-        .await
+        let context = task.autopilot_context();
+        let command = self
+            .claude
+            .autopilot_command(&conversation_id, prompt, &context, true);
+        self.launch(task, command).await
+    }
+
+    pub async fn request_autopilot_report(
+        &self,
+        task: Task,
+    ) -> Result<(Task, TaskRun, CommandSession), TaskServiceError> {
+        let conversation_id = self.claude_conversation(&task, true).await?;
+        let command = self
+            .claude
+            .report_command(&conversation_id, &task.autopilot_context());
+        self.launch(task, command).await
     }
 
     pub async fn start_operator(
         &self,
         mut task: Task,
     ) -> Result<(Task, TaskRun, CommandSession), TaskServiceError> {
-        let Some(conversation_id) = task.agent_conversation_id.clone() else {
-            return Err(TaskServiceError::Agent(AgentError::new(
-                "Claude task has no conversation ID",
-            )));
-        };
+        let conversation_id = self.claude_conversation(&task, true).await?;
         if task.sandbox_id.is_none() {
             task = self.provision(task).await?;
         }
@@ -644,6 +871,15 @@ where
                 .await
                 .map_err(TaskServiceError::Isolation)?;
         }
+        if task.agent_kind == Some(AgentKind::Claude)
+            && let Some(conversation_id) = task.agent_conversation_id.as_deref()
+        {
+            let files = self.claude.conversation_files(conversation_id);
+            self.isolation
+                .remove_profile_entries(files.profile, files.cleanup_entries)
+                .await
+                .map_err(TaskServiceError::Isolation)?;
+        }
         self.store
             .delete(&task.id)
             .await
@@ -754,9 +990,69 @@ where
             ..task.clone()
         })
     }
+
+    async fn claude_conversation(
+        &self,
+        task: &Task,
+        require_transcript: bool,
+    ) -> Result<String, TaskServiceError> {
+        let Some(conversation_id) = task.agent_conversation_id.as_deref() else {
+            return self
+                .conversation_failure(task, "Claude task has no conversation ID")
+                .await;
+        };
+        if !require_transcript {
+            return Ok(conversation_id.to_owned());
+        }
+
+        let files = self.claude.conversation_files(conversation_id);
+        match self
+            .isolation
+            .profile_regular_file_exists(files.profile, files.transcript)
+            .await
+        {
+            Ok(true) => Ok(conversation_id.to_owned()),
+            Ok(false) => {
+                self.conversation_failure(
+                    task,
+                    "Claude conversation transcript is missing; remove this task or restore its session file before resuming it",
+                )
+                .await
+            }
+            Err(error) => {
+                self.conversation_failure(
+                    task,
+                    format!("could not read Claude conversation transcript: {error}"),
+                )
+                .await
+            }
+        }
+    }
+
+    async fn conversation_failure<T>(
+        &self,
+        task: &Task,
+        message: impl Into<String>,
+    ) -> Result<T, TaskServiceError> {
+        let error = AgentError::new(message);
+        self.store
+            .mark_errored(&task.id, &error.to_string())
+            .await
+            .map_err(TaskServiceError::Task)?;
+        Err(TaskServiceError::Agent(error))
+    }
 }
 
 impl Task {
+    pub fn autopilot_context(&self) -> AgentTaskContext {
+        AgentTaskContext {
+            execution: TaskStatus::InProgress,
+            custody: TaskCustody::Autopilot,
+            operator_attention: self.operator_attention.clone(),
+            datetime: Local::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+        }
+    }
+
     pub fn should_resume(&self) -> bool {
         matches!(self.status, TaskStatus::Pending | TaskStatus::InProgress)
     }
@@ -812,6 +1108,7 @@ pub enum TaskServiceError {
     Agent(AgentError),
     Task(TaskError),
     Isolation(IsolationError),
+    InvalidReport(String),
 }
 
 impl fmt::Display for TaskServiceError {
@@ -820,6 +1117,7 @@ impl fmt::Display for TaskServiceError {
             Self::Agent(error) => error.fmt(formatter),
             Self::Task(error) => error.fmt(formatter),
             Self::Isolation(error) => error.fmt(formatter),
+            Self::InvalidReport(error) => write!(formatter, "invalid agent report: {error}"),
         }
     }
 }

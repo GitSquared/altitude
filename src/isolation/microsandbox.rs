@@ -2,7 +2,7 @@ use std::{
     fs,
     io::ErrorKind,
     os::unix::fs::symlink,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -213,6 +213,12 @@ impl MicrosandboxIsolation {
             }
             Err(error) => Err(IsolationError::new(error.to_string())),
         }
+    }
+
+    fn profile_entry(&self, profile: &str, path: &Path) -> Result<PathBuf, IsolationError> {
+        environment::relative_path(profile, false)?;
+        environment::relative_entry(path)?;
+        Ok(self.config.profile_dir(profile).join(path))
     }
 }
 
@@ -532,5 +538,53 @@ impl IsolationEngine for MicrosandboxIsolation {
         Snapshot::remove(&path.to_string_lossy(), false)
             .await
             .map_err(|error| IsolationError::new(error.to_string()))
+    }
+
+    async fn profile_regular_file_exists(
+        &self,
+        profile: &'static str,
+        path: PathBuf,
+    ) -> Result<bool, IsolationError> {
+        let path = self.profile_entry(profile, &path)?;
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_file() => Ok(true),
+            Ok(_) => Err(IsolationError::new(format!(
+                "conversation transcript is not a regular file: {}",
+                path.display()
+            ))),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(IsolationError::new(error.to_string())),
+        }
+    }
+
+    async fn remove_profile_entries(
+        &self,
+        profile: &'static str,
+        paths: Vec<PathBuf>,
+    ) -> Result<(), IsolationError> {
+        for relative_path in paths {
+            let path = self.profile_entry(profile, &relative_path)?;
+            match fs::symlink_metadata(&path) {
+                Ok(metadata)
+                    if metadata.file_type().is_file() || metadata.file_type().is_symlink() =>
+                {
+                    fs::remove_file(&path)
+                        .map_err(|error| IsolationError::new(error.to_string()))?;
+                }
+                Ok(metadata) if metadata.file_type().is_dir() => {
+                    fs::remove_dir_all(&path)
+                        .map_err(|error| IsolationError::new(error.to_string()))?;
+                }
+                Ok(_) => {
+                    return Err(IsolationError::new(format!(
+                        "profile entry is not a file or directory: {}",
+                        path.display()
+                    )));
+                }
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(IsolationError::new(error.to_string())),
+            }
+        }
+        Ok(())
     }
 }

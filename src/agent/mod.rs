@@ -1,8 +1,8 @@
 use crate::isolation::EnvironmentRecipe;
 use sqlx::Type;
-use std::{error::Error as StdError, fmt};
+use std::{error::Error as StdError, fmt, path::PathBuf};
 mod claude;
-pub use claude::{AutopilotNext, ClaudeCode, ClaudeStream};
+pub use claude::{ClaudeCode, ClaudeStream};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Type)]
 #[sqlx(type_name = "TEXT", rename_all = "lowercase")]
@@ -27,8 +27,20 @@ impl fmt::Display for AgentError {
 
 impl StdError for AgentError {}
 
+/// The persistent files that identify one agent conversation.
+///
+/// Agents describe their own on-disk layout; isolation validates and removes
+/// these entries inside the named profile.
+#[derive(Clone, Debug)]
+pub struct ConversationFiles {
+    pub profile: &'static str,
+    pub transcript: PathBuf,
+    pub cleanup_entries: Vec<PathBuf>,
+}
+
 /// Agent-specific commands and environment requirements; isolation owns their lifecycle.
 pub trait AgentEngine: Send + Sync {
     fn environment_recipe(&self) -> EnvironmentRecipe;
     fn new_conversation_id(&self) -> String;
+    fn conversation_files(&self, conversation_id: &str) -> ConversationFiles;
 }

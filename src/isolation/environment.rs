@@ -210,7 +210,7 @@ impl EnvironmentPlan {
     }
 }
 
-fn relative_path(path: &str, allow_empty: bool) -> Result<(), IsolationError> {
+pub(super) fn relative_path(path: &str, allow_empty: bool) -> Result<(), IsolationError> {
     if (!allow_empty && path.is_empty())
         || Path::new(path)
             .components()
@@ -218,6 +218,20 @@ fn relative_path(path: &str, allow_empty: bool) -> Result<(), IsolationError> {
     {
         return Err(IsolationError::new(format!(
             "invalid persistent path: {path}"
+        )));
+    }
+    Ok(())
+}
+
+pub(super) fn relative_entry(path: &Path) -> Result<(), IsolationError> {
+    if path.as_os_str().is_empty()
+        || path
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        return Err(IsolationError::new(format!(
+            "invalid persistent path: {}",
+            path.display()
         )));
     }
     Ok(())

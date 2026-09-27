@@ -7,9 +7,12 @@ use std::{
 use tokio::{sync::mpsc, time};
 
 use crate::{
-    agent::{AutopilotNext, ClaudeStream},
+    agent::ClaudeStream,
     isolation::{Command, CommandEvent, CommandSession, IsolationEngine, OutputStream},
-    tasks::{OutputChunk, Task, TaskRun, TaskRunMode, TaskService, TaskServiceError},
+    tasks::{
+        OutputChunk, Task, TaskRun, TaskRunMode, TaskService, TaskServiceError, TaskSignal,
+        TurnDisposition,
+    },
 };
 
 pub enum TaskEvent {
@@ -23,9 +26,10 @@ pub enum TaskEvent {
         bytes: Vec<u8>,
     },
     OperatorReady(Task),
-    Decision {
-        task_id: String,
+    Report {
+        task: Task,
         summary: String,
+        signals: Vec<TaskSignal>,
     },
 }
 
@@ -97,7 +101,7 @@ where
         self.request_handoff(task_id, TaskRunMode::Operator);
     }
 
-    pub fn take_awaiting_control(&self, task: Task) {
+    pub fn take_stopped_control(&self, task: Task) {
         let runtime = self.clone();
         tokio::spawn(async move {
             let result = runtime.service.start_operator(task).await;
@@ -204,7 +208,8 @@ where
         tokio::spawn(async move {
             let mut chunks = Vec::new();
             let mut sequence = 0;
-            let mut claude_stream = matches!(mode, TaskRunMode::Autopilot).then(ClaudeStream::new);
+            let mut claude_stream =
+                matches!(mode, TaskRunMode::AutopilotReport).then(ClaudeStream::new);
             let mut flush = time::interval(Duration::from_millis(100));
             loop {
                 tokio::select! {
@@ -283,7 +288,12 @@ where
                                         return;
                                     }
                                     let result = match target {
-                                        TaskRunMode::Autopilot => service.continue_autopilot(task).await,
+                                        TaskRunMode::Autopilot => {
+                                            service.resume_autopilot_after_operator(task).await
+                                        }
+                                        TaskRunMode::AutopilotReport => {
+                                            unreachable!("report turns cannot be handoff targets")
+                                        }
                                         TaskRunMode::Operator => service.start_operator(task).await,
                                     };
                                     let operator_task = matches!(target, TaskRunMode::Operator)
@@ -298,14 +308,36 @@ where
                                 if matches!(mode, TaskRunMode::Autopilot)
                                     && matches!(event, CommandEvent::Exited(0))
                                 {
-                                    match claude_stream.and_then(ClaudeStream::decision) {
-                                        Some(decision) => {
-                                            let _ = events.send(TaskEvent::Decision {
-                                                task_id: task.id.clone(),
-                                                summary: decision.summary.clone(),
+                                    if let Err(error) = service.continue_turn(&run).await {
+                                        let _ = events.send(TaskEvent::Finished(task.id.clone(), Err(error)));
+                                        return;
+                                    }
+                                    runtime.observe(
+                                        TaskRunMode::AutopilotReport,
+                                        service.request_autopilot_report(task).await,
+                                    );
+                                    return;
+                                }
+                                if matches!(mode, TaskRunMode::AutopilotReport)
+                                    && matches!(event, CommandEvent::Exited(0))
+                                {
+                                    match claude_stream.expect("report turns create a Claude parser").report() {
+                                        Ok(report) => {
+                                            let (task, signals) = match service.apply_report(&task, &run, &report).await {
+                                                Ok(result) => result,
+                                                Err(error) => {
+                                                    let result = service.finish(&task, &run, CommandEvent::Failed(error.to_string())).await;
+                                                    let _ = events.send(TaskEvent::Finished(task.id, result));
+                                                    return;
+                                                }
+                                            };
+                                            let _ = events.send(TaskEvent::Report {
+                                                task: task.clone(),
+                                                summary: report.summary,
+                                                signals,
                                             });
-                                            match decision.next {
-                                            AutopilotNext::Continue => {
+                                            match report.disposition {
+                                            TurnDisposition::Continue => {
                                                 if let Err(error) = service.continue_turn(&run).await {
                                                     let _ = events.send(TaskEvent::Finished(task.id.clone(), Err(error)));
                                                     return;
@@ -315,22 +347,22 @@ where
                                                     service.continue_autopilot(task).await,
                                                 );
                                             }
-                                            AutopilotNext::AwaitOperator => {
+                                            TurnDisposition::AwaitOperator => {
                                                 let result = service.await_operator(&task, &run).await;
                                                 let _ = events.send(TaskEvent::Finished(task.id, result));
                                             }
-                                            AutopilotNext::Complete => {
+                                            TurnDisposition::Complete => {
                                                 let result = service.complete(&task, &run).await;
                                                 let _ = events.send(TaskEvent::Finished(task.id, result));
                                             }
                                         }
                                         }
-                                        None => {
+                                        Err(error) => {
                                             let result = service
                                                 .finish(
                                                     &task,
                                                     &run,
-                                                    CommandEvent::Failed("Claude ended without an autopilot decision".into()),
+                                                    CommandEvent::Failed(error),
                                                 )
                                                 .await;
                                             let _ = events.send(TaskEvent::Finished(task.id, result));

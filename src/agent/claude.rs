@@ -1,6 +1,6 @@
-use super::AgentEngine;
+use super::{AgentEngine, ConversationFiles};
 use crate::isolation::{DefaultFile, EnvironmentRecipe, GuestPath, PersistentDirectory};
-use serde::Deserialize;
+use crate::tasks::{AgentTaskContext, TurnReport};
 use serde_json::Value;
 use std::mem;
 use uuid::Uuid;
@@ -8,34 +8,37 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct ClaudeCode;
 
-#[derive(Clone, Debug, Deserialize)]
-pub struct AutopilotDecision {
-    pub next: AutopilotNext,
-    pub summary: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AutopilotNext {
-    Continue,
-    AwaitOperator,
-    Complete,
-}
-
 pub struct ClaudeStream {
     pending: String,
-    decision: Option<AutopilotDecision>,
+    report: Option<TurnReport>,
+    received_result: bool,
+    error: Option<String>,
 }
 
-const AUTOPILOT_SYSTEM_PROMPT: &str = "Altitude is driving this task without an operator watching. Continue autonomously whenever the next action is reasonably implied by the original task. At the end of this turn, choose `continue` if useful work remains that you can pursue from the original intent. Choose `await_operator` only when human review or an input is genuinely required. Choose `complete` only when the task is fully done and needs no further operator action.";
+const AUTOPILOT_SYSTEM_PROMPT: &str = "Altitude is driving this task without an operator watching. Continue autonomously whenever the next action is reasonably implied by the original task. Do not stop for routine confirmation. Altitude will ask for a structured task report after this work turn ends.";
+const REPORT_SYSTEM_PROMPT: &str = "Altitude is driving this task without an operator watching. Do not perform more work in this turn. Return the structured task report now. Set operator_attention to attention when you need an operator and choose await_operator, or alarm for a credible serious issue. Omit it when the task's current operator attention level remains appropriate; set it to nominal when an escalation is resolved. Use an info signal for a consequential judgment the operator may want to know about; keep working. Use attention or alarm signals to explain their corresponding operator attention level. An alarm may await_operator if no useful remediation or investigation remains. Choose complete only when the task is fully done and needs no further operator action.";
 const AUTOPILOT_SCHEMA: &str = r#"{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "next": { "enum": ["continue", "await_operator", "complete"] },
-    "summary": { "type": "string" }
+    "disposition": { "enum": ["continue", "await_operator", "complete"] },
+    "operator_attention": { "enum": ["nominal", "attention", "alarm"] },
+    "summary": { "type": "string" },
+    "signals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "level": { "enum": ["info", "attention", "alarm"] },
+          "title": { "type": "string" },
+          "body": { "type": "string" }
+        },
+        "required": ["level", "title", "body"]
+      }
+    }
   },
-  "required": ["next", "summary"]
+  "required": ["disposition", "summary", "signals"]
 }"#;
 
 const DEFAULT_SETTINGS: &str = r#"{
@@ -49,12 +52,20 @@ const DEFAULT_SETTINGS: &str = r#"{
 
 impl ClaudeCode {
     fn install_command() -> &'static str {
-        "wget -qO /etc/apk/keys/claude-code.rsa.pub https://downloads.claude.ai/keys/claude-code.rsa.pub && \\
-         printf '%s\\n' https://downloads.claude.ai/claude-code/apk/stable >> /etc/apk/repositories && \\
-         apk add --no-cache claude-code"
+        "export HOME=/root && \\
+         curl -fsSL https://claude.ai/install.sh -o /tmp/install-claude && \\
+         bash /tmp/install-claude && \\
+         test -x /root/.local/bin/claude && \\
+         rm /tmp/install-claude"
     }
 
-    pub fn autopilot_command(&self, conversation_id: &str, prompt: &str, resume: bool) -> String {
+    pub fn autopilot_command(
+        &self,
+        conversation_id: &str,
+        prompt: &str,
+        context: &AgentTaskContext,
+        resume: bool,
+    ) -> String {
         let session = if resume {
             format!("--resume {}", shell_quote(conversation_id))
         } else {
@@ -63,10 +74,26 @@ impl ClaudeCode {
         format!(
             "exec claude -p --permission-mode auto \\
              --output-format stream-json --verbose --include-partial-messages \\
-             --append-system-prompt {} --json-schema {} {session} {}",
+             --system-prompt-snapshot off \\
+             --append-system-prompt {} {session} {}",
             shell_quote(AUTOPILOT_SYSTEM_PROMPT),
+            shell_quote(&format!(
+                "{prompt}\n\nAltitude task context at the start of this turn: {context}"
+            )),
+        )
+    }
+
+    pub fn report_command(&self, conversation_id: &str, context: &AgentTaskContext) -> String {
+        format!(
+            "exec claude -p --permission-mode auto --output-format json \\
+             --system-prompt-snapshot off \\
+             --append-system-prompt {} --json-schema {} --resume {} {}",
+            shell_quote(REPORT_SYSTEM_PROMPT),
             shell_quote(AUTOPILOT_SCHEMA),
-            shell_quote(prompt),
+            shell_quote(conversation_id),
+            shell_quote(&format!(
+                "Return the required task report.\n\nAltitude task context at the start of this turn: {context}"
+            )),
         )
     }
 
@@ -82,7 +109,9 @@ impl ClaudeStream {
     pub fn new() -> Self {
         Self {
             pending: String::new(),
-            decision: None,
+            report: None,
+            received_result: false,
+            error: None,
         }
     }
 
@@ -94,29 +123,63 @@ impl ClaudeStream {
         }
     }
 
-    pub fn decision(mut self) -> Option<AutopilotDecision> {
+    pub fn report(mut self) -> Result<TurnReport, String> {
         if !self.pending.is_empty() {
             let line = mem::take(&mut self.pending);
             self.process_line(&line);
         }
-        self.decision
+        self.report.ok_or_else(|| {
+            self.error.unwrap_or_else(|| {
+                if self.received_result {
+                    "Claude's report result did not contain structured output"
+                } else {
+                    "Claude's report command ended without a result response"
+                }
+                .to_owned()
+            })
+        })
     }
 
     fn process_line(&mut self, line: &str) {
         let Ok(message) = serde_json::from_str::<Value>(line.trim()) else {
             return;
         };
-        if message.get("type").and_then(Value::as_str) == Some("result")
-            && let Some(output) = message.get("structured_output")
-            && let Ok(decision) = serde_json::from_value(output.clone())
-        {
-            self.decision = Some(decision);
+        if message.get("type").and_then(Value::as_str) == Some("result") {
+            self.received_result = true;
+            if message.get("is_error").and_then(Value::as_bool) == Some(true) {
+                self.error = Some(
+                    if message
+                        .get("result")
+                        .and_then(Value::as_str)
+                        .is_some_and(|result| result.contains("Not logged in"))
+                    {
+                        "Claude is not logged in in its sandbox profile; open an attached Claude shell and run /login"
+                    } else {
+                        "Claude rejected the report request"
+                    }.to_owned(),
+                );
+            }
+            if let Some(output) = message.get("structured_output") {
+                match serde_json::from_value(output.clone()) {
+                    Ok(report) => self.report = Some(report),
+                    Err(error) => self.error = Some(format!("Invalid Claude task report: {error}")),
+                }
+            }
         }
     }
 }
 
 fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\\"'\\\"'"))
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn conversation_files(conversation_id: &str) -> ConversationFiles {
+    let project = format!("projects/-/{conversation_id}");
+    ConversationFiles {
+        profile: "agents/claude",
+        transcript: format!("{project}.jsonl").into(),
+        cleanup_entries: vec![format!("{project}.jsonl").into(), project.into()],
+    }
 }
 
 impl AgentEngine for ClaudeCode {
@@ -135,11 +198,19 @@ impl AgentEngine for ClaudeCode {
             environment: vec![
                 ("CLAUDE_CONFIG_DIR", "/altitude/claude"),
                 ("DISABLE_AUTOUPDATER", "1"),
+                (
+                    "PATH",
+                    "/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                ),
             ],
         }
     }
 
     fn new_conversation_id(&self) -> String {
         Uuid::new_v4().to_string()
+    }
+
+    fn conversation_files(&self, conversation_id: &str) -> ConversationFiles {
+        conversation_files(conversation_id)
     }
 }

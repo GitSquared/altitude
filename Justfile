@@ -55,6 +55,32 @@ logs:
 
     exec tail -n 100 -F "$logs_dir/altitude.log"
 
+# Remove only Altitude's task database for a fresh local task history.
+reset:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    case "$(uname -s)" in
+        Darwin) database="$HOME/Library/Application Support/altitude/altitude.db" ;;
+        Linux) database="${XDG_DATA_HOME:-$HOME/.local/share}/altitude/altitude.db" ;;
+        *)
+            echo "just reset does not support $(uname -s) yet" >&2
+            exit 1
+            ;;
+    esac
+
+    echo "This removes only Altitude's task database:"
+    echo "  $database"
+    echo "Snapshots, persistent profiles, isolation state, and logs are kept."
+    read -r -p "Make sure altitude is not running. Continue? [y/N] " answer
+    if [[ "$answer" != "y" && "$answer" != "Y" ]]; then
+        echo "cancelled"
+        exit 0
+    fi
+
+    rm -f -- "$database" "${database}-wal" "${database}-shm"
+    echo "altitude task database removed"
+
 # Remove all local altitude state for a fresh development start.
 nuke:
     #!/usr/bin/env bash

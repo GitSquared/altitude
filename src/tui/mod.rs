@@ -18,13 +18,17 @@ use tokio::{signal::unix::Signal, sync::mpsc, time};
 use crate::{
     app::{TaskEvent, TaskRuntime},
     isolation::{IsolationEngine, OutputStream},
-    tasks::{Task, TaskCustody, TaskServiceError, TaskStatus},
+    tasks::{
+        SignalLevel, Task, TaskCustody, TaskService, TaskServiceError, TaskSignal, TaskStatus,
+    },
 };
 
 mod boot;
 mod overview;
 mod prompt;
 mod shell;
+mod signals;
+mod utils;
 
 use prompt::{Prompt, PromptAction};
 use shell::Shell;
@@ -42,6 +46,9 @@ struct App {
     prompt: Option<Prompt>,
     shells: HashMap<String, Shell>,
     open_shell: Option<String>,
+    signals: Vec<TaskSignal>,
+    selected_signal: usize,
+    open_signals: bool,
 }
 
 impl App {
@@ -66,6 +73,9 @@ impl App {
             prompt: None,
             shells: HashMap::new(),
             open_shell: None,
+            signals: Vec::new(),
+            selected_signal: 0,
+            open_signals: false,
         }
     }
 
@@ -139,6 +149,19 @@ impl App {
             self.open_shell = None;
         }
     }
+
+    fn select_next_signal(&mut self) {
+        if !self.signals.is_empty() {
+            self.selected_signal = (self.selected_signal + 1) % self.signals.len();
+        }
+    }
+
+    fn select_previous_signal(&mut self) {
+        if !self.signals.is_empty() {
+            self.selected_signal =
+                (self.selected_signal + self.signals.len() - 1) % self.signals.len();
+        }
+    }
 }
 
 pub async fn run<E>(
@@ -146,6 +169,7 @@ pub async fn run<E>(
     terminate: &mut Signal,
     interrupt: &mut Signal,
     runtime: TaskRuntime<E>,
+    task_service: TaskService<E>,
     tasks: Vec<Task>,
     task_events: mpsc::UnboundedReceiver<TaskEvent>,
 ) -> io::Result<()>
@@ -157,6 +181,7 @@ where
         terminate,
         interrupt,
         runtime.clone(),
+        task_service,
         tasks,
         task_events,
     )
@@ -172,6 +197,7 @@ async fn run_loop<E>(
     terminate: &mut Signal,
     interrupt: &mut Signal,
     runtime: TaskRuntime<E>,
+    task_service: TaskService<E>,
     tasks: Vec<Task>,
     mut task_events: mpsc::UnboundedReceiver<TaskEvent>,
 ) -> io::Result<()>
@@ -206,6 +232,9 @@ where
             }
             if let Some(shell) = app.open_shell.as_ref().and_then(|id| app.shells.get(id)) {
                 shell.draw(frame);
+            }
+            if app.open_signals {
+                signals::draw(frame, &app.signals, app.selected_signal);
             }
         })?;
         tokio::select! {
@@ -256,14 +285,23 @@ where
                     app.shells.insert(id.clone(), Shell::new(rows, cols, history));
                     app.open_shell = Some(id);
                 }
-                TaskEvent::Decision { task_id, summary } => {
-                    app.latest_output.insert(task_id, summary);
+                TaskEvent::Report {
+                    task,
+                    summary,
+                    signals,
+                } => {
+                    let id = task.id.clone();
+                    app.replace_task(task);
+                    app.latest_output.insert(id, summary);
+                    if let Some(signal) = signals.iter().find(|signal| signal.level == "alarm") {
+                        app.notice = Some(format!("ALARM: {}", signal.title));
+                    }
                 }
                 _ => {}
             },
             event = events.next() => {
                 let Some(event) = event else { return Ok(()) };
-                if handle_event(event?, terminal, &runtime, &mut app).await? { return Ok(()); }
+                if handle_event(event?, terminal, &runtime, &task_service, &mut app).await? { return Ok(()); }
             }
         }
     }
@@ -294,6 +332,7 @@ async fn handle_event<E>(
     event: Event,
     terminal: &DefaultTerminal,
     runtime: &TaskRuntime<E>,
+    task_service: &TaskService<E>,
     app: &mut App,
 ) -> io::Result<bool>
 where
@@ -357,12 +396,41 @@ where
         }
         return Ok(false);
     }
+    if app.open_signals {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('i') => app.open_signals = false,
+            KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') => app.select_next_signal(),
+            KeyCode::BackTab | KeyCode::Up | KeyCode::Char('h') => app.select_previous_signal(),
+            KeyCode::Enter => {
+                if let Some(signal) = app.signals.get(app.selected_signal).cloned() {
+                    match task_service.acknowledge_signal(&signal.id).await {
+                        Ok(()) => {
+                            app.signals.remove(app.selected_signal);
+                            app.selected_signal =
+                                app.selected_signal.min(app.signals.len().saturating_sub(1));
+                        }
+                        Err(error) => app.notice = Some(error.to_string()),
+                    }
+                }
+            }
+            _ => {}
+        }
+        return Ok(false);
+    }
     match key.code {
         KeyCode::Char('q') => return Ok(true),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
         KeyCode::Char('c') => app.prompt = Some(Prompt::new("what should Claude do?")),
-        KeyCode::Tab => app.select_next(),
-        KeyCode::BackTab => app.select_previous(),
+        KeyCode::Char('i') => {
+            app.signals = task_service
+                .unacknowledged_signals(SignalLevel::Info)
+                .await
+                .map_err(io::Error::other)?;
+            app.selected_signal = 0;
+            app.open_signals = true;
+        }
+        KeyCode::Tab | KeyCode::Char('j') => app.select_next(),
+        KeyCode::BackTab | KeyCode::Char('h') => app.select_previous(),
         KeyCode::Backspace | KeyCode::Delete => {
             if let Some(task) = app.selected_task() {
                 tracing::info!(task_id = %task.id, "removing task from overview");
@@ -373,8 +441,8 @@ where
         }
         KeyCode::Enter => {
             if let Some(task) = app.selected_task() {
-                if matches!(task.status, TaskStatus::Awaiting) {
-                    runtime.take_awaiting_control(task);
+                if matches!(task.status, TaskStatus::Awaiting | TaskStatus::Errored) {
+                    runtime.take_stopped_control(task);
                     app.notice = Some("restoring Claude in the terminal…".into());
                     return Ok(false);
                 }

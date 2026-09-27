@@ -8,7 +8,7 @@ use ratatui::{
     widgets::{Block, BorderType, Padding, Paragraph},
 };
 
-use crate::tasks::{Task, TaskCustody, TaskStatus};
+use crate::tasks::{OperatorAttention, Task, TaskCustody, TaskStatus};
 
 pub fn draw(
     frame: &mut Frame,
@@ -39,7 +39,7 @@ pub fn draw(
         frame.render_widget(Line::from(notice).red(), footer);
     }
     frame.render_widget(
-        Line::from("c create · tab select · enter shell · delete remove · q quit")
+        Line::from("c create · i info · h/j select · enter shell · delete remove · q quit")
             .dim()
             .alignment(HorizontalAlignment::Right),
         footer,
@@ -75,7 +75,7 @@ fn draw_tasks(
 
     for (index, (task, area)) in tasks.iter().zip(cards.iter()).enumerate() {
         let selected = index == selected;
-        let status = match &task.status {
+        let mut status = match &task.status {
             TaskStatus::Pending => Line::from("pending").yellow(),
             TaskStatus::InProgress => Line::from(match task.custody {
                 TaskCustody::Autopilot => "autopilot · working",
@@ -90,6 +90,15 @@ fn draw_tasks(
             ))
             .red(),
         };
+        match task.operator_attention {
+            OperatorAttention::Alarm => {
+                status.spans.push(" · ALARM".red().bold());
+            }
+            OperatorAttention::Attention => {
+                status.spans.push(" · attention required".yellow().bold());
+            }
+            OperatorAttention::Nominal => {}
+        }
         let style = if selected {
             Style::new().white().bold()
         } else {

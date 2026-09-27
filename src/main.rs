@@ -72,7 +72,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             return Ok(());
         };
         let task_rows = tasks.list().await.map_err(io::Error::other)?;
-        let (runtime, task_events) = TaskRuntime::new(tasks);
+        let (runtime, task_events) = TaskRuntime::new(tasks.clone());
         runtime.resume(resumed);
 
         tui::run(
@@ -80,6 +80,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             &mut terminate,
             &mut interrupt,
             runtime,
+            tasks,
             task_rows,
             task_events,
         )
