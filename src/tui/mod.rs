@@ -16,12 +16,12 @@ use ratatui::DefaultTerminal;
 use tokio::{signal::unix::Signal, sync::mpsc, time};
 
 use crate::{
-    app::{TaskRuntime, TaskRuntimeUpdate},
     isolation::{IsolationEngine, OutputStream},
     tasks::{
-        Task, TaskExecutionController, TaskExecutionStatus, TaskOperatorNotice,
-        TaskOperatorNoticeLevel, TaskService, TaskServiceError,
+        Task, TaskExecutionMode, TaskExecutionStatus, TaskOperatorAttentionLevel,
+        TaskOperatorNotice, TaskService, TaskServiceError,
     },
+    tasks::{TaskEventLoop, TaskExecutionUpdate},
 };
 
 mod boot;
@@ -169,10 +169,10 @@ pub async fn run<E>(
     terminal: &mut DefaultTerminal,
     terminate: &mut Signal,
     interrupt: &mut Signal,
-    runtime: TaskRuntime<E>,
+    event_loop: TaskEventLoop<E>,
     task_service: TaskService<E>,
     tasks: Vec<Task>,
-    task_runtime_updates: mpsc::UnboundedReceiver<TaskRuntimeUpdate>,
+    task_execution_updates: mpsc::UnboundedReceiver<TaskExecutionUpdate>,
 ) -> io::Result<()>
 where
     E: IsolationEngine + Clone + 'static,
@@ -181,14 +181,14 @@ where
         terminal,
         terminate,
         interrupt,
-        runtime.clone(),
+        event_loop.clone(),
         task_service,
         tasks,
-        task_runtime_updates,
+        task_execution_updates,
     )
     .await;
     let mouse_cleanup = execute!(io::stdout(), DisableMouseCapture, DisableBracketedPaste);
-    runtime.suspend_all().await.map_err(io::Error::other)?;
+    event_loop.suspend_all().await.map_err(io::Error::other)?;
     mouse_cleanup?;
     result
 }
@@ -197,10 +197,10 @@ async fn run_loop<E>(
     terminal: &mut DefaultTerminal,
     terminate: &mut Signal,
     interrupt: &mut Signal,
-    runtime: TaskRuntime<E>,
+    event_loop: TaskEventLoop<E>,
     task_service: TaskService<E>,
     tasks: Vec<Task>,
-    mut task_runtime_updates: mpsc::UnboundedReceiver<TaskRuntimeUpdate>,
+    mut task_execution_updates: mpsc::UnboundedReceiver<TaskExecutionUpdate>,
 ) -> io::Result<()>
 where
     E: IsolationEngine + Clone + 'static,
@@ -242,28 +242,28 @@ where
             _ = terminate.recv() => return Ok(()),
             _ = interrupt.recv() => return Ok(()),
             _ = refresh.tick(), if app.open_shell.is_none() => {
-                if let Ok(tasks) = runtime.list().await {
+                if let Ok(tasks) = event_loop.list().await {
                     app.tasks = tasks;
                     app.selected = app.selected.min(app.tasks.len().saturating_sub(1));
                 }
             }
             _ = shell_notice.tick(), if app.shell_has_active_notice() => {}
-            Some(event) = task_runtime_updates.recv() => match event {
-                TaskRuntimeUpdate::Created(Ok(task)) => app.replace_task(task),
-                TaskRuntimeUpdate::Created(Err(error)) => app.notice = Some(error.to_string()),
-                TaskRuntimeUpdate::Started(Ok(task)) => app.replace_task(task),
-                TaskRuntimeUpdate::Started(Err(error)) => app.notice = Some(error.to_string()),
-                TaskRuntimeUpdate::Finished(id, Ok(task)) if !app.is_removing(&id) => {
+            Some(event) = task_execution_updates.recv() => match event {
+                TaskExecutionUpdate::Created(Ok(task)) => app.replace_task(task),
+                TaskExecutionUpdate::Created(Err(error)) => app.notice = Some(error.to_string()),
+                TaskExecutionUpdate::Started(Ok(task)) => app.replace_task(task),
+                TaskExecutionUpdate::Started(Err(error)) => app.notice = Some(error.to_string()),
+                TaskExecutionUpdate::Finished(id, Ok(task)) if !app.is_removing(&id) => {
                     app.remove_shell(&id);
                     app.replace_task(task);
                 }
-                TaskRuntimeUpdate::Finished(id, Err(error)) if !app.is_removing(&id) => set_error(&mut app, &id, error),
-                TaskRuntimeUpdate::Removed(id, Ok(())) => app.remove_task(&id),
-                TaskRuntimeUpdate::Removed(id, Err(error)) => {
+                TaskExecutionUpdate::Finished(id, Err(error)) if !app.is_removing(&id) => set_error(&mut app, &id, error),
+                TaskExecutionUpdate::Removed(id, Ok(())) => app.remove_task(&id),
+                TaskExecutionUpdate::Removed(id, Err(error)) => {
                     app.cancel_removing(&id);
                     set_error(&mut app, &id, error);
                 }
-                TaskRuntimeUpdate::Output { task_id, stream, bytes } => {
+                TaskExecutionUpdate::Output { task_id, stream, bytes } => {
                     app.append_output(task_id.clone(), stream, bytes.clone());
                     if let Some(shell) = app.shells.get_mut(&task_id)
                         && let Some(text) = shell.process(bytes)
@@ -277,16 +277,16 @@ where
                         }
                     }
                 }
-                TaskRuntimeUpdate::OperatorReady(task) => {
+                TaskExecutionUpdate::OperatorReady(task) => {
                     let id = task.id.clone();
                     app.replace_task(task);
                     let (rows, cols) = shell::size(terminal.size()?.into());
-                    let history = runtime.cached_terminal_output(&id);
-                    runtime.resize(&id, rows, cols);
+                    let history = event_loop.cached_terminal_output(&id);
+                    event_loop.resize_terminal(&id, rows, cols);
                     app.shells.insert(id.clone(), Shell::new(rows, cols, history));
                     app.open_shell = Some(id);
                 }
-                TaskRuntimeUpdate::Report {
+                TaskExecutionUpdate::Report {
                     task,
                     summary,
                     operator_notices,
@@ -294,7 +294,7 @@ where
                     let id = task.id.clone();
                     app.replace_task(task);
                     app.latest_output.insert(id, summary);
-                    if let Some(operator_notice) = operator_notices.iter().find(|operator_notice| operator_notice.level == TaskOperatorNoticeLevel::Alarm) {
+                    if let Some(operator_notice) = operator_notices.iter().find(|operator_notice| operator_notice.level == TaskOperatorAttentionLevel::Alarm) {
                         app.notice = Some(format!("ALARM: {}", operator_notice.title));
                     }
                 }
@@ -302,7 +302,7 @@ where
             },
             event = events.next() => {
                 let Some(event) = event else { return Ok(()) };
-                if handle_event(event?, terminal, &runtime, &task_service, &mut app).await? { return Ok(()); }
+                if handle_event(event?, terminal, &event_loop, &task_service, &mut app).await? { return Ok(()); }
             }
         }
     }
@@ -333,7 +333,7 @@ fn set_error(app: &mut App, id: &str, error: TaskServiceError) {
 async fn handle_event<E>(
     event: Event,
     terminal: &DefaultTerminal,
-    runtime: &TaskRuntime<E>,
+    event_loop: &TaskEventLoop<E>,
     task_service: &TaskService<E>,
     app: &mut App,
 ) -> io::Result<bool>
@@ -344,7 +344,7 @@ where
         && let Some(id) = &app.open_shell
     {
         let (rows, cols) = shell::size(terminal.size()?.into());
-        runtime.resize(id, rows, cols);
+        event_loop.resize_terminal(id, rows, cols);
         if let Some(shell) = app.shells.get_mut(id) {
             shell.resize(rows, cols);
         }
@@ -357,7 +357,7 @@ where
             && let Some(shell) = app.shells.get(id)
             && let Some(bytes) = shell.paste_bytes(text)
         {
-            runtime.send_input(id, bytes);
+            event_loop.send_terminal_input(id, bytes);
         }
         return Ok(false);
     }
@@ -366,7 +366,7 @@ where
             && let Some(shell) = app.shells.get_mut(id)
             && let Some(bytes) = shell.mouse_bytes(mouse, terminal.size()?.into())
         {
-            runtime.send_input(id, bytes);
+            event_loop.send_terminal_input(id, bytes);
         }
         return Ok(false);
     }
@@ -381,7 +381,7 @@ where
             Some(PromptAction::Cancel) => app.prompt = None,
             Some(PromptAction::Submit(command)) => {
                 app.prompt = None;
-                runtime.create_claude(command);
+                event_loop.create_claude(command);
             }
             None => {}
         }
@@ -389,12 +389,12 @@ where
     }
     if let Some(id) = app.open_shell.clone() {
         if shell::is_exit_key(key) {
-            runtime.return_to_autopilot(&id);
+            event_loop.return_to_autopilot(&id);
             app.hide_shell();
         } else if let Some(shell) = app.shells.get_mut(&id)
             && let Some(bytes) = shell.key_bytes(key)
         {
-            runtime.send_input(&id, bytes);
+            event_loop.send_terminal_input(&id, bytes);
         }
         return Ok(false);
     }
@@ -435,7 +435,7 @@ where
         KeyCode::Char('c') => app.prompt = Some(Prompt::new("what should Claude do?")),
         KeyCode::Char('i') => {
             app.operator_notices = task_service
-                .unacknowledged_operator_notices(TaskOperatorNoticeLevel::Info)
+                .unacknowledged_operator_notices(TaskOperatorAttentionLevel::Nominal)
                 .await
                 .map_err(io::Error::other)?;
             app.selected_operator_notice = 0;
@@ -448,7 +448,7 @@ where
                 tracing::info!(task_id = %task.id, "removing task from overview");
                 app.begin_removing(&task.id);
                 app.remove_shell(&task.id);
-                runtime.remove(task);
+                event_loop.remove(task);
             }
         }
         KeyCode::Enter => {
@@ -457,7 +457,7 @@ where
                     task.current_state.execution_status,
                     TaskExecutionStatus::Paused | TaskExecutionStatus::Failed
                 ) {
-                    runtime.take_stopped_control(task);
+                    event_loop.start_operator_control(task);
                     app.notice = Some("restoring Claude in the terminal…".into());
                     return Ok(false);
                 }
@@ -468,16 +468,16 @@ where
                     return Ok(false);
                 }
                 if matches!(
-                    task.current_state.execution_controller,
-                    TaskExecutionController::Altitude
+                    task.current_state.execution_mode,
+                    TaskExecutionMode::Autopilot | TaskExecutionMode::AutopilotReport
                 ) {
-                    runtime.take_control(&task.id);
+                    event_loop.take_control(&task.id);
                     app.notice = Some("bringing Claude to the terminal…".into());
                     return Ok(false);
                 }
                 if app.shells.contains_key(&task.id) {
                     let (rows, cols) = shell::size(terminal.size()?.into());
-                    runtime.resize(&task.id, rows, cols);
+                    event_loop.resize_terminal(&task.id, rows, cols);
                     if let Some(shell) = app.shells.get_mut(&task.id) {
                         shell.resize(rows, cols);
                     }
@@ -485,12 +485,12 @@ where
                     app.open_shell = Some(task.id);
                     return Ok(false);
                 }
-                if !runtime.has_command(&task.id) {
+                if !event_loop.has_active_command(&task.id) {
                     return Ok(false);
                 }
                 let (rows, cols) = shell::size(terminal.size()?.into());
-                let history = runtime.cached_terminal_output(&task.id);
-                runtime.resize(&task.id, rows, cols);
+                let history = event_loop.cached_terminal_output(&task.id);
+                event_loop.resize_terminal(&task.id, rows, cols);
                 app.shells
                     .insert(task.id.clone(), Shell::new(rows, cols, history));
                 app.open_shell = Some(task.id);

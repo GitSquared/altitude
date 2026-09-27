@@ -16,7 +16,7 @@ pub struct ClaudeStream {
 }
 
 const AUTOPILOT_SYSTEM_PROMPT: &str = "Altitude is driving this task without an operator watching. Continue autonomously whenever the next action is reasonably implied by the original task. Do not stop for routine confirmation. Altitude will ask for a structured task report after this work turn ends.";
-const REPORT_SYSTEM_PROMPT: &str = "Altitude is driving this task without an operator watching. Do not perform more work in this turn. Return the structured task report now. Set operator_attention_level to requested when you need an operator and choose await_operator, or alarm for a credible serious issue. Omit it when the task's current operator attention level remains appropriate; set it to nominal when an escalation is resolved. Use an info operator notice for a consequential judgment the operator may want to know about; keep working. Use attention or alarm operator notices to explain their corresponding operator attention level. An alarm may await_operator if no useful remediation or investigation remains. Choose complete only when the task is fully done and needs no further operator action.";
+const REPORT_SYSTEM_PROMPT: &str = "Altitude is driving this task without an operator watching. Do not perform more work in this turn. Return the structured task report now. Set operator_attention_level to requested when you need an operator and choose await_operator, or alarm for a credible serious issue. Omit it when the task's current operator attention level remains appropriate; set it to nominal when an escalation is resolved. Use a nominal (informational) operator notice for a consequential judgment the operator may want to know about; keep working. Use requested or alarm operator notices to explain their corresponding operator attention level. An alarm may await_operator if no useful remediation or investigation remains. Choose complete only when the task is fully done and needs no further operator action.";
 const AUTOPILOT_SCHEMA: &str = r#"{
   "type": "object",
   "additionalProperties": false,
@@ -30,7 +30,7 @@ const AUTOPILOT_SCHEMA: &str = r#"{
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "level": { "enum": ["info", "attention", "alarm"] },
+          "level": { "enum": ["nominal", "requested", "alarm"] },
           "title": { "type": "string" },
           "body": { "type": "string" }
         },

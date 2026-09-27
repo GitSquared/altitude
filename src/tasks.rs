@@ -6,7 +6,9 @@ use crate::{
 use futures_util::future::join_all;
 use std::{error::Error, fmt, path::PathBuf};
 use uuid::Uuid;
+mod event_loop;
 mod state;
+pub use event_loop::{TaskEventLoop, TaskExecutionUpdate};
 mod store;
 pub use state::*;
 pub use store::TaskStore;
@@ -72,7 +74,7 @@ where
 
     pub async fn unacknowledged_operator_notices(
         &self,
-        level: TaskOperatorNoticeLevel,
+        level: TaskOperatorAttentionLevel,
     ) -> Result<Vec<TaskOperatorNotice>, TaskServiceError> {
         self.store
             .unacknowledged_operator_notices(level)
@@ -103,8 +105,7 @@ where
         task: Task,
     ) -> Result<(Task, TaskAgentRun, CommandSession), TaskServiceError> {
         let resume = task.current_state.snapshot_path.is_some();
-        let mut task = self.provision(task).await?;
-        task.current_state.execution_controller = TaskExecutionController::Altitude;
+        let task = self.provision(task).await?;
         let command = match task.agent_kind {
             Some(AgentKind::Claude) => {
                 let conversation_id = self.claude_conversation(&task, resume).await?;
@@ -115,13 +116,14 @@ where
                     } else {
                         &task.current_state.intent
                     },
-                    &task.autopilot_context(),
+                    &task.turn_context(TaskExecutionMode::Autopilot),
                     resume,
                 )
             }
             None => task.current_state.intent.clone(),
         };
-        self.launch(task, command).await
+        self.launch(task, command, TaskExecutionMode::Autopilot)
+            .await
     }
 
     async fn provision(&self, task: Task) -> Result<Task, TaskServiceError> {
@@ -191,18 +193,18 @@ where
 
     async fn start_autopilot_turn(
         &self,
-        mut task: Task,
+        task: Task,
         prompt: &str,
     ) -> Result<(Task, TaskAgentRun, CommandSession), TaskServiceError> {
         let conversation_id = self.claude_conversation(&task, true).await?;
-        task.current_state.execution_controller = TaskExecutionController::Altitude;
         let command = self.claude.autopilot_command(
             &conversation_id,
             prompt,
-            &task.autopilot_context(),
+            &task.turn_context(TaskExecutionMode::Autopilot),
             true,
         );
-        self.launch(task, command).await
+        self.launch(task, command, TaskExecutionMode::Autopilot)
+            .await
     }
 
     pub async fn request_autopilot_report(
@@ -210,10 +212,12 @@ where
         task: Task,
     ) -> Result<(Task, TaskAgentRun, CommandSession), TaskServiceError> {
         let conversation_id = self.claude_conversation(&task, true).await?;
-        let command = self
-            .claude
-            .report_command(&conversation_id, &task.autopilot_context());
-        self.launch(task, command).await
+        let command = self.claude.report_command(
+            &conversation_id,
+            &task.turn_context(TaskExecutionMode::AutopilotReport),
+        );
+        self.launch(task, command, TaskExecutionMode::AutopilotReport)
+            .await
     }
 
     pub async fn start_operator(
@@ -224,15 +228,19 @@ where
             task = self.provision(task).await?;
         }
         let conversation_id = self.claude_conversation(&task, true).await?;
-        task.current_state.execution_controller = TaskExecutionController::Operator;
-        self.launch(task, self.claude.operator_command(&conversation_id))
-            .await
+        self.launch(
+            task,
+            self.claude.operator_command(&conversation_id),
+            TaskExecutionMode::Operator,
+        )
+        .await
     }
 
     async fn launch(
         &self,
         task: Task,
         command: String,
+        mode: TaskExecutionMode,
     ) -> Result<(Task, TaskAgentRun, CommandSession), TaskServiceError> {
         let sandbox_id = task
             .current_state
@@ -249,7 +257,7 @@ where
                 &[TaskHistoryEvent::AgentRunStarted {
                     agent_run_id: agent_run.id.clone(),
                     sandbox_id: sandbox_id.clone(),
-                    controller: task.current_state.execution_controller.clone(),
+                    mode,
                 }],
             )
             .await?;
@@ -354,7 +362,7 @@ where
             CommandEvent::Exited(0) => return self.complete(task, agent_run).await,
             CommandEvent::Exited(code) => (Some(code), format!("command exited with code {code}")),
             CommandEvent::Failed(error) => (None, error),
-            CommandEvent::Output { .. } => unreachable!("output is handled by the runtime"),
+            CommandEvent::Output { .. } => unreachable!("output is handled by the event_loop"),
         };
         self.record(
             &task.id,

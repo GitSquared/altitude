@@ -4,15 +4,13 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use crate::{
     agent::ClaudeCode,
-    app::TaskRuntime,
     config::Config,
     db::Database,
     isolation::MicrosandboxIsolation,
-    tasks::{TaskService, TaskStore},
+    tasks::{TaskEventLoop, TaskService, TaskStore},
 };
 
 mod agent;
-mod app;
 mod config;
 mod db;
 mod isolation;
@@ -72,17 +70,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
             return Ok(());
         };
         let task_rows = tasks.list().await.map_err(io::Error::other)?;
-        let (runtime, task_runtime_updates) = TaskRuntime::new(tasks.clone());
-        runtime.resume(resumed);
+        let (event_loop, task_execution_updates) = TaskEventLoop::new(tasks.clone());
+        event_loop.watch_resumed_runs(resumed);
 
         tui::run(
             &mut terminal,
             &mut terminate,
             &mut interrupt,
-            runtime,
+            event_loop,
             tasks,
             task_rows,
-            task_runtime_updates,
+            task_execution_updates,
         )
         .await
     }

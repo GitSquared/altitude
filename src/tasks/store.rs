@@ -1,11 +1,29 @@
-use sqlx::{Sqlite, SqlitePool, Transaction};
+use sqlx::{FromRow, Sqlite, SqlitePool, Transaction, types::Json};
 use uuid::Uuid;
 
 use super::{
     Task, TaskAgentRun, TaskAgentTurnReport, TaskCurrentState, TaskError, TaskHistoryEvent,
-    TaskOperatorNotice, TaskOperatorNoticeLevel,
+    TaskOperatorAttentionLevel, TaskOperatorNotice,
 };
 use crate::{agent::AgentKind, db::Database};
+
+// SQLx reads the JSON projection through Serde, sharing its enum spellings.
+#[derive(FromRow)]
+struct TaskRow {
+    id: String,
+    agent_kind: Option<AgentKind>,
+    state: Json<TaskCurrentState>,
+}
+
+impl From<TaskRow> for Task {
+    fn from(row: TaskRow) -> Self {
+        Self {
+            id: row.id,
+            agent_kind: row.agent_kind,
+            current_state: row.state.0,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct TaskStore {
@@ -20,8 +38,18 @@ impl TaskStore {
     }
 
     pub async fn list(&self) -> Result<Vec<Task>, TaskError> {
-        sqlx::query_as("SELECT tasks.id, tasks.agent_kind, task_statuses.* FROM tasks JOIN task_statuses ON task_statuses.task_id = tasks.id ORDER BY last_event_sequence DESC")
-            .fetch_all(&self.pool).await.map_err(TaskError::Database)
+        sqlx::query_as::<_, TaskRow>(
+            r#"
+            SELECT tasks.id, tasks.agent_kind, task_statuses.state
+            FROM tasks
+            JOIN task_statuses ON task_statuses.task_id = tasks.id
+            ORDER BY last_event_sequence DESC
+        "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| rows.into_iter().map(Task::from).collect())
+        .map_err(TaskError::Database)
     }
 
     pub async fn create_with_agent(
@@ -30,37 +58,39 @@ impl TaskStore {
         agent_kind: Option<AgentKind>,
         agent_conversation_id: Option<String>,
     ) -> Result<Task, TaskError> {
-        let mut task = Task {
-            id: Uuid::new_v4().to_string(),
-            agent_kind,
-            current_state: TaskCurrentState::default(),
-        };
+        let task_id = Uuid::new_v4().to_string();
         let mut transaction = self
             .pool
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(TaskError::Database)?;
-        sqlx::query("INSERT INTO tasks (id, agent_kind, created_at_ms) VALUES (?, ?, ?)")
-            .bind(&task.id)
-            .bind(agent_kind)
-            .bind(now_ms())
-            .execute(&mut *transaction)
-            .await
-            .map_err(TaskError::Database)?;
+        sqlx::query(
+            r#"
+            INSERT INTO tasks (id, agent_kind, created_at_ms)
+            VALUES (?1, ?2, ?3)
+        "#,
+        )
+        .bind(&task_id)
+        .bind(agent_kind)
+        .bind(now_ms())
+        .execute(&mut *transaction)
+        .await
+        .map_err(TaskError::Database)?;
         Self::write_events(
             &mut transaction,
-            &mut task,
+            &task_id,
             &[TaskHistoryEvent::IntentExpressed {
                 intent,
                 agent_conversation_id,
             }],
         )
         .await?;
+        let task = Self::read_task(&mut transaction, &task_id).await?;
         transaction.commit().await.map_err(TaskError::Database)?;
         Ok(task)
     }
 
-    /// Serialize writers before reading the projection. Events and their projection commit together.
+    /// Append a whole transition atomically and read its resulting state before releasing the writer.
     pub async fn append_events(
         &self,
         task_id: &str,
@@ -71,37 +101,52 @@ impl TaskStore {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(TaskError::Database)?;
-        let mut task = sqlx::query_as::<_, Task>("SELECT tasks.id, tasks.agent_kind, task_statuses.* FROM tasks JOIN task_statuses ON task_statuses.task_id = tasks.id WHERE tasks.id = ?")
-            .bind(task_id).fetch_one(&mut *transaction).await.map_err(TaskError::Database)?;
-        Self::write_events(&mut transaction, &mut task, events).await?;
+        Self::write_events(&mut transaction, task_id, events).await?;
+        let task = Self::read_task(&mut transaction, task_id).await?;
         transaction.commit().await.map_err(TaskError::Database)?;
         Ok(task)
     }
 
+    async fn read_task(
+        transaction: &mut Transaction<'_, Sqlite>,
+        task_id: &str,
+    ) -> Result<Task, TaskError> {
+        sqlx::query_as::<_, TaskRow>(
+            r#"
+            SELECT tasks.id, tasks.agent_kind, task_statuses.state
+            FROM tasks
+            JOIN task_statuses ON task_statuses.task_id = tasks.id
+            WHERE tasks.id = ?
+        "#,
+        )
+        .bind(task_id)
+        .fetch_one(&mut **transaction)
+        .await
+        .map(Task::from)
+        .map_err(TaskError::Database)
+    }
+
     async fn write_events(
         transaction: &mut Transaction<'_, Sqlite>,
-        task: &mut Task,
+        task_id: &str,
         events: &[TaskHistoryEvent],
     ) -> Result<(), TaskError> {
-        let mut last_event_sequence = None;
         for event in events {
             let payload = serde_json::to_string(event).map_err(TaskError::HistoryData)?;
-            let result = sqlx::query("INSERT INTO task_event_logs (id, task_id, recorded_at_ms, payload) VALUES (?, ?, ?, ?)")
-                .bind(Uuid::new_v4().to_string()).bind(&task.id).bind(now_ms()).bind(payload)
-                .execute(&mut **transaction).await.map_err(TaskError::Database)?;
-            task.current_state.apply(event);
-            last_event_sequence = Some(result.last_insert_rowid());
+            sqlx::query(
+                r#"
+                INSERT INTO task_event_logs (id, task_id, recorded_at_ms, payload)
+                VALUES (?1, ?2, ?3, ?4)
+            "#,
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(task_id)
+            .bind(now_ms())
+            .bind(payload)
+            .execute(&mut **transaction)
+            .await
+            .map_err(TaskError::Database)?;
         }
-        let Some(sequence) = last_event_sequence else {
-            return Ok(());
-        };
-        let state = &task.current_state;
-        sqlx::query("INSERT INTO task_statuses (task_id, intent, agent_conversation_id, execution_status, execution_pause_reason, execution_controller, operator_attention_level, sandbox_id, snapshot_path, last_error, latest_turn_summary, last_event_sequence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(task_id) DO UPDATE SET intent = excluded.intent, agent_conversation_id = excluded.agent_conversation_id, execution_status = excluded.execution_status, execution_pause_reason = excluded.execution_pause_reason, execution_controller = excluded.execution_controller, operator_attention_level = excluded.operator_attention_level, sandbox_id = excluded.sandbox_id, snapshot_path = excluded.snapshot_path, last_error = excluded.last_error, latest_turn_summary = excluded.latest_turn_summary, last_event_sequence = excluded.last_event_sequence")
-            .bind(&task.id).bind(&state.intent).bind(&state.agent_conversation_id)
-            .bind(&state.execution_status).bind(&state.execution_pause_reason).bind(&state.execution_controller)
-            .bind(&state.operator_attention_level).bind(&state.sandbox_id).bind(&state.snapshot_path)
-            .bind(&state.last_error).bind(&state.latest_turn_summary).bind(sequence)
-            .execute(&mut **transaction).await.map_err(TaskError::Database)?;
         Ok(())
     }
 
@@ -139,22 +184,49 @@ impl TaskStore {
 
     pub async fn unacknowledged_operator_notices(
         &self,
-        level: TaskOperatorNoticeLevel,
+        level: TaskOperatorAttentionLevel,
     ) -> Result<Vec<TaskOperatorNotice>, TaskError> {
-        sqlx::query_as("SELECT id, task_id, level, title, body FROM task_operator_notices WHERE level = ? AND acknowledged = 0 ORDER BY sequence DESC")
-            .bind(level).fetch_all(&self.pool).await.map_err(TaskError::Database)
+        sqlx::query_scalar::<_, Json<TaskOperatorNotice>>(
+            r#"
+            SELECT json_object(
+                'id', id,
+                'task_id', task_id,
+                'level', level,
+                'title', title,
+                'body', body
+            )
+            FROM task_operator_notices
+            WHERE level = json_extract(?1, '$') AND acknowledged = 0
+            ORDER BY sequence DESC
+        "#,
+        )
+        .bind(Json(level))
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| rows.into_iter().map(|row| row.0).collect())
+        .map_err(TaskError::Database)
     }
 
     pub async fn acknowledge_operator_notice(&self, notice_id: &str) -> Result<(), TaskError> {
+        let mut transaction = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(TaskError::Database)?;
         let task_id: Option<String> = sqlx::query_scalar(
-            "SELECT task_id FROM task_operator_notices WHERE id = ? AND acknowledged = 0",
+            r#"
+            SELECT task_id
+            FROM task_operator_notices
+            WHERE id = ? AND acknowledged = 0
+        "#,
         )
         .bind(notice_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *transaction)
         .await
         .map_err(TaskError::Database)?;
         if let Some(task_id) = task_id {
-            self.append_events(
+            Self::write_events(
+                &mut transaction,
                 &task_id,
                 &[TaskHistoryEvent::OperatorNoticeAcknowledged {
                     notice_id: notice_id.to_owned(),
@@ -162,6 +234,7 @@ impl TaskStore {
             )
             .await?;
         }
+        transaction.commit().await.map_err(TaskError::Database)?;
         Ok(())
     }
 

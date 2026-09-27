@@ -9,7 +9,7 @@ use ratatui::{
 };
 
 use crate::tasks::{
-    Task, TaskExecutionController, TaskExecutionPauseReason, TaskExecutionStatus,
+    Task, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
     TaskOperatorAttentionLevel,
 };
 
@@ -80,13 +80,12 @@ fn draw_tasks(
         let selected = index == selected;
         let mut status = match &task.current_state.execution_status {
             TaskExecutionStatus::Pending => Line::from("pending").yellow(),
-            TaskExecutionStatus::Running => {
-                Line::from(match task.current_state.execution_controller {
-                    TaskExecutionController::Altitude => "autopilot · working",
-                    TaskExecutionController::Operator => "operator override",
-                })
-                .green()
-            }
+            TaskExecutionStatus::Running => Line::from(match task.current_state.execution_mode {
+                TaskExecutionMode::Autopilot => "autopilot · working",
+                TaskExecutionMode::AutopilotReport => "autopilot · reporting",
+                TaskExecutionMode::Operator => "operator override",
+            })
+            .green(),
             TaskExecutionStatus::Paused => {
                 Line::from(match task.current_state.execution_pause_reason {
                     Some(TaskExecutionPauseReason::AwaitingOperator) => {
