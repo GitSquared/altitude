@@ -32,6 +32,8 @@ db:
             ;;
     esac
 
+    database="${ALTITUDE_DATA_DIR:-$(dirname "$database")}/altitude.db"
+
     if [[ ! -f "$database" ]]; then
         echo "altitude has not created its database yet; run altitude once first" >&2
         exit 1
@@ -53,6 +55,8 @@ logs:
             ;;
     esac
 
+    logs_dir="${ALTITUDE_CACHE_DIR:-$(dirname "$logs_dir")}/logs"
+
     exec tail -n 100 -F "$logs_dir/altitude.log"
 
 # Remove only Altitude's task database for a fresh local task history.
@@ -68,6 +72,8 @@ reset:
             exit 1
             ;;
     esac
+
+    database="${ALTITUDE_DATA_DIR:-$(dirname "$database")}/altitude.db"
 
     echo "This removes only Altitude's task database:"
     echo "  $database"
@@ -101,6 +107,9 @@ nuke:
             ;;
     esac
 
+    data_dir="${ALTITUDE_DATA_DIR:-$data_dir}"
+    cache_dir="${ALTITUDE_CACHE_DIR:-$cache_dir}"
+
     echo "This removes altitude's local data and cache:"
     echo "  $data_dir"
     echo "  $cache_dir"
@@ -133,6 +142,9 @@ msb *args:
             exit 1
             ;;
     esac
+
+    data_home="${ALTITUDE_DATA_DIR:-$(dirname "$data_home")}/isolation"
+    socket_safe_home="${ALTITUDE_CACHE_DIR:-$(dirname "$socket_safe_home")}/msb"
 
     binary="$data_home/bin/msb"
     if [[ ! -x "$binary" ]]; then

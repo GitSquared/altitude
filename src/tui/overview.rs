@@ -8,7 +8,10 @@ use ratatui::{
     widgets::{Block, BorderType, Padding, Paragraph},
 };
 
-use crate::tasks::{OperatorAttention, Task, TaskCustody, TaskStatus};
+use crate::tasks::{
+    Task, TaskExecutionController, TaskExecutionPauseReason, TaskExecutionStatus,
+    TaskOperatorAttentionLevel,
+};
 
 pub fn draw(
     frame: &mut Frame,
@@ -75,29 +78,42 @@ fn draw_tasks(
 
     for (index, (task, area)) in tasks.iter().zip(cards.iter()).enumerate() {
         let selected = index == selected;
-        let mut status = match &task.status {
-            TaskStatus::Pending => Line::from("pending").yellow(),
-            TaskStatus::InProgress => Line::from(match task.custody {
-                TaskCustody::Autopilot => "autopilot · working",
-                TaskCustody::Operator => "operator override",
-            })
-            .green(),
-            TaskStatus::Awaiting => Line::from("awaiting operator").yellow(),
-            TaskStatus::Completed => Line::from("completed").dim(),
-            TaskStatus::Errored => Line::from(task.last_error.as_deref().map_or_else(
-                || "errored".to_owned(),
-                |error| format!("errored · {error}"),
-            ))
-            .red(),
+        let mut status = match &task.current_state.execution_status {
+            TaskExecutionStatus::Pending => Line::from("pending").yellow(),
+            TaskExecutionStatus::Running => {
+                Line::from(match task.current_state.execution_controller {
+                    TaskExecutionController::Altitude => "autopilot · working",
+                    TaskExecutionController::Operator => "operator override",
+                })
+                .green()
+            }
+            TaskExecutionStatus::Paused => {
+                Line::from(match task.current_state.execution_pause_reason {
+                    Some(TaskExecutionPauseReason::AwaitingOperator) => {
+                        "paused · awaiting operator"
+                    }
+                    Some(TaskExecutionPauseReason::ApplicationShutdown) => "paused · app stopped",
+                    None => "paused",
+                })
+                .yellow()
+            }
+            TaskExecutionStatus::Completed => Line::from("completed").dim(),
+            TaskExecutionStatus::Failed => {
+                Line::from(task.current_state.last_error.as_deref().map_or_else(
+                    || "execution failed".to_owned(),
+                    |error| format!("execution failed · {error}"),
+                ))
+                .red()
+            }
         };
-        match task.operator_attention {
-            OperatorAttention::Alarm => {
+        match task.current_state.operator_attention_level {
+            TaskOperatorAttentionLevel::Alarm => {
                 status.spans.push(" · ALARM".red().bold());
             }
-            OperatorAttention::Attention => {
+            TaskOperatorAttentionLevel::Requested => {
                 status.spans.push(" · attention required".yellow().bold());
             }
-            OperatorAttention::Nominal => {}
+            TaskOperatorAttentionLevel::Nominal => {}
         }
         let style = if selected {
             Style::new().white().bold()
@@ -114,7 +130,7 @@ fn draw_tasks(
                 .style(style)
                 .block(
                     Block::bordered()
-                        .title(format!(" {} ", task.command))
+                        .title(format!(" {} ", task.current_state.intent))
                         .border_type(BorderType::Rounded)
                         .border_style(style)
                         .padding(Padding::horizontal(1)),

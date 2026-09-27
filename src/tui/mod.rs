@@ -16,18 +16,19 @@ use ratatui::DefaultTerminal;
 use tokio::{signal::unix::Signal, sync::mpsc, time};
 
 use crate::{
-    app::{TaskEvent, TaskRuntime},
+    app::{TaskRuntime, TaskRuntimeUpdate},
     isolation::{IsolationEngine, OutputStream},
     tasks::{
-        SignalLevel, Task, TaskCustody, TaskService, TaskServiceError, TaskSignal, TaskStatus,
+        Task, TaskExecutionController, TaskExecutionStatus, TaskOperatorNotice,
+        TaskOperatorNoticeLevel, TaskService, TaskServiceError,
     },
 };
 
 mod boot;
+mod operator_notices;
 mod overview;
 mod prompt;
 mod shell;
-mod signals;
 mod utils;
 
 use prompt::{Prompt, PromptAction};
@@ -46,9 +47,9 @@ struct App {
     prompt: Option<Prompt>,
     shells: HashMap<String, Shell>,
     open_shell: Option<String>,
-    signals: Vec<TaskSignal>,
-    selected_signal: usize,
-    open_signals: bool,
+    operator_notices: Vec<TaskOperatorNotice>,
+    selected_operator_notice: usize,
+    open_operator_notices: bool,
 }
 
 impl App {
@@ -56,12 +57,10 @@ impl App {
         let latest_output = tasks
             .iter()
             .filter_map(|task| {
-                task.last_output.as_ref().map(|output| {
-                    (
-                        task.id.clone(),
-                        String::from_utf8_lossy(output).into_owned(),
-                    )
-                })
+                task.current_state
+                    .latest_turn_summary
+                    .clone()
+                    .map(|summary| (task.id.clone(), summary))
             })
             .collect();
         Self {
@@ -73,9 +72,9 @@ impl App {
             prompt: None,
             shells: HashMap::new(),
             open_shell: None,
-            signals: Vec::new(),
-            selected_signal: 0,
-            open_signals: false,
+            operator_notices: Vec::new(),
+            selected_operator_notice: 0,
+            open_operator_notices: false,
         }
     }
 
@@ -150,16 +149,18 @@ impl App {
         }
     }
 
-    fn select_next_signal(&mut self) {
-        if !self.signals.is_empty() {
-            self.selected_signal = (self.selected_signal + 1) % self.signals.len();
+    fn select_next_operator_notice(&mut self) {
+        if !self.operator_notices.is_empty() {
+            self.selected_operator_notice =
+                (self.selected_operator_notice + 1) % self.operator_notices.len();
         }
     }
 
-    fn select_previous_signal(&mut self) {
-        if !self.signals.is_empty() {
-            self.selected_signal =
-                (self.selected_signal + self.signals.len() - 1) % self.signals.len();
+    fn select_previous_operator_notice(&mut self) {
+        if !self.operator_notices.is_empty() {
+            self.selected_operator_notice =
+                (self.selected_operator_notice + self.operator_notices.len() - 1)
+                    % self.operator_notices.len();
         }
     }
 }
@@ -171,7 +172,7 @@ pub async fn run<E>(
     runtime: TaskRuntime<E>,
     task_service: TaskService<E>,
     tasks: Vec<Task>,
-    task_events: mpsc::UnboundedReceiver<TaskEvent>,
+    task_runtime_updates: mpsc::UnboundedReceiver<TaskRuntimeUpdate>,
 ) -> io::Result<()>
 where
     E: IsolationEngine + Clone + 'static,
@@ -183,7 +184,7 @@ where
         runtime.clone(),
         task_service,
         tasks,
-        task_events,
+        task_runtime_updates,
     )
     .await;
     let mouse_cleanup = execute!(io::stdout(), DisableMouseCapture, DisableBracketedPaste);
@@ -199,7 +200,7 @@ async fn run_loop<E>(
     runtime: TaskRuntime<E>,
     task_service: TaskService<E>,
     tasks: Vec<Task>,
-    mut task_events: mpsc::UnboundedReceiver<TaskEvent>,
+    mut task_runtime_updates: mpsc::UnboundedReceiver<TaskRuntimeUpdate>,
 ) -> io::Result<()>
 where
     E: IsolationEngine + Clone + 'static,
@@ -233,8 +234,8 @@ where
             if let Some(shell) = app.open_shell.as_ref().and_then(|id| app.shells.get(id)) {
                 shell.draw(frame);
             }
-            if app.open_signals {
-                signals::draw(frame, &app.signals, app.selected_signal);
+            if app.open_operator_notices {
+                operator_notices::draw(frame, &app.operator_notices, app.selected_operator_notice);
             }
         })?;
         tokio::select! {
@@ -247,22 +248,22 @@ where
                 }
             }
             _ = shell_notice.tick(), if app.shell_has_active_notice() => {}
-            Some(event) = task_events.recv() => match event {
-                TaskEvent::Created(Ok(task)) => app.replace_task(task),
-                TaskEvent::Created(Err(error)) => app.notice = Some(error.to_string()),
-                TaskEvent::Started(Ok(task)) => app.replace_task(task),
-                TaskEvent::Started(Err(error)) => app.notice = Some(error.to_string()),
-                TaskEvent::Finished(id, Ok(task)) if !app.is_removing(&id) => {
+            Some(event) = task_runtime_updates.recv() => match event {
+                TaskRuntimeUpdate::Created(Ok(task)) => app.replace_task(task),
+                TaskRuntimeUpdate::Created(Err(error)) => app.notice = Some(error.to_string()),
+                TaskRuntimeUpdate::Started(Ok(task)) => app.replace_task(task),
+                TaskRuntimeUpdate::Started(Err(error)) => app.notice = Some(error.to_string()),
+                TaskRuntimeUpdate::Finished(id, Ok(task)) if !app.is_removing(&id) => {
                     app.remove_shell(&id);
                     app.replace_task(task);
                 }
-                TaskEvent::Finished(id, Err(error)) if !app.is_removing(&id) => set_error(&mut app, &id, error),
-                TaskEvent::Removed(id, Ok(())) => app.remove_task(&id),
-                TaskEvent::Removed(id, Err(error)) => {
+                TaskRuntimeUpdate::Finished(id, Err(error)) if !app.is_removing(&id) => set_error(&mut app, &id, error),
+                TaskRuntimeUpdate::Removed(id, Ok(())) => app.remove_task(&id),
+                TaskRuntimeUpdate::Removed(id, Err(error)) => {
                     app.cancel_removing(&id);
                     set_error(&mut app, &id, error);
                 }
-                TaskEvent::Output { task_id, stream, bytes } => {
+                TaskRuntimeUpdate::Output { task_id, stream, bytes } => {
                     app.append_output(task_id.clone(), stream, bytes.clone());
                     if let Some(shell) = app.shells.get_mut(&task_id)
                         && let Some(text) = shell.process(bytes)
@@ -276,25 +277,25 @@ where
                         }
                     }
                 }
-                TaskEvent::OperatorReady(task) => {
+                TaskRuntimeUpdate::OperatorReady(task) => {
                     let id = task.id.clone();
                     app.replace_task(task);
                     let (rows, cols) = shell::size(terminal.size()?.into());
-                    let history = runtime.output_history(&id).await.map_err(io::Error::other)?;
+                    let history = runtime.cached_terminal_output(&id);
                     runtime.resize(&id, rows, cols);
                     app.shells.insert(id.clone(), Shell::new(rows, cols, history));
                     app.open_shell = Some(id);
                 }
-                TaskEvent::Report {
+                TaskRuntimeUpdate::Report {
                     task,
                     summary,
-                    signals,
+                    operator_notices,
                 } => {
                     let id = task.id.clone();
                     app.replace_task(task);
                     app.latest_output.insert(id, summary);
-                    if let Some(signal) = signals.iter().find(|signal| signal.level == "alarm") {
-                        app.notice = Some(format!("ALARM: {}", signal.title));
+                    if let Some(operator_notice) = operator_notices.iter().find(|operator_notice| operator_notice.level == TaskOperatorNoticeLevel::Alarm) {
+                        app.notice = Some(format!("ALARM: {}", operator_notice.title));
                     }
                 }
                 _ => {}
@@ -323,8 +324,9 @@ fn copy_to_clipboard(text: String) -> Result<(), arboard::Error> {
 
 fn set_error(app: &mut App, id: &str, error: TaskServiceError) {
     if let Some(task) = app.tasks.iter_mut().find(|task| task.id == id) {
-        task.status = TaskStatus::Errored;
-        task.last_error = Some(error.to_string());
+        task.current_state.execution_status = TaskExecutionStatus::Failed;
+        task.current_state.execution_pause_reason = None;
+        task.current_state.last_error = Some(error.to_string());
     }
 }
 
@@ -396,18 +398,28 @@ where
         }
         return Ok(false);
     }
-    if app.open_signals {
+    if app.open_operator_notices {
         match key.code {
-            KeyCode::Esc | KeyCode::Char('i') => app.open_signals = false,
-            KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') => app.select_next_signal(),
-            KeyCode::BackTab | KeyCode::Up | KeyCode::Char('h') => app.select_previous_signal(),
+            KeyCode::Esc | KeyCode::Char('i') => app.open_operator_notices = false,
+            KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') => app.select_next_operator_notice(),
+            KeyCode::BackTab | KeyCode::Up | KeyCode::Char('h') => {
+                app.select_previous_operator_notice()
+            }
             KeyCode::Enter => {
-                if let Some(signal) = app.signals.get(app.selected_signal).cloned() {
-                    match task_service.acknowledge_signal(&signal.id).await {
+                if let Some(operator_notice) = app
+                    .operator_notices
+                    .get(app.selected_operator_notice)
+                    .cloned()
+                {
+                    match task_service
+                        .acknowledge_operator_notice(&operator_notice.id)
+                        .await
+                    {
                         Ok(()) => {
-                            app.signals.remove(app.selected_signal);
-                            app.selected_signal =
-                                app.selected_signal.min(app.signals.len().saturating_sub(1));
+                            app.operator_notices.remove(app.selected_operator_notice);
+                            app.selected_operator_notice = app
+                                .selected_operator_notice
+                                .min(app.operator_notices.len().saturating_sub(1));
                         }
                         Err(error) => app.notice = Some(error.to_string()),
                     }
@@ -422,12 +434,12 @@ where
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
         KeyCode::Char('c') => app.prompt = Some(Prompt::new("what should Claude do?")),
         KeyCode::Char('i') => {
-            app.signals = task_service
-                .unacknowledged_signals(SignalLevel::Info)
+            app.operator_notices = task_service
+                .unacknowledged_operator_notices(TaskOperatorNoticeLevel::Info)
                 .await
                 .map_err(io::Error::other)?;
-            app.selected_signal = 0;
-            app.open_signals = true;
+            app.selected_operator_notice = 0;
+            app.open_operator_notices = true;
         }
         KeyCode::Tab | KeyCode::Char('j') => app.select_next(),
         KeyCode::BackTab | KeyCode::Char('h') => app.select_previous(),
@@ -441,15 +453,24 @@ where
         }
         KeyCode::Enter => {
             if let Some(task) = app.selected_task() {
-                if matches!(task.status, TaskStatus::Awaiting | TaskStatus::Errored) {
+                if matches!(
+                    task.current_state.execution_status,
+                    TaskExecutionStatus::Paused | TaskExecutionStatus::Failed
+                ) {
                     runtime.take_stopped_control(task);
                     app.notice = Some("restoring Claude in the terminal…".into());
                     return Ok(false);
                 }
-                if !matches!(task.status, TaskStatus::InProgress) {
+                if !matches!(
+                    task.current_state.execution_status,
+                    TaskExecutionStatus::Running
+                ) {
                     return Ok(false);
                 }
-                if matches!(task.custody, TaskCustody::Autopilot) {
+                if matches!(
+                    task.current_state.execution_controller,
+                    TaskExecutionController::Altitude
+                ) {
                     runtime.take_control(&task.id);
                     app.notice = Some("bringing Claude to the terminal…".into());
                     return Ok(false);
@@ -468,10 +489,7 @@ where
                     return Ok(false);
                 }
                 let (rows, cols) = shell::size(terminal.size()?.into());
-                let history = runtime
-                    .output_history(&task.id)
-                    .await
-                    .map_err(io::Error::other)?;
+                let history = runtime.cached_terminal_output(&task.id);
                 runtime.resize(&task.id, rows, cols);
                 app.shells
                     .insert(task.id.clone(), Shell::new(rows, cols, history));

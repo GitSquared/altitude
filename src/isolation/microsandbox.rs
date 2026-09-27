@@ -2,7 +2,7 @@ use std::{
     fs,
     io::ErrorKind,
     os::unix::fs::symlink,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -79,7 +79,7 @@ impl MicrosandboxIsolation {
         for (key, value) in options.environment {
             builder = builder.env(key, value);
         }
-        match options.snapshot_path {
+        let result = match options.snapshot_path {
             Some(snapshot_path) => builder.from_snapshot(snapshot_path).create_detached().await,
             None => {
                 builder
@@ -89,8 +89,15 @@ impl MicrosandboxIsolation {
                     .create_detached()
                     .await
             }
+        };
+        if let Err(error) = result {
+            if let Ok(sandbox) = Sandbox::get(&id).await
+                && let Err(cleanup_error) = sandbox.remove().await
+            {
+                tracing::warn!(sandbox_id = %id, %cleanup_error, "could not remove failed sandbox creation");
+            }
+            return Err(IsolationError::new(error.to_string()));
         }
-        .map_err(|error| IsolationError::new(error.to_string()))?;
 
         tracing::info!(sandbox_id = %id, "sandbox created");
 
@@ -213,12 +220,6 @@ impl MicrosandboxIsolation {
             }
             Err(error) => Err(IsolationError::new(error.to_string())),
         }
-    }
-
-    fn profile_entry(&self, profile: &str, path: &Path) -> Result<PathBuf, IsolationError> {
-        environment::relative_path(profile, false)?;
-        environment::relative_entry(path)?;
-        Ok(self.config.profile_dir(profile).join(path))
     }
 }
 
@@ -540,51 +541,27 @@ impl IsolationEngine for MicrosandboxIsolation {
             .map_err(|error| IsolationError::new(error.to_string()))
     }
 
-    async fn profile_regular_file_exists(
+    async fn guest_regular_file_exists(
         &self,
-        profile: &'static str,
-        path: PathBuf,
+        id: String,
+        path: String,
     ) -> Result<bool, IsolationError> {
-        let path = self.profile_entry(profile, &path)?;
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_file() => Ok(true),
-            Ok(_) => Err(IsolationError::new(format!(
-                "conversation transcript is not a regular file: {}",
-                path.display()
+        let sandbox = Sandbox::get(&id)
+            .await
+            .map_err(|error| IsolationError::new(error.to_string()))?
+            .connect_or_start()
+            .await
+            .map_err(|error| IsolationError::new(error.to_string()))?;
+        let output = sandbox
+            .shell(format!("test -f {}", environment::shell_quote(&path)))
+            .await
+            .map_err(|error| IsolationError::new(error.to_string()))?;
+        match output.status().code {
+            0 => Ok(true),
+            1 => Ok(false),
+            code => Err(IsolationError::new(format!(
+                "guest file check exited with code {code}"
             ))),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(IsolationError::new(error.to_string())),
         }
-    }
-
-    async fn remove_profile_entries(
-        &self,
-        profile: &'static str,
-        paths: Vec<PathBuf>,
-    ) -> Result<(), IsolationError> {
-        for relative_path in paths {
-            let path = self.profile_entry(profile, &relative_path)?;
-            match fs::symlink_metadata(&path) {
-                Ok(metadata)
-                    if metadata.file_type().is_file() || metadata.file_type().is_symlink() =>
-                {
-                    fs::remove_file(&path)
-                        .map_err(|error| IsolationError::new(error.to_string()))?;
-                }
-                Ok(metadata) if metadata.file_type().is_dir() => {
-                    fs::remove_dir_all(&path)
-                        .map_err(|error| IsolationError::new(error.to_string()))?;
-                }
-                Ok(_) => {
-                    return Err(IsolationError::new(format!(
-                        "profile entry is not a file or directory: {}",
-                        path.display()
-                    )));
-                }
-                Err(error) if error.kind() == ErrorKind::NotFound => {}
-                Err(error) => return Err(IsolationError::new(error.to_string())),
-            }
-        }
-        Ok(())
     }
 }

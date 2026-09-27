@@ -165,17 +165,11 @@ pub trait IsolationEngine: Send + Sync {
         path: PathBuf,
     ) -> impl Future<Output = Result<(), IsolationError>> + Send;
 
-    fn profile_regular_file_exists(
+    fn guest_regular_file_exists(
         &self,
-        profile: &'static str,
-        path: PathBuf,
+        id: String,
+        path: String,
     ) -> impl Future<Output = Result<bool, IsolationError>> + Send;
-
-    fn remove_profile_entries(
-        &self,
-        profile: &'static str,
-        paths: Vec<PathBuf>,
-    ) -> impl Future<Output = Result<(), IsolationError>> + Send;
 }
 
 pub fn prepare(engine: impl IsolationEngine + 'static) -> watch::Receiver<IsolationStatus> {

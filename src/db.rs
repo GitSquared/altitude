@@ -1,6 +1,10 @@
-use std::{error::Error, fmt, fs, io};
+use std::{error::Error, fmt, fs, io, time::Duration};
 
-use sqlx::{SqlitePool, migrate::MigrateError, sqlite::SqliteConnectOptions};
+use sqlx::{
+    SqlitePool,
+    migrate::MigrateError,
+    sqlite::{SqliteConnectOptions, SqliteJournalMode},
+};
 
 use crate::config::Config;
 
@@ -16,7 +20,9 @@ impl Database {
         let options = SqliteConnectOptions::new()
             .filename(config.database_path())
             .create_if_missing(true)
-            .foreign_keys(true);
+            .foreign_keys(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
         let pool = SqlitePool::connect_with(options)
             .await
             .map_err(DatabaseError::Open)?;

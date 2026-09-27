@@ -1,5 +1,5 @@
 use std::{
-    io,
+    env, io,
     path::{Path, PathBuf},
 };
 
@@ -17,8 +17,12 @@ impl Config {
             .ok_or_else(|| io::Error::other("could not determine altitude's data directory"))?;
 
         Ok(Self {
-            data_dir: directories.data_dir().to_owned(),
-            cache_dir: directories.cache_dir().to_owned(),
+            data_dir: env::var_os("ALTITUDE_DATA_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| directories.data_dir().to_owned()),
+            cache_dir: env::var_os("ALTITUDE_CACHE_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| directories.cache_dir().to_owned()),
         })
     }
 

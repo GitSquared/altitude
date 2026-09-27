@@ -9,7 +9,9 @@ use std::{
 
 use crate::config::Config;
 
-use super::{BaseSandboxRecipe, IsolationEngine, IsolationError, SandboxMount, SandboxOptions};
+use super::{
+    BaseSandboxRecipe, CommandEvent, IsolationEngine, IsolationError, SandboxMount, SandboxOptions,
+};
 
 // The current Alpine environment runs as root. Resolve home-relative requirements here.
 const GUEST_HOME: &str = "/root";
@@ -35,6 +37,8 @@ pub struct PersistentDirectory {
     pub guest_path: GuestPath,
     pub defaults: Vec<DefaultFile>,
     pub instructions: &'static str,
+    /// Redirect these guest subdirectories to the task disk, outside the shared profile.
+    pub task_local_subdirectories: Vec<&'static str>,
 }
 
 impl PersistentDirectory {
@@ -48,6 +52,7 @@ impl PersistentDirectory {
             guest_path,
             defaults: Vec::new(),
             instructions,
+            task_local_subdirectories: Vec::new(),
         }
     }
 
@@ -61,7 +66,13 @@ impl PersistentDirectory {
             guest_path,
             defaults,
             instructions,
+            task_local_subdirectories: Vec::new(),
         }
+    }
+
+    pub fn with_task_local_subdirectories(mut self, paths: &[&'static str]) -> Self {
+        self.task_local_subdirectories = paths.to_vec();
+        self
     }
 }
 
@@ -75,6 +86,7 @@ struct EnvironmentPlan {
     options: SandboxOptions,
     defaults: Vec<(PathBuf, &'static str)>,
     readmes: Vec<(PathBuf, String)>,
+    task_local_mounts: Vec<(String, String)>,
 }
 
 impl EnvironmentPlan {
@@ -97,6 +109,7 @@ impl EnvironmentPlan {
             },
             defaults: Vec::new(),
             readmes: Vec::new(),
+            task_local_mounts: Vec::new(),
         };
         let mut profiles = HashSet::new();
         for recipe in recipes {
@@ -139,6 +152,18 @@ impl EnvironmentPlan {
                     .replace("{{host_path}}", &host_path.to_string_lossy())
                     .replace("{{instructions}}", directory.instructions);
                 plan.readmes.push((host_path.join("README.md"), readme));
+                for path in directory.task_local_subdirectories {
+                    relative_path(path, false)?;
+                    let source = Path::new("/altitude/task-state")
+                        .join(recipe.profile)
+                        .join(directory.relative_path)
+                        .join(path);
+                    let target = guest_path.join(path);
+                    plan.task_local_mounts.push((
+                        source.to_string_lossy().into_owned(),
+                        target.to_string_lossy().into_owned(),
+                    ));
+                }
                 for default in directory.defaults {
                     relative_path(default.path, false)?;
                     plan.defaults
@@ -166,10 +191,11 @@ impl EnvironmentPlan {
         Ok(plan)
     }
 
-    fn initialize(&self, config: &Config) -> Result<(), IsolationError> {
+    fn initialize(&mut self, config: &Config) -> Result<(), IsolationError> {
         private_directory(config.data_dir())?;
-        for mount in &self.options.mounts {
+        for mount in &mut self.options.mounts {
             private_directory(&mount.host_path)?;
+            mount.host_path = fs::canonicalize(&mount.host_path).map_err(io_error)?;
         }
         for (path, readme) in &self.readmes {
             // Replace the managed note without following a guest-created symlink.
@@ -223,20 +249,6 @@ pub(super) fn relative_path(path: &str, allow_empty: bool) -> Result<(), Isolati
     Ok(())
 }
 
-pub(super) fn relative_entry(path: &Path) -> Result<(), IsolationError> {
-    if path.as_os_str().is_empty()
-        || path
-            .components()
-            .any(|part| !matches!(part, Component::Normal(_)))
-    {
-        return Err(IsolationError::new(format!(
-            "invalid persistent path: {}",
-            path.display()
-        )));
-    }
-    Ok(())
-}
-
 pub(super) fn private_directory(path: &Path) -> Result<(), IsolationError> {
     if let Ok(metadata) = fs::symlink_metadata(path)
         && !metadata.file_type().is_dir()
@@ -277,5 +289,51 @@ pub(super) async fn provision(
             .to_string_lossy()
             .into_owned(),
     });
-    engine.create(id, plan.options).await
+    engine.create(id.clone(), plan.options).await?;
+    if !plan.task_local_mounts.is_empty() {
+        let mut command = String::from("set -eu\n");
+        for (source, target) in plan.task_local_mounts {
+            let source = shell_quote(&source);
+            let target = shell_quote(&target);
+            command.push_str(&format!(
+                "mkdir -p {source} {target}\nmount --bind {source} {target}\n"
+            ));
+        }
+        let result = run_setup(engine, id.clone(), command).await;
+        if let Err(error) = result {
+            if let Err(cleanup_error) = engine.remove(id).await {
+                tracing::warn!(%cleanup_error, "could not remove sandbox after task directory setup failure");
+            }
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+async fn run_setup(
+    engine: &impl IsolationEngine,
+    id: String,
+    command: String,
+) -> Result<(), IsolationError> {
+    let mut session = engine.run_command(id, command).await?;
+    let mut output = String::new();
+    while let Some(event) = session.events.recv().await {
+        match event {
+            CommandEvent::Output { bytes, .. } => output.push_str(&String::from_utf8_lossy(&bytes)),
+            CommandEvent::Exited(0) => return Ok(()),
+            CommandEvent::Exited(code) => {
+                return Err(IsolationError::new(format!(
+                    "task directory setup exited with code {code}: {output}"
+                )));
+            }
+            CommandEvent::Failed(error) => return Err(IsolationError::new(error)),
+        }
+    }
+    Err(IsolationError::new(
+        "task directory setup closed without an exit status",
+    ))
 }

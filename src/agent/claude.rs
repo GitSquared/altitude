@@ -1,6 +1,6 @@
-use super::{AgentEngine, ConversationFiles};
+use super::AgentEngine;
 use crate::isolation::{DefaultFile, EnvironmentRecipe, GuestPath, PersistentDirectory};
-use crate::tasks::{AgentTaskContext, TurnReport};
+use crate::tasks::{TaskAgentTurnContext, TaskAgentTurnReport};
 use serde_json::Value;
 use std::mem;
 use uuid::Uuid;
@@ -10,21 +10,21 @@ pub struct ClaudeCode;
 
 pub struct ClaudeStream {
     pending: String,
-    report: Option<TurnReport>,
+    report: Option<TaskAgentTurnReport>,
     received_result: bool,
     error: Option<String>,
 }
 
 const AUTOPILOT_SYSTEM_PROMPT: &str = "Altitude is driving this task without an operator watching. Continue autonomously whenever the next action is reasonably implied by the original task. Do not stop for routine confirmation. Altitude will ask for a structured task report after this work turn ends.";
-const REPORT_SYSTEM_PROMPT: &str = "Altitude is driving this task without an operator watching. Do not perform more work in this turn. Return the structured task report now. Set operator_attention to attention when you need an operator and choose await_operator, or alarm for a credible serious issue. Omit it when the task's current operator attention level remains appropriate; set it to nominal when an escalation is resolved. Use an info signal for a consequential judgment the operator may want to know about; keep working. Use attention or alarm signals to explain their corresponding operator attention level. An alarm may await_operator if no useful remediation or investigation remains. Choose complete only when the task is fully done and needs no further operator action.";
+const REPORT_SYSTEM_PROMPT: &str = "Altitude is driving this task without an operator watching. Do not perform more work in this turn. Return the structured task report now. Set operator_attention_level to requested when you need an operator and choose await_operator, or alarm for a credible serious issue. Omit it when the task's current operator attention level remains appropriate; set it to nominal when an escalation is resolved. Use an info operator notice for a consequential judgment the operator may want to know about; keep working. Use attention or alarm operator notices to explain their corresponding operator attention level. An alarm may await_operator if no useful remediation or investigation remains. Choose complete only when the task is fully done and needs no further operator action.";
 const AUTOPILOT_SCHEMA: &str = r#"{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "disposition": { "enum": ["continue", "await_operator", "complete"] },
-    "operator_attention": { "enum": ["nominal", "attention", "alarm"] },
+    "requested_action": { "enum": ["continue", "await_operator", "complete"] },
+    "operator_attention_level": { "enum": ["nominal", "requested", "alarm"] },
     "summary": { "type": "string" },
-    "signals": {
+    "operator_notices": {
       "type": "array",
       "items": {
         "type": "object",
@@ -38,7 +38,7 @@ const AUTOPILOT_SCHEMA: &str = r#"{
       }
     }
   },
-  "required": ["disposition", "summary", "signals"]
+  "required": ["requested_action", "summary", "operator_notices"]
 }"#;
 
 const DEFAULT_SETTINGS: &str = r#"{
@@ -63,7 +63,7 @@ impl ClaudeCode {
         &self,
         conversation_id: &str,
         prompt: &str,
-        context: &AgentTaskContext,
+        context: &TaskAgentTurnContext,
         resume: bool,
     ) -> String {
         let session = if resume {
@@ -83,7 +83,7 @@ impl ClaudeCode {
         )
     }
 
-    pub fn report_command(&self, conversation_id: &str, context: &AgentTaskContext) -> String {
+    pub fn report_command(&self, conversation_id: &str, context: &TaskAgentTurnContext) -> String {
         format!(
             "exec claude -p --permission-mode auto --output-format json \\
              --system-prompt-snapshot off \\
@@ -123,7 +123,7 @@ impl ClaudeStream {
         }
     }
 
-    pub fn report(mut self) -> Result<TurnReport, String> {
+    pub fn report(mut self) -> Result<TaskAgentTurnReport, String> {
         if !self.pending.is_empty() {
             let line = mem::take(&mut self.pending);
             self.process_line(&line);
@@ -173,28 +173,38 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-fn conversation_files(conversation_id: &str) -> ConversationFiles {
-    let project = format!("projects/-/{conversation_id}");
-    ConversationFiles {
-        profile: "agents/claude",
-        transcript: format!("{project}.jsonl").into(),
-        cleanup_entries: vec![format!("{project}.jsonl").into(), project.into()],
-    }
-}
-
 impl AgentEngine for ClaudeCode {
     fn environment_recipe(&self) -> EnvironmentRecipe {
         EnvironmentRecipe {
             profile: "agents/claude",
             setup_command: Self::install_command(),
-            directories: vec![PersistentDirectory::root(
-                GuestPath::Absolute("/altitude/claude"),
-                include_str!("assets/claude.md"),
-                vec![DefaultFile {
-                    path: "settings.json",
-                    contents: DEFAULT_SETTINGS,
-                }],
-            )],
+            directories: vec![
+                PersistentDirectory::root(
+                    GuestPath::Absolute("/altitude/claude"),
+                    include_str!("assets/claude.md"),
+                    vec![DefaultFile {
+                        path: "settings.json",
+                        contents: DEFAULT_SETTINGS,
+                    }],
+                )
+                .with_task_local_subdirectories(&[
+                    "projects",
+                    "file-history",
+                    "plans",
+                    "session-env",
+                    "tasks",
+                    "paste-cache",
+                    "image-cache",
+                    "uploads",
+                    "shell-snapshots",
+                    "sessions",
+                    "debug",
+                    "feedback",
+                    "feedback-bundles",
+                    "usage-data",
+                    "todos",
+                ]),
+            ],
             environment: vec![
                 ("CLAUDE_CONFIG_DIR", "/altitude/claude"),
                 ("DISABLE_AUTOUPDATER", "1"),
@@ -210,7 +220,7 @@ impl AgentEngine for ClaudeCode {
         Uuid::new_v4().to_string()
     }
 
-    fn conversation_files(&self, conversation_id: &str) -> ConversationFiles {
-        conversation_files(conversation_id)
+    fn conversation_transcript_path(&self, conversation_id: &str) -> String {
+        format!("/altitude/claude/projects/-/{conversation_id}.jsonl")
     }
 }
