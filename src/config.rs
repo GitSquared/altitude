@@ -168,14 +168,14 @@ impl Settings {
             environment
                 .validate()
                 .map_err(|error| SettingsError::Invalid(error.to_string()))?;
-            if !names.insert(environment.name.as_str()) {
+            if !names.insert(environment_key(&environment.name)) {
                 return Err(SettingsError::Invalid(format!(
                     "duplicate environment name: {}",
                     environment.name
                 )));
             }
         }
-        if !names.contains(self.default_environment.as_str()) {
+        if !names.contains(&environment_key(&self.default_environment)) {
             return Err(SettingsError::Invalid(format!(
                 "default environment {:?} is not configured",
                 self.default_environment
@@ -183,6 +183,19 @@ impl Settings {
         }
         Ok(())
     }
+}
+
+/// The key two environment names are compared by.
+///
+/// An environment name becomes a snapshot directory name (`coding-{name}`), and
+/// macOS filesystems are case-insensitive by default. Treating `rust` and `Rust`
+/// as distinct would let both pass validation and then share one snapshot
+/// directory, so distinct setup commands would silently reuse each other's
+/// environment. Comparison is case-insensitive to keep one environment per
+/// directory; the configured spelling is preserved everywhere it is stored, so
+/// a task still records the name as written.
+fn environment_key(name: &str) -> String {
+    name.to_ascii_lowercase()
 }
 
 #[derive(Debug)]
