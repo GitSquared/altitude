@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use super::{
     Task, TaskAgentRun, TaskAgentTurnReport, TaskCurrentState, TaskError, TaskHistoryEvent,
-    TaskOperatorAttentionLevel, TaskOperatorNotice,
+    TaskOperatorAttentionLevel, TaskOperatorSignal, TaskOperatorSignalKind,
 };
 use crate::{agent::AgentKind, db::Database};
 
@@ -155,87 +155,161 @@ impl TaskStore {
         task_id: &str,
         agent_run: &TaskAgentRun,
         report: &TaskAgentTurnReport,
-    ) -> Result<(Task, Vec<TaskOperatorNotice>), TaskError> {
+        attention: TaskOperatorAttentionLevel,
+    ) -> Result<(Task, Vec<TaskOperatorSignal>), TaskError> {
         let mut events = vec![TaskHistoryEvent::AgentTurnReported {
             agent_run_id: agent_run.id.clone(),
             requested_action: report.requested_action.clone(),
-            operator_attention_level: report.operator_attention_level.clone(),
+            operator_attention_level: attention,
             summary: report.summary.clone(),
         }];
-        let notices: Vec<_> = report
-            .operator_notices
+        let signals: Vec<_> = report
+            .operator_signal
             .iter()
-            .map(|draft| TaskOperatorNotice {
+            .map(|draft| TaskOperatorSignal {
                 id: Uuid::new_v4().to_string(),
                 task_id: task_id.to_owned(),
-                level: draft.level.clone(),
+                kind: draft.kind,
+                priority: draft.priority,
                 title: draft.title.clone(),
                 body: draft.body.clone(),
+                raised_at_ms: now_ms(),
+                read: false,
             })
             .collect();
         events.extend(
-            notices
+            signals
                 .iter()
                 .cloned()
-                .map(|notice| TaskHistoryEvent::OperatorNoticeRaised { notice }),
+                .map(|signal| TaskHistoryEvent::OperatorSignalRaised { signal }),
         );
-        Ok((self.append_events(task_id, &events).await?, notices))
+        Ok((self.append_events(task_id, &events).await?, signals))
     }
 
-    pub async fn unacknowledged_operator_notices(
+    pub async fn operator_signals(
         &self,
-        level: TaskOperatorAttentionLevel,
-    ) -> Result<Vec<TaskOperatorNotice>, TaskError> {
-        sqlx::query_scalar::<_, Json<TaskOperatorNotice>>(
+        task_id: &str,
+    ) -> Result<Vec<TaskOperatorSignal>, TaskError> {
+        sqlx::query_scalar::<_, Json<TaskOperatorSignal>>(
             r#"
             SELECT json_object(
                 'id', id,
                 'task_id', task_id,
-                'level', level,
+                'kind', kind,
+                'priority', priority,
                 'title', title,
-                'body', body
+                'body', body,
+                'raised_at_ms', raised_at_ms,
+                'read', read
             )
-            FROM task_operator_notices
-            WHERE level = json_extract(?1, '$') AND acknowledged = 0
-            ORDER BY sequence DESC
+            FROM task_operator_signals
+            WHERE task_id = ?1 AND resolved = 0
+            ORDER BY
+                CASE priority
+                    WHEN 'urgent' THEN 0
+                    WHEN 'high' THEN 1
+                    WHEN 'normal' THEN 2
+                    WHEN 'low' THEN 3
+                END,
+                CASE kind
+                    WHEN 'decision' THEN 0
+                    WHEN 'review' THEN 1
+                    WHEN 'update' THEN 2
+                END,
+                raised_at_ms ASC
         "#,
         )
-        .bind(Json(level))
+        .bind(task_id)
         .fetch_all(&self.pool)
         .await
         .map(|rows| rows.into_iter().map(|row| row.0).collect())
         .map_err(TaskError::Database)
     }
 
-    pub async fn acknowledge_operator_notice(&self, notice_id: &str) -> Result<(), TaskError> {
+    pub async fn read_operator_signals(&self, task_id: &str) -> Result<Task, TaskError> {
         let mut transaction = self
             .pool
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(TaskError::Database)?;
-        let task_id: Option<String> = sqlx::query_scalar(
+        let signal_ids: Vec<String> = sqlx::query_scalar(
             r#"
-            SELECT task_id
-            FROM task_operator_notices
-            WHERE id = ? AND acknowledged = 0
+            SELECT id
+            FROM task_operator_signals
+            WHERE task_id = ?1 AND read = 0 AND resolved = 0
         "#,
         )
-        .bind(notice_id)
-        .fetch_optional(&mut *transaction)
+        .bind(task_id)
+        .fetch_all(&mut *transaction)
         .await
         .map_err(TaskError::Database)?;
-        if let Some(task_id) = task_id {
-            Self::write_events(
-                &mut transaction,
-                &task_id,
-                &[TaskHistoryEvent::OperatorNoticeAcknowledged {
-                    notice_id: notice_id.to_owned(),
-                }],
-            )
-            .await?;
-        }
+        let events: Vec<_> = signal_ids
+            .into_iter()
+            .map(|signal_id| TaskHistoryEvent::OperatorSignalRead { signal_id })
+            .collect();
+        Self::write_events(&mut transaction, task_id, &events).await?;
+        let task = Self::read_task(&mut transaction, task_id).await?;
         transaction.commit().await.map_err(TaskError::Database)?;
-        Ok(())
+        Ok(task)
+    }
+
+    pub async fn acknowledge_operator_signal(&self, signal_id: &str) -> Result<Task, TaskError> {
+        self.resolve_operator_signal(signal_id, None).await
+    }
+
+    pub async fn answer_operator_signal(
+        &self,
+        signal_id: &str,
+        answer: &str,
+    ) -> Result<Task, TaskError> {
+        self.resolve_operator_signal(signal_id, Some(answer)).await
+    }
+
+    async fn resolve_operator_signal(
+        &self,
+        signal_id: &str,
+        answer: Option<&str>,
+    ) -> Result<Task, TaskError> {
+        let mut transaction = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(TaskError::Database)?;
+        let (task_id, kind): (String, Json<TaskOperatorSignalKind>) = sqlx::query_as(
+            r#"
+            SELECT task_id, json_quote(kind)
+            FROM task_operator_signals
+            WHERE id = ?1 AND resolved = 0
+        "#,
+        )
+        .bind(signal_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(TaskError::Database)?;
+        let event = match (kind.0, answer) {
+            (TaskOperatorSignalKind::Update, None) => {
+                TaskHistoryEvent::OperatorSignalAcknowledged {
+                    signal_id: signal_id.to_owned(),
+                }
+            }
+            (TaskOperatorSignalKind::Decision | TaskOperatorSignalKind::Review, Some(answer)) => {
+                TaskHistoryEvent::OperatorSignalAnswered {
+                    signal_id: signal_id.to_owned(),
+                    answer: answer.to_owned(),
+                }
+            }
+            _ => {
+                return Err(TaskError::HistoryData(serde_json::Error::io(
+                    std::io::Error::other(
+                        "updates are acknowledged; decisions and reviews are answered",
+                    ),
+                )));
+            }
+        };
+        Self::write_events(&mut transaction, &task_id, &[event]).await?;
+        let task = Self::read_task(&mut transaction, &task_id).await?;
+        transaction.commit().await.map_err(TaskError::Database)?;
+        Ok(task)
     }
 
     pub async fn delete(&self, task_id: &str) -> Result<(), TaskError> {

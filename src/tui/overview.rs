@@ -114,6 +114,13 @@ fn draw_tasks(
             }
             TaskOperatorAttentionLevel::Nominal => {}
         }
+        if task.current_state.unread_operator_signal_count > 0 {
+            status.spans.push(
+                format!(" · ● {}", task.current_state.unread_operator_signal_count)
+                    .cyan()
+                    .bold(),
+            );
+        }
         let style = if selected {
             Style::new().white().bold()
         } else {

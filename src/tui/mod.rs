@@ -18,8 +18,8 @@ use tokio::{signal::unix::Signal, sync::mpsc, time};
 use crate::{
     isolation::{IsolationEngine, OutputStream},
     tasks::{
-        Task, TaskExecutionMode, TaskExecutionStatus, TaskOperatorAttentionLevel,
-        TaskOperatorNotice, TaskService, TaskServiceError,
+        Task, TaskExecutionMode, TaskExecutionStatus, TaskOperatorSignal, TaskOperatorSignalKind,
+        TaskService, TaskServiceError,
     },
     tasks::{TaskEventLoop, TaskExecutionUpdate},
 };
@@ -47,9 +47,10 @@ struct App {
     prompt: Option<Prompt>,
     shells: HashMap<String, Shell>,
     open_shell: Option<String>,
-    operator_notices: Vec<TaskOperatorNotice>,
-    selected_operator_notice: usize,
-    open_operator_notices: bool,
+    operator_signals: Vec<TaskOperatorSignal>,
+    selected_operator_signal: usize,
+    open_operator_signals: bool,
+    answering_operator_signal: Option<(Task, String)>,
 }
 
 impl App {
@@ -72,9 +73,10 @@ impl App {
             prompt: None,
             shells: HashMap::new(),
             open_shell: None,
-            operator_notices: Vec::new(),
-            selected_operator_notice: 0,
-            open_operator_notices: false,
+            operator_signals: Vec::new(),
+            selected_operator_signal: 0,
+            open_operator_signals: false,
+            answering_operator_signal: None,
         }
     }
 
@@ -149,18 +151,18 @@ impl App {
         }
     }
 
-    fn select_next_operator_notice(&mut self) {
-        if !self.operator_notices.is_empty() {
-            self.selected_operator_notice =
-                (self.selected_operator_notice + 1) % self.operator_notices.len();
+    fn select_next_operator_signal(&mut self) {
+        if !self.operator_signals.is_empty() {
+            self.selected_operator_signal =
+                (self.selected_operator_signal + 1) % self.operator_signals.len();
         }
     }
 
-    fn select_previous_operator_notice(&mut self) {
-        if !self.operator_notices.is_empty() {
-            self.selected_operator_notice =
-                (self.selected_operator_notice + self.operator_notices.len() - 1)
-                    % self.operator_notices.len();
+    fn select_previous_operator_signal(&mut self) {
+        if !self.operator_signals.is_empty() {
+            self.selected_operator_signal =
+                (self.selected_operator_signal + self.operator_signals.len() - 1)
+                    % self.operator_signals.len();
         }
     }
 }
@@ -234,8 +236,8 @@ where
             if let Some(shell) = app.open_shell.as_ref().and_then(|id| app.shells.get(id)) {
                 shell.draw(frame);
             }
-            if app.open_operator_notices {
-                operator_notices::draw(frame, &app.operator_notices, app.selected_operator_notice);
+            if app.open_operator_signals {
+                operator_notices::draw(frame, &app.operator_signals, app.selected_operator_signal);
             }
         })?;
         tokio::select! {
@@ -289,14 +291,11 @@ where
                 TaskExecutionUpdate::Report {
                     task,
                     summary,
-                    operator_notices,
+                    operator_signals: _,
                 } => {
                     let id = task.id.clone();
                     app.replace_task(task);
                     app.latest_output.insert(id, summary);
-                    if let Some(operator_notice) = operator_notices.iter().find(|operator_notice| operator_notice.level == TaskOperatorAttentionLevel::Alarm) {
-                        app.notice = Some(format!("ALARM: {}", operator_notice.title));
-                    }
                 }
                 _ => {}
             },
@@ -378,10 +377,17 @@ where
     }
     if let Some(prompt) = &mut app.prompt {
         match prompt.handle_key(key) {
-            Some(PromptAction::Cancel) => app.prompt = None,
+            Some(PromptAction::Cancel) => {
+                app.prompt = None;
+                app.answering_operator_signal = None;
+            }
             Some(PromptAction::Submit(command)) => {
                 app.prompt = None;
-                event_loop.create_claude(command);
+                if let Some((task, signal_id)) = app.answering_operator_signal.take() {
+                    event_loop.answer_operator_signal(task, signal_id, command);
+                } else {
+                    event_loop.create_claude(command);
+                }
             }
             None => {}
         }
@@ -398,30 +404,47 @@ where
         }
         return Ok(false);
     }
-    if app.open_operator_notices {
+    if app.open_operator_signals {
         match key.code {
-            KeyCode::Esc | KeyCode::Char('i') => app.open_operator_notices = false,
-            KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') => app.select_next_operator_notice(),
+            KeyCode::Esc | KeyCode::Char('i') => app.open_operator_signals = false,
+            KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') => app.select_next_operator_signal(),
             KeyCode::BackTab | KeyCode::Up | KeyCode::Char('h') => {
-                app.select_previous_operator_notice()
+                app.select_previous_operator_signal()
             }
             KeyCode::Enter => {
-                if let Some(operator_notice) = app
-                    .operator_notices
-                    .get(app.selected_operator_notice)
+                if let Some(operator_signal) = app
+                    .operator_signals
+                    .get(app.selected_operator_signal)
                     .cloned()
                 {
-                    match task_service
-                        .acknowledge_operator_notice(&operator_notice.id)
-                        .await
-                    {
-                        Ok(()) => {
-                            app.operator_notices.remove(app.selected_operator_notice);
-                            app.selected_operator_notice = app
-                                .selected_operator_notice
-                                .min(app.operator_notices.len().saturating_sub(1));
+                    match operator_signal.kind {
+                        TaskOperatorSignalKind::Update => {
+                            match task_service
+                                .acknowledge_operator_signal(&operator_signal.id)
+                                .await
+                            {
+                                Ok(task) => {
+                                    app.replace_task(task);
+                                    app.operator_signals.remove(app.selected_operator_signal);
+                                    app.selected_operator_signal = app
+                                        .selected_operator_signal
+                                        .min(app.operator_signals.len().saturating_sub(1));
+                                }
+                                Err(error) => app.notice = Some(error.to_string()),
+                            }
                         }
-                        Err(error) => app.notice = Some(error.to_string()),
+                        TaskOperatorSignalKind::Decision | TaskOperatorSignalKind::Review => {
+                            if let Some(task) = app
+                                .tasks
+                                .iter()
+                                .find(|task| task.id == operator_signal.task_id)
+                                .cloned()
+                            {
+                                app.answering_operator_signal = Some((task, operator_signal.id));
+                                app.prompt = Some(Prompt::new("answer operator signal"));
+                                app.open_operator_signals = false;
+                            }
+                        }
                     }
                 }
             }
@@ -434,12 +457,22 @@ where
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
         KeyCode::Char('c') => app.prompt = Some(Prompt::new("what should Claude do?")),
         KeyCode::Char('i') => {
-            app.operator_notices = task_service
-                .unacknowledged_operator_notices(TaskOperatorAttentionLevel::Nominal)
-                .await
-                .map_err(io::Error::other)?;
-            app.selected_operator_notice = 0;
-            app.open_operator_notices = true;
+            if let Some(task) = app.selected_task() {
+                app.operator_signals = task_service
+                    .operator_signals(&task.id)
+                    .await
+                    .map_err(io::Error::other)?;
+                let task = task_service
+                    .read_operator_signals(&task.id)
+                    .await
+                    .map_err(io::Error::other)?;
+                app.replace_task(task);
+                for signal in &mut app.operator_signals {
+                    signal.read = true;
+                }
+                app.selected_operator_signal = 0;
+                app.open_operator_signals = true;
+            }
         }
         KeyCode::Tab | KeyCode::Char('j') => app.select_next(),
         KeyCode::BackTab | KeyCode::Char('h') => app.select_previous(),

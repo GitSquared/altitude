@@ -54,39 +54,81 @@ where
         task: &Task,
         agent_run: &TaskAgentRun,
         report: &TaskAgentTurnReport,
-    ) -> Result<(Task, Vec<TaskOperatorNotice>), TaskServiceError> {
-        let attention = report
-            .operator_attention_level
-            .as_ref()
-            .unwrap_or(&task.current_state.operator_attention_level);
-        if (*attention == TaskOperatorAttentionLevel::Requested
-            && report.requested_action != TaskAgentRequestedAction::AwaitOperator)
-            || (report.requested_action == TaskAgentRequestedAction::AwaitOperator
-                && *attention == TaskOperatorAttentionLevel::Nominal)
-        {
-            return Err(TaskServiceError::InvalidReport("requested attention requires await_operator; await_operator requires requested attention or alarm".into()));
-        }
+    ) -> Result<(Task, Vec<TaskOperatorSignal>), TaskServiceError> {
+        let attention = match (&report.requested_action, &report.operator_signal) {
+            (TaskAgentRequestedAction::Continue, None)
+            | (
+                TaskAgentRequestedAction::Continue,
+                Some(TaskOperatorSignalDraft {
+                    kind: TaskOperatorSignalKind::Update,
+                    ..
+                }),
+            )
+            | (TaskAgentRequestedAction::Complete, None) => TaskOperatorAttentionLevel::Nominal,
+            (
+                TaskAgentRequestedAction::AwaitOperator,
+                Some(TaskOperatorSignalDraft {
+                    kind: TaskOperatorSignalKind::Decision | TaskOperatorSignalKind::Review,
+                    ..
+                }),
+            ) => TaskOperatorAttentionLevel::Requested,
+            _ => {
+                return Err(TaskServiceError::InvalidReport(
+                    "updates must continue; decisions and reviews must await the operator; completion cannot raise a signal".into(),
+                ));
+            }
+        };
         self.store
-            .record_report(&task.id, agent_run, report)
+            .record_report(&task.id, agent_run, report, attention)
             .await
             .map_err(TaskServiceError::Task)
     }
 
-    pub async fn unacknowledged_operator_notices(
+    pub async fn operator_signals(
         &self,
-        level: TaskOperatorAttentionLevel,
-    ) -> Result<Vec<TaskOperatorNotice>, TaskServiceError> {
+        task_id: &str,
+    ) -> Result<Vec<TaskOperatorSignal>, TaskServiceError> {
         self.store
-            .unacknowledged_operator_notices(level)
+            .operator_signals(task_id)
             .await
             .map_err(TaskServiceError::Task)
     }
 
-    pub async fn acknowledge_operator_notice(&self, id: &str) -> Result<(), TaskServiceError> {
+    pub async fn read_operator_signals(&self, task_id: &str) -> Result<Task, TaskServiceError> {
         self.store
-            .acknowledge_operator_notice(id)
+            .read_operator_signals(task_id)
             .await
             .map_err(TaskServiceError::Task)
+    }
+
+    pub async fn acknowledge_operator_signal(&self, id: &str) -> Result<Task, TaskServiceError> {
+        self.store
+            .acknowledge_operator_signal(id)
+            .await
+            .map_err(TaskServiceError::Task)
+    }
+
+    pub async fn answer_operator_signal(
+        &self,
+        mut task: Task,
+        signal_id: &str,
+        answer: String,
+    ) -> Result<(Task, TaskAgentRun, CommandSession), TaskServiceError> {
+        task = self
+            .store
+            .answer_operator_signal(signal_id, &answer)
+            .await
+            .map_err(TaskServiceError::Task)?;
+        if task.current_state.sandbox_id.is_none() {
+            task = self.provision(task).await?;
+        }
+        self.start_autopilot_turn(
+            task,
+            &format!(
+                "The operator answered attention signal {signal_id}:\n\n{answer}\n\nApply this new intent and continue autonomously."
+            ),
+        )
+        .await
     }
 
     async fn record(
