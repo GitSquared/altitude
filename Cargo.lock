@@ -67,6 +67,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "tui-term",
+ "url",
  "uuid",
 ]
 

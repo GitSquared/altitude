@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::agent::AgentKind;
+use crate::vcs::CodeContribution;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskAgentTurnReport {
@@ -11,6 +12,8 @@ pub struct TaskAgentTurnReport {
     pub summary: String,
     #[serde(default)]
     pub operator_notices: Vec<TaskOperatorNoticeDraft>,
+    #[serde(default)]
+    pub code_contribution_urls: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -80,6 +83,7 @@ pub struct TaskOperatorNotice {
 pub struct Task {
     pub id: String,
     pub agent_kind: Option<AgentKind>,
+    pub code_contributions: Vec<CodeContribution>,
     pub current_state: TaskCurrentState,
 }
 
@@ -130,6 +134,9 @@ pub enum TaskHistoryEvent {
     },
     OperatorNoticeAcknowledged {
         notice_id: String,
+    },
+    CodeContributionLinked {
+        contribution: CodeContribution,
     },
     ExecutionPaused {
         reason: TaskExecutionPauseReason,

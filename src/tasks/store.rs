@@ -5,13 +5,14 @@ use super::{
     Task, TaskAgentRun, TaskAgentTurnReport, TaskCurrentState, TaskError, TaskHistoryEvent,
     TaskOperatorAttentionLevel, TaskOperatorNotice,
 };
-use crate::{agent::AgentKind, db::Database};
+use crate::{agent::AgentKind, db::Database, vcs::CodeContribution};
 
 // SQLx reads the JSON projection through Serde, sharing its enum spellings.
 #[derive(FromRow)]
 struct TaskRow {
     id: String,
     agent_kind: Option<AgentKind>,
+    contributions: Json<Vec<CodeContribution>>,
     state: Json<TaskCurrentState>,
 }
 
@@ -20,6 +21,7 @@ impl From<TaskRow> for Task {
         Self {
             id: row.id,
             agent_kind: row.agent_kind,
+            code_contributions: row.contributions.0,
             current_state: row.state.0,
         }
     }
@@ -40,7 +42,12 @@ impl TaskStore {
     pub async fn list(&self) -> Result<Vec<Task>, TaskError> {
         sqlx::query_as::<_, TaskRow>(
             r#"
-            SELECT tasks.id, tasks.agent_kind, task_statuses.state
+            SELECT tasks.id, tasks.agent_kind, task_statuses.state,
+                COALESCE((
+                    SELECT json_group_array(json(contribution))
+                    FROM task_code_contributions
+                    WHERE task_id = tasks.id
+                ), json('[]')) AS contributions
             FROM tasks
             JOIN task_statuses ON task_statuses.task_id = tasks.id
             ORDER BY last_event_sequence DESC
@@ -113,7 +120,12 @@ impl TaskStore {
     ) -> Result<Task, TaskError> {
         sqlx::query_as::<_, TaskRow>(
             r#"
-            SELECT tasks.id, tasks.agent_kind, task_statuses.state
+            SELECT tasks.id, tasks.agent_kind, task_statuses.state,
+                COALESCE((
+                    SELECT json_group_array(json(contribution))
+                    FROM task_code_contributions
+                    WHERE task_id = tasks.id
+                ), json('[]')) AS contributions
             FROM tasks
             JOIN task_statuses ON task_statuses.task_id = tasks.id
             WHERE tasks.id = ?
@@ -155,6 +167,7 @@ impl TaskStore {
         task_id: &str,
         agent_run: &TaskAgentRun,
         report: &TaskAgentTurnReport,
+        contributions: &[CodeContribution],
     ) -> Result<(Task, Vec<TaskOperatorNotice>), TaskError> {
         let mut events = vec![TaskHistoryEvent::AgentTurnReported {
             agent_run_id: agent_run.id.clone(),
@@ -179,7 +192,35 @@ impl TaskStore {
                 .cloned()
                 .map(|notice| TaskHistoryEvent::OperatorNoticeRaised { notice }),
         );
-        Ok((self.append_events(task_id, &events).await?, notices))
+        let mut transaction = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(TaskError::Database)?;
+        Self::write_events(&mut transaction, task_id, &events).await?;
+        for contribution in contributions {
+            let event = TaskHistoryEvent::CodeContributionLinked {
+                contribution: contribution.clone(),
+            };
+            let payload = serde_json::to_string(&event).map_err(TaskError::HistoryData)?;
+            sqlx::query(
+                r#"
+                INSERT INTO task_event_logs (id, task_id, recorded_at_ms, payload)
+                VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT(id) DO NOTHING
+            "#,
+            )
+            .bind(format!("code-contribution:{task_id}:{}", contribution.id))
+            .bind(task_id)
+            .bind(now_ms())
+            .bind(payload)
+            .execute(&mut *transaction)
+            .await
+            .map_err(TaskError::Database)?;
+        }
+        let task = Self::read_task(&mut transaction, task_id).await?;
+        transaction.commit().await.map_err(TaskError::Database)?;
+        Ok((task, notices))
     }
 
     pub async fn unacknowledged_operator_notices(

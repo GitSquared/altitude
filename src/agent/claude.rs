@@ -16,7 +16,7 @@ pub struct ClaudeStream {
 }
 
 const AUTOPILOT_SYSTEM_PROMPT: &str = "Altitude is driving this task without an operator watching. Continue autonomously whenever the next action is reasonably implied by the original task. Do not stop for routine confirmation. Altitude will ask for a structured task report after this work turn ends.";
-const REPORT_SYSTEM_PROMPT: &str = "Altitude is driving this task without an operator watching. Do not perform more work in this turn. Return the structured task report now. Set operator_attention_level to requested when you need an operator and choose await_operator, or alarm for a credible serious issue. Omit it when the task's current operator attention level remains appropriate; set it to nominal when an escalation is resolved. Use a nominal (informational) operator notice for a consequential judgment the operator may want to know about; keep working. Use requested or alarm operator notices to explain their corresponding operator attention level. An alarm may await_operator if no useful remediation or investigation remains. Choose complete only when the task is fully done and needs no further operator action.";
+const REPORT_SYSTEM_PROMPT: &str = "Altitude is driving this task without an operator watching. Do not perform more work in this turn. Return the structured task report now. Set operator_attention_level to requested when you need an operator and choose await_operator, or alarm for a credible serious issue. Omit it when the task's current operator attention level remains appropriate; set it to nominal when an escalation is resolved. Use a nominal (informational) operator notice for a consequential judgment the operator may want to know about; keep working. Use requested or alarm operator notices to explain their corresponding operator attention level. An alarm may await_operator if no useful remediation or investigation remains. Choose complete only when the task is fully done and needs no further operator action. Include every pull-request or merge-request URL already associated with this task in code_contribution_urls. Do not create or publish one merely to populate that field.";
 const AUTOPILOT_SCHEMA: &str = r#"{
   "type": "object",
   "additionalProperties": false,
@@ -36,9 +36,13 @@ const AUTOPILOT_SCHEMA: &str = r#"{
         },
         "required": ["level", "title", "body"]
       }
+    },
+    "code_contribution_urls": {
+      "type": "array",
+      "items": { "type": "string" }
     }
   },
-  "required": ["requested_action", "summary", "operator_notices"]
+  "required": ["requested_action", "summary", "operator_notices", "code_contribution_urls"]
 }"#;
 
 const DEFAULT_SETTINGS: &str = r#"{

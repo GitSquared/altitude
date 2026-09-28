@@ -1,7 +1,7 @@
 use crate::{
     agent::{AgentEngine, AgentError, AgentKind, ClaudeCode},
     isolation::{CommandEvent, CommandSession, IsolationEngine, IsolationError, SandboxOptions},
-    vcs::GitHub,
+    vcs::{GitHub, VcsProvider},
 };
 use futures_util::future::join_all;
 use std::{error::Error, fmt, path::PathBuf};
@@ -66,8 +66,20 @@ where
         {
             return Err(TaskServiceError::InvalidReport("requested attention requires await_operator; await_operator requires requested attention or alarm".into()));
         }
+        let github = GitHub;
+        let contributions: Vec<_> = report
+            .code_contribution_urls
+            .iter()
+            .filter_map(|url| {
+                let contribution = github.contribution_from_url(url);
+                if contribution.is_none() {
+                    tracing::warn!(task_id = %task.id, %url, "ignoring unsupported code contribution URL");
+                }
+                contribution
+            })
+            .collect();
         self.store
-            .record_report(&task.id, agent_run, report)
+            .record_report(&task.id, agent_run, report, &contributions)
             .await
             .map_err(TaskServiceError::Task)
     }
