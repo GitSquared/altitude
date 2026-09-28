@@ -16,6 +16,7 @@ use ratatui::DefaultTerminal;
 use tokio::{signal::unix::Signal, sync::mpsc, time};
 
 use crate::{
+    config::{Config, Settings, SettingsError},
     development::DevelopmentEnvironment,
     isolation::{IsolationEngine, OutputStream},
     tasks::{
@@ -26,6 +27,7 @@ use crate::{
 };
 
 mod boot;
+mod environment_picker;
 mod operator_notices;
 mod overview;
 mod prompt;
@@ -39,6 +41,15 @@ pub use boot::{
     database as boot_database, isolation as boot_isolation, task_resume as boot_task_resume,
 };
 
+/// A step of the add-environment prompt chain.
+///
+/// The chain reuses the single-line prompt rather than introducing a form
+/// widget: it already handles editing, cancellation, and resize.
+enum SettingsPrompt {
+    Name,
+    SetupCommand,
+}
+
 struct App {
     tasks: Vec<Task>,
     latest_output: HashMap<String, String>,
@@ -51,10 +62,31 @@ struct App {
     operator_notices: Vec<TaskOperatorNotice>,
     selected_operator_notice: usize,
     open_operator_notices: bool,
+    /// Every configured environment, in configuration order.
+    environments: Vec<DevelopmentEnvironment>,
+    /// Name of the configured default, used to mark it in the picker.
+    default_environment: String,
+    selected_environment: usize,
+    /// True while the picker is asking which environment a new task uses.
+    open_environment_picker: bool,
+    /// The new-task prompt held while the picker is open.
+    pending_command: Option<String>,
+    /// Where `config.toml` lives, so the manage view can persist changes.
+    config: Config,
+    open_environment_settings: bool,
+    settings_prompt: Option<SettingsPrompt>,
+    /// Name collected by the add-environment chain, held until its setup
+    /// command arrives.
+    pending_environment_name: Option<String>,
 }
 
 impl App {
-    fn new(tasks: Vec<Task>) -> Self {
+    fn new(
+        tasks: Vec<Task>,
+        config: Config,
+        environments: Vec<DevelopmentEnvironment>,
+        default_environment: String,
+    ) -> Self {
         let latest_output = tasks
             .iter()
             .filter_map(|task| {
@@ -76,6 +108,15 @@ impl App {
             operator_notices: Vec::new(),
             selected_operator_notice: 0,
             open_operator_notices: false,
+            environments,
+            default_environment,
+            selected_environment: 0,
+            open_environment_picker: false,
+            pending_command: None,
+            config,
+            open_environment_settings: false,
+            settings_prompt: None,
+            pending_environment_name: None,
         }
     }
 
@@ -96,6 +137,101 @@ impl App {
     fn select_previous(&mut self) {
         if !self.tasks.is_empty() {
             self.selected = (self.selected + self.tasks.len() - 1) % self.tasks.len();
+        }
+    }
+
+    /// The only configured environment, when there is exactly one.
+    ///
+    /// A single environment is not a decision, so the picker is skipped rather
+    /// than shown with one row.
+    fn single_environment(&self) -> Option<DevelopmentEnvironment> {
+        match self.environments.as_slice() {
+            [environment] => Some(environment.clone()),
+            _ => None,
+        }
+    }
+
+    /// Hold a new-task prompt until the operator picks an environment.
+    ///
+    /// Selection starts on the configured default so the common case is a
+    /// single Enter.
+    fn hold_command_for_environment_pick(&mut self, command: String) {
+        self.selected_environment = self
+            .environments
+            .iter()
+            .position(|environment| environment.name == self.default_environment)
+            .unwrap_or(0);
+        self.pending_command = Some(command);
+        self.open_environment_picker = true;
+    }
+
+    fn chosen_environment(&self) -> Option<DevelopmentEnvironment> {
+        self.environments.get(self.selected_environment).cloned()
+    }
+
+    fn select_next_environment(&mut self) {
+        if !self.environments.is_empty() {
+            self.selected_environment = (self.selected_environment + 1) % self.environments.len();
+        }
+    }
+
+    fn select_previous_environment(&mut self) {
+        if !self.environments.is_empty() {
+            self.selected_environment =
+                (self.selected_environment + self.environments.len() - 1) % self.environments.len();
+        }
+    }
+
+    /// Persist the environment configuration.
+    ///
+    /// The TUI is the only writer of `config.toml`, so the file follows what was
+    /// changed here. Hand edits are read at startup.
+    fn write_settings(&self) -> Result<(), SettingsError> {
+        self.config.save_settings(&Settings {
+            default_environment: self.default_environment.clone(),
+            environments: self.environments.clone(),
+        })
+    }
+
+    /// Continue the add-environment prompt chain.
+    fn continue_settings_prompt(&mut self, step: SettingsPrompt, input: String) {
+        match step {
+            SettingsPrompt::Name => {
+                self.pending_environment_name = Some(input);
+                self.settings_prompt = Some(SettingsPrompt::SetupCommand);
+                self.prompt = Some(Prompt::new("setup command"));
+            }
+            SettingsPrompt::SetupCommand => {
+                let Some(name) = self.pending_environment_name.take() else {
+                    return;
+                };
+                let environment = DevelopmentEnvironment {
+                    name,
+                    setup_command: input,
+                };
+                // Reject a bad name before it reaches the list, so the overlay
+                // never shows an environment that cannot be saved.
+                if let Err(error) = environment.validate() {
+                    self.notice = Some(error.to_string());
+                    return;
+                }
+                let previous_default = self.default_environment.clone();
+                // An empty configuration has no default to inherit, so the first
+                // environment added becomes it.
+                if self.environments.is_empty() {
+                    self.default_environment = environment.name.clone();
+                }
+                self.environments.push(environment);
+                self.selected_environment = self.environments.len() - 1;
+                if let Err(error) = self.write_settings() {
+                    // Keep the list and the file consistent: a configuration the
+                    // file rejected must not linger on screen.
+                    self.environments.pop();
+                    self.selected_environment = self.selected_environment.saturating_sub(1);
+                    self.default_environment = previous_default;
+                    self.notice = Some(error.to_string());
+                }
+            }
         }
     }
 
@@ -172,7 +308,9 @@ pub async fn run<E>(
     interrupt: &mut Signal,
     event_loop: TaskEventLoop<E>,
     task_service: TaskService<E>,
-    default_environment: DevelopmentEnvironment,
+    config: Config,
+    environments: Vec<DevelopmentEnvironment>,
+    default_environment: String,
     tasks: Vec<Task>,
     task_execution_updates: mpsc::UnboundedReceiver<TaskExecutionUpdate>,
 ) -> io::Result<()>
@@ -185,6 +323,8 @@ where
         interrupt,
         event_loop.clone(),
         task_service,
+        config,
+        environments,
         default_environment,
         tasks,
         task_execution_updates,
@@ -202,7 +342,9 @@ async fn run_loop<E>(
     interrupt: &mut Signal,
     event_loop: TaskEventLoop<E>,
     task_service: TaskService<E>,
-    default_environment: DevelopmentEnvironment,
+    config: Config,
+    environments: Vec<DevelopmentEnvironment>,
+    default_environment: String,
     tasks: Vec<Task>,
     mut task_execution_updates: mpsc::UnboundedReceiver<TaskExecutionUpdate>,
 ) -> io::Result<()>
@@ -213,7 +355,7 @@ where
     let mut events = EventStream::new();
     let mut refresh = time::interval(Duration::from_secs(2));
     let mut shell_notice = time::interval(Duration::from_millis(100));
-    let mut app = App::new(tasks);
+    let mut app = App::new(tasks, config, environments, default_environment);
     let mut mouse_captured = false;
     loop {
         if mouse_captured != app.open_shell.is_some() {
@@ -240,6 +382,24 @@ where
             }
             if app.open_operator_notices {
                 operator_notices::draw(frame, &app.operator_notices, app.selected_operator_notice);
+            }
+            if app.open_environment_picker {
+                environment_picker::draw(
+                    frame,
+                    environment_picker::Purpose::NewTask,
+                    &app.environments,
+                    &app.default_environment,
+                    app.selected_environment,
+                );
+            }
+            if app.open_environment_settings {
+                environment_picker::draw(
+                    frame,
+                    environment_picker::Purpose::Manage,
+                    &app.environments,
+                    &app.default_environment,
+                    app.selected_environment,
+                );
             }
         })?;
         tokio::select! {
@@ -306,7 +466,7 @@ where
             },
             event = events.next() => {
                 let Some(event) = event else { return Ok(()) };
-                if handle_event(event?, terminal, &event_loop, &task_service, &default_environment, &mut app).await? { return Ok(()); }
+                if handle_event(event?, terminal, &event_loop, &task_service, &mut app).await? { return Ok(()); }
             }
         }
     }
@@ -339,7 +499,6 @@ async fn handle_event<E>(
     terminal: &DefaultTerminal,
     event_loop: &TaskEventLoop<E>,
     task_service: &TaskService<E>,
-    default_environment: &DevelopmentEnvironment,
     app: &mut App,
 ) -> io::Result<bool>
 where
@@ -383,10 +542,25 @@ where
     }
     if let Some(prompt) = &mut app.prompt {
         match prompt.handle_key(key) {
-            Some(PromptAction::Cancel) => app.prompt = None,
+            Some(PromptAction::Cancel) => {
+                app.prompt = None;
+                // A cancelled settings prompt must not swallow the next task
+                // prompt, so the chain is abandoned here rather than left
+                // half-open.
+                app.settings_prompt = None;
+                app.pending_environment_name = None;
+            }
             Some(PromptAction::Submit(command)) => {
                 app.prompt = None;
-                event_loop.create_claude(command, (*default_environment).clone());
+                if let Some(step) = app.settings_prompt.take() {
+                    app.continue_settings_prompt(step, command);
+                } else if let Some(environment) = app.single_environment() {
+                    event_loop.create_claude(command, environment);
+                } else if app.environments.is_empty() {
+                    app.notice = Some("no environments are configured".into());
+                } else {
+                    app.hold_command_for_environment_pick(command);
+                }
             }
             None => {}
         }
@@ -400,6 +574,53 @@ where
             && let Some(bytes) = shell.key_bytes(key)
         {
             event_loop.send_terminal_input(&id, bytes);
+        }
+        return Ok(false);
+    }
+    if app.open_environment_settings {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('s') => app.open_environment_settings = false,
+            KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') => app.select_next_environment(),
+            KeyCode::BackTab | KeyCode::Up | KeyCode::Char('h') => {
+                app.select_previous_environment()
+            }
+            KeyCode::Char('n') => {
+                app.settings_prompt = Some(SettingsPrompt::Name);
+                app.prompt = Some(Prompt::new("new environment name"));
+            }
+            KeyCode::Enter => {
+                if let Some(environment) = app.chosen_environment() {
+                    let previous =
+                        std::mem::replace(&mut app.default_environment, environment.name);
+                    if let Err(error) = app.write_settings() {
+                        app.default_environment = previous;
+                        app.notice = Some(error.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+        return Ok(false);
+    }
+    if app.open_environment_picker {
+        match key.code {
+            KeyCode::Esc => {
+                app.open_environment_picker = false;
+                app.pending_command = None;
+            }
+            KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') => app.select_next_environment(),
+            KeyCode::BackTab | KeyCode::Up | KeyCode::Char('h') => {
+                app.select_previous_environment()
+            }
+            KeyCode::Enter => {
+                if let (Some(command), Some(environment)) =
+                    (app.pending_command.take(), app.chosen_environment())
+                {
+                    app.open_environment_picker = false;
+                    event_loop.create_claude(command, environment);
+                }
+            }
+            _ => {}
         }
         return Ok(false);
     }
@@ -438,6 +659,14 @@ where
         KeyCode::Char('q') => return Ok(true),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
         KeyCode::Char('c') => app.prompt = Some(Prompt::new("what should Claude do?")),
+        KeyCode::Char('s') => {
+            app.selected_environment = app
+                .environments
+                .iter()
+                .position(|environment| environment.name == app.default_environment)
+                .unwrap_or(0);
+            app.open_environment_settings = true;
+        }
         KeyCode::Char('i') => {
             app.operator_notices = task_service
                 .unacknowledged_operator_notices(TaskOperatorAttentionLevel::Nominal)

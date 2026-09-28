@@ -81,7 +81,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             &mut interrupt,
             event_loop,
             tasks,
-            settings.default_environment().clone(),
+            config.clone(),
+            settings.environments.clone(),
+            settings.default_environment.clone(),
             task_rows,
             task_execution_updates,
         )

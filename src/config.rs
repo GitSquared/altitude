@@ -155,13 +155,6 @@ impl Config {
 }
 
 impl Settings {
-    pub fn default_environment(&self) -> &DevelopmentEnvironment {
-        self.environments
-            .iter()
-            .find(|environment| environment.name == self.default_environment)
-            .expect("validated settings have a default environment")
-    }
-
     fn validate(&self) -> Result<(), SettingsError> {
         let mut names = HashSet::new();
         for environment in &self.environments {
