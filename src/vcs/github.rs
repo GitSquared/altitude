@@ -49,12 +49,15 @@ impl VcsProvider for GitHub {
             .path_segments()?
             .filter(|part| !part.is_empty())
             .collect();
-        let [owner, repository, "pull", number] = parts.as_slice() else {
+        // GitHub appends view segments to the same resource (`/files`,
+        // `/commits`, `/checks`), and a reported URL may carry them. They do not
+        // identify a different contribution, so accept and ignore the tail.
+        let [owner, repository, "pull", number, ..] = parts.as_slice() else {
             return None;
         };
-        if number.parse::<u64>().is_err() {
-            return None;
-        }
+        // Normalize the number rather than echoing it: `/pull/007` and `/pull/7`
+        // are one contribution, so they must produce one identity.
+        let number = number.parse::<u64>().ok()?;
         let repository = format!("{owner}/{repository}");
         let canonical_url = format!("https://{host}/{repository}/pull/{number}");
         Some(CodeContribution {
@@ -62,7 +65,7 @@ impl VcsProvider for GitHub {
             provider: VcsProviderKind::GitHub,
             host: host.to_owned(),
             repository,
-            reference: (*number).to_owned(),
+            reference: number.to_string(),
             url: canonical_url,
         })
     }
