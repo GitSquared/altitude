@@ -29,6 +29,7 @@ terminput = "0.5.15"
 terminput-crossterm = "0.4.11"
 throbber-widgets-tui = { version = "0.11.1", default-features = false }
 tokio = { version = "1.53.1", features = ["rt", "macros", "signal", "sync", "time"] }
+toml = "1.1.6"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

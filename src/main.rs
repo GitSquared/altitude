@@ -13,6 +13,7 @@ use crate::{
 mod agent;
 mod config;
 mod db;
+mod development;
 mod isolation;
 mod logging;
 mod tasks;
@@ -24,6 +25,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
     let config = Config::load()?;
+    let settings = config.load_or_create_settings()?;
     let _log_guard = logging::init(&config)?;
     tracing::info!("starting altitude");
     let mut terminal = ratatui::init();
@@ -79,6 +81,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             &mut interrupt,
             event_loop,
             tasks,
+            settings.default_environment().clone(),
             task_rows,
             task_execution_updates,
         )

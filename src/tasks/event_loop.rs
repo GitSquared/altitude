@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     agent::ClaudeStream,
+    development::DevelopmentEnvironment,
     isolation::{Command, CommandEvent, CommandSession, IsolationEngine, OutputStream},
     tasks::{
         Task, TaskAgentRequestedAction, TaskAgentRun, TaskExecutionMode, TaskOperatorNotice,
@@ -180,11 +181,11 @@ where
         }
     }
 
-    pub fn create_claude(&self, prompt: String) {
+    pub fn create_claude(&self, prompt: String, environment: DevelopmentEnvironment) {
         tracing::info!("creating Claude task");
         let event_loop = self.clone();
         tokio::spawn(async move {
-            let task = match event_loop.service.create_claude(prompt).await {
+            let task = match event_loop.service.create_claude(prompt, environment).await {
                 Ok(task) => task,
                 Err(error) => {
                     let _ = event_loop

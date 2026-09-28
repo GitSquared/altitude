@@ -18,6 +18,7 @@ use microsandbox::{
 use tokio::sync::{Mutex, mpsc, watch};
 
 use crate::config::Config;
+use crate::development::DevelopmentEnvironment;
 
 use super::{
     BaseSandboxRecipe, BaseSandboxSnapshot, Command, CommandEvent, CommandSession,
@@ -359,9 +360,18 @@ impl IsolationEngine for MicrosandboxIsolation {
         &self,
         id: String,
         task_snapshot: Option<String>,
+        development_environment: DevelopmentEnvironment,
         recipes: Vec<EnvironmentRecipe>,
     ) -> Result<(), IsolationError> {
-        environment::provision(self, &self.config, id, task_snapshot, recipes).await
+        environment::provision(
+            self,
+            &self.config,
+            id,
+            task_snapshot,
+            development_environment,
+            recipes,
+        )
+        .await
     }
 
     async fn prepare(&self, status: &watch::Sender<IsolationStatus>) -> Result<(), IsolationError> {

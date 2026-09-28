@@ -5,6 +5,7 @@ use super::{
     Task, TaskAgentRun, TaskAgentTurnReport, TaskCurrentState, TaskError, TaskHistoryEvent,
     TaskOperatorAttentionLevel, TaskOperatorNotice,
 };
+use crate::development::DevelopmentEnvironment;
 use crate::{agent::AgentKind, db::Database};
 
 // SQLx reads the JSON projection through Serde, sharing its enum spellings.
@@ -55,6 +56,7 @@ impl TaskStore {
     pub async fn create_with_agent(
         &self,
         intent: String,
+        environment: DevelopmentEnvironment,
         agent_kind: Option<AgentKind>,
         agent_conversation_id: Option<String>,
     ) -> Result<Task, TaskError> {
@@ -81,6 +83,7 @@ impl TaskStore {
             &task_id,
             &[TaskHistoryEvent::IntentExpressed {
                 intent,
+                environment,
                 agent_conversation_id,
             }],
         )

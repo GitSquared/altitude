@@ -1,3 +1,4 @@
+use crate::development::DevelopmentEnvironment;
 use crate::{
     agent::{AgentEngine, AgentError, AgentKind, ClaudeCode},
     isolation::{CommandEvent, CommandSession, IsolationEngine, IsolationError, SandboxOptions},
@@ -38,10 +39,15 @@ where
         self.store.list().await.map_err(TaskServiceError::Task)
     }
 
-    pub async fn create_claude(&self, intent: String) -> Result<Task, TaskServiceError> {
+    pub async fn create_claude(
+        &self,
+        intent: String,
+        environment: DevelopmentEnvironment,
+    ) -> Result<Task, TaskServiceError> {
         self.store
             .create_with_agent(
                 intent,
+                environment,
                 Some(AgentKind::Claude),
                 Some(self.claude.new_conversation_id()),
             )
@@ -134,6 +140,7 @@ where
                     .provision(
                         sandbox_id.clone(),
                         task.current_state.snapshot_path.clone(),
+                        task.development_environment(),
                         vec![
                             self.claude.environment_recipe(),
                             GitHub::environment_recipe(),

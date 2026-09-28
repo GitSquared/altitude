@@ -8,6 +8,7 @@ use std::{
 };
 
 use crate::config::Config;
+use crate::development::DevelopmentEnvironment;
 
 use super::{
     BaseSandboxRecipe, CommandEvent, IsolationEngine, IsolationError, SandboxMount, SandboxOptions,
@@ -90,13 +91,24 @@ struct EnvironmentPlan {
 }
 
 impl EnvironmentPlan {
-    fn compose(config: &Config, recipes: Vec<EnvironmentRecipe>) -> Result<Self, IsolationError> {
+    fn compose(
+        config: &Config,
+        development_environment: DevelopmentEnvironment,
+        recipes: Vec<EnvironmentRecipe>,
+    ) -> Result<Self, IsolationError> {
+        development_environment
+            .validate()
+            .map_err(|error| IsolationError::new(error.to_string()))?;
+        let environment_name = development_environment.name;
+        let mut setup_command = String::from("set -eu\n");
+        setup_command.push_str(&development_environment.setup_command);
+        setup_command.push('\n');
         let mut plan = Self {
             recipe: BaseSandboxRecipe::new(
-                "coding",
-                config.environment_snapshots_dir("coding"),
+                format!("coding-{environment_name}"),
+                config.development_environment_snapshots_dir(&environment_name),
                 REFRESH_AFTER,
-                "set -eu\n",
+                setup_command,
             ),
             options: SandboxOptions {
                 snapshot_path: None,
@@ -275,10 +287,11 @@ pub(super) async fn provision(
     config: &Config,
     id: String,
     snapshot: Option<String>,
+    development_environment: DevelopmentEnvironment,
     recipes: Vec<EnvironmentRecipe>,
 ) -> Result<(), IsolationError> {
     // Validate every recipe before creating directories or building images.
-    let mut plan = EnvironmentPlan::compose(config, recipes)?;
+    let mut plan = EnvironmentPlan::compose(config, development_environment, recipes)?;
     plan.initialize(config)?;
     plan.options.snapshot_path = Some(match snapshot {
         Some(path) => path,

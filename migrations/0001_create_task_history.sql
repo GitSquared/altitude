@@ -27,6 +27,8 @@ WITH projected_tasks AS (
                 CASE event_type
                     WHEN 'intent_expressed' THEN json_object(
                         'intent', payload ->> '$.data.intent',
+                        'environment_name', payload ->> '$.data.environment.name',
+                        'environment_setup_command', payload ->> '$.data.environment.setup_command',
                         'agent_conversation_id', payload ->> '$.data.agent_conversation_id',
                         'execution_status', 'pending',
                         'execution_pause_reason', NULL,
@@ -105,6 +107,8 @@ WITH projected_tasks AS (
 )
 SELECT task_id, state,
     state ->> '$.intent' AS intent,
+    state ->> '$.environment_name' AS environment_name,
+    state ->> '$.environment_setup_command' AS environment_setup_command,
     state ->> '$.agent_conversation_id' AS agent_conversation_id,
     state ->> '$.execution_status' AS execution_status,
     state ->> '$.execution_pause_reason' AS execution_pause_reason,

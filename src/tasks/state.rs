@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::agent::AgentKind;
+use crate::development::DevelopmentEnvironment;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskAgentTurnReport {
@@ -87,6 +88,8 @@ pub struct Task {
 #[derive(Clone, Debug, Deserialize)]
 pub struct TaskCurrentState {
     pub intent: String,
+    pub environment_name: String,
+    pub environment_setup_command: String,
     pub agent_conversation_id: Option<String>,
     pub execution_status: TaskExecutionStatus,
     pub execution_pause_reason: Option<TaskExecutionPauseReason>,
@@ -104,6 +107,7 @@ pub struct TaskCurrentState {
 pub enum TaskHistoryEvent {
     IntentExpressed {
         intent: String,
+        environment: DevelopmentEnvironment,
         agent_conversation_id: Option<String>,
     },
     SandboxProvisioned {
@@ -178,6 +182,13 @@ impl fmt::Display for TaskAgentTurnContext {
 }
 
 impl Task {
+    pub fn development_environment(&self) -> DevelopmentEnvironment {
+        DevelopmentEnvironment {
+            name: self.current_state.environment_name.clone(),
+            setup_command: self.current_state.environment_setup_command.clone(),
+        }
+    }
+
     pub fn turn_context(&self, execution_mode: TaskExecutionMode) -> TaskAgentTurnContext {
         TaskAgentTurnContext {
             execution_status: TaskExecutionStatus::Running,

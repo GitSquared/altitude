@@ -16,6 +16,7 @@ use ratatui::DefaultTerminal;
 use tokio::{signal::unix::Signal, sync::mpsc, time};
 
 use crate::{
+    development::DevelopmentEnvironment,
     isolation::{IsolationEngine, OutputStream},
     tasks::{
         Task, TaskExecutionMode, TaskExecutionStatus, TaskOperatorAttentionLevel,
@@ -171,6 +172,7 @@ pub async fn run<E>(
     interrupt: &mut Signal,
     event_loop: TaskEventLoop<E>,
     task_service: TaskService<E>,
+    default_environment: DevelopmentEnvironment,
     tasks: Vec<Task>,
     task_execution_updates: mpsc::UnboundedReceiver<TaskExecutionUpdate>,
 ) -> io::Result<()>
@@ -183,6 +185,7 @@ where
         interrupt,
         event_loop.clone(),
         task_service,
+        default_environment,
         tasks,
         task_execution_updates,
     )
@@ -199,6 +202,7 @@ async fn run_loop<E>(
     interrupt: &mut Signal,
     event_loop: TaskEventLoop<E>,
     task_service: TaskService<E>,
+    default_environment: DevelopmentEnvironment,
     tasks: Vec<Task>,
     mut task_execution_updates: mpsc::UnboundedReceiver<TaskExecutionUpdate>,
 ) -> io::Result<()>
@@ -302,7 +306,7 @@ where
             },
             event = events.next() => {
                 let Some(event) = event else { return Ok(()) };
-                if handle_event(event?, terminal, &event_loop, &task_service, &mut app).await? { return Ok(()); }
+                if handle_event(event?, terminal, &event_loop, &task_service, &default_environment, &mut app).await? { return Ok(()); }
             }
         }
     }
@@ -335,6 +339,7 @@ async fn handle_event<E>(
     terminal: &DefaultTerminal,
     event_loop: &TaskEventLoop<E>,
     task_service: &TaskService<E>,
+    default_environment: &DevelopmentEnvironment,
     app: &mut App,
 ) -> io::Result<bool>
 where
@@ -381,7 +386,7 @@ where
             Some(PromptAction::Cancel) => app.prompt = None,
             Some(PromptAction::Submit(command)) => {
                 app.prompt = None;
-                event_loop.create_claude(command);
+                event_loop.create_claude(command, (*default_environment).clone());
             }
             None => {}
         }
