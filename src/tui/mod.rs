@@ -50,7 +50,7 @@ struct App {
     operator_signals: Vec<TaskOperatorSignal>,
     selected_operator_signal: usize,
     open_operator_signals: bool,
-    answering_operator_signal: Option<(Task, String)>,
+    answering_operator_signal: Option<String>,
 }
 
 impl App {
@@ -288,11 +288,7 @@ where
                     app.shells.insert(id.clone(), Shell::new(rows, cols, history));
                     app.open_shell = Some(id);
                 }
-                TaskExecutionUpdate::Report {
-                    task,
-                    summary,
-                    operator_signals: _,
-                } => {
+                TaskExecutionUpdate::Report { task, summary } => {
                     let id = task.id.clone();
                     app.replace_task(task);
                     app.latest_output.insert(id, summary);
@@ -383,8 +379,8 @@ where
             }
             Some(PromptAction::Submit(command)) => {
                 app.prompt = None;
-                if let Some((task, signal_id)) = app.answering_operator_signal.take() {
-                    event_loop.answer_operator_signal(task, signal_id, command);
+                if let Some(signal_id) = app.answering_operator_signal.take() {
+                    event_loop.answer_operator_signal(signal_id, command);
                 } else {
                     event_loop.create_claude(command);
                 }
@@ -434,13 +430,12 @@ where
                             }
                         }
                         TaskOperatorSignalKind::Decision | TaskOperatorSignalKind::Review => {
-                            if let Some(task) = app
+                            if app
                                 .tasks
                                 .iter()
-                                .find(|task| task.id == operator_signal.task_id)
-                                .cloned()
+                                .any(|task| task.id == operator_signal.task_id)
                             {
-                                app.answering_operator_signal = Some((task, operator_signal.id));
+                                app.answering_operator_signal = Some(operator_signal.id);
                                 app.prompt = Some(Prompt::new("answer operator signal"));
                                 app.open_operator_signals = false;
                             }

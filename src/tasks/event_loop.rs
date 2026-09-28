@@ -9,8 +9,8 @@ use crate::{
     agent::ClaudeStream,
     isolation::{Command, CommandEvent, CommandSession, IsolationEngine, OutputStream},
     tasks::{
-        Task, TaskAgentRequestedAction, TaskAgentRun, TaskExecutionMode, TaskOperatorSignal,
-        TaskService, TaskServiceError,
+        Task, TaskAgentRequestedAction, TaskAgentRun, TaskExecutionMode, TaskService,
+        TaskServiceError,
     },
 };
 
@@ -28,7 +28,6 @@ pub enum TaskExecutionUpdate {
     Report {
         task: Task,
         summary: String,
-        operator_signals: Vec<TaskOperatorSignal>,
     },
 }
 
@@ -200,12 +199,12 @@ where
         });
     }
 
-    pub fn answer_operator_signal(&self, task: Task, signal_id: String, answer: String) {
+    pub fn answer_operator_signal(&self, signal_id: String, answer: String) {
         let event_loop = self.clone();
         tokio::spawn(async move {
             let result = event_loop
                 .service
-                .answer_operator_signal(task, &signal_id, answer)
+                .answer_operator_signal(&signal_id, answer)
                 .await;
             event_loop.watch_agent_run(result);
         });
@@ -388,12 +387,10 @@ where
                     .expect("report runs have a decoder")
                     .report()
                     .map_err(TaskServiceError::InvalidReport)?;
-                let (task, operator_signals) =
-                    self.service.apply_report(&task, run, &report).await?;
+                let task = self.service.apply_report(&task, run, &report).await?;
                 let _ = self.events.send(TaskExecutionUpdate::Report {
                     task: task.clone(),
                     summary: report.summary,
-                    operator_signals,
                 });
                 match report.requested_action {
                     TaskAgentRequestedAction::Continue => {

@@ -54,7 +54,7 @@ where
         task: &Task,
         agent_run: &TaskAgentRun,
         report: &TaskAgentTurnReport,
-    ) -> Result<(Task, Vec<TaskOperatorSignal>), TaskServiceError> {
+    ) -> Result<Task, TaskServiceError> {
         let attention = match (&report.requested_action, &report.operator_signal) {
             (TaskAgentRequestedAction::Continue, None)
             | (
@@ -110,11 +110,12 @@ where
 
     pub async fn answer_operator_signal(
         &self,
-        mut task: Task,
         signal_id: &str,
         answer: String,
     ) -> Result<(Task, TaskAgentRun, CommandSession), TaskServiceError> {
-        task = self
+        // Re-read rather than trusting a caller-held task: the operator may have
+        // opened the signal list some time before answering.
+        let mut task = self
             .store
             .answer_operator_signal(signal_id, &answer)
             .await

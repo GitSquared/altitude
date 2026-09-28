@@ -156,7 +156,7 @@ impl TaskStore {
         agent_run: &TaskAgentRun,
         report: &TaskAgentTurnReport,
         attention: TaskOperatorAttentionLevel,
-    ) -> Result<(Task, Vec<TaskOperatorSignal>), TaskError> {
+    ) -> Result<Task, TaskError> {
         let mut events = vec![TaskHistoryEvent::AgentTurnReported {
             agent_run_id: agent_run.id.clone(),
             requested_action: report.requested_action.clone(),
@@ -183,7 +183,7 @@ impl TaskStore {
                 .cloned()
                 .map(|signal| TaskHistoryEvent::OperatorSignalRaised { signal }),
         );
-        Ok((self.append_events(task_id, &events).await?, signals))
+        self.append_events(task_id, &events).await
     }
 
     pub async fn operator_signals(
