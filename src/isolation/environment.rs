@@ -310,7 +310,7 @@ pub(super) async fn provision(
     Ok(())
 }
 
-pub(super) fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 

@@ -5,7 +5,11 @@ use super::{
     Task, TaskAgentRun, TaskAgentTurnReport, TaskCurrentState, TaskError, TaskHistoryEvent,
     TaskOperatorAttentionLevel, TaskOperatorNotice,
 };
-use crate::{agent::AgentKind, db::Database, vcs::CodeContribution};
+use crate::{
+    agent::AgentKind,
+    db::Database,
+    vcs::{CodeContribution, ContributionObservation},
+};
 
 // SQLx reads the JSON projection through Serde, sharing its enum spellings.
 #[derive(FromRow)]
@@ -13,6 +17,7 @@ struct TaskRow {
     id: String,
     agent_kind: Option<AgentKind>,
     contributions: Json<Vec<CodeContribution>>,
+    observations: Json<Vec<ContributionObservation>>,
     state: Json<TaskCurrentState>,
 }
 
@@ -22,6 +27,7 @@ impl From<TaskRow> for Task {
             id: row.id,
             agent_kind: row.agent_kind,
             code_contributions: row.contributions.0,
+            code_contribution_observations: row.observations.0,
             current_state: row.state.0,
         }
     }
@@ -47,7 +53,18 @@ impl TaskStore {
                     SELECT json_group_array(json(contribution))
                     FROM task_code_contributions
                     WHERE task_id = tasks.id
-                ), json('[]')) AS contributions
+                ), json('[]')) AS contributions,
+                COALESCE((
+                    SELECT json_group_array(json(observation))
+                    FROM task_code_contribution_observations
+                    WHERE task_id = tasks.id
+                      AND sequence IN (
+                          SELECT MAX(sequence)
+                          FROM task_code_contribution_observations
+                          WHERE task_id = tasks.id
+                          GROUP BY json_extract(observation, '$.contribution_id')
+                      )
+                ), json('[]')) AS observations
             FROM tasks
             JOIN task_statuses ON task_statuses.task_id = tasks.id
             ORDER BY last_event_sequence DESC
@@ -125,7 +142,18 @@ impl TaskStore {
                     SELECT json_group_array(json(contribution))
                     FROM task_code_contributions
                     WHERE task_id = tasks.id
-                ), json('[]')) AS contributions
+                ), json('[]')) AS contributions,
+                COALESCE((
+                    SELECT json_group_array(json(observation))
+                    FROM task_code_contribution_observations
+                    WHERE task_id = tasks.id
+                      AND sequence IN (
+                          SELECT MAX(sequence)
+                          FROM task_code_contribution_observations
+                          WHERE task_id = tasks.id
+                          GROUP BY json_extract(observation, '$.contribution_id')
+                      )
+                ), json('[]')) AS observations
             FROM tasks
             JOIN task_statuses ON task_statuses.task_id = tasks.id
             WHERE tasks.id = ?
@@ -221,6 +249,49 @@ impl TaskStore {
         let task = Self::read_task(&mut transaction, task_id).await?;
         transaction.commit().await.map_err(TaskError::Database)?;
         Ok((task, notices))
+    }
+
+    /// Record observed contribution state for a task.
+    ///
+    /// The event id is derived from the observation itself, so a state already
+    /// delivered collapses into the existing row instead of replaying the same
+    /// feedback. That is what makes restarting Altitude safe.
+    pub async fn record_code_contribution_observations(
+        &self,
+        task_id: &str,
+        observations: &[ContributionObservation],
+    ) -> Result<Task, TaskError> {
+        let mut transaction = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(TaskError::Database)?;
+        for observation in observations {
+            let event = TaskHistoryEvent::CodeContributionObserved {
+                observation: observation.clone(),
+            };
+            let payload = serde_json::to_string(&event).map_err(TaskError::HistoryData)?;
+            sqlx::query(
+                r#"
+                INSERT INTO task_event_logs (id, task_id, recorded_at_ms, payload)
+                VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT(id) DO NOTHING
+            "#,
+            )
+            .bind(format!(
+                "code-contribution-observation:{task_id}:{}",
+                observation.identity()
+            ))
+            .bind(task_id)
+            .bind(now_ms())
+            .bind(payload)
+            .execute(&mut *transaction)
+            .await
+            .map_err(TaskError::Database)?;
+        }
+        let task = Self::read_task(&mut transaction, task_id).await?;
+        transaction.commit().await.map_err(TaskError::Database)?;
+        Ok(task)
     }
 
     pub async fn unacknowledged_operator_notices(

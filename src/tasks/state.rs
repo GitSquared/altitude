@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::agent::AgentKind;
-use crate::vcs::CodeContribution;
+use crate::vcs::{CodeContribution, ContributionObservation};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskAgentTurnReport {
@@ -84,6 +84,8 @@ pub struct Task {
     pub id: String,
     pub agent_kind: Option<AgentKind>,
     pub code_contributions: Vec<CodeContribution>,
+    /// Latest observed state per contribution, oldest contribution first.
+    pub code_contribution_observations: Vec<ContributionObservation>,
     pub current_state: TaskCurrentState,
 }
 
@@ -138,6 +140,13 @@ pub enum TaskHistoryEvent {
     CodeContributionLinked {
         contribution: CodeContribution,
     },
+    /// External state observed for a contribution.
+    ///
+    /// An input to the task, not a notification: the control loop decides
+    /// whether anything about it deserves the operator's attention.
+    CodeContributionObserved {
+        observation: ContributionObservation,
+    },
     ExecutionPaused {
         reason: TaskExecutionPauseReason,
         snapshot_path: String,
@@ -169,6 +178,8 @@ pub struct TaskAgentTurnContext {
     pub execution_mode: TaskExecutionMode,
     pub operator_attention_level: TaskOperatorAttentionLevel,
     pub datetime: String,
+    /// What the linked contributions currently look like outside Altitude.
+    pub code_contribution_observations: Vec<ContributionObservation>,
 }
 
 impl fmt::Display for TaskAgentTurnContext {
@@ -180,7 +191,22 @@ impl fmt::Display for TaskAgentTurnContext {
             self.execution_mode,
             self.operator_attention_level,
             self.datetime
-        )
+        )?;
+        if self.code_contribution_observations.is_empty() {
+            return Ok(());
+        }
+        write!(formatter, "; code_contributions=[")?;
+        for (index, observation) in self.code_contribution_observations.iter().enumerate() {
+            if index > 0 {
+                write!(formatter, "; ")?;
+            }
+            write!(
+                formatter,
+                "{} @ {}: {}",
+                observation.contribution_id, observation.state.head_sha, observation.summary
+            )?;
+        }
+        write!(formatter, "]")
     }
 }
 
@@ -191,6 +217,7 @@ impl Task {
             execution_mode,
             operator_attention_level: self.current_state.operator_attention_level.clone(),
             datetime: Local::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            code_contribution_observations: self.code_contribution_observations.clone(),
         }
     }
 
