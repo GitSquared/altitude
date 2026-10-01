@@ -49,16 +49,18 @@ pub enum TaskOperatorSignalPriority {
     Urgent,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
+#[sqlx(rename_all = "snake_case")]
 pub enum TaskOperatorAttentionLevel {
     Nominal,
     Requested,
     Alarm,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
+#[sqlx(rename_all = "snake_case")]
 pub enum TaskExecutionStatus {
     Pending,
     Running,
@@ -67,15 +69,17 @@ pub enum TaskExecutionStatus {
     Failed,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
+#[sqlx(rename_all = "snake_case")]
 pub enum TaskExecutionPauseReason {
     AwaitingOperator,
     ApplicationShutdown,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
+#[sqlx(rename_all = "snake_case")]
 pub enum TaskExecutionMode {
     Autopilot,
     AutopilotReport,
@@ -110,8 +114,8 @@ pub struct Task {
     pub current_state: TaskCurrentState,
 }
 
-/// Derived directly from task history by the task_statuses view.
-#[derive(Clone, Debug, Deserialize)]
+/// Latest recorded values. Consumers decide which facts are relevant to their operation.
+#[derive(Clone, Debug, sqlx::FromRow)]
 pub struct TaskCurrentState {
     pub intent: String,
     pub environment_name: String,
@@ -122,11 +126,28 @@ pub struct TaskCurrentState {
     pub execution_mode: TaskExecutionMode,
     pub operator_attention_level: TaskOperatorAttentionLevel,
     pub sandbox_id: Option<String>,
+    pub sandbox_available: bool,
     pub snapshot_path: Option<String>,
+    pub snapshot_available: bool,
     pub last_error: Option<String>,
     pub latest_turn_summary: Option<String>,
-    pub latest_operator_answer: Option<serde_json::Value>,
+    #[sqlx(json(nullable))]
+    pub latest_operator_answer: Option<TaskOperatorAnswer>,
     pub unread_operator_signal_count: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskOperatorAnswer {
+    pub signal_id: String,
+    pub answer: String,
+}
+
+impl fmt::Display for TaskOperatorAnswer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Preserve escaping when embedding an operator's answer in agent context.
+        let json = serde_json::to_string(self).map_err(|_| fmt::Error)?;
+        formatter.write_str(&json)
+    }
 }
 
 /// Semantic history written by Altitude's controllers, never directly by agents.
@@ -134,17 +155,24 @@ pub struct TaskCurrentState {
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum TaskHistoryEvent {
     IntentExpressed {
+        execution_status: TaskExecutionStatus,
+        execution_mode: TaskExecutionMode,
+        operator_attention_level: TaskOperatorAttentionLevel,
+        sandbox_available: bool,
+        snapshot_available: bool,
         intent: String,
         environment: DevelopmentEnvironment,
         agent_conversation_id: Option<String>,
     },
     SandboxProvisioned {
+        sandbox_available: bool,
         sandbox_id: String,
     },
     AgentRunStarted {
+        execution_status: TaskExecutionStatus,
         agent_run_id: String,
         sandbox_id: String,
-        mode: TaskExecutionMode,
+        execution_mode: TaskExecutionMode,
     },
     AgentRunEnded {
         agent_run_id: String,
@@ -181,19 +209,39 @@ pub enum TaskHistoryEvent {
         observation: ContributionObservation,
     },
     ExecutionPaused {
-        reason: TaskExecutionPauseReason,
+        execution_status: TaskExecutionStatus,
+        sandbox_available: bool,
+        snapshot_available: bool,
+        execution_pause_reason: TaskExecutionPauseReason,
         snapshot_path: String,
     },
     ExecutionRecovered {
+        execution_status: TaskExecutionStatus,
+        sandbox_available: bool,
+        snapshot_available: bool,
         snapshot_path: String,
     },
     TaskSnapshotSaved {
+        sandbox_available: bool,
+        snapshot_available: bool,
         snapshot_path: String,
     },
     ExecutionFailed {
+        execution_status: TaskExecutionStatus,
         error: String,
     },
-    TaskCompleted,
+    ExecutionQueued {
+        execution_status: TaskExecutionStatus,
+    },
+    SandboxRemoved {
+        sandbox_available: bool,
+    },
+    SnapshotRemoved {
+        snapshot_available: bool,
+    },
+    TaskCompleted {
+        execution_status: TaskExecutionStatus,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -209,9 +257,8 @@ pub enum TaskAgentRunOutcome {
 pub struct TaskAgentTurnContext {
     pub execution_status: TaskExecutionStatus,
     pub execution_mode: TaskExecutionMode,
-    pub operator_attention_level: TaskOperatorAttentionLevel,
     pub datetime: String,
-    pub latest_operator_answer: Option<serde_json::Value>,
+    pub latest_operator_answer: Option<TaskOperatorAnswer>,
     /// What the linked contributions currently look like outside Altitude.
     pub code_contribution_observations: Vec<ContributionObservation>,
 }
@@ -220,10 +267,9 @@ impl fmt::Display for TaskAgentTurnContext {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "execution_status={:?}; execution_mode={:?}; operator_attention_level={:?}; current_datetime={}; latest_operator_answer={}",
+            "execution_status={:?}; execution_mode={:?}; current_datetime={}; latest_operator_answer={}",
             self.execution_status,
             self.execution_mode,
-            self.operator_attention_level,
             self.datetime,
             self.latest_operator_answer
                 .as_ref()
@@ -260,27 +306,9 @@ impl Task {
         TaskAgentTurnContext {
             execution_status: TaskExecutionStatus::Running,
             execution_mode,
-            operator_attention_level: self.current_state.operator_attention_level.clone(),
             datetime: Local::now().to_rfc3339_opts(SecondsFormat::Secs, true),
             latest_operator_answer: self.current_state.latest_operator_answer.clone(),
             code_contribution_observations: self.code_contribution_observations.clone(),
         }
-    }
-
-    pub fn should_resume(&self) -> bool {
-        matches!(
-            self.current_state.execution_status,
-            TaskExecutionStatus::Pending | TaskExecutionStatus::Running
-        ) || (self.current_state.execution_status == TaskExecutionStatus::Paused
-            && self.current_state.execution_pause_reason
-                == Some(TaskExecutionPauseReason::ApplicationShutdown))
-    }
-
-    pub fn should_suspend(&self) -> bool {
-        self.current_state.sandbox_id.is_some()
-            && matches!(
-                self.current_state.execution_status,
-                TaskExecutionStatus::Running | TaskExecutionStatus::Failed
-            )
     }
 }

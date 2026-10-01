@@ -140,7 +140,7 @@ where
             .answer_operator_signal(signal_id, &answer)
             .await
             .map_err(TaskServiceError::Task)?;
-        if task.current_state.sandbox_id.is_none() {
+        if !task.current_state.sandbox_available {
             task = self.provision(task).await?;
         }
         self.start_autopilot_turn(
@@ -167,7 +167,7 @@ where
         &self,
         task: Task,
     ) -> Result<(Task, TaskAgentRun, CommandSession), TaskServiceError> {
-        let resume = task.current_state.snapshot_path.is_some();
+        let resume = task.current_state.snapshot_available;
         let task = self.provision(task).await?;
         let command = match task.agent_kind {
             Some(AgentKind::Claude) => {
@@ -191,12 +191,17 @@ where
 
     async fn provision(&self, task: Task) -> Result<Task, TaskServiceError> {
         let sandbox_id = format!("altitude-{}", Uuid::new_v4());
+        let snapshot_path = if task.current_state.snapshot_available {
+            task.current_state.snapshot_path.clone()
+        } else {
+            None
+        };
         let create = match task.agent_kind {
             Some(AgentKind::Claude) => {
                 self.isolation
                     .provision(
                         sandbox_id.clone(),
-                        task.current_state.snapshot_path.clone(),
+                        snapshot_path.clone(),
                         task.development_environment(),
                         vec![
                             self.claude.environment_recipe(),
@@ -207,10 +212,7 @@ where
             }
             None => {
                 self.isolation
-                    .create(
-                        sandbox_id.clone(),
-                        SandboxOptions::isolated(task.current_state.snapshot_path.clone()),
-                    )
+                    .create(sandbox_id.clone(), SandboxOptions::isolated(snapshot_path))
                     .await
             }
         };
@@ -222,6 +224,7 @@ where
             .record(
                 &task.id,
                 &[TaskHistoryEvent::SandboxProvisioned {
+                    sandbox_available: true,
                     sandbox_id: sandbox_id.clone(),
                 }],
             )
@@ -301,6 +304,9 @@ where
     /// unreachable or unauthenticated must not stop the task, so failures are
     /// logged and the turn proceeds with the state already recorded.
     async fn observe_code_contributions(&self, task: Task) -> Task {
+        if !task.current_state.sandbox_available {
+            return task;
+        }
         let Some(sandbox_id) = task.current_state.sandbox_id.clone() else {
             return task;
         };
@@ -377,7 +383,7 @@ where
         &self,
         mut task: Task,
     ) -> Result<(Task, TaskAgentRun, CommandSession), TaskServiceError> {
-        if task.current_state.sandbox_id.is_none() {
+        if !task.current_state.sandbox_available {
             task = self.provision(task).await?;
         }
         let conversation_id = self.claude_conversation(&task, true).await?;
@@ -408,9 +414,10 @@ where
             .record(
                 &task.id,
                 &[TaskHistoryEvent::AgentRunStarted {
+                    execution_status: TaskExecutionStatus::Running,
                     agent_run_id: agent_run.id.clone(),
                     sandbox_id: sandbox_id.clone(),
-                    mode,
+                    execution_mode: mode,
                 }],
             )
             .await?;
@@ -454,7 +461,10 @@ where
             &[
                 run_ended(agent_run, TaskAgentRunOutcome::AwaitingOperator, Some(0)),
                 TaskHistoryEvent::ExecutionPaused {
-                    reason: TaskExecutionPauseReason::AwaitingOperator,
+                    execution_status: TaskExecutionStatus::Paused,
+                    sandbox_available: false,
+                    snapshot_available: true,
+                    execution_pause_reason: TaskExecutionPauseReason::AwaitingOperator,
                     snapshot_path: snapshot_path.to_string_lossy().into_owned(),
                 },
             ],
@@ -480,26 +490,14 @@ where
         task: &Task,
         agent_run: &TaskAgentRun,
     ) -> Result<Task, TaskServiceError> {
-        if let Some(sandbox_id) = &task.current_state.sandbox_id
-            && let Err(error) = self.isolation.remove(sandbox_id.clone()).await
-        {
-            self.fail(task, error.to_string()).await?;
-            return Err(TaskServiceError::Isolation(error));
-        }
-        if let Some(snapshot_path) = &task.current_state.snapshot_path
-            && let Err(error) = self
-                .isolation
-                .remove_snapshot(PathBuf::from(snapshot_path))
-                .await
-        {
-            self.fail(task, error.to_string()).await?;
-            return Err(TaskServiceError::Isolation(error));
-        }
+        let task = self.release_resources(task).await?;
         self.record(
             &task.id,
             &[
                 run_ended(agent_run, TaskAgentRunOutcome::Completed, Some(0)),
-                TaskHistoryEvent::TaskCompleted,
+                TaskHistoryEvent::TaskCompleted {
+                    execution_status: TaskExecutionStatus::Completed,
+                },
             ],
         )
         .await
@@ -521,29 +519,64 @@ where
             &task.id,
             &[
                 run_ended(agent_run, TaskAgentRunOutcome::Failed, exit_code),
-                TaskHistoryEvent::ExecutionFailed { error },
+                TaskHistoryEvent::ExecutionFailed {
+                    execution_status: TaskExecutionStatus::Failed,
+                    error,
+                },
             ],
         )
         .await
     }
 
     pub async fn remove(&self, task: Task) -> Result<(), TaskServiceError> {
-        if let Some(sandbox_id) = task.current_state.sandbox_id {
-            self.isolation
-                .remove(sandbox_id)
-                .await
-                .map_err(TaskServiceError::Isolation)?;
-        }
-        if let Some(snapshot_path) = task.current_state.snapshot_path {
-            self.isolation
-                .remove_snapshot(PathBuf::from(snapshot_path))
-                .await
-                .map_err(TaskServiceError::Isolation)?;
-        }
+        self.release_resources(&task).await?;
         self.store
             .delete(&task.id)
             .await
             .map_err(TaskServiceError::Task)
+    }
+
+    async fn release_resources(&self, task: &Task) -> Result<Task, TaskServiceError> {
+        let mut task = task.clone();
+        if task.current_state.sandbox_available {
+            let id = task
+                .current_state
+                .sandbox_id
+                .clone()
+                .ok_or(TaskServiceError::Task(TaskError::MissingSandbox))?;
+            if let Err(error) = self.isolation.remove(id).await {
+                self.fail(&task, error.to_string()).await?;
+                return Err(TaskServiceError::Isolation(error));
+            }
+            task = self
+                .record(
+                    &task.id,
+                    &[TaskHistoryEvent::SandboxRemoved {
+                        sandbox_available: false,
+                    }],
+                )
+                .await?;
+        }
+        if task.current_state.snapshot_available {
+            let path = task
+                .current_state
+                .snapshot_path
+                .as_ref()
+                .expect("available snapshot has a recorded path");
+            if let Err(error) = self.isolation.remove_snapshot(PathBuf::from(path)).await {
+                self.fail(&task, error.to_string()).await?;
+                return Err(TaskServiceError::Isolation(error));
+            }
+            task = self
+                .record(
+                    &task.id,
+                    &[TaskHistoryEvent::SnapshotRemoved {
+                        snapshot_available: false,
+                    }],
+                )
+                .await?;
+        }
+        Ok(task)
     }
 
     pub async fn resume_all(
@@ -553,11 +586,13 @@ where
             Ok(tasks) => tasks,
             Err(error) => return vec![Err(error)],
         };
-        join_all(tasks.into_iter().filter(Task::should_resume).map(|task| {
+        join_all(tasks.into_iter().filter(should_resume).map(|task| {
             let service = self.clone();
             async move {
                 let mut task = task;
-                if let Some(sandbox_id) = &task.current_state.sandbox_id {
+                if let Some(sandbox_id) = &task.current_state.sandbox_id
+                    && task.current_state.sandbox_available
+                {
                     match service
                         .isolation
                         .suspend(
@@ -572,6 +607,9 @@ where
                                 .record_snapshot(
                                     &task,
                                     &[TaskHistoryEvent::ExecutionRecovered {
+                                        execution_status: TaskExecutionStatus::Pending,
+                                        sandbox_available: false,
+                                        snapshot_available: true,
                                         snapshot_path: path.to_string_lossy().into_owned(),
                                     }],
                                 )
@@ -595,7 +633,7 @@ where
     }
 
     pub async fn suspend_all(&self, tasks: Vec<Task>) -> Vec<Result<(), TaskServiceError>> {
-        join_all(tasks.into_iter().filter(Task::should_suspend).map(|task| {
+        join_all(tasks.into_iter().filter(should_suspend).map(|task| {
             let service = self.clone();
             async move {
                 let sandbox_id = task
@@ -616,10 +654,18 @@ where
                         let snapshot_path = path.to_string_lossy().into_owned();
                         let event =
                             if task.current_state.execution_status == TaskExecutionStatus::Failed {
-                                TaskHistoryEvent::TaskSnapshotSaved { snapshot_path }
+                                TaskHistoryEvent::TaskSnapshotSaved {
+                                    snapshot_path,
+                                    sandbox_available: false,
+                                    snapshot_available: true,
+                                }
                             } else {
                                 TaskHistoryEvent::ExecutionPaused {
-                                    reason: TaskExecutionPauseReason::ApplicationShutdown,
+                                    execution_status: TaskExecutionStatus::Paused,
+                                    sandbox_available: false,
+                                    snapshot_available: true,
+                                    execution_pause_reason:
+                                        TaskExecutionPauseReason::ApplicationShutdown,
                                     snapshot_path,
                                 }
                             };
@@ -645,6 +691,7 @@ where
     ) -> Result<Task, TaskServiceError> {
         let updated = self.record(&task.id, events).await?;
         if let Some(previous) = &task.current_state.snapshot_path
+            && task.current_state.snapshot_available
             && updated.current_state.snapshot_path.as_ref() != Some(previous)
             && let Err(error) = self
                 .isolation
@@ -658,8 +705,14 @@ where
 
     async fn fail(&self, task: &Task, error: String) -> Result<Task, TaskServiceError> {
         tracing::error!(task_id = %task.id, %error, "task execution failed");
-        self.record(&task.id, &[TaskHistoryEvent::ExecutionFailed { error }])
-            .await
+        self.record(
+            &task.id,
+            &[TaskHistoryEvent::ExecutionFailed {
+                execution_status: TaskExecutionStatus::Failed,
+                error,
+            }],
+        )
+        .await
     }
 
     async fn claude_conversation(
@@ -750,3 +803,21 @@ impl fmt::Display for TaskServiceError {
     }
 }
 impl Error for TaskServiceError {}
+
+// Execution policy consumes recorded values; the store does not infer these decisions.
+fn should_resume(task: &Task) -> bool {
+    matches!(
+        task.current_state.execution_status,
+        TaskExecutionStatus::Pending | TaskExecutionStatus::Running
+    ) || (task.current_state.execution_status == TaskExecutionStatus::Paused
+        && task.current_state.execution_pause_reason
+            == Some(TaskExecutionPauseReason::ApplicationShutdown))
+}
+
+fn should_suspend(task: &Task) -> bool {
+    task.current_state.sandbox_available
+        && matches!(
+            task.current_state.execution_status,
+            TaskExecutionStatus::Running | TaskExecutionStatus::Failed
+        )
+}

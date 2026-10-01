@@ -3,9 +3,9 @@ use std::io;
 use uuid::Uuid;
 
 use super::{
-    Task, TaskAgentRun, TaskAgentTurnReport, TaskCurrentState, TaskError, TaskExecutionPauseReason,
-    TaskExecutionStatus, TaskHistoryEvent, TaskOperatorAttentionLevel, TaskOperatorSignal,
-    TaskOperatorSignalKind,
+    Task, TaskAgentRun, TaskAgentTurnReport, TaskCurrentState, TaskError, TaskExecutionMode,
+    TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent, TaskOperatorAttentionLevel,
+    TaskOperatorSignal, TaskOperatorSignalKind,
 };
 use crate::development::DevelopmentEnvironment;
 use crate::{
@@ -14,14 +14,15 @@ use crate::{
     vcs::{CodeContribution, ContributionObservation},
 };
 
-// SQLx reads the JSON projection through Serde, sharing its enum spellings.
+// SQL returns the latest recorded properties without interpreting task lifecycle.
 #[derive(FromRow)]
 struct TaskRow {
     id: String,
     agent_kind: Option<AgentKind>,
     contributions: Json<Vec<CodeContribution>>,
     observations: Json<Vec<ContributionObservation>>,
-    state: Json<TaskCurrentState>,
+    #[sqlx(flatten)]
+    state: TaskCurrentState,
 }
 
 impl From<TaskRow> for Task {
@@ -31,7 +32,7 @@ impl From<TaskRow> for Task {
             agent_kind: row.agent_kind,
             code_contributions: row.contributions.0,
             code_contribution_observations: row.observations.0,
-            current_state: row.state.0,
+            current_state: row.state,
         }
     }
 }
@@ -49,30 +50,10 @@ impl TaskStore {
     }
 
     pub async fn list(&self) -> Result<Vec<Task>, TaskError> {
-        sqlx::query_as::<_, TaskRow>(
-            r#"
-            SELECT tasks.id, tasks.agent_kind, task_statuses.state,
-                COALESCE((
-                    SELECT json_group_array(json(contribution))
-                    FROM task_code_contributions
-                    WHERE task_id = tasks.id
-                ), json('[]')) AS contributions,
-                COALESCE((
-                    SELECT json_group_array(json(observation))
-                    FROM task_code_contribution_observations
-                    WHERE task_id = tasks.id
-                      AND sequence IN (
-                          SELECT MAX(sequence)
-                          FROM task_code_contribution_observations
-                          WHERE task_id = tasks.id
-                          GROUP BY json_extract(observation, '$.contribution_id')
-                      )
-                ), json('[]')) AS observations
-            FROM tasks
-            JOIN task_statuses ON task_statuses.task_id = tasks.id
-            ORDER BY last_event_sequence DESC
-        "#,
-        )
+        sqlx::query_as::<_, TaskRow>(concat!(
+            include_str!("read_task.sql"),
+            " ORDER BY last_event_sequence DESC"
+        ))
         .fetch_all(&self.pool)
         .await
         .map(|rows| rows.into_iter().map(Task::from).collect())
@@ -108,6 +89,11 @@ impl TaskStore {
             &mut transaction,
             &task_id,
             &[TaskHistoryEvent::IntentExpressed {
+                execution_status: TaskExecutionStatus::Pending,
+                execution_mode: TaskExecutionMode::Autopilot,
+                operator_attention_level: TaskOperatorAttentionLevel::Nominal,
+                sandbox_available: false,
+                snapshot_available: false,
                 intent,
                 environment,
                 agent_conversation_id,
@@ -140,35 +126,15 @@ impl TaskStore {
         transaction: &mut Transaction<'_, Sqlite>,
         task_id: &str,
     ) -> Result<Task, TaskError> {
-        sqlx::query_as::<_, TaskRow>(
-            r#"
-            SELECT tasks.id, tasks.agent_kind, task_statuses.state,
-                COALESCE((
-                    SELECT json_group_array(json(contribution))
-                    FROM task_code_contributions
-                    WHERE task_id = tasks.id
-                ), json('[]')) AS contributions,
-                COALESCE((
-                    SELECT json_group_array(json(observation))
-                    FROM task_code_contribution_observations
-                    WHERE task_id = tasks.id
-                      AND sequence IN (
-                          SELECT MAX(sequence)
-                          FROM task_code_contribution_observations
-                          WHERE task_id = tasks.id
-                          GROUP BY json_extract(observation, '$.contribution_id')
-                      )
-                ), json('[]')) AS observations
-            FROM tasks
-            JOIN task_statuses ON task_statuses.task_id = tasks.id
-            WHERE tasks.id = ?
-        "#,
-        )
+        sqlx::query_as::<_, TaskRow>(concat!(
+            include_str!("read_task.sql"),
+            " WHERE tasks.id = ?"
+        ))
         .bind(task_id)
         .fetch_one(&mut **transaction)
         .await
-        .map(Task::from)
         .map_err(TaskError::Database)
+        .map(Task::from)
     }
 
     async fn write_events(
@@ -442,7 +408,14 @@ impl TaskStore {
                 )));
             }
         };
-        Self::write_events(&mut transaction, &task_id, &[event]).await?;
+        let mut events = vec![event];
+        if answer.is_some() {
+            // Queue continuation durably with the answer so restart can pick it up.
+            events.push(TaskHistoryEvent::ExecutionQueued {
+                execution_status: TaskExecutionStatus::Pending,
+            });
+        }
+        Self::write_events(&mut transaction, &task_id, &events).await?;
         let task = Self::read_task(&mut transaction, &task_id).await?;
         transaction.commit().await.map_err(TaskError::Database)?;
         Ok(task)

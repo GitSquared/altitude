@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
     let config = Config::load()?;
-    let settings = config.load_or_create_settings()?;
+    let settings = config.load_or_create_settings();
     let _log_guard = logging::init(&config)?;
     tracing::info!("starting altitude");
     let mut terminal = ratatui::init();
@@ -82,8 +82,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             event_loop,
             tasks,
             config.clone(),
-            settings.environments.clone(),
-            settings.default_environment.clone(),
+            settings,
             task_rows,
             task_execution_updates,
         )

@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    io,
+    io, mem,
     time::Duration,
 };
 
@@ -16,7 +16,7 @@ use ratatui::DefaultTerminal;
 use tokio::{signal::unix::Signal, sync::mpsc, time};
 
 use crate::{
-    config::{Config, Settings, SettingsError},
+    config::{Config, Settings, SettingsError, SettingsFile},
     development::DevelopmentEnvironment,
     isolation::{IsolationEngine, OutputStream},
     tasks::{
@@ -74,6 +74,7 @@ struct App {
     pending_command: Option<String>,
     /// Where `config.toml` lives, so the manage view can persist changes.
     config: Config,
+    settings_file: Option<SettingsFile>,
     open_environment_settings: bool,
     settings_prompt: Option<SettingsPrompt>,
     /// Name collected by the add-environment chain, held until its setup
@@ -85,8 +86,7 @@ impl App {
     fn new(
         tasks: Vec<Task>,
         config: Config,
-        environments: Vec<DevelopmentEnvironment>,
-        default_environment: String,
+        settings: Result<SettingsFile, SettingsError>,
     ) -> Self {
         let latest_output = tasks
             .iter()
@@ -97,10 +97,28 @@ impl App {
                     .map(|summary| (task.id.clone(), summary))
             })
             .collect();
+        let (settings_file, settings_error) = match settings {
+            Ok(file) => (Some(file), None),
+            Err(error) => (
+                None,
+                Some(format!(
+                    "Settings unavailable. Fix {}, then press s to reload.\n{error}",
+                    config.settings_path().display()
+                )),
+            ),
+        };
+        let environments = settings_file
+            .as_ref()
+            .map(|file| file.settings.environments.clone())
+            .unwrap_or_default();
+        let default_environment = settings_file
+            .as_ref()
+            .map(|file| file.settings.default_environment.clone())
+            .unwrap_or_default();
         Self {
             tasks,
             latest_output,
-            notice: None,
+            notice: settings_error,
             removing: HashSet::new(),
             selected: 0,
             prompt: None,
@@ -116,6 +134,7 @@ impl App {
             open_environment_picker: false,
             pending_command: None,
             config,
+            settings_file,
             open_environment_settings: false,
             settings_prompt: None,
             pending_environment_name: None,
@@ -188,12 +207,34 @@ impl App {
         }
     }
 
-    /// Persist the environment configuration.
-    ///
-    /// The TUI is the only writer of `config.toml`, so the file follows what was
-    /// changed here. Hand edits are read at startup.
-    fn write_settings(&self) -> Result<(), SettingsError> {
-        self.config.save_settings(&Settings {
+    fn reload_settings(&mut self) -> bool {
+        match self.config.load_or_create_settings() {
+            Ok(file) => {
+                self.environments = file.settings.environments.clone();
+                self.default_environment = file.settings.default_environment.clone();
+                self.settings_file = Some(file);
+                self.notice = None;
+                true
+            }
+            Err(error) => {
+                let message = format!(
+                    "Settings unavailable. Fix {}, then press s to reload.\n{error}",
+                    self.config.settings_path().display()
+                );
+                self.settings_file = None;
+                self.environments.clear();
+                self.default_environment.clear();
+                self.notice = Some(message);
+                false
+            }
+        }
+    }
+
+    fn write_settings(&mut self) -> Result<(), SettingsError> {
+        let file = self.settings_file.as_mut().ok_or_else(|| {
+            SettingsError::Invalid("fix and reload the settings file first".into())
+        })?;
+        file.save(Settings {
             default_environment: self.default_environment.clone(),
             environments: self.environments.clone(),
         })
@@ -315,8 +356,7 @@ pub async fn run<E>(
     event_loop: TaskEventLoop<E>,
     task_service: TaskService<E>,
     config: Config,
-    environments: Vec<DevelopmentEnvironment>,
-    default_environment: String,
+    settings: Result<SettingsFile, SettingsError>,
     tasks: Vec<Task>,
     task_execution_updates: mpsc::UnboundedReceiver<TaskExecutionUpdate>,
 ) -> io::Result<()>
@@ -330,8 +370,7 @@ where
         event_loop.clone(),
         task_service,
         config,
-        environments,
-        default_environment,
+        settings,
         tasks,
         task_execution_updates,
     )
@@ -349,8 +388,7 @@ async fn run_loop<E>(
     event_loop: TaskEventLoop<E>,
     task_service: TaskService<E>,
     config: Config,
-    environments: Vec<DevelopmentEnvironment>,
-    default_environment: String,
+    settings: Result<SettingsFile, SettingsError>,
     tasks: Vec<Task>,
     mut task_execution_updates: mpsc::UnboundedReceiver<TaskExecutionUpdate>,
 ) -> io::Result<()>
@@ -361,7 +399,7 @@ where
     let mut events = EventStream::new();
     let mut refresh = time::interval(Duration::from_secs(2));
     let mut shell_notice = time::interval(Duration::from_millis(100));
-    let mut app = App::new(tasks, config, environments, default_environment);
+    let mut app = App::new(tasks, config, settings);
     let mut mouse_captured = false;
     loop {
         if mouse_captured != app.open_shell.is_some() {
@@ -593,8 +631,7 @@ where
             }
             KeyCode::Enter => {
                 if let Some(environment) = app.chosen_environment() {
-                    let previous =
-                        std::mem::replace(&mut app.default_environment, environment.name);
+                    let previous = mem::replace(&mut app.default_environment, environment.name);
                     if let Err(error) = app.write_settings() {
                         app.default_environment = previous;
                         app.notice = Some(error.to_string());
@@ -677,8 +714,15 @@ where
     match key.code {
         KeyCode::Char('q') => return Ok(true),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
-        KeyCode::Char('c') => app.prompt = Some(Prompt::new("what should Claude do?")),
+        KeyCode::Char('c') => {
+            if app.reload_settings() {
+                app.prompt = Some(Prompt::new("what should Claude do?"));
+            }
+        }
         KeyCode::Char('s') => {
+            if !app.reload_settings() {
+                return Ok(false);
+            }
             app.selected_environment = app
                 .environments
                 .iter()

@@ -228,7 +228,7 @@ where
         let tasks = self.list().await?;
         let suspending: Vec<_> = tasks
             .iter()
-            .filter(|task| task.should_suspend())
+            .filter(|task| super::should_suspend(task))
             .map(|task| task.id.clone())
             .collect();
         self.suspending

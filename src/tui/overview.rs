@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Constraint, HorizontalAlignment, Layout, Rect},
     style::{Style, Stylize},
     text::Line,
-    widgets::{Block, BorderType, Padding, Paragraph},
+    widgets::{Block, BorderType, Padding, Paragraph, Wrap},
 };
 
 use crate::tasks::{
@@ -20,9 +20,17 @@ pub fn draw(
     latest_output: &HashMap<String, String>,
     notice: Option<&str>,
 ) {
-    let [header, body, footer] = Layout::vertical([
+    let message_width = usize::from(frame.area().width.saturating_sub(2).max(1));
+    let message_height = notice.map_or(0, |text| {
+        text.lines()
+            .map(|line| line.chars().count().div_ceil(message_width).max(1))
+            .sum::<usize>()
+            .min(6) as u16
+    });
+    let [header, body, message, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
+        Constraint::Length(message_height),
         Constraint::Length(1),
     ])
     .margin(1)
@@ -39,12 +47,17 @@ pub fn draw(
     draw_tasks(frame, body, tasks, selected, latest_output);
 
     if let Some(notice) = notice {
-        frame.render_widget(Line::from(notice).red(), footer);
+        frame.render_widget(
+            Paragraph::new(notice).red().wrap(Wrap { trim: false }),
+            message,
+        );
     }
     frame.render_widget(
-        Line::from("c create · i info · h/j select · enter shell · delete remove · q quit")
-            .dim()
-            .alignment(HorizontalAlignment::Right),
+        Line::from(
+            "c create · s settings · i info · h/j select · enter shell · delete remove · q quit",
+        )
+        .dim()
+        .alignment(HorizontalAlignment::Right),
         footer,
     );
 }
@@ -105,14 +118,20 @@ fn draw_tasks(
                 .red()
             }
         };
-        match task.current_state.operator_attention_level {
-            TaskOperatorAttentionLevel::Alarm => {
-                status.spans.push(" · ALARM".red().bold());
+        // A previous report's request is not a current interruption after execution resumes.
+        if task.current_state.execution_status == TaskExecutionStatus::Paused
+            && task.current_state.execution_pause_reason
+                == Some(TaskExecutionPauseReason::AwaitingOperator)
+        {
+            match task.current_state.operator_attention_level {
+                TaskOperatorAttentionLevel::Alarm => {
+                    status.spans.push(" · ALARM".red().bold());
+                }
+                TaskOperatorAttentionLevel::Requested => {
+                    status.spans.push(" · attention required".yellow().bold());
+                }
+                TaskOperatorAttentionLevel::Nominal => {}
             }
-            TaskOperatorAttentionLevel::Requested => {
-                status.spans.push(" · attention required".yellow().bold());
-            }
-            TaskOperatorAttentionLevel::Nominal => {}
         }
         if task.current_state.unread_operator_signal_count > 0 {
             status.spans.push(
