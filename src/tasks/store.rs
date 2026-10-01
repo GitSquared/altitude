@@ -1,11 +1,10 @@
 use sqlx::{FromRow, Sqlite, SqlitePool, Transaction, types::Json};
-use std::io;
 use uuid::Uuid;
 
 use super::{
-    Task, TaskAgentRun, TaskAgentTurnReport, TaskCurrentState, TaskError, TaskExecutionMode,
-    TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent, TaskOperatorAttentionLevel,
-    TaskOperatorSignal, TaskOperatorSignalKind,
+    Task, TaskAgentRun, TaskAgentTurnReport, TaskError, TaskExecutionMode,
+    TaskExecutionPauseReason, TaskExecutionStatus, TaskFacts, TaskHistoryEvent,
+    TaskOperatorAttentionLevel, TaskOperatorSignal, TaskOperatorSignalKind,
 };
 use crate::development::DevelopmentEnvironment;
 use crate::{
@@ -22,7 +21,7 @@ struct TaskRow {
     contributions: Json<Vec<CodeContribution>>,
     observations: Json<Vec<ContributionObservation>>,
     #[sqlx(flatten)]
-    state: TaskCurrentState,
+    facts: TaskFacts,
 }
 
 impl From<TaskRow> for Task {
@@ -32,7 +31,7 @@ impl From<TaskRow> for Task {
             agent_kind: row.agent_kind,
             code_contributions: row.contributions.0,
             code_contribution_observations: row.observations.0,
-            current_state: row.state,
+            facts: row.facts,
         }
     }
 }
@@ -377,15 +376,13 @@ impl TaskStore {
         .map_err(TaskError::Database)?;
         if answer.is_some() {
             let task = Self::read_task(&mut transaction, &task_id).await?;
-            if task.current_state.execution_status != TaskExecutionStatus::Paused
-                || task.current_state.execution_pause_reason
+            if task.facts.execution_status != TaskExecutionStatus::Paused
+                || task.facts.execution_pause_reason
                     != Some(TaskExecutionPauseReason::AwaitingOperator)
             {
-                return Err(TaskError::HistoryData(serde_json::Error::io(
-                    io::Error::other(
-                        "wait until the task is paused for the operator before answering",
-                    ),
-                )));
+                return Err(TaskError::OperationRejected(
+                    "wait until the task is paused for the operator before answering",
+                ));
             }
         }
         let event = match (kind.0, answer) {
@@ -401,11 +398,9 @@ impl TaskStore {
                 }
             }
             _ => {
-                return Err(TaskError::HistoryData(serde_json::Error::io(
-                    io::Error::other(
-                        "updates are acknowledged; decisions and reviews are answered",
-                    ),
-                )));
+                return Err(TaskError::OperationRejected(
+                    "updates are acknowledged; decisions and reviews are answered",
+                ));
             }
         };
         let mut events = vec![event];

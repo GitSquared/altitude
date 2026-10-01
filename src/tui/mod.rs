@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    io, mem,
+    io,
     time::Duration,
 };
 
@@ -16,7 +16,7 @@ use ratatui::DefaultTerminal;
 use tokio::{signal::unix::Signal, sync::mpsc, time};
 
 use crate::{
-    config::{Config, Settings, SettingsError, SettingsFile},
+    config::{Config, SettingsError, SettingsFile},
     development::DevelopmentEnvironment,
     isolation::{IsolationEngine, OutputStream},
     tasks::{
@@ -63,10 +63,6 @@ struct App {
     selected_operator_signal: usize,
     open_operator_signals: bool,
     answering_operator_signal: Option<String>,
-    /// Every configured environment, in configuration order.
-    environments: Vec<DevelopmentEnvironment>,
-    /// Name of the configured default, used to mark it in the picker.
-    default_environment: String,
     selected_environment: usize,
     /// True while the picker is asking which environment a new task uses.
     open_environment_picker: bool,
@@ -91,7 +87,7 @@ impl App {
         let latest_output = tasks
             .iter()
             .filter_map(|task| {
-                task.current_state
+                task.facts
                     .latest_turn_summary
                     .clone()
                     .map(|summary| (task.id.clone(), summary))
@@ -107,14 +103,6 @@ impl App {
                 )),
             ),
         };
-        let environments = settings_file
-            .as_ref()
-            .map(|file| file.settings.environments.clone())
-            .unwrap_or_default();
-        let default_environment = settings_file
-            .as_ref()
-            .map(|file| file.settings.default_environment.clone())
-            .unwrap_or_default();
         Self {
             tasks,
             latest_output,
@@ -128,8 +116,6 @@ impl App {
             selected_operator_signal: 0,
             open_operator_signals: false,
             answering_operator_signal: None,
-            environments,
-            default_environment,
             selected_environment: 0,
             open_environment_picker: false,
             pending_command: None,
@@ -161,12 +147,26 @@ impl App {
         }
     }
 
+    fn environments(&self) -> &[DevelopmentEnvironment] {
+        self.settings_file
+            .as_ref()
+            .map(|file| file.settings().environments.as_slice())
+            .unwrap_or_default()
+    }
+
+    fn default_environment(&self) -> &str {
+        self.settings_file
+            .as_ref()
+            .map(|file| file.settings().default_environment.as_str())
+            .unwrap_or_default()
+    }
+
     /// The only configured environment, when there is exactly one.
     ///
     /// A single environment is not a decision, so the picker is skipped rather
     /// than shown with one row.
     fn single_environment(&self) -> Option<DevelopmentEnvironment> {
-        match self.environments.as_slice() {
+        match self.environments() {
             [environment] => Some(environment.clone()),
             _ => None,
         }
@@ -178,12 +178,12 @@ impl App {
     /// single Enter.
     fn hold_command_for_environment_pick(&mut self, command: String) {
         self.selected_environment = self
-            .environments
+            .environments()
             .iter()
             .position(|environment| {
                 environment
                     .name
-                    .eq_ignore_ascii_case(&self.default_environment)
+                    .eq_ignore_ascii_case(self.default_environment())
             })
             .unwrap_or(0);
         self.pending_command = Some(command);
@@ -191,27 +191,25 @@ impl App {
     }
 
     fn chosen_environment(&self) -> Option<DevelopmentEnvironment> {
-        self.environments.get(self.selected_environment).cloned()
+        self.environments().get(self.selected_environment).cloned()
     }
 
     fn select_next_environment(&mut self) {
-        if !self.environments.is_empty() {
-            self.selected_environment = (self.selected_environment + 1) % self.environments.len();
+        if !self.environments().is_empty() {
+            self.selected_environment = (self.selected_environment + 1) % self.environments().len();
         }
     }
 
     fn select_previous_environment(&mut self) {
-        if !self.environments.is_empty() {
-            self.selected_environment =
-                (self.selected_environment + self.environments.len() - 1) % self.environments.len();
+        if !self.environments().is_empty() {
+            self.selected_environment = (self.selected_environment + self.environments().len() - 1)
+                % self.environments().len();
         }
     }
 
     fn reload_settings(&mut self) -> bool {
         match self.config.load_or_create_settings() {
             Ok(file) => {
-                self.environments = file.settings.environments.clone();
-                self.default_environment = file.settings.default_environment.clone();
                 self.settings_file = Some(file);
                 self.notice = None;
                 true
@@ -222,22 +220,10 @@ impl App {
                     self.config.settings_path().display()
                 );
                 self.settings_file = None;
-                self.environments.clear();
-                self.default_environment.clear();
                 self.notice = Some(message);
                 false
             }
         }
-    }
-
-    fn write_settings(&mut self) -> Result<(), SettingsError> {
-        let file = self.settings_file.as_mut().ok_or_else(|| {
-            SettingsError::Invalid("fix and reload the settings file first".into())
-        })?;
-        file.save(Settings {
-            default_environment: self.default_environment.clone(),
-            environments: self.environments.clone(),
-        })
     }
 
     /// Continue the add-environment prompt chain.
@@ -256,27 +242,17 @@ impl App {
                     name,
                     setup_command: input,
                 };
-                // Reject a bad name before it reaches the list, so the overlay
-                // never shows an environment that cannot be saved.
-                if let Err(error) = environment.validate() {
-                    self.notice = Some(error.to_string());
+                let Some(file) = self.settings_file.as_mut() else {
                     return;
-                }
-                let previous_default = self.default_environment.clone();
-                // An empty configuration has no default to inherit, so the first
-                // environment added becomes it.
-                if self.environments.is_empty() {
-                    self.default_environment = environment.name.clone();
-                }
-                self.environments.push(environment);
-                self.selected_environment = self.environments.len() - 1;
-                if let Err(error) = self.write_settings() {
-                    // Keep the list and the file consistent: a configuration the
-                    // file rejected must not linger on screen.
-                    self.environments.pop();
-                    self.selected_environment = self.selected_environment.saturating_sub(1);
-                    self.default_environment = previous_default;
-                    self.notice = Some(error.to_string());
+                };
+                let mut proposed = file.settings().clone();
+                proposed.environments.push(environment);
+                match file.save(proposed) {
+                    Ok(()) => {
+                        self.selected_environment = file.settings().environments.len() - 1;
+                        self.notice = None;
+                    }
+                    Err(error) => self.notice = Some(error.to_string()),
                 }
             }
         }
@@ -428,8 +404,8 @@ where
                 environment_picker::draw(
                     frame,
                     environment_picker::Purpose::NewTask,
-                    &app.environments,
-                    &app.default_environment,
+                    app.environments(),
+                    app.default_environment(),
                     app.selected_environment,
                 );
             }
@@ -437,8 +413,8 @@ where
                 environment_picker::draw(
                     frame,
                     environment_picker::Purpose::Manage,
-                    &app.environments,
-                    &app.default_environment,
+                    app.environments(),
+                    app.default_environment(),
                     app.selected_environment,
                 );
             }
@@ -526,9 +502,9 @@ fn copy_to_clipboard(text: String) -> Result<(), arboard::Error> {
 
 fn set_error(app: &mut App, id: &str, error: TaskServiceError) {
     if let Some(task) = app.tasks.iter_mut().find(|task| task.id == id) {
-        task.current_state.execution_status = TaskExecutionStatus::Failed;
-        task.current_state.execution_pause_reason = None;
-        task.current_state.last_error = Some(error.to_string());
+        task.facts.execution_status = TaskExecutionStatus::Failed;
+        task.facts.execution_pause_reason = None;
+        task.facts.last_error = Some(error.to_string());
     }
 }
 
@@ -597,7 +573,7 @@ where
                     app.continue_settings_prompt(step, command);
                 } else if let Some(environment) = app.single_environment() {
                     event_loop.create_claude(command, environment);
-                } else if app.environments.is_empty() {
+                } else if app.environments().is_empty() {
                     app.notice = Some("no environments are configured".into());
                 } else {
                     app.hold_command_for_environment_pick(command);
@@ -630,11 +606,14 @@ where
                 app.prompt = Some(Prompt::new("new environment name"));
             }
             KeyCode::Enter => {
-                if let Some(environment) = app.chosen_environment() {
-                    let previous = mem::replace(&mut app.default_environment, environment.name);
-                    if let Err(error) = app.write_settings() {
-                        app.default_environment = previous;
-                        app.notice = Some(error.to_string());
+                if let Some(environment) = app.chosen_environment()
+                    && let Some(file) = app.settings_file.as_mut()
+                {
+                    let mut proposed = file.settings().clone();
+                    proposed.default_environment = environment.name;
+                    match file.save(proposed) {
+                        Ok(()) => app.notice = None,
+                        Err(error) => app.notice = Some(error.to_string()),
                     }
                 }
             }
@@ -724,12 +703,12 @@ where
                 return Ok(false);
             }
             app.selected_environment = app
-                .environments
+                .environments()
                 .iter()
                 .position(|environment| {
                     environment
                         .name
-                        .eq_ignore_ascii_case(&app.default_environment)
+                        .eq_ignore_ascii_case(app.default_environment())
                 })
                 .unwrap_or(0);
             app.open_environment_settings = true;
@@ -765,21 +744,18 @@ where
         KeyCode::Enter => {
             if let Some(task) = app.selected_task() {
                 if matches!(
-                    task.current_state.execution_status,
+                    task.facts.execution_status,
                     TaskExecutionStatus::Paused | TaskExecutionStatus::Failed
                 ) {
                     event_loop.start_operator_control(task);
                     app.notice = Some("restoring Claude in the terminal…".into());
                     return Ok(false);
                 }
-                if !matches!(
-                    task.current_state.execution_status,
-                    TaskExecutionStatus::Running
-                ) {
+                if !matches!(task.facts.execution_status, TaskExecutionStatus::Running) {
                     return Ok(false);
                 }
                 if matches!(
-                    task.current_state.execution_mode,
+                    task.facts.execution_mode,
                     TaskExecutionMode::Autopilot | TaskExecutionMode::AutopilotReport
                 ) {
                     event_loop.take_control(&task.id);

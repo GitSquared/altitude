@@ -140,7 +140,7 @@ where
             .answer_operator_signal(signal_id, &answer)
             .await
             .map_err(TaskServiceError::Task)?;
-        if !task.current_state.sandbox_available {
+        if !task.facts.sandbox_available {
             task = self.provision(task).await?;
         }
         self.start_autopilot_turn(
@@ -167,7 +167,7 @@ where
         &self,
         task: Task,
     ) -> Result<(Task, TaskAgentRun, CommandSession), TaskServiceError> {
-        let resume = task.current_state.snapshot_available;
+        let resume = task.facts.snapshot_available;
         let task = self.provision(task).await?;
         let command = match task.agent_kind {
             Some(AgentKind::Claude) => {
@@ -177,13 +177,13 @@ where
                     if resume {
                         "Resume the task and continue making progress."
                     } else {
-                        &task.current_state.intent
+                        &task.facts.intent
                     },
                     &task.turn_context(TaskExecutionMode::Autopilot),
                     resume,
                 )
             }
-            None => task.current_state.intent.clone(),
+            None => task.facts.intent.clone(),
         };
         self.launch(task, command, TaskExecutionMode::Autopilot)
             .await
@@ -191,8 +191,8 @@ where
 
     async fn provision(&self, task: Task) -> Result<Task, TaskServiceError> {
         let sandbox_id = format!("altitude-{}", Uuid::new_v4());
-        let snapshot_path = if task.current_state.snapshot_available {
-            task.current_state.snapshot_path.clone()
+        let snapshot_path = if task.facts.snapshot_available {
+            task.facts.snapshot_path.clone()
         } else {
             None
         };
@@ -304,10 +304,10 @@ where
     /// unreachable or unauthenticated must not stop the task, so failures are
     /// logged and the turn proceeds with the state already recorded.
     async fn observe_code_contributions(&self, task: Task) -> Task {
-        if !task.current_state.sandbox_available {
+        if !task.facts.sandbox_available {
             return task;
         }
-        let Some(sandbox_id) = task.current_state.sandbox_id.clone() else {
+        let Some(sandbox_id) = task.facts.sandbox_id.clone() else {
             return task;
         };
         let github = GitHub;
@@ -383,7 +383,7 @@ where
         &self,
         mut task: Task,
     ) -> Result<(Task, TaskAgentRun, CommandSession), TaskServiceError> {
-        if !task.current_state.sandbox_available {
+        if !task.facts.sandbox_available {
             task = self.provision(task).await?;
         }
         let conversation_id = self.claude_conversation(&task, true).await?;
@@ -402,7 +402,7 @@ where
         mode: TaskExecutionMode,
     ) -> Result<(Task, TaskAgentRun, CommandSession), TaskServiceError> {
         let sandbox_id = task
-            .current_state
+            .facts
             .sandbox_id
             .clone()
             .ok_or(TaskServiceError::Task(TaskError::MissingSandbox))?;
@@ -437,7 +437,7 @@ where
         agent_run: &TaskAgentRun,
     ) -> Result<Task, TaskServiceError> {
         let sandbox_id = task
-            .current_state
+            .facts
             .sandbox_id
             .clone()
             .ok_or(TaskServiceError::Task(TaskError::MissingSandbox))?;
@@ -538,9 +538,9 @@ where
 
     async fn release_resources(&self, task: &Task) -> Result<Task, TaskServiceError> {
         let mut task = task.clone();
-        if task.current_state.sandbox_available {
+        if task.facts.sandbox_available {
             let id = task
-                .current_state
+                .facts
                 .sandbox_id
                 .clone()
                 .ok_or(TaskServiceError::Task(TaskError::MissingSandbox))?;
@@ -557,9 +557,9 @@ where
                 )
                 .await?;
         }
-        if task.current_state.snapshot_available {
+        if task.facts.snapshot_available {
             let path = task
-                .current_state
+                .facts
                 .snapshot_path
                 .as_ref()
                 .expect("available snapshot has a recorded path");
@@ -590,8 +590,8 @@ where
             let service = self.clone();
             async move {
                 let mut task = task;
-                if let Some(sandbox_id) = &task.current_state.sandbox_id
-                    && task.current_state.sandbox_available
+                if let Some(sandbox_id) = &task.facts.sandbox_id
+                    && task.facts.sandbox_available
                 {
                     match service
                         .isolation
@@ -637,7 +637,7 @@ where
             let service = self.clone();
             async move {
                 let sandbox_id = task
-                    .current_state
+                    .facts
                     .sandbox_id
                     .clone()
                     .expect("suspendable tasks have a sandbox");
@@ -652,23 +652,22 @@ where
                 {
                     Ok(path) => {
                         let snapshot_path = path.to_string_lossy().into_owned();
-                        let event =
-                            if task.current_state.execution_status == TaskExecutionStatus::Failed {
-                                TaskHistoryEvent::TaskSnapshotSaved {
-                                    snapshot_path,
-                                    sandbox_available: false,
-                                    snapshot_available: true,
-                                }
-                            } else {
-                                TaskHistoryEvent::ExecutionPaused {
-                                    execution_status: TaskExecutionStatus::Paused,
-                                    sandbox_available: false,
-                                    snapshot_available: true,
-                                    execution_pause_reason:
-                                        TaskExecutionPauseReason::ApplicationShutdown,
-                                    snapshot_path,
-                                }
-                            };
+                        let event = if task.facts.execution_status == TaskExecutionStatus::Failed {
+                            TaskHistoryEvent::TaskSnapshotSaved {
+                                snapshot_path,
+                                sandbox_available: false,
+                                snapshot_available: true,
+                            }
+                        } else {
+                            TaskHistoryEvent::ExecutionPaused {
+                                execution_status: TaskExecutionStatus::Paused,
+                                sandbox_available: false,
+                                snapshot_available: true,
+                                execution_pause_reason:
+                                    TaskExecutionPauseReason::ApplicationShutdown,
+                                snapshot_path,
+                            }
+                        };
                         service.record_snapshot(&task, &[event]).await?;
                         Ok(())
                     }
@@ -690,9 +689,9 @@ where
         events: &[TaskHistoryEvent],
     ) -> Result<Task, TaskServiceError> {
         let updated = self.record(&task.id, events).await?;
-        if let Some(previous) = &task.current_state.snapshot_path
-            && task.current_state.snapshot_available
-            && updated.current_state.snapshot_path.as_ref() != Some(previous)
+        if let Some(previous) = &task.facts.snapshot_path
+            && task.facts.snapshot_available
+            && updated.facts.snapshot_path.as_ref() != Some(previous)
             && let Err(error) = self
                 .isolation
                 .remove_snapshot(PathBuf::from(previous))
@@ -720,7 +719,7 @@ where
         task: &Task,
         require_transcript: bool,
     ) -> Result<String, TaskServiceError> {
-        let Some(conversation_id) = task.current_state.agent_conversation_id.as_deref() else {
+        let Some(conversation_id) = task.facts.agent_conversation_id.as_deref() else {
             return self
                 .conversation_failure(task, "Claude task has no conversation ID")
                 .await;
@@ -730,7 +729,7 @@ where
         }
         let transcript_path = self.claude.conversation_transcript_path(conversation_id);
         let sandbox_id = task
-            .current_state
+            .facts
             .sandbox_id
             .clone()
             .ok_or(TaskServiceError::Task(TaskError::MissingSandbox))?;
@@ -772,6 +771,7 @@ fn run_ended(
 pub enum TaskError {
     Database(sqlx::Error),
     HistoryData(serde_json::Error),
+    OperationRejected(&'static str),
     MissingSandbox,
 }
 impl fmt::Display for TaskError {
@@ -779,6 +779,7 @@ impl fmt::Display for TaskError {
         match self {
             Self::Database(error) => write!(formatter, "task database error: {error}"),
             Self::HistoryData(error) => write!(formatter, "invalid task history data: {error}"),
+            Self::OperationRejected(reason) => formatter.write_str(reason),
             Self::MissingSandbox => formatter.write_str("task has no running sandbox"),
         }
     }
@@ -807,17 +808,16 @@ impl Error for TaskServiceError {}
 // Execution policy consumes recorded values; the store does not infer these decisions.
 fn should_resume(task: &Task) -> bool {
     matches!(
-        task.current_state.execution_status,
+        task.facts.execution_status,
         TaskExecutionStatus::Pending | TaskExecutionStatus::Running
-    ) || (task.current_state.execution_status == TaskExecutionStatus::Paused
-        && task.current_state.execution_pause_reason
-            == Some(TaskExecutionPauseReason::ApplicationShutdown))
+    ) || (task.facts.execution_status == TaskExecutionStatus::Paused
+        && task.facts.execution_pause_reason == Some(TaskExecutionPauseReason::ApplicationShutdown))
 }
 
 fn should_suspend(task: &Task) -> bool {
-    task.current_state.sandbox_available
+    task.facts.sandbox_available
         && matches!(
-            task.current_state.execution_status,
+            task.facts.execution_status,
             TaskExecutionStatus::Running | TaskExecutionStatus::Failed
         )
 }

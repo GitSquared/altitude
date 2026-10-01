@@ -91,27 +91,23 @@ fn draw_tasks(
 
     for (index, (task, area)) in tasks.iter().zip(cards.iter()).enumerate() {
         let selected = index == selected;
-        let mut status = match &task.current_state.execution_status {
+        let mut status = match &task.facts.execution_status {
             TaskExecutionStatus::Pending => Line::from("pending").yellow(),
-            TaskExecutionStatus::Running => Line::from(match task.current_state.execution_mode {
+            TaskExecutionStatus::Running => Line::from(match task.facts.execution_mode {
                 TaskExecutionMode::Autopilot => "autopilot · working",
                 TaskExecutionMode::AutopilotReport => "autopilot · reporting",
                 TaskExecutionMode::Operator => "operator override",
             })
             .green(),
-            TaskExecutionStatus::Paused => {
-                Line::from(match task.current_state.execution_pause_reason {
-                    Some(TaskExecutionPauseReason::AwaitingOperator) => {
-                        "paused · awaiting operator"
-                    }
-                    Some(TaskExecutionPauseReason::ApplicationShutdown) => "paused · app stopped",
-                    None => "paused",
-                })
-                .yellow()
-            }
+            TaskExecutionStatus::Paused => Line::from(match task.facts.execution_pause_reason {
+                Some(TaskExecutionPauseReason::AwaitingOperator) => "paused · awaiting operator",
+                Some(TaskExecutionPauseReason::ApplicationShutdown) => "paused · app stopped",
+                None => "paused",
+            })
+            .yellow(),
             TaskExecutionStatus::Completed => Line::from("completed").dim(),
             TaskExecutionStatus::Failed => {
-                Line::from(task.current_state.last_error.as_deref().map_or_else(
+                Line::from(task.facts.last_error.as_deref().map_or_else(
                     || "execution failed".to_owned(),
                     |error| format!("execution failed · {error}"),
                 ))
@@ -119,11 +115,10 @@ fn draw_tasks(
             }
         };
         // A previous report's request is not a current interruption after execution resumes.
-        if task.current_state.execution_status == TaskExecutionStatus::Paused
-            && task.current_state.execution_pause_reason
-                == Some(TaskExecutionPauseReason::AwaitingOperator)
+        if task.facts.execution_status == TaskExecutionStatus::Paused
+            && task.facts.execution_pause_reason == Some(TaskExecutionPauseReason::AwaitingOperator)
         {
-            match task.current_state.operator_attention_level {
+            match task.facts.operator_attention_level {
                 TaskOperatorAttentionLevel::Alarm => {
                     status.spans.push(" · ALARM".red().bold());
                 }
@@ -133,9 +128,9 @@ fn draw_tasks(
                 TaskOperatorAttentionLevel::Nominal => {}
             }
         }
-        if task.current_state.unread_operator_signal_count > 0 {
+        if task.facts.unread_operator_signal_count > 0 {
             status.spans.push(
-                format!(" · ● {}", task.current_state.unread_operator_signal_count)
+                format!(" · ● {}", task.facts.unread_operator_signal_count)
                     .cyan()
                     .bold(),
             );
@@ -162,7 +157,7 @@ fn draw_tasks(
                 .style(style)
                 .block(
                     Block::bordered()
-                        .title(format!(" {} ", task.current_state.intent))
+                        .title(format!(" {} ", task.facts.intent))
                         .border_type(BorderType::Rounded)
                         .border_style(style)
                         .padding(Padding::horizontal(1)),

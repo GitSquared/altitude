@@ -111,12 +111,12 @@ pub struct Task {
     pub code_contributions: Vec<CodeContribution>,
     /// Latest observed state per contribution, oldest contribution first.
     pub code_contribution_observations: Vec<ContributionObservation>,
-    pub current_state: TaskCurrentState,
+    pub facts: TaskFacts,
 }
 
 /// Latest recorded values. Consumers decide which facts are relevant to their operation.
 #[derive(Clone, Debug, sqlx::FromRow)]
-pub struct TaskCurrentState {
+pub struct TaskFacts {
     pub intent: String,
     pub environment_name: String,
     pub environment_setup_command: String,
@@ -297,8 +297,8 @@ impl fmt::Display for TaskAgentTurnContext {
 impl Task {
     pub fn development_environment(&self) -> DevelopmentEnvironment {
         DevelopmentEnvironment {
-            name: self.current_state.environment_name.clone(),
-            setup_command: self.current_state.environment_setup_command.clone(),
+            name: self.facts.environment_name.clone(),
+            setup_command: self.facts.environment_setup_command.clone(),
         }
     }
 
@@ -307,7 +307,7 @@ impl Task {
             execution_status: TaskExecutionStatus::Running,
             execution_mode,
             datetime: Local::now().to_rfc3339_opts(SecondsFormat::Secs, true),
-            latest_operator_answer: self.current_state.latest_operator_answer.clone(),
+            latest_operator_answer: self.facts.latest_operator_answer.clone(),
             code_contribution_observations: self.code_contribution_observations.clone(),
         }
     }

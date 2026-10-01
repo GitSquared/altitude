@@ -265,7 +265,7 @@ where
             .expect("task command lock poisoned")
             .insert(task.id.clone(), session.commands.clone());
 
-        let mode = task.current_state.execution_mode;
+        let mode = task.facts.execution_mode;
         let service = self.service.clone();
         let events = self.events.clone();
         let commands = Arc::clone(&self.commands);
@@ -361,9 +361,7 @@ where
             let operator_task = result
                 .as_ref()
                 .ok()
-                .filter(|(task, _, _)| {
-                    task.current_state.execution_mode == TaskExecutionMode::Operator
-                })
+                .filter(|(task, _, _)| task.facts.execution_mode == TaskExecutionMode::Operator)
                 .map(|(task, _, _)| task.clone());
             self.watch_agent_run(result);
             if let Some(task) = operator_task {

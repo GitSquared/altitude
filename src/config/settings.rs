@@ -27,7 +27,7 @@ pub struct Settings {
 pub struct SettingsFile {
     path: PathBuf,
     source: String,
-    pub settings: Settings,
+    settings: Settings,
 }
 
 impl SettingsFile {
@@ -50,6 +50,11 @@ impl SettingsFile {
         })
     }
 
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    /// Adopt a proposed edit only after it has been successfully saved.
     pub fn save(&mut self, settings: Settings) -> Result<(), SettingsError> {
         settings.validate()?;
         // The stable lock file serializes Altitude writers across atomic renames.

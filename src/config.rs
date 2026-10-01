@@ -6,7 +6,7 @@ use std::{
 use directories::ProjectDirs;
 
 mod settings;
-pub use settings::{Settings, SettingsError, SettingsFile};
+pub use settings::{SettingsError, SettingsFile};
 
 #[derive(Clone)]
 pub struct Config {
