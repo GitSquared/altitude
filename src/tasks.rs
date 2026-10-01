@@ -410,22 +410,39 @@ where
             id: Uuid::new_v4().to_string(),
             task_id: task.id.clone(),
         };
-        let task = self
-            .record(
-                &task.id,
-                &[TaskHistoryEvent::AgentRunStarted {
-                    execution_status: TaskExecutionStatus::Running,
-                    agent_run_id: agent_run.id.clone(),
-                    sandbox_id: sandbox_id.clone(),
-                    execution_mode: mode,
-                }],
-            )
-            .await?;
+        let mut events = Vec::new();
+        if mode == TaskExecutionMode::Autopilot {
+            // Returning from an operator shell is also an explicit retry. Retire
+            // its old failure signals; another failed attempt raises fresh evidence.
+            events.extend(
+                self.store
+                    .operator_signals(&task.id)
+                    .await
+                    .map_err(TaskServiceError::Task)?
+                    .into_iter()
+                    .filter(|signal| signal.kind == TaskOperatorSignalKind::Failure)
+                    .map(|signal| TaskHistoryEvent::OperatorSignalAcknowledged {
+                        signal_id: signal.id,
+                    }),
+            );
+        }
+        events.push(TaskHistoryEvent::AgentRunStarted {
+            execution_status: TaskExecutionStatus::Running,
+            agent_run_id: agent_run.id.clone(),
+            sandbox_id: sandbox_id.clone(),
+            execution_mode: mode,
+        });
+        let task = self.record(&task.id, &events).await?;
         match self.isolation.run_command(sandbox_id, command).await {
             Ok(session) => Ok((task, agent_run, session)),
             Err(error) => {
-                self.finish(&task, &agent_run, CommandEvent::Failed(error.to_string()))
-                    .await?;
+                self.finish(
+                    &task,
+                    &agent_run,
+                    CommandEvent::Failed(error.to_string()),
+                    None,
+                )
+                .await?;
                 Err(TaskServiceError::Isolation(error))
             }
         }
@@ -508,6 +525,7 @@ where
         task: &Task,
         agent_run: &TaskAgentRun,
         event: CommandEvent,
+        diagnostic: Option<&str>,
     ) -> Result<Task, TaskServiceError> {
         let (exit_code, error) = match event {
             CommandEvent::Exited(0) => return self.complete(task, agent_run).await,
@@ -515,17 +533,10 @@ where
             CommandEvent::Failed(error) => (None, error),
             CommandEvent::Output { .. } => unreachable!("output is handled by the event_loop"),
         };
-        self.record(
-            &task.id,
-            &[
-                run_ended(agent_run, TaskAgentRunOutcome::Failed, exit_code),
-                TaskHistoryEvent::ExecutionFailed {
-                    execution_status: TaskExecutionStatus::Failed,
-                    error,
-                },
-            ],
-        )
-        .await
+        let error = diagnostic.map_or(error.clone(), |detail| format!("{error}: {detail}"));
+        let mut events = vec![run_ended(agent_run, TaskAgentRunOutcome::Failed, exit_code)];
+        events.extend(failure_events(task, error));
+        self.record(&task.id, &events).await
     }
 
     pub async fn remove(&self, task: Task) -> Result<(), TaskServiceError> {
@@ -704,14 +715,7 @@ where
 
     async fn fail(&self, task: &Task, error: String) -> Result<Task, TaskServiceError> {
         tracing::error!(task_id = %task.id, %error, "task execution failed");
-        self.record(
-            &task.id,
-            &[TaskHistoryEvent::ExecutionFailed {
-                execution_status: TaskExecutionStatus::Failed,
-                error,
-            }],
-        )
-        .await
+        self.record(&task.id, &failure_events(task, error)).await
     }
 
     async fn claude_conversation(
@@ -749,6 +753,28 @@ where
         self.fail(task, error.to_string()).await?;
         Err(TaskServiceError::Agent(error))
     }
+}
+
+fn failure_events(task: &Task, error: String) -> [TaskHistoryEvent; 2] {
+    let signal = TaskOperatorSignal {
+        id: Uuid::new_v4().to_string(),
+        task_id: task.id.clone(),
+        kind: TaskOperatorSignalKind::Failure,
+        priority: TaskOperatorSignalPriority::High,
+        title: "Execution stopped".into(),
+        body: format!(
+            "{error}\n\nAltitude cannot continue this task. If ignored, it stays stopped.\n\nFix the problem first; open the task's shell with Enter if needed. Then answer this signal to retry with your instructions."
+        ),
+        raised_at_ms: chrono::Utc::now().timestamp_millis(),
+        read: false,
+    };
+    [
+        TaskHistoryEvent::ExecutionFailed {
+            execution_status: TaskExecutionStatus::Failed,
+            error,
+        },
+        TaskHistoryEvent::OperatorSignalRaised { signal },
+    ]
 }
 
 fn snapshot_name(task_id: &str) -> String {

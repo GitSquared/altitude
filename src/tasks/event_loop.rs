@@ -274,7 +274,7 @@ where
         let event_loop = self.clone();
         tokio::spawn(async move {
             let mut claude_stream =
-                matches!(mode, TaskExecutionMode::AutopilotReport).then(ClaudeStream::new);
+                (!matches!(mode, TaskExecutionMode::Operator)).then(ClaudeStream::new);
             loop {
                 let event = session.events.recv().await.unwrap_or_else(|| {
                     CommandEvent::Failed(
@@ -326,7 +326,7 @@ where
                             .await
                         {
                             let result = service
-                                .finish(&task, &run, CommandEvent::Failed(error.to_string()))
+                                .finish(&task, &run, CommandEvent::Failed(error.to_string()), None)
                                 .await;
                             let _ = events.send(TaskExecutionUpdate::Finished(task.id, result));
                         }
@@ -344,7 +344,7 @@ where
         run: &TaskAgentRun,
         mode: TaskExecutionMode,
         handoff: Option<TaskExecutionMode>,
-        report_stream: Option<ClaudeStream>,
+        mut report_stream: Option<ClaudeStream>,
         event: CommandEvent,
     ) -> Result<(), TaskServiceError> {
         if let Some(target) = handoff {
@@ -370,7 +370,10 @@ where
             return Ok(());
         }
         if !matches!(event, CommandEvent::Exited(0)) {
-            let result = self.service.finish(&task, run, event).await;
+            let diagnostic = report_stream
+                .as_mut()
+                .and_then(ClaudeStream::failure_message);
+            let result = self.service.finish(&task, run, event, diagnostic).await;
             let _ = self
                 .events
                 .send(TaskExecutionUpdate::Finished(task.id, result));

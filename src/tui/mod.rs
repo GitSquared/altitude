@@ -14,6 +14,7 @@ use crossterm::{
 use futures_util::StreamExt;
 use ratatui::DefaultTerminal;
 use tokio::{signal::unix::Signal, sync::mpsc, time};
+use tui_term::vt100;
 
 use crate::{
     config::{Config, SettingsError, SettingsFile},
@@ -53,14 +54,17 @@ enum SettingsPrompt {
 pub struct App {
     tasks: Vec<Task>,
     latest_output: HashMap<String, String>,
+    output_previews: HashMap<String, vt100::Parser>,
     notice: Option<String>,
     removing: HashSet<String>,
     selected: usize,
+    first_visible_task: usize,
     prompt: Option<Prompt>,
     shells: HashMap<String, Shell>,
     open_shell: Option<String>,
     operator_signals: Vec<TaskOperatorSignal>,
     selected_operator_signal: usize,
+    operator_signal_scroll: u16,
     open_operator_signals: bool,
     answering_operator_signal: Option<String>,
     selected_environment: usize,
@@ -106,14 +110,17 @@ impl App {
         Self {
             tasks,
             latest_output,
+            output_previews: HashMap::new(),
             notice: settings_error,
             removing: HashSet::new(),
             selected: 0,
+            first_visible_task: 0,
             prompt: None,
             shells: HashMap::new(),
             open_shell: None,
             operator_signals: Vec::new(),
             selected_operator_signal: 0,
+            operator_signal_scroll: 0,
             open_operator_signals: false,
             answering_operator_signal: None,
             selected_environment: 0,
@@ -263,6 +270,8 @@ impl App {
     }
 
     fn remove_task(&mut self, id: &str) {
+        self.output_previews.remove(id);
+        self.latest_output.remove(id);
         self.removing.remove(id);
         if let Some(index) = self.tasks.iter().position(|task| task.id == id) {
             self.tasks.remove(index);
@@ -282,18 +291,19 @@ impl App {
         self.removing.contains(id)
     }
 
-    fn append_output(&mut self, id: String, stream: OutputStream, bytes: Vec<u8>) {
-        let output = self.latest_output.entry(id).or_default();
-        if matches!(stream, OutputStream::Stderr) {
-            output.push_str("stderr · ");
-        }
-        output.push_str(&String::from_utf8_lossy(&bytes));
-        if output.len() > 240 {
-            let mut start = output.len() - 240;
-            while !output.is_char_boundary(start) {
-                start += 1;
-            }
-            output.drain(..start);
+    fn append_output(&mut self, id: String, _stream: OutputStream, bytes: Vec<u8>) {
+        let parser = self
+            .output_previews
+            .entry(id.clone())
+            .or_insert_with(|| vt100::Parser::new(24, 120, 0));
+        parser.process(&bytes);
+        if let Some(line) = parser
+            .screen()
+            .contents()
+            .lines()
+            .rfind(|line| !line.trim().is_empty())
+        {
+            self.latest_output.insert(id, line.to_owned());
         }
     }
 
@@ -310,6 +320,7 @@ impl App {
     }
 
     fn select_next_operator_signal(&mut self) {
+        self.operator_signal_scroll = 0;
         if !self.operator_signals.is_empty() {
             self.selected_operator_signal =
                 (self.selected_operator_signal + 1) % self.operator_signals.len();
@@ -317,6 +328,7 @@ impl App {
     }
 
     fn select_previous_operator_signal(&mut self) {
+        self.operator_signal_scroll = 0;
         if !self.operator_signals.is_empty() {
             self.selected_operator_signal =
                 (self.selected_operator_signal + self.operator_signals.len() - 1)
@@ -384,6 +396,7 @@ where
                 frame,
                 &app.tasks,
                 app.selected,
+                &mut app.first_visible_task,
                 &app.latest_output,
                 app.notice.as_deref(),
             );
@@ -391,7 +404,12 @@ where
                 shell.draw(frame);
             }
             if app.open_operator_signals {
-                operator_signals::draw(frame, &app.operator_signals, app.selected_operator_signal);
+                operator_signals::draw(
+                    frame,
+                    &app.operator_signals,
+                    app.selected_operator_signal,
+                    &mut app.operator_signal_scroll,
+                );
             }
             if app.open_environment_picker {
                 environment_picker::draw(
@@ -429,7 +447,11 @@ where
             Some(event) = task_execution_updates.recv() => match event {
                 TaskExecutionUpdate::Created(Ok(task)) => app.replace_task(task),
                 TaskExecutionUpdate::Created(Err(error)) => app.notice = Some(error.to_string()),
-                TaskExecutionUpdate::Started(Ok(task)) => app.replace_task(task),
+                TaskExecutionUpdate::Started(Ok(task)) => {
+                    app.output_previews.remove(&task.id);
+                    app.latest_output.remove(&task.id);
+                    app.replace_task(task);
+                }
                 TaskExecutionUpdate::Started(Err(error)) => app.notice = Some(error.to_string()),
                 TaskExecutionUpdate::Finished(id, Ok(task)) if !app.is_removing(&id) => {
                     app.remove_shell(&id);
@@ -639,6 +661,14 @@ where
     }
     if app.open_operator_signals {
         match key.code {
+            KeyCode::PageDown => {
+                app.operator_signal_scroll = app.operator_signal_scroll.saturating_add(5)
+            }
+            KeyCode::PageUp => {
+                app.operator_signal_scroll = app.operator_signal_scroll.saturating_sub(5)
+            }
+            KeyCode::Home => app.operator_signal_scroll = 0,
+            KeyCode::End => app.operator_signal_scroll = u16::MAX,
             KeyCode::Esc | KeyCode::Char('i') => app.open_operator_signals = false,
             KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') => app.select_next_operator_signal(),
             KeyCode::BackTab | KeyCode::Up | KeyCode::Char('h') => {
@@ -659,6 +689,7 @@ where
                                 Ok(task) => {
                                     app.replace_task(task);
                                     app.operator_signals.remove(app.selected_operator_signal);
+                                    app.operator_signal_scroll = 0;
                                     app.selected_operator_signal = app
                                         .selected_operator_signal
                                         .min(app.operator_signals.len().saturating_sub(1));
@@ -666,7 +697,9 @@ where
                                 Err(error) => app.notice = Some(error.to_string()),
                             }
                         }
-                        TaskOperatorSignalKind::Decision | TaskOperatorSignalKind::Review => {
+                        TaskOperatorSignalKind::Decision
+                        | TaskOperatorSignalKind::Review
+                        | TaskOperatorSignalKind::Failure => {
                             if app
                                 .tasks
                                 .iter()
@@ -722,6 +755,7 @@ where
                     signal.read = true;
                 }
                 app.selected_operator_signal = 0;
+                app.operator_signal_scroll = 0;
                 app.open_operator_signals = true;
             }
         }

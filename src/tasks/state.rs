@@ -38,6 +38,8 @@ pub enum TaskOperatorSignalKind {
     Update,
     Decision,
     Review,
+    /// The harness stopped; the operator must repair the problem before retrying.
+    Failure,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]

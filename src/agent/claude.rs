@@ -166,6 +166,14 @@ impl ClaudeStream {
         })
     }
 
+    pub fn failure_message(&mut self) -> Option<&str> {
+        if !self.pending.is_empty() {
+            let line = mem::take(&mut self.pending);
+            self.process_line(&line);
+        }
+        self.error.as_deref()
+    }
+
     fn process_line(&mut self, line: &str) {
         let Ok(message) = serde_json::from_str::<Value>(line.trim()) else {
             return;
@@ -181,7 +189,7 @@ impl ClaudeStream {
                     {
                         "Claude is not logged in in its sandbox profile; open an attached Claude shell and run /login"
                     } else {
-                        "Claude rejected the report request"
+                        "Claude rejected the command"
                     }.to_owned(),
                 );
             }

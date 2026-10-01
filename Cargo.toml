@@ -21,7 +21,7 @@ futures-util = { version = "0.3.34", default-features = false, features = ["std"
 microsandbox = { version = "0.7.3", default-features = false, features = ["local", "net"] }
 # Embed Microsandbox's guest helper without running its host-runtime installer at build time.
 microsandbox-filesystem = { version = "0.7.3", default-features = false, features = ["download-binaries"] }
-ratatui = "0.30.2"
+ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }

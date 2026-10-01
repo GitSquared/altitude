@@ -81,9 +81,23 @@ impl Prompt {
             .border_type(BorderType::Rounded)
             .padding(Padding::horizontal(1));
         let input_area = block.inner(area);
-        let input = format!("❯ {}", self.value.replace(['\r', '\n'], "↵"));
-        frame.render_widget(Paragraph::new(Line::from(input).white()).block(block), area);
-        let input_width = self.value[..self.byte_index()].chars().count() as u16;
+        frame.render_widget(block, area);
+        if input_area.width < 3 || input_area.height == 0 {
+            return;
+        }
+        // Keep the caret visible, measuring terminal columns rather than Unicode scalars.
+        let available = usize::from(input_area.width - 3);
+        let before_cursor = self.value[..self.byte_index()].replace(['\r', '\n'], "↵");
+        let mut start = 0;
+        while Line::from(&before_cursor[start..]).width() > available {
+            start += before_cursor[start..].chars().next().unwrap().len_utf8();
+        }
+        let value = self.value.replace(['\r', '\n'], "↵");
+        let input_width = Line::from(&before_cursor[start..]).width() as u16;
+        frame.render_widget(
+            Paragraph::new(Line::from(format!("❯ {}", &value[start..])).white()),
+            input_area,
+        );
         frame.set_cursor_position((input_area.x + 2 + input_width, input_area.y));
     }
 

@@ -300,6 +300,7 @@ impl TaskStore {
                     WHEN 'low' THEN 3
                 END,
                 CASE kind
+                    WHEN 'failure' THEN -1
                     WHEN 'decision' THEN 0
                     WHEN 'review' THEN 1
                     WHEN 'update' THEN 2
@@ -376,12 +377,14 @@ impl TaskStore {
         .map_err(TaskError::Database)?;
         if answer.is_some() {
             let task = Self::read_task(&mut transaction, &task_id).await?;
-            if task.facts.execution_status != TaskExecutionStatus::Paused
-                || task.facts.execution_pause_reason
-                    != Some(TaskExecutionPauseReason::AwaitingOperator)
-            {
+            let failed = kind.0 == TaskOperatorSignalKind::Failure
+                && task.facts.execution_status == TaskExecutionStatus::Failed;
+            let awaiting_operator = task.facts.execution_status == TaskExecutionStatus::Paused
+                && task.facts.execution_pause_reason
+                    == Some(TaskExecutionPauseReason::AwaitingOperator);
+            if !failed && !awaiting_operator {
                 return Err(TaskError::OperationRejected(
-                    "wait until the task is paused for the operator before answering",
+                    "wait until the task is stopped for the operator before answering",
                 ));
             }
         }
@@ -391,15 +394,18 @@ impl TaskStore {
                     signal_id: signal_id.to_owned(),
                 }
             }
-            (TaskOperatorSignalKind::Decision | TaskOperatorSignalKind::Review, Some(answer)) => {
-                TaskHistoryEvent::OperatorSignalAnswered {
-                    signal_id: signal_id.to_owned(),
-                    answer: answer.to_owned(),
-                }
-            }
+            (
+                TaskOperatorSignalKind::Decision
+                | TaskOperatorSignalKind::Review
+                | TaskOperatorSignalKind::Failure,
+                Some(answer),
+            ) => TaskHistoryEvent::OperatorSignalAnswered {
+                signal_id: signal_id.to_owned(),
+                answer: answer.to_owned(),
+            },
             _ => {
                 return Err(TaskError::OperationRejected(
-                    "updates are acknowledged; decisions and reviews are answered",
+                    "updates are acknowledged; decisions, reviews, and failures are answered",
                 ));
             }
         };

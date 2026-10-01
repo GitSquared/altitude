@@ -13,15 +13,28 @@ use crate::{
     tui::utils::centered_width,
 };
 
-pub fn draw(frame: &mut Frame, operator_signals: &[TaskOperatorSignal], selected: usize) {
+pub fn draw(
+    frame: &mut Frame,
+    operator_signals: &[TaskOperatorSignal],
+    selected: usize,
+    scroll: &mut u16,
+) {
     let area = centered_width(frame.area(), 72, 65);
     frame.render_widget(Clear, area);
-    let block = Block::bordered().title(" Signals · enter acknowledge/answer · esc close ");
+    let block = Block::bordered()
+        .title(" Signals · enter answer/ack · esc close ")
+        .title_bottom(" pgup/pgdn scroll · home/end · h/j select ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let [list_area, detail_area] = Layout::vertical([Constraint::Length(8), Constraint::Min(1)])
-        .margin(1)
-        .areas(inner);
+    let list_height = operator_signals
+        .len()
+        .min(8)
+        .min(usize::from(inner.height / 3)) as u16;
+    let [list_area, detail_area] =
+        Layout::vertical([Constraint::Length(list_height), Constraint::Min(1)])
+            .spacing(1)
+            .margin(1)
+            .areas(inner);
     let items = operator_signals
         .iter()
         .map(|signal| {
@@ -48,10 +61,13 @@ pub fn draw(frame: &mut Frame, operator_signals: &[TaskOperatorSignal], selected
         .get(selected)
         .map(|signal| signal.body.as_str())
         .unwrap_or("No unresolved signals for this task.");
-    frame.render_widget(
-        Paragraph::new(detail).white().wrap(Wrap { trim: true }),
-        detail_area,
-    );
+    let paragraph = Paragraph::new(detail).white().wrap(Wrap { trim: true });
+    let max_scroll = paragraph
+        .line_count(detail_area.width)
+        .saturating_sub(usize::from(detail_area.height))
+        .min(usize::from(u16::MAX)) as u16;
+    *scroll = (*scroll).min(max_scroll);
+    frame.render_widget(paragraph.scroll((*scroll, 0)), detail_area);
 }
 
 fn kind_label(kind: TaskOperatorSignalKind) -> &'static str {
@@ -59,6 +75,7 @@ fn kind_label(kind: TaskOperatorSignalKind) -> &'static str {
         TaskOperatorSignalKind::Update => "update",
         TaskOperatorSignalKind::Decision => "decision",
         TaskOperatorSignalKind::Review => "review",
+        TaskOperatorSignalKind::Failure => "failure",
     }
 }
 

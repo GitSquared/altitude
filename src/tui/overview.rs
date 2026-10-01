@@ -1,8 +1,8 @@
-use std::{collections::HashMap, iter};
+use std::{collections::HashMap, mem};
 
 use ratatui::{
     Frame,
-    layout::{Constraint, HorizontalAlignment, Layout, Rect},
+    layout::{Constraint, Layout, Rect},
     style::{Style, Stylize},
     text::Line,
     widgets::{Block, BorderType, Padding, Paragraph, Wrap},
@@ -17,9 +17,12 @@ pub fn draw(
     frame: &mut Frame,
     tasks: &[Task],
     selected: usize,
+    first_visible: &mut usize,
     latest_output: &HashMap<String, String>,
     notice: Option<&str>,
 ) {
+    let shortcuts = shortcut_hints(frame.area().width.saturating_sub(2));
+    let footer_height = shortcuts.line_count(frame.area().width.saturating_sub(2)) as u16;
     let message_width = usize::from(frame.area().width.saturating_sub(2).max(1));
     let message_height = notice.map_or(0, |text| {
         text.lines()
@@ -31,7 +34,7 @@ pub fn draw(
         Constraint::Length(1),
         Constraint::Min(0),
         Constraint::Length(message_height),
-        Constraint::Length(1),
+        Constraint::Length(footer_height),
     ])
     .margin(1)
     .spacing(1)
@@ -44,7 +47,7 @@ pub fn draw(
         Line::from(concat!("v", env!("CARGO_PKG_VERSION")).dim()).right_aligned(),
         version,
     );
-    draw_tasks(frame, body, tasks, selected, latest_output);
+    draw_tasks(frame, body, tasks, selected, first_visible, latest_output);
 
     if let Some(notice) = notice {
         frame.render_widget(
@@ -52,14 +55,32 @@ pub fn draw(
             message,
         );
     }
-    frame.render_widget(
-        Line::from(
-            "c create · s settings · i info · h/j select · enter shell · delete remove · q quit",
-        )
-        .dim()
-        .alignment(HorizontalAlignment::Right),
-        footer,
-    );
+    frame.render_widget(shortcuts, footer);
+}
+
+fn shortcut_hints(width: u16) -> Paragraph<'static> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for hint in [
+        "c create",
+        "s settings",
+        "i info",
+        "h/j select",
+        "enter shell",
+        "delete remove",
+        "q quit",
+    ] {
+        if !line.is_empty() {
+            if Line::from(format!("{line} · {hint}")).width() > usize::from(width) {
+                lines.push(Line::from(mem::take(&mut line)));
+            } else {
+                line.push_str(" · ");
+            }
+        }
+        line.push_str(hint);
+    }
+    lines.push(Line::from(line));
+    Paragraph::new(lines).dim().wrap(Wrap { trim: true })
 }
 
 fn draw_tasks(
@@ -67,6 +88,7 @@ fn draw_tasks(
     area: Rect,
     tasks: &[Task],
     selected: usize,
+    first_visible: &mut usize,
     latest_output: &HashMap<String, String>,
 ) {
     let panel = Block::bordered()
@@ -80,16 +102,24 @@ fn draw_tasks(
         return;
     }
 
-    let cards = Layout::vertical(
-        tasks
-            .iter()
-            .map(|_| Constraint::Length(4))
-            .chain(iter::once(Constraint::Min(0))),
-    )
-    .spacing(1)
-    .split(content);
-
-    for (index, (task, area)) in tasks.iter().zip(cards.iter()).enumerate() {
+    let visible_count = usize::from((content.height + 1) / 5).max(1);
+    *first_visible = (*first_visible)
+        .min(selected)
+        .max((selected + 1).saturating_sub(visible_count))
+        .min(tasks.len().saturating_sub(visible_count));
+    for (row, (index, task)) in tasks
+        .iter()
+        .enumerate()
+        .skip(*first_visible)
+        .take(visible_count)
+        .enumerate()
+    {
+        let area = Rect::new(
+            content.x,
+            content.y + row as u16 * 5,
+            content.width,
+            content.height.saturating_sub(row as u16 * 5).min(4),
+        );
         let selected = index == selected;
         let mut status = match &task.facts.execution_status {
             TaskExecutionStatus::Pending => Line::from("pending").yellow(),
@@ -162,7 +192,7 @@ fn draw_tasks(
                         .border_style(style)
                         .padding(Padding::horizontal(1)),
                 ),
-            *area,
+            area,
         );
     }
 }
