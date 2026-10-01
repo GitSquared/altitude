@@ -4,6 +4,7 @@ use std::fmt;
 
 use crate::agent::AgentKind;
 use crate::development::DevelopmentEnvironment;
+use crate::vcs::{CodeContribution, ContributionObservation};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskAgentTurnReport {
@@ -11,6 +12,8 @@ pub struct TaskAgentTurnReport {
     pub summary: String,
     #[serde(default)]
     pub operator_signal: Option<TaskOperatorSignalDraft>,
+    #[serde(default)]
+    pub code_contribution_urls: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -101,6 +104,9 @@ pub struct TaskOperatorSignal {
 pub struct Task {
     pub id: String,
     pub agent_kind: Option<AgentKind>,
+    pub code_contributions: Vec<CodeContribution>,
+    /// Latest observed state per contribution, oldest contribution first.
+    pub code_contribution_observations: Vec<ContributionObservation>,
     pub current_state: TaskCurrentState,
 }
 
@@ -164,6 +170,16 @@ pub enum TaskHistoryEvent {
         signal_id: String,
         answer: String,
     },
+    CodeContributionLinked {
+        contribution: CodeContribution,
+    },
+    /// External state observed for a contribution.
+    ///
+    /// An input to the task, not a notification: the control loop decides
+    /// whether anything about it deserves the operator's attention.
+    CodeContributionObserved {
+        observation: ContributionObservation,
+    },
     ExecutionPaused {
         reason: TaskExecutionPauseReason,
         snapshot_path: String,
@@ -196,6 +212,8 @@ pub struct TaskAgentTurnContext {
     pub operator_attention_level: TaskOperatorAttentionLevel,
     pub datetime: String,
     pub latest_operator_answer: Option<serde_json::Value>,
+    /// What the linked contributions currently look like outside Altitude.
+    pub code_contribution_observations: Vec<ContributionObservation>,
 }
 
 impl fmt::Display for TaskAgentTurnContext {
@@ -211,7 +229,22 @@ impl fmt::Display for TaskAgentTurnContext {
                 .as_ref()
                 .map(ToString::to_string)
                 .unwrap_or_else(|| "none".into())
-        )
+        )?;
+        if self.code_contribution_observations.is_empty() {
+            return Ok(());
+        }
+        write!(formatter, "; code_contributions=[")?;
+        for (index, observation) in self.code_contribution_observations.iter().enumerate() {
+            if index > 0 {
+                write!(formatter, "; ")?;
+            }
+            write!(
+                formatter,
+                "{} @ {}: {}",
+                observation.contribution_id, observation.state.head_sha, observation.summary
+            )?;
+        }
+        write!(formatter, "]")
     }
 }
 
@@ -230,6 +263,7 @@ impl Task {
             operator_attention_level: self.current_state.operator_attention_level.clone(),
             datetime: Local::now().to_rfc3339_opts(SecondsFormat::Secs, true),
             latest_operator_answer: self.current_state.latest_operator_answer.clone(),
+            code_contribution_observations: self.code_contribution_observations.clone(),
         }
     }
 

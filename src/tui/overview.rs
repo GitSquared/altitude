@@ -121,6 +121,13 @@ fn draw_tasks(
                     .bold(),
             );
         }
+        match task.code_contributions.len() {
+            0 => {}
+            1 => status.spans.push(" · 1 contribution".cyan()),
+            count => status
+                .spans
+                .push(format!(" · {count} contributions").cyan()),
+        }
         let style = if selected {
             Style::new().white().bold()
         } else {

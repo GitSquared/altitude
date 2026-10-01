@@ -6,6 +6,8 @@ use crate::development::DevelopmentEnvironment;
 
 mod environment;
 mod microsandbox;
+/// Shared with the VCS providers so capsule commands are quoted one way.
+pub(crate) use environment::shell_quote;
 pub use environment::{DefaultFile, EnvironmentRecipe, GuestPath, PersistentDirectory};
 
 pub use microsandbox::MicrosandboxIsolation;
@@ -110,7 +112,7 @@ pub enum OutputStream {
 pub struct IsolationError(String);
 
 impl IsolationError {
-    fn new(message: impl Into<String>) -> Self {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
         Self(message.into())
     }
 }

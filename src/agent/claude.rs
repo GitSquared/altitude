@@ -32,6 +32,8 @@ Raise no signal unless that reasoning justifies one. Signals have strict meaning
 
 Priority reflects response time and impact if ignored: low is useful whenever convenient; normal deserves routine attention; high should be handled before dependent work proceeds; urgent means delay risks serious or irreversible harm. Do not inflate priority.
 
+Include every pull-request or merge-request URL already associated with this task in code_contribution_urls. Do not create or publish one merely to populate that field.
+
 Choose complete only when the task needs neither operator review nor any other operator action."#;
 const AUTOPILOT_SCHEMA: &str = r#"{
   "type": "object",
@@ -54,9 +56,13 @@ const AUTOPILOT_SCHEMA: &str = r#"{
         "required": ["kind", "priority", "title", "body"]
         }
       ]
+    },
+    "code_contribution_urls": {
+      "type": "array",
+      "items": { "type": "string" }
     }
   },
-  "required": ["requested_action", "summary", "operator_signal"]
+  "required": ["requested_action", "summary", "operator_signal", "code_contribution_urls"]
 }"#;
 
 const DEFAULT_SETTINGS: &str = r#"{
