@@ -740,10 +740,9 @@ where
         require_transcript: bool,
     ) -> Result<String, TaskServiceError> {
         let kind = self.agent_kind(task)?;
-        let label = kind.label();
         let Some(conversation_id) = task.facts.agent_conversation_id.as_deref() else {
             return self
-                .conversation_failure(task, format!("{label} task has no conversation ID"))
+                .conversation_failure(task, format!("{kind} task has no conversation ID"))
                 .await;
         };
         if !require_transcript {
@@ -760,8 +759,8 @@ where
             .ok_or(TaskServiceError::Task(TaskError::MissingSandbox))?;
         match self.isolation.guest_regular_file_exists(sandbox_id, transcript_path).await {
             Ok(true) => Ok(conversation_id.to_owned()),
-            Ok(false) => self.conversation_failure(task, format!("{label} conversation transcript is missing; the task cannot resume without its session state")).await,
-            Err(error) => self.conversation_failure(task, format!("could not read {label} conversation transcript: {error}")).await,
+            Ok(false) => self.conversation_failure(task, format!("{kind} conversation transcript is missing; the task cannot resume without its session state")).await,
+            Err(error) => self.conversation_failure(task, format!("could not read {kind} conversation transcript: {error}")).await,
         }
     }
 

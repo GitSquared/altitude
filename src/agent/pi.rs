@@ -18,23 +18,28 @@ const INSTALL_COMMAND: &str = concat!(
     " && test -x /usr/local/bin/pi"
 );
 
+/// Forced rather than left to the operator: the workspace is already isolated,
+/// so trusting a project's own `.pi` resources prompts for nothing useful, and
+/// the operator attaches to a terminal Altitude renders.
 const DEFAULT_SETTINGS: &str = r#"{
   "defaultProjectTrust": "always",
   "tuiMode": "fullscreen"
 }
 "#;
 
+/// Where the report turn writes the generated extension inside the capsule.
+const REPORT_EXTENSION_PATH: &str = "/tmp/altitude-report.ts";
+/// The channel the schema travels on, so the report contract stays Altitude's.
+const REPORT_SCHEMA_ENV: &str = "ALTITUDE_REPORT_SCHEMA";
+/// The name the extension below registers. The shim repeats this name and
+/// `REPORT_SCHEMA_ENV`; both mentions sit in this file, near each other.
+const REPORT_TOOL_NAME: &str = "altitude_task_report";
 /// Pi has no schema-forced output mode, so the report turn loads a tool that
 /// carries Altitude's schema and terminates the turn with the report attached.
 ///
-/// The extension is written per turn instead of living in the persistent
-/// profile: profile defaults are only created once, and the schema must travel
-/// with Altitude's code rather than with the operator's machine.
-const REPORT_EXTENSION_PATH: &str = "/tmp/altitude-report.ts";
-/// Passed to the extension process so the schema stays owned by Altitude.
-const REPORT_SCHEMA_ENV: &str = "ALTITUDE_REPORT_SCHEMA";
-/// The report tool's name. It must match the name the extension registers.
-const REPORT_TOOL_NAME: &str = "altitude_task_report";
+/// It is written per turn instead of living in the persistent profile: profile
+/// defaults are only created once, and the schema must travel with Altitude's
+/// code rather than with the operator's machine.
 const REPORT_EXTENSION: &str = r#"import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
@@ -68,12 +73,6 @@ pub struct PiStream {
     report: Option<TaskAgentTurnReport>,
     settled: bool,
     error: Option<String>,
-}
-
-impl PiCode {
-    fn session_path(&self, conversation_id: &str) -> String {
-        self.conversation_transcript_path(conversation_id)
-    }
 }
 
 impl PiStream {
@@ -187,7 +186,7 @@ impl AgentEngine for PiCode {
         format!(
             "exec pi --print --mode json --session {} \
              --append-system-prompt {} {}",
-            shell_quote(&self.session_path(conversation_id)),
+            shell_quote(&self.conversation_transcript_path(conversation_id)),
             shell_quote(AUTOPILOT_SYSTEM_PROMPT),
             shell_quote(&format!(
                 "{prompt}\n\nAltitude task context at the start of this turn: {context}"
@@ -208,7 +207,7 @@ impl AgentEngine for PiCode {
             extension = REPORT_EXTENSION,
             schema_env = REPORT_SCHEMA_ENV,
             schema = shell_quote(REPORT_SCHEMA),
-            session = shell_quote(&self.session_path(conversation_id)),
+            session = shell_quote(&self.conversation_transcript_path(conversation_id)),
             tool = REPORT_TOOL_NAME,
             prompt = shell_quote(REPORT_SYSTEM_PROMPT),
             message = shell_quote(&format!(
@@ -220,7 +219,7 @@ impl AgentEngine for PiCode {
     fn operator_command(&self, conversation_id: &str) -> String {
         format!(
             "exec pi --session {}",
-            shell_quote(&self.session_path(conversation_id))
+            shell_quote(&self.conversation_transcript_path(conversation_id))
         )
     }
 

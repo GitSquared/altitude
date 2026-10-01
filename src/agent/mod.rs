@@ -5,8 +5,8 @@ use sqlx::Type;
 use std::{error::Error as StdError, fmt, str::FromStr};
 mod claude;
 mod pi;
-pub use claude::ClaudeCode;
-pub use pi::PiCode;
+use claude::ClaudeCode;
+use pi::PiCode;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Type, Serialize, Deserialize)]
 #[sqlx(type_name = "TEXT", rename_all = "lowercase")]
@@ -24,19 +24,14 @@ impl Default for AgentKind {
     }
 }
 
-impl AgentKind {
-    /// How the operator reads this harness in the interface.
-    pub fn label(self) -> &'static str {
-        match self {
+impl fmt::Display for AgentKind {
+    /// How the operator reads this harness in the interface, which is not how
+    /// it is spelled in settings, where the serde name is lowercase.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
             Self::Claude => "Claude",
             Self::Pi => "Pi",
-        }
-    }
-}
-
-impl fmt::Display for AgentKind {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.label())
+        })
     }
 }
 
