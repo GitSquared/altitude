@@ -45,11 +45,9 @@ pub trait VcsProvider {
 }
 
 /// The parts of a contribution's state that decide whether there is something
-/// new to deliver.
+/// new to record.
 ///
-/// Deliberately holds no timestamp and no sequence number: identity is derived
-/// from the state itself, so observing an unchanged contribution is recognisably
-/// the same observation rather than a new one.
+/// Compared with the latest stored observation to suppress unchanged polls.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ContributionState {
     /// Commit the state applies to. Feedback on an older commit stays
@@ -63,19 +61,6 @@ pub struct ContributionState {
     pub review: String,
 }
 
-impl ContributionState {
-    fn identity(&self) -> String {
-        format!(
-            "{}:{}:{}:{}:{}",
-            self.head_sha,
-            self.checks_passing,
-            self.checks_failing,
-            self.checks_pending,
-            self.review
-        )
-    }
-}
-
 /// What a provider reported about one contribution.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ContributionObservation {
@@ -85,15 +70,4 @@ pub struct ContributionObservation {
     /// One operator-facing line, e.g. `ci 1 failing, 2 passing · review changes
     /// requested`.
     pub summary: String,
-}
-
-impl ContributionObservation {
-    /// Identity of this observed state.
-    ///
-    /// Deterministic in the state, so the same state seen again after a restart
-    /// collapses into the event that already recorded it rather than replaying
-    /// the same feedback.
-    pub fn identity(&self) -> String {
-        format!("{}:{}", self.contribution_id, self.state.identity())
-    }
 }

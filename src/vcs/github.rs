@@ -62,7 +62,10 @@ impl VcsProvider for GitHub {
         // Normalize the number rather than echoing it: `/pull/007` and `/pull/7`
         // are one contribution, so they must produce one identity.
         let number = number.parse::<u64>().ok()?;
-        let repository = format!("{owner}/{repository}");
+        if number == 0 {
+            return None;
+        }
+        let repository = format!("{owner}/{repository}").to_ascii_lowercase();
         let canonical_url = format!("https://{host}/{repository}/pull/{number}");
         Some(CodeContribution {
             id: canonical_url.clone(),
@@ -155,6 +158,7 @@ impl CheckRollupEntry {
             }
             // An unrecognized conclusion is surfaced rather than counted as a
             // pass, so a new GitHub verdict cannot hide behind a green build.
+            Some("") => CheckOutcome::Pending,
             Some(_) => CheckOutcome::Failing,
             // A check run with no conclusion has not finished; a status context
             // carries its state here instead.

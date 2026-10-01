@@ -251,11 +251,9 @@ impl TaskStore {
         Ok((task, notices))
     }
 
-    /// Record observed contribution state for a task.
-    ///
-    /// The event id is derived from the observation itself, so a state already
-    /// delivered collapses into the existing row instead of replaying the same
-    /// feedback. That is what makes restarting Altitude safe.
+    /// Record transitions, including a return to a previously observed state.
+    /// Compare with the latest event under the write lock so unchanged polls
+    /// remain a no-op across restarts without suppressing A -> B -> A.
     pub async fn record_code_contribution_observations(
         &self,
         task_id: &str,
@@ -267,27 +265,35 @@ impl TaskStore {
             .await
             .map_err(TaskError::Database)?;
         for observation in observations {
-            let event = TaskHistoryEvent::CodeContributionObserved {
-                observation: observation.clone(),
-            };
-            let payload = serde_json::to_string(&event).map_err(TaskError::HistoryData)?;
-            sqlx::query(
+            let previous: Option<Json<ContributionObservation>> = sqlx::query_scalar(
                 r#"
-                INSERT INTO task_event_logs (id, task_id, recorded_at_ms, payload)
-                VALUES (?1, ?2, ?3, ?4)
-                ON CONFLICT(id) DO NOTHING
-            "#,
+                SELECT observation
+                FROM task_code_contribution_observations
+                WHERE task_id = ?1
+                    AND json_extract(observation, '$.contribution_id') = ?2
+                ORDER BY sequence DESC
+                LIMIT 1
+                "#,
             )
-            .bind(format!(
-                "code-contribution-observation:{task_id}:{}",
-                observation.identity()
-            ))
             .bind(task_id)
-            .bind(now_ms())
-            .bind(payload)
-            .execute(&mut *transaction)
+            .bind(&observation.contribution_id)
+            .fetch_optional(&mut *transaction)
             .await
             .map_err(TaskError::Database)?;
+            if previous
+                .as_ref()
+                .is_some_and(|previous| previous.0 == *observation)
+            {
+                continue;
+            }
+            Self::write_events(
+                &mut transaction,
+                task_id,
+                &[TaskHistoryEvent::CodeContributionObserved {
+                    observation: observation.clone(),
+                }],
+            )
+            .await?;
         }
         let task = Self::read_task(&mut transaction, task_id).await?;
         transaction.commit().await.map_err(TaskError::Database)?;
