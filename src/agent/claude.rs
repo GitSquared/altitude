@@ -15,30 +15,48 @@ pub struct ClaudeStream {
     error: Option<String>,
 }
 
-const AUTOPILOT_SYSTEM_PROMPT: &str = "Altitude is driving this task without an operator watching. Continue autonomously whenever the next action is reasonably implied by the original task. Do not stop for routine confirmation. Altitude will ask for a structured task report after this work turn ends.";
-const REPORT_SYSTEM_PROMPT: &str = "Altitude is driving this task without an operator watching. Do not perform more work in this turn. Return the structured task report now. Set operator_attention_level to requested when you need an operator and choose await_operator, or alarm for a credible serious issue. Omit it when the task's current operator attention level remains appropriate; set it to nominal when an escalation is resolved. Use a nominal (informational) operator notice for a consequential judgment the operator may want to know about; keep working. Use requested or alarm operator notices to explain their corresponding operator attention level. An alarm may await_operator if no useful remediation or investigation remains. Choose complete only when the task is fully done and needs no further operator action.";
+const AUTOPILOT_SYSTEM_PROMPT: &str = "Altitude is driving this task without an operator watching. Continue autonomously whenever the next action is reasonably implied by the original task. Match the precision of the operator's expressed intent. Investigate and take reasonable defaults instead of asking for confirmation. Altitude will ask for a structured task report after this work turn ends.";
+const REPORT_SYSTEM_PROMPT: &str = r#"Altitude is driving this task without an operator watching. Do not perform more work in this turn. Return the structured task report now.
+
+Keep routine reasoning, progress, recoverable failures, and decisions you can reasonably infer in the summary. Before raising an operator signal, weigh the cost of taking the operator's attention:
+1. Is this necessary for the operator to know?
+2. What action is expected, if any?
+3. Is there enough time for the operator to respond?
+4. Is the information genuinely new rather than repeated progress?
+5. What happens if it is ignored?
+
+Raise no signal unless that reasoning justifies one. Signals have strict meanings:
+- update: unique, durable information worth seeing, with no operator action required. Choose continue.
+- decision: new context makes the original intent genuinely ambiguous and no reasonable default remains. State what is missing, why no reasonable path can be inferred, and what happens if ignored. Choose await_operator. If independent useful work remains, continue it before requesting a blocking decision.
+- review: the requested work and applicable machine verification are complete, and human acceptance or requested changes are now needed. Account for the whole expressed intent, including any unfinished or omitted work. Include concrete review evidence and verification limits; pending CI or automated review is still work in progress. Choose await_operator; never treat review readiness as operator acceptance.
+
+Priority reflects response time and impact if ignored: low is useful whenever convenient; normal deserves routine attention; high should be handled before dependent work proceeds; urgent means delay risks serious or irreversible harm. Do not inflate priority.
+
+Choose complete only when the task needs neither operator review nor any other operator action."#;
 const AUTOPILOT_SCHEMA: &str = r#"{
   "type": "object",
   "additionalProperties": false,
   "properties": {
     "requested_action": { "enum": ["continue", "await_operator", "complete"] },
-    "operator_attention_level": { "enum": ["nominal", "requested", "alarm"] },
     "summary": { "type": "string" },
-    "operator_notices": {
-      "type": "array",
-      "items": {
+    "operator_signal": {
+      "anyOf": [
+        { "type": "null" },
+        {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "level": { "enum": ["nominal", "requested", "alarm"] },
+          "kind": { "enum": ["update", "decision", "review"] },
+          "priority": { "enum": ["low", "normal", "high", "urgent"] },
           "title": { "type": "string" },
           "body": { "type": "string" }
         },
-        "required": ["level", "title", "body"]
-      }
+        "required": ["kind", "priority", "title", "body"]
+        }
+      ]
     }
   },
-  "required": ["requested_action", "summary", "operator_notices"]
+  "required": ["requested_action", "summary", "operator_signal"]
 }"#;
 
 const DEFAULT_SETTINGS: &str = r#"{

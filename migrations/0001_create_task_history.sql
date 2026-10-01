@@ -17,6 +17,28 @@ CREATE INDEX task_event_logs_task_sequence ON task_event_logs(task_id, sequence)
 CREATE INDEX task_event_logs_task_time ON task_event_logs(task_id, recorded_at_ms);
 CREATE INDEX task_event_logs_task_type ON task_event_logs(task_id, event_type, sequence);
 
+CREATE VIEW task_operator_signals AS
+SELECT raised.sequence, raised.task_id, raised.recorded_at_ms AS raised_at_ms,
+    json_extract(raised.payload, '$.data.signal.id') AS id,
+    json_extract(raised.payload, '$.data.signal.kind') AS kind,
+    json_extract(raised.payload, '$.data.signal.priority') AS priority,
+    json_extract(raised.payload, '$.data.signal.title') AS title,
+    json_extract(raised.payload, '$.data.signal.body') AS body,
+    EXISTS (
+        SELECT 1 FROM task_event_logs AS read
+        WHERE read.task_id = raised.task_id
+            AND read.event_type IN ('operator_signal_read', 'operator_signal_acknowledged', 'operator_signal_answered')
+            AND json_extract(read.payload, '$.data.signal_id') = json_extract(raised.payload, '$.data.signal.id')
+    ) AS read,
+    EXISTS (
+        SELECT 1 FROM task_event_logs AS resolved
+        WHERE resolved.task_id = raised.task_id
+            AND resolved.event_type IN ('operator_signal_acknowledged', 'operator_signal_answered')
+            AND json_extract(resolved.payload, '$.data.signal_id') = json_extract(raised.payload, '$.data.signal.id')
+    ) AS resolved
+FROM task_event_logs AS raised
+WHERE raised.event_type = 'operator_signal_raised';
+
 -- Each event changes only these properties. An explicit null clears a property;
 -- an absent property leaves its previous value intact.
 CREATE VIEW task_statuses AS
@@ -37,7 +59,9 @@ WITH projected_tasks AS (
                         'sandbox_id', NULL,
                         'snapshot_path', NULL,
                         'last_error', NULL,
-                        'latest_turn_summary', NULL
+                        'latest_turn_summary', NULL,
+                        'latest_operator_answer', NULL,
+                        'unread_operator_signal_count', 0
                     )
                     WHEN 'sandbox_provisioned' THEN json_object(
                         'sandbox_id', payload ->> '$.data.sandbox_id'
@@ -50,13 +74,19 @@ WITH projected_tasks AS (
                         'last_error', NULL
                     )
                     WHEN 'agent_turn_reported' THEN
-                        CASE WHEN payload ->> '$.data.operator_attention_level' IS NULL
-                            THEN json_object('latest_turn_summary', payload ->> '$.data.summary')
-                            ELSE json_object(
-                                'latest_turn_summary', payload ->> '$.data.summary',
-                                'operator_attention_level', payload ->> '$.data.operator_attention_level'
-                            )
-                        END
+                        json_object(
+                            'latest_turn_summary', payload ->> '$.data.summary',
+                            'operator_attention_level', payload ->> '$.data.operator_attention_level'
+                        )
+                    WHEN 'operator_signal_answered' THEN json_object(
+                        'operator_attention_level', 'nominal',
+                        'execution_status', 'pending',
+                        'execution_pause_reason', NULL,
+                        'latest_operator_answer', json_object(
+                            'signal_id', payload ->> '$.data.signal_id',
+                            'answer', payload ->> '$.data.answer'
+                        )
+                    )
                     WHEN 'execution_paused' THEN json_object(
                         'execution_status', 'paused',
                         'execution_pause_reason', payload ->> '$.data.reason',
@@ -101,37 +131,27 @@ WITH projected_tasks AS (
         SELECT json_group_object(key, value)
         FROM ranked_properties
         WHERE recency = 1
-    ) AS state,
+    ) AS projected_state,
     (SELECT max(sequence) FROM task_event_logs WHERE task_id = tasks.id) AS last_event_sequence
     FROM tasks
 )
-SELECT task_id, state,
-    state ->> '$.intent' AS intent,
-    state ->> '$.environment_name' AS environment_name,
-    state ->> '$.environment_setup_command' AS environment_setup_command,
-    state ->> '$.agent_conversation_id' AS agent_conversation_id,
-    state ->> '$.execution_status' AS execution_status,
-    state ->> '$.execution_pause_reason' AS execution_pause_reason,
-    state ->> '$.execution_mode' AS execution_mode,
-    state ->> '$.operator_attention_level' AS operator_attention_level,
-    state ->> '$.sandbox_id' AS sandbox_id,
-    state ->> '$.snapshot_path' AS snapshot_path,
-    state ->> '$.last_error' AS last_error,
-    state ->> '$.latest_turn_summary' AS latest_turn_summary,
+SELECT task_id,
+    json_set(
+        projected_state,
+        '$.unread_operator_signal_count',
+        (SELECT count(*) FROM task_operator_signals WHERE task_id = projected_tasks.task_id AND read = 0 AND resolved = 0)
+    ) AS state,
+    projected_state ->> '$.intent' AS intent,
+    projected_state ->> '$.environment_name' AS environment_name,
+    projected_state ->> '$.environment_setup_command' AS environment_setup_command,
+    projected_state ->> '$.agent_conversation_id' AS agent_conversation_id,
+    projected_state ->> '$.execution_status' AS execution_status,
+    projected_state ->> '$.execution_pause_reason' AS execution_pause_reason,
+    projected_state ->> '$.execution_mode' AS execution_mode,
+    projected_state ->> '$.operator_attention_level' AS operator_attention_level,
+    projected_state ->> '$.sandbox_id' AS sandbox_id,
+    projected_state ->> '$.snapshot_path' AS snapshot_path,
+    projected_state ->> '$.last_error' AS last_error,
+    projected_state ->> '$.latest_turn_summary' AS latest_turn_summary,
     last_event_sequence
 FROM projected_tasks;
-
-CREATE VIEW task_operator_notices AS
-SELECT raised.sequence, raised.task_id,
-    json_extract(raised.payload, '$.data.notice.id') AS id,
-    json_extract(raised.payload, '$.data.notice.level') AS level,
-    json_extract(raised.payload, '$.data.notice.title') AS title,
-    json_extract(raised.payload, '$.data.notice.body') AS body,
-    EXISTS (
-        SELECT 1 FROM task_event_logs AS acknowledged
-        WHERE acknowledged.task_id = raised.task_id
-            AND acknowledged.event_type = 'operator_notice_acknowledged'
-            AND json_extract(acknowledged.payload, '$.data.notice_id') = json_extract(raised.payload, '$.data.notice.id')
-    ) AS acknowledged
-FROM task_event_logs AS raised
-WHERE raised.event_type = 'operator_notice_raised';

@@ -8,10 +8,9 @@ use crate::development::DevelopmentEnvironment;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskAgentTurnReport {
     pub requested_action: TaskAgentRequestedAction,
-    pub operator_attention_level: Option<TaskOperatorAttentionLevel>,
     pub summary: String,
     #[serde(default)]
-    pub operator_notices: Vec<TaskOperatorNoticeDraft>,
+    pub operator_signal: Option<TaskOperatorSignalDraft>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -23,10 +22,28 @@ pub enum TaskAgentRequestedAction {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TaskOperatorNoticeDraft {
-    pub level: TaskOperatorAttentionLevel,
+pub struct TaskOperatorSignalDraft {
+    pub kind: TaskOperatorSignalKind,
+    pub priority: TaskOperatorSignalPriority,
     pub title: String,
     pub body: String,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskOperatorSignalKind {
+    Update,
+    Decision,
+    Review,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskOperatorSignalPriority {
+    Low,
+    Normal,
+    High,
+    Urgent,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -69,12 +86,15 @@ pub struct TaskAgentRun {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TaskOperatorNotice {
+pub struct TaskOperatorSignal {
     pub id: String,
     pub task_id: String,
-    pub level: TaskOperatorAttentionLevel,
+    pub kind: TaskOperatorSignalKind,
+    pub priority: TaskOperatorSignalPriority,
     pub title: String,
     pub body: String,
+    pub raised_at_ms: i64,
+    pub read: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -99,6 +119,8 @@ pub struct TaskCurrentState {
     pub snapshot_path: Option<String>,
     pub last_error: Option<String>,
     pub latest_turn_summary: Option<String>,
+    pub latest_operator_answer: Option<serde_json::Value>,
+    pub unread_operator_signal_count: u32,
 }
 
 /// Semantic history written by Altitude's controllers, never directly by agents.
@@ -126,14 +148,21 @@ pub enum TaskHistoryEvent {
     AgentTurnReported {
         agent_run_id: String,
         requested_action: TaskAgentRequestedAction,
-        operator_attention_level: Option<TaskOperatorAttentionLevel>,
+        operator_attention_level: TaskOperatorAttentionLevel,
         summary: String,
     },
-    OperatorNoticeRaised {
-        notice: TaskOperatorNotice,
+    OperatorSignalRaised {
+        signal: TaskOperatorSignal,
     },
-    OperatorNoticeAcknowledged {
-        notice_id: String,
+    OperatorSignalRead {
+        signal_id: String,
+    },
+    OperatorSignalAcknowledged {
+        signal_id: String,
+    },
+    OperatorSignalAnswered {
+        signal_id: String,
+        answer: String,
     },
     ExecutionPaused {
         reason: TaskExecutionPauseReason,
@@ -166,17 +195,22 @@ pub struct TaskAgentTurnContext {
     pub execution_mode: TaskExecutionMode,
     pub operator_attention_level: TaskOperatorAttentionLevel,
     pub datetime: String,
+    pub latest_operator_answer: Option<serde_json::Value>,
 }
 
 impl fmt::Display for TaskAgentTurnContext {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "execution_status={:?}; execution_mode={:?}; operator_attention_level={:?}; current_datetime={}",
+            "execution_status={:?}; execution_mode={:?}; operator_attention_level={:?}; current_datetime={}; latest_operator_answer={}",
             self.execution_status,
             self.execution_mode,
             self.operator_attention_level,
-            self.datetime
+            self.datetime,
+            self.latest_operator_answer
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "none".into())
         )
     }
 }
@@ -195,6 +229,7 @@ impl Task {
             execution_mode,
             operator_attention_level: self.current_state.operator_attention_level.clone(),
             datetime: Local::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            latest_operator_answer: self.current_state.latest_operator_answer.clone(),
         }
     }
 
