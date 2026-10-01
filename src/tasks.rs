@@ -7,14 +7,18 @@ use crate::{
     vcs::{GitHub, VcsProvider},
 };
 use futures_util::future::join_all;
-use std::{error::Error, fmt, path::PathBuf};
+use std::{collections::HashMap, error::Error, fmt, path::PathBuf};
 use uuid::Uuid;
 mod event_loop;
 mod state;
 pub use event_loop::{TaskEventLoop, TaskExecutionUpdate};
+mod progress;
 mod store;
 pub use state::*;
 pub use store::TaskStore;
+
+use crate::isolation::EnvironmentProgress;
+use progress::EnvironmentProgressRegistry;
 
 #[derive(Clone)]
 pub struct TaskService<E> {
@@ -22,6 +26,7 @@ pub struct TaskService<E> {
     isolation: E,
     snapshots_dir: PathBuf,
     agents: AgentEngines,
+    environment_progress: EnvironmentProgressRegistry,
 }
 
 impl<E> TaskService<E>
@@ -39,7 +44,15 @@ where
             isolation,
             snapshots_dir,
             agents,
+            environment_progress: EnvironmentProgressRegistry::default(),
         }
+    }
+
+    /// What each task's environment build is doing, for an interface to show.
+    ///
+    /// Keyed by task, and only present while this service is building for it.
+    pub fn environment_builds(&self) -> HashMap<String, EnvironmentProgress> {
+        self.environment_progress.published()
     }
 
     pub async fn list(&self) -> Result<Vec<Task>, TaskServiceError> {
@@ -204,6 +217,7 @@ where
         } else {
             None
         };
+        let progress = self.environment_progress.writer(&task.id);
         let create = match task.agent_kind {
             Some(kind) => {
                 self.isolation
@@ -215,6 +229,7 @@ where
                             self.agents.engine(kind).environment_recipe(),
                             GitHub::environment_recipe(),
                         ],
+                        &progress,
                     )
                     .await
             }
@@ -224,6 +239,7 @@ where
                     .await
             }
         };
+        self.environment_progress.clear(&task.id);
         if let Err(error) = create {
             self.fail(&task, error.to_string()).await?;
             return Err(TaskServiceError::Isolation(error));

@@ -8,9 +8,13 @@ use ratatui::{
     widgets::{Block, BorderType, Padding, Paragraph, Wrap},
 };
 
-use crate::tasks::{
-    Task, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
-    TaskOperatorAttentionLevel,
+use crate::{
+    isolation::EnvironmentProgress,
+    tasks::{
+        Task, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
+        TaskOperatorAttentionLevel,
+    },
+    tui::utils::{shimmer, truncate},
 };
 
 pub fn draw(
@@ -19,6 +23,8 @@ pub fn draw(
     selected: usize,
     latest_output: &HashMap<String, String>,
     notice: Option<&str>,
+    environment_builds: &HashMap<String, EnvironmentProgress>,
+    tick: usize,
 ) {
     let message_width = usize::from(frame.area().width.saturating_sub(2).max(1));
     let message_height = notice.map_or(0, |text| {
@@ -44,7 +50,15 @@ pub fn draw(
         Line::from(concat!("v", env!("CARGO_PKG_VERSION")).dim()).right_aligned(),
         version,
     );
-    draw_tasks(frame, body, tasks, selected, latest_output);
+    draw_tasks(
+        frame,
+        body,
+        tasks,
+        selected,
+        latest_output,
+        environment_builds,
+        tick,
+    );
 
     if let Some(notice) = notice {
         frame.render_widget(
@@ -68,6 +82,8 @@ fn draw_tasks(
     tasks: &[Task],
     selected: usize,
     latest_output: &HashMap<String, String>,
+    environment_builds: &HashMap<String, EnvironmentProgress>,
+    tick: usize,
 ) {
     let panel = Block::bordered()
         .border_type(BorderType::Rounded)
@@ -91,27 +107,43 @@ fn draw_tasks(
 
     for (index, (task, area)) in tasks.iter().zip(cards.iter()).enumerate() {
         let selected = index == selected;
-        let mut status = match &task.facts.execution_status {
-            TaskExecutionStatus::Pending => Line::from("pending").yellow(),
-            TaskExecutionStatus::Running => Line::from(match task.facts.execution_mode {
-                TaskExecutionMode::Autopilot => "autopilot · working",
-                TaskExecutionMode::AutopilotReport => "autopilot · reporting",
-                TaskExecutionMode::Operator => "operator override",
-            })
-            .green(),
-            TaskExecutionStatus::Paused => Line::from(match task.facts.execution_pause_reason {
-                Some(TaskExecutionPauseReason::AwaitingOperator) => "paused · awaiting operator",
-                Some(TaskExecutionPauseReason::ApplicationShutdown) => "paused · app stopped",
-                None => "paused",
-            })
-            .yellow(),
-            TaskExecutionStatus::Completed => Line::from("completed").dim(),
-            TaskExecutionStatus::Failed => {
-                Line::from(task.facts.last_error.as_deref().map_or_else(
-                    || "execution failed".to_owned(),
-                    |error| format!("execution failed · {error}"),
-                ))
-                .red()
+        // A pending task is waiting on its environment build; nothing else
+        // makes it pending after creation.
+        let building = (task.facts.execution_status == TaskExecutionStatus::Pending)
+            .then(|| environment_builds.get(&task.id))
+            .flatten();
+        let text_width = usize::from(area.width.saturating_sub(4));
+        let mut status = if let Some(progress) = building {
+            Line::from_iter(shimmer(&build_label(progress, text_width), tick + index))
+        } else {
+            match &task.facts.execution_status {
+                TaskExecutionStatus::Pending => Line::from("pending").yellow(),
+                TaskExecutionStatus::Running => Line::from(match task.facts.execution_mode {
+                    TaskExecutionMode::Autopilot => "autopilot · working",
+                    TaskExecutionMode::AutopilotReport => "autopilot · reporting",
+                    TaskExecutionMode::Operator => "operator override",
+                })
+                .green(),
+                TaskExecutionStatus::Paused => {
+                    Line::from(match task.facts.execution_pause_reason {
+                        Some(TaskExecutionPauseReason::AwaitingOperator) => {
+                            "paused · awaiting operator"
+                        }
+                        Some(TaskExecutionPauseReason::ApplicationShutdown) => {
+                            "paused · app stopped"
+                        }
+                        None => "paused",
+                    })
+                    .yellow()
+                }
+                TaskExecutionStatus::Completed => Line::from("completed").dim(),
+                TaskExecutionStatus::Failed => {
+                    Line::from(task.facts.last_error.as_deref().map_or_else(
+                        || "execution failed".to_owned(),
+                        |error| format!("execution failed · {error}"),
+                    ))
+                    .red()
+                }
             }
         };
         // A previous report's request is not a current interruption after execution resumes.
@@ -147,11 +179,15 @@ fn draw_tasks(
         } else {
             Style::new().dim()
         };
-        let output = (selected)
-            .then(|| latest_output.get(&task.id))
-            .flatten()
-            .and_then(|output| output.lines().last())
-            .unwrap_or_default();
+        let output = match building {
+            Some(progress) => truncate(&progress.command, text_width),
+            None => (selected)
+                .then(|| latest_output.get(&task.id))
+                .flatten()
+                .and_then(|output| output.lines().last())
+                .unwrap_or_default()
+                .to_owned(),
+        };
         frame.render_widget(
             Paragraph::new(vec![status, Line::from(output).dim()])
                 .style(style)
@@ -165,4 +201,13 @@ fn draw_tasks(
             *area,
         );
     }
+}
+
+/// What a waiting task is doing, with its place in the build kept visible.
+fn build_label(progress: &EnvironmentProgress, width: usize) -> String {
+    let count = format!(" ({}/{})", progress.completed + 1, progress.total);
+    format!(
+        "{}{count}",
+        truncate(&progress.label, width.saturating_sub(count.chars().count()))
+    )
 }

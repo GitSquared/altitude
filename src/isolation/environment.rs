@@ -11,7 +11,8 @@ use crate::config::Config;
 use crate::development::DevelopmentEnvironment;
 
 use super::{
-    BaseSandboxRecipe, CommandEvent, IsolationEngine, IsolationError, SandboxMount, SandboxOptions,
+    BaseSandboxRecipe, CommandEvent, EnvironmentProgressSink, IsolationEngine, IsolationError,
+    SandboxMount, SandboxOptions, SetupStep,
 };
 
 // The current Alpine environment runs as root. Resolve home-relative requirements here.
@@ -22,6 +23,8 @@ const REFRESH_AFTER: Duration = Duration::from_secs(72 * 60 * 60);
 pub struct EnvironmentRecipe {
     /// Stable relative profile identity, e.g. `agents/claude` or `vcs/github`.
     pub profile: &'static str,
+    /// What this recipe installs, in the operator's words; a waiting task shows it.
+    pub label: &'static str,
     pub setup_command: &'static str,
     pub directories: Vec<PersistentDirectory>,
     pub environment: Vec<(&'static str, &'static str)>,
@@ -100,15 +103,17 @@ impl EnvironmentPlan {
             .validate()
             .map_err(|error| IsolationError::new(error.to_string()))?;
         let environment_name = development_environment.name;
-        let mut setup_command = String::from("set -eu\n");
-        setup_command.push_str(&development_environment.setup_command);
-        setup_command.push('\n');
         let mut plan = Self {
             recipe: BaseSandboxRecipe::new(
                 format!("coding-{environment_name}"),
                 config.development_environment_snapshots_dir(&environment_name),
                 REFRESH_AFTER,
-                setup_command,
+                // Each contributor to the build is its own step, so a task
+                // waiting on a cold environment can say what it is waiting for.
+                vec![SetupStep::new(
+                    format!("preparing the {environment_name} environment"),
+                    development_environment.setup_command,
+                )],
             ),
             options: SandboxOptions {
                 snapshot_path: None,
@@ -129,8 +134,9 @@ impl EnvironmentPlan {
             if !profiles.insert(recipe.profile) {
                 return Err(IsolationError::new("duplicate profile recipe"));
             }
-            plan.recipe.setup_command.push_str(recipe.setup_command);
-            plan.recipe.setup_command.push('\n');
+            plan.recipe
+                .steps
+                .push(SetupStep::new(recipe.label, recipe.setup_command));
             for directory in recipe.directories {
                 relative_path(directory.relative_path, true)?;
                 let host_path = config
@@ -289,6 +295,7 @@ pub(super) async fn provision(
     snapshot: Option<String>,
     development_environment: DevelopmentEnvironment,
     recipes: Vec<EnvironmentRecipe>,
+    progress: &dyn EnvironmentProgressSink,
 ) -> Result<(), IsolationError> {
     // Validate every recipe before creating directories or building images.
     let mut plan = EnvironmentPlan::compose(config, development_environment, recipes)?;
@@ -296,7 +303,7 @@ pub(super) async fn provision(
     plan.options.snapshot_path = Some(match snapshot {
         Some(path) => path,
         None => engine
-            .ensure_base(plan.recipe)
+            .ensure_base(plan.recipe, progress)
             .await?
             .path
             .to_string_lossy()

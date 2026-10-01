@@ -19,7 +19,7 @@ use crate::{
     agent::AgentKind,
     config::{Config, SettingsError, SettingsFile},
     development::DevelopmentEnvironment,
-    isolation::{IsolationEngine, OutputStream},
+    isolation::{EnvironmentProgress, IsolationEngine, OutputStream},
     tasks::{
         Task, TaskExecutionMode, TaskExecutionStatus, TaskOperatorSignal, TaskOperatorSignalKind,
         TaskService, TaskServiceError,
@@ -55,6 +55,11 @@ enum SettingsPrompt {
 pub struct App {
     tasks: Vec<Task>,
     latest_output: HashMap<String, String>,
+    /// What each provisioning task is waiting on, refreshed while any task is
+    /// pending.
+    environment_builds: HashMap<String, EnvironmentProgress>,
+    /// Advances the highlight on that waiting text.
+    shimmer: usize,
     notice: Option<String>,
     removing: HashSet<String>,
     selected: usize,
@@ -128,9 +133,10 @@ impl App {
             settings_prompt: None,
             pending_environment_name: None,
             pending_environment_harness: None,
+            environment_builds: HashMap::new(),
+            shimmer: 0,
         }
     }
-
     fn replace_task(&mut self, task: Task) {
         if let Some(current) = self.tasks.iter_mut().find(|current| current.id == task.id) {
             *current = task;
@@ -397,6 +403,7 @@ where
     let mut events = EventStream::new();
     let mut refresh = time::interval(Duration::from_secs(2));
     let mut shell_notice = time::interval(Duration::from_millis(100));
+    let mut shimmer = time::interval(Duration::from_millis(80));
     let mut mouse_captured = false;
     loop {
         if mouse_captured != app.open_shell.is_some() {
@@ -414,6 +421,8 @@ where
                 app.selected,
                 &app.latest_output,
                 app.notice.as_deref(),
+                &app.environment_builds,
+                app.shimmer,
             );
             if let Some(shell) = app.open_shell.as_ref().and_then(|id| app.shells.get(id)) {
                 shell.draw(frame);
@@ -454,6 +463,10 @@ where
                 }
             }
             _ = shell_notice.tick(), if app.shell_has_active_notice() => {}
+            _ = shimmer.tick(), if app.is_preparing() => {
+                app.shimmer = app.shimmer.wrapping_add(1);
+                app.environment_builds = task_service.environment_builds();
+            }
             Some(event) = task_execution_updates.recv() => match event {
                 TaskExecutionUpdate::Created(Ok(task)) => app.replace_task(task),
                 TaskExecutionUpdate::Created(Err(error)) => app.notice = Some(error.to_string()),
@@ -513,6 +526,13 @@ impl App {
             .as_ref()
             .and_then(|id| self.shells.get(id))
             .is_some_and(Shell::has_active_notice)
+    }
+
+    /// Whether any task can currently be waiting on an environment build.
+    fn is_preparing(&self) -> bool {
+        self.tasks
+            .iter()
+            .any(|task| task.facts.execution_status == TaskExecutionStatus::Pending)
     }
 }
 

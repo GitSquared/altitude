@@ -14,7 +14,7 @@ use uuid::Uuid;
 /// against instead of following whatever the registry publishes next.
 const INSTALL_COMMAND: &str = concat!(
     "npm install -g --ignore-scripts --no-fund --no-audit ",
-    "@earendil-works/pi-coding-agent@1.0.0",
+    "@earendil-works/pi-coding-agent@0.99.1",
     " && test -x /usr/local/bin/pi"
 );
 
@@ -234,6 +234,7 @@ impl AgentEngine for PiCode {
     fn environment_recipe(&self) -> EnvironmentRecipe {
         EnvironmentRecipe {
             profile: "agents/pi",
+            label: "installing Pi",
             setup_command: INSTALL_COMMAND,
             directories: vec![
                 PersistentDirectory::root(
