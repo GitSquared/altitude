@@ -28,7 +28,7 @@ use crate::{
 
 mod boot;
 mod environment_picker;
-mod operator_notices;
+mod operator_signals;
 mod overview;
 mod prompt;
 mod shell;
@@ -50,7 +50,7 @@ enum SettingsPrompt {
     SetupCommand,
 }
 
-struct App {
+pub struct App {
     tasks: Vec<Task>,
     latest_output: HashMap<String, String>,
     notice: Option<String>,
@@ -79,7 +79,7 @@ struct App {
 }
 
 impl App {
-    fn new(
+    pub fn new(
         tasks: Vec<Task>,
         config: Config,
         settings: Result<SettingsFile, SettingsError>,
@@ -331,9 +331,7 @@ pub async fn run<E>(
     interrupt: &mut Signal,
     event_loop: TaskEventLoop<E>,
     task_service: TaskService<E>,
-    config: Config,
-    settings: Result<SettingsFile, SettingsError>,
-    tasks: Vec<Task>,
+    app: App,
     task_execution_updates: mpsc::UnboundedReceiver<TaskExecutionUpdate>,
 ) -> io::Result<()>
 where
@@ -345,9 +343,7 @@ where
         interrupt,
         event_loop.clone(),
         task_service,
-        config,
-        settings,
-        tasks,
+        app,
         task_execution_updates,
     )
     .await;
@@ -363,9 +359,7 @@ async fn run_loop<E>(
     interrupt: &mut Signal,
     event_loop: TaskEventLoop<E>,
     task_service: TaskService<E>,
-    config: Config,
-    settings: Result<SettingsFile, SettingsError>,
-    tasks: Vec<Task>,
+    mut app: App,
     mut task_execution_updates: mpsc::UnboundedReceiver<TaskExecutionUpdate>,
 ) -> io::Result<()>
 where
@@ -375,7 +369,6 @@ where
     let mut events = EventStream::new();
     let mut refresh = time::interval(Duration::from_secs(2));
     let mut shell_notice = time::interval(Duration::from_millis(100));
-    let mut app = App::new(tasks, config, settings);
     let mut mouse_captured = false;
     loop {
         if mouse_captured != app.open_shell.is_some() {
@@ -398,7 +391,7 @@ where
                 shell.draw(frame);
             }
             if app.open_operator_signals {
-                operator_notices::draw(frame, &app.operator_signals, app.selected_operator_signal);
+                operator_signals::draw(frame, &app.operator_signals, app.selected_operator_signal);
             }
             if app.open_environment_picker {
                 environment_picker::draw(
@@ -442,11 +435,11 @@ where
                     app.remove_shell(&id);
                     app.replace_task(task);
                 }
-                TaskExecutionUpdate::Finished(id, Err(error)) if !app.is_removing(&id) => set_error(&mut app, &id, error),
+                TaskExecutionUpdate::Finished(id, Err(error)) if !app.is_removing(&id) => show_task_error(&mut app, &id, error),
                 TaskExecutionUpdate::Removed(id, Ok(())) => app.remove_task(&id),
                 TaskExecutionUpdate::Removed(id, Err(error)) => {
                     app.cancel_removing(&id);
-                    set_error(&mut app, &id, error);
+                    show_task_error(&mut app, &id, error);
                 }
                 TaskExecutionUpdate::Output { task_id, stream, bytes } => {
                     app.append_output(task_id.clone(), stream, bytes.clone());
@@ -500,12 +493,13 @@ fn copy_to_clipboard(text: String) -> Result<(), arboard::Error> {
     clipboard.set_text(text)
 }
 
-fn set_error(app: &mut App, id: &str, error: TaskServiceError) {
-    if let Some(task) = app.tasks.iter_mut().find(|task| task.id == id) {
-        task.facts.execution_status = TaskExecutionStatus::Failed;
-        task.facts.execution_pause_reason = None;
-        task.facts.last_error = Some(error.to_string());
-    }
+fn show_task_error(app: &mut App, id: &str, error: TaskServiceError) {
+    let title = app
+        .tasks
+        .iter()
+        .find(|task| task.id == id)
+        .map_or(id, |task| task.facts.intent.as_str());
+    app.notice = Some(format!("{title}: {error}"));
 }
 
 async fn handle_event<E>(

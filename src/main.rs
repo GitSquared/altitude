@@ -81,9 +81,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             &mut interrupt,
             event_loop,
             tasks,
-            config.clone(),
-            settings,
-            task_rows,
+            tui::App::new(task_rows, config.clone(), settings),
             task_execution_updates,
         )
         .await

@@ -104,7 +104,7 @@ impl TaskStore {
         Ok(task)
     }
 
-    /// Append a whole transition atomically and read its resulting state before releasing the writer.
+    /// Append related facts atomically and read their latest values before releasing the writer.
     pub async fn append_events(
         &self,
         task_id: &str,

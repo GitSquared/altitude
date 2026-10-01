@@ -1,5 +1,7 @@
 use super::AgentEngine;
-use crate::isolation::{DefaultFile, EnvironmentRecipe, GuestPath, PersistentDirectory};
+use crate::isolation::{
+    DefaultFile, EnvironmentRecipe, GuestPath, PersistentDirectory, shell_quote,
+};
 use crate::tasks::{TaskAgentTurnContext, TaskAgentTurnReport};
 use serde_json::Value;
 use std::mem;
@@ -191,10 +193,6 @@ impl ClaudeStream {
             }
         }
     }
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 impl AgentEngine for ClaudeCode {
