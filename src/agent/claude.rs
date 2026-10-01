@@ -15,7 +15,7 @@ pub struct ClaudeStream {
     error: Option<String>,
 }
 
-const AUTOPILOT_SYSTEM_PROMPT: &str = "Altitude is driving this task without an operator watching. Continue autonomously whenever the next action is reasonably implied by the original task. Do not stop for routine confirmation. Altitude will ask for a structured task report after this work turn ends.";
+const AUTOPILOT_SYSTEM_PROMPT: &str = "Altitude is driving this task without an operator watching. Continue autonomously whenever the next action is reasonably implied by the original task. Match the precision of the operator's expressed intent. Investigate and take reasonable defaults instead of asking for confirmation. Altitude will ask for a structured task report after this work turn ends.";
 const REPORT_SYSTEM_PROMPT: &str = r#"Altitude is driving this task without an operator watching. Do not perform more work in this turn. Return the structured task report now.
 
 Keep routine reasoning, progress, recoverable failures, and decisions you can reasonably infer in the summary. Before raising an operator signal, weigh the cost of taking the operator's attention:
@@ -27,8 +27,8 @@ Keep routine reasoning, progress, recoverable failures, and decisions you can re
 
 Raise no signal unless that reasoning justifies one. Signals have strict meanings:
 - update: unique, durable information worth seeing, with no operator action required. Choose continue.
-- decision: new context makes the original intent genuinely ambiguous and no reasonable default remains. State the exact decision, your recommendation/default, and what happens if ignored. Choose await_operator only when useful dependent work cannot continue.
-- review: the requested work and applicable machine verification are complete, and human acceptance or requested changes are now needed. Include the review evidence and verification limits. Choose await_operator; never treat review readiness as operator acceptance.
+- decision: new context makes the original intent genuinely ambiguous and no reasonable default remains. State what is missing, why no reasonable path can be inferred, and what happens if ignored. Choose await_operator. If independent useful work remains, continue it before requesting a blocking decision.
+- review: the requested work and applicable machine verification are complete, and human acceptance or requested changes are now needed. Account for the whole expressed intent, including any unfinished or omitted work. Include concrete review evidence and verification limits; pending CI or automated review is still work in progress. Choose await_operator; never treat review readiness as operator acceptance.
 
 Priority reflects response time and impact if ignored: low is useful whenever convenient; normal deserves routine attention; high should be handled before dependent work proceeds; urgent means delay risks serious or irreversible harm. Do not inflate priority.
 

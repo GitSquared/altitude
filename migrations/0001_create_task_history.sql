@@ -58,6 +58,7 @@ WITH projected_tasks AS (
                         'snapshot_path', NULL,
                         'last_error', NULL,
                         'latest_turn_summary', NULL,
+                        'latest_operator_answer', NULL,
                         'unread_operator_signal_count', 0
                     )
                     WHEN 'sandbox_provisioned' THEN json_object(
@@ -76,7 +77,13 @@ WITH projected_tasks AS (
                             'operator_attention_level', payload ->> '$.data.operator_attention_level'
                         )
                     WHEN 'operator_signal_answered' THEN json_object(
-                        'operator_attention_level', 'nominal'
+                        'operator_attention_level', 'nominal',
+                        'execution_status', 'pending',
+                        'execution_pause_reason', NULL,
+                        'latest_operator_answer', json_object(
+                            'signal_id', payload ->> '$.data.signal_id',
+                            'answer', payload ->> '$.data.answer'
+                        )
                     )
                     WHEN 'execution_paused' THEN json_object(
                         'execution_status', 'paused',

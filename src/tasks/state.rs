@@ -116,6 +116,7 @@ pub struct TaskCurrentState {
     pub snapshot_path: Option<String>,
     pub last_error: Option<String>,
     pub latest_turn_summary: Option<String>,
+    pub latest_operator_answer: Option<serde_json::Value>,
     pub unread_operator_signal_count: u32,
 }
 
@@ -190,17 +191,22 @@ pub struct TaskAgentTurnContext {
     pub execution_mode: TaskExecutionMode,
     pub operator_attention_level: TaskOperatorAttentionLevel,
     pub datetime: String,
+    pub latest_operator_answer: Option<serde_json::Value>,
 }
 
 impl fmt::Display for TaskAgentTurnContext {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "execution_status={:?}; execution_mode={:?}; operator_attention_level={:?}; current_datetime={}",
+            "execution_status={:?}; execution_mode={:?}; operator_attention_level={:?}; current_datetime={}; latest_operator_answer={}",
             self.execution_status,
             self.execution_mode,
             self.operator_attention_level,
-            self.datetime
+            self.datetime,
+            self.latest_operator_answer
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "none".into())
         )
     }
 }
@@ -212,6 +218,7 @@ impl Task {
             execution_mode,
             operator_attention_level: self.current_state.operator_attention_level.clone(),
             datetime: Local::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            latest_operator_answer: self.current_state.latest_operator_answer.clone(),
         }
     }
 

@@ -1,9 +1,11 @@
 use sqlx::{FromRow, Sqlite, SqlitePool, Transaction, types::Json};
+use std::io;
 use uuid::Uuid;
 
 use super::{
-    Task, TaskAgentRun, TaskAgentTurnReport, TaskCurrentState, TaskError, TaskHistoryEvent,
-    TaskOperatorAttentionLevel, TaskOperatorSignal, TaskOperatorSignalKind,
+    Task, TaskAgentRun, TaskAgentTurnReport, TaskCurrentState, TaskError, TaskExecutionPauseReason,
+    TaskExecutionStatus, TaskHistoryEvent, TaskOperatorAttentionLevel, TaskOperatorSignal,
+    TaskOperatorSignalKind,
 };
 use crate::{agent::AgentKind, db::Database};
 
@@ -200,7 +202,7 @@ impl TaskStore {
                 'title', title,
                 'body', body,
                 'raised_at_ms', raised_at_ms,
-                'read', read
+                'read', json(CASE WHEN read THEN 'true' ELSE 'false' END)
             )
             FROM task_operator_signals
             WHERE task_id = ?1 AND resolved = 0
@@ -286,6 +288,19 @@ impl TaskStore {
         .fetch_one(&mut *transaction)
         .await
         .map_err(TaskError::Database)?;
+        if answer.is_some() {
+            let task = Self::read_task(&mut transaction, &task_id).await?;
+            if task.current_state.execution_status != TaskExecutionStatus::Paused
+                || task.current_state.execution_pause_reason
+                    != Some(TaskExecutionPauseReason::AwaitingOperator)
+            {
+                return Err(TaskError::HistoryData(serde_json::Error::io(
+                    io::Error::other(
+                        "wait until the task is paused for the operator before answering",
+                    ),
+                )));
+            }
+        }
         let event = match (kind.0, answer) {
             (TaskOperatorSignalKind::Update, None) => {
                 TaskHistoryEvent::OperatorSignalAcknowledged {
@@ -300,7 +315,7 @@ impl TaskStore {
             }
             _ => {
                 return Err(TaskError::HistoryData(serde_json::Error::io(
-                    std::io::Error::other(
+                    io::Error::other(
                         "updates are acknowledged; decisions and reviews are answered",
                     ),
                 )));
