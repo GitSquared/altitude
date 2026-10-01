@@ -1,10 +1,16 @@
+use crate::agent::AgentKind;
 use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt};
 
+/// A named environment a task runs in, as configured in `config.toml`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct DevelopmentEnvironment {
     pub name: String,
     pub setup_command: String,
+    /// The coding harness Altitude drives in this environment. Isolation
+    /// ignores it; task execution uses it to pick an agent engine.
+    #[serde(default)]
+    pub harness: AgentKind,
 }
 
 impl DevelopmentEnvironment {

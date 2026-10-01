@@ -52,7 +52,10 @@ pub fn draw(
             } else {
                 ""
             };
-            ListItem::new(Line::from(format!("{}{marker}", environment.name)))
+            ListItem::new(Line::from(format!(
+                "{} · {}{marker}",
+                environment.name, environment.harness
+            )))
         })
         .collect::<Vec<_>>();
     let list = List::new(items)
@@ -61,12 +64,17 @@ pub fn draw(
     let mut state = ListState::default();
     state.select((!environments.is_empty()).then_some(selected));
     frame.render_stateful_widget(list, list_area, &mut state);
-    let setup_command = environments
+    let detail = environments
         .get(selected)
-        .map(|environment| environment.setup_command.as_str())
-        .unwrap_or("No environments are configured. Press n to add one.");
+        .map(|environment| {
+            format!(
+                "harness: {}\n\n{}",
+                environment.harness, environment.setup_command
+            )
+        })
+        .unwrap_or_else(|| "No environments are configured. Press n to add one.".to_owned());
     frame.render_widget(
-        Paragraph::new(setup_command).wrap(Wrap { trim: true }),
+        Paragraph::new(detail).wrap(Wrap { trim: true }),
         detail_area,
     );
 }

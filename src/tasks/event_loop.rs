@@ -6,7 +6,7 @@ use std::{
 use tokio::sync::mpsc;
 
 use crate::{
-    agent::ClaudeStream,
+    agent::TaskReportDecoder,
     development::DevelopmentEnvironment,
     isolation::{Command, CommandEvent, CommandSession, IsolationEngine, OutputStream},
     tasks::{
@@ -180,11 +180,11 @@ where
         }
     }
 
-    pub fn create_claude(&self, prompt: String, environment: DevelopmentEnvironment) {
-        tracing::info!("creating Claude task");
+    pub fn create(&self, prompt: String, environment: DevelopmentEnvironment) {
+        tracing::info!(harness = %environment.harness, "creating task");
         let event_loop = self.clone();
         tokio::spawn(async move {
-            let task = match event_loop.service.create_claude(prompt, environment).await {
+            let task = match event_loop.service.create(prompt, environment).await {
                 Ok(task) => task,
                 Err(error) => {
                     let _ = event_loop
@@ -273,8 +273,10 @@ where
         let handoffs = Arc::clone(&self.handoffs);
         let event_loop = self.clone();
         tokio::spawn(async move {
-            let mut claude_stream =
-                matches!(mode, TaskExecutionMode::AutopilotReport).then(ClaudeStream::new);
+            let mut report_stream = match mode {
+                TaskExecutionMode::AutopilotReport => service.report_decoder(&task),
+                _ => None,
+            };
             loop {
                 let event = session.events.recv().await.unwrap_or_else(|| {
                     CommandEvent::Failed(
@@ -283,8 +285,8 @@ where
                 });
                 match event {
                     CommandEvent::Output { stream, bytes } => {
-                        if let Some(parser) = &mut claude_stream {
-                            parser.process(&bytes);
+                        if let Some(decoder) = &mut report_stream {
+                            decoder.process(&bytes);
                         }
                         event_loop.cache_terminal_output(&task.id, &bytes);
                         let _ = events.send(TaskExecutionUpdate::Output {
@@ -320,7 +322,7 @@ where
                                 &run,
                                 mode,
                                 handoff,
-                                claude_stream,
+                                report_stream,
                                 event,
                             )
                             .await
@@ -344,7 +346,7 @@ where
         run: &TaskAgentRun,
         mode: TaskExecutionMode,
         handoff: Option<TaskExecutionMode>,
-        report_stream: Option<ClaudeStream>,
+        report_stream: Option<Box<dyn TaskReportDecoder>>,
         event: CommandEvent,
     ) -> Result<(), TaskServiceError> {
         if let Some(target) = handoff {
@@ -383,7 +385,9 @@ where
             }
             TaskExecutionMode::AutopilotReport => {
                 let report = report_stream
-                    .expect("report runs have a decoder")
+                    .ok_or_else(|| {
+                        TaskServiceError::InvalidReport("the report turn has no decoder".into())
+                    })?
                     .report()
                     .map_err(TaskServiceError::InvalidReport)?;
                 let task = self.service.apply_report(&task, run, &report).await?;
