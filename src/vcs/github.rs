@@ -13,6 +13,7 @@ impl GitHub {
     pub fn environment_recipe() -> EnvironmentRecipe {
         EnvironmentRecipe {
             profile: "vcs/github",
+            label: "installing GitHub tools",
             setup_command: "apk add --no-cache git openssh-client-default github-cli gnupg",
             directories: vec![
                 PersistentDirectory::at(

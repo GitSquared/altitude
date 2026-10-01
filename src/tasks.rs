@@ -1,57 +1,77 @@
 use crate::development::DevelopmentEnvironment;
 use crate::{
-    agent::{AgentEngine, AgentError, AgentKind, ClaudeCode},
+    agent::{AgentEngine, AgentEngines, AgentError, AgentKind, TaskReportDecoder},
     isolation::{
         CommandEvent, CommandSession, IsolationEngine, IsolationError, OutputStream, SandboxOptions,
     },
     vcs::{GitHub, VcsProvider},
 };
 use futures_util::future::join_all;
-use std::{error::Error, fmt, path::PathBuf};
+use std::{collections::HashMap, error::Error, fmt, path::PathBuf};
 use uuid::Uuid;
 mod event_loop;
 mod state;
 pub use event_loop::{TaskEventLoop, TaskExecutionUpdate};
+mod progress;
 mod store;
 pub use state::*;
 pub use store::TaskStore;
+
+use crate::isolation::EnvironmentProgress;
+use progress::EnvironmentProgressRegistry;
 
 #[derive(Clone)]
 pub struct TaskService<E> {
     store: TaskStore,
     isolation: E,
     snapshots_dir: PathBuf,
-    claude: ClaudeCode,
+    agents: AgentEngines,
+    environment_progress: EnvironmentProgressRegistry,
 }
 
 impl<E> TaskService<E>
 where
     E: IsolationEngine + Clone,
 {
-    pub fn new(store: TaskStore, isolation: E, snapshots_dir: PathBuf, claude: ClaudeCode) -> Self {
+    pub fn new(
+        store: TaskStore,
+        isolation: E,
+        snapshots_dir: PathBuf,
+        agents: AgentEngines,
+    ) -> Self {
         Self {
             store,
             isolation,
             snapshots_dir,
-            claude,
+            agents,
+            environment_progress: EnvironmentProgressRegistry::default(),
         }
+    }
+
+    /// What each task's environment build is doing, for an interface to show.
+    ///
+    /// Keyed by task, and only present while this service is building for it.
+    pub fn environment_builds(&self) -> HashMap<String, EnvironmentProgress> {
+        self.environment_progress.published()
     }
 
     pub async fn list(&self) -> Result<Vec<Task>, TaskServiceError> {
         self.store.list().await.map_err(TaskServiceError::Task)
     }
 
-    pub async fn create_claude(
+    /// Start a task in the harness its environment names.
+    pub async fn create(
         &self,
         intent: String,
         environment: DevelopmentEnvironment,
     ) -> Result<Task, TaskServiceError> {
+        let kind = environment.harness;
         self.store
             .create_with_agent(
                 intent,
                 environment,
-                Some(AgentKind::Claude),
-                Some(self.claude.new_conversation_id()),
+                Some(kind),
+                Some(self.agents.engine(kind).new_conversation_id()),
             )
             .await
             .map_err(TaskServiceError::Task)
@@ -170,9 +190,10 @@ where
         let resume = task.facts.snapshot_available;
         let task = self.provision(task).await?;
         let command = match task.agent_kind {
-            Some(AgentKind::Claude) => {
-                let conversation_id = self.claude_conversation(&task, resume).await?;
-                self.claude.autopilot_command(
+            Some(kind) => {
+                let engine = self.agents.engine(kind);
+                let conversation_id = self.agent_conversation(&task, resume).await?;
+                engine.autopilot_command(
                     &conversation_id,
                     if resume {
                         "Resume the task and continue making progress."
@@ -196,17 +217,19 @@ where
         } else {
             None
         };
+        let progress = self.environment_progress.writer(&task.id);
         let create = match task.agent_kind {
-            Some(AgentKind::Claude) => {
+            Some(kind) => {
                 self.isolation
                     .provision(
                         sandbox_id.clone(),
                         snapshot_path.clone(),
                         task.development_environment(),
                         vec![
-                            self.claude.environment_recipe(),
+                            self.agents.engine(kind).environment_recipe(),
                             GitHub::environment_recipe(),
                         ],
+                        &progress,
                     )
                     .await
             }
@@ -216,6 +239,7 @@ where
                     .await
             }
         };
+        self.environment_progress.clear(&task.id);
         if let Err(error) = create {
             self.fail(&task, error.to_string()).await?;
             return Err(TaskServiceError::Isolation(error));
@@ -355,8 +379,9 @@ where
         // turn is planned against current external state rather than the state
         // as of the previous turn.
         let task = self.observe_code_contributions(task).await;
-        let conversation_id = self.claude_conversation(&task, true).await?;
-        let command = self.claude.autopilot_command(
+        let engine = self.engine(&task)?;
+        let conversation_id = self.agent_conversation(&task, true).await?;
+        let command = engine.autopilot_command(
             &conversation_id,
             prompt,
             &task.turn_context(TaskExecutionMode::Autopilot),
@@ -370,8 +395,9 @@ where
         &self,
         task: Task,
     ) -> Result<(Task, TaskAgentRun, CommandSession), TaskServiceError> {
-        let conversation_id = self.claude_conversation(&task, true).await?;
-        let command = self.claude.report_command(
+        let engine = self.engine(&task)?;
+        let conversation_id = self.agent_conversation(&task, true).await?;
+        let command = engine.report_command(
             &conversation_id,
             &task.turn_context(TaskExecutionMode::AutopilotReport),
         );
@@ -379,6 +405,11 @@ where
             .await
     }
 
+    /// Hand the task's terminal to the operator.
+    ///
+    /// The conversation check is waived for harnesses that create a session on
+    /// demand, so an operator can attach and authenticate before a task's first
+    /// turn has ever succeeded.
     pub async fn start_operator(
         &self,
         mut task: Task,
@@ -386,10 +417,13 @@ where
         if !task.facts.sandbox_available {
             task = self.provision(task).await?;
         }
-        let conversation_id = self.claude_conversation(&task, true).await?;
+        let engine = self.engine(&task)?;
+        let conversation_id = self
+            .agent_conversation(&task, engine.operator_requires_conversation())
+            .await?;
         self.launch(
             task,
-            self.claude.operator_command(&conversation_id),
+            engine.operator_command(&conversation_id),
             TaskExecutionMode::Operator,
         )
         .await
@@ -718,20 +752,26 @@ where
         self.record(&task.id, &failure_events(task, error)).await
     }
 
-    async fn claude_conversation(
+    /// The task's conversation in its harness, after confirming that the
+    /// harness can still resume it.
+    async fn agent_conversation(
         &self,
         task: &Task,
         require_transcript: bool,
     ) -> Result<String, TaskServiceError> {
+        let kind = self.agent_kind(task)?;
         let Some(conversation_id) = task.facts.agent_conversation_id.as_deref() else {
             return self
-                .conversation_failure(task, "Claude task has no conversation ID")
+                .conversation_failure(task, format!("{kind} task has no conversation ID"))
                 .await;
         };
         if !require_transcript {
             return Ok(conversation_id.to_owned());
         }
-        let transcript_path = self.claude.conversation_transcript_path(conversation_id);
+        let transcript_path = self
+            .agents
+            .engine(kind)
+            .conversation_transcript_path(conversation_id);
         let sandbox_id = task
             .facts
             .sandbox_id
@@ -739,9 +779,25 @@ where
             .ok_or(TaskServiceError::Task(TaskError::MissingSandbox))?;
         match self.isolation.guest_regular_file_exists(sandbox_id, transcript_path).await {
             Ok(true) => Ok(conversation_id.to_owned()),
-            Ok(false) => self.conversation_failure(task, "Claude conversation transcript is missing; the task cannot resume without its session state").await,
-            Err(error) => self.conversation_failure(task, format!("could not read Claude conversation transcript: {error}")).await,
+            Ok(false) => self.conversation_failure(task, format!("{kind} conversation transcript is missing; the task cannot resume without its session state")).await,
+            Err(error) => self.conversation_failure(task, format!("could not read {kind} conversation transcript: {error}")).await,
         }
+    }
+
+    /// The harness that owns this task's conversation.
+    fn engine(&self, task: &Task) -> Result<&dyn AgentEngine, TaskServiceError> {
+        Ok(self.agents.engine(self.agent_kind(task)?))
+    }
+
+    fn agent_kind(&self, task: &Task) -> Result<AgentKind, TaskServiceError> {
+        task.agent_kind
+            .ok_or(TaskServiceError::Task(TaskError::MissingAgent))
+    }
+
+    /// Decodes a report turn's output for the task's harness.
+    pub fn report_decoder(&self, task: &Task) -> Option<Box<dyn TaskReportDecoder>> {
+        task.agent_kind
+            .map(|kind| self.agents.engine(kind).report_decoder())
     }
 
     async fn conversation_failure<T>(
@@ -799,6 +855,7 @@ pub enum TaskError {
     HistoryData(serde_json::Error),
     OperationRejected(&'static str),
     MissingSandbox,
+    MissingAgent,
 }
 impl fmt::Display for TaskError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -807,6 +864,7 @@ impl fmt::Display for TaskError {
             Self::HistoryData(error) => write!(formatter, "invalid task history data: {error}"),
             Self::OperationRejected(reason) => formatter.write_str(reason),
             Self::MissingSandbox => formatter.write_str("task has no running sandbox"),
+            Self::MissingAgent => formatter.write_str("task has no agent harness"),
         }
     }
 }

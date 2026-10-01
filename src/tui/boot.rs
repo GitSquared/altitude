@@ -5,16 +5,15 @@ use futures_util::StreamExt;
 use ratatui::{
     DefaultTerminal, Frame,
     layout::{Constraint, Layout},
-    style::{Color, Style, Stylize},
-    text::{Line, Span},
+    style::Stylize,
+    text::Line,
     widgets::Paragraph,
 };
 use tokio::{signal::unix::Signal, sync::watch, time};
 
-use crate::isolation::IsolationStatus;
+use crate::{isolation::IsolationStatus, tui::utils::shimmer};
 
 const TITLE: &str = "⛰  altitude";
-const SHIMMER_WIDTH: usize = 3;
 
 pub async fn database<T, E>(
     terminal: &mut DefaultTerminal,
@@ -133,7 +132,7 @@ fn isolation_label(status: &IsolationStatus) -> &'static str {
     }
 }
 
-fn draw(frame: &mut Frame, label: &str, shimmer: usize) {
+fn draw(frame: &mut Frame, label: &str, tick: usize) {
     let [_, title_area, _, status, _] = Layout::vertical([
         Constraint::Fill(1),
         Constraint::Length(1),
@@ -148,19 +147,8 @@ fn draw(frame: &mut Frame, label: &str, shimmer: usize) {
         title_area,
     );
 
-    let position = shimmer % (label.chars().count() + SHIMMER_WIDTH);
-    let shimmer_text = label.chars().enumerate().map(|(index, character)| {
-        let is_shimmering = index.abs_diff(position) < SHIMMER_WIDTH;
-        let style = if is_shimmering {
-            Style::new().fg(Color::Gray)
-        } else {
-            Style::new().fg(Color::DarkGray)
-        };
-        Span::styled(character.to_string(), style)
-    });
-
     frame.render_widget(
-        Paragraph::new(Line::from_iter(shimmer_text)).centered(),
+        Paragraph::new(Line::from_iter(shimmer(label, tick))).centered(),
         status,
     );
 }

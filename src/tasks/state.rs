@@ -297,10 +297,13 @@ impl fmt::Display for TaskAgentTurnContext {
 }
 
 impl Task {
+    /// The environment this task runs in. Its harness is recorded separately as
+    /// the task's agent kind.
     pub fn development_environment(&self) -> DevelopmentEnvironment {
         DevelopmentEnvironment {
             name: self.facts.environment_name.clone(),
             setup_command: self.facts.environment_setup_command.clone(),
+            harness: self.agent_kind.unwrap_or_default(),
         }
     }
 

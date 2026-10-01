@@ -17,9 +17,10 @@ use tokio::{signal::unix::Signal, sync::mpsc, time};
 use tui_term::vt100;
 
 use crate::{
+    agent::AgentKind,
     config::{Config, SettingsError, SettingsFile},
     development::DevelopmentEnvironment,
-    isolation::{IsolationEngine, OutputStream},
+    isolation::{EnvironmentProgress, IsolationEngine, OutputStream},
     tasks::{
         Task, TaskExecutionMode, TaskExecutionStatus, TaskOperatorSignal, TaskOperatorSignalKind,
         TaskService, TaskServiceError,
@@ -48,6 +49,7 @@ pub use boot::{
 /// widget: it already handles editing, cancellation, and resize.
 enum SettingsPrompt {
     Name,
+    Harness,
     SetupCommand,
 }
 
@@ -55,6 +57,11 @@ pub struct App {
     tasks: Vec<Task>,
     latest_output: HashMap<String, String>,
     output_previews: HashMap<String, vt100::Parser>,
+    /// What each provisioning task is waiting on, refreshed while any task is
+    /// pending.
+    environment_builds: HashMap<String, EnvironmentProgress>,
+    /// Advances the highlight on that waiting text.
+    shimmer: usize,
     notice: Option<String>,
     removing: HashSet<String>,
     selected: usize,
@@ -77,9 +84,10 @@ pub struct App {
     settings_file: Option<SettingsFile>,
     open_environment_settings: bool,
     settings_prompt: Option<SettingsPrompt>,
-    /// Name collected by the add-environment chain, held until its setup
-    /// command arrives.
+    /// Name collected by the add-environment chain, held until its harness and
+    /// setup command arrive.
     pending_environment_name: Option<String>,
+    pending_environment_harness: Option<AgentKind>,
 }
 
 impl App {
@@ -131,9 +139,11 @@ impl App {
             open_environment_settings: false,
             settings_prompt: None,
             pending_environment_name: None,
+            pending_environment_harness: None,
+            environment_builds: HashMap::new(),
+            shimmer: 0,
         }
     }
-
     fn replace_task(&mut self, task: Task) {
         if let Some(current) = self.tasks.iter_mut().find(|current| current.id == task.id) {
             *current = task;
@@ -238,16 +248,40 @@ impl App {
         match step {
             SettingsPrompt::Name => {
                 self.pending_environment_name = Some(input);
+                self.settings_prompt = Some(SettingsPrompt::Harness);
+                self.prompt = Some(Prompt::new("harness: claude or pi"));
+            }
+            SettingsPrompt::Harness => {
+                let harness = if input.trim().is_empty() {
+                    AgentKind::default()
+                } else {
+                    match input.trim().parse::<AgentKind>() {
+                        Ok(harness) => harness,
+                        Err(error) => {
+                            // The chain keeps its collected name and asks again
+                            // rather than discarding the operator's input.
+                            self.notice = Some(error.to_string());
+                            self.settings_prompt = Some(SettingsPrompt::Harness);
+                            self.prompt = Some(Prompt::new("harness: claude or pi"));
+                            return;
+                        }
+                    }
+                };
+                self.pending_environment_harness = Some(harness);
                 self.settings_prompt = Some(SettingsPrompt::SetupCommand);
                 self.prompt = Some(Prompt::new("setup command"));
             }
             SettingsPrompt::SetupCommand => {
-                let Some(name) = self.pending_environment_name.take() else {
+                let (Some(name), Some(harness)) = (
+                    self.pending_environment_name.take(),
+                    self.pending_environment_harness.take(),
+                ) else {
                     return;
                 };
                 let environment = DevelopmentEnvironment {
                     name,
                     setup_command: input,
+                    harness,
                 };
                 let Some(file) = self.settings_file.as_mut() else {
                     return;
@@ -381,6 +415,7 @@ where
     let mut events = EventStream::new();
     let mut refresh = time::interval(Duration::from_secs(2));
     let mut shell_notice = time::interval(Duration::from_millis(100));
+    let mut shimmer = time::interval(Duration::from_millis(80));
     let mut mouse_captured = false;
     loop {
         if mouse_captured != app.open_shell.is_some() {
@@ -392,14 +427,7 @@ where
             }
         }
         terminal.draw(|frame| {
-            overview::draw(
-                frame,
-                &app.tasks,
-                app.selected,
-                &mut app.first_visible_task,
-                &app.latest_output,
-                app.notice.as_deref(),
-            );
+            overview::draw(frame, &mut app);
             if let Some(shell) = app.open_shell.as_ref().and_then(|id| app.shells.get(id)) {
                 shell.draw(frame);
             }
@@ -444,6 +472,10 @@ where
                 }
             }
             _ = shell_notice.tick(), if app.shell_has_active_notice() => {}
+            _ = shimmer.tick(), if app.is_preparing() => {
+                app.shimmer = app.shimmer.wrapping_add(1);
+                app.environment_builds = task_service.environment_builds();
+            }
             Some(event) = task_execution_updates.recv() => match event {
                 TaskExecutionUpdate::Created(Ok(task)) => app.replace_task(task),
                 TaskExecutionUpdate::Created(Err(error)) => app.notice = Some(error.to_string()),
@@ -507,6 +539,13 @@ impl App {
             .as_ref()
             .and_then(|id| self.shells.get(id))
             .is_some_and(Shell::has_active_notice)
+    }
+
+    /// Whether any task can currently be waiting on an environment build.
+    fn is_preparing(&self) -> bool {
+        self.tasks
+            .iter()
+            .any(|task| task.facts.execution_status == TaskExecutionStatus::Pending)
     }
 }
 
@@ -579,6 +618,7 @@ where
                 // half-open.
                 app.settings_prompt = None;
                 app.pending_environment_name = None;
+                app.pending_environment_harness = None;
                 app.answering_operator_signal = None;
             }
             Some(PromptAction::Submit(command)) => {
@@ -588,7 +628,7 @@ where
                 } else if let Some(step) = app.settings_prompt.take() {
                     app.continue_settings_prompt(step, command);
                 } else if let Some(environment) = app.single_environment() {
-                    event_loop.create_claude(command, environment);
+                    event_loop.create(command, environment);
                 } else if app.environments().is_empty() {
                     app.notice = Some("no environments are configured".into());
                 } else {
@@ -652,7 +692,7 @@ where
                     (app.pending_command.take(), app.chosen_environment())
                 {
                     app.open_environment_picker = false;
-                    event_loop.create_claude(command, environment);
+                    event_loop.create(command, environment);
                 }
             }
             _ => {}
@@ -722,7 +762,7 @@ where
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
         KeyCode::Char('c') => {
             if app.reload_settings() {
-                app.prompt = Some(Prompt::new("what should Claude do?"));
+                app.prompt = Some(Prompt::new("what should the agent do?"));
             }
         }
         KeyCode::Char('s') => {
@@ -776,7 +816,7 @@ where
                     TaskExecutionStatus::Paused | TaskExecutionStatus::Failed
                 ) {
                     event_loop.start_operator_control(task);
-                    app.notice = Some("restoring Claude in the terminal…".into());
+                    app.notice = Some("restoring the agent in the terminal…".into());
                     return Ok(false);
                 }
                 if !matches!(task.facts.execution_status, TaskExecutionStatus::Running) {
@@ -787,7 +827,7 @@ where
                     TaskExecutionMode::Autopilot | TaskExecutionMode::AutopilotReport
                 ) {
                     event_loop.take_control(&task.id);
-                    app.notice = Some("bringing Claude to the terminal…".into());
+                    app.notice = Some("bringing the agent to the terminal…".into());
                     return Ok(false);
                 }
                 if app.shells.contains_key(&task.id) {

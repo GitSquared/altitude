@@ -22,8 +22,8 @@ use crate::development::DevelopmentEnvironment;
 
 use super::{
     BaseSandboxRecipe, BaseSandboxSnapshot, Command, CommandEvent, CommandSession,
-    EnvironmentRecipe, IsolationEngine, IsolationError, IsolationStatus, OutputStream,
-    SandboxOptions,
+    EnvironmentProgress, EnvironmentProgressSink, EnvironmentRecipe, IsolationEngine,
+    IsolationError, IsolationStatus, OutputStream, SandboxOptions, SetupStep,
     environment::{self, private_directory},
 };
 
@@ -134,8 +134,12 @@ impl MicrosandboxIsolation {
                 "workspace",
                 self.config.environment_snapshots_dir("workspace"),
                 Duration::from_secs(72 * 60 * 60),
-                WORKSPACE_SETUP,
+                vec![SetupStep::new(
+                    "preparing workspace packages",
+                    WORKSPACE_SETUP,
+                )],
             ),
+            None,
             None,
         )
         .await
@@ -145,6 +149,7 @@ impl MicrosandboxIsolation {
         &self,
         recipe: BaseSandboxRecipe,
         parent: Option<BaseSandboxSnapshot>,
+        progress: Option<&dyn EnvironmentProgressSink>,
     ) -> Result<BaseSandboxSnapshot, IsolationError> {
         let store = BaseSandboxSnapshotStore::new(&recipe);
         let current = store.current()?;
@@ -154,13 +159,13 @@ impl MicrosandboxIsolation {
                 .as_ref()
                 .is_some_and(|current| parent.created_at_ms > current.created_at_ms)
         });
-        if !parent_refreshed && !store.needs_refresh(current.as_ref(), &recipe.setup_command) {
+        if !parent_refreshed && !store.needs_refresh(current.as_ref(), &recipe.setup_command()) {
             return Ok(current.expect("a base snapshot was present"));
         }
 
         let sandbox_id = format!("altitude-{}-setup", recipe.name);
         let created_at_ms = now_ms();
-        tracing::info!(environment = %recipe.name, "building environment base sandbox snapshot");
+        tracing::info!(environment = %recipe.name, steps = recipe.steps.len(), "building environment base sandbox snapshot");
         let mut options = SandboxOptions::isolated(
             parent.map(|snapshot| snapshot.path.to_string_lossy().into_owned()),
         );
@@ -168,25 +173,16 @@ impl MicrosandboxIsolation {
         self.create_sandbox(sandbox_id.clone(), options, PullPolicy::Always)
             .await?;
         let result = async {
-            let mut session = self
-                .run_command(sandbox_id.clone(), recipe.setup_command.clone())
-                .await?;
-            loop {
-                let Some(event) = session.events.recv().await else {
-                    return Err(IsolationError::new(
-                        "environment setup connection closed without an exit status",
-                    ));
-                };
-                match event {
-                    CommandEvent::Output { .. } => {}
-                    CommandEvent::Exited(0) => break,
-                    CommandEvent::Exited(code) => {
-                        return Err(IsolationError::new(format!(
-                            "environment setup exited with code {code}"
-                        )));
-                    }
-                    CommandEvent::Failed(error) => return Err(IsolationError::new(error)),
+            for (completed, step) in recipe.steps.iter().enumerate() {
+                if let Some(progress) = progress {
+                    progress.report(EnvironmentProgress {
+                        label: step.label.clone(),
+                        command: step.command.clone(),
+                        completed,
+                        total: recipe.steps.len(),
+                    });
                 }
+                self.run_setup_step(&sandbox_id, step).await?;
             }
             let path = self.suspend(
                 sandbox_id.clone(),
@@ -196,7 +192,7 @@ impl MicrosandboxIsolation {
             let snapshot = BaseSandboxSnapshot {
                 path,
                 created_at_ms,
-                setup_command: recipe.setup_command.clone(),
+                setup_command: recipe.setup_command(),
             };
             store.publish(&snapshot)?;
             for stale_snapshot in store.stale_snapshots().await? {
@@ -217,6 +213,45 @@ impl MicrosandboxIsolation {
         let snapshot = result?;
         tracing::info!(environment = %recipe.name, snapshot = %snapshot.path.display(), "environment base sandbox ready");
         Ok(snapshot)
+    }
+
+    /// Run one build step, failing fast and reporting what the command printed.
+    ///
+    /// Steps share the sandbox's filesystem but not its shell, so a step must
+    /// stand on its own.
+    async fn run_setup_step(
+        &self,
+        sandbox_id: &str,
+        step: &SetupStep,
+    ) -> Result<(), IsolationError> {
+        let mut session = self
+            .run_command(sandbox_id.to_owned(), format!("set -eu\n{}", step.command))
+            .await?;
+        let mut output = String::new();
+        loop {
+            let Some(event) = session.events.recv().await else {
+                return Err(IsolationError::new(format!(
+                    "{} stopped without an exit status",
+                    step.label
+                )));
+            };
+            match event {
+                CommandEvent::Output { bytes, .. } => {
+                    output.push_str(&String::from_utf8_lossy(&bytes))
+                }
+                CommandEvent::Exited(0) => return Ok(()),
+                CommandEvent::Exited(code) => {
+                    return Err(IsolationError::new(format!(
+                        "{} exited with code {code}: {}",
+                        step.label,
+                        output_tail(&output)
+                    )));
+                }
+                CommandEvent::Failed(error) => {
+                    return Err(IsolationError::new(format!("{}: {error}", step.label)));
+                }
+            }
+        }
     }
 
     fn ensure_socket_safe_home(&self) -> Result<PathBuf, IsolationError> {
@@ -362,6 +397,7 @@ impl IsolationEngine for MicrosandboxIsolation {
         task_snapshot: Option<String>,
         development_environment: DevelopmentEnvironment,
         recipes: Vec<EnvironmentRecipe>,
+        progress: &dyn EnvironmentProgressSink,
     ) -> Result<(), IsolationError> {
         environment::provision(
             self,
@@ -370,6 +406,7 @@ impl IsolationEngine for MicrosandboxIsolation {
             task_snapshot,
             development_environment,
             recipes,
+            progress,
         )
         .await
     }
@@ -425,10 +462,14 @@ impl IsolationEngine for MicrosandboxIsolation {
     async fn ensure_base(
         &self,
         recipe: BaseSandboxRecipe,
+        progress: &dyn EnvironmentProgressSink,
     ) -> Result<BaseSandboxSnapshot, IsolationError> {
         let _preparation = self.base_preparation_lock.lock().await;
+        // The workspace base is app startup's concern and reports on its own
+        // screen; a task waits only on the environment built from it.
         let workspace = self.ensure_workspace().await?;
-        self.ensure_snapshot(recipe, Some(workspace)).await
+        self.ensure_snapshot(recipe, Some(workspace), Some(progress))
+            .await
     }
 
     async fn run_command(
@@ -589,4 +630,14 @@ impl IsolationEngine for MicrosandboxIsolation {
             ))),
         }
     }
+}
+
+/// The end of a failing command's output, where the reason usually is.
+fn output_tail(output: &str) -> &str {
+    const LIMIT: usize = 1_000;
+    let mut start = output.len().saturating_sub(LIMIT);
+    while start < output.len() && !output.is_char_boundary(start) {
+        start += 1;
+    }
+    output[start..].trim()
 }

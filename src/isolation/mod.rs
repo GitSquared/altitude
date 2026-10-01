@@ -36,7 +36,9 @@ pub struct BaseSandboxRecipe {
     pub name: String,
     pub snapshots_dir: PathBuf,
     pub refresh_after: Duration,
-    pub setup_command: String,
+    /// Run in order, each in its own shell. Their commands are also this
+    /// recipe's identity: a snapshot is reused only while they are unchanged.
+    pub steps: Vec<SetupStep>,
 }
 
 impl BaseSandboxRecipe {
@@ -44,15 +46,59 @@ impl BaseSandboxRecipe {
         name: impl Into<String>,
         snapshots_dir: PathBuf,
         refresh_after: Duration,
-        setup_command: impl Into<String>,
+        steps: Vec<SetupStep>,
     ) -> Self {
         Self {
             name: name.into(),
             snapshots_dir,
             refresh_after,
-            setup_command: setup_command.into(),
+            steps,
         }
     }
+
+    /// The work this recipe describes, as one value to compare and persist.
+    pub fn setup_command(&self) -> String {
+        self.steps
+            .iter()
+            .map(|step| step.command.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// One command in an environment build, named so that an operator waiting on
+/// the build can see what the wait is for.
+#[derive(Clone, Debug)]
+pub struct SetupStep {
+    pub label: String,
+    pub command: String,
+}
+
+impl SetupStep {
+    pub fn new(label: impl Into<String>, command: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            command: command.into(),
+        }
+    }
+}
+
+/// What an environment build is doing, for the task that waits on it.
+#[derive(Clone, Debug)]
+pub struct EnvironmentProgress {
+    /// The step in progress, in the operator's words.
+    pub label: String,
+    /// The exact command running, which a caller may truncate.
+    pub command: String,
+    /// Steps finished before this one, and the build's step count.
+    pub completed: usize,
+    pub total: usize,
+}
+
+/// Receives build progress. Isolation reports it; the task layer decides where
+/// it goes, and a build nobody waits on can ignore it.
+pub trait EnvironmentProgressSink: Send + Sync {
+    fn report(&self, progress: EnvironmentProgress);
 }
 
 #[derive(Clone, Debug)]
@@ -132,6 +178,7 @@ pub trait IsolationEngine: Send + Sync {
         task_snapshot: Option<String>,
         development_environment: DevelopmentEnvironment,
         recipes: Vec<EnvironmentRecipe>,
+        progress: &dyn EnvironmentProgressSink,
     ) -> impl Future<Output = Result<(), IsolationError>> + Send;
 
     fn prepare(
@@ -148,6 +195,7 @@ pub trait IsolationEngine: Send + Sync {
     fn ensure_base(
         &self,
         recipe: BaseSandboxRecipe,
+        progress: &dyn EnvironmentProgressSink,
     ) -> impl Future<Output = Result<BaseSandboxSnapshot, IsolationError>> + Send;
 
     fn run_command(

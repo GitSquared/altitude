@@ -3,7 +3,7 @@ use std::{error::Error, io};
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::{
-    agent::ClaudeCode,
+    agent::AgentEngines,
     config::Config,
     db::Database,
     isolation::MicrosandboxIsolation,
@@ -53,13 +53,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         else {
             return Ok(());
         };
-        let claude = ClaudeCode;
-
         let tasks = TaskService::new(
             TaskStore::new(&database),
             isolation,
             config.task_snapshots_dir(),
-            claude,
+            AgentEngines::new(),
         );
         let Some(resumed) = tui::boot_task_resume(
             &mut terminal,

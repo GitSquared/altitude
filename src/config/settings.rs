@@ -15,6 +15,7 @@ const DEFAULT_SETTINGS: &str = r#"default_environment = "rust"
 [[environments]]
 name = "rust"
 setup_command = "apk add --no-cache rust cargo rustfmt rust-clippy build-base cmake"
+harness = "pi"
 "#;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

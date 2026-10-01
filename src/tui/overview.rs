@@ -1,4 +1,4 @@
-use std::{collections::HashMap, mem};
+use std::mem;
 
 use ratatui::{
     Frame,
@@ -8,23 +8,20 @@ use ratatui::{
     widgets::{Block, BorderType, Padding, Paragraph, Wrap},
 };
 
-use crate::tasks::{
-    Task, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
-    TaskOperatorAttentionLevel,
+use crate::{
+    isolation::EnvironmentProgress,
+    tasks::{
+        TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
+        TaskOperatorAttentionLevel,
+    },
+    tui::utils::{shimmer, truncate},
 };
 
-pub fn draw(
-    frame: &mut Frame,
-    tasks: &[Task],
-    selected: usize,
-    first_visible: &mut usize,
-    latest_output: &HashMap<String, String>,
-    notice: Option<&str>,
-) {
+pub fn draw(frame: &mut Frame, app: &mut super::App) {
     let shortcuts = shortcut_hints(frame.area().width.saturating_sub(2));
     let footer_height = shortcuts.line_count(frame.area().width.saturating_sub(2)) as u16;
     let message_width = usize::from(frame.area().width.saturating_sub(2).max(1));
-    let message_height = notice.map_or(0, |text| {
+    let message_height = app.notice.as_deref().map_or(0, |text| {
         text.lines()
             .map(|line| line.chars().count().div_ceil(message_width).max(1))
             .sum::<usize>()
@@ -47,9 +44,9 @@ pub fn draw(
         Line::from(concat!("v", env!("CARGO_PKG_VERSION")).dim()).right_aligned(),
         version,
     );
-    draw_tasks(frame, body, tasks, selected, first_visible, latest_output);
+    draw_tasks(frame, body, app);
 
-    if let Some(notice) = notice {
+    if let Some(notice) = app.notice.as_deref() {
         frame.render_widget(
             Paragraph::new(notice).red().wrap(Wrap { trim: false }),
             message,
@@ -83,14 +80,13 @@ fn shortcut_hints(width: u16) -> Paragraph<'static> {
     Paragraph::new(lines).dim().wrap(Wrap { trim: true })
 }
 
-fn draw_tasks(
-    frame: &mut Frame,
-    area: Rect,
-    tasks: &[Task],
-    selected: usize,
-    first_visible: &mut usize,
-    latest_output: &HashMap<String, String>,
-) {
+fn draw_tasks(frame: &mut Frame, area: Rect, app: &mut super::App) {
+    let tasks = &app.tasks;
+    let selected = app.selected;
+    let first_visible = &mut app.first_visible_task;
+    let latest_output = &app.latest_output;
+    let environment_builds = &app.environment_builds;
+    let tick = app.shimmer;
     let panel = Block::bordered()
         .border_type(BorderType::Rounded)
         .padding(Padding::uniform(1));
@@ -121,27 +117,39 @@ fn draw_tasks(
             content.height.saturating_sub(row as u16 * 5).min(4),
         );
         let selected = index == selected;
-        let mut status = match &task.facts.execution_status {
-            TaskExecutionStatus::Pending => Line::from("pending").yellow(),
-            TaskExecutionStatus::Running => Line::from(match task.facts.execution_mode {
-                TaskExecutionMode::Autopilot => "autopilot · working",
-                TaskExecutionMode::AutopilotReport => "autopilot · reporting",
-                TaskExecutionMode::Operator => "operator override",
-            })
-            .green(),
-            TaskExecutionStatus::Paused => Line::from(match task.facts.execution_pause_reason {
-                Some(TaskExecutionPauseReason::AwaitingOperator) => "paused · awaiting operator",
-                Some(TaskExecutionPauseReason::ApplicationShutdown) => "paused · app stopped",
-                None => "paused",
-            })
-            .yellow(),
-            TaskExecutionStatus::Completed => Line::from("completed").dim(),
-            TaskExecutionStatus::Failed => {
-                Line::from(task.facts.last_error.as_deref().map_or_else(
-                    || "execution failed".to_owned(),
-                    |error| format!("execution failed · {error}"),
-                ))
-                .red()
+        // A pending task is waiting on its environment build; nothing else
+        // makes it pending after creation.
+        let building = (task.facts.execution_status == TaskExecutionStatus::Pending)
+            .then(|| environment_builds.get(&task.id))
+            .flatten();
+        let text_width = usize::from(area.width.saturating_sub(4));
+        let mut status = if let Some(progress) = building {
+            Line::from_iter(shimmer(&build_label(progress, text_width), tick + index))
+        } else {
+            match &task.facts.execution_status {
+                TaskExecutionStatus::Pending => Line::from("pending").yellow(),
+                TaskExecutionStatus::Running => Line::from(match task.facts.execution_mode {
+                    TaskExecutionMode::Autopilot => "autopilot · working",
+                    TaskExecutionMode::AutopilotReport => "autopilot · reporting",
+                    TaskExecutionMode::Operator => "operator override",
+                })
+                .green(),
+                TaskExecutionStatus::Paused => {
+                    Line::from(match task.facts.execution_pause_reason {
+                        Some(TaskExecutionPauseReason::AwaitingOperator) => {
+                            "paused · awaiting operator"
+                        }
+                        Some(TaskExecutionPauseReason::ApplicationShutdown) => {
+                            "paused · app stopped"
+                        }
+                        None => "paused",
+                    })
+                    .yellow()
+                }
+                TaskExecutionStatus::Completed => Line::from("completed").dim(),
+                TaskExecutionStatus::Failed => {
+                    Line::from("blocked · execution failed · i details").red()
+                }
             }
         };
         // A previous report's request is not a current interruption after execution resumes.
@@ -177,11 +185,18 @@ fn draw_tasks(
         } else {
             Style::new().dim()
         };
-        let output = (selected)
-            .then(|| latest_output.get(&task.id))
-            .flatten()
-            .and_then(|output| output.lines().last())
-            .unwrap_or_default();
+        let output = match building {
+            Some(progress) => truncate(&progress.command, text_width),
+            None if task.facts.execution_status == TaskExecutionStatus::Failed => {
+                task.facts.last_error.clone().unwrap_or_default()
+            }
+            None => (selected)
+                .then(|| latest_output.get(&task.id))
+                .flatten()
+                .and_then(|output| output.lines().last())
+                .unwrap_or_default()
+                .to_owned(),
+        };
         frame.render_widget(
             Paragraph::new(vec![status, Line::from(output).dim()])
                 .style(style)
@@ -195,4 +210,13 @@ fn draw_tasks(
             area,
         );
     }
+}
+
+/// What a waiting task is doing, with its place in the build kept visible.
+fn build_label(progress: &EnvironmentProgress, width: usize) -> String {
+    let count = format!(" ({}/{})", progress.completed + 1, progress.total);
+    format!(
+        "{}{count}",
+        truncate(&progress.label, width.saturating_sub(count.chars().count()))
+    )
 }

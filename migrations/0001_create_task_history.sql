@@ -1,6 +1,6 @@
 CREATE TABLE tasks (
     id TEXT PRIMARY KEY NOT NULL,
-    agent_kind TEXT CHECK (agent_kind IS NULL OR agent_kind = 'claude'),
+    agent_kind TEXT CHECK (agent_kind IS NULL OR agent_kind IN ('claude', 'pi')),
     created_at_ms INTEGER NOT NULL
 );
 
