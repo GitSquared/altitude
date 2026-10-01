@@ -47,7 +47,7 @@ pub fn draw(
     let items = environments
         .iter()
         .map(|environment| {
-            let marker = if environment.name == default_environment {
+            let marker = if environment.name.eq_ignore_ascii_case(default_environment) {
                 " (default)"
             } else {
                 ""

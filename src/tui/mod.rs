@@ -159,7 +159,11 @@ impl App {
         self.selected_environment = self
             .environments
             .iter()
-            .position(|environment| environment.name == self.default_environment)
+            .position(|environment| {
+                environment
+                    .name
+                    .eq_ignore_ascii_case(&self.default_environment)
+            })
             .unwrap_or(0);
         self.pending_command = Some(command);
         self.open_environment_picker = true;
@@ -374,9 +378,6 @@ where
                 &app.latest_output,
                 app.notice.as_deref(),
             );
-            if let Some(prompt) = &app.prompt {
-                prompt.draw(frame);
-            }
             if let Some(shell) = app.open_shell.as_ref().and_then(|id| app.shells.get(id)) {
                 shell.draw(frame);
             }
@@ -400,6 +401,10 @@ where
                     &app.default_environment,
                     app.selected_environment,
                 );
+            }
+            // Input belongs above the settings overlay that opened it.
+            if let Some(prompt) = &app.prompt {
+                prompt.draw(frame);
             }
         })?;
         tokio::select! {
@@ -663,7 +668,11 @@ where
             app.selected_environment = app
                 .environments
                 .iter()
-                .position(|environment| environment.name == app.default_environment)
+                .position(|environment| {
+                    environment
+                        .name
+                        .eq_ignore_ascii_case(&app.default_environment)
+                })
                 .unwrap_or(0);
             app.open_environment_settings = true;
         }
