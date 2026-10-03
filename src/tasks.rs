@@ -1,3 +1,4 @@
+use crate::config::InstallationIdentity;
 use crate::development::DevelopmentEnvironment;
 use crate::{
     agent::{AgentEngine, AgentEngines, AgentError, AgentKind, TaskReportDecoder},
@@ -31,7 +32,7 @@ pub struct TaskService<E> {
     /// Nothing reads it back yet: the task's history is where it belongs, and its
     /// consumers are the ones that will need to tell several operators' work
     /// apart.
-    identity: String,
+    identity: InstallationIdentity,
     environment_progress: EnvironmentProgressRegistry,
 }
 
@@ -44,7 +45,7 @@ where
         isolation: E,
         snapshots_dir: PathBuf,
         agents: AgentEngines,
-        identity: String,
+        identity: InstallationIdentity,
     ) -> Self {
         Self {
             store,
@@ -80,7 +81,8 @@ where
             .create_with_agent(
                 intent,
                 environment,
-                self.identity.clone(),
+                self.identity.id.clone(),
+                self.identity.label.clone(),
                 Some(kind),
                 Some(self.agents.engine(kind).new_conversation_id()),
             )

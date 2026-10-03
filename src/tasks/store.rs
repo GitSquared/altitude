@@ -64,6 +64,7 @@ impl TaskStore {
         intent: String,
         environment: DevelopmentEnvironment,
         identity_id: String,
+        identity_label: String,
         agent_kind: Option<AgentKind>,
         agent_conversation_id: Option<String>,
     ) -> Result<Task, TaskError> {
@@ -97,6 +98,7 @@ impl TaskStore {
                 intent,
                 environment,
                 identity_id,
+                identity_label,
                 agent_conversation_id,
             }],
         )

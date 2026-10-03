@@ -170,6 +170,10 @@ pub enum TaskHistoryEvent {
         /// that runs work for several operators needs to know whose work this is,
         /// and the answer is only available at the moment of delegation.
         identity_id: String,
+        /// How that identity reads to a human, e.g. the machine it was delegated
+        /// from. Recorded beside the id so a task's history and a tracker comment
+        /// can say where the work is without anyone resolving a key.
+        identity_label: String,
         agent_conversation_id: Option<String>,
     },
     SandboxProvisioned {

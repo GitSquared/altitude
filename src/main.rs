@@ -46,7 +46,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         };
         // This installation's identity, named once and recorded on every task it
         // delegates.
-        let identity = config.identity_id()?;
+        let identity = config.identity()?;
         let isolation = MicrosandboxIsolation::new(&config);
         let isolation_status = isolation::prepare(isolation.clone());
         let Some(_isolation_status) = tui::boot_isolation(
