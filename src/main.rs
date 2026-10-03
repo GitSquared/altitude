@@ -11,12 +11,15 @@ use crate::{
 };
 
 mod agent;
+mod capacity;
 mod config;
 mod db;
 mod development;
 mod isolation;
 mod logging;
+mod net;
 mod tasks;
+mod transfer;
 mod tui;
 mod vcs;
 
