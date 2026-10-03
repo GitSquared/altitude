@@ -18,8 +18,10 @@ and implementer of bounded pieces—not an autonomous author of the whole v1.
   rewrite or build out speculative architecture.
 - Gabriel may sketch the central interaction or API in Rust, TypeScript, or
   pseudocode. Help translate it into Rust while preserving its intent.
-- After each iteration that changes files, open the changes in Codex's review
-  panel so Gabriel can read the diff as we go.
+- After each iteration that changes files, make the diff easy for Gabriel to
+  read as we go: a reviewable diff in whatever review or diff view he is using,
+  or the changed hunks shown inline when that is not available. Do not assume a
+  particular review tool, and do not spawn one.
 - Teach through the current code: explain unfamiliar ownership, borrowing,
   lifetimes, enums, or async behavior when relevant. Give a small example and
   leave room for Gabriel to implement the next similar piece. Avoid unsolicited
