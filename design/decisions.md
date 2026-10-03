@@ -418,6 +418,16 @@ to reach a shell on the node to find out what is happening.**
    fire at the end of the *next* run, and `suspending` is never cleared, so a task
    can silently stop recording run endings. Observable in today's TUI, no
    networking.
+
+   **Implemented, with one substitution.** Driver authority is realised as the
+   agent run id rather than an epoch: a control request names the run it was asked
+   during, and only that run may act on it. That is the same "which copy is live"
+   question asked at the driver level, and it is the whole of the answer while one
+   node holds the capsule. The hosting epoch arrives with transfer, where a second
+   physical location actually exists. The identity is recorded on a task's founding
+   event and nothing reads it back yet — its consumers are the ones that need to
+   tell several operators' work apart.
+
 2. **Acceptance as a signal.** `complete` becomes a request; evidence is required;
    confirmation disposes. Observable in today's TUI.
 3. **Headless node and push.** Push identity and configuration; queue with
@@ -471,6 +481,15 @@ the rare operation.
   already in hand.
 - The one place worth reconsidering the "no tests yet" rule: the move state
   machine is pure, subtle, and the kind of thing a test suite is genuinely for.
+- Reading the identity back, and its consumers: identity-scoped task lists, the
+  tracker projection's actor map, and per-identity storage roots.
+- **Resuming does not preserve the driver.** A task handed to the operator and
+  then suspended by application shutdown comes back as autopilot, because
+  `should_resume` reads execution status and knows nothing about who was driving.
+  Whether an interrupted operator session should resume as operator, or ask, is a
+  product decision that slice 1 deliberately left open.
+- Deleting a task while its run is still alive races the run's own ending, which
+  is recorded against a row being deleted. Pre-existing, and unexercised.
 
 ## Evidence and its limits
 
