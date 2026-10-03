@@ -26,6 +26,12 @@ pub struct TaskService<E> {
     isolation: E,
     snapshots_dir: PathBuf,
     agents: AgentEngines,
+    /// The identity this node delegates under, recorded on every task it founds.
+    ///
+    /// Nothing reads it back yet: the task's history is where it belongs, and its
+    /// consumers are the ones that will need to tell several operators' work
+    /// apart.
+    identity: String,
     environment_progress: EnvironmentProgressRegistry,
 }
 
@@ -38,15 +44,19 @@ where
         isolation: E,
         snapshots_dir: PathBuf,
         agents: AgentEngines,
+        identity: String,
     ) -> Self {
         Self {
             store,
             isolation,
             snapshots_dir,
             agents,
+            identity,
             environment_progress: EnvironmentProgressRegistry::default(),
         }
     }
+
+    // The identity every task this node founds is recorded under.
 
     /// What each task's environment build is doing, for an interface to show.
     ///
@@ -70,9 +80,26 @@ where
             .create_with_agent(
                 intent,
                 environment,
+                self.identity.clone(),
                 Some(kind),
                 Some(self.agents.engine(kind).new_conversation_id()),
             )
+            .await
+            .map_err(TaskServiceError::Task)
+    }
+
+    /// Record that the operator asked for the task to be driven differently.
+    ///
+    /// The request is addressed to the run it was asked during, so a later run
+    /// cannot pick it up as though it were still current.
+    pub async fn request_control(
+        &self,
+        task_id: &str,
+        execution_mode: TaskExecutionMode,
+        agent_run_id: &str,
+    ) -> Result<Task, TaskServiceError> {
+        self.store
+            .request_control(task_id, execution_mode, agent_run_id)
             .await
             .map_err(TaskServiceError::Task)
     }

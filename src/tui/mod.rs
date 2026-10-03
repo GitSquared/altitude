@@ -641,7 +641,9 @@ where
     }
     if let Some(id) = app.open_shell.clone() {
         if shell::is_exit_key(key) {
-            event_loop.return_to_autopilot(&id);
+            if !event_loop.return_to_autopilot(&id) {
+                app.notice = Some("this task is no longer running; nothing was handed back".into());
+            }
             app.hide_shell();
         } else if let Some(shell) = app.shells.get_mut(&id)
             && let Some(bytes) = shell.key_bytes(key)
@@ -826,8 +828,11 @@ where
                     task.facts.execution_mode,
                     TaskExecutionMode::Autopilot | TaskExecutionMode::AutopilotReport
                 ) {
-                    event_loop.take_control(&task.id);
-                    app.notice = Some("bringing the agent to the terminal…".into());
+                    app.notice = Some(if event_loop.take_control(&task.id) {
+                        "bringing the agent to the terminal…".into()
+                    } else {
+                        "this task has no run to take over".into()
+                    });
                     return Ok(false);
                 }
                 if app.shells.contains_key(&task.id) {

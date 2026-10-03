@@ -44,6 +44,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         else {
             return Ok(());
         };
+        // This installation's identity, named once and recorded on every task it
+        // delegates.
+        let identity = config.identity_id()?;
         let isolation = MicrosandboxIsolation::new(&config);
         let isolation_status = isolation::prepare(isolation.clone());
         let Some(_isolation_status) = tui::boot_isolation(
@@ -61,6 +64,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             isolation,
             config.task_snapshots_dir(),
             AgentEngines::new(),
+            identity,
         );
         let Some(resumed) = tui::boot_task_resume(
             &mut terminal,

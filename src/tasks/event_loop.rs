@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
 };
 
@@ -58,10 +58,20 @@ impl CachedTerminalOutput {
 pub struct TaskEventLoop<E> {
     service: TaskService<E>,
     events: mpsc::UnboundedSender<TaskExecutionUpdate>,
-    commands: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<Command>>>>,
-    suspending: Arc<Mutex<HashSet<String>>>,
-    handoffs: Arc<Mutex<HashMap<String, TaskExecutionMode>>>,
+    runs: Arc<Mutex<HashMap<String, ActiveRun>>>,
+    control_requests: Arc<Mutex<HashMap<String, (String, TaskExecutionMode)>>>,
     terminal_output: Arc<Mutex<HashMap<String, CachedTerminalOutput>>>,
+}
+
+/// A turn this node is currently driving.
+///
+/// The command channel, the run it belongs to, and a reason to expect its
+/// ending all share one lifetime. That is what keeps a control request or a
+/// suspension reason from being read against a run they were never about.
+struct ActiveRun {
+    commands: mpsc::UnboundedSender<Command>,
+    agent_run_id: String,
+    suspending: bool,
 }
 
 impl<E> TaskEventLoop<E>
@@ -74,9 +84,8 @@ where
             Self {
                 service,
                 events,
-                commands: Arc::new(Mutex::new(HashMap::new())),
-                suspending: Arc::new(Mutex::new(HashSet::new())),
-                handoffs: Arc::new(Mutex::new(HashMap::new())),
+                runs: Arc::new(Mutex::new(HashMap::new())),
+                control_requests: Arc::new(Mutex::new(HashMap::new())),
                 terminal_output: Arc::new(Mutex::new(HashMap::new())),
             },
             receiver,
@@ -106,36 +115,36 @@ where
     }
 
     pub fn has_active_command(&self, task_id: &str) -> bool {
-        self.commands
+        self.runs
             .lock()
-            .expect("task command lock poisoned")
+            .expect("task run lock poisoned")
             .contains_key(task_id)
     }
 
     pub fn send_terminal_input(&self, task_id: &str, bytes: Vec<u8>) {
-        if let Some(commands) = self
-            .commands
+        if let Some(run) = self
+            .runs
             .lock()
-            .expect("task command lock poisoned")
+            .expect("task run lock poisoned")
             .get(task_id)
         {
-            let _ = commands.send(Command::Input(bytes));
+            let _ = run.commands.send(Command::Input(bytes));
         }
     }
 
     pub fn resize_terminal(&self, task_id: &str, rows: u16, cols: u16) {
-        if let Some(commands) = self
-            .commands
+        if let Some(run) = self
+            .runs
             .lock()
-            .expect("task command lock poisoned")
+            .expect("task run lock poisoned")
             .get(task_id)
         {
-            let _ = commands.send(Command::Resize { rows, cols });
+            let _ = run.commands.send(Command::Resize { rows, cols });
         }
     }
 
-    pub fn take_control(&self, task_id: &str) {
-        self.request_handoff(task_id, TaskExecutionMode::Operator);
+    pub fn take_control(&self, task_id: &str) -> bool {
+        self.request_handoff(task_id, TaskExecutionMode::Operator)
     }
 
     pub fn start_operator_control(&self, task: Task) {
@@ -152,22 +161,88 @@ where
         });
     }
 
-    pub fn return_to_autopilot(&self, task_id: &str) {
-        self.request_handoff(task_id, TaskExecutionMode::Autopilot);
+    pub fn return_to_autopilot(&self, task_id: &str) -> bool {
+        self.request_handoff(task_id, TaskExecutionMode::Autopilot)
     }
 
-    fn request_handoff(&self, task_id: &str, target: TaskExecutionMode) {
-        self.handoffs
+    /// Hand the task to a different driver at the next safe boundary, answering
+    /// whether the request was accepted.
+    ///
+    /// The request names the run it was asked during, and only that run may act
+    /// on it. Asking while nothing is running is refused: a request with no run
+    /// to receive it would otherwise wait for whichever run ends next, handing the
+    /// task over long after the operator meant it.
+    fn request_handoff(&self, task_id: &str, target: TaskExecutionMode) -> bool {
+        let agent_run_id = {
+            let runs = self.runs.lock().expect("task run lock poisoned");
+            let Some(run) = runs.get(task_id) else {
+                tracing::warn!(task_id = %task_id, ?target, "refusing a control request: the task has no run to hand over");
+                return false;
+            };
+            run.agent_run_id.clone()
+        };
+        // Register before interrupting, so a run that ends on the interrupt cannot
+        // terminate before its request is on record.
+        self.control_requests
             .lock()
-            .expect("task handoff lock poisoned")
-            .insert(task_id.to_owned(), target);
-        if let Some(command) = self
-            .commands
+            .expect("task control request lock poisoned")
+            .insert(task_id.to_owned(), (agent_run_id.clone(), target));
+        let service = self.service.clone();
+        let id = task_id.to_owned();
+        tokio::spawn(async move {
+            if let Err(error) = service.request_control(&id, target, &agent_run_id).await {
+                tracing::error!(task_id = %id, %error, "could not record a control request");
+            }
+        });
+        if let Some(run) = self
+            .runs
             .lock()
-            .expect("task command lock poisoned")
+            .expect("task run lock poisoned")
             .get(task_id)
         {
-            let _ = command.send(Command::Interrupt);
+            let _ = run.commands.send(Command::Interrupt);
+        }
+        true
+    }
+
+    /// Take the run this node is driving for a task, if it still has one.
+    fn take_active_run(&self, task_id: &str) -> Option<ActiveRun> {
+        self.runs
+            .lock()
+            .expect("task run lock poisoned")
+            .remove(task_id)
+    }
+
+    /// Take a control request if it belongs to the run that is ending now.
+    ///
+    /// A request addressed to another run is dropped. That run has already gone,
+    /// and honouring the request now would hand the task over at a moment the
+    /// operator never asked for.
+    fn take_control_request(&self, task_id: &str, agent_run_id: &str) -> Option<TaskExecutionMode> {
+        let mut requests = self
+            .control_requests
+            .lock()
+            .expect("task control request lock poisoned");
+        match requests.remove(task_id) {
+            Some((run_id, target)) if run_id == agent_run_id => Some(target),
+            Some(_) => {
+                tracing::debug!(task_id = %task_id, "dropping a control request addressed to an earlier run");
+                None
+            }
+            None => None,
+        }
+    }
+
+    /// Expect this run to end, so its ending is not recorded as a failure and
+    /// does not outlive the run it belongs to.
+    fn mark_suspending(&self, task_id: &str) {
+        if let Some(run) = self
+            .runs
+            .lock()
+            .expect("task run lock poisoned")
+            .get_mut(task_id)
+        {
+            run.suspending = true;
         }
     }
 
@@ -218,6 +293,14 @@ where
             .lock()
             .expect("terminal output lock poisoned")
             .remove(&task.id);
+        self.runs
+            .lock()
+            .expect("task run lock poisoned")
+            .remove(&task.id);
+        self.control_requests
+            .lock()
+            .expect("task control request lock poisoned")
+            .remove(&task.id);
         tokio::spawn(async move {
             let id = task.id.clone();
             let _ = events.send(TaskExecutionUpdate::Removed(id, service.remove(task).await));
@@ -226,15 +309,11 @@ where
 
     pub async fn suspend_all(&self) -> Result<(), TaskServiceError> {
         let tasks = self.list().await?;
-        let suspending: Vec<_> = tasks
-            .iter()
-            .filter(|task| super::should_suspend(task))
-            .map(|task| task.id.clone())
-            .collect();
-        self.suspending
-            .lock()
-            .expect("task suspension lock poisoned")
-            .extend(suspending);
+        // The flag lives on the run it describes, so a task suspended now and
+        // resumed later does not carry a stale reason for its next ending.
+        for task in tasks.iter().filter(|task| super::should_suspend(task)) {
+            self.mark_suspending(&task.id);
+        }
         for result in self.service.suspend_all(tasks).await {
             result?;
         }
@@ -260,17 +339,18 @@ where
         let _ = self
             .events
             .send(TaskExecutionUpdate::Started(Ok(task.clone())));
-        self.commands
-            .lock()
-            .expect("task command lock poisoned")
-            .insert(task.id.clone(), session.commands.clone());
+        self.runs.lock().expect("task run lock poisoned").insert(
+            task.id.clone(),
+            ActiveRun {
+                commands: session.commands.clone(),
+                agent_run_id: run.id.clone(),
+                suspending: false,
+            },
+        );
 
         let mode = task.facts.execution_mode;
         let service = self.service.clone();
         let events = self.events.clone();
-        let commands = Arc::clone(&self.commands);
-        let suspending = Arc::clone(&self.suspending);
-        let handoffs = Arc::clone(&self.handoffs);
         let event_loop = self.clone();
         tokio::spawn(async move {
             let mut report_stream = match mode {
@@ -298,32 +378,23 @@ where
                         });
                     }
                     event => {
-                        if suspending
-                            .lock()
-                            .expect("task suspension lock poisoned")
-                            .contains(&task.id)
-                        {
+                        // This run's entry, its control request and its suspension
+                        // reason are taken together: all three describe the run
+                        // that is ending now and mean nothing to the next one.
+                        let suspending = event_loop
+                            .take_active_run(&task.id)
+                            .is_some_and(|active| active.suspending);
+                        let control = event_loop.take_control_request(&task.id, &run.id);
+                        if suspending {
                             tracing::debug!(task_id = %task.id, "command ended during intentional suspension");
-                            commands
-                                .lock()
-                                .expect("task command lock poisoned")
-                                .remove(&task.id);
                             return;
                         }
-                        let handoff = handoffs
-                            .lock()
-                            .expect("task handoff lock poisoned")
-                            .remove(&task.id);
-                        commands
-                            .lock()
-                            .expect("task command lock poisoned")
-                            .remove(&task.id);
                         if let Err(error) = event_loop
                             .handle_run_termination(
                                 task.clone(),
                                 &run,
                                 mode,
-                                handoff,
+                                control,
                                 report_stream,
                                 event,
                             )
@@ -347,11 +418,11 @@ where
         task: Task,
         run: &TaskAgentRun,
         mode: TaskExecutionMode,
-        handoff: Option<TaskExecutionMode>,
+        control: Option<TaskExecutionMode>,
         mut report_stream: Option<Box<dyn TaskReportDecoder>>,
         event: CommandEvent,
     ) -> Result<(), TaskServiceError> {
-        if let Some(target) = handoff {
+        if let Some(target) = control {
             self.service.continue_turn(run).await?;
             let result = match target {
                 TaskExecutionMode::Autopilot => {

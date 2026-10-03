@@ -164,6 +164,12 @@ pub enum TaskHistoryEvent {
         snapshot_available: bool,
         intent: String,
         environment: DevelopmentEnvironment,
+        /// The identity this task was delegated under.
+        ///
+        /// Recorded with the intent because it cannot be inferred later: a node
+        /// that runs work for several operators needs to know whose work this is,
+        /// and the answer is only available at the moment of delegation.
+        identity_id: String,
         agent_conversation_id: Option<String>,
     },
     SandboxProvisioned {
@@ -175,6 +181,15 @@ pub enum TaskHistoryEvent {
         agent_run_id: String,
         sandbox_id: String,
         execution_mode: TaskExecutionMode,
+    },
+    /// The operator asked for the task to be driven by someone else.
+    ///
+    /// It names the run it was asked during. Only that run can hand the task
+    /// over, so a request cannot land on whichever run happens to end next;
+    /// a request nothing was running to receive is refused rather than recorded.
+    ControlRequested {
+        execution_mode: TaskExecutionMode,
+        agent_run_id: String,
     },
     AgentRunEnded {
         agent_run_id: String,

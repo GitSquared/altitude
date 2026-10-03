@@ -63,6 +63,7 @@ impl TaskStore {
         &self,
         intent: String,
         environment: DevelopmentEnvironment,
+        identity_id: String,
         agent_kind: Option<AgentKind>,
         agent_conversation_id: Option<String>,
     ) -> Result<Task, TaskError> {
@@ -95,6 +96,7 @@ impl TaskStore {
                 snapshot_available: false,
                 intent,
                 environment,
+                identity_id,
                 agent_conversation_id,
             }],
         )
@@ -158,6 +160,26 @@ impl TaskStore {
             .map_err(TaskError::Database)?;
         }
         Ok(())
+    }
+
+    /// Record that the operator asked for a different driver.
+    ///
+    /// The run is named because only it can hand over; the record is what makes
+    /// the request visible in a task's history afterwards, whatever happened to it.
+    pub async fn request_control(
+        &self,
+        task_id: &str,
+        execution_mode: TaskExecutionMode,
+        agent_run_id: &str,
+    ) -> Result<Task, TaskError> {
+        self.append_events(
+            task_id,
+            &[TaskHistoryEvent::ControlRequested {
+                execution_mode,
+                agent_run_id: agent_run_id.to_owned(),
+            }],
+        )
+        .await
     }
 
     pub async fn record_report(

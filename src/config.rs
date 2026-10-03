@@ -1,5 +1,6 @@
 use std::{
-    env, io,
+    env, fs,
+    io::{self, ErrorKind, Write},
     path::{Path, PathBuf},
 };
 
@@ -39,6 +40,58 @@ impl Config {
 
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    /// How this installation names itself.
+    ///
+    /// One installation is one operator on one machine, and this name is what a
+    /// task records as the identity it was delegated under. A node that later
+    /// runs work for several operators needs that to tell them apart, and a task
+    /// cannot be given an identity retroactively without guessing at its own
+    /// history. The keypair that proves this name to another node arrives with
+    /// the transport, not here.
+    pub fn identity_id(&self) -> io::Result<String> {
+        let path = self.data_dir.join("identity");
+        match fs::read_to_string(&path) {
+            Ok(identity) => {
+                let identity = identity.trim().to_owned();
+                if identity.is_empty() {
+                    return Err(io::Error::other(format!(
+                        "{} names no identity",
+                        path.display()
+                    )));
+                }
+                Ok(identity)
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => self.name_identity(&path),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Claim a name for the first time, privately.
+    ///
+    /// Kept outside the database so the name survives a task history reset, and
+    /// written exclusively so two Altitude processes cannot both claim one.
+    fn name_identity(&self, path: &Path) -> io::Result<String> {
+        let identity = uuid::Uuid::new_v4().to_string();
+        fs::create_dir_all(&self.data_dir)?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(path) {
+            Ok(mut file) => {
+                file.write_all(identity.as_bytes())?;
+                file.sync_all()?;
+                Ok(identity)
+            }
+            // Another Altitude process named this installation first; keep its name.
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => self.identity_id(),
+            Err(error) => Err(error),
+        }
     }
 
     pub fn settings_path(&self) -> PathBuf {
