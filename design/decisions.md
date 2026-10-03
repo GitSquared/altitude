@@ -391,7 +391,38 @@ durable memory. Note this is a *policy at acceptance*, not a per-turn fact:
 Altitude's capsule persists across turns via snapshots, which is what makes
 pull-and-inspect possible at all.
 
-### Q16. How much tracker state does Altitude write?
+### Q16. What is an installation's identity?
+
+**Options:** an opaque generated id; a name derived from the machine; a keypair.
+
+**Decision:** both parts, answering different questions. The **label** is derived
+from the machine (`user@host`) and is what a human reads in a task's history or a
+tracker comment, so nobody has to resolve anything to find out where work is. The
+**id** is what a machine checks, and it is deliberately not derived: a name anyone
+can type is not an identity.
+
+**Why:** "hostname and username describe identity well" is right about legibility
+and wrong about trust on its own, hence the pair. The label is resolved once at
+first run and kept, so a renamed machine, or a context that cannot resolve a user
+(a node started by a service manager), does not silently re-identify itself and
+re-label history.
+
+**One subtlety to keep in view:** a person with two machines has two installation
+identities. That is correct for "where is this work", and insufficient for "whose
+work is this", which is why the tracker's actor→principal mapping (Q10) must key
+on the keypair rather than on the label.
+
+The id is a placeholder until the transport supplies a keypair to fill it — which
+is exactly what the Iroh link is for, since there a node's identity *is* its
+public key. Nothing outside this installation treats the id as trustworthy yet.
+
+**Confirmed, from using it:** shutting the laptop down, SIGTERM, or quitting
+Altitude is "dropping a task off your desk". Tasks resuming as autopilot after a
+restart is therefore correct, not a bug. The remote counterpart follows: a client
+that reboots should hand its pulled tasks back to the node when it can, and say so
+when it cannot.
+
+### Q17. How much tracker state does Altitude write?
 
 **Options:** minimal workflow-state writes per the tracker's own guidance; mirror
 Altitude's states onto the tracker's workflow; or read-only.
@@ -410,47 +441,52 @@ to reach a shell on the node to find out what is happening.**
 
 ---
 
-## Slices
+## Order of work
 
-1. **Identity and durable authority.** A task records the identity it was
-   delegated under; control gestures become durable and epoch-checked. Fixes two
-   latent bugs on the way: a control request in the in-memory `handoffs` map can
-   fire at the end of the *next* run, and `suspending` is never cleared, so a task
-   can silently stop recording run endings. Observable in today's TUI, no
-   networking.
+Named rather than numbered: these are landings on the way to one journey, not
+numbered parts, and the order below is dependency, not priority.
 
-   **Implemented, with one substitution.** Driver authority is realised as the
-   agent run id rather than an epoch: a control request names the run it was asked
-   during, and only that run may act on it. That is the same "which copy is live"
-   question asked at the driver level, and it is the whole of the answer while one
-   node holds the capsule. The hosting epoch arrives with transfer, where a second
-   physical location actually exists. The identity is recorded on a task's founding
-   event and nothing reads it back yet — its consumers are the ones that need to
-   tell several operators' work apart.
+**Delegated identity, and control scoped to its run.** *Done.* A task records the
+identity it was delegated under; a control request names the run it was asked
+during and only that run may act on it. Fixes two latent bugs on the way: a
+control request in the in-memory `handoffs` map could fire at the end of the
+*next* run, and `suspending` was never cleared, so a task could silently stop
+recording run endings. Observable in today's TUI, no networking.
 
-2. **Acceptance as a signal.** `complete` becomes a request; evidence is required;
-   confirmation disposes. Observable in today's TUI.
-3. **Headless node and push.** Push identity and configuration; queue with
-   computed capacity; delegate tasks that keep running with the laptop closed.
-4. **Linear.** Intake, the signal contract on Linear's surfaces, acceptance, and
-   the "no shell needed" projection. Prerequisite: a small public ingress shim,
-   because Linear requires a public HTTPS webhook URL.
-5. **Pull and push over Iroh.** A full move, one live owner, working with the
-   origin node unreachable.
-6. **Team.** N identities on one node, actor→principal mapping.
+Implemented with one substitution. Driver authority is realised as the agent run
+id rather than an epoch: that is the same "which copy is live" question asked at
+the driver level, and it is the whole of the answer while one node holds the
+capsule. The hosting epoch arrives with transfer, where a second physical
+location actually exists. Nothing reads the identity back yet; its consumers are
+the ones that need to tell several operators' work apart.
 
-The original thoughtpiece ordered Linear before transfer. The order above puts
-transfer later: the risk of Linear amplifying authority bugs is handled by proving
-authority in slice 1, and after that Linear is the daily driver while a move is
-the rare operation.
+**Acceptance as a signal.** `complete` becomes a request; evidence is required;
+confirmation disposes. Observable in today's TUI.
+
+**Headless node and push.** Push identity and configuration; queue with computed
+capacity; delegate tasks that keep running with the laptop closed.
+
+**Linear.** Intake, the signal contract on Linear's surfaces, acceptance, and the
+"no shell needed" projection. Prerequisite: a small public ingress shim, because
+Linear requires a public HTTPS webhook URL.
+
+**Pull and push over Iroh.** A full move, one live owner, working with the origin
+node unreachable.
+
+**Team.** N identities on one node, actor→principal mapping.
+
+The original thoughtpiece put Linear before transfer. This order puts transfer
+later: the risk of Linear amplifying authority bugs is handled by proving
+authority first, and after that Linear is the daily driver while a move is the
+rare operation.
 
 ---
 
 ## Superseded in `server-mode-ux.md`
 
-- **Slice order** (Linear at 3, transfer at 4) → transfer follows Linear.
+- **Slice order** (Linear before transfer) → transfer follows Linear.
 - **Workflow-state mapping** ("In Review while awaiting a decision", per-team
-  state mapping as a setup decision) → minimal writes, per Q16.
+  state mapping as a setup decision) → minimal writes, per Q17.
 - **"Most pull gestures should first be a remote attach"** → control means pull;
   there is no attach surface, per Q2.
 - **"The signal ID, not comment text, links the reply to the paused task"** →
@@ -483,13 +519,15 @@ the rare operation.
   machine is pure, subtle, and the kind of thing a test suite is genuinely for.
 - Reading the identity back, and its consumers: identity-scoped task lists, the
   tracker projection's actor map, and per-identity storage roots.
-- **Resuming does not preserve the driver.** A task handed to the operator and
-  then suspended by application shutdown comes back as autopilot, because
-  `should_resume` reads execution status and knows nothing about who was driving.
-  Whether an interrupted operator session should resume as operator, or ask, is a
-  product decision that slice 1 deliberately left open.
+- **Handing pulled tasks back on reboot.** Confirmed as intended behaviour in Q16:
+  a client that reboots should return its pulled tasks to the node when it can,
+  and say so when it cannot. Not built yet, and it needs the transfer path.
 - Deleting a task while its run is still alive races the run's own ending, which
   is recorded against a row being deleted. Pre-existing, and unexercised.
+- Whether a task that was under operator control when the machine went down should
+  simply resume as autopilot. Q16 says restarting is dropping a task off your desk,
+  which makes autopilot the right answer; it becomes a real question only for a
+  node that keeps running while its operator's client disappears.
 
 ## Evidence and its limits
 
