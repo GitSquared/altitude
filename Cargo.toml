@@ -18,7 +18,6 @@ crossterm = { version = "0.29.0", features = ["event-stream"] }
 chrono = "0.4"
 directories = "6"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
-gethostname = "1.1.0"
 microsandbox = { version = "0.7.3", default-features = false, features = ["local", "net"] }
 # Embed Microsandbox's guest helper without running its host-runtime installer at build time.
 microsandbox-filesystem = { version = "0.7.3", default-features = false, features = ["download-binaries"] }

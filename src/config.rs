@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     env, fs,
     io::{self, ErrorKind, Write},
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
 
@@ -97,12 +98,7 @@ impl Config {
             .map_err(|error| io::Error::other(format!("could not encode an identity: {error}")))?;
         fs::create_dir_all(&self.data_dir)?;
         let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
+        options.write(true).create_new(true).mode(0o600);
         match options.open(path) {
             Ok(mut file) => {
                 file.write_all(recorded.as_bytes())?;
@@ -172,14 +168,17 @@ impl Config {
 ///
 /// Best effort by design. A node started by a service manager may have no user
 /// in its environment, and an installation must still be able to name itself.
-/// Whitespace is removed because the name is written into a single-line record
-/// wherever it appears.
+/// Whitespace is removed because the name is written into single-line records.
 fn install_label() -> String {
-    let described = |value: String| match value.split_whitespace().collect::<String>() {
-        empty if empty.is_empty() => "unknown".to_owned(),
-        name => name,
+    let named = |value: String| {
+        let value: String = value.split_whitespace().collect();
+        if value.is_empty() {
+            "unknown".to_owned()
+        } else {
+            value
+        }
     };
-    let user = described(whoami::username().unwrap_or_default());
-    let host = described(gethostname::gethostname().to_string_lossy().into_owned());
+    let user = named(whoami::username().unwrap_or_default());
+    let host = named(whoami::hostname().unwrap_or_default());
     format!("{user}@{host}")
 }
