@@ -7,7 +7,10 @@
 //! import; the module is compiled into this example directly. Once the link is
 //! wired into the app, add a library target and switch this to a normal import.
 
-#[path = "../src/net.rs"]
+// The module root is `mod.rs` rather than `net.rs` so that its child modules
+// resolve alongside it: a `#[path]`-loaded single file cannot declare
+// submodules, because they would be looked up relative to this directory.
+#[path = "../src/net/mod.rs"]
 mod net;
 
 use std::{
