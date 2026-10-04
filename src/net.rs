@@ -12,19 +12,23 @@
 #![allow(dead_code)] // Remove once the link is wired into the app.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     error::Error,
     fmt, fs,
     io::ErrorKind,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    str::FromStr,
+    sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, SecretKey,
-    endpoint::{Connection, RecvStream, SendStream, presets},
+    endpoint::{
+        AfterHandshakeOutcome, Builder, Connection, ConnectionError, EndpointHooks, RecvStream,
+        SendStream, VarInt, presets,
+    },
     protocol::{AcceptError, ProtocolHandler, Router},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -50,6 +54,9 @@ const MAX_FRAME_BYTES: usize = 64 * 1024;
 const MAX_BLOB_BYTES: u64 = 64 * 1024 * 1024;
 /// Write granularity for blob bytes.
 const CHUNK_BYTES: usize = 64 * 1024;
+/// Close code sent to a client the node will not talk to. Distinguishable from
+/// a transport error, so a client can tell "refused" from "unreachable".
+const REFUSED: VarInt = VarInt::from_u32(1);
 
 // ------------------------------------------------------------------ identity
 
@@ -126,6 +133,264 @@ fn write_secret(path: &Path, secret_key: &SecretKey) -> LinkResult<()> {
     #[cfg(not(unix))]
     fs::write(path, text)?;
     Ok(())
+}
+
+// ------------------------------------------------------------------- pairing
+
+/// How an endpoint finds and reaches peers.
+///
+/// `presets::N0` is Iroh's default wiring: n0's relays, plus n0's DNS to
+/// publish and resolve addresses. It makes a bare public key dialable from
+/// anywhere, and it puts n0's servers in the addressing path. `presets::Minimal`
+/// is the empty base — no relay, no lookup — so an endpoint reaches only what a
+/// [`NodeTicket`] told it about.
+///
+/// Which one Altitude ships is a real decision, not a default to inherit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Discovery {
+    /// n0's relay servers and DNS.
+    Directory,
+    /// No relay and no directory: only what a ticket carries.
+    TicketOnly,
+}
+
+/// The builder a wiring choice implies.
+fn endpoint(wiring: Discovery) -> Builder {
+    match wiring {
+        Discovery::Directory => Endpoint::builder(presets::N0),
+        Discovery::TicketOnly => Endpoint::builder(presets::Minimal),
+    }
+}
+
+/// Who a node will talk to.
+///
+/// The transport authenticates *which* key is on the other end; it has no
+/// opinion on whether that key is welcome. That is this, and it belongs to the
+/// caller: a node starts paired with exactly the keys it was given and nobody
+/// else. There is no "open" mode, because a shared node that accepts anyone is
+/// not a mode worth having one line of code for.
+///
+/// Two constructors, because both are real. [`NodeAccess::in_memory`] forgets on
+/// restart and is what a test or an example wants;
+/// [`NodeAccess::open`] persists to a path the caller supplies, with no default
+/// location, so where a node keeps its grants is the caller's decision and not
+/// this module's.
+#[derive(Clone, Debug, Default)]
+pub struct NodeAccess {
+    /// Where the grants are kept, if anywhere. `None` means in memory only.
+    path: Option<PathBuf>,
+    /// Kept sorted so the file has a stable order and diffs stay readable.
+    paired: Arc<RwLock<BTreeSet<EndpointId>>>,
+}
+
+impl NodeAccess {
+    /// A node paired with exactly these keys, forgotten on restart.
+    pub fn in_memory(keys: impl IntoIterator<Item = EndpointId>) -> Self {
+        Self {
+            path: None,
+            paired: Arc::new(RwLock::new(keys.into_iter().collect())),
+        }
+    }
+
+    /// A node whose grants live at `path`.
+    ///
+    /// A missing file means nobody is paired, and nothing is written until the
+    /// first pairing — starting a node does not scatter empty files around.
+    pub fn open(path: impl Into<PathBuf>) -> LinkResult<Self> {
+        let path = path.into();
+        let paired = match fs::read_to_string(&path) {
+            Ok(text) => parse_grants(&text)?,
+            Err(err) if err.kind() == ErrorKind::NotFound => BTreeSet::new(),
+            Err(err) => return Err(err.into()),
+        };
+        Ok(Self {
+            path: Some(path),
+            paired: Arc::new(RwLock::new(paired)),
+        })
+    }
+
+    /// Where the grants are kept, or `None` if this access is in memory only.
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    /// Pairs a client. This is the out-of-band gesture: the operator has to
+    /// carry the client's public key to the node for this to happen.
+    ///
+    /// Persisted before returning, so a grant that was reported as made is a
+    /// grant that survives a restart.
+    pub fn pair(&self, key: EndpointId) -> LinkResult<()> {
+        let mut paired = self.paired.write().expect("node access");
+        paired.insert(key);
+        self.persist(&paired)
+    }
+
+    /// Unpairs a client. `true` if it was paired.
+    ///
+    /// Refuses new connections only. An exchange already in flight finishes,
+    /// per `design/decisions.md` (Q7).
+    pub fn unpair(&self, key: &EndpointId) -> LinkResult<bool> {
+        let mut paired = self.paired.write().expect("node access");
+        let removed = paired.remove(key);
+        if removed {
+            self.persist(&paired)?;
+        }
+        Ok(removed)
+    }
+
+    /// Whether a key may connect.
+    pub fn is_paired(&self, key: &EndpointId) -> bool {
+        self.paired.read().expect("node access").contains(key)
+    }
+
+    /// Every paired key, in a stable order.
+    pub fn paired_keys(&self) -> Vec<EndpointId> {
+        self.paired
+            .read()
+            .expect("node access")
+            .iter()
+            .copied()
+            .collect()
+    }
+
+    /// Writes the grants. Only public keys, never a secret, so this file is a
+    /// list of who is allowed rather than a credential itself.
+    fn persist(&self, paired: &BTreeSet<EndpointId>) -> LinkResult<()> {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        let keys: Vec<String> = paired.iter().map(EndpointId::to_string).collect();
+        let text = format!("{}\n", serde_json::to_string_pretty(&keys)?);
+        write_private(path, &text)
+    }
+}
+
+fn parse_grants(text: &str) -> LinkResult<BTreeSet<EndpointId>> {
+    let keys: Vec<String> = serde_json::from_str(text)?;
+    keys.iter()
+        .map(|key| {
+            EndpointId::from_str(key)
+                .map_err(|err| format!("grant file holds an invalid public key: {err}").into())
+        })
+        .collect()
+}
+
+/// Writes a file only the owner can read, replaced atomically.
+///
+/// The rename means a reader sees either the old grants or the new ones, never
+/// a half-written list, and it carries the temporary file's mode across.
+fn write_private(path: &Path, text: &str) -> LinkResult<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_file_name(format!(".{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| -> LinkResult<()> {
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temporary)?;
+            file.write_all(text.as_bytes())?;
+            file.sync_all()?;
+        }
+        #[cfg(not(unix))]
+        fs::write(&temporary, text)?;
+        fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+/// The gate itself, installed as an endpoint hook so it runs once the handshake
+/// has established which key is on the other end, and before any ALPN handler
+/// reads a byte.
+#[derive(Debug)]
+struct PairingGate {
+    access: NodeAccess,
+}
+
+impl EndpointHooks for PairingGate {
+    async fn after_handshake(&self, connection: &Connection) -> AfterHandshakeOutcome {
+        // Only incoming connections: the gate is about who may call in, and a
+        // node that later dials out must not lock itself out.
+        if !connection.side().is_server() {
+            return AfterHandshakeOutcome::accept();
+        }
+        let remote = connection.remote_id();
+        if self.access.is_paired(&remote) {
+            return AfterHandshakeOutcome::accept();
+        }
+        tracing::info!(%remote, "refused an unpaired client");
+        AfterHandshakeOutcome::Reject {
+            error_code: REFUSED,
+            reason: b"not paired with this node".to_vec(),
+        }
+    }
+}
+
+/// A node's address, as a string to carry out of band.
+///
+/// This is the whole reason to have it: `presets::N0` resolves a bare public
+/// key through n0's DNS and publishes the node's addresses through n0's relays,
+/// which puts a third party in the addressing path. A ticket carries the key
+/// and its addresses in the operator's own hands instead, so dialling a node
+/// needs nobody's directory. The cost is that the string has to be moved
+/// between machines out of band.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NodeTicket {
+    addr: EndpointAddr,
+    text: String,
+}
+
+impl NodeTicket {
+    /// Renders an address as a ticket.
+    pub fn new(addr: EndpointAddr) -> LinkResult<Self> {
+        let text = serde_json::to_string(&addr)?;
+        Ok(Self { addr, text })
+    }
+
+    /// The address it carries.
+    pub fn addr(&self) -> &EndpointAddr {
+        &self.addr
+    }
+
+    /// The key to dial, without the network addresses.
+    pub fn id(&self) -> EndpointId {
+        self.addr.id
+    }
+
+    /// The ticket text.
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+}
+
+impl fmt::Display for NodeTicket {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+impl FromStr for NodeTicket {
+    type Err = LinkError;
+
+    fn from_str(text: &str) -> LinkResult<Self> {
+        let addr: EndpointAddr = serde_json::from_str(text.trim())?;
+        Self::new(addr)
+    }
+}
+
+impl From<NodeTicket> for EndpointAddr {
+    fn from(ticket: NodeTicket) -> Self {
+        ticket.addr
+    }
 }
 
 // ------------------------------------------------------------------ protocol
@@ -305,26 +570,37 @@ async fn answer(
 pub struct LinkNode {
     router: Router,
     identity: NodeIdentity,
+    access: NodeAccess,
     blobs: Arc<BlobStore>,
 }
 
 impl LinkNode {
-    /// Binds an endpoint for `identity` and starts accepting link connections.
-    pub async fn serve(identity: NodeIdentity) -> LinkResult<Self> {
+    /// Binds an endpoint for `identity`, pairs it with exactly the keys in
+    /// `access`, and starts accepting link connections.
+    pub async fn serve(
+        identity: NodeIdentity,
+        access: NodeAccess,
+        discovery: Discovery,
+    ) -> LinkResult<Self> {
         let blobs = Arc::new(BlobStore::default());
         let handler = LinkHandler {
             node: identity.id(),
             blobs: Arc::clone(&blobs),
         };
-        let endpoint = Endpoint::builder(presets::N0)
+        let gate = PairingGate {
+            access: access.clone(),
+        };
+        let endpoint = endpoint(discovery)
             .secret_key(identity.secret_key().clone())
             .alpns(vec![LINK_ALPN.to_vec()])
+            .hooks(gate)
             .bind()
             .await?;
         let router = Router::builder(endpoint).accept(LINK_ALPN, handler).spawn();
         Ok(Self {
             router,
             identity,
+            access,
             blobs,
         })
     }
@@ -334,6 +610,17 @@ impl LinkNode {
         self.identity.id()
     }
 
+    /// Who this node will talk to. Pairing and unpairing while running take
+    /// effect on the next connection.
+    pub fn access(&self) -> &NodeAccess {
+        &self.access
+    }
+
+    /// The node's address as a string to hand to a client out of band.
+    pub fn ticket(&self) -> LinkResult<NodeTicket> {
+        NodeTicket::new(self.addr())
+    }
+
     /// How to reach the node right now: its key plus whatever addresses are
     /// currently known. Dialling needs only the key if address discovery can
     /// resolve it; the addresses are a shortcut.
@@ -341,10 +628,14 @@ impl LinkNode {
         self.router.endpoint().addr()
     }
 
-    /// Waits up to `limit` for a relay handshake. `false` means the node is
-    /// only reachable on its direct addresses, which is enough locally and
-    /// nowhere else.
-    pub async fn wait_online(&self, limit: Duration) -> bool {
+    /// Waits up to `limit` for a relay handshake, which is what makes a bare
+    /// public key dialable from elsewhere. `false` means the node is only
+    /// reachable on the addresses a ticket carries.
+    ///
+    /// With [`Discovery::TicketOnly`] there is no relay, so this always times
+    /// out — Iroh's `online` pends forever without one, which is why the limit
+    /// is not optional here.
+    pub async fn wait_for_relay(&self, limit: Duration) -> bool {
         timeout(limit, self.router.endpoint().online())
             .await
             .is_ok()
@@ -426,6 +717,46 @@ pub struct LinkReply<T> {
     pub path: LinkPath,
 }
 
+/// Why a client could not finish an exchange.
+#[derive(Debug)]
+pub enum LinkClientError {
+    /// The node will not talk to this client. Retrying does not help until the
+    /// node has paired this key.
+    Refused {
+        /// What the node said.
+        reason: String,
+    },
+    /// Anything else: discovery, transport, framing.
+    Transport(LinkError),
+}
+
+impl fmt::Display for LinkClientError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Refused { reason } => write!(f, "node refused this client: {reason}"),
+            Self::Transport(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl Error for LinkClientError {}
+
+/// Reads a node's refusal out of the connection that carried it.
+///
+/// A refusal arrives as an application close with a known code. Without
+/// looking for it, the client sees only "connection lost" and cannot tell a
+/// node that will never accept it from a network that dropped.
+fn refusal(connection: &Connection, err: LinkError) -> LinkClientError {
+    match connection.close_reason() {
+        Some(ConnectionError::ApplicationClosed(close)) if close.error_code == REFUSED => {
+            LinkClientError::Refused {
+                reason: String::from_utf8_lossy(&close.reason).into_owned(),
+            }
+        }
+        _ => LinkClientError::Transport(err),
+    }
+}
+
 /// The client side of the link: an endpoint that dials nodes by public key.
 pub struct LinkClient {
     endpoint: Endpoint,
@@ -433,8 +764,8 @@ pub struct LinkClient {
 
 impl LinkClient {
     /// Binds a client endpoint. Nothing about a node is needed to do this.
-    pub async fn bind() -> LinkResult<Self> {
-        let endpoint = Endpoint::bind(presets::N0).await?;
+    pub async fn bind(discovery: Discovery) -> LinkResult<Self> {
+        let endpoint = endpoint(discovery).bind().await?;
         Ok(Self { endpoint })
     }
 
@@ -452,13 +783,18 @@ impl LinkClient {
     /// Dials a node and runs one request/response exchange.
     ///
     /// `peer` may be a bare [`EndpointId`] — no URL, no port — in which case
-    /// the address has to be discoverable.
+    /// the address has to be discoverable — a [`NodeTicket`], or an
+    /// [`EndpointAddr`].
     pub async fn request(
         &self,
         peer: impl Into<EndpointAddr>,
         request: &LinkRequest,
-    ) -> LinkResult<LinkReply<LinkResponse>> {
-        let connection = self.endpoint.connect(peer, LINK_ALPN).await?;
+    ) -> Result<LinkReply<LinkResponse>, LinkClientError> {
+        let connection = self
+            .endpoint
+            .connect(peer, LINK_ALPN)
+            .await
+            .map_err(|err| LinkClientError::Transport(err.into()))?;
         let result = async {
             let (mut send, mut recv) = connection.open_bi().await?;
             write_frame(&mut send, request).await?;
@@ -471,6 +807,8 @@ impl LinkClient {
             })
         }
         .await;
+        // Classified before the local close, which would overwrite the reason.
+        let result = result.map_err(|err| refusal(&connection, err));
         connection.close(0u32.into(), b"done");
         result
     }
@@ -483,13 +821,17 @@ impl LinkClient {
         &self,
         peer: impl Into<EndpointAddr>,
         bytes: &[u8],
-    ) -> LinkResult<LinkReply<BlobHash>> {
+    ) -> Result<LinkReply<BlobHash>, LinkClientError> {
         let hash = BlobHash::of(bytes);
         let request = LinkRequest::PutBlob {
             hash: hash.clone(),
             len: bytes.len() as u64,
         };
-        let connection = self.endpoint.connect(peer, LINK_ALPN).await?;
+        let connection = self
+            .endpoint
+            .connect(peer, LINK_ALPN)
+            .await
+            .map_err(|err| LinkClientError::Transport(err.into()))?;
         let result = async {
             let (mut send, mut recv) = connection.open_bi().await?;
             write_frame(&mut send, &request).await?;
@@ -512,6 +854,8 @@ impl LinkClient {
             })
         }
         .await;
+        // Classified before the local close, which would overwrite the reason.
+        let result = result.map_err(|err| refusal(&connection, err));
         connection.close(0u32.into(), b"done");
         result
     }

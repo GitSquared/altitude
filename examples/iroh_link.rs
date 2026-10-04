@@ -11,18 +11,21 @@
 mod net;
 
 use std::{
-    env,
+    env, fs,
+    os::unix::fs::PermissionsExt,
+    str::FromStr,
     time::{Duration, Instant},
 };
 
+use iroh::EndpointAddr;
 use net::{
-    BlobHash, LinkClient, LinkError, LinkNode, LinkReply, LinkRequest, LinkResponse, NodeIdentity,
+    BlobHash, Discovery, LinkClient, LinkClientError, LinkError, LinkNode, LinkReply, LinkRequest,
+    LinkResponse, NodeAccess, NodeIdentity, NodeTicket,
 };
 use tokio::{runtime::Builder, time::timeout};
 
-/// How long to wait for a relay handshake, and for address discovery on a dial
-/// by bare public key. Generous, because a cold relay handshake is the slowest
-/// thing here.
+/// How long to wait for a relay handshake, a dial, or address discovery.
+/// Generous, because a cold relay handshake is the slowest thing here.
 const WAIT_LIMIT: Duration = Duration::from_secs(15);
 
 fn main() -> Result<(), LinkError> {
@@ -37,30 +40,52 @@ async fn run() -> Result<(), LinkError> {
     let identity = NodeIdentity::load_or_create(dir.join("node.key"))?;
     println!("node key file:   {}", identity.path().display());
 
-    let node = LinkNode::serve(identity).await?;
+    // A node starts paired with nobody. This is the state after a fresh
+    // install, before the operator has carried any client key to it.
+    let node = LinkNode::serve(identity, NodeAccess::in_memory([]), Discovery::Directory).await?;
     println!("node public key: {}", node.id());
-
-    if node.wait_online(WAIT_LIMIT).await {
-        println!("node online:     relay handshake completed");
+    println!("paired clients:  {}", node.access().paired_keys().len());
+    if node.wait_for_relay(WAIT_LIMIT).await {
+        println!("relay:           handshake completed (a bare key is dialable)");
     } else {
-        println!("node online:     not within {WAIT_LIMIT:?} (direct addresses only)");
+        println!("relay:           none within {WAIT_LIMIT:?} (ticket addresses only)");
     }
-    println!("node address:    {:?}", node.addr());
 
-    let client = LinkClient::bind().await?;
+    // The ticket is the address, carried out of band. Nothing here needs a
+    // directory to resolve it.
+    let ticket = node.ticket()?;
+    println!("ticket:          {ticket}");
+    // Round-trip it through its string form, because that is how a real client
+    // would receive it.
+    let ticket = NodeTicket::from_str(&ticket.to_string())?;
+    println!("ticket dials:    {}", ticket.id());
+
+    let client = LinkClient::bind(Discovery::Directory).await?;
     println!("client key:      {}", client.id());
+
+    println!();
+    println!("-- pairing --");
+    println!(
+        "unpaired:        {}",
+        attempt(&client, ticket.clone()).await
+    );
+
+    // The out-of-band gesture: the operator carries the client's public key to
+    // the node. There is no enrollment window and no token on the wire.
+    node.access().pair(client.id())?;
+    println!("paired clients:  {}", node.access().paired_keys().len());
+    println!(
+        "after pairing:   {}",
+        attempt(&client, ticket.clone()).await
+    );
 
     println!();
     println!("-- request/response --");
     let started = Instant::now();
-    let reply = identify(&client, &node).await?;
+    let reply = identify(&client, ticket.clone()).await?;
     println!("elapsed:         {:?}", started.elapsed());
     println!("answered by:     {}", reply.remote);
     println!("path:            {}", reply.path);
-    match &reply.value {
-        LinkResponse::Identified { node } => println!("node says it is: {node}"),
-        other => println!("unexpected answer: {other:?}"),
-    }
     println!(
         "authenticated:   {}",
         if reply.remote == node.id() {
@@ -78,7 +103,7 @@ async fn run() -> Result<(), LinkError> {
     println!("blob:            {} bytes, blake3 {hash}", blob.len());
 
     let started = Instant::now();
-    let stored = client.put_blob(node.addr(), &blob).await?;
+    let stored = client.put_blob(ticket.clone(), &blob).await?;
     let upload = started.elapsed();
     println!(
         "stored:          {} bytes, node confirmed {hash}",
@@ -89,6 +114,65 @@ async fn run() -> Result<(), LinkError> {
     println!("node holds:      {} blob(s)", node.blob_count());
     println!("upload rate:     {}", rate(blob.len(), upload));
 
+    println!();
+    println!("-- bare key dial --");
+    // What a ticket buys: this works too, but only because n0's relays and DNS
+    // resolve the key. The ticket needs neither.
+    println!("dial by key:     {}", attempt(&client, node.id()).await);
+    println!("                 (resolved through n0's DNS, not the ticket)");
+
+    println!();
+    println!("-- without n0 --");
+    // The same node and client, wired with no relay and no directory. This is
+    // what a ticket is for: the bare key now has nowhere to resolve from.
+    let private_identity = NodeIdentity::load_or_create(dir.join("private.key"))?;
+    let private = LinkNode::serve(
+        private_identity,
+        NodeAccess::in_memory([client.id()]),
+        Discovery::TicketOnly,
+    )
+    .await?;
+    private.wait_for_relay(Duration::from_secs(2)).await;
+    let private_ticket = private.ticket()?;
+    println!("node:            {} (no relay, no DNS)", private.id());
+    println!("dial by key:     {}", attempt(&client, private.id()).await);
+    println!(
+        "dial by ticket:  {}",
+        attempt(&client, private_ticket).await
+    );
+    private.shutdown().await?;
+
+    println!();
+    println!("-- persistence --");
+    // A node's grants belong to the node, not to a task, so they have to
+    // outlive the process. Same seam as the identity key: the caller says where.
+    let grants_path = dir.join("paired.json");
+    // Start clean, so the numbers below mean something on a second run.
+    let _ = fs::remove_file(&grants_path);
+    let grants = NodeAccess::open(&grants_path)?;
+    println!("paired file:     {}", grants_path.display());
+    println!("starts paired:   {}", grants.paired_keys().len());
+    println!(
+        "file created?    {} (nothing is written until the first pairing)",
+        grants_path.exists()
+    );
+    grants.pair(client.id())?;
+    // Reopened as a fresh process would, with nothing carried over.
+    let reopened = NodeAccess::open(&grants_path)?;
+    println!("after restart:   {} paired", reopened.paired_keys().len());
+    println!("                 (read back from disk, not from the first handle)");
+    println!("is the client?   {}", reopened.is_paired(&client.id()));
+    println!(
+        "file mode:       {:o}",
+        fs::metadata(&grants_path)?.permissions().mode() & 0o777
+    );
+
+    println!();
+    println!("-- revocation --");
+    let removed = node.access().unpair(&client.id())?;
+    println!("unpaired {removed}:  {}", attempt(&client, ticket).await);
+    println!("paired clients:  {}", node.access().paired_keys().len());
+
     client.close().await?;
     node.shutdown().await?;
     println!();
@@ -96,34 +180,25 @@ async fn run() -> Result<(), LinkError> {
     Ok(())
 }
 
-/// Dial by public key alone first. That is the shape the design wants — no
-/// URL, no port — but it only works if the key can be discovered, so it is
-/// bounded and falls back to the node's advertised address.
+/// One Identify exchange, reported rather than propagated: a refusal is the
+/// thing being demonstrated here, not an error.
+async fn attempt(client: &LinkClient, peer: impl Into<EndpointAddr>) -> String {
+    match timeout(WAIT_LIMIT, client.request(peer, &LinkRequest::Identify)).await {
+        Ok(Ok(_)) => "accepted".to_owned(),
+        Ok(Err(LinkClientError::Refused { reason })) => {
+            format!("REFUSED, typed as a refusal: {reason}")
+        }
+        Ok(Err(err)) => format!("failed: {err}"),
+        Err(_) => format!("no answer within {WAIT_LIMIT:?}"),
+    }
+}
+
+/// The same exchange, but a refusal is a failure.
 async fn identify(
     client: &LinkClient,
-    node: &LinkNode,
-) -> Result<LinkReply<LinkResponse>, LinkError> {
-    match timeout(
-        WAIT_LIMIT,
-        client.request(node.id(), &LinkRequest::Identify),
-    )
-    .await
-    {
-        Ok(Ok(reply)) => {
-            println!("dial by key:     resolved through address discovery");
-            Ok(reply)
-        }
-        Ok(Err(err)) => {
-            println!("dial by key:     failed ({err})");
-            println!("                 retrying with the node's advertised address");
-            Ok(client.request(node.addr(), &LinkRequest::Identify).await?)
-        }
-        Err(_) => {
-            println!("dial by key:     timed out after {WAIT_LIMIT:?}");
-            println!("                 retrying with the node's advertised address");
-            Ok(client.request(node.addr(), &LinkRequest::Identify).await?)
-        }
-    }
+    peer: impl Into<EndpointAddr>,
+) -> Result<LinkReply<LinkResponse>, LinkClientError> {
+    client.request(peer, &LinkRequest::Identify).await
 }
 
 /// Megabytes per second, for the report as much as the demo.
