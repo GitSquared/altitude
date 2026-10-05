@@ -353,6 +353,18 @@ impl App {
         }
     }
 
+    /// Drop a signal the operator has just resolved, keeping the highlight inside
+    /// the list that remains.
+    fn resolved_operator_signal(&mut self, index: usize) {
+        if index < self.operator_signals.len() {
+            self.operator_signals.remove(index);
+        }
+        self.operator_signal_scroll = 0;
+        self.selected_operator_signal = self
+            .selected_operator_signal
+            .min(self.operator_signals.len().saturating_sub(1));
+    }
+
     fn select_next_operator_signal(&mut self) {
         self.operator_signal_scroll = 0;
         if !self.operator_signals.is_empty() {
@@ -717,6 +729,27 @@ where
             KeyCode::BackTab | KeyCode::Up | KeyCode::Char('h') => {
                 app.select_previous_operator_signal()
             }
+            KeyCode::Char('c') => {
+                let signal = app
+                    .operator_signals
+                    .get(app.selected_operator_signal)
+                    .cloned();
+                match signal {
+                    Some(signal) if signal.kind == TaskOperatorSignalKind::InReview => {
+                        match task_service.confirm_operator_signal(&signal.id).await {
+                            Ok(task) => {
+                                app.replace_task(task);
+                                app.resolved_operator_signal(app.selected_operator_signal);
+                                app.notice =
+                                    Some("task closed; its capsule was disposed of".into());
+                            }
+                            Err(error) => app.notice = Some(error.to_string()),
+                        }
+                    }
+                    Some(_) => app.notice = Some("only a wrap-up request can be confirmed".into()),
+                    None => {}
+                }
+            }
             KeyCode::Enter => {
                 if let Some(operator_signal) = app
                     .operator_signals
@@ -731,17 +764,13 @@ where
                             {
                                 Ok(task) => {
                                     app.replace_task(task);
-                                    app.operator_signals.remove(app.selected_operator_signal);
-                                    app.operator_signal_scroll = 0;
-                                    app.selected_operator_signal = app
-                                        .selected_operator_signal
-                                        .min(app.operator_signals.len().saturating_sub(1));
+                                    app.resolved_operator_signal(app.selected_operator_signal);
                                 }
                                 Err(error) => app.notice = Some(error.to_string()),
                             }
                         }
                         TaskOperatorSignalKind::Decision
-                        | TaskOperatorSignalKind::Review
+                        | TaskOperatorSignalKind::InReview
                         | TaskOperatorSignalKind::Failure => {
                             if app
                                 .tasks

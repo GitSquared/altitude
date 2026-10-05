@@ -22,7 +22,9 @@ pub fn draw(
     let area = centered_width(frame.area(), 72, 65);
     frame.render_widget(Clear, area);
     let block = Block::bordered()
-        .title(" Signals · enter answer/ack · esc close ")
+        .title(signal_keys(
+            operator_signals.get(selected).map(|signal| signal.kind),
+        ))
         .title_bottom(" pgup/pgdn scroll · home/end · h/j select ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -70,11 +72,22 @@ pub fn draw(
     frame.render_widget(paragraph.scroll((*scroll, 0)), detail_area);
 }
 
+/// What the selected signal can be answered with, so the keys are visible rather
+/// than remembered.
+fn signal_keys(kind: Option<TaskOperatorSignalKind>) -> &'static str {
+    match kind {
+        Some(TaskOperatorSignalKind::Update) => " Signals · enter acknowledge · esc close ",
+        Some(TaskOperatorSignalKind::InReview) => " Signals · c confirm · enter reply · esc close ",
+        Some(_) => " Signals · enter reply · esc close ",
+        None => " Signals · esc close ",
+    }
+}
+
 fn kind_label(kind: TaskOperatorSignalKind) -> &'static str {
     match kind {
         TaskOperatorSignalKind::Update => "update",
         TaskOperatorSignalKind::Decision => "decision",
-        TaskOperatorSignalKind::Review => "review",
+        TaskOperatorSignalKind::InReview => "in review",
         TaskOperatorSignalKind::Failure => "failure",
     }
 }

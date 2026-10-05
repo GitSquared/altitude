@@ -27,13 +27,13 @@ SELECT raised.sequence, raised.task_id, raised.recorded_at_ms AS raised_at_ms,
     EXISTS (
         SELECT 1 FROM task_event_logs AS read
         WHERE read.task_id = raised.task_id
-            AND read.event_type IN ('operator_signal_read', 'operator_signal_acknowledged', 'operator_signal_answered')
+            AND read.event_type IN ('operator_signal_read', 'operator_signal_acknowledged', 'operator_signal_answered', 'operator_signal_confirmed')
             AND json_extract(read.payload, '$.data.signal_id') = json_extract(raised.payload, '$.data.signal.id')
     ) AS read,
     EXISTS (
         SELECT 1 FROM task_event_logs AS resolved
         WHERE resolved.task_id = raised.task_id
-            AND resolved.event_type IN ('operator_signal_acknowledged', 'operator_signal_answered')
+            AND resolved.event_type IN ('operator_signal_acknowledged', 'operator_signal_answered', 'operator_signal_confirmed')
             AND json_extract(resolved.payload, '$.data.signal_id') = json_extract(raised.payload, '$.data.signal.id')
     ) AS resolved
 FROM task_event_logs AS raised

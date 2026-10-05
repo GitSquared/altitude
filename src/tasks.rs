@@ -120,18 +120,18 @@ where
                     kind: TaskOperatorSignalKind::Update,
                     ..
                 }),
-            )
-            | (TaskAgentRequestedAction::Complete, None) => TaskOperatorAttentionLevel::Nominal,
+            ) => TaskOperatorAttentionLevel::Nominal,
             (
                 TaskAgentRequestedAction::AwaitOperator,
                 Some(TaskOperatorSignalDraft {
-                    kind: TaskOperatorSignalKind::Decision | TaskOperatorSignalKind::Review,
+                    kind: TaskOperatorSignalKind::Decision | TaskOperatorSignalKind::InReview,
                     ..
                 }),
             ) => TaskOperatorAttentionLevel::Requested,
             _ => {
                 return Err(TaskServiceError::InvalidReport(
-                    "updates must continue; decisions and reviews must await the operator; completion cannot raise a signal".into(),
+                    "updates must continue; decisions and wrap-up requests must await the operator"
+                        .into(),
                 ));
             }
         };
@@ -565,20 +565,23 @@ where
         Ok(())
     }
 
-    pub async fn complete(
-        &self,
-        task: &Task,
-        agent_run: &TaskAgentRun,
-    ) -> Result<Task, TaskServiceError> {
-        let task = self.release_resources(task).await?;
+    /// Accept a wrap-up request: the operator's judgment, and the only ending.
+    ///
+    /// The judgment is recorded before the capsule is touched, so what the
+    /// operator decided does not depend on cleanup succeeding. Nothing here ends a
+    /// run: the run that asked for review already ended, waiting for this answer.
+    pub async fn confirm_operator_signal(&self, signal_id: &str) -> Result<Task, TaskServiceError> {
+        let task = self
+            .store
+            .confirm_operator_signal(signal_id)
+            .await
+            .map_err(TaskServiceError::Task)?;
+        let task = self.release_resources(&task).await?;
         self.record(
             &task.id,
-            &[
-                run_ended(agent_run, TaskAgentRunOutcome::Completed, Some(0)),
-                TaskHistoryEvent::TaskCompleted {
-                    execution_status: TaskExecutionStatus::Completed,
-                },
-            ],
+            &[TaskHistoryEvent::TaskCompleted {
+                execution_status: TaskExecutionStatus::Completed,
+            }],
         )
         .await
     }
@@ -591,7 +594,9 @@ where
         diagnostic: Option<&str>,
     ) -> Result<Task, TaskServiceError> {
         let (exit_code, error) = match event {
-            CommandEvent::Exited(0) => return self.complete(task, agent_run).await,
+            // A clean exit is not an ending: a run that stops without a report has
+            // failed to report, and only the operator closes a task out.
+            CommandEvent::Exited(0) => (Some(0), "the run ended without a task report".to_owned()),
             CommandEvent::Exited(code) => (Some(code), format!("command exited with code {code}")),
             CommandEvent::Failed(error) => (None, error),
             CommandEvent::Output { .. } => unreachable!("output is handled by the event_loop"),

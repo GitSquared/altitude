@@ -18,10 +18,13 @@ pub struct TaskAgentTurnReport {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+/// What a work turn asks for next.
+///
+/// There is no way to finish a task here, deliberately: a harness may ask for the
+/// operator, but only the operator closes a task out.
 pub enum TaskAgentRequestedAction {
     Continue,
     AwaitOperator,
-    Complete,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -37,7 +40,10 @@ pub struct TaskOperatorSignalDraft {
 pub enum TaskOperatorSignalKind {
     Update,
     Decision,
-    Review,
+    /// The work is finished as far as the harness can tell, and the operator
+    /// decides whether it is done. Confirming closes the task and disposes of its
+    /// capsule; replying sends it back for more work.
+    InReview,
     /// The harness stopped; the operator must repair the problem before retrying.
     Failure,
 }
@@ -220,6 +226,10 @@ pub enum TaskHistoryEvent {
         signal_id: String,
         answer: String,
     },
+    /// The operator accepted a wrap-up request, which is the only way a task ends.
+    OperatorSignalConfirmed {
+        signal_id: String,
+    },
     CodeContributionLinked {
         contribution: CodeContribution,
     },
@@ -271,7 +281,6 @@ pub enum TaskHistoryEvent {
 pub enum TaskAgentRunOutcome {
     Continued,
     AwaitingOperator,
-    Completed,
     Failed,
 }
 

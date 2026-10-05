@@ -501,18 +501,16 @@ where
                             .events
                             .send(TaskExecutionUpdate::Finished(task.id, result));
                     }
-                    TaskAgentRequestedAction::Complete => self.complete(task, run).await,
                 }
             }
-            TaskExecutionMode::Operator => self.complete(task, run).await,
+            // An operator's terminal ending is dropping the task off their desk,
+            // which is the same thing as handing it back deliberately: the work
+            // carries on under autopilot rather than the task being closed out.
+            TaskExecutionMode::Operator => {
+                self.service.continue_turn(run).await?;
+                self.watch_agent_run(self.service.resume_autopilot_after_operator(task).await);
+            }
         }
         Ok(())
-    }
-
-    async fn complete(&self, task: Task, run: &TaskAgentRun) {
-        let result = self.service.complete(&task, run).await;
-        let _ = self
-            .events
-            .send(TaskExecutionUpdate::Finished(task.id, result));
     }
 }

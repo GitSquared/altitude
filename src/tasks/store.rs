@@ -326,7 +326,7 @@ impl TaskStore {
                 CASE kind
                     WHEN 'failure' THEN -1
                     WHEN 'decision' THEN 0
-                    WHEN 'review' THEN 1
+                    WHEN 'in_review' THEN 1
                     WHEN 'update' THEN 2
                 END,
                 raised_at_ms ASC
@@ -367,7 +367,8 @@ impl TaskStore {
     }
 
     pub async fn acknowledge_operator_signal(&self, signal_id: &str) -> Result<Task, TaskError> {
-        self.resolve_operator_signal(signal_id, None).await
+        self.resolve_operator_signal(signal_id, SignalResolution::Acknowledge)
+            .await
     }
 
     pub async fn answer_operator_signal(
@@ -375,13 +376,23 @@ impl TaskStore {
         signal_id: &str,
         answer: &str,
     ) -> Result<Task, TaskError> {
-        self.resolve_operator_signal(signal_id, Some(answer)).await
+        self.resolve_operator_signal(signal_id, SignalResolution::Answer(answer))
+            .await
+    }
+
+    /// Record that the operator accepted a wrap-up request.
+    ///
+    /// This resolves the signal but does not end the task: closing it out is the
+    /// caller's business, because that is where the capsule is disposed of.
+    pub async fn confirm_operator_signal(&self, signal_id: &str) -> Result<Task, TaskError> {
+        self.resolve_operator_signal(signal_id, SignalResolution::Confirm)
+            .await
     }
 
     async fn resolve_operator_signal(
         &self,
         signal_id: &str,
-        answer: Option<&str>,
+        resolution: SignalResolution<'_>,
     ) -> Result<Task, TaskError> {
         let mut transaction = self
             .pool
@@ -399,7 +410,9 @@ impl TaskStore {
         .fetch_one(&mut *transaction)
         .await
         .map_err(TaskError::Database)?;
-        if answer.is_some() {
+        // Acknowledging an update asks nothing of the task; confirming or replying
+        // needs it stopped, so the operator is answering something that is waiting.
+        if resolution.is_answer() {
             let task = Self::read_task(&mut transaction, &task_id).await?;
             let failed = kind.0 == TaskOperatorSignalKind::Failure
                 && task.facts.execution_status == TaskExecutionStatus::Failed;
@@ -412,29 +425,34 @@ impl TaskStore {
                 ));
             }
         }
-        let event = match (kind.0, answer) {
-            (TaskOperatorSignalKind::Update, None) => {
+        let event = match (kind.0, &resolution) {
+            (TaskOperatorSignalKind::Update, SignalResolution::Acknowledge) => {
                 TaskHistoryEvent::OperatorSignalAcknowledged {
+                    signal_id: signal_id.to_owned(),
+                }
+            }
+            (TaskOperatorSignalKind::InReview, SignalResolution::Confirm) => {
+                TaskHistoryEvent::OperatorSignalConfirmed {
                     signal_id: signal_id.to_owned(),
                 }
             }
             (
                 TaskOperatorSignalKind::Decision
-                | TaskOperatorSignalKind::Review
+                | TaskOperatorSignalKind::InReview
                 | TaskOperatorSignalKind::Failure,
-                Some(answer),
+                SignalResolution::Answer(answer),
             ) => TaskHistoryEvent::OperatorSignalAnswered {
                 signal_id: signal_id.to_owned(),
-                answer: answer.to_owned(),
+                answer: (*answer).to_owned(),
             },
             _ => {
                 return Err(TaskError::OperationRejected(
-                    "updates are acknowledged; decisions, reviews, and failures are answered",
+                    "updates are acknowledged; wrap-up requests are confirmed; decisions, reviews, and failures are answered",
                 ));
             }
         };
         let mut events = vec![event];
-        if answer.is_some() {
+        if resolution.is_answer() {
             // Queue continuation durably with the answer so restart can pick it up.
             events.push(TaskHistoryEvent::ExecutionQueued {
                 execution_status: TaskExecutionStatus::Pending,
@@ -453,6 +471,22 @@ impl TaskStore {
             .await
             .map_err(TaskError::Database)?;
         Ok(())
+    }
+}
+
+/// What the operator did with a signal. One verb per kind, because the kinds mean
+/// different things: an update is dismissed, a wrap-up request is accepted, and a
+/// question is replied to.
+enum SignalResolution<'a> {
+    Acknowledge,
+    Confirm,
+    Answer(&'a str),
+}
+
+impl SignalResolution<'_> {
+    /// Whether the operator is answering something that was waiting for them.
+    fn is_answer(&self) -> bool {
+        matches!(self, Self::Confirm | Self::Answer(_))
     }
 }
 
