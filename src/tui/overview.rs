@@ -12,7 +12,7 @@ use crate::{
     isolation::EnvironmentProgress,
     tasks::{
         TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
-        TaskOperatorAttentionLevel,
+        TaskOperatorAttentionLevel, TaskOperatorSignalKind,
     },
     tui::utils::{shimmer, truncate},
 };
@@ -156,14 +156,21 @@ fn draw_tasks(frame: &mut Frame, area: Rect, app: &mut super::App) {
         if task.facts.execution_status == TaskExecutionStatus::Paused
             && task.facts.execution_pause_reason == Some(TaskExecutionPauseReason::AwaitingOperator)
         {
-            match task.facts.operator_attention_level {
-                TaskOperatorAttentionLevel::Alarm => {
-                    status.spans.push(" · ALARM".red().bold());
+            match task.facts.awaiting_signal_kind {
+                // A wrap-up request is not a problem to solve. It is work waiting to
+                // be accepted, so it reads as ready rather than as an alarm.
+                Some(TaskOperatorSignalKind::InReview) => {
+                    status.spans.push(" · in review".green().bold());
                 }
-                TaskOperatorAttentionLevel::Requested => {
-                    status.spans.push(" · attention required".yellow().bold());
-                }
-                TaskOperatorAttentionLevel::Nominal => {}
+                _ => match task.facts.operator_attention_level {
+                    TaskOperatorAttentionLevel::Alarm => {
+                        status.spans.push(" · ALARM".red().bold());
+                    }
+                    TaskOperatorAttentionLevel::Requested => {
+                        status.spans.push(" · attention required".yellow().bold());
+                    }
+                    TaskOperatorAttentionLevel::Nominal => {}
+                },
             }
         }
         if task.facts.unread_operator_signal_count > 0 {

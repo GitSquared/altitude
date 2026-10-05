@@ -45,12 +45,21 @@ pub fn draw(
                 .single()
                 .map(|time| time.format("%H:%M").to_string())
                 .unwrap_or_else(|| "--:--".into());
-            ListItem::new(Line::from(format!(
-                "{timestamp}  {:<6}  {:<8}  {}",
-                priority_label(signal.priority),
-                kind_label(signal.kind),
-                signal.title
-            )))
+            // A wrap-up request is the one signal that asks for acceptance rather
+            // than attention, so it reads green instead of like a problem.
+            let style = match signal.kind {
+                TaskOperatorSignalKind::InReview => Style::new().green(),
+                _ => Style::new(),
+            };
+            ListItem::new(
+                Line::from(format!(
+                    "{timestamp}  {:<6}  {:<9}  {}",
+                    priority_label(signal.priority),
+                    kind_label(signal.kind),
+                    signal.title
+                ))
+                .style(style),
+            )
         })
         .collect::<Vec<_>>();
     let list = List::new(items)

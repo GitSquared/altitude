@@ -75,6 +75,12 @@ SELECT tasks.id, tasks.agent_kind,
      FROM task_event_logs
      WHERE task_id = tasks.id AND event_type = 'operator_signal_answered'
      ORDER BY sequence DESC LIMIT 1) AS latest_operator_answer,
+    (SELECT kind
+     FROM task_operator_signals
+     WHERE task_id = tasks.id
+       AND resolved = 0
+       AND kind IN ('decision', 'in_review')
+     ORDER BY raised_at_ms DESC LIMIT 1) AS awaiting_signal_kind,
     (SELECT count(*) FROM task_operator_signals
      WHERE task_id = tasks.id AND read = 0 AND resolved = 0) AS unread_operator_signal_count,
     (SELECT json_group_array(json(contribution))

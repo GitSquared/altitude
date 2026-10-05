@@ -35,8 +35,9 @@ pub struct TaskOperatorSignalDraft {
     pub body: String,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
+#[sqlx(rename_all = "snake_case")]
 pub enum TaskOperatorSignalKind {
     Update,
     Decision,
@@ -141,6 +142,8 @@ pub struct TaskFacts {
     pub latest_turn_summary: Option<String>,
     #[sqlx(json(nullable))]
     pub latest_operator_answer: Option<TaskOperatorAnswer>,
+    /// The blocking signal the operator is being waited on for, when one is open.
+    pub awaiting_signal_kind: Option<TaskOperatorSignalKind>,
     pub unread_operator_signal_count: u32,
 }
 
