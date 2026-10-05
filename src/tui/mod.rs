@@ -642,7 +642,8 @@ where
     if let Some(id) = app.open_shell.clone() {
         if shell::is_exit_key(key) {
             if !event_loop.return_to_autopilot(&id) {
-                app.notice = Some("this task is no longer running; nothing was handed back".into());
+                app.notice =
+                    Some("this task is no longer running; control stayed with autopilot".into());
             }
             app.hide_shell();
         } else if let Some(shell) = app.shells.get_mut(&id)
@@ -845,7 +846,7 @@ where
                     app.open_shell = Some(task.id);
                     return Ok(false);
                 }
-                if !event_loop.has_active_command(&task.id) {
+                if !event_loop.has_active_run(&task.id) {
                     return Ok(false);
                 }
                 let (rows, cols) = shell::size(terminal.size()?.into());

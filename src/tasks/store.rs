@@ -171,13 +171,13 @@ impl TaskStore {
     pub async fn request_control(
         &self,
         task_id: &str,
-        execution_mode: TaskExecutionMode,
+        requested_mode: TaskExecutionMode,
         agent_run_id: &str,
     ) -> Result<Task, TaskError> {
         self.append_events(
             task_id,
             &[TaskHistoryEvent::ControlRequested {
-                execution_mode,
+                requested_mode,
                 agent_run_id: agent_run_id.to_owned(),
             }],
         )

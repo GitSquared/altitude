@@ -188,11 +188,12 @@ pub enum TaskHistoryEvent {
     },
     /// The operator asked for the task to be driven by someone else.
     ///
-    /// It names the run it was asked during. Only that run can hand the task
-    /// over, so a request cannot land on whichever run happens to end next;
-    /// a request nothing was running to receive is refused rather than recorded.
+    /// It names the run it was asked during. Only that run can act on it, so a
+    /// request cannot land on whichever run happens to end next; a request with
+    /// no run to receive it is refused rather than recorded.
     ControlRequested {
-        execution_mode: TaskExecutionMode,
+        /// The driver the operator asked for, not the one in effect.
+        requested_mode: TaskExecutionMode,
         agent_run_id: String,
     },
     AgentRunEnded {

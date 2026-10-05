@@ -76,7 +76,7 @@ impl Config {
                     path.display()
                 ))
             }),
-            Err(error) if error.kind() == ErrorKind::NotFound => self.name_identity(&path),
+            Err(error) if error.kind() == ErrorKind::NotFound => self.claim_identity(&path),
             Err(error) => Err(error),
         }
     }
@@ -88,8 +88,8 @@ impl Config {
     /// label is resolved once and kept: a machine that is later renamed, or
     /// reached from a context that cannot resolve a user, keeps the name the
     /// tasks it already delegated were recorded under.
-    fn name_identity(&self, path: &Path) -> io::Result<InstallationIdentity> {
-        let label = install_label();
+    fn claim_identity(&self, path: &Path) -> io::Result<InstallationIdentity> {
+        let label = installation_label();
         let identity = InstallationIdentity {
             id: uuid::Uuid::new_v4().to_string(),
             label: label.clone(),
@@ -168,17 +168,19 @@ impl Config {
 ///
 /// Best effort by design. A node started by a service manager may have no user
 /// in its environment, and an installation must still be able to name itself.
-/// Whitespace is removed because the name is written into single-line records.
-fn install_label() -> String {
-    let named = |value: String| {
-        let value: String = value.split_whitespace().collect();
-        if value.is_empty() {
-            "unknown".to_owned()
-        } else {
-            value
-        }
-    };
-    let user = named(whoami::username().unwrap_or_default());
-    let host = named(whoami::hostname().unwrap_or_default());
+fn installation_label() -> String {
+    let user = name_or_unknown(whoami::username().unwrap_or_default());
+    let host = name_or_unknown(whoami::hostname().unwrap_or_default());
     format!("{user}@{host}")
+}
+
+/// A name this machine could not resolve still has to read as something, and a
+/// name is written into single-line records, so its whitespace goes.
+fn name_or_unknown(name: String) -> String {
+    let name: String = name.split_whitespace().collect();
+    if name.is_empty() {
+        "unknown".to_owned()
+    } else {
+        name
+    }
 }

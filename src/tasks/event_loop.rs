@@ -59,7 +59,7 @@ pub struct TaskEventLoop<E> {
     service: TaskService<E>,
     events: mpsc::UnboundedSender<TaskExecutionUpdate>,
     runs: Arc<Mutex<HashMap<String, ActiveRun>>>,
-    control_requests: Arc<Mutex<HashMap<String, (String, TaskExecutionMode)>>>,
+    control_requests: Arc<Mutex<HashMap<String, RequestedControl>>>,
     terminal_output: Arc<Mutex<HashMap<String, CachedTerminalOutput>>>,
 }
 
@@ -72,6 +72,16 @@ struct ActiveRun {
     commands: mpsc::UnboundedSender<Command>,
     agent_run_id: String,
     suspending: bool,
+}
+
+/// A driver the operator asked for, and the run that was asked during.
+///
+/// Both are needed to answer the only question that matters later: whether this
+/// request is still the one that applies. A request whose run has gone is not a
+/// request any more.
+struct RequestedControl {
+    agent_run_id: String,
+    requested_mode: TaskExecutionMode,
 }
 
 impl<E> TaskEventLoop<E>
@@ -114,7 +124,7 @@ where
             .push(bytes);
     }
 
-    pub fn has_active_command(&self, task_id: &str) -> bool {
+    pub fn has_active_run(&self, task_id: &str) -> bool {
         self.runs
             .lock()
             .expect("task run lock poisoned")
@@ -144,7 +154,7 @@ where
     }
 
     pub fn take_control(&self, task_id: &str) -> bool {
-        self.request_handoff(task_id, TaskExecutionMode::Operator)
+        self.request_control(task_id, TaskExecutionMode::Operator)
     }
 
     pub fn start_operator_control(&self, task: Task) {
@@ -162,21 +172,21 @@ where
     }
 
     pub fn return_to_autopilot(&self, task_id: &str) -> bool {
-        self.request_handoff(task_id, TaskExecutionMode::Autopilot)
+        self.request_control(task_id, TaskExecutionMode::Autopilot)
     }
 
-    /// Hand the task to a different driver at the next safe boundary, answering
-    /// whether the request was accepted.
+    /// Ask for the task to be driven differently at the next safe boundary,
+    /// answering whether the request was accepted.
     ///
     /// The request names the run it was asked during, and only that run may act
-    /// on it. Asking while nothing is running is refused: a request with no run
-    /// to receive it would otherwise wait for whichever run ends next, handing the
+    /// on it. Asking while nothing is running is refused: a request with no run to
+    /// receive it would otherwise wait for whichever run ends next, handing the
     /// task over long after the operator meant it.
-    fn request_handoff(&self, task_id: &str, target: TaskExecutionMode) -> bool {
+    fn request_control(&self, task_id: &str, requested_mode: TaskExecutionMode) -> bool {
         let agent_run_id = {
             let runs = self.runs.lock().expect("task run lock poisoned");
             let Some(run) = runs.get(task_id) else {
-                tracing::warn!(task_id = %task_id, ?target, "refusing a control request: the task has no run to hand over");
+                tracing::warn!(task_id = %task_id, ?requested_mode, "refusing a control request: the task has no run to receive it");
                 return false;
             };
             run.agent_run_id.clone()
@@ -186,11 +196,20 @@ where
         self.control_requests
             .lock()
             .expect("task control request lock poisoned")
-            .insert(task_id.to_owned(), (agent_run_id.clone(), target));
+            .insert(
+                task_id.to_owned(),
+                RequestedControl {
+                    agent_run_id: agent_run_id.clone(),
+                    requested_mode,
+                },
+            );
         let service = self.service.clone();
         let id = task_id.to_owned();
         tokio::spawn(async move {
-            if let Err(error) = service.request_control(&id, target, &agent_run_id).await {
+            if let Err(error) = service
+                .request_control(&id, requested_mode, &agent_run_id)
+                .await
+            {
                 tracing::error!(task_id = %id, %error, "could not record a control request");
             }
         });
@@ -224,7 +243,7 @@ where
             .lock()
             .expect("task control request lock poisoned");
         match requests.remove(task_id) {
-            Some((run_id, target)) if run_id == agent_run_id => Some(target),
+            Some(request) if request.agent_run_id == agent_run_id => Some(request.requested_mode),
             Some(_) => {
                 tracing::debug!(task_id = %task_id, "dropping a control request addressed to an earlier run");
                 None
@@ -430,7 +449,7 @@ where
                 }
                 TaskExecutionMode::Operator => self.service.start_operator(task).await,
                 TaskExecutionMode::AutopilotReport => {
-                    unreachable!("report turns cannot be handoff targets")
+                    unreachable!("a report turn cannot be a control target")
                 }
             };
             let operator_task = result

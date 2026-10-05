@@ -97,11 +97,11 @@ where
     pub async fn request_control(
         &self,
         task_id: &str,
-        execution_mode: TaskExecutionMode,
+        requested_mode: TaskExecutionMode,
         agent_run_id: &str,
     ) -> Result<Task, TaskServiceError> {
         self.store
-            .request_control(task_id, execution_mode, agent_run_id)
+            .request_control(task_id, requested_mode, agent_run_id)
             .await
             .map_err(TaskServiceError::Task)
     }
