@@ -369,19 +369,40 @@ resource pressure becomes legible, which is the signal to scale up.
 
 **Options:** nothing automatic; disposal on acceptance; or keep today's behaviour.
 
-**Decision:** acceptance is a distinct signal kind — a request for the operator to
-confirm wrapping up. It requires evidence, it is confirmed by a human, and the
-confirmation disposes the capsule, its working memory and its files.
+**Decision:** acceptance is a signal, named `InReview` to match what task trackers
+call this state. A task is InReview when the operator can accept its outputs and
+close it, or reply and send it back for more work. The two gestures are
+different things, so they are different actions: **confirm** accepts the work,
+disposes of the capsule, its working memory and its files, and reports the task
+as done to any connected tracker; **reply** is an ordinary signal reply, and
+therefore more instructions for the agent.
 
 **Why:** "the agent thinks it has done all it can — do you confirm we wrap up?" is
-a human judgment, not an agent one. The prototype's `qa` kind is the shape to
-keep, including its evidence requirement and fixed options. The agent never holds
-the delete key.
+a human judgment, not an agent one. The agent never holds the delete key.
 
-**This changes current behaviour.** Today `TaskService::complete` calls
-`release_resources`, which removes the sandbox *and* the snapshot, and the agent
-decides when to report `complete`. After this change, `complete` becomes "raise an
-acceptance request and wait", and `Completed` means operator-confirmed.
+**Implementation notes.** This is not a new signal kind in the sense of new
+machinery: `Review` already meant exactly this, and the thing that had to go was
+`Complete`, a second and autonomous way for a harness to end a task. So the report
+contract lost an action, the wrap-up request was renamed, and confirming became
+the only path to a completed task. Two further doors closed with it: an operator's
+terminal ending hands the task back to autopilot instead of closing it out, and a
+run that exits cleanly without a report is a failure to report rather than an
+ending.
+
+**Presentation.** A wrap-up request blocks like a decision, but it is not a
+problem to solve, so it reads green where a decision reads yellow and a failure
+reads red.
+
+**Evidence is not enforced structurally.** The earlier instinct — borrow the
+prototype's rule that a wrap-up request cannot be raised with an empty evidence
+list — was set aside deliberately. Altitude's system prompts stay generic: they
+explain the harness, the task's state, and that approval shuts the task down, and
+they say that work offered for review should be in a state the operator can
+accept (artifacts ready, pull requests green and mergeable by the repository's own
+rules, other signals already sent). What actually constitutes valid work is
+specific to a team and belongs in a user-provided "software factory"
+configuration later, not in Altitude's contract. Enforcement is the thing to
+revisit if wrap-up requests arrive thin in practice.
 
 **Ephemerality.** No archive of old capsules, working directories or full agent
 conversations is kept. Context for further work is reconstructed from the
@@ -524,6 +545,13 @@ rare operation.
   and say so when it cannot. Not built yet, and it needs the transfer path.
 - Deleting a task while its run is still alive races the run's own ending, which
   is recorded against a row being deleted. Pre-existing, and unexercised.
+- **A "software factory" configuration**, user-provided, that says what counts as
+  finished work for a given team or repository. Altitude's contract stays generic
+  (Q15); this is where a team tightens it.
+- **An interrupted environment build leaves its setup sandbox behind**, and the
+  next start fails hard with `sandbox already exists` rather than recovering.
+  Found by killing the app mid-build; pre-existing and unrelated to the work above,
+  but it means a stopped build can stop the node from starting.
 - Whether a task that was under operator control when the machine went down should
   simply resume as autopilot. Q16 says restarting is dropping a task off your desk,
   which makes autopilot the right answer; it becomes a real question only for a
