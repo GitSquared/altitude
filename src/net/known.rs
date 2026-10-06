@@ -1,34 +1,27 @@
-//! The nodes this client has met.
+//! Comparing a node's key to the one you remember for its address.
 //!
 //! A key learned from an announcement is unauthenticated — that is what makes a
-//! first sighting possible at all — so it is written down here and compared on
-//! every later one. That is the whole protection: not that the first answer was
-//! trustworthy, but that a *different* answer later is noticed.
+//! first sighting possible at all — so the protection is not that the first
+//! answer was trustworthy but that a *different* answer later is noticed. This
+//! says whether it is different. Remembering is the caller's business, because
+//! the first sighting is the part that cannot be authenticated and so the
+//! operator is the one who decides.
 //!
-//! Kept beside the key rather than in the task database, because it is trust
-//! state and because the link has to work without a database. Nothing here is a
-//! secret: a node's key is public by definition.
-
-use std::{
-    collections::BTreeMap,
-    fs,
-    io::ErrorKind,
-    path::PathBuf,
-    sync::{Arc, RwLock},
-};
+//! Nothing here stores anything, which is why a node with no database can use
+//! the link. A client keeps what it remembers in the database; a node keeps its
+//! own record in a file; an example keeps it in a map.
 
 use iroh::EndpointId;
-use serde::{Deserialize, Serialize};
 
-use super::{LinkResult, announce::Announcement, identity::write_private, protocol::NodeTicket};
+use super::{LinkResult, announce::Announcement, protocol::NodeTicket};
 
-/// What is remembered about a node, keyed by the address a person typed.
-///
-/// The address as typed, not the addresses the ticket resolved to: a pin is
-/// about the name you use for a machine, the way a known-hosts entry is.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// What is remembered about a node: the key an address answered with, and how
+/// the node reads to a human.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KnownNode {
-    /// The key this address answered with last time.
+    /// The address a person typed, which is what it is remembered under.
+    pub address: String,
+    /// The key that address answered with.
     pub id: String,
     /// How the node reads to a human, so a list can be read without connecting.
     pub label: String,
@@ -49,7 +42,20 @@ pub enum Trust {
     Changed { previous: String },
 }
 
-/// A node, as met: what it says about itself and how it compares to memory.
+impl Trust {
+    /// Compares a key to the one remembered for an address, if any.
+    pub fn between(remembered: Option<&str>, id: &EndpointId) -> Self {
+        match remembered {
+            None => Self::New,
+            Some(previous) if previous == id.to_string() => Self::Known,
+            Some(previous) => Self::Changed {
+                previous: previous.to_owned(),
+            },
+        }
+    }
+}
+
+/// A node, as met: what it says about itself, and how it compares to memory.
 pub struct Sighting {
     /// Where to reach it.
     pub ticket: NodeTicket,
@@ -59,105 +65,26 @@ pub struct Sighting {
     pub trust: Trust,
 }
 
-/// The nodes this client remembers.
-#[derive(Clone, Debug, Default)]
-pub struct KnownNodes {
-    path: Option<PathBuf>,
-    known: Arc<RwLock<BTreeMap<String, KnownNode>>>,
-}
-
-impl KnownNodes {
-    /// A memory kept at `path`.
-    ///
-    /// A missing file means no node has been met, and nothing is written until
-    /// one is remembered.
-    pub fn open(path: impl Into<PathBuf>) -> LinkResult<Self> {
-        let path = path.into();
-        let known = match fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str(&text)?,
-            Err(err) if err.kind() == ErrorKind::NotFound => BTreeMap::new(),
-            Err(err) => return Err(err.into()),
-        };
-        Ok(Self {
-            path: Some(path),
-            known: Arc::new(RwLock::new(known)),
-        })
-    }
-
-    /// Meets a node at an address, without remembering it.
-    ///
-    /// Learning and remembering are separate on purpose: the first sighting is
-    /// unauthenticated, so the operator is the one who decides to keep it.
-    pub async fn learn(&self, address: &str, default_port: u16) -> LinkResult<Sighting> {
-        let (ticket, announcement) = NodeTicket::from_broadcast(address, default_port).await?;
-        let id: EndpointId = announcement
-            .id
-            .parse()
-            .map_err(|error| format!("{address} announced an unreadable key: {error}"))?;
-        let trust = self.verify(address, &id);
-        Ok(Sighting {
-            ticket,
-            announcement,
-            trust,
-        })
-    }
-
-    /// How a key compares to the one remembered for an address.
-    pub fn verify(&self, address: &str, id: &EndpointId) -> Trust {
-        match self.known.read().expect("known nodes").get(address) {
-            None => Trust::New,
-            Some(remembered) if remembered.id == id.to_string() => Trust::Known,
-            Some(remembered) => Trust::Changed {
-                previous: remembered.id.clone(),
-            },
-        }
-    }
-
-    /// Writes down what a node said.
-    ///
-    /// This is also how a change is accepted: remembering a new key replaces the
-    /// old one, so accepting is the same act as meeting a node for the first
-    /// time.
-    pub fn remember(&self, address: &str, sighting: &Sighting) -> LinkResult<()> {
-        let mut known = self.known.write().expect("known nodes");
-        known.insert(
-            address.to_owned(),
-            KnownNode {
-                id: sighting.announcement.id.clone(),
-                label: sighting.announcement.label.clone(),
-            },
-        );
-        self.persist(&known)
-    }
-
-    /// Forgets a node. `true` if it was remembered.
-    ///
-    /// The next meeting is a first sighting again, which is what forgetting
-    /// means.
-    pub fn forget(&self, address: &str) -> LinkResult<bool> {
-        let mut known = self.known.write().expect("known nodes");
-        let removed = known.remove(address).is_some();
-        if removed {
-            self.persist(&known)?;
-        }
-        Ok(removed)
-    }
-
-    /// Every node remembered, in a stable order, as `(address, node)`.
-    pub fn known(&self) -> Vec<(String, KnownNode)> {
-        self.known
-            .read()
-            .expect("known nodes")
-            .iter()
-            .map(|(address, node)| (address.clone(), node.clone()))
-            .collect()
-    }
-
-    fn persist(&self, known: &BTreeMap<String, KnownNode>) -> LinkResult<()> {
-        let Some(path) = &self.path else {
-            return Ok(());
-        };
-        let text = format!("{}\n", serde_json::to_string_pretty(known)?);
-        write_private(path, &text)
-    }
+/// Meets a node at an address, and says how its key compares to what was
+/// remembered there.
+///
+/// `remembered` is the key previously seen for this address, which the caller
+/// looks up wherever it keeps such things. Learning and remembering are separate
+/// on purpose: the first sighting is unauthenticated, so keeping it is a
+/// decision rather than a side effect.
+pub async fn meet(
+    address: &str,
+    default_port: u16,
+    remembered: Option<&str>,
+) -> LinkResult<Sighting> {
+    let (ticket, announcement) = NodeTicket::from_broadcast(address, default_port).await?;
+    let id: EndpointId = announcement
+        .id
+        .parse()
+        .map_err(|error| format!("{address} announced an unreadable key: {error}"))?;
+    Ok(Sighting {
+        ticket,
+        announcement,
+        trust: Trust::between(remembered, &id),
+    })
 }

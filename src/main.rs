@@ -20,6 +20,10 @@ mod config;
 mod db;
 mod development;
 mod isolation;
+// The settings screen is the caller for this; until it exists nothing in the app
+// dials a remote, so nothing reads what was remembered.
+#[allow(dead_code)]
+mod known_nodes;
 mod logging;
 mod net;
 mod serve;
