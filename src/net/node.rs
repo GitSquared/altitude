@@ -3,7 +3,7 @@
 use std::{
     collections::HashMap,
     fmt,
-    net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket},
+    net::{IpAddr, Ipv6Addr, SocketAddr},
     sync::{Arc, Mutex},
 };
 
@@ -15,6 +15,7 @@ use iroh::{
 
 use super::{
     LinkResult,
+    announce::{Announcement, Broadcast, ipv6_available},
     clients::{ClientLog, ClientRecord},
     identity::NodeIdentity,
     protocol::{
@@ -39,10 +40,6 @@ fn bind(builder: Builder, listen: SocketAddr) -> LinkResult<Builder> {
         return Ok(builder.bind_addr(anywhere)?);
     }
     Ok(builder)
-}
-
-fn ipv6_available() -> bool {
-    UdpSocket::bind("[::]:0").is_ok()
 }
 
 /// Blobs a node currently holds, keyed by digest.
@@ -134,6 +131,7 @@ pub struct LinkNode {
     /// has its own handle, so the node does not need this to work.
     #[allow(dead_code)]
     blobs: Arc<BlobStore>,
+    broadcast: Broadcast,
 }
 
 impl LinkNode {
@@ -146,6 +144,7 @@ impl LinkNode {
         identity: NodeIdentity,
         clients: ClientRecord,
         listen: SocketAddr,
+        label: String,
     ) -> LinkResult<Self> {
         let blobs = Arc::new(BlobStore::default());
         let handler = LinkHandler {
@@ -165,10 +164,23 @@ impl LinkNode {
         .bind()
         .await?;
         let router = Router::builder(endpoint).accept(LINK_ALPN, handler).spawn();
+        // Announced on the same address, over TCP, so that a client which has
+        // only been told where this node is can still find out who it is.
+        let broadcast = Broadcast::start(
+            listen,
+            Announcement {
+                protocol: String::from_utf8_lossy(LINK_ALPN).into_owned(),
+                id: identity.id().to_string(),
+                label,
+                version: env!("CARGO_PKG_VERSION").to_owned(),
+            },
+        )
+        .await?;
         Ok(Self {
             router,
             identity,
             blobs,
+            broadcast,
         })
     }
 
@@ -197,6 +209,7 @@ impl LinkNode {
 
     /// Stops accepting and closes the endpoint.
     pub async fn shutdown(self) -> LinkResult<()> {
+        self.broadcast.stop();
         self.router.shutdown().await?;
         Ok(())
     }

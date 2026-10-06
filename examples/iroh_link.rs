@@ -53,6 +53,7 @@ async fn run() -> Result<(), LinkError> {
         identity,
         clients.clone(),
         "0.0.0.0:0".parse().expect("a valid address"),
+        "an example node".to_owned(),
     )
     .await?;
     println!("node public key: {}", node.id());

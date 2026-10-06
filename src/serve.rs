@@ -42,7 +42,10 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         .map_err(io::Error::other)?;
     let clients =
         ClientRecord::open(config.data_dir().join("clients.json")).map_err(io::Error::other)?;
-    let node = LinkNode::serve(identity, clients, listen)
+    // The label travels with the key, so a client that learns one learns what to
+    // call this node as well.
+    let label = config.identity().map_err(io::Error::other)?.label;
+    let node = LinkNode::serve(identity, clients, listen, label)
         .await
         .map_err(io::Error::other)?;
     let ticket = node.ticket().map_err(io::Error::other)?;

@@ -22,6 +22,7 @@
 // reports their dead code honestly and a few accessors carry their own allow.
 // The dial side and the wire contract still have no caller, so nothing inside
 // them can be told apart from speculative API yet.
+mod announce;
 mod identity;
 
 #[allow(dead_code)]
@@ -38,6 +39,7 @@ use std::error::Error;
 // away with the last `allow(dead_code)` above.
 #[allow(unused_imports)]
 pub use {
+    announce::Announcement,
     client::{LinkClient, LinkPath, LinkReply, PathKind},
     clients::ClientRecord,
     identity::NodeIdentity,
