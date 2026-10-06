@@ -25,7 +25,7 @@
 mod identity;
 
 #[allow(dead_code)]
-mod access;
+mod clients;
 #[allow(dead_code)]
 mod client;
 #[allow(dead_code)]
@@ -40,7 +40,7 @@ use std::error::Error;
 // away with the last `allow(dead_code)` above.
 #[allow(unused_imports)]
 pub use {
-    access::NodeAccess,
+    clients::NodeAccess,
     client::{LinkClient, LinkClientError, LinkPath, LinkReply, PathKind},
     identity::NodeIdentity,
     node::LinkNode,

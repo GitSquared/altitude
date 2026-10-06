@@ -14,7 +14,7 @@ use iroh::{
 
 use super::{
     LinkResult,
-    access::{NodeAccess, PairingGate},
+    clients::{NodeAccess, PairingGate},
     identity::NodeIdentity,
     protocol::{
         BlobHash, LINK_ALPN, LinkRequest, LinkResponse, MAX_BLOB_BYTES, NodeTicket, builder,
