@@ -8,7 +8,7 @@ use std::{
 
 use directories::ProjectDirs;
 
-use crate::net::NodeIdentity;
+use crate::net::InstallationKey;
 
 mod serve;
 mod settings;
@@ -23,7 +23,7 @@ pub use settings::{SettingsError, SettingsFile};
 /// comment knows where the work is. The id is what a machine checks, and it is
 /// deliberately not derived: a name anyone can type is not an identity.
 ///
-/// The id is the node's public key, and the keypair that proves it lives beside
+/// The id is the installation's public key, and the keypair that proves it lives beside
 /// the label in the data directory. A name anyone can type is not an identity,
 /// which is why the label is only ever for reading.
 #[derive(Clone, Debug)]
@@ -76,9 +76,9 @@ impl Config {
         &self.data_dir
     }
 
-    /// The same installation's paths, as the node role sees them.
+    /// The same installation's paths, as the serve role sees them.
     ///
-    /// A node is not a client: it keeps its own key, its own record of who has
+    /// The serve role is not a client: it keeps its own key, its own record of who has
     /// connected and its own logs, and it reads its own settings file. One
     /// machine can be both roles without either seeing the other's state.
     pub fn serve(&self) -> Self {
@@ -89,7 +89,7 @@ impl Config {
         }
     }
 
-    /// Where the node role reads its settings.
+    /// Where the serve role reads its settings.
     pub fn serve_settings_path(&self) -> PathBuf {
         self.config_dir.join("serve.toml")
     }
@@ -103,7 +103,7 @@ impl Config {
     /// How this installation names itself.
     ///
     /// One installation is one operator on one machine, and this is what a task
-    /// records as the identity it was delegated under. A node that later runs
+    /// records as the identity it was delegated under. A machine that later runs
     /// work for several operators needs that to tell them apart, and a task
     /// cannot be given an identity retroactively without guessing at its own
     /// history.
@@ -132,9 +132,9 @@ impl Config {
     /// Beside the label rather than inside it, because the two files have
     /// different natures: one is a secret that is never read by a human, the
     /// other is a name that appears in task history.
-    fn key(&self) -> io::Result<NodeIdentity> {
-        let path = self.data_dir.join("node.key");
-        NodeIdentity::load_or_create(&path).map_err(|error| {
+    fn key(&self) -> io::Result<InstallationKey> {
+        let path = self.data_dir.join("identity.key");
+        InstallationKey::load_or_create(&path).map_err(|error| {
             io::Error::other(format!(
                 "this installation's key at {} could not be read: {error}. Restore it from a \
                  backup if you have one. Minting a new key would change which installation \
@@ -147,7 +147,7 @@ impl Config {
     /// Claim a name for the first time, privately.
     ///
     /// Kept outside the database so the name survives a task history reset, and
-    /// written exclusively so two Altitude processes cannot both claim one. The
+    /// written exclusively so two Altitude instances cannot both claim one. The
     /// label is resolved once and kept: a machine that is later renamed, or
     /// reached from a context that cannot resolve a user, keeps the name the
     /// tasks it already delegated were recorded under.
@@ -170,7 +170,7 @@ impl Config {
                     label,
                 })
             }
-            // Another Altitude process named this installation first; keep its name.
+            // Another Altitude instance named this installation first; keep its name.
             Err(error) if error.kind() == ErrorKind::AlreadyExists => self.identity(),
             Err(error) => Err(error),
         }
@@ -230,7 +230,8 @@ impl Config {
 
 /// The name a human reads for this installation: who is at which machine.
 ///
-/// Best effort by design. A node started by a service manager may have no user
+/// Best effort by design. An instance started by a service manager may have no
+/// user
 /// in its environment, and an installation must still be able to name itself.
 fn installation_label() -> String {
     let user = name_or_unknown(whoami::username().unwrap_or_default());

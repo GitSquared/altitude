@@ -5,11 +5,11 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use crate::config::Config;
 
-/// Logging for the node role: to stdout, because a service manager collects it
+/// Logging for the serve role: to stdout, because a service manager collects it
 /// and nobody is watching a terminal.
 ///
 /// A different shape from [`init`] on purpose. There is no file to roll and no
-/// guard to hold, and a node's output belongs wherever the operator's service
+/// guard to hold, and the serve role's output belongs wherever the operator's service
 /// manager put it.
 pub fn init_service() {
     let filter =

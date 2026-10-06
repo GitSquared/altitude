@@ -1,7 +1,7 @@
-//! The node role: serve work to clients, with no terminal.
+//! The serve role: work for clients, with no terminal.
 //!
 //! A different execution mode, not a different configuration of the same one. A
-//! node has nobody at the keyboard, so it never takes the terminal, it logs to
+//! serve role has nobody at the keyboard, so it never takes the terminal, it logs to
 //! stdout for whatever service manager started it, and it reads its own settings
 //! file rather than the client's.
 
@@ -13,10 +13,10 @@ use crate::{
     cli::ServeArgs,
     config::{Config, ServeSettings},
     logging,
-    net::{ClientRecord, LinkNode, NodeIdentity},
+    net::{ClientRecord, InstallationKey, LinkServer},
 };
 
-/// Runs a node until it is asked to stop.
+/// Runs a server until it is asked to stop.
 pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     logging::init_service();
 
@@ -38,19 +38,19 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
             ))
         })?;
 
-    let identity = NodeIdentity::load_or_create(config.data_dir().join("node.key"))
+    let identity = InstallationKey::load_or_create(config.data_dir().join("identity.key"))
         .map_err(io::Error::other)?;
     let clients =
         ClientRecord::open(config.data_dir().join("clients.json")).map_err(io::Error::other)?;
     // The label travels with the key, so a client that learns one learns what to
-    // call this node as well.
+    // call this remote as well.
     let label = config.identity().map_err(io::Error::other)?.label;
-    let node = LinkNode::serve(identity, clients, listen, label)
+    let server = LinkServer::serve(identity, clients, listen, label)
         .await
         .map_err(io::Error::other)?;
-    let ticket = node.ticket().map_err(io::Error::other)?;
+    let ticket = server.ticket().map_err(io::Error::other)?;
 
-    // Everything an operator needs to point a client at this node, said once and
+    // Everything an operator needs to point a client at this remote, said once and
     // said at the place they will be looking.
     tracing::info!(
         listening = %listen,
@@ -61,7 +61,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     println!("listening on {listen} (udp)");
     println!("settings     {}", settings_path.display());
     println!("data         {}", config.data_dir().display());
-    println!("node key     {}", node.id());
+    println!("identity     {}", server.id());
     println!("ticket       {ticket}");
 
     let mut terminate = signal(SignalKind::terminate())?;
@@ -71,6 +71,6 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         _ = interrupt.recv() => tracing::info!("asked to stop"),
     }
 
-    node.shutdown().await.map_err(io::Error::other)?;
+    server.shutdown().await.map_err(io::Error::other)?;
     Ok(())
 }

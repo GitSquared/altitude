@@ -1,10 +1,10 @@
-//! Reaching a node from a client.
+//! Reaching a remote from a client.
 //!
-//! Nodes are dialled by public key. The client↔node path needs no inbound port
+//! Remotes are dialled by public key. The client↔remote path needs no inbound port
 //! and no public URL; tracker ingress is a separate concern. See
 //! `design/decisions.md` (Q8) for the reasoning.
 //!
-//! The serve side is in use: `altitude serve` binds a node, announces it, and
+//! The serve side is in use: `altitude serve` binds a server, announces it, and
 //! records whoever connects. The dial side has no caller yet — nothing in the app
 //! reaches a remote until there is somewhere to configure one — and neither has
 //! moved a capsule, which is what this is ultimately for. Blobs are held in
@@ -22,23 +22,24 @@
 //!
 //! The pieces:
 //!
-//! - [`identity`] — the keypair that names a node, and node-local file plumbing.
+//! - [`identity`] — the keypair that names an installation, and machine-local file
+//!   plumbing.
 //! - [`protocol`] — the wire contract, and how a peer is addressed.
-//! - [`announce`] — how a node says who it is to a client that cannot dial it yet.
-//! - [`clients`] — which clients a node has seen.
+//! - [`announce`] — how a server says who it is to a client that cannot dial it yet.
+//! - [`clients`] — which clients a server has seen.
 //! - [`known`] — comparing a key to the one remembered for an address.
-//! - [`node`] — the serve side.
+//! - [`server`] — the serve side.
 //! - [`client`] — the dial side.
 
-// `identity`, `clients`, `announce` and `node` are wired into the app, so the
+// `identity`, `clients`, `announce` and `server` are wired into the app, so the
 // compiler reports their dead code honestly and a few accessors carry their own
 // allow. What is left is the dialling side: nothing in the app reaches a remote
 // yet, because that arrives with the settings screen. Each module loses its
-// allow as it gains a caller, the same way the node side lost its own.
+// allow as it gains a caller, the same way the server side lost its own.
 mod announce;
 mod clients;
 mod identity;
-mod node;
+mod server;
 
 #[allow(dead_code)]
 mod client;
@@ -59,10 +60,10 @@ pub use {
     announce::Announcement,
     client::{LinkClient, LinkPath, LinkReply, PathKind},
     clients::ClientRecord,
-    identity::NodeIdentity,
-    known::{KnownNode, Sighting, Trust, meet},
-    node::LinkNode,
-    protocol::{BlobHash, LINK_ALPN, LinkRequest, LinkResponse, NodeTicket},
+    identity::InstallationKey,
+    known::{Sighting, Trust, meet},
+    protocol::{BlobHash, LINK_ALPN, LinkRequest, LinkResponse, RemoteTicket},
+    server::LinkServer,
 };
 
 /// Boxed errors: a typed error enum would be speculation until a caller exists.

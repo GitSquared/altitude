@@ -1,4 +1,4 @@
-//! How many tasks a node will run at once.
+//! How many tasks this host will run at once.
 //!
 //! A queue with a visible reason, against a limit computed from the host rather
 //! than configured by hand. See `design/decisions.md` (Q14).
@@ -121,7 +121,7 @@ impl SampleWindow {
     }
 }
 
-/// How many slots a node may start with, before anything has been observed.
+/// How many slots the host may start with, before anything has been observed.
 ///
 /// One task per core. Optimistic on purpose: the caps a capsule is created with
 /// are ceilings rather than reservations, so a core each is a defensible guess to
@@ -130,7 +130,7 @@ pub fn optimistic_start() -> usize {
     thread::available_parallelism().map_or(1, |cores| cores.get())
 }
 
-/// How many slots the node should allow, given the window and the demand.
+/// How many slots the host should allow, given the window and the demand.
 ///
 /// `demand` is the tasks wanting a slot, running or waiting. While the window is
 /// warming up the limit holds: capacity is already at its optimistic start, and
@@ -166,17 +166,17 @@ fn percentile_75(values: impl Iterator<Item = f64>) -> Option<f64> {
     sorted.get(rank.checked_sub(1)?).copied()
 }
 
-/// The node's capacity: what it has observed, and the limit that follows.
+/// The host's capacity: what it has observed, and the limit that follows.
 ///
 /// Carries the limit so a caller does not have to, and nothing else. It is not a
 /// queue and knows nothing about tasks; deciding who runs is the caller's job.
 #[derive(Debug)]
-pub struct NodeCapacity {
+pub struct HostCapacity {
     window: SampleWindow,
     limit: usize,
 }
 
-impl NodeCapacity {
+impl HostCapacity {
     /// Capacity before anything has been observed: see [`optimistic_start`].
     pub fn new() -> Self {
         Self {
@@ -197,7 +197,7 @@ impl NodeCapacity {
     }
 }
 
-impl Default for NodeCapacity {
+impl Default for HostCapacity {
     fn default() -> Self {
         Self::new()
     }

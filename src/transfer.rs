@@ -1,12 +1,12 @@
-//! Moving a task capsule between nodes.
+//! Moving a task capsule between machines.
 //!
-//! A task is owned by exactly one node, and only that node may run it. A
-//! transfer hands ownership to another node. Two rules make that safe:
+//! A task is owned by exactly one machine, and only that machine may run it. A
+//! transfer hands ownership to another machine. Two rules make that safe:
 //!
 //! 1. The source stops running the task before the payload leaves it.
 //! 2. The destination owns the task only once it holds the whole payload.
 //!
-//! Break either rule and two nodes can run the same task. Keep both and the
+//! Break either rule and two machines can run the same task. Keep both and the
 //! worst case is that nobody runs it for a moment, which is self-repairing.
 //!
 //! Pure. No I/O, no database, no network. See `design/decisions.md` (Q12) for why
@@ -16,67 +16,67 @@
 
 use std::{error::Error, fmt};
 
-/// Which node owns a task, and whether a transfer is in flight.
+/// Which machine owns a task, and whether a transfer is in flight.
 ///
-/// The owning node holds the task and may run it. While a transfer is in flight
+/// The owning machine holds the task and may run it. While a transfer is in flight
 /// nobody runs it: the source has given it up and the destination does not own
 /// it yet.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TaskNodeOwnership {
-    owning_node: String,
-    transfer_destination_node: Option<String>,
+pub struct TaskOwnership {
+    owning_machine: String,
+    transfer_destination_machine: Option<String>,
 }
 
-impl TaskNodeOwnership {
-    /// A task held by `owning_node`, going nowhere.
-    pub fn owned_by_node(owning_node: &str) -> Self {
+impl TaskOwnership {
+    /// A task held by `owning_machine`, going nowhere.
+    pub fn owned_by_machine(owning_machine: &str) -> Self {
         Self {
-            owning_node: owning_node.to_owned(),
-            transfer_destination_node: None,
+            owning_machine: owning_machine.to_owned(),
+            transfer_destination_machine: None,
         }
     }
 
-    pub fn owning_node(&self) -> &str {
-        &self.owning_node
+    pub fn owning_machine(&self) -> &str {
+        &self.owning_machine
     }
 
     /// Where the task is being sent, while a transfer is in flight.
-    pub fn transfer_destination_node(&self) -> Option<&str> {
-        self.transfer_destination_node.as_deref()
+    pub fn transfer_destination_machine(&self) -> Option<&str> {
+        self.transfer_destination_machine.as_deref()
     }
 
     pub fn is_transferring(&self) -> bool {
-        self.transfer_destination_node.is_some()
+        self.transfer_destination_machine.is_some()
     }
 
-    pub fn is_owned_by(&self, node: &str) -> bool {
-        self.owning_node == node
+    pub fn is_owned_by(&self, machine: &str) -> bool {
+        self.owning_machine == machine
     }
 
-    /// Whether `node` may run the task right now.
+    /// Whether `machine` may run the task right now.
     ///
     /// This is the question the rest of the system asks. An in-flight transfer
     /// is what stops the source from running the task while the payload travels.
-    pub fn node_may_run_task(&self, node: &str) -> bool {
-        !self.is_transferring() && self.is_owned_by(node)
+    pub fn machine_may_run_task(&self, machine: &str) -> bool {
+        !self.is_transferring() && self.is_owned_by(machine)
     }
 
     /// The source stops running the task and starts sending it to
-    /// `destination_node`.
+    /// `destination_machine`.
     ///
     /// Retrying the send is the caller's business; starting the transfer is done
     /// once, and doing it twice is a mistake worth reporting.
-    pub fn start_transfer_to_node(
+    pub fn start_transfer_to_machine(
         &mut self,
-        destination_node: &str,
+        destination_machine: &str,
     ) -> Result<(), TaskTransferError> {
         if self.is_transferring() {
             return Err(TaskTransferError::TransferAlreadyInFlight);
         }
-        if self.is_owned_by(destination_node) {
+        if self.is_owned_by(destination_machine) {
             return Err(TaskTransferError::DestinationAlreadyOwnsTask);
         }
-        self.transfer_destination_node = Some(destination_node.to_owned());
+        self.transfer_destination_machine = Some(destination_machine.to_owned());
         Ok(())
     }
 
@@ -86,11 +86,11 @@ impl TaskNodeOwnership {
     /// there. That is rule 2: owning the task before holding it would let it run
     /// in two places.
     pub fn destination_took_ownership(&mut self) -> Result<(), TaskTransferError> {
-        let destination_node = self
-            .transfer_destination_node
+        let destination_machine = self
+            .transfer_destination_machine
             .take()
             .ok_or(TaskTransferError::NoTransferInFlight)?;
-        self.owning_node = destination_node;
+        self.owning_machine = destination_machine;
         Ok(())
     }
 
@@ -100,7 +100,7 @@ impl TaskNodeOwnership {
         if !self.is_transferring() {
             return Err(TaskTransferError::NoTransferInFlight);
         }
-        self.transfer_destination_node = None;
+        self.transfer_destination_machine = None;
         Ok(())
     }
 }

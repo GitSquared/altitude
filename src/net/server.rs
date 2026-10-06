@@ -1,4 +1,4 @@
-//! The node side: accept a connection, answer one request, hold the blobs.
+//! The server side: accept a connection, answer one request, hold the blobs.
 
 use std::{
     collections::HashMap,
@@ -17,19 +17,19 @@ use super::{
     LinkResult,
     announce::{Announcement, Broadcast},
     clients::{ClientLog, ClientRecord},
-    identity::NodeIdentity,
+    identity::InstallationKey,
     protocol::{
-        BlobHash, LINK_ALPN, LinkRequest, LinkResponse, MAX_BLOB_BYTES, NodeTicket, builder,
+        BlobHash, LINK_ALPN, LinkRequest, LinkResponse, MAX_BLOB_BYTES, RemoteTicket, builder,
         read_body, read_frame, write_frame,
     },
 };
 
-// --------------------------------------------------------------- the node side
+// ------------------------------------------------------------- the server side
 
 /// Binds the operator's address, and the same port on the other family when they
 /// asked for every interface.
 ///
-/// A node that answered on only one family would be unreachable from a client
+/// A server that answered on only one family would be unreachable from a client
 /// that has only the other, and a client's configured `host:port` names one
 /// port. IPv6 is probed first, because a host without it fails the bind rather
 /// than ignoring it.
@@ -50,7 +50,7 @@ fn ipv6_available() -> bool {
     UdpSocket::bind("[::]:0").is_ok()
 }
 
-/// Blobs a node currently holds, keyed by digest.
+/// Blobs a server currently holds, keyed by digest.
 ///
 /// In memory on purpose: this spike does not touch the capsule store, and a
 /// restart loses them. See `design/decisions.md` (Q4, Q15).
@@ -66,16 +66,14 @@ impl BlobStore {
 
 #[derive(Clone)]
 struct LinkHandler {
-    node: EndpointId,
+    id: EndpointId,
     blobs: Arc<BlobStore>,
 }
 
 impl fmt::Debug for LinkHandler {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Deliberately does not print the blobs: they are payload, not identity.
-        f.debug_struct("LinkHandler")
-            .field("node", &self.node)
-            .finish()
+        f.debug_struct("LinkHandler").field("id", &self.id).finish()
     }
 }
 
@@ -103,7 +101,7 @@ async fn answer(
     match request {
         LinkRequest::Identify => {
             let response = LinkResponse::Identified {
-                node: handler.node.to_string(),
+                remote: handler.id.to_string(),
             };
             write_frame(&mut send, &response).await?;
         }
@@ -125,29 +123,29 @@ async fn answer(
     Ok(())
 }
 
-/// The node side of the link: an endpoint that accepts connections and the
+/// The server side of the link: an endpoint that accepts connections and the
 /// blobs it holds.
-pub struct LinkNode {
+pub struct LinkServer {
     router: Router,
-    identity: NodeIdentity,
+    identity: InstallationKey,
     broadcast: Broadcast,
 }
 
-impl LinkNode {
+impl LinkServer {
     /// Binds an endpoint for `identity` at `listen` and starts accepting link
     /// connections.
     ///
     /// `listen` is the operator's, not the operating system's: a port nobody can
     /// predict is a port nobody can configure a client to reach.
     pub async fn serve(
-        identity: NodeIdentity,
+        identity: InstallationKey,
         clients: ClientRecord,
         listen: SocketAddr,
         label: String,
     ) -> LinkResult<Self> {
         let blobs = Arc::new(BlobStore::default());
         let handler = LinkHandler {
-            node: identity.id(),
+            id: identity.id(),
             blobs: Arc::clone(&blobs),
         };
         let log = ClientLog {
@@ -164,7 +162,7 @@ impl LinkNode {
         .await?;
         let router = Router::builder(endpoint).accept(LINK_ALPN, handler).spawn();
         // Announced on the same address, over TCP, so that a client which has
-        // only been told where this node is can still find out who it is.
+        // only been told where this server is can still find out who it is.
         let broadcast = Broadcast::start(
             &router.endpoint().bound_sockets(),
             Announcement {
@@ -187,12 +185,12 @@ impl LinkNode {
         self.identity.id()
     }
 
-    /// The node's address as a string to hand to a client out of band.
-    pub fn ticket(&self) -> LinkResult<NodeTicket> {
-        NodeTicket::new(self.addr())
+    /// The server's address as a string to hand to a client out of band.
+    pub fn ticket(&self) -> LinkResult<RemoteTicket> {
+        RemoteTicket::new(self.addr())
     }
 
-    /// How to reach the node right now: its key plus whatever addresses are
+    /// How to reach the server right now: its key plus whatever addresses are
     /// currently known. Not public: a caller wants the ticket, which is the
     /// address rendered as something it can carry.
     fn addr(&self) -> EndpointAddr {

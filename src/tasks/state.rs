@@ -175,7 +175,7 @@ pub enum TaskHistoryEvent {
         environment: DevelopmentEnvironment,
         /// The identity this task was delegated under.
         ///
-        /// Recorded with the intent because it cannot be inferred later: a node
+        /// Recorded with the intent because it cannot be inferred later: a machine
         /// that runs work for several operators needs to know whose work this is,
         /// and the answer is only available at the moment of delegation.
         identity_id: String,

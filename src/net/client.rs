@@ -1,4 +1,4 @@
-//! The client side: dial a node by key and run one exchange.
+//! The client side: dial a remote by key and run one exchange.
 
 use std::fmt;
 
@@ -79,13 +79,13 @@ pub struct LinkReply<T> {
     pub path: LinkPath,
 }
 
-/// The client side of the link: an endpoint that dials nodes by public key.
+/// The client side of the link: an endpoint that dials remotes by public key.
 pub struct LinkClient {
     endpoint: Endpoint,
 }
 
 impl LinkClient {
-    /// Binds a client endpoint. Nothing about a node is needed to do this.
+    /// Binds a client endpoint. Nothing about a remote is needed to do this.
     pub async fn bind() -> LinkResult<Self> {
         let endpoint = builder().bind().await?;
         Ok(Self { endpoint })
@@ -102,10 +102,10 @@ impl LinkClient {
         Ok(())
     }
 
-    /// Dials a node and runs one request/response exchange.
+    /// Dials a remote and runs one request/response exchange.
     ///
     /// `peer` may be a bare [`EndpointId`] — no URL, no port — in which case
-    /// the address has to be discoverable — a [`NodeTicket`], or an
+    /// the address has to be discoverable — a [`RemoteTicket`], or an
     /// [`EndpointAddr`].
     pub async fn request(
         &self,
@@ -129,9 +129,9 @@ impl LinkClient {
         result
     }
 
-    /// Sends a blob and returns the digest the node confirmed it received.
+    /// Sends a blob and returns the digest the remote confirmed it received.
     ///
-    /// The client hashes what it sends; the node hashes what it receives and
+    /// The client hashes what it sends; the remote hashes what it receives and
     /// answers with the digest only when the two agree.
     pub async fn put_blob(
         &self,

@@ -1,4 +1,4 @@
-//! Comparing a node's key to the one you remember for its address.
+//! Comparing a remote's key to the one you remember for its address.
 //!
 //! A key learned from an announcement is unauthenticated — that is what makes a
 //! first sighting possible at all — so the protection is not that the first
@@ -7,27 +7,15 @@
 //! the first sighting is the part that cannot be authenticated and so the
 //! operator is the one who decides.
 //!
-//! Nothing here stores anything, which is why a node with no database can use
-//! the link. A client keeps what it remembers in the database, and a node keeps
+//! Nothing here stores anything, which is why a machine with no database can use
+//! the link. A client keeps what it remembers in the database, and a server keeps
 //! its own record of who connected in a file; this module keeps neither.
 
 use iroh::EndpointId;
 
-use super::{LinkResult, announce::Announcement, protocol::NodeTicket};
+use super::{LinkResult, announce::Announcement, protocol::RemoteTicket};
 
-/// What is remembered about a node: the key an address answered with, and how
-/// the node reads to a human.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct KnownNode {
-    /// The address a person typed, which is what it is remembered under.
-    pub address: String,
-    /// The key that address answered with.
-    pub id: String,
-    /// How the node reads to a human, so a list can be read without connecting.
-    pub label: String,
-}
-
-/// How a node's key compares to the one remembered for its address.
+/// How a remote's key compares to the one remembered for its address.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Trust {
     /// This address has not been seen before.
@@ -36,7 +24,7 @@ pub enum Trust {
     Known,
     /// A different key.
     ///
-    /// A node that was replaced and a node that was never the one you thought
+    /// A remote that was replaced and a remote that was never the one you thought
     /// look identical from here, so this is reported and never followed
     /// silently. The operator decides.
     Changed { previous: String },
@@ -55,17 +43,17 @@ impl Trust {
     }
 }
 
-/// A node, as met: what it says about itself, and how it compares to memory.
+/// A remote, as met: what it says about itself, and how it compares to memory.
 pub struct Sighting {
     /// Where to reach it.
-    pub ticket: NodeTicket,
+    pub ticket: RemoteTicket,
     /// What it said.
     pub announcement: Announcement,
     /// How its key compares to the one remembered for this address.
     pub trust: Trust,
 }
 
-/// Meets a node at an address, and says how its key compares to what was
+/// Meets a remote at an address, and says how its key compares to what was
 /// remembered there.
 ///
 /// `remembered` is the key previously seen for this address, which the caller
@@ -77,7 +65,7 @@ pub async fn meet(
     default_port: u16,
     remembered: Option<&str>,
 ) -> LinkResult<Sighting> {
-    let (ticket, announcement) = NodeTicket::from_broadcast(address, default_port).await?;
+    let (ticket, announcement) = RemoteTicket::from_broadcast(address, default_port).await?;
     let id: EndpointId = announcement
         .id
         .parse()

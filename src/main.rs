@@ -22,10 +22,10 @@ mod development;
 mod isolation;
 // The settings screen is the caller for this; until it exists nothing in the app
 // dials a remote, so nothing reads what was remembered.
-#[allow(dead_code)]
-mod known_nodes;
 mod logging;
 mod net;
+#[allow(dead_code)]
+mod remote_keys;
 mod serve;
 mod tasks;
 mod transfer;
@@ -101,7 +101,7 @@ async fn client() -> Result<(), Box<dyn Error>> {
         let task_rows = tasks.list().await.map_err(io::Error::other)?;
         let (event_loop, task_execution_updates) = TaskEventLoop::new(tasks.clone());
         // Recovered tasks are waiting, not running: they are admitted against what
-        // the node can carry, like everything else.
+        // the host can carry, like everything else.
         event_loop.admit();
 
         tui::run(

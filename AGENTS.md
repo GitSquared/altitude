@@ -11,7 +11,7 @@ and implementer of bounded pieces—not an autonomous author of the whole v1.
 
 - Work toward one observable experience per session, small enough to try before
   the session ends. Keep the wider vision in mind: delegation, durable capsules,
-  attention routing, levels of intent, visual review, and optional remote nodes.
+  attention routing, levels of intent, visual review, and optional remotes.
 - Keep changes small enough for Gabriel to comfortably read and understand.
   Surface consequential product, ownership, and lifecycle decisions before they
   become buried in implementation. Do not expand a bounded request into a broad
@@ -72,7 +72,7 @@ and implementer of bounded pieces—not an autonomous author of the whole v1.
   happen, a fallback for a state that need not exist. Each one has to be
   maintained, explained and kept in step. Delete the state, or derive it.
 - Keep the task capsule, not an external tracker, as the source of operational truth.
-- Keep portable task state separate from node-local identities, credentials, caches, and runtimes.
+- Keep portable task state separate from machine-local identities, credentials, caches, and runtimes.
 - Prefer small typed protocols and deterministic state transitions over conversational glue.
 - Treat Trace, Update, Decision, and Review as additive attention semantics.
 - Never merge, deploy, release, or publish on the operator's behalf.

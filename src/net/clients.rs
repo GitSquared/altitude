@@ -1,8 +1,8 @@
-//! Which clients a node has seen.
+//! Which clients a server has seen.
 //!
 //! The transport authenticates *which* key is on the other end. Whether that key
 //! is welcome is a separate question, and the answer today is "yes, and write it
-//! down": a node records the identity of everyone who connects and says so, so
+//! down": a server records the identity of everyone who connects and says so, so
 //! that a new one is visible rather than silent. Refusing is not built, because a
 //! half-answer to "who may connect" is worse than none — the shape of the answer
 //! depends on how identity is delegated, which is not settled.
@@ -26,10 +26,10 @@ use iroh::{
 
 use super::{LinkResult, identity::write_private};
 
-/// The clients a node has seen.
+/// The clients a server has seen.
 ///
 /// The record lives at a path the caller supplies, with no default location, so
-/// where a node writes it stays the caller's decision.
+/// where a server writes it stays the caller's decision.
 #[derive(Clone, Debug)]
 pub struct ClientRecord {
     /// Where the record is kept.
@@ -42,7 +42,7 @@ impl ClientRecord {
     /// A record kept at `path`.
     ///
     /// A missing file means nobody has connected, and nothing is written until
-    /// the first one does — starting a node does not scatter empty files around.
+    /// the first one does — starting a server does not scatter empty files around.
     pub fn open(path: impl Into<PathBuf>) -> LinkResult<Self> {
         let path = path.into();
         let seen = match fs::read_to_string(&path) {
@@ -71,7 +71,7 @@ impl ClientRecord {
 
     /// Every client seen, in a stable order.
     ///
-    /// Nothing reads this back yet. A node records who has been here so that a
+    /// Nothing reads this back yet. A server records who has been here so that a
     /// new key is visible rather than silent, and the log is what an operator
     /// reads today; this is the reader the record was written for.
     #[allow(dead_code)]
@@ -112,7 +112,7 @@ pub(super) struct ClientLog {
 
 impl EndpointHooks for ClientLog {
     async fn after_handshake(&self, connection: &Connection) -> AfterHandshakeOutcome {
-        // Only incoming connections: a node that later dials out is not a client
+        // Only incoming connections: a server that later dials out is not a client
         // of itself.
         if !connection.side().is_server() {
             return AfterHandshakeOutcome::accept();

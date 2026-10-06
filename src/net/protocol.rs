@@ -5,7 +5,7 @@
 //! follow on the same stream.
 //!
 //! This is also where the thing both sides need to agree on lives: how a peer is
-//! addressed ([`NodeTicket`]).
+//! addressed ([`RemoteTicket`]).
 
 use std::{fmt, net::Ipv6Addr, str::FromStr};
 
@@ -30,7 +30,7 @@ pub const LINK_ALPN: &[u8] = b"altitude/link/1";
 /// Upper bound on a framed message. Requests are small; blob bytes travel
 /// outside the frame.
 const MAX_FRAME_BYTES: usize = 64 * 1024;
-/// Upper bound on a single blob, so a peer cannot make the node allocate
+/// Upper bound on a single blob, so a peer cannot make a remote allocate
 /// without limit. The capsule sizes this has to carry are not yet known.
 pub(super) const MAX_BLOB_BYTES: u64 = 64 * 1024 * 1024;
 /// Write granularity for blob bytes.
@@ -40,7 +40,7 @@ pub(super) const CHUNK_BYTES: usize = 64 * 1024;
 ///
 /// No relay, no address lookup: an endpoint reaches exactly the addresses it was
 /// given. That is the point — it keeps a third party out of both the data path
-/// and the addressing path, and it matches how a node is meant to be reached: on
+/// and the addressing path, and it matches how a remote is meant to be reached: on
 /// a network you already share, or at an address the operator supplied.
 ///
 /// What it gives up is hole punching, so two peers that are both behind NAT and
@@ -73,18 +73,18 @@ impl fmt::Display for BlobHash {
 /// One request. A blob's bytes follow the frame on the same stream.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum LinkRequest {
-    /// Ask the node who it is. The answer is authenticated by the handshake,
+    /// Ask the remote who it is. The answer is authenticated by the handshake,
     /// so it is really a check that both sides agree on the key.
     Identify,
     /// Announce an upload: `len` raw bytes follow, whose digest must be `hash`.
     PutBlob { hash: BlobHash, len: u64 },
 }
 
-/// The node's answer to a [`LinkRequest`].
+/// The remote's answer to a [`LinkRequest`].
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum LinkResponse {
-    /// Who the node is.
-    Identified { node: String },
+    /// Who the remote is.
+    Identified { remote: String },
     /// The upload arrived and its digest matched.
     Stored { hash: BlobHash, len: u64 },
     /// The request was understood and refused.
@@ -135,19 +135,19 @@ where
     Ok(bytes)
 }
 
-/// A node's address, as a string to carry out of band.
+/// A remote's address, as a string to carry out of band.
 ///
-/// A ticket is the only way to reach a node: with no relay and no address
+/// A ticket is the only way to reach a remote: with no relay and no address
 /// lookup, a bare public key has nowhere to resolve from. It carries the key and
-/// the addresses the node knows about itself, and it travels between machines in
+/// the addresses a remote knows about itself, and it travels between machines in
 /// the operator's own hands.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NodeTicket {
+pub struct RemoteTicket {
     addr: EndpointAddr,
     text: String,
 }
 
-impl NodeTicket {
+impl RemoteTicket {
     /// Renders an address as a ticket.
     pub fn new(addr: EndpointAddr) -> LinkResult<Self> {
         let text = serde_json::to_string(&addr)?;
@@ -159,15 +159,15 @@ impl NodeTicket {
         self.addr.id
     }
 
-    /// The port the node advertises, if it advertises any address at all.
+    /// The port the remote advertises, if it advertises any address at all.
     pub fn port(&self) -> Option<u16> {
         self.addr.ip_addrs().next().map(|socket| socket.port())
     }
 
-    /// A ticket for a node reached at an address that announces itself.
+    /// A ticket for a remote reached at an address that announces itself.
     ///
-    /// This is the one-thing-to-type path: the operator is told where a node is
-    /// and nothing else. The key comes from the node's own announcement, and a
+    /// This is the one-thing-to-type path: the operator is told where a remote is
+    /// and nothing else. The key comes from the remote's own announcement, and a
     /// caller that cares about drift compares it against what it saw last time.
     pub async fn from_broadcast(
         address: &str,
@@ -191,7 +191,7 @@ impl NodeTicket {
         Ok((ticket, announcement))
     }
 
-    /// A ticket for a node reached at an address an operator typed.
+    /// A ticket for a remote reached at an address an operator typed.
     ///
     /// The address may be a name or an IP, with or without a port:
     /// `host`, `host:7700`, `10.0.0.4`, `[fd00::1]:7700`. A name is resolved by
@@ -249,13 +249,13 @@ fn split_address(address: &str, default_port: u16) -> (String, u16) {
     }
 }
 
-impl fmt::Display for NodeTicket {
+impl fmt::Display for RemoteTicket {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.text)
     }
 }
 
-impl FromStr for NodeTicket {
+impl FromStr for RemoteTicket {
     type Err = LinkError;
 
     fn from_str(text: &str) -> LinkResult<Self> {
@@ -264,8 +264,8 @@ impl FromStr for NodeTicket {
     }
 }
 
-impl From<NodeTicket> for EndpointAddr {
-    fn from(ticket: NodeTicket) -> Self {
+impl From<RemoteTicket> for EndpointAddr {
+    fn from(ticket: RemoteTicket) -> Self {
         ticket.addr
     }
 }

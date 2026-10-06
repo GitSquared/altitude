@@ -7,7 +7,7 @@ use tokio::{sync::mpsc, time};
 
 use crate::{
     agent::TaskReportDecoder,
-    capacity::{HostSampler, NodeCapacity, SAMPLE_INTERVAL},
+    capacity::{HostCapacity, HostSampler, SAMPLE_INTERVAL},
     development::DevelopmentEnvironment,
     isolation::{Command, CommandEvent, CommandSession, IsolationEngine, OutputStream},
     tasks::{
@@ -62,14 +62,14 @@ pub struct TaskEventLoop<E> {
     runs: Arc<Mutex<HashMap<String, ActiveRun>>>,
     control_requests: Arc<Mutex<HashMap<String, RequestedControl>>>,
     terminal_output: Arc<Mutex<HashMap<String, CachedTerminalOutput>>>,
-    /// What the node will run at once, and what it has observed to decide it.
-    capacity: Arc<Mutex<NodeCapacity>>,
+    /// What the host will run at once, and what it has observed to decide it.
+    capacity: Arc<Mutex<HostCapacity>>,
     /// Tasks admitted but not yet running. A task stays `Pending` until its run
     /// reports, so without this it would be admitted again on the next pass.
     starting: Arc<Mutex<HashSet<String>>>,
 }
 
-/// A turn this node is currently driving.
+/// A turn this host is currently driving.
 ///
 /// The command channel, the run it belongs to, and a reason to expect its
 /// ending all share one lifetime. That is what keeps a control request or a
@@ -102,14 +102,14 @@ where
             runs: Arc::new(Mutex::new(HashMap::new())),
             control_requests: Arc::new(Mutex::new(HashMap::new())),
             terminal_output: Arc::new(Mutex::new(HashMap::new())),
-            capacity: Arc::new(Mutex::new(NodeCapacity::new())),
+            capacity: Arc::new(Mutex::new(HostCapacity::new())),
             starting: Arc::new(Mutex::new(HashSet::new())),
         };
         event_loop.watch_host_capacity();
         (event_loop, receiver)
     }
 
-    /// What the node will run at once, for an interface that has to explain a wait.
+    /// What the host will run at once, for an interface that has to explain a wait.
     pub fn capacity_limit(&self) -> usize {
         self.capacity
             .lock()
@@ -150,7 +150,7 @@ where
         });
     }
 
-    /// Start waiting tasks while the node has room for them.
+    /// Start waiting tasks while the host has room for them.
     ///
     /// Cheap to call and safe to call repeatedly: a task already being started is
     /// skipped, so this is idempotent and can be triggered by anything that might
@@ -336,7 +336,7 @@ where
         true
     }
 
-    /// Take the run this node is driving for a task, if it still has one.
+    /// Take the run this host is driving for a task, if it still has one.
     fn take_active_run(&self, task_id: &str) -> Option<ActiveRun> {
         self.runs
             .lock()

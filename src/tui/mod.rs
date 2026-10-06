@@ -62,7 +62,7 @@ pub struct App {
     environment_builds: HashMap<String, EnvironmentProgress>,
     /// Advances the highlight on that waiting text.
     shimmer: usize,
-    /// What the node will run at once, so a wait can say whether there is room.
+    /// What the host will run at once, so a wait can say whether there is room.
     /// Absent until the first refresh, and never stale by more than one interval.
     capacity: Option<usize>,
     notice: Option<String>,

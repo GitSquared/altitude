@@ -1,6 +1,7 @@
-//! What the node role reads.
+//! What the serve role reads.
 //!
-//! Its own file rather than the client's. A node has no default environment and
+//! Its own file rather than the client's. The serve role has no default environment
+//! and
 //! no task prompt; a client has no listening address. Sharing one file would
 //! mean each role carrying fields it cannot interpret.
 
@@ -15,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use super::SettingsError;
 
-/// The address a node listens on when nobody has said otherwise.
+/// The address the serve role listens on when nobody has said otherwise.
 ///
 /// 25848 is unassigned, which is all a port has to be, and it is one number to
 /// remember: on a phone keypad `ALTIT` is 25848. TCP and UDP both use it, so an
@@ -40,7 +41,7 @@ impl Default for ServeSettings {
 impl ServeSettings {
     /// Reads the settings, writing a default file first if there is none.
     ///
-    /// Written rather than assumed so that a fresh node leaves something to edit
+    /// Written rather than assumed so that a fresh serve role leaves something to edit
     /// and something to point at, instead of behaviour that lives only in a
     /// binary's defaults.
     pub fn load_or_create(path: &Path) -> Result<Self, SettingsError> {

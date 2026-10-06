@@ -1,7 +1,7 @@
 //! How the program is invoked.
 //!
 //! Altitude is one binary in two roles, and the role is not a preference: a
-//! client wants a terminal and a person at it, a node wants neither. So the role
+//! client wants a terminal and a person at it, a server wants neither. So the role
 //! is chosen on the command line rather than inferred from a config file that
 //! one role cannot sensibly read anyway.
 
@@ -19,7 +19,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Run as a node: serve work to clients, with no terminal.
+    /// Run as a server: serve work to clients, with no terminal.
     ///
     /// Reads its own settings file, keeps its own identity, and logs to stdout
     /// so a service manager can collect it.
@@ -37,7 +37,7 @@ pub struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
 
-    /// Data directory to use instead of the default, where the node keeps its
+    /// Data directory to use instead of the default, where the serve role keeps its
     /// key and its record of clients.
     #[arg(long, value_name = "PATH")]
     pub data_dir: Option<PathBuf>,

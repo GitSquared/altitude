@@ -24,7 +24,7 @@ Two rules held throughout:
   operator's behalf, it never acts on their behalf where a human judgment is
   implied, and it is unhooked as easily as it is hooked up. The product image is
   a trailer you attach to a car, or a bit you screw into a drill.
-- **Altitude is additive.** Local autopilot → version control → remote node →
+- **Altitude is additive.** Local autopilot → version control → remote →
   task tracker. Each step is optional and each one is useful on its own. Nothing
   later may be required to make something earlier work.
 
@@ -47,7 +47,7 @@ Three bodies of evidence shaped the decisions.
 - `TaskExecutionMode` (autopilot/operator) is already the *driver* axis, durably
   recorded. Nothing records the *hosting* axis.
 - Environments travel as a recipe (`name`, `setup_command`, `harness`) recorded in
-  the task's history; each node materialises its own base snapshot from it.
+  the task's history; each machine materialises its own base snapshot from it.
 
 ### External reality, as of this review
 
@@ -104,30 +104,45 @@ reported to be fragile in practice (agents failing to raise QA correctly).
 
 ---
 
+## The words
+
+Six nouns carry this document, and they are not interchangeable.
+
+- **machine** — any machine running Altitude. Durable state that must outlive a
+  process lives here.
+- **installation** — one Altitude's durable state: a data directory, its settings,
+  and its identity. A machine may hold several (Q9).
+- **instance** — a running Altitude process.
+- **host** — an instance with a terminal and a person at it. The client role.
+- **server** — an instance started as `altitude serve`, with no terminal. The role
+  a host pushes work to.
+- **remote** — a machine you delegate to. A relationship, not a kind of software:
+  the same machine is a remote to someone else's host.
+
 ## The model
 
 1. **Two axes, never fused.** *Driver* (autopilot ⇄ operator) is fluid and cheap.
    *Hosting* (which machine holds the capsule) changes only by an explicit move.
 2. **Control means pull.** There is no remote terminal attach. The two remote
    surfaces are signals and pull/push.
-3. **Ownership follows hosting.** The node is home; you send the task back when
-   you are done.
+3. **Ownership follows hosting.** The machine holding it is home; you send the
+   task back when you are done.
 4. **A move is a move.** The source stops running the task before the payload
    leaves it; the destination owns it only once it holds everything.
-5. **Identity originates on the client** as a keypair; a node holds a delegated
-   replica. One push carries identity, configuration and capabilities.
+5. **Identity originates on the client** as a keypair; a remote holds a
+   delegated replica. One push carries identity, configuration and capabilities.
 6. **Permission is scoping; authority is possession.** Tasks belong to an
-   identity. Authority is which node holds the task, and while a transfer is in
+   identity. Authority is which machine holds the task, and while a transfer is in
    flight it is nobody.
 7. **Isolation is per identity**, in one instance, with per-identity storage roots.
 8. **The tracker is an adapter, not a state store.** Stable external identity is
-   portable with the task; projection state is node-local and rebuildable.
+   portable with the task; projection state is machine-local and rebuildable.
 9. **Altitude owns the signal contract.** Good operator-facing signals are
    defined by Altitude, which coerces the agent into producing them and conveys
    the artifacts in both directions.
 10. **Disposal is a human-confirmed acceptance signal.** Nothing disposes a
     capsule automatically.
-11. **Node and client are one binary in two roles.** Not two products.
+11. **The server and the host are one binary in two roles.** Not two products.
 
 ---
 
@@ -167,10 +182,11 @@ integrity pass, and the window where nothing is running.
 
 ### Q3. After overriding locally, where does the capsule live?
 
-**Options:** it returns to the node; it stays on the desk until pushed; or per
-task.
+**Options:** it returns to the machine it came from; it stays on the desk until
+pushed; or per task.
 
-**Decision:** it returns. Ownership follows hosting, and the node is home.
+**Decision:** it returns. Ownership follows hosting, and the machine holding it is
+home.
 
 **Why:** "you don't keep clutter on your desk". One obvious home per task keeps
 the tracker's view honest. Ownership tracking where the capsule is avoids the
@@ -179,15 +195,15 @@ creates two live owners.
 
 ### Q4. What moves when you pull?
 
-**Options:** the desk becomes a node and takes history, capsule and authority; or
-the desk is only a runtime host while the origin keeps the log.
+**Options:** the desk takes it over, history, capsule and authority included; or
+the desk only runs it while the origin keeps the log.
 
-**Decision:** the desk becomes a node. Full transfer, history included. The
+**Decision:** the desk takes it over. Full transfer, history included. The
 tracker binding follows the capsule: pulling detaches it from tracker sync,
 sending it back reattaches.
 
-**Why:** a runtime-host model stops working the moment the origin node is
-unreachable, which defeats "just like developing locally". Full transfer means
+**Why:** a model where the desk only runs the capsule stops working the moment
+the origin machine is unreachable, which defeats "just like developing locally". Full transfer means
 task history must be portable — the prototype already prototyped this shape as
 portable task state.
 
@@ -195,27 +211,28 @@ Consequence: while a task is on a desk it is detached from the tracker. This mus
 be visible rather than silent — the issue should say the task is pulled and where
 it is.
 
-### Q5. Is harness auth node-level or pushed from the client?
+### Q5. Is harness auth per machine, or pushed from the client?
 
-**Options:** each node logs into each harness itself; or the client pushes a
-scoped capability so a node can run work it was never logged into.
+**Options:** each machine logs into each harness itself; or the client pushes a
+scoped capability so a machine can run work it was never logged into.
 
-**Decision:** pushed capabilities. A node is a blind runner that accepts work on
-behalf of clients, and a shared node is multi-principal.
+**Decision:** pushed capabilities. A server is a blind runner that accepts work
+on behalf of clients, and a shared server is multi-principal.
 
-**Why:** the target is a node that can be deployed for a team and bound to a
+**Why:** the target is a server that can be deployed for a team and bound to a
 shared tracker, where several engineers push their own tasks and keep clean
 isolation between their tasks and harness identities. Per-principal pushed
-credentials are what make that possible without turning the node into a shared
+credentials are what make that possible without turning the server into a shared
 login.
 
 ### Q6. Where does a principal come from?
 
-**Options:** node-local identities mapped from tracker users; tracker users as the
+**Options:** machine-local identities mapped from tracker users; tracker users as
+the
 principal; client credentials as the principal.
 
 **Decision:** identity originates on the client, as a keypair born in the
-operator's own install. Pushing to a node ships a delegated replica of who you
+operator's own install. Pushing to a remote ships a delegated replica of who you
 are, how to run your agents, and the capabilities to do it. A tracker user or a
 paired machine is a *credential for* a principal, never the principal itself.
 
@@ -225,7 +242,7 @@ owner. It also keeps the "tracker is an adapter" rule intact — an external sys
 may point at a principal, never be one. Pushing identity, configuration and auth
 is one mechanism, not three.
 
-### Q7. How long does a delegated identity stay valid on a node?
+### Q7. How long does a delegated identity stay valid on a remote?
 
 **Options:** until revoked; a mandate window; a short lease refreshed by the
 client.
@@ -233,7 +250,7 @@ client.
 **Decision:** until revoked. No mandate clock. Revocation stops new turns
 immediately and lets an in-flight turn finish.
 
-**Why:** a lease contradicts the point — a node you cannot reach would stop
+**Why:** a lease contradicts the point — a remote you cannot reach would stop
 driving your tasks. A mandate window adds a renewal chore and a silent-stop
 failure mode, and silently halting work is worse than a key that lives slightly
 too long. In practice the harness credential has its own expiry, and the repair
@@ -243,28 +260,31 @@ lifetime; it inherits it.
 Consequence: an expired upstream credential must surface as a specific, repairable
 state pointing at that loop, not as a generic failure.
 
-### Q8. How does a client reach its node?
+### Q8. How does a client reach its remote?
 
 **Options:** direct HTTPS for everything; split paths where signals ride the
 tracker; or Iroh for everything.
 
-**Decision:** Iroh. Node identity is its keypair; the client↔node path needs no
-inbound port and no public URL. Tracker ingress is a separate, later hook.
+**Decision:** Iroh. A remote's identity is its keypair; the client↔remote path
+needs no inbound port and no public URL. Tracker ingress is a separate, later hook.
 
 **Why:** it keeps "delegate to a remote" independent of "be publicly reachable
 from the internet for a tracker". Making step two of the journey depend on step
 three is friction too early. Iroh is already a named building block in
 `AGENTS.md`, gives dial-by-public-key, hole punching with relay fallback, and
-verified blob transfer — which is exactly the shape a capsule move needs. A node
-can therefore be deployed with no ingress at all until a tracker is hooked up.
+verified blob transfer — which is exactly the shape a capsule move needs. A
+remote can therefore be deployed with no ingress at all until a tracker is hooked
+up.
 
 **Built 2026-10-06, as far as the serve side.** `iroh` with `presets::Minimal`: no
-relay and no address lookup, so a node is reachable on a network you already share
+relay and no address lookup, so a remote is reachable on a network you already
+share
 (a LAN, a VPN such as Tailscale, or public IPv6) or at an address an operator
 supplies. Hole punching is given up along with the relay; a relay would return as
 an explicitly configured, self-hosted server rather than an inherited default.
 
-That qualifies the second sentence above. A node still needs no public URL, no TLS
+That qualifies the second sentence above. A remote still needs no public URL, no
+TLS
 and no ingress, but it does bind an inbound port: `0.0.0.0:25848` by default, UDP
 for the link and TCP for one announcement endpoint that speaks HTTP, so a client
 told only an address can learn the key at it. `curl` works against it, and a
@@ -272,17 +292,17 @@ reverse proxy can put TLS in front. One port serves both because TCP and UDP do
 not collide. The announcement is on by default and not configurable, which is what
 makes "configure a remote" one field instead of two.
 
-Two more things settled here. Clients are **recorded, not refused**: a node writes
-down every key that connects and says so, because whether a key is welcome depends
+Two more things settled here. Clients are **recorded, not refused**: a server
+writes down every key that connects and says so, because whether a key is welcome depends
 on how identity is delegated, which is not settled, and a half-answer was judged
 worse than none. And the serve role is a different execution mode rather than a
 different configuration of the same one: its own settings file (`serve.toml`), its
 own data directory (`<data_dir>/serve`), its own logs, and no terminal.
 
-### Q9. How isolated are two operators on one shared node?
+### Q9. How isolated are two operators on one shared machine?
 
 **Options:** one instance with principal-tagged rows; one instance with identity
-as a first-class dimension; or a host of independent instances.
+as a first-class dimension; or several independent instances.
 
 **Decision:** (b) — one instance, identity as a first-class dimension: N
 long-lived identity objects, each with its own profiles, snapshot store and
@@ -296,9 +316,9 @@ thing with N of them.
 Noted for later: (c) may turn out to be both stronger and *simpler*, because it
 does not alter the base tool at all — an altitude instance is fully described by
 three directories, and `Config` already accepts `ALTITUDE_DATA_DIR`,
-`ALTITUDE_CONFIG_DIR` and `ALTITUDE_CACHE_DIR` overrides. A host of instances is
-therefore N service/event-loop triples over N roots plus a front door, with no
-schema change. The cheap hedge is to keep per-identity storage roots from day one.
+`ALTITUDE_CONFIG_DIR` and `ALTITUDE_CACHE_DIR` overrides. A machine running several
+instances is therefore N service/event-loop triples over N roots plus a front
+door, with no schema change. The cheap hedge is to keep per-identity storage roots from day one.
 
 ### Q10. Is approval in the tracker Altitude's acceptance?
 
@@ -318,7 +338,7 @@ two filters, both failing closed.
 ### Q11. What counts as review evidence?
 
 **Options:** whatever the agent reports; artifacts the agent is prompted to
-produce; or evidence the node captures independently.
+produce; or evidence the host captures independently.
 
 **Decision:** Altitude owns the signal contract. It defines what a good
 operator-facing signal looks like, which coerces the agent into producing the
@@ -326,9 +346,9 @@ right artifacts; Altitude's job is then to convey them to the operator and back.
 
 **Why:** the contract is the mechanism, not a separate evidence pipeline. The
 prototype encoded this well: QA cannot be raised with an empty evidence list, and
-QA has fixed options. Node-side capture is not needed to make the contract real,
-though a terminal recording is nearly free because the node already sees every
-byte and currently discards it.
+QA has fixed options. Host-side capture is not needed to make the contract real, though a terminal
+recording is nearly free because the host already sees every byte and currently
+discards it.
 
 ### Q12. Is authority event-sourced or a table?
 
@@ -336,7 +356,7 @@ byte and currently discards it.
 authority record at all, with possession as the authority.
 
 **Decision:** history events, and a concept much smaller than first proposed: the
-node that owns the task, plus the destination while a transfer is in flight.
+machine that owns the task, plus the destination while a transfer is in flight.
 
 **Why:** every write already runs inside `BEGIN IMMEDIATE`, which holds SQLite's
 write lock, so reading the current owner inside the transaction and rejecting a
@@ -356,13 +376,13 @@ destination owns the task only once it holds it; a delayed or duplicated command
 is caught by the transfer being in flight, and a replayed one by the store's
 dedupe key (Q13). A monotonic counter needs a second party to be monotonic
 *relative to*, and once authority is possession there is no shared record left to
-version. What replaced it is two fields — the owning node, and the destination
-while a transfer is in flight — with one question asked of them: may this node run
-this task right now?
+version. What replaced it is two fields — the owning machine, and the destination while a
+transfer is in flight — with one question asked of them: may this machine run this
+task right now?
 
 **Move ordering rule:** the source stops running the task before the payload
 leaves, and the destination owns it only once it holds everything. Break either
-rule and two nodes can run the same task; keep both and the worst case is that
+rule and two machines can run the same task; keep both and the worst case is that
 nobody runs it for a moment, which is self-repairing.
 
 **A lost confirmation is not a state.** The original answer made the final
@@ -394,7 +414,7 @@ signal becomes new context rather than an error. Our own records never accumulat
 duplicate entries; unreliable information from external systems is absorbed at
 the boundary and converted into clean internal records.
 
-### Q14. What happens when a node is at capacity?
+### Q14. What happens when a host is at capacity?
 
 **Options:** queue with a visible reason; oversubscribe; or reject with a signal.
 
@@ -410,7 +430,7 @@ reservation ceiling on top: because capsules are fixed-size VMs, compute how man
 fit if every task used its whole cap, and take the minimum of that and the
 observed limit. That is dropped, and the reason is worth keeping. Taking the
 minimum means the ceiling always wins — on a ten-core host with four-core
-capsules it pins the node at two tasks — so the observed half could only ever
+capsules it pins the host at two tasks — so the observed half could only ever
 shrink below it and never pack, which is the opposite of what this decision is
 for. It also derived from per-task values that were chosen arbitrarily.
 
@@ -486,7 +506,7 @@ anyone can type is not an identity, and a key is.
 **Why:** "hostname and username describe identity well" is right about legibility
 and wrong about trust on its own, hence the pair. The label is resolved once at
 first run and kept, so a renamed machine, or a context that cannot resolve a user
-(a node started by a service manager), does not silently re-identify itself and
+(an instance started by a service manager), does not silently re-identify itself and
 re-label history.
 
 **One subtlety to keep in view:** a person with two machines has two installation
@@ -496,8 +516,8 @@ on the keypair rather than on the label.
 
 **Settled 2026-10-06, when the transport arrived.** The id was first a recorded
 UUID, noted here as a placeholder until the transport supplied a keypair. It does
-now, so the placeholder is gone: the id is the public key of `NodeIdentity`, whose
-secret lives at `<data_dir>/node.key` (0600), and only the label is written down.
+now, so the placeholder is gone: the id is the public key of `InstallationKey`, whose secret lives at
+`<data_dir>/identity.key` (0600), and only the label is written down.
 Deriving it removes a failure mode rather than defending one — a key recorded
 beside a name is a second copy that can fall out of agreement with the first, and
 the disagreement then needs a check, an error and an operator to resolve it. What
@@ -507,8 +527,8 @@ identity.
 **Confirmed, from using it:** shutting the laptop down, SIGTERM, or quitting
 Altitude is "dropping a task off your desk". Tasks resuming as autopilot after a
 restart is therefore correct, not a bug. The remote counterpart follows: a client
-that reboots should hand its pulled tasks back to the node when it can, and say so
-when it cannot.
+that reboots should hand its pulled tasks back to the remote it pulled them from
+when it can, and say so when it cannot.
 
 ### Q17. How much tracker state does Altitude write?
 
@@ -525,7 +545,7 @@ prototype had already been bitten by. But minimal does not mean austere: comment
 threads per steering signal, the ability to discuss in a thread before validating,
 document artifacts, and the full session stream with model and logs are all part
 of the product. The requirement to hold onto is: **the operator should never need
-to reach a shell on the node to find out what is happening.**
+to reach a shell on the remote to find out what is happening.**
 
 ---
 
@@ -543,8 +563,9 @@ recording run endings. Observable in today's TUI, no networking.
 
 Implemented with one substitution. Driver authority is realised as the agent run
 id rather than an epoch: that is the same "which copy is live" question asked at
-the driver level, and it is the whole of the answer while one node holds the
-capsule. The hosting level answers it the same way: the node that holds the task
+the driver level, and it is the whole of the answer while one machine holds the
+capsule. The hosting level answers it the same way: the machine that holds the
+task
 is the authority, and while a transfer is in flight it is nobody (Q12). Nothing
 reads the identity back yet; its consumers are the ones that need to tell several
 operators' work apart.
@@ -553,31 +574,30 @@ operators' work apart.
 required; confirmation disposes. Observable in today's TUI.
 
 **A queue with a visible reason.** *Done.* Concurrency is observed from the host
-rather than configured, and a task waits in `Pending` until the node has room for
+rather than configured, and a task waits in `Pending` until the host has room for
 it (Q14).
 
-**The link, and a node role.** *Done, serve side.* Iroh with no relay, one
-announcement endpoint over TCP, remembered nodes in the database, and `altitude
+**The link, and the serve role.** *Done, serve side.* Iroh with no relay, one
+announcement endpoint over TCP, remembered keys in the database, and `altitude
 serve` as a role with its own settings and no terminal (Q8). The dial side is
 written but nothing in the app reaches a remote yet — the settings screen is its
 caller — and no capsule has moved.
 
-**The move record.** *Done, not wired.* Which node owns a task, and that nobody
+**The move record.** *Done, not wired.* Which machine owns a task, and that nobody
 owns it while a transfer is in flight (Q12). The durable half, the compare-and-set
 that reads the owner inside `BEGIN IMMEDIATE`, is still to come.
 
-**Headless node and push.** Push identity and configuration; delegate tasks that
-keep running with the laptop closed. Capacity and the node role are in place; the
+**A headless server, and push.** Push identity and configuration; delegate tasks that
+keep running with the laptop closed. Capacity and the serve role are in place; the
 push path is not.
 
 **Linear.** Intake, the signal contract on Linear's surfaces, acceptance, and the
 "no shell needed" projection. Prerequisite: a small public ingress shim, because
 Linear requires a public HTTPS webhook URL.
 
-**Pull and push over Iroh.** A full move, one live owner, working with the origin
-node unreachable.
+**Pull and push over Iroh.** A full move, one live owner, working with the origin machine unreachable.
 
-**Team.** N identities on one node, actor→principal mapping.
+**Team.** N identities in one instance, actor→principal mapping.
 
 The original thoughtpiece put Linear before transfer. This order puts transfer
 later: the risk of Linear amplifying authority bugs is handled by proving
@@ -603,7 +623,7 @@ rare operation.
 - **`Task` may outlive an issue, a conversation, a capsule instance or a server** →
   still true, but the task's own record is now explicitly narrower: decisions and
   signals persist, capsules and transcripts do not, per Q15.
-- **Discovery layers, mDNS, node pools** → deferred; explicit pairing over Iroh is
+- **Discovery layers, mDNS, remote pools** → deferred; explicit pairing over Iroh is
   the whole story for now.
 - **No mention of** identity/principal, authority, move ordering, capacity,
   acceptance-as-signal, or Iroh. Those are new here.
@@ -615,15 +635,16 @@ rare operation.
 - Capacity tunables: the window, the targets, the warm-up, and the starting
   limit. The per-capsule CPU and memory values are no longer capacity inputs at
   all — they only size the sandbox — and they remain arbitrary placeholders.
-- **Answering an operator signal bypasses admission**, so it can take the node one
+- **Answering an operator signal bypasses admission**, so it can take the host one
   over its limit. The turn carries a directive prompt built from the answer, which
   admission cannot reconstruct: `latest_operator_answer` is the most recent answer
   ever, not an unprocessed one. Fixing it means recording why a task is waiting on
   its queue entry.
-- Whether the node becomes a host of instances (Q9's option c) once a real team
+- Whether a machine becomes a home for several instances (Q9's option c) once a
+  real team
   needs a harder boundary.
 - Tracker ingress: operator-provided URL and reverse proxy versus something else.
-- Whether node-side terminal recording is worth persisting, given the bytes are
+- Whether host-side terminal recording is worth persisting, given the bytes are
   already in hand.
 - Whether the "no tests yet" rule should bend for the durable side of ownership.
   The move record is now small enough to review by reading, but the
@@ -632,11 +653,11 @@ rare operation.
 - Reading the identity back, and its consumers: identity-scoped task lists, the
   tracker projection's actor map, and per-identity storage roots.
 - **Handing pulled tasks back on reboot.** Confirmed as intended behaviour in Q16:
-  a client that reboots should return its pulled tasks to the node when it can,
-  and say so when it cannot. Not built yet, and it needs the transfer path.
+  a client that reboots should return its pulled tasks to the remote it pulled them
+  from when it can, and say so when it cannot. Not built yet, and it needs the transfer path.
 - **A transfer in flight cannot be restored.** The ownership record has one
-  constructor, for a task a node holds, so a process that died mid-transfer cannot
-  rebuild what it was doing. The store will need the other one, and it is the first
+  constructor, for a task a machine holds, so an instance that died mid-transfer
+  cannot rebuild what it was doing. The store will need the other one, and it is the first
   thing the bullet above wants.
 - Deleting a task while its run is still alive races the run's own ending, which
   is recorded against a row being deleted. Pre-existing, and unexercised.
@@ -646,7 +667,7 @@ rare operation.
 - Whether a task that was under operator control when the machine went down should
   simply resume as autopilot. Q16 says restarting is dropping a task off your desk,
   which makes autopilot the right answer; it becomes a real question only for a
-  node that keeps running while its operator's client disappears.
+  server that keeps running while its operator's client disappears.
 
 ## Evidence and its limits
 
@@ -655,7 +676,7 @@ their current documentation, the Microsandbox 0.7.3 crate source, and the Iroh
 release material. The Straylight statements come from reading that branch. The
 implementation statements come from reading this repository.
 
-The node side has been run: `altitude serve` binds the port, announces itself over
+The serve side has been run: `altitude serve` binds the port, announces itself over
 TCP, and answers with the same key it printed; a client boots, migrates and mints
 its own key. Both were two endpoints on one machine, never across a network.
 Nothing here has been established by running a transfer or a tracker integration,

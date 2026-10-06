@@ -129,7 +129,7 @@ fn draw_tasks(frame: &mut Frame, area: Rect, app: &mut super::App) {
             .then(|| environment_builds.get(&task.id))
             .flatten();
         let text_width = usize::from(area.width.saturating_sub(4));
-        // Pending without a build to show means the node has not admitted it yet.
+        // Pending without a build to show means the host has not admitted it yet.
         let at_capacity = capacity.is_some_and(|limit| occupied >= limit);
         let mut status = if let Some(progress) = building {
             Line::from_iter(shimmer(&build_label(progress, text_width), tick + index))
@@ -137,7 +137,7 @@ fn draw_tasks(frame: &mut Frame, area: Rect, app: &mut super::App) {
             match &task.facts.execution_status {
                 TaskExecutionStatus::Pending => {
                     // Both are recorded as `Pending`; the only difference is
-                    // whether the node has room yet, and neither lasts long
+                    // whether the host has room yet, and neither lasts long
                     // enough to be worth distinguishing further.
                     let label = if at_capacity {
                         "waiting for capacity..."

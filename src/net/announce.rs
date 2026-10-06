@@ -1,13 +1,13 @@
-//! Saying who a node is, to a client that cannot dial it yet.
+//! Saying who a server is, to a client that cannot dial it yet.
 //!
 //! The link dials by public key, so a client needs the key before it can
 //! connect. That is the one thing an operator cannot reasonably be asked to type
-//! and the one thing that cannot come from the link itself, so the node says it
+//! and the one thing that cannot come from the link itself, so the server says it
 //! over TCP on the same port number as its UDP. One address to remember, one
 //! thing to be told.
 //!
 //! It speaks HTTP rather than a protocol of its own. `curl` then works, which
-//! matters when a node is not answering and someone has to find out why, and a
+//! matters when a server is not answering and someone has to find out why, and a
 //! reverse proxy can put TLS in front of it, which authenticates the first
 //! sighting instead of trusting it.
 
@@ -29,18 +29,18 @@ const EXCHANGE_LIMIT: Duration = Duration::from_secs(5);
 /// is nothing to ask for.
 const MAX_REQUEST_BYTES: usize = 8 * 1024;
 
-/// What a node says about itself.
+/// What a server says about itself.
 ///
 /// Nothing here is a secret: the key is public by definition, and everything else
 /// is what a person would read off the machine's own console.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Announcement {
-    /// The protocol a client must speak to this node, so a client can tell it is
+    /// The protocol a client must speak to this server, so a client can tell it is
     /// talking to the right thing rather than to whatever else is on the port.
     pub protocol: String,
     /// The public key, which is the thing a client cannot otherwise obtain.
     pub id: String,
-    /// How the node reads to a human, e.g. the machine it is on.
+    /// How the server reads to a human, e.g. the machine it is on.
     pub label: String,
     /// Which build is answering.
     pub version: String,
@@ -73,7 +73,7 @@ impl Broadcast {
         Ok(Self { tasks })
     }
 
-    /// Stops answering. Dropping a node should not leave a port open.
+    /// Stops answering. Dropping a server should not leave a port open.
     pub(super) fn stop(self) {
         for task in self.tasks {
             task.abort();
@@ -94,7 +94,7 @@ async fn answer_everyone(listener: TcpListener, announcement: Announcement) {
             }
             Err(error) => {
                 // A listener that dies because one accept failed would leave the
-                // node silently unreachable, so it waits rather than stopping.
+                // server silently unreachable, so it waits rather than stopping.
                 tracing::warn!(%error, "could not accept an announcement request");
                 sleep(Duration::from_millis(100)).await;
             }
@@ -138,7 +138,7 @@ async fn read_head(stream: &mut TcpStream, request: &mut Vec<u8>) -> LinkResult<
     }
 }
 
-/// Asks a node who it is.
+/// Asks a server who it is.
 ///
 /// The answer is not authenticated by anything, which is the point: this is the
 /// first sighting, and the client pins what it learns here. Everything after it
@@ -156,14 +156,14 @@ fn parse(response: &[u8]) -> LinkResult<Announcement> {
     let split = response
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
-        .ok_or("the node's answer had no body")?;
+        .ok_or("the server's answer had no body")?;
     let status = String::from_utf8_lossy(&response[..split])
         .lines()
         .next()
         .unwrap_or_default()
         .to_owned();
     if !status.contains(" 200 ") {
-        return Err(format!("the node answered {status}").into());
+        return Err(format!("the server answered {status}").into());
     }
     Ok(serde_json::from_slice(&response[split + 4..])?)
 }

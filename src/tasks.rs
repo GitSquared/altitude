@@ -27,7 +27,7 @@ pub struct TaskService<E> {
     isolation: E,
     snapshots_dir: PathBuf,
     agents: AgentEngines,
-    /// The identity this node delegates under, recorded on every task it founds.
+    /// The identity this installation delegates under, recorded on every task it founds.
     ///
     /// Nothing reads it back yet: the task's history is where it belongs, and its
     /// consumers are the ones that will need to tell several operators' work
@@ -57,7 +57,7 @@ where
         }
     }
 
-    // The identity every task this node founds is recorded under.
+    // The identity every task this installation founds is recorded under.
 
     /// What each task's environment build is doing, for an interface to show.
     ///
@@ -661,7 +661,7 @@ where
     /// Bring back what was running, and return the tasks that want a slot.
     ///
     /// Recovery is not starting. This puts a task's work back on disk and leaves
-    /// it waiting, so the caller decides what the node can carry; starting here
+    /// it waiting, so the caller decides what the host can carry; starting here
     /// would run everything at once on the way up.
     pub async fn recover_all(&self) -> Vec<Result<Task, TaskServiceError>> {
         let tasks = match self.list().await {
@@ -932,7 +932,7 @@ impl Error for TaskServiceError {}
 ///
 /// A paused task holds nothing: pausing suspends the capsule to a snapshot, so
 /// its resources are already back. What it wants is to be admitted again, which
-/// is a separate question from how much the node will carry.
+/// is a separate question from how much the host will carry.
 pub(crate) fn wants_a_slot(task: &Task) -> bool {
     matches!(
         task.facts.execution_status,

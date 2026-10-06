@@ -1,7 +1,8 @@
-//! The keypair that names a node, and the file plumbing for node-local state.
+//! The keypair that names an installation, and the file plumbing for machine-local
+//! state.
 //!
 //! The path is always the caller's: nothing here picks a default location or
-//! keeps global state, so the client and the node role can each hold their own
+//! keeps global state, so the client and the serve role can each hold their own
 //! identity.
 
 use std::{
@@ -17,15 +18,15 @@ use super::LinkResult;
 
 // ------------------------------------------------------------------ identity
 
-/// A node's transport identity: an Ed25519 keypair on disk.
+/// An installation's transport identity: an Ed25519 keypair on disk.
 ///
 /// The caller supplies the path. There is no default location and no global
-/// state, so the client and the node role can each hold their own.
-pub struct NodeIdentity {
+/// state, so the client and the serve role can each hold their own.
+pub struct InstallationKey {
     secret_key: SecretKey,
 }
 
-impl NodeIdentity {
+impl InstallationKey {
     /// Loads the keypair at `path`, generating and writing one if absent.
     ///
     /// The file holds the 32 secret bytes, base64, on one line. On unix it is
