@@ -3,18 +3,19 @@
 use std::{
     collections::HashMap,
     fmt,
+    net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket},
     sync::{Arc, Mutex},
 };
 
 use iroh::{
     EndpointAddr, EndpointId,
-    endpoint::{Connection, RecvStream, SendStream},
+    endpoint::{Builder, Connection, RecvStream, SendStream},
     protocol::{AcceptError, ProtocolHandler, Router},
 };
 
 use super::{
     LinkResult,
-    clients::{NodeAccess, PairingGate},
+    clients::{ClientLog, ClientRecord},
     identity::NodeIdentity,
     protocol::{
         BlobHash, LINK_ALPN, LinkRequest, LinkResponse, MAX_BLOB_BYTES, NodeTicket, builder,
@@ -23,6 +24,26 @@ use super::{
 };
 
 // --------------------------------------------------------------- the node side
+
+/// Binds the operator's address, and the same port on the other family when they
+/// asked for every interface.
+///
+/// A node that answered on only one family would be unreachable from a client
+/// that has only the other, and a client's configured `host:port` names one
+/// port. IPv6 is probed first, because a host without it fails the bind rather
+/// than ignoring it.
+fn bind(builder: Builder, listen: SocketAddr) -> LinkResult<Builder> {
+    let builder = builder.bind_addr(listen)?;
+    if listen.ip().is_unspecified() && listen.is_ipv4() && ipv6_available() {
+        let anywhere = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), listen.port());
+        return Ok(builder.bind_addr(anywhere)?);
+    }
+    Ok(builder)
+}
+
+fn ipv6_available() -> bool {
+    UdpSocket::bind("[::]:0").is_ok()
+}
 
 /// Blobs a node currently holds, keyed by digest.
 ///
@@ -109,33 +130,44 @@ async fn answer(
 pub struct LinkNode {
     router: Router,
     identity: NodeIdentity,
-    access: NodeAccess,
+    /// Held only so a caller can ask how much the node is carrying. The handler
+    /// has its own handle, so the node does not need this to work.
+    #[allow(dead_code)]
     blobs: Arc<BlobStore>,
 }
 
 impl LinkNode {
-    /// Binds an endpoint for `identity`, pairs it with exactly the keys in
-    /// `access`, and starts accepting link connections.
-    pub async fn serve(identity: NodeIdentity, access: NodeAccess) -> LinkResult<Self> {
+    /// Binds an endpoint for `identity` at `listen` and starts accepting link
+    /// connections.
+    ///
+    /// `listen` is the operator's, not the operating system's: a port nobody can
+    /// predict is a port nobody can configure a client to reach.
+    pub async fn serve(
+        identity: NodeIdentity,
+        clients: ClientRecord,
+        listen: SocketAddr,
+    ) -> LinkResult<Self> {
         let blobs = Arc::new(BlobStore::default());
         let handler = LinkHandler {
             node: identity.id(),
             blobs: Arc::clone(&blobs),
         };
-        let gate = PairingGate {
-            access: access.clone(),
+        let log = ClientLog {
+            record: clients.clone(),
         };
-        let endpoint = builder()
-            .secret_key(identity.secret_key().clone())
-            .alpns(vec![LINK_ALPN.to_vec()])
-            .hooks(gate)
-            .bind()
-            .await?;
+        let endpoint = bind(
+            builder()
+                .secret_key(identity.secret_key().clone())
+                .alpns(vec![LINK_ALPN.to_vec()])
+                .hooks(log),
+            listen,
+        )?
+        .bind()
+        .await?;
         let router = Router::builder(endpoint).accept(LINK_ALPN, handler).spawn();
         Ok(Self {
             router,
             identity,
-            access,
             blobs,
         })
     }
@@ -143,12 +175,6 @@ impl LinkNode {
     /// The public key a client dials.
     pub fn id(&self) -> EndpointId {
         self.identity.id()
-    }
-
-    /// Who this node will talk to. Pairing and unpairing while running take
-    /// effect on the next connection.
-    pub fn access(&self) -> &NodeAccess {
-        &self.access
     }
 
     /// The node's address as a string to hand to a client out of band.
@@ -164,6 +190,7 @@ impl LinkNode {
     }
 
     /// How many blobs the node is holding.
+    #[allow(dead_code)]
     pub fn blob_count(&self) -> usize {
         self.blobs.count()
     }

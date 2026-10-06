@@ -1,7 +1,14 @@
-//! Who a node will talk to.
+//! Which clients a node has seen.
 //!
-//! The transport authenticates *which* key is on the other end; it has no
-//! opinion on whether that key is welcome. That is this.
+//! The transport authenticates *which* key is on the other end. Whether that key
+//! is welcome is a separate question, and the answer today is "yes, and write it
+//! down": a node records the identity of everyone who connects and says so, so
+//! that a new one is visible rather than silent. Refusing is not built, because a
+//! half-answer to "who may connect" is worse than none — the shape of the answer
+//! depends on how identity is delegated, which is not settled.
+//!
+//! The record is a list of public keys, never a secret, so the file says who has
+//! been here rather than granting anything.
 
 use std::{
     collections::BTreeSet,
@@ -17,139 +24,121 @@ use iroh::{
     endpoint::{AfterHandshakeOutcome, Connection, EndpointHooks},
 };
 
-use super::{LinkResult, identity::write_private, protocol::REFUSED};
+use super::{LinkResult, identity::write_private};
 
-/// Who a node will talk to.
+/// The clients a node has seen.
 ///
-/// The transport authenticates *which* key is on the other end; it has no
-/// opinion on whether that key is welcome. That is this, and it belongs to the
-/// caller: a node starts paired with exactly the keys it was given and nobody
-/// else. There is no "open" mode, because a shared node that accepts anyone is
-/// not a mode worth having one line of code for.
-///
-/// Two constructors, because both are real. [`NodeAccess::in_memory`] forgets on
-/// restart and is what a test or an example wants;
-/// [`NodeAccess::open`] persists to a path the caller supplies, with no default
-/// location, so where a node keeps its grants is the caller's decision and not
-/// this module's.
+/// Two constructors, because both are real. [`ClientRecord::in_memory`] forgets
+/// on restart and is what a test or an example wants; [`ClientRecord::open`]
+/// keeps the record at a path the caller supplies, with no default location, so
+/// where a node writes it stays the caller's decision.
 #[derive(Clone, Debug, Default)]
-pub struct NodeAccess {
-    /// Where the grants are kept, if anywhere. `None` means in memory only.
+pub struct ClientRecord {
+    /// Where the record is kept, if anywhere. `None` means in memory only.
     path: Option<PathBuf>,
     /// Kept sorted so the file has a stable order and diffs stay readable.
-    paired: Arc<RwLock<BTreeSet<EndpointId>>>,
+    seen: Arc<RwLock<BTreeSet<EndpointId>>>,
 }
 
-impl NodeAccess {
-    /// A node paired with exactly these keys, forgotten on restart.
+impl ClientRecord {
+    /// A record that forgets on restart.
+    #[allow(dead_code)]
     pub fn in_memory(keys: impl IntoIterator<Item = EndpointId>) -> Self {
         Self {
             path: None,
-            paired: Arc::new(RwLock::new(keys.into_iter().collect())),
+            seen: Arc::new(RwLock::new(keys.into_iter().collect())),
         }
     }
 
-    /// A node whose grants live at `path`.
+    /// A record kept at `path`.
     ///
-    /// A missing file means nobody is paired, and nothing is written until the
-    /// first pairing — starting a node does not scatter empty files around.
+    /// A missing file means nobody has connected, and nothing is written until
+    /// the first one does — starting a node does not scatter empty files around.
     pub fn open(path: impl Into<PathBuf>) -> LinkResult<Self> {
         let path = path.into();
-        let paired = match fs::read_to_string(&path) {
-            Ok(text) => parse_grants(&text)?,
+        let seen = match fs::read_to_string(&path) {
+            Ok(text) => parse_record(&text)?,
             Err(err) if err.kind() == ErrorKind::NotFound => BTreeSet::new(),
             Err(err) => return Err(err.into()),
         };
         Ok(Self {
             path: Some(path),
-            paired: Arc::new(RwLock::new(paired)),
+            seen: Arc::new(RwLock::new(seen)),
         })
     }
 
-    /// Pairs a client. This is the out-of-band gesture: the operator has to
-    /// carry the client's public key to the node for this to happen.
+    /// Notes a client, answering whether this is the first time.
     ///
-    /// Persisted before returning, so a grant that was reported as made is a
-    /// grant that survives a restart.
-    pub fn pair(&self, key: EndpointId) -> LinkResult<()> {
-        let mut paired = self.paired.write().expect("node access");
-        paired.insert(key);
-        self.persist(&paired)
-    }
-
-    /// Unpairs a client. `true` if it was paired.
-    ///
-    /// Refuses new connections only. An exchange already in flight finishes,
-    /// per `design/decisions.md` (Q7).
-    pub fn unpair(&self, key: &EndpointId) -> LinkResult<bool> {
-        let mut paired = self.paired.write().expect("node access");
-        let removed = paired.remove(key);
-        if removed {
-            self.persist(&paired)?;
+    /// Written before returning, so a client that was recorded is a client that
+    /// survives a restart.
+    pub fn record(&self, key: EndpointId) -> LinkResult<bool> {
+        let mut seen = self.seen.write().expect("client record");
+        let first = seen.insert(key);
+        if first {
+            self.persist(&seen)?;
         }
-        Ok(removed)
+        Ok(first)
     }
 
-    /// Whether a key may connect.
-    pub fn is_paired(&self, key: &EndpointId) -> bool {
-        self.paired.read().expect("node access").contains(key)
+    /// Whether a client has been seen before.
+    #[allow(dead_code)]
+    pub fn has_seen(&self, key: &EndpointId) -> bool {
+        self.seen.read().expect("client record").contains(key)
     }
 
-    /// Every paired key, in a stable order.
-    pub fn paired_keys(&self) -> Vec<EndpointId> {
-        self.paired
+    /// Every client seen, in a stable order.
+    #[allow(dead_code)]
+    pub fn seen(&self) -> Vec<EndpointId> {
+        self.seen
             .read()
-            .expect("node access")
+            .expect("client record")
             .iter()
             .copied()
             .collect()
     }
 
-    /// Writes the grants. Only public keys, never a secret, so this file is a
-    /// list of who is allowed rather than a credential itself.
-    fn persist(&self, paired: &BTreeSet<EndpointId>) -> LinkResult<()> {
+    fn persist(&self, seen: &BTreeSet<EndpointId>) -> LinkResult<()> {
         let Some(path) = &self.path else {
             return Ok(());
         };
-        let keys: Vec<String> = paired.iter().map(EndpointId::to_string).collect();
+        let keys: Vec<String> = seen.iter().map(EndpointId::to_string).collect();
         let text = format!("{}\n", serde_json::to_string_pretty(&keys)?);
         write_private(path, &text)
     }
 }
 
-fn parse_grants(text: &str) -> LinkResult<BTreeSet<EndpointId>> {
+fn parse_record(text: &str) -> LinkResult<BTreeSet<EndpointId>> {
     let keys: Vec<String> = serde_json::from_str(text)?;
     keys.iter()
         .map(|key| {
             EndpointId::from_str(key)
-                .map_err(|err| format!("grant file holds an invalid public key: {err}").into())
+                .map_err(|err| format!("client record holds an invalid public key: {err}").into())
         })
         .collect()
 }
 
-/// The gate itself, installed as an endpoint hook so it runs once the handshake
-/// has established which key is on the other end, and before any ALPN handler
-/// reads a byte.
+/// Notes who connects, and lets them in.
+///
+/// Installed as an endpoint hook so it runs once the handshake has established
+/// which key is on the other end, and before any ALPN handler reads a byte.
 #[derive(Debug)]
-pub(super) struct PairingGate {
-    pub(super) access: NodeAccess,
+pub(super) struct ClientLog {
+    pub(super) record: ClientRecord,
 }
 
-impl EndpointHooks for PairingGate {
+impl EndpointHooks for ClientLog {
     async fn after_handshake(&self, connection: &Connection) -> AfterHandshakeOutcome {
-        // Only incoming connections: the gate is about who may call in, and a
-        // node that later dials out must not lock itself out.
+        // Only incoming connections: a node that later dials out is not a client
+        // of itself.
         if !connection.side().is_server() {
             return AfterHandshakeOutcome::accept();
         }
         let remote = connection.remote_id();
-        if self.access.is_paired(&remote) {
-            return AfterHandshakeOutcome::accept();
+        match self.record.record(remote) {
+            Ok(true) => tracing::info!(%remote, "a client connected for the first time"),
+            Ok(false) => tracing::debug!(%remote, "a known client connected"),
+            Err(error) => tracing::warn!(%remote, %error, "could not record a client"),
         }
-        tracing::info!(%remote, "refused an unpaired client");
-        AfterHandshakeOutcome::Reject {
-            error_code: REFUSED,
-            reason: b"not paired with this node".to_vec(),
-        }
+        AfterHandshakeOutcome::accept()
     }
 }

@@ -17,6 +17,7 @@ base64 = "0.23.1"
 blake3 = "1.8"
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
 directories = "6"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 iroh = "1.3"

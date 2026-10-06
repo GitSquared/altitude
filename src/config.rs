@@ -10,7 +10,9 @@ use directories::ProjectDirs;
 
 use crate::net::NodeIdentity;
 
+mod serve;
 mod settings;
+pub use serve::ServeSettings;
 pub use settings::{SettingsError, SettingsFile};
 
 /// How this installation names itself.
@@ -74,6 +76,30 @@ impl Config {
         &self.data_dir
     }
 
+    /// The same installation's paths, as the node role sees them.
+    ///
+    /// A node is not a client: it keeps its own key, its own record of who has
+    /// connected and its own logs, and it reads its own settings file. One
+    /// machine can be both roles without either seeing the other's state.
+    pub fn serve(&self) -> Self {
+        Self {
+            config_dir: self.config_dir.clone(),
+            data_dir: self.data_dir.join("serve"),
+            cache_dir: self.cache_dir.join("serve"),
+        }
+    }
+
+    /// Where the node role reads its settings.
+    pub fn serve_settings_path(&self) -> PathBuf {
+        self.config_dir.join("serve.toml")
+    }
+
+    /// Use a different data directory, for a caller that was told to.
+    pub fn with_data_dir(mut self, data_dir: PathBuf) -> Self {
+        self.data_dir = data_dir;
+        self
+    }
+
     /// How this installation names itself.
     ///
     /// One installation is one operator on one machine, and this is what a task
@@ -107,8 +133,15 @@ impl Config {
     /// different natures: one is a secret that is never read by a human, the
     /// other is a name that appears in task history.
     fn key(&self) -> io::Result<NodeIdentity> {
-        NodeIdentity::load_or_create(self.data_dir.join("node.key"))
-            .map_err(|error| io::Error::other(format!("could not load this node's key: {error}")))
+        let path = self.data_dir.join("node.key");
+        NodeIdentity::load_or_create(&path).map_err(|error| {
+            io::Error::other(format!(
+                "this installation's key at {} could not be read: {error}. Restore it from a \
+                 backup if you have one. Minting a new key would change which installation \
+                 this is, and the tasks already delegated under the old id would stay theirs.",
+                path.display()
+            ))
+        })
     }
 
     /// Claim a name for the first time, privately.

@@ -13,7 +13,7 @@ use tokio::net::lookup_host;
 
 use iroh::{
     Endpoint, EndpointAddr, EndpointId,
-    endpoint::{Builder, VarInt, presets},
+    endpoint::{Builder, presets},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -32,9 +32,6 @@ const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub(super) const MAX_BLOB_BYTES: u64 = 64 * 1024 * 1024;
 /// Write granularity for blob bytes.
 pub(super) const CHUNK_BYTES: usize = 64 * 1024;
-/// Close code sent to a client the node will not talk to. Distinguishable from
-/// a transport error, so a client can tell "refused" from "unreachable".
-pub(super) const REFUSED: VarInt = VarInt::from_u32(1);
 
 /// The endpoint both sides bind.
 ///

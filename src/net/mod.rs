@@ -14,21 +14,19 @@
 //!
 //! - [`identity`] — the keypair that names a node, and node-local file plumbing.
 //! - [`protocol`] — the wire contract, and how a peer is addressed.
-//! - [`access`] — the keys a node will talk to.
+//! - [`clients`] — which clients a node has seen.
 //! - [`node`] — the serve side.
 //! - [`client`] — the dial side.
 
-// `identity` is wired into the app through `Config`, so the compiler reports its
-// dead code honestly. The link itself still has no caller, so nothing inside
-// these four can be told apart from speculative API yet; each loses its allow as
-// it gains one.
+// `identity`, `clients` and `node` are wired into the app, so the compiler
+// reports their dead code honestly and a few accessors carry their own allow.
+// The dial side and the wire contract still have no caller, so nothing inside
+// them can be told apart from speculative API yet.
 mod identity;
 
 #[allow(dead_code)]
-mod clients;
-#[allow(dead_code)]
 mod client;
-#[allow(dead_code)]
+mod clients;
 mod node;
 #[allow(dead_code)]
 mod protocol;
@@ -40,8 +38,8 @@ use std::error::Error;
 // away with the last `allow(dead_code)` above.
 #[allow(unused_imports)]
 pub use {
-    clients::NodeAccess,
-    client::{LinkClient, LinkClientError, LinkPath, LinkReply, PathKind},
+    client::{LinkClient, LinkPath, LinkReply, PathKind},
+    clients::ClientRecord,
     identity::NodeIdentity,
     node::LinkNode,
     protocol::{BlobHash, LINK_ALPN, LinkRequest, LinkResponse, NodeTicket},

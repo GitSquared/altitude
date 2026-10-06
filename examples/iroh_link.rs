@@ -22,8 +22,8 @@ use std::{
 
 use iroh::EndpointAddr;
 use net::{
-    BlobHash, LinkClient, LinkClientError, LinkError, LinkNode, LinkReply, LinkRequest,
-    LinkResponse, NodeAccess, NodeIdentity, NodeTicket,
+    BlobHash, ClientRecord, LinkClient, LinkError, LinkNode, LinkReply, LinkRequest, LinkResponse,
+    NodeIdentity, NodeTicket,
 };
 use tokio::{runtime::Builder, time::timeout};
 
@@ -43,11 +43,20 @@ async fn run() -> Result<(), LinkError> {
     let identity = NodeIdentity::load_or_create(dir.join("node.key"))?;
     println!("node key file:   {}", identity.path().display());
 
-    // A node starts paired with nobody. This is the state after a fresh
-    // install, before the operator has carried any client key to it.
-    let node = LinkNode::serve(identity, NodeAccess::in_memory([])).await?;
+    // A node records who connects and lets them in. Nobody is refused: the
+    // shape of an answer to "who may connect" is not settled, and a half-answer
+    // would be worse than none.
+    // The caller keeps its own handle on the record, so it can ask what the
+    // node has seen without the node having to expose it.
+    let clients = ClientRecord::in_memory([]);
+    let node = LinkNode::serve(
+        identity,
+        clients.clone(),
+        "0.0.0.0:0".parse().expect("a valid address"),
+    )
+    .await?;
     println!("node public key: {}", node.id());
-    println!("paired clients:  {}", node.access().paired_keys().len());
+    println!("clients seen:    {}", clients.seen().len());
     println!("relays:          none, and no address lookup");
 
     // The ticket is the address, carried out of band. Nothing else can resolve
@@ -64,20 +73,14 @@ async fn run() -> Result<(), LinkError> {
     println!("client key:      {}", client.id());
 
     println!();
-    println!("-- pairing --");
+    println!("-- first contact --");
+    println!("clients seen:    {}", clients.seen().len());
     println!(
-        "unpaired:        {}",
+        "before talking:  {}",
         attempt(&client, ticket.clone()).await
     );
-
-    // The out-of-band gesture: the operator carries the client's public key to
-    // the node. There is no enrollment window and no token on the wire.
-    node.access().pair(client.id())?;
-    println!("paired clients:  {}", node.access().paired_keys().len());
-    println!(
-        "after pairing:   {}",
-        attempt(&client, ticket.clone()).await
-    );
+    println!("clients seen:    {}", clients.seen().len());
+    println!("recorded:        {}", clients.has_seen(&client.id()));
 
     println!();
     println!("-- request/response --");
@@ -120,13 +123,11 @@ async fn run() -> Result<(), LinkError> {
     // only thing missing is an address: a bare key has nowhere to resolve from
     // now that there is no directory.
     let fresh = LinkClient::bind().await?;
-    node.access().pair(fresh.id())?;
-    println!("paired, by key:  {}", attempt(&fresh, node.id()).await);
-    println!("paired, ticket:  {}", attempt(&fresh, ticket.clone()).await);
+    println!("fresh, by key:   {}", attempt(&fresh, node.id()).await);
+    println!("fresh, ticket:   {}", attempt(&fresh, ticket.clone()).await);
     // The same client again, by key alone. An endpoint remembers the addresses
     // it has learned for a peer, so the ticket is needed once, not every time.
     println!("then by key:     {}", attempt(&fresh, node.id()).await);
-    node.access().unpair(&fresh.id())?;
     fresh.close().await?;
 
     // The operator-facing field: an IP or a name, resolved by this machine's own
@@ -139,34 +140,28 @@ async fn run() -> Result<(), LinkError> {
 
     println!();
     println!("-- persistence --");
-    // A node's grants belong to the node, not to a task, so they have to
-    // outlive the process. Same seam as the identity key: the caller says where.
-    let grants_path = dir.join("paired.json");
+    // The record belongs to the node, not to a task, so it has to outlive the
+    // process. Same seam as the identity key: the caller says where.
+    let record_path = dir.join("clients.json");
     // Start clean, so the numbers below mean something on a second run.
-    let _ = fs::remove_file(&grants_path);
-    let grants = NodeAccess::open(&grants_path)?;
-    println!("paired file:     {}", grants_path.display());
-    println!("starts paired:   {}", grants.paired_keys().len());
+    let _ = fs::remove_file(&record_path);
+    let record = ClientRecord::open(&record_path)?;
+    println!("record file:     {}", record_path.display());
+    println!("starts empty:    {}", record.seen().len());
     println!(
-        "file created?    {} (nothing is written until the first pairing)",
-        grants_path.exists()
+        "file created?    {} (nothing is written until a client connects)",
+        record_path.exists()
     );
-    grants.pair(client.id())?;
+    record.record(client.id())?;
     // Reopened as a fresh process would, with nothing carried over.
-    let reopened = NodeAccess::open(&grants_path)?;
-    println!("after restart:   {} paired", reopened.paired_keys().len());
+    let reopened = ClientRecord::open(&record_path)?;
+    println!("after restart:   {} recorded", reopened.seen().len());
     println!("                 (read back from disk, not from the first handle)");
-    println!("is the client?   {}", reopened.is_paired(&client.id()));
+    println!("is the client?   {}", reopened.has_seen(&client.id()));
     println!(
         "file mode:       {:o}",
-        fs::metadata(&grants_path)?.permissions().mode() & 0o777
+        fs::metadata(&record_path)?.permissions().mode() & 0o777
     );
-
-    println!();
-    println!("-- revocation --");
-    let removed = node.access().unpair(&client.id())?;
-    println!("unpaired {removed}:  {}", attempt(&client, ticket).await);
-    println!("paired clients:  {}", node.access().paired_keys().len());
 
     client.close().await?;
     node.shutdown().await?;
@@ -180,9 +175,6 @@ async fn run() -> Result<(), LinkError> {
 async fn attempt(client: &LinkClient, peer: impl Into<EndpointAddr>) -> String {
     match timeout(WAIT_LIMIT, client.request(peer, &LinkRequest::Identify)).await {
         Ok(Ok(_)) => "accepted".to_owned(),
-        Ok(Err(LinkClientError::Refused { reason })) => {
-            format!("REFUSED, typed as a refusal: {reason}")
-        }
         Ok(Err(err)) => format!("failed: {err}"),
         Err(_) => format!("no answer within {WAIT_LIMIT:?}"),
     }
@@ -192,7 +184,7 @@ async fn attempt(client: &LinkClient, peer: impl Into<EndpointAddr>) -> String {
 async fn identify(
     client: &LinkClient,
     peer: impl Into<EndpointAddr>,
-) -> Result<LinkReply<LinkResponse>, LinkClientError> {
+) -> Result<LinkReply<LinkResponse>, LinkError> {
     client.request(peer, &LinkRequest::Identify).await
 }
 

@@ -1,16 +1,13 @@
 //! The client side: dial a node by key and run one exchange.
 
-use std::{error::Error, fmt};
+use std::fmt;
 
-use iroh::{
-    Endpoint, EndpointAddr, EndpointId,
-    endpoint::{Connection, ConnectionError},
-};
+use iroh::{Endpoint, EndpointAddr, EndpointId, endpoint::Connection};
 
 use super::{
-    LinkError, LinkResult,
+    LinkResult,
     protocol::{
-        BlobHash, CHUNK_BYTES, LINK_ALPN, LinkRequest, LinkResponse, REFUSED, builder, read_frame,
+        BlobHash, CHUNK_BYTES, LINK_ALPN, LinkRequest, LinkResponse, builder, read_frame,
         write_frame,
     },
 };
@@ -82,46 +79,6 @@ pub struct LinkReply<T> {
     pub path: LinkPath,
 }
 
-/// Why a client could not finish an exchange.
-#[derive(Debug)]
-pub enum LinkClientError {
-    /// The node will not talk to this client. Retrying does not help until the
-    /// node has paired this key.
-    Refused {
-        /// What the node said.
-        reason: String,
-    },
-    /// Anything else: discovery, transport, framing.
-    Transport(LinkError),
-}
-
-impl fmt::Display for LinkClientError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Refused { reason } => write!(f, "node refused this client: {reason}"),
-            Self::Transport(err) => write!(f, "{err}"),
-        }
-    }
-}
-
-impl Error for LinkClientError {}
-
-/// Reads a node's refusal out of the connection that carried it.
-///
-/// A refusal arrives as an application close with a known code. Without
-/// looking for it, the client sees only "connection lost" and cannot tell a
-/// node that will never accept it from a network that dropped.
-fn refusal(connection: &Connection, err: LinkError) -> LinkClientError {
-    match connection.close_reason() {
-        Some(ConnectionError::ApplicationClosed(close)) if close.error_code == REFUSED => {
-            LinkClientError::Refused {
-                reason: String::from_utf8_lossy(&close.reason).into_owned(),
-            }
-        }
-        _ => LinkClientError::Transport(err),
-    }
-}
-
 /// The client side of the link: an endpoint that dials nodes by public key.
 pub struct LinkClient {
     endpoint: Endpoint,
@@ -154,12 +111,8 @@ impl LinkClient {
         &self,
         peer: impl Into<EndpointAddr>,
         request: &LinkRequest,
-    ) -> Result<LinkReply<LinkResponse>, LinkClientError> {
-        let connection = self
-            .endpoint
-            .connect(peer, LINK_ALPN)
-            .await
-            .map_err(|err| LinkClientError::Transport(err.into()))?;
+    ) -> LinkResult<LinkReply<LinkResponse>> {
+        let connection = self.endpoint.connect(peer, LINK_ALPN).await?;
         let result = async {
             let (mut send, mut recv) = connection.open_bi().await?;
             write_frame(&mut send, request).await?;
@@ -172,8 +125,6 @@ impl LinkClient {
             })
         }
         .await;
-        // Classified before the local close, which would overwrite the reason.
-        let result = result.map_err(|err| refusal(&connection, err));
         connection.close(0u32.into(), b"done");
         result
     }
@@ -186,17 +137,13 @@ impl LinkClient {
         &self,
         peer: impl Into<EndpointAddr>,
         bytes: &[u8],
-    ) -> Result<LinkReply<BlobHash>, LinkClientError> {
+    ) -> LinkResult<LinkReply<BlobHash>> {
         let hash = BlobHash::of(bytes);
         let request = LinkRequest::PutBlob {
             hash: hash.clone(),
             len: bytes.len() as u64,
         };
-        let connection = self
-            .endpoint
-            .connect(peer, LINK_ALPN)
-            .await
-            .map_err(|err| LinkClientError::Transport(err.into()))?;
+        let connection = self.endpoint.connect(peer, LINK_ALPN).await?;
         let result = async {
             let (mut send, mut recv) = connection.open_bi().await?;
             write_frame(&mut send, &request).await?;
@@ -219,8 +166,6 @@ impl LinkClient {
             })
         }
         .await;
-        // Classified before the local close, which would overwrite the reason.
-        let result = result.map_err(|err| refusal(&connection, err));
         connection.close(0u32.into(), b"done");
         result
     }
