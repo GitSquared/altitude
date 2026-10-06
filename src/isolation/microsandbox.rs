@@ -128,6 +128,23 @@ impl MicrosandboxIsolation {
         Ok(())
     }
 
+    /// Remove a sandbox left behind by a build that never finished.
+    ///
+    /// Setup sandboxes are named after the recipe they build, so a sandbox already
+    /// under that name is always a leftover rather than something in use: an
+    /// interrupted build, or one whose cleanup never ran because the process was
+    /// signalled. Without this, a build that was stopped keeps the next start from
+    /// happening at all.
+    async fn remove_leftover(&self, id: &str) {
+        if Sandbox::get(id).await.is_err() {
+            return;
+        }
+        tracing::info!(sandbox_id = %id, "removing a sandbox left by an unfinished build");
+        if let Err(error) = self.remove(id.to_owned()).await {
+            tracing::warn!(sandbox_id = %id, %error, "could not remove a leftover sandbox");
+        }
+    }
+
     async fn ensure_workspace(&self) -> Result<BaseSandboxSnapshot, IsolationError> {
         self.ensure_snapshot(
             BaseSandboxRecipe::new(
@@ -166,6 +183,7 @@ impl MicrosandboxIsolation {
         let sandbox_id = format!("altitude-{}-setup", recipe.name);
         let created_at_ms = now_ms();
         tracing::info!(environment = %recipe.name, steps = recipe.steps.len(), "building environment base sandbox snapshot");
+        self.remove_leftover(&sandbox_id).await;
         let mut options = SandboxOptions::isolated(
             parent.map(|snapshot| snapshot.path.to_string_lossy().into_owned()),
         );
