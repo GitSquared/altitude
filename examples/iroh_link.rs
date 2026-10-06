@@ -22,13 +22,13 @@ use std::{
 
 use iroh::EndpointAddr;
 use net::{
-    BlobHash, Discovery, LinkClient, LinkClientError, LinkError, LinkNode, LinkReply, LinkRequest,
+    BlobHash, LinkClient, LinkClientError, LinkError, LinkNode, LinkReply, LinkRequest,
     LinkResponse, NodeAccess, NodeIdentity, NodeTicket,
 };
 use tokio::{runtime::Builder, time::timeout};
 
-/// How long to wait for a relay handshake, a dial, or address discovery.
-/// Generous, because a cold relay handshake is the slowest thing here.
+/// How long to wait for a dial. With no relay and no address lookup there is no
+/// bootstrap to wait for, so this is only a guard against a dial that hangs.
 const WAIT_LIMIT: Duration = Duration::from_secs(15);
 
 fn main() -> Result<(), LinkError> {
@@ -45,17 +45,14 @@ async fn run() -> Result<(), LinkError> {
 
     // A node starts paired with nobody. This is the state after a fresh
     // install, before the operator has carried any client key to it.
-    let node = LinkNode::serve(identity, NodeAccess::in_memory([]), Discovery::Directory).await?;
+    let node = LinkNode::serve(identity, NodeAccess::in_memory([])).await?;
     println!("node public key: {}", node.id());
     println!("paired clients:  {}", node.access().paired_keys().len());
-    if node.wait_for_relay(WAIT_LIMIT).await {
-        println!("relay:           handshake completed (a bare key is dialable)");
-    } else {
-        println!("relay:           none within {WAIT_LIMIT:?} (ticket addresses only)");
-    }
+    println!("relays:          none, and no address lookup");
 
-    // The ticket is the address, carried out of band. Nothing here needs a
-    // directory to resolve it.
+    // The ticket is the address, carried out of band. Nothing else can resolve
+    // a bare key here, which is the trade: no directory, and no way in without
+    // something the operator handed over.
     let ticket = node.ticket()?;
     println!("ticket:          {ticket}");
     // Round-trip it through its string form, because that is how a real client
@@ -63,7 +60,7 @@ async fn run() -> Result<(), LinkError> {
     let ticket = NodeTicket::from_str(&ticket.to_string())?;
     println!("ticket dials:    {}", ticket.id());
 
-    let client = LinkClient::bind(Discovery::Directory).await?;
+    let client = LinkClient::bind().await?;
     println!("client key:      {}", client.id());
 
     println!();
@@ -118,32 +115,26 @@ async fn run() -> Result<(), LinkError> {
     println!("upload rate:     {}", rate(blob.len(), upload));
 
     println!();
-    println!("-- bare key dial --");
-    // What a ticket buys: this works too, but only because n0's relays and DNS
-    // resolve the key. The ticket needs neither.
-    println!("dial by key:     {}", attempt(&client, node.id()).await);
-    println!("                 (resolved through n0's DNS, not the ticket)");
+    println!("-- reaching a node --");
+    // Measured with a client that has never spoken to this node. Paired, so the
+    // only thing missing is an address: a bare key has nowhere to resolve from
+    // now that there is no directory.
+    let fresh = LinkClient::bind().await?;
+    node.access().pair(fresh.id())?;
+    println!("paired, by key:  {}", attempt(&fresh, node.id()).await);
+    println!("paired, ticket:  {}", attempt(&fresh, ticket.clone()).await);
+    // The same client again, by key alone. An endpoint remembers the addresses
+    // it has learned for a peer, so the ticket is needed once, not every time.
+    println!("then by key:     {}", attempt(&fresh, node.id()).await);
+    node.access().unpair(&fresh.id())?;
+    fresh.close().await?;
 
-    println!();
-    println!("-- without n0 --");
-    // The same node and client, wired with no relay and no directory. This is
-    // what a ticket is for: the bare key now has nowhere to resolve from.
-    let private_identity = NodeIdentity::load_or_create(dir.join("private.key"))?;
-    let private = LinkNode::serve(
-        private_identity,
-        NodeAccess::in_memory([client.id()]),
-        Discovery::TicketOnly,
-    )
-    .await?;
-    private.wait_for_relay(Duration::from_secs(2)).await;
-    let private_ticket = private.ticket()?;
-    println!("node:            {} (no relay, no DNS)", private.id());
-    println!("dial by key:     {}", attempt(&client, private.id()).await);
-    println!(
-        "dial by ticket:  {}",
-        attempt(&client, private_ticket).await
-    );
-    private.shutdown().await?;
+    // A name instead of a ticket: DNS supplies the addresses, the operator
+    // supplies the key, and nothing else is consulted.
+    let port = node.ticket()?.port().expect("the node advertises a port");
+    let by_name = NodeTicket::from_host(node.id(), "localhost", port).await?;
+    println!("by name:         localhost:{port}");
+    println!("dial by name:    {}", attempt(&client, by_name).await);
 
     println!();
     println!("-- persistence --");

@@ -13,8 +13,7 @@
 //! The pieces:
 //!
 //! - [`identity`] — the keypair that names a node, and node-local file plumbing.
-//! - [`protocol`] — the wire contract, how an endpoint is wired, how a peer is
-//!   addressed.
+//! - [`protocol`] — the wire contract, and how a peer is addressed.
 //! - [`access`] — the keys a node will talk to.
 //! - [`node`] — the serve side.
 //! - [`client`] — the dial side.
@@ -38,7 +37,7 @@ pub use {
     client::{LinkClient, LinkClientError, LinkPath, LinkReply, PathKind},
     identity::NodeIdentity,
     node::LinkNode,
-    protocol::{BlobHash, Discovery, LINK_ALPN, LinkRequest, LinkResponse, NodeTicket},
+    protocol::{BlobHash, LINK_ALPN, LinkRequest, LinkResponse, NodeTicket},
 };
 
 /// Boxed errors: a typed error enum would be speculation until a caller exists.

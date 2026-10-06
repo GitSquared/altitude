@@ -4,10 +4,12 @@
 //! bytes never travel inside a frame; a frame announces them and `len` raw bytes
 //! follow on the same stream.
 //!
-//! This is also where the two things both sides need to agree on live: how an
-//! endpoint is wired ([`Discovery`]), and how a peer is addressed ([`NodeTicket`]).
+//! This is also where the thing both sides need to agree on lives: how a peer is
+//! addressed ([`NodeTicket`]).
 
 use std::{fmt, str::FromStr};
+
+use tokio::net::lookup_host;
 
 use iroh::{
     Endpoint, EndpointAddr, EndpointId,
@@ -34,29 +36,18 @@ pub(super) const CHUNK_BYTES: usize = 64 * 1024;
 /// a transport error, so a client can tell "refused" from "unreachable".
 pub(super) const REFUSED: VarInt = VarInt::from_u32(1);
 
-/// How an endpoint finds and reaches peers.
+/// The endpoint both sides bind.
 ///
-/// `presets::N0` is Iroh's default wiring: n0's relays, plus n0's DNS to
-/// publish and resolve addresses. It makes a bare public key dialable from
-/// anywhere, and it puts n0's servers in the addressing path. `presets::Minimal`
-/// is the empty base — no relay, no lookup — so an endpoint reaches only what a
-/// [`NodeTicket`] told it about.
+/// No relay, no address lookup: an endpoint reaches exactly the addresses it was
+/// given. That is the point — it keeps a third party out of both the data path
+/// and the addressing path, and it matches how a node is meant to be reached: on
+/// a network you already share, or at an address the operator supplied.
 ///
-/// Which one Altitude ships is a real decision, not a default to inherit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Discovery {
-    /// n0's relay servers and DNS.
-    Directory,
-    /// No relay and no directory: only what a ticket carries.
-    TicketOnly,
-}
-
-/// The builder a wiring choice implies.
-pub(super) fn endpoint(wiring: Discovery) -> Builder {
-    match wiring {
-        Discovery::Directory => Endpoint::builder(presets::N0),
-        Discovery::TicketOnly => Endpoint::builder(presets::Minimal),
-    }
+/// What it gives up is hole punching, so two peers that are both behind NAT and
+/// share no network cannot reach each other. A relay would come back as an
+/// explicitly configured, self-hosted server, never an inherited default.
+pub(super) fn builder() -> Builder {
+    Endpoint::builder(presets::Minimal)
 }
 
 // ------------------------------------------------------------------- the wire
@@ -146,12 +137,10 @@ where
 
 /// A node's address, as a string to carry out of band.
 ///
-/// This is the whole reason to have it: `presets::N0` resolves a bare public
-/// key through n0's DNS and publishes the node's addresses through n0's relays,
-/// which puts a third party in the addressing path. A ticket carries the key
-/// and its addresses in the operator's own hands instead, so dialling a node
-/// needs nobody's directory. The cost is that the string has to be moved
-/// between machines out of band.
+/// A ticket is the only way to reach a node: with no relay and no address
+/// lookup, a bare public key has nowhere to resolve from. It carries the key and
+/// the addresses the node knows about itself, and it travels between machines in
+/// the operator's own hands.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NodeTicket {
     addr: EndpointAddr,
@@ -168,6 +157,30 @@ impl NodeTicket {
     /// The key to dial, without the network addresses.
     pub fn id(&self) -> EndpointId {
         self.addr.id
+    }
+
+    /// The port the node advertises, if it advertises any address at all.
+    pub fn port(&self) -> Option<u16> {
+        self.addr.ip_addrs().next().map(|socket| socket.port())
+    }
+
+    /// A ticket for a node reached at a name.
+    ///
+    /// This is what "configure the remote as a domain" means with no directory:
+    /// the name supplies the addresses, the operator supplies the key, and no
+    /// third party is in either path. Resolution happens once, here, so a name
+    /// that moves under you is a dial-time concern rather than a hidden one.
+    pub async fn from_host(key: EndpointId, host: &str, port: u16) -> LinkResult<Self> {
+        let mut addr = EndpointAddr::new(key);
+        let mut resolved = 0;
+        for socket in lookup_host((host, port)).await? {
+            addr = addr.with_ip_addr(socket);
+            resolved += 1;
+        }
+        if resolved == 0 {
+            return Err(format!("{host} resolved to no addresses").into());
+        }
+        Self::new(addr)
     }
 }
 

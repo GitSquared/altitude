@@ -4,7 +4,6 @@ use std::{
     collections::HashMap,
     fmt,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 use iroh::{
@@ -12,15 +11,14 @@ use iroh::{
     endpoint::{Connection, RecvStream, SendStream},
     protocol::{AcceptError, ProtocolHandler, Router},
 };
-use tokio::time::timeout;
 
 use super::{
     LinkResult,
     access::{NodeAccess, PairingGate},
     identity::NodeIdentity,
     protocol::{
-        BlobHash, Discovery, LINK_ALPN, LinkRequest, LinkResponse, MAX_BLOB_BYTES, NodeTicket,
-        endpoint, read_body, read_frame, write_frame,
+        BlobHash, LINK_ALPN, LinkRequest, LinkResponse, MAX_BLOB_BYTES, NodeTicket, builder,
+        read_body, read_frame, write_frame,
     },
 };
 
@@ -118,11 +116,7 @@ pub struct LinkNode {
 impl LinkNode {
     /// Binds an endpoint for `identity`, pairs it with exactly the keys in
     /// `access`, and starts accepting link connections.
-    pub async fn serve(
-        identity: NodeIdentity,
-        access: NodeAccess,
-        discovery: Discovery,
-    ) -> LinkResult<Self> {
+    pub async fn serve(identity: NodeIdentity, access: NodeAccess) -> LinkResult<Self> {
         let blobs = Arc::new(BlobStore::default());
         let handler = LinkHandler {
             node: identity.id(),
@@ -131,7 +125,7 @@ impl LinkNode {
         let gate = PairingGate {
             access: access.clone(),
         };
-        let endpoint = endpoint(discovery)
+        let endpoint = builder()
             .secret_key(identity.secret_key().clone())
             .alpns(vec![LINK_ALPN.to_vec()])
             .hooks(gate)
@@ -167,19 +161,6 @@ impl LinkNode {
     /// address rendered as something it can carry.
     fn addr(&self) -> EndpointAddr {
         self.router.endpoint().addr()
-    }
-
-    /// Waits up to `limit` for a relay handshake, which is what makes a bare
-    /// public key dialable from elsewhere. `false` means the node is only
-    /// reachable on the addresses a ticket carries.
-    ///
-    /// With [`Discovery::TicketOnly`] there is no relay, so this always times
-    /// out — Iroh's `online` pends forever without one, which is why the limit
-    /// is not optional here.
-    pub async fn wait_for_relay(&self, limit: Duration) -> bool {
-        timeout(limit, self.router.endpoint().online())
-            .await
-            .is_ok()
     }
 
     /// How many blobs the node is holding.

@@ -10,8 +10,8 @@ use iroh::{
 use super::{
     LinkError, LinkResult,
     protocol::{
-        BlobHash, CHUNK_BYTES, Discovery, LINK_ALPN, LinkRequest, LinkResponse, REFUSED, endpoint,
-        read_frame, write_frame,
+        BlobHash, CHUNK_BYTES, LINK_ALPN, LinkRequest, LinkResponse, REFUSED, builder, read_frame,
+        write_frame,
     },
 };
 
@@ -23,6 +23,9 @@ pub enum PathKind {
     /// A direct IP path.
     Direct,
     /// Traffic is going through a relay server.
+    ///
+    /// Unreachable while Altitude configures no relay, and kept because this
+    /// mirrors what iroh itself reports rather than what we expect to see.
     Relay,
     /// No path was selected at the time it was observed.
     Unestablished,
@@ -126,8 +129,8 @@ pub struct LinkClient {
 
 impl LinkClient {
     /// Binds a client endpoint. Nothing about a node is needed to do this.
-    pub async fn bind(discovery: Discovery) -> LinkResult<Self> {
-        let endpoint = endpoint(discovery).bind().await?;
+    pub async fn bind() -> LinkResult<Self> {
+        let endpoint = builder().bind().await?;
         Ok(Self { endpoint })
     }
 
