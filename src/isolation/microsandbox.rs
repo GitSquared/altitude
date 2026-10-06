@@ -17,6 +17,7 @@ use microsandbox::{
 };
 use tokio::sync::{Mutex, mpsc, watch};
 
+use crate::capacity::{CAPSULE_CPUS, CAPSULE_DISK_MIB, CAPSULE_MEMORY_MIB};
 use crate::config::Config;
 use crate::development::DevelopmentEnvironment;
 
@@ -26,10 +27,6 @@ use super::{
     IsolationError, IsolationStatus, OutputStream, SandboxOptions, SetupStep,
     environment::{self, private_directory},
 };
-
-const TASK_CPUS: u8 = 4;
-const TASK_MEMORY_MIB: u32 = 5 * 1_024;
-const TASK_DISK_MIB: u32 = 15 * 1_024;
 
 const BASE_IMAGE: &str = "alpine";
 const WORKSPACE_SETUP: &str = concat!(
@@ -67,13 +64,13 @@ impl MicrosandboxIsolation {
         options: SandboxOptions,
         pull_policy: PullPolicy,
     ) -> Result<(), IsolationError> {
-        tracing::info!(sandbox_id = %id, network_enabled = options.network_enabled, cpus = TASK_CPUS, memory_mib = TASK_MEMORY_MIB, "creating sandbox");
+        tracing::info!(sandbox_id = %id, network_enabled = options.network_enabled, cpus = CAPSULE_CPUS, memory_mib = CAPSULE_MEMORY_MIB, "creating sandbox");
         let result = match options.snapshot_path {
             Some(snapshot_path) => {
                 let mut restore = Sandbox::restore(snapshot_path)
                     .name(&id)
-                    .cpus(TASK_CPUS)
-                    .memory(TASK_MEMORY_MIB);
+                    .cpus(CAPSULE_CPUS)
+                    .memory(CAPSULE_MEMORY_MIB);
                 if !options.network_enabled {
                     restore = restore.disable_network();
                 }
@@ -96,10 +93,10 @@ impl MicrosandboxIsolation {
             }
             None => {
                 let mut builder = Sandbox::builder(&id)
-                    .cpus(TASK_CPUS)
-                    .memory(TASK_MEMORY_MIB)
+                    .cpus(CAPSULE_CPUS)
+                    .memory(CAPSULE_MEMORY_MIB)
                     .image(BASE_IMAGE)
-                    .root_disk(TASK_DISK_MIB)
+                    .root_disk(CAPSULE_DISK_MIB)
                     .pull_policy(pull_policy);
                 if !options.network_enabled {
                     builder = builder.disable_network();

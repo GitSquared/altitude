@@ -86,7 +86,13 @@ fn draw_tasks(frame: &mut Frame, area: Rect, app: &mut super::App) {
     let first_visible = &mut app.first_visible_task;
     let latest_output = &app.latest_output;
     let environment_builds = &app.environment_builds;
+    let capacity = app.capacity;
     let tick = app.shimmer;
+    // A capsule that exists is a slot in use.
+    let occupied = tasks
+        .iter()
+        .filter(|task| task.facts.sandbox_available)
+        .count();
     let panel = Block::bordered()
         .border_type(BorderType::Rounded)
         .padding(Padding::uniform(1));
@@ -123,11 +129,23 @@ fn draw_tasks(frame: &mut Frame, area: Rect, app: &mut super::App) {
             .then(|| environment_builds.get(&task.id))
             .flatten();
         let text_width = usize::from(area.width.saturating_sub(4));
+        // Pending without a build to show means the node has not admitted it yet.
+        let at_capacity = capacity.is_some_and(|limit| occupied >= limit);
         let mut status = if let Some(progress) = building {
             Line::from_iter(shimmer(&build_label(progress, text_width), tick + index))
         } else {
             match &task.facts.execution_status {
-                TaskExecutionStatus::Pending => Line::from("pending").yellow(),
+                TaskExecutionStatus::Pending => {
+                    // Both are recorded as `Pending`; the only difference is
+                    // whether the node has room yet, and neither lasts long
+                    // enough to be worth distinguishing further.
+                    let label = if at_capacity {
+                        "waiting for capacity..."
+                    } else {
+                        "starting up..."
+                    };
+                    Line::from_iter(shimmer(label, tick + index)).dim()
+                }
                 TaskExecutionStatus::Running => Line::from(match task.facts.execution_mode {
                     TaskExecutionMode::Autopilot => "autopilot · working",
                     TaskExecutionMode::AutopilotReport => "autopilot · reporting",

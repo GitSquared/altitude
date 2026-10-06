@@ -658,9 +658,12 @@ where
         Ok(task)
     }
 
-    pub async fn resume_all(
-        &self,
-    ) -> Vec<Result<(Task, TaskAgentRun, CommandSession), TaskServiceError>> {
+    /// Bring back what was running, and return the tasks that want a slot.
+    ///
+    /// Recovery is not starting. This puts a task's work back on disk and leaves
+    /// it waiting, so the caller decides what the node can carry; starting here
+    /// would run everything at once on the way up.
+    pub async fn recover_all(&self) -> Vec<Result<Task, TaskServiceError>> {
         let tasks = match self.list().await {
             Ok(tasks) => tasks,
             Err(error) => return vec![Err(error)],
@@ -705,7 +708,7 @@ where
                         }
                     }
                 }
-                service.start(task).await
+                Ok(task)
             }
         }))
         .await
@@ -924,6 +927,19 @@ impl fmt::Display for TaskServiceError {
 impl Error for TaskServiceError {}
 
 // Execution policy consumes recorded values; the store does not infer these decisions.
+
+/// Whether this task is waiting for a slot, or holding one.
+///
+/// A paused task holds nothing: pausing suspends the capsule to a snapshot, so
+/// its resources are already back. What it wants is to be admitted again, which
+/// is a separate question from how much the node will carry.
+pub(crate) fn wants_a_slot(task: &Task) -> bool {
+    matches!(
+        task.facts.execution_status,
+        TaskExecutionStatus::Pending | TaskExecutionStatus::Running
+    )
+}
+
 fn should_resume(task: &Task) -> bool {
     matches!(
         task.facts.execution_status,
