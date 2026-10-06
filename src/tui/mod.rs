@@ -62,6 +62,9 @@ pub struct App {
     environment_builds: HashMap<String, EnvironmentProgress>,
     /// Advances the highlight on that waiting text.
     shimmer: usize,
+    /// What the node will run at once, so a wait can say whether there is room.
+    /// Absent until the first refresh, and never stale by more than one interval.
+    capacity: Option<usize>,
     notice: Option<String>,
     removing: HashSet<String>,
     selected: usize,
@@ -145,6 +148,7 @@ impl App {
             pending_environment_harness: None,
             environment_builds: HashMap::new(),
             shimmer: 0,
+            capacity: None,
         }
     }
     fn replace_task(&mut self, task: Task) {
@@ -513,6 +517,7 @@ where
                     app.tasks = tasks;
                     app.selected = app.selected.min(app.tasks.len().saturating_sub(1));
                 }
+                app.capacity = Some(event_loop.capacity_limit());
             }
             _ = shell_notice.tick(), if app.shell_has_active_notice() => {}
             _ = shimmer.tick(), if app.is_preparing() => {

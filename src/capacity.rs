@@ -1,6 +1,3 @@
-// TODO: remove this allow in the commit that uses this module.
-#![allow(dead_code)]
-
 //! How many tasks a node will run at once.
 //!
 //! A queue with a visible reason, against a limit computed from the host rather

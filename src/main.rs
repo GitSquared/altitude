@@ -66,19 +66,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
             AgentEngines::new(),
             identity,
         );
-        let Some(resumed) = tui::boot_task_resume(
+        let Some(recovered) = tui::boot_task_resume(
             &mut terminal,
             &mut terminate,
             &mut interrupt,
-            tasks.resume_all(),
+            tasks.recover_all(),
         )
         .await?
         else {
             return Ok(());
         };
+        for result in recovered {
+            if let Err(error) = result {
+                tracing::error!(%error, "could not recover a task");
+            }
+        }
         let task_rows = tasks.list().await.map_err(io::Error::other)?;
         let (event_loop, task_execution_updates) = TaskEventLoop::new(tasks.clone());
-        event_loop.watch_resumed_runs(resumed);
+        // Recovered tasks are waiting, not running: they are admitted against what
+        // the node can carry, like everything else.
+        event_loop.admit();
 
         tui::run(
             &mut terminal,

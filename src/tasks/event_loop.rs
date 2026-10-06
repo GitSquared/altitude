@@ -1,17 +1,18 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, Mutex},
 };
 
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, time};
 
 use crate::{
     agent::TaskReportDecoder,
+    capacity::{HostSampler, NodeCapacity, ResourceSampler, SAMPLE_INTERVAL},
     development::DevelopmentEnvironment,
     isolation::{Command, CommandEvent, CommandSession, IsolationEngine, OutputStream},
     tasks::{
-        Task, TaskAgentRequestedAction, TaskAgentRun, TaskExecutionMode, TaskService,
-        TaskServiceError,
+        Task, TaskAgentRequestedAction, TaskAgentRun, TaskExecutionMode, TaskExecutionStatus,
+        TaskService, TaskServiceError,
     },
 };
 
@@ -61,6 +62,11 @@ pub struct TaskEventLoop<E> {
     runs: Arc<Mutex<HashMap<String, ActiveRun>>>,
     control_requests: Arc<Mutex<HashMap<String, RequestedControl>>>,
     terminal_output: Arc<Mutex<HashMap<String, CachedTerminalOutput>>>,
+    /// What the node will run at once, and what it has observed to decide it.
+    capacity: Arc<Mutex<NodeCapacity>>,
+    /// Tasks admitted but not yet running. A task stays `Pending` until its run
+    /// reports, so without this it would be admitted again on the next pass.
+    starting: Arc<Mutex<HashSet<String>>>,
 }
 
 /// A turn this node is currently driving.
@@ -90,16 +96,122 @@ where
 {
     pub fn new(service: TaskService<E>) -> (Self, mpsc::UnboundedReceiver<TaskExecutionUpdate>) {
         let (events, receiver) = mpsc::unbounded_channel();
-        (
-            Self {
-                service,
-                events,
-                runs: Arc::new(Mutex::new(HashMap::new())),
-                control_requests: Arc::new(Mutex::new(HashMap::new())),
-                terminal_output: Arc::new(Mutex::new(HashMap::new())),
-            },
-            receiver,
-        )
+        let event_loop = Self {
+            service,
+            events,
+            runs: Arc::new(Mutex::new(HashMap::new())),
+            control_requests: Arc::new(Mutex::new(HashMap::new())),
+            terminal_output: Arc::new(Mutex::new(HashMap::new())),
+            capacity: Arc::new(Mutex::new(NodeCapacity::new())),
+            starting: Arc::new(Mutex::new(HashSet::new())),
+        };
+        event_loop.watch_host_capacity();
+        (event_loop, receiver)
+    }
+
+    /// What the node will run at once, for an interface that has to explain a wait.
+    pub fn capacity_limit(&self) -> usize {
+        self.capacity
+            .lock()
+            .expect("capacity lock poisoned")
+            .limit()
+    }
+
+    /// Observe the host on an interval, and let the observation admit work.
+    fn watch_host_capacity(&self) {
+        let event_loop = self.clone();
+        tokio::spawn(async move {
+            let mut sampler = HostSampler::new();
+            let mut tick = time::interval(SAMPLE_INTERVAL);
+            loop {
+                tick.tick().await;
+                let demand = match event_loop.service.list().await {
+                    Ok(tasks) => tasks
+                        .iter()
+                        .filter(|task| super::wants_a_slot(task))
+                        .count(),
+                    Err(error) => {
+                        tracing::warn!(%error, "could not read tasks to measure demand");
+                        continue;
+                    }
+                };
+                // A host that cannot be read leaves the limit where it is.
+                let Some(sample) = sampler.sample() else {
+                    continue;
+                };
+                let limit = event_loop
+                    .capacity
+                    .lock()
+                    .expect("capacity lock poisoned")
+                    .observe(sample, demand);
+                tracing::debug!(limit, demand, "observed host capacity");
+                event_loop.admit();
+            }
+        });
+    }
+
+    /// Start waiting tasks while the node has room for them.
+    ///
+    /// Cheap to call and safe to call repeatedly: a task already being started is
+    /// skipped, so this is idempotent and can be triggered by anything that might
+    /// have freed a slot.
+    pub fn admit(&self) {
+        let event_loop = self.clone();
+        tokio::spawn(async move { event_loop.admit_waiting().await });
+    }
+
+    async fn admit_waiting(&self) {
+        let tasks = match self.service.list().await {
+            Ok(tasks) => tasks,
+            Err(error) => {
+                tracing::warn!(%error, "could not read tasks to admit work");
+                return;
+            }
+        };
+        let limit = self
+            .capacity
+            .lock()
+            .expect("capacity lock poisoned")
+            .limit();
+        // A capsule that exists is a slot in use. A task being started has no
+        // capsule yet but is about to want one, so it counts too.
+        let occupied = tasks
+            .iter()
+            .filter(|task| task.facts.sandbox_available)
+            .count();
+        let taken = occupied + self.starting.lock().expect("starting lock poisoned").len();
+        let room = limit.saturating_sub(taken);
+        let mut waiting: Vec<Task> = tasks
+            .into_iter()
+            .filter(|task| task.facts.execution_status == TaskExecutionStatus::Pending)
+            .filter(|task| {
+                !self
+                    .starting
+                    .lock()
+                    .expect("starting lock poisoned")
+                    .contains(&task.id)
+            })
+            .collect();
+        // The list arrives newest first; the queue is served oldest first.
+        waiting.reverse();
+        for task in waiting.into_iter().take(room) {
+            self.starting
+                .lock()
+                .expect("starting lock poisoned")
+                .insert(task.id.clone());
+            let event_loop = self.clone();
+            tokio::spawn(async move {
+                let result = event_loop.service.start(task.clone()).await;
+                event_loop
+                    .starting
+                    .lock()
+                    .expect("starting lock poisoned")
+                    .remove(&task.id);
+                event_loop.watch_agent_run(result);
+                // Provisioning may have freed or taken room for something else.
+                event_loop.admit();
+            });
+        }
     }
 
     pub async fn list(&self) -> Result<Vec<Task>, TaskServiceError> {
@@ -265,15 +377,6 @@ where
         }
     }
 
-    pub fn watch_resumed_runs(
-        &self,
-        results: Vec<Result<(Task, TaskAgentRun, CommandSession), TaskServiceError>>,
-    ) {
-        for result in results {
-            self.watch_agent_run(result);
-        }
-    }
-
     pub fn create(&self, prompt: String, environment: DevelopmentEnvironment) {
         tracing::info!(harness = %environment.harness, "creating task");
         let event_loop = self.clone();
@@ -290,7 +393,9 @@ where
             let _ = event_loop
                 .events
                 .send(TaskExecutionUpdate::Created(Ok(task.clone())));
-            event_loop.watch_agent_run(event_loop.service.start(task).await);
+            // A new task is not started here: it waits for a slot like everything
+            // else, so a burst of them queues instead of all running at once.
+            event_loop.admit();
         });
     }
 
@@ -424,6 +529,8 @@ where
                                 .await;
                             let _ = events.send(TaskExecutionUpdate::Finished(task.id, result));
                         }
+                        // A run ending is the main way a slot frees.
+                        event_loop.admit();
                         return;
                     }
                 }
