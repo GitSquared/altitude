@@ -4,6 +4,9 @@ Status: authoritative record for the remote/server work. Agreed 2026-10-03 in a
 review of `server-mode-ux.md`. Where the two disagree, this document wins; the
 superseded points are listed explicitly at the end.
 
+Revised 2026-10-06: Q12's authority model was reversed while implementing the
+move state machine. The original answer and why it did not hold are kept in Q12.
+
 `server-mode-ux.md` remains useful as the original sketch and for its diagrams,
 but it was written without review and several of its choices have been replaced.
 
@@ -107,12 +110,13 @@ reported to be fragile in practice (agents failing to raise QA correctly).
    surfaces are signals and pull/push.
 3. **Ownership follows hosting.** The node is home; you send the task back when
    you are done.
-4. **A move is a move.** Source relinquishes liveness before the payload leaves;
-   the destination becomes live only once it holds everything.
+4. **A move is a move.** The source stops running the task before the payload
+   leaves it; the destination owns it only once it holds everything.
 5. **Identity originates on the client** as a keypair; a node holds a delegated
    replica. One push carries identity, configuration and capabilities.
-6. **Permission is scoping; authority is liveness.** Tasks belong to an identity.
-   Authority is only a monotonic epoch plus which node is live.
+6. **Permission is scoping; authority is possession.** Tasks belong to an
+   identity. Authority is which node holds the task, and while a transfer is in
+   flight it is nobody.
 7. **Isolation is per identity**, in one instance, with per-identity storage roots.
 8. **The tracker is an adapter, not a state store.** Stable external identity is
    portable with the task; projection state is node-local and rebuildable.
@@ -305,26 +309,45 @@ byte and currently discards it.
 
 ### Q12. Is authority event-sourced or a table?
 
-**Options:** history events; a lock table plus audit events; a table alone.
+**Options:** history events; a lock table plus audit events; a table alone; or no
+authority record at all, with possession as the authority.
 
-**Decision:** history events, and a much smaller concept than first proposed.
+**Decision:** history events, and a concept much smaller than first proposed: the
+node that owns the task, plus the destination while a transfer is in flight.
 
 **Why:** every write already runs inside `BEGIN IMMEDIATE`, which holds SQLite's
-write lock, so reading the current epoch inside the transaction and rejecting a
-stale one *is* a compare-and-set. No second source of truth is needed.
+write lock, so reading the current owner inside the transaction and rejecting a
+stale write *is* a compare-and-set. No second source of truth is needed.
 
 The concept shrank because of Q6 and Q9: with tasks scoped to an identity and
 identities isolated, cross-operator permission questions disappear. Authority is
 not "who is allowed" — that is scoping. It is "which copy is live", which is
 needed because a move creates a second physical location for the same task, and
-the same operator is on both sides of it. Concretely it is a monotonic epoch plus
-which node is live. No leases, no expiry, no holder principals.
+the same operator is on both sides of it. No leases, no expiry, no holder
+principals.
 
-**Move ordering rule:** the source relinquishes liveness before the payload
-leaves, and the destination becomes live only once it holds everything. One
-ambiguous moment remains — the final acknowledgement — and it resolves to
-fail-stopped: nobody runs, the operator is asked. Silence must never become
-autonomous execution.
+**Reversed 2026-10-06.** The original answer added a monotonic epoch to that, so a
+stale claim could be refused. Building the move state machine showed the epoch was
+carrying almost nothing. The source stops running before the payload leaves; the
+destination owns the task only once it holds it; a delayed or duplicated command
+is caught by the transfer being in flight, and a replayed one by the store's
+dedupe key (Q13). A monotonic counter needs a second party to be monotonic
+*relative to*, and once authority is possession there is no shared record left to
+version. What replaced it is two fields — the owning node, and the destination
+while a transfer is in flight — with one question asked of them: may this node run
+this task right now?
+
+**Move ordering rule:** the source stops running the task before the payload
+leaves, and the destination owns it only once it holds everything. Break either
+rule and two nodes can run the same task; keep both and the worst case is that
+nobody runs it for a moment, which is self-repairing.
+
+**A lost confirmation is not a state.** The original answer made the final
+acknowledgement a terminal `fail-stopped` phase. It is not needed. A transfer
+whose answer was lost is settled by asking the destination, which is idempotent
+and can be retried; a transfer that stays unreconciled raises an operator signal.
+Escalation is what the attention semantics are for, and it does not belong in the
+ownership record.
 
 ### Q13. Cursors and idempotency: one substrate or per surface?
 
@@ -340,11 +363,13 @@ from one mechanism instead of three. Note that `read_task.sql` already computes
 for it.
 
 **Where dedupe is reserved:** operations that *start or move* work — delegate,
-stop, pull, push. Operations that only *record* should instead converge: "this
-signal is resolved with this answer" is safe to repeat, and a late reply to an
-already-resolved signal becomes new context rather than an error. Our own records
-never accumulate duplicate entries; unreliable information from external systems
-is absorbed at the boundary and converted into clean internal records.
+stop, pull, push. This is also why the move record keeps no list of applied
+commands: idempotency belongs to the unique index, not to the value type.
+Operations that only *record* should instead converge: "this signal is resolved
+with this answer" is safe to repeat, and a late reply to an already-resolved
+signal becomes new context rather than an error. Our own records never accumulate
+duplicate entries; unreliable information from external systems is absorbed at
+the boundary and converted into clean internal records.
 
 ### Q14. What happens when a node is at capacity?
 
@@ -477,9 +502,10 @@ recording run endings. Observable in today's TUI, no networking.
 Implemented with one substitution. Driver authority is realised as the agent run
 id rather than an epoch: that is the same "which copy is live" question asked at
 the driver level, and it is the whole of the answer while one node holds the
-capsule. The hosting epoch arrives with transfer, where a second physical
-location actually exists. Nothing reads the identity back yet; its consumers are
-the ones that need to tell several operators' work apart.
+capsule. The hosting level answers it the same way: the node that holds the task
+is the authority, and while a transfer is in flight it is nobody (Q12). Nothing
+reads the identity back yet; its consumers are the ones that need to tell several
+operators' work apart.
 
 **Acceptance as a signal.** `complete` becomes a request; evidence is required;
 confirmation disposes. Observable in today's TUI.
@@ -522,7 +548,7 @@ rare operation.
   signals persist, capsules and transcripts do not, per Q15.
 - **Discovery layers, mDNS, node pools** → deferred; explicit pairing over Iroh is
   the whole story for now.
-- **No mention of** identity/principal, authority epochs, move ordering, capacity,
+- **No mention of** identity/principal, authority, move ordering, capacity,
   acceptance-as-signal, or Iroh. Those are new here.
 
 ## Deferred
@@ -536,8 +562,10 @@ rare operation.
 - Tracker ingress: operator-provided URL and reverse proxy versus something else.
 - Whether node-side terminal recording is worth persisting, given the bytes are
   already in hand.
-- The one place worth reconsidering the "no tests yet" rule: the move state
-  machine is pure, subtle, and the kind of thing a test suite is genuinely for.
+- Whether the "no tests yet" rule should bend for the durable side of ownership.
+  The move record is now small enough to review by reading, but the
+  compare-and-set that guards it, and the reconciliation of a transfer whose
+  answer was lost, are not.
 - Reading the identity back, and its consumers: identity-scoped task lists, the
   tracker projection's actor map, and per-identity storage roots.
 - **Handing pulled tasks back on reboot.** Confirmed as intended behaviour in Q16:
