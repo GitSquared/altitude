@@ -355,11 +355,24 @@ is absorbed at the boundary and converted into clean internal records.
 **Why:** the per-task CPU and memory values are **ceilings, not pre-allocations** —
 most tasks use much less most of the time — so they are a packing lever rather
 than a reservation. The prototype's adaptive slots are the reference: p75 over a
-10-minute window, grow only under demand, shrink on pressure, floor of one. A
-refinement for Altitude: because capsules are fixed-size VMs, also compute a
-deterministic reservation ceiling and take the minimum of that and the sampled
-limit. Reservation gives a stable ceiling; sampling catches everything else on
-the host.
+10-minute window, grow only under demand, shrink on pressure, floor of one.
+
+**Refined 2026-10-04, during implementation.** The first draft added a
+reservation ceiling on top: because capsules are fixed-size VMs, compute how many
+fit if every task used its whole cap, and take the minimum of that and the
+observed limit. That is dropped, and the reason is worth keeping. Taking the
+minimum means the ceiling always wins — on a ten-core host with four-core
+capsules it pins the node at two tasks — so the observed half could only ever
+shrink below it and never pack, which is the opposite of what this decision is
+for. It also derived from per-task values that were chosen arbitrarily.
+
+What replaces it: the limit starts at one task per core, holds until the window
+holds four readings, then moves by observation alone. Four is the smallest count
+at which a nearest-rank p75 is a p75; below it the same arithmetic returns the
+maximum, which is a different statistic and one that moves the wrong way as the
+window fills. A host that cannot be observed keeps its optimistic start rather
+than being capped by a guess. The per-capsule CPU and memory values now only size
+the sandbox; nothing derives concurrency from them.
 
 Queueing is nearly free: `Pending` already exists in the status enum and the TUI
 already renders a pending state with progress. Visible queueing is also how
@@ -529,8 +542,9 @@ rare operation.
 
 - The exact set of tracker affordances used within a task (threads, documents,
   reactions, the session stream) — settled by use, not by argument.
-- Capacity tunables, and the per-capsule CPU and memory ceilings themselves. They
-  are placeholders chosen arbitrarily.
+- Capacity tunables: the window, the targets, the warm-up, and the starting
+  limit. The per-capsule CPU and memory values are no longer capacity inputs at
+  all — they only size the sandbox — and they remain arbitrary placeholders.
 - Whether the node becomes a host of instances (Q9's option c) once a real team
   needs a harder boundary.
 - Tracker ingress: operator-provided URL and reverse proxy versus something else.
