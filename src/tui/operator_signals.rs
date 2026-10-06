@@ -2,7 +2,7 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout},
     style::{Style, Stylize},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
@@ -13,18 +13,52 @@ use crate::{
     tui::utils::centered_width,
 };
 
+/// What the operator can do with the signal they have selected.
+///
+/// Replying is always offered, because every signal can be answered with
+/// instructions. The affirmative is offered only where it means something: an
+/// update can be dismissed, and a wrap-up request can be accepted. A decision or a
+/// failure has no text-free answer — the reply *is* the answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignalAction {
+    Reply,
+    Acknowledge,
+    Confirm,
+}
+
+impl SignalAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Reply => "reply",
+            Self::Acknowledge => "acknowledge",
+            Self::Confirm => "confirm",
+        }
+    }
+}
+
+/// The actions a signal offers, in the order they are shown.
+pub fn actions_for(kind: TaskOperatorSignalKind) -> &'static [SignalAction] {
+    const REPLY: &[SignalAction] = &[SignalAction::Reply];
+    const REPLY_OR_ACKNOWLEDGE: &[SignalAction] = &[SignalAction::Reply, SignalAction::Acknowledge];
+    const REPLY_OR_CONFIRM: &[SignalAction] = &[SignalAction::Reply, SignalAction::Confirm];
+    match kind {
+        TaskOperatorSignalKind::Update => REPLY_OR_ACKNOWLEDGE,
+        TaskOperatorSignalKind::InReview => REPLY_OR_CONFIRM,
+        TaskOperatorSignalKind::Decision | TaskOperatorSignalKind::Failure => REPLY,
+    }
+}
+
 pub fn draw(
     frame: &mut Frame,
     operator_signals: &[TaskOperatorSignal],
     selected: usize,
+    focused_action: usize,
     scroll: &mut u16,
 ) {
     let area = centered_width(frame.area(), 72, 65);
     frame.render_widget(Clear, area);
     let block = Block::bordered()
-        .title(signal_keys(
-            operator_signals.get(selected).map(|signal| signal.kind),
-        ))
+        .title(" Signals · tab focus · enter validate · esc close ")
         .title_bottom(" pgup/pgdn scroll · home/end · h/j select ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -32,11 +66,14 @@ pub fn draw(
         .len()
         .min(8)
         .min(usize::from(inner.height / 3)) as u16;
-    let [list_area, detail_area] =
-        Layout::vertical([Constraint::Length(list_height), Constraint::Min(1)])
-            .spacing(1)
-            .margin(1)
-            .areas(inner);
+    let [list_area, detail_area, actions_area] = Layout::vertical([
+        Constraint::Length(list_height),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .spacing(1)
+    .margin(1)
+    .areas(inner);
     let items = operator_signals
         .iter()
         .map(|signal| {
@@ -79,17 +116,35 @@ pub fn draw(
         .min(usize::from(u16::MAX)) as u16;
     *scroll = (*scroll).min(max_scroll);
     frame.render_widget(paragraph.scroll((*scroll, 0)), detail_area);
+    frame.render_widget(
+        actions(operator_signals.get(selected), focused_action),
+        actions_area,
+    );
 }
 
-/// What the selected signal can be answered with, so the keys are visible rather
-/// than remembered.
-fn signal_keys(kind: Option<TaskOperatorSignalKind>) -> &'static str {
-    match kind {
-        Some(TaskOperatorSignalKind::Update) => " Signals · enter acknowledge · esc close ",
-        Some(TaskOperatorSignalKind::InReview) => " Signals · c confirm · enter reply · esc close ",
-        Some(_) => " Signals · enter reply · esc close ",
-        None => " Signals · esc close ",
-    }
+/// The buttons for the selected signal, with the focused one picked out.
+fn actions(signal: Option<&TaskOperatorSignal>, focused_action: usize) -> Paragraph<'static> {
+    let Some(signal) = signal else {
+        return Paragraph::new(Line::default());
+    };
+    let actions = actions_for(signal.kind);
+    let focused = focused_action.min(actions.len().saturating_sub(1));
+    let spans = actions
+        .iter()
+        .enumerate()
+        .flat_map(|(index, action)| {
+            let style = if index == focused {
+                Style::new().black().on_cyan().bold()
+            } else {
+                Style::new().dim()
+            };
+            [
+                Span::styled(format!("[ {} ]", action.label()), style),
+                Span::raw(" "),
+            ]
+        })
+        .collect::<Vec<_>>();
+    Paragraph::new(Line::from(spans))
 }
 
 fn kind_label(kind: TaskOperatorSignalKind) -> &'static str {

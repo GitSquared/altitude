@@ -22,8 +22,8 @@ use crate::{
     development::DevelopmentEnvironment,
     isolation::{EnvironmentProgress, IsolationEngine, OutputStream},
     tasks::{
-        Task, TaskExecutionMode, TaskExecutionStatus, TaskOperatorSignal, TaskOperatorSignalKind,
-        TaskService, TaskServiceError,
+        Task, TaskExecutionMode, TaskExecutionStatus, TaskOperatorSignal, TaskService,
+        TaskServiceError,
     },
     tasks::{TaskEventLoop, TaskExecutionUpdate},
 };
@@ -71,6 +71,8 @@ pub struct App {
     open_shell: Option<String>,
     operator_signals: Vec<TaskOperatorSignal>,
     selected_operator_signal: usize,
+    /// Which of the selected signal's actions has focus.
+    selected_signal_action: usize,
     operator_signal_scroll: u16,
     open_operator_signals: bool,
     answering_operator_signal: Option<String>,
@@ -128,6 +130,7 @@ impl App {
             open_shell: None,
             operator_signals: Vec::new(),
             selected_operator_signal: 0,
+            selected_signal_action: 0,
             operator_signal_scroll: 0,
             open_operator_signals: false,
             answering_operator_signal: None,
@@ -360,13 +363,39 @@ impl App {
             self.operator_signals.remove(index);
         }
         self.operator_signal_scroll = 0;
+        self.selected_signal_action = 0;
         self.selected_operator_signal = self
             .selected_operator_signal
             .min(self.operator_signals.len().saturating_sub(1));
     }
 
+    /// The actions the selected signal offers.
+    fn selected_signal_actions(&self) -> &'static [operator_signals::SignalAction] {
+        self.operator_signals
+            .get(self.selected_operator_signal)
+            .map_or(&[], |signal| operator_signals::actions_for(signal.kind))
+    }
+
+    /// Move the focus between the selected signal's actions.
+    fn focus_next_signal_action(&mut self) {
+        let count = self.selected_signal_actions().len();
+        if count > 0 {
+            self.selected_signal_action = (self.selected_signal_action + 1) % count;
+        }
+    }
+
+    fn focus_previous_signal_action(&mut self) {
+        let count = self.selected_signal_actions().len();
+        if count > 0 {
+            self.selected_signal_action = (self.selected_signal_action + count - 1) % count;
+        }
+    }
+
     fn select_next_operator_signal(&mut self) {
         self.operator_signal_scroll = 0;
+        // Focus follows the selection rather than the list position, so moving to
+        // another signal always starts from its first action.
+        self.selected_signal_action = 0;
         if !self.operator_signals.is_empty() {
             self.selected_operator_signal =
                 (self.selected_operator_signal + 1) % self.operator_signals.len();
@@ -375,6 +404,7 @@ impl App {
 
     fn select_previous_operator_signal(&mut self) {
         self.operator_signal_scroll = 0;
+        self.selected_signal_action = 0;
         if !self.operator_signals.is_empty() {
             self.selected_operator_signal =
                 (self.selected_operator_signal + self.operator_signals.len() - 1)
@@ -448,6 +478,7 @@ where
                     frame,
                     &app.operator_signals,
                     app.selected_operator_signal,
+                    app.selected_signal_action,
                     &mut app.operator_signal_scroll,
                 );
             }
@@ -725,17 +756,48 @@ where
             KeyCode::Home => app.operator_signal_scroll = 0,
             KeyCode::End => app.operator_signal_scroll = u16::MAX,
             KeyCode::Esc | KeyCode::Char('i') => app.open_operator_signals = false,
-            KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') => app.select_next_operator_signal(),
-            KeyCode::BackTab | KeyCode::Up | KeyCode::Char('h') => {
-                app.select_previous_operator_signal()
-            }
-            KeyCode::Char('c') => {
-                let signal = app
+            KeyCode::Tab => app.focus_next_signal_action(),
+            KeyCode::BackTab => app.focus_previous_signal_action(),
+            KeyCode::Down | KeyCode::Char('j') => app.select_next_operator_signal(),
+            KeyCode::Up | KeyCode::Char('h') => app.select_previous_operator_signal(),
+            KeyCode::Enter => {
+                let actions = app.selected_signal_actions();
+                let Some(action) = actions
+                    .get(
+                        app.selected_signal_action
+                            .min(actions.len().saturating_sub(1)),
+                    )
+                    .copied()
+                else {
+                    return Ok(false);
+                };
+                let Some(signal) = app
                     .operator_signals
                     .get(app.selected_operator_signal)
-                    .cloned();
-                match signal {
-                    Some(signal) if signal.kind == TaskOperatorSignalKind::InReview => {
+                    .cloned()
+                else {
+                    return Ok(false);
+                };
+                match action {
+                    operator_signals::SignalAction::Reply => {
+                        if app.tasks.iter().any(|task| task.id == signal.task_id) {
+                            app.answering_operator_signal = Some(signal.id);
+                            app.prompt = Some(Prompt::new("answer operator signal"));
+                            app.open_operator_signals = false;
+                        } else {
+                            app.notice = Some("this task is no longer in the list".into());
+                        }
+                    }
+                    operator_signals::SignalAction::Acknowledge => {
+                        match task_service.acknowledge_operator_signal(&signal.id).await {
+                            Ok(task) => {
+                                app.replace_task(task);
+                                app.resolved_operator_signal(app.selected_operator_signal);
+                            }
+                            Err(error) => app.notice = Some(error.to_string()),
+                        }
+                    }
+                    operator_signals::SignalAction::Confirm => {
                         match task_service.confirm_operator_signal(&signal.id).await {
                             Ok(task) => {
                                 app.replace_task(task);
@@ -744,43 +806,6 @@ where
                                     Some("task closed; its capsule was disposed of".into());
                             }
                             Err(error) => app.notice = Some(error.to_string()),
-                        }
-                    }
-                    Some(_) => app.notice = Some("only a wrap-up request can be confirmed".into()),
-                    None => {}
-                }
-            }
-            KeyCode::Enter => {
-                if let Some(operator_signal) = app
-                    .operator_signals
-                    .get(app.selected_operator_signal)
-                    .cloned()
-                {
-                    match operator_signal.kind {
-                        TaskOperatorSignalKind::Update => {
-                            match task_service
-                                .acknowledge_operator_signal(&operator_signal.id)
-                                .await
-                            {
-                                Ok(task) => {
-                                    app.replace_task(task);
-                                    app.resolved_operator_signal(app.selected_operator_signal);
-                                }
-                                Err(error) => app.notice = Some(error.to_string()),
-                            }
-                        }
-                        TaskOperatorSignalKind::Decision
-                        | TaskOperatorSignalKind::InReview
-                        | TaskOperatorSignalKind::Failure => {
-                            if app
-                                .tasks
-                                .iter()
-                                .any(|task| task.id == operator_signal.task_id)
-                            {
-                                app.answering_operator_signal = Some(operator_signal.id);
-                                app.prompt = Some(Prompt::new("answer operator signal"));
-                                app.open_operator_signals = false;
-                            }
                         }
                     }
                 }
@@ -827,6 +852,7 @@ where
                     signal.read = true;
                 }
                 app.selected_operator_signal = 0;
+                app.selected_signal_action = 0;
                 app.operator_signal_scroll = 0;
                 app.open_operator_signals = true;
             }
