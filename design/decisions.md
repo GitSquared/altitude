@@ -5,7 +5,9 @@ review of `server-mode-ux.md`. Where the two disagree, this document wins; the
 superseded points are listed explicitly at the end.
 
 Revised 2026-10-06: Q12's authority model was reversed while implementing the
-move state machine. The original answer and why it did not hold are kept in Q12.
+move state machine, and Q8 and Q16 were settled by building the link. Each keeps
+its original answer and says what replaced it. The order of work below records
+what has landed since.
 
 `server-mode-ux.md` remains useful as the original sketch and for its diagrams,
 but it was written without review and several of its choices have been replaced.
@@ -256,6 +258,27 @@ three is friction too early. Iroh is already a named building block in
 verified blob transfer — which is exactly the shape a capsule move needs. A node
 can therefore be deployed with no ingress at all until a tracker is hooked up.
 
+**Built 2026-10-06, as far as the serve side.** `iroh` with `presets::Minimal`: no
+relay and no address lookup, so a node is reachable on a network you already share
+(a LAN, a VPN such as Tailscale, or public IPv6) or at an address an operator
+supplies. Hole punching is given up along with the relay; a relay would return as
+an explicitly configured, self-hosted server rather than an inherited default.
+
+That qualifies the second sentence above. A node still needs no public URL, no TLS
+and no ingress, but it does bind an inbound port: `0.0.0.0:25848` by default, UDP
+for the link and TCP for one announcement endpoint that speaks HTTP, so a client
+told only an address can learn the key at it. `curl` works against it, and a
+reverse proxy can put TLS in front. One port serves both because TCP and UDP do
+not collide. The announcement is on by default and not configurable, which is what
+makes "configure a remote" one field instead of two.
+
+Two more things settled here. Clients are **recorded, not refused**: a node writes
+down every key that connects and says so, because whether a key is welcome depends
+on how identity is delegated, which is not settled, and a half-answer was judged
+worse than none. And the serve role is a different execution mode rather than a
+different configuration of the same one: its own settings file (`serve.toml`), its
+own data directory (`<data_dir>/serve`), its own logs, and no terminal.
+
 ### Q9. How isolated are two operators on one shared node?
 
 **Options:** one instance with principal-tagged rows; one instance with identity
@@ -457,8 +480,8 @@ pull-and-inspect possible at all.
 **Decision:** both parts, answering different questions. The **label** is derived
 from the machine (`user@host`) and is what a human reads in a task's history or a
 tracker comment, so nobody has to resolve anything to find out where work is. The
-**id** is what a machine checks, and it is deliberately not derived: a name anyone
-can type is not an identity.
+**id** is the installation's public key and is what a machine checks: a name
+anyone can type is not an identity, and a key is.
 
 **Why:** "hostname and username describe identity well" is right about legibility
 and wrong about trust on its own, hence the pair. The label is resolved once at
@@ -471,9 +494,15 @@ identities. That is correct for "where is this work", and insufficient for "whos
 work is this", which is why the tracker's actor→principal mapping (Q10) must key
 on the keypair rather than on the label.
 
-The id is a placeholder until the transport supplies a keypair to fill it — which
-is exactly what the Iroh link is for, since there a node's identity *is* its
-public key. Nothing outside this installation treats the id as trustworthy yet.
+**Settled 2026-10-06, when the transport arrived.** The id was first a recorded
+UUID, noted here as a placeholder until the transport supplied a keypair. It does
+now, so the placeholder is gone: the id is the public key of `NodeIdentity`, whose
+secret lives at `<data_dir>/node.key` (0600), and only the label is written down.
+Deriving it removes a failure mode rather than defending one — a key recorded
+beside a name is a second copy that can fall out of agreement with the first, and
+the disagreement then needs a check, an error and an operator to resolve it. What
+is not derived is anything a person types: the label is still legibility, not
+identity.
 
 **Confirmed, from using it:** shutting the laptop down, SIGTERM, or quitting
 Altitude is "dropping a task off your desk". Tasks resuming as autopilot after a
@@ -520,11 +549,26 @@ is the authority, and while a transfer is in flight it is nobody (Q12). Nothing
 reads the identity back yet; its consumers are the ones that need to tell several
 operators' work apart.
 
-**Acceptance as a signal.** `complete` becomes a request; evidence is required;
-confirmation disposes. Observable in today's TUI.
+**Acceptance as a signal.** *Done.* `complete` becomes a request; evidence is
+required; confirmation disposes. Observable in today's TUI.
 
-**Headless node and push.** Push identity and configuration; queue with computed
-capacity; delegate tasks that keep running with the laptop closed.
+**A queue with a visible reason.** *Done.* Concurrency is observed from the host
+rather than configured, and a task waits in `Pending` until the node has room for
+it (Q14).
+
+**The link, and a node role.** *Done, serve side.* Iroh with no relay, one
+announcement endpoint over TCP, remembered nodes in the database, and `altitude
+serve` as a role with its own settings and no terminal (Q8). The dial side is
+written but nothing in the app reaches a remote yet — the settings screen is its
+caller — and no capsule has moved.
+
+**The move record.** *Done, not wired.* Which node owns a task, and that nobody
+owns it while a transfer is in flight (Q12). The durable half, the compare-and-set
+that reads the owner inside `BEGIN IMMEDIATE`, is still to come.
+
+**Headless node and push.** Push identity and configuration; delegate tasks that
+keep running with the laptop closed. Capacity and the node role are in place; the
+push path is not.
 
 **Linear.** Intake, the signal contract on Linear's surfaces, acceptance, and the
 "no shell needed" projection. Prerequisite: a small public ingress shim, because
@@ -571,6 +615,11 @@ rare operation.
 - Capacity tunables: the window, the targets, the warm-up, and the starting
   limit. The per-capsule CPU and memory values are no longer capacity inputs at
   all — they only size the sandbox — and they remain arbitrary placeholders.
+- **Answering an operator signal bypasses admission**, so it can take the node one
+  over its limit. The turn carries a directive prompt built from the answer, which
+  admission cannot reconstruct: `latest_operator_answer` is the most recent answer
+  ever, not an unprocessed one. Fixing it means recording why a task is waiting on
+  its queue entry.
 - Whether the node becomes a host of instances (Q9's option c) once a real team
   needs a harder boundary.
 - Tracker ingress: operator-provided URL and reverse proxy versus something else.
@@ -585,15 +634,15 @@ rare operation.
 - **Handing pulled tasks back on reboot.** Confirmed as intended behaviour in Q16:
   a client that reboots should return its pulled tasks to the node when it can,
   and say so when it cannot. Not built yet, and it needs the transfer path.
+- **A transfer in flight cannot be restored.** The ownership record has one
+  constructor, for a task a node holds, so a process that died mid-transfer cannot
+  rebuild what it was doing. The store will need the other one, and it is the first
+  thing the bullet above wants.
 - Deleting a task while its run is still alive races the run's own ending, which
   is recorded against a row being deleted. Pre-existing, and unexercised.
 - **A "software factory" configuration**, user-provided, that says what counts as
   finished work for a given team or repository. Altitude's contract stays generic
   (Q15); this is where a team tightens it.
-- **An interrupted environment build leaves its setup sandbox behind**, and the
-  next start fails hard with `sandbox already exists` rather than recovering.
-  Found by killing the app mid-build; pre-existing and unrelated to the work above,
-  but it means a stopped build can stop the node from starting.
 - Whether a task that was under operator control when the machine went down should
   simply resume as autopilot. Q16 says restarting is dropping a task off your desk,
   which makes autopilot the right answer; it becomes a real question only for a
@@ -606,6 +655,9 @@ their current documentation, the Microsandbox 0.7.3 crate source, and the Iroh
 release material. The Straylight statements come from reading that branch. The
 implementation statements come from reading this repository.
 
-Nothing in this document has been established by running a node, a transfer, or a
-tracker integration. Every "consequence" above is a design inference, not an
-observation.
+The node side has been run: `altitude serve` binds the port, announces itself over
+TCP, and answers with the same key it printed; a client boots, migrates and mints
+its own key. Both were two endpoints on one machine, never across a network.
+Nothing here has been established by running a transfer or a tracker integration,
+and no capsule has moved; every other "consequence" above is a design inference,
+not an observation.

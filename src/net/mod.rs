@@ -49,9 +49,11 @@ mod protocol;
 
 use std::error::Error;
 
-// The facade. Only part of this is reachable from the app, so the rest reads as
-// unused in a binary build; the example compiles against all of it. This goes
-// away with the last `allow(dead_code)` above.
+// The facade: one import site for the link, so a caller names what it wants from
+// `net` rather than from a module inside it. Part of this is the dialling side
+// above, which nothing in the app reaches yet, so the re-export is allowed to
+// read as unused. It stops being needed when the last `allow(dead_code)` above
+// goes.
 #[allow(unused_imports)]
 pub use {
     announce::Announcement,

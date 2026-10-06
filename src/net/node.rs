@@ -62,11 +62,6 @@ impl BlobStore {
         let mut store = self.0.lock().expect("blob store");
         store.insert(hash, bytes);
     }
-
-    fn count(&self) -> usize {
-        let store = self.0.lock().expect("blob store");
-        store.len()
-    }
 }
 
 #[derive(Clone)]
@@ -135,10 +130,6 @@ async fn answer(
 pub struct LinkNode {
     router: Router,
     identity: NodeIdentity,
-    /// Held only so a caller can ask how much the node is carrying. The handler
-    /// has its own handle, so the node does not need this to work.
-    #[allow(dead_code)]
-    blobs: Arc<BlobStore>,
     broadcast: Broadcast,
 }
 
@@ -187,7 +178,6 @@ impl LinkNode {
         Ok(Self {
             router,
             identity,
-            blobs,
             broadcast,
         })
     }
@@ -207,12 +197,6 @@ impl LinkNode {
     /// address rendered as something it can carry.
     fn addr(&self) -> EndpointAddr {
         self.router.endpoint().addr()
-    }
-
-    /// How many blobs the node is holding.
-    #[allow(dead_code)]
-    pub fn blob_count(&self) -> usize {
-        self.blobs.count()
     }
 
     /// Stops accepting and closes the endpoint.

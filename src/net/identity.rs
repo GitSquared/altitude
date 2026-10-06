@@ -1,8 +1,8 @@
 //! The keypair that names a node, and the file plumbing for node-local state.
 //!
 //! The path is always the caller's: nothing here picks a default location or
-//! keeps global state, so a test, an example and the app can each hold their
-//! own identity.
+//! keeps global state, so the client and the node role can each hold their own
+//! identity.
 
 use std::{
     fs,
@@ -20,13 +20,9 @@ use super::LinkResult;
 /// A node's transport identity: an Ed25519 keypair on disk.
 ///
 /// The caller supplies the path. There is no default location and no global
-/// state, so a test, an example and the app can each hold their own.
+/// state, so the client and the node role can each hold their own.
 pub struct NodeIdentity {
     secret_key: SecretKey,
-    /// Read by the example, which reports where the key lives; nothing in the
-    /// app needs to ask yet.
-    #[allow(dead_code)]
-    path: PathBuf,
 }
 
 impl NodeIdentity {
@@ -48,7 +44,7 @@ impl NodeIdentity {
             }
             Err(err) => return Err(err.into()),
         };
-        Ok(Self { secret_key, path })
+        Ok(Self { secret_key })
     }
 
     /// The public key other peers dial.
@@ -59,12 +55,6 @@ impl NodeIdentity {
     /// The key itself, for building an endpoint.
     pub fn secret_key(&self) -> &SecretKey {
         &self.secret_key
-    }
-
-    /// Where the key is stored.
-    #[allow(dead_code)]
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 }
 
@@ -98,8 +88,8 @@ fn write_secret(path: &Path, secret_key: &SecretKey) -> LinkResult<()> {
 
 /// Writes a file only the owner can read, replaced atomically.
 ///
-/// The rename means a reader sees either the old grants or the new ones, never
-/// a half-written list, and it carries the temporary file's mode across.
+/// The rename means a reader sees either the old record or the new one, never a
+/// half-written list, and it carries the temporary file's mode across.
 pub(super) fn write_private(path: &Path, text: &str) -> LinkResult<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;

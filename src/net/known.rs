@@ -8,8 +8,8 @@
 //! operator is the one who decides.
 //!
 //! Nothing here stores anything, which is why a node with no database can use
-//! the link. A client keeps what it remembers in the database; a node keeps its
-//! own record in a file; an example keeps it in a map.
+//! the link. A client keeps what it remembers in the database, and a node keeps
+//! its own record of who connected in a file; this module keeps neither.
 
 use iroh::EndpointId;
 

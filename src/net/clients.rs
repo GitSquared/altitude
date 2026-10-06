@@ -28,28 +28,17 @@ use super::{LinkResult, identity::write_private};
 
 /// The clients a node has seen.
 ///
-/// Two constructors, because both are real. [`ClientRecord::in_memory`] forgets
-/// on restart and is what a test or an example wants; [`ClientRecord::open`]
-/// keeps the record at a path the caller supplies, with no default location, so
+/// The record lives at a path the caller supplies, with no default location, so
 /// where a node writes it stays the caller's decision.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ClientRecord {
-    /// Where the record is kept, if anywhere. `None` means in memory only.
-    path: Option<PathBuf>,
+    /// Where the record is kept.
+    path: PathBuf,
     /// Kept sorted so the file has a stable order and diffs stay readable.
     seen: Arc<RwLock<BTreeSet<EndpointId>>>,
 }
 
 impl ClientRecord {
-    /// A record that forgets on restart.
-    #[allow(dead_code)]
-    pub fn in_memory(keys: impl IntoIterator<Item = EndpointId>) -> Self {
-        Self {
-            path: None,
-            seen: Arc::new(RwLock::new(keys.into_iter().collect())),
-        }
-    }
-
     /// A record kept at `path`.
     ///
     /// A missing file means nobody has connected, and nothing is written until
@@ -62,7 +51,7 @@ impl ClientRecord {
             Err(err) => return Err(err.into()),
         };
         Ok(Self {
-            path: Some(path),
+            path,
             seen: Arc::new(RwLock::new(seen)),
         })
     }
@@ -80,13 +69,11 @@ impl ClientRecord {
         Ok(first)
     }
 
-    /// Whether a client has been seen before.
-    #[allow(dead_code)]
-    pub fn has_seen(&self, key: &EndpointId) -> bool {
-        self.seen.read().expect("client record").contains(key)
-    }
-
     /// Every client seen, in a stable order.
+    ///
+    /// Nothing reads this back yet. A node records who has been here so that a
+    /// new key is visible rather than silent, and the log is what an operator
+    /// reads today; this is the reader the record was written for.
     #[allow(dead_code)]
     pub fn seen(&self) -> Vec<EndpointId> {
         self.seen
@@ -98,12 +85,9 @@ impl ClientRecord {
     }
 
     fn persist(&self, seen: &BTreeSet<EndpointId>) -> LinkResult<()> {
-        let Some(path) = &self.path else {
-            return Ok(());
-        };
         let keys: Vec<String> = seen.iter().map(EndpointId::to_string).collect();
         let text = format!("{}\n", serde_json::to_string_pretty(&keys)?);
-        write_private(path, &text)
+        write_private(&self.path, &text)
     }
 }
 
