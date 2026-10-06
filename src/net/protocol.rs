@@ -7,7 +7,7 @@
 //! This is also where the thing both sides need to agree on lives: how a peer is
 //! addressed ([`NodeTicket`]).
 
-use std::{fmt, str::FromStr};
+use std::{fmt, net::Ipv6Addr, str::FromStr};
 
 use tokio::net::lookup_host;
 
@@ -164,16 +164,26 @@ impl NodeTicket {
         self.addr.ip_addrs().next().map(|socket| socket.port())
     }
 
-    /// A ticket for a node reached at a name.
+    /// A ticket for a node reached at an address an operator typed.
     ///
-    /// This is what "configure the remote as a domain" means with no directory:
-    /// the name supplies the addresses, the operator supplies the key, and no
-    /// third party is in either path. Resolution happens once, here, so a name
-    /// that moves under you is a dial-time concern rather than a hidden one.
-    pub async fn from_host(key: EndpointId, host: &str, port: u16) -> LinkResult<Self> {
+    /// The address may be a name or an IP, with or without a port:
+    /// `host`, `host:7700`, `10.0.0.4`, `[fd00::1]:7700`. A name is resolved by
+    /// the host machine's own resolver, so anything that resolver knows works —
+    /// including a Tailscale MagicDNS name, which is the point of asking for a
+    /// name rather than an IP.
+    ///
+    /// The key is not part of the address and is never discovered: the operator
+    /// supplies it, and the handshake proves the peer holds it. That is why this
+    /// needs no directory and trusts no resolver with anything but addresses.
+    pub async fn from_address(
+        key: EndpointId,
+        address: &str,
+        default_port: u16,
+    ) -> LinkResult<Self> {
+        let (host, port) = split_address(address, default_port);
         let mut addr = EndpointAddr::new(key);
         let mut resolved = 0;
-        for socket in lookup_host((host, port)).await? {
+        for socket in lookup_host((host.as_str(), port)).await? {
             addr = addr.with_ip_addr(socket);
             resolved += 1;
         }
@@ -181,6 +191,34 @@ impl NodeTicket {
             return Err(format!("{host} resolved to no addresses").into());
         }
         Self::new(addr)
+    }
+}
+
+/// Splits `host[:port]` the way a person writes it.
+///
+/// A bare IPv6 literal is a host with no port, so it is only treated as
+/// `host:port` when the tail parses as a port and the head is not itself an
+/// address — otherwise `fd00::1` would split at the last colon and lose.
+fn split_address(address: &str, default_port: u16) -> (String, u16) {
+    let address = address.trim();
+    if let Some(rest) = address.strip_prefix('[')
+        && let Some((host, tail)) = rest.split_once(']')
+    {
+        let port = tail
+            .strip_prefix(':')
+            .and_then(|port| port.parse().ok())
+            .unwrap_or(default_port);
+        return (host.to_owned(), port);
+    }
+    if address.parse::<Ipv6Addr>().is_ok() {
+        return (address.to_owned(), default_port);
+    }
+    match address.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() => match port.parse() {
+            Ok(port) => (host.to_owned(), port),
+            Err(_) => (address.to_owned(), default_port),
+        },
+        _ => (address.to_owned(), default_port),
     }
 }
 

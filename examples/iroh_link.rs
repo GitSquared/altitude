@@ -129,12 +129,13 @@ async fn run() -> Result<(), LinkError> {
     node.access().unpair(&fresh.id())?;
     fresh.close().await?;
 
-    // A name instead of a ticket: DNS supplies the addresses, the operator
-    // supplies the key, and nothing else is consulted.
+    // The operator-facing field: an IP or a name, resolved by this machine's own
+    // resolver. DNS supplies addresses; the operator supplies the key.
     let port = node.ticket()?.port().expect("the node advertises a port");
-    let by_name = NodeTicket::from_host(node.id(), "localhost", port).await?;
-    println!("by name:         localhost:{port}");
-    println!("dial by name:    {}", attempt(&client, by_name).await);
+    for address in ["localhost", &format!("localhost:{port}"), "127.0.0.1"] {
+        let by_address = NodeTicket::from_address(node.id(), address, port).await?;
+        println!("dial {address:16} {}", attempt(&client, by_address).await);
+    }
 
     println!();
     println!("-- persistence --");

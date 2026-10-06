@@ -8,6 +8,8 @@ use std::{
 
 use directories::ProjectDirs;
 
+use crate::net::NodeIdentity;
+
 mod settings;
 pub use settings::{SettingsError, SettingsFile};
 
@@ -19,8 +21,9 @@ pub use settings::{SettingsError, SettingsFile};
 /// comment knows where the work is. The id is what a machine checks, and it is
 /// deliberately not derived: a name anyone can type is not an identity.
 ///
-/// The id is a placeholder until the transport supplies a keypair to fill it;
-/// nothing outside this installation treats it as trustworthy yet.
+/// The id is the node's public key, and the keypair that proves it lives beside
+/// the label in the data directory. A name anyone can type is not an identity,
+/// which is why the label is only ever for reading.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct InstallationIdentity {
     pub id: String,
@@ -70,15 +73,53 @@ impl Config {
     pub fn identity(&self) -> io::Result<InstallationIdentity> {
         let path = self.data_dir.join("identity");
         match fs::read_to_string(&path) {
-            Ok(recorded) => serde_json::from_str(&recorded).map_err(|error| {
-                io::Error::other(format!(
-                    "{} is not a valid identity: {error}",
-                    path.display()
-                ))
-            }),
+            Ok(recorded) => {
+                let recorded: InstallationIdentity =
+                    serde_json::from_str(&recorded).map_err(|error| {
+                        io::Error::other(format!(
+                            "{} is not a valid identity: {error}",
+                            path.display()
+                        ))
+                    })?;
+                self.check_key_matches(recorded)
+            }
             Err(error) if error.kind() == ErrorKind::NotFound => self.claim_identity(&path),
             Err(error) => Err(error),
         }
+    }
+
+    /// The keypair that is this installation's identity.
+    ///
+    /// Beside the label rather than inside it, because the two files have
+    /// different natures: one is a secret that is never read by a human, the
+    /// other is a name that appears in task history.
+    fn key(&self) -> io::Result<NodeIdentity> {
+        NodeIdentity::load_or_create(self.data_dir.join("node.key"))
+            .map_err(|error| io::Error::other(format!("could not load this node's key: {error}")))
+    }
+
+    /// Whether the recorded identity is still the identity this node holds.
+    ///
+    /// A key that has been replaced under a running installation is worth
+    /// shouting about: the tasks it already delegated are recorded against a
+    /// different id, and quietly adopting the new one would make its own history
+    /// look like somebody else's.
+    fn check_key_matches(
+        &self,
+        recorded: InstallationIdentity,
+    ) -> io::Result<InstallationIdentity> {
+        let id = self.key()?.id().to_string();
+        if recorded.id != id {
+            return Err(io::Error::other(format!(
+                "this installation is recorded as {} but its key now names it {}; \
+                 remove {} to re-identify it, accepting that its earlier tasks stay \
+                 under the old id",
+                recorded.id,
+                id,
+                self.data_dir.join("identity").display()
+            )));
+        }
+        Ok(recorded)
     }
 
     /// Claim a name for the first time, privately.
@@ -91,7 +132,7 @@ impl Config {
     fn claim_identity(&self, path: &Path) -> io::Result<InstallationIdentity> {
         let label = installation_label();
         let identity = InstallationIdentity {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: self.key()?.id().to_string(),
             label: label.clone(),
         };
         let recorded = serde_json::to_string_pretty(&identity)

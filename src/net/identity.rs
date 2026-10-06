@@ -6,14 +6,14 @@
 
 use std::{
     fs,
-    io::ErrorKind,
+    io::{self, ErrorKind},
     path::{Path, PathBuf},
 };
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use iroh::{EndpointId, SecretKey};
 
-use super::LinkResult;
+use super::{LinkError, LinkResult};
 
 // ------------------------------------------------------------------ identity
 
@@ -23,6 +23,9 @@ use super::LinkResult;
 /// state, so a test, an example and the app can each hold their own.
 pub struct NodeIdentity {
     secret_key: SecretKey,
+    /// Read by the example, which reports where the key lives; nothing in the
+    /// app needs to ask yet.
+    #[allow(dead_code)]
     path: PathBuf,
 }
 
@@ -40,8 +43,15 @@ impl NodeIdentity {
             Ok(text) => parse_secret(&text)?,
             Err(err) if err.kind() == ErrorKind::NotFound => {
                 let secret_key = SecretKey::generate();
-                write_secret(&path, &secret_key)?;
-                secret_key
+                match write_secret(&path, &secret_key) {
+                    Ok(()) => secret_key,
+                    // Another process claimed this identity between the read and
+                    // the write. Its key is the installation's key; keep it
+                    // rather than failing, which would leave the loser unable to
+                    // name itself at all.
+                    Err(err) if already_exists(&err) => parse_secret(&fs::read_to_string(&path)?)?,
+                    Err(err) => return Err(err),
+                }
             }
             Err(err) => return Err(err.into()),
         };
@@ -59,9 +69,16 @@ impl NodeIdentity {
     }
 
     /// Where the key is stored.
+    #[allow(dead_code)]
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+/// Whether a failed write lost a race to another process creating the same file.
+fn already_exists(err: &LinkError) -> bool {
+    err.downcast_ref::<io::Error>()
+        .is_some_and(|err| err.kind() == ErrorKind::AlreadyExists)
 }
 
 fn parse_secret(text: &str) -> LinkResult<SecretKey> {

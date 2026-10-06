@@ -18,19 +18,26 @@
 //! - [`node`] — the serve side.
 //! - [`client`] — the dial side.
 
-#![allow(dead_code)] // Remove once the link is wired into the app.
+// `identity` is wired into the app through `Config`, so the compiler reports its
+// dead code honestly. The link itself still has no caller, so nothing inside
+// these four can be told apart from speculative API yet; each loses its allow as
+// it gains one.
+mod identity;
+
+#[allow(dead_code)]
+mod access;
+#[allow(dead_code)]
+mod client;
+#[allow(dead_code)]
+mod node;
+#[allow(dead_code)]
+mod protocol;
 
 use std::error::Error;
 
-mod access;
-mod client;
-mod identity;
-mod node;
-mod protocol;
-
-// The facade. Nothing in the app uses it yet, which is why it reads as unused
-// in a binary build; the example compiles against it. Both this and the
-// `allow(dead_code)` above go away when the link is wired in.
+// The facade. Only `identity` is reachable from the app, so the rest reads as
+// unused in a binary build; the example compiles against all of it. This goes
+// away with the last `allow(dead_code)` above.
 #[allow(unused_imports)]
 pub use {
     access::NodeAccess,
