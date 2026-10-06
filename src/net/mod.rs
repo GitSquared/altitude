@@ -20,21 +20,24 @@
 
 // `identity`, `clients` and `node` are wired into the app, so the compiler
 // reports their dead code honestly and a few accessors carry their own allow.
-// The dial side and the wire contract still have no caller, so nothing inside
-// them can be told apart from speculative API yet.
+// The rest has no caller in the app yet — only the example — so nothing inside
+// it can be told apart from speculative API. Each loses its allow as it gains a
+// caller, the same way the node side lost its own.
 mod announce;
 mod identity;
+mod node;
 
 #[allow(dead_code)]
 mod client;
 mod clients;
-mod node;
+#[allow(dead_code)]
+mod known;
 #[allow(dead_code)]
 mod protocol;
 
 use std::error::Error;
 
-// The facade. Only `identity` is reachable from the app, so the rest reads as
+// The facade. Only part of this is reachable from the app, so the rest reads as
 // unused in a binary build; the example compiles against all of it. This goes
 // away with the last `allow(dead_code)` above.
 #[allow(unused_imports)]
@@ -43,6 +46,7 @@ pub use {
     client::{LinkClient, LinkPath, LinkReply, PathKind},
     clients::ClientRecord,
     identity::NodeIdentity,
+    known::{KnownNode, KnownNodes, Sighting, Trust},
     node::LinkNode,
     protocol::{BlobHash, LINK_ALPN, LinkRequest, LinkResponse, NodeTicket},
 };

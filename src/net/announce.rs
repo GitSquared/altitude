@@ -11,10 +11,7 @@
 //! reverse proxy can put TLS in front of it, which authenticates the first
 //! sighting instead of trusting it.
 
-use std::{
-    net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket},
-    time::Duration,
-};
+use std::{net::SocketAddr, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -55,13 +52,20 @@ pub(super) struct Broadcast {
 }
 
 impl Broadcast {
-    /// Starts answering on the same address as the link, over TCP.
+    /// Starts answering on the sockets the link itself bound, over TCP.
     ///
     /// TCP and UDP do not collide, so this costs the operator no second address
-    /// to remember or to make reachable.
-    pub(super) async fn start(listen: SocketAddr, announcement: Announcement) -> LinkResult<Self> {
+    /// to remember or to make reachable. Taking the link's own sockets rather
+    /// than the address the operator asked for is what keeps the port the same
+    /// when they asked for *any* port: an operating system picks a UDP port and
+    /// a TCP port independently, so binding the announcement to what was asked
+    /// for would quietly put it somewhere else.
+    pub(super) async fn start(
+        bound: &[SocketAddr],
+        announcement: Announcement,
+    ) -> LinkResult<Self> {
         let mut tasks = Vec::new();
-        for address in matching_addresses(listen) {
+        for address in bound {
             let listener = TcpListener::bind(address).await?;
             let announcement = announcement.clone();
             tasks.push(tokio::spawn(answer_everyone(listener, announcement)));
@@ -75,30 +79,6 @@ impl Broadcast {
             task.abort();
         }
     }
-}
-
-/// The addresses to listen on, given the one the operator chose.
-///
-/// An operator who asked for every interface gets every interface: a client's
-/// configured `host:port` names one port, and a node answering on only IPv4
-/// would be unreachable from a client that has only IPv6.
-fn matching_addresses(listen: SocketAddr) -> Vec<SocketAddr> {
-    let mut addresses = vec![listen];
-    if listen.ip().is_unspecified() && listen.is_ipv4() && ipv6_available() {
-        addresses.push(SocketAddr::new(
-            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-            listen.port(),
-        ));
-    }
-    addresses
-}
-
-/// Whether this host can bind IPv6 at all.
-///
-/// Probed rather than assumed, because a host without it fails the bind instead
-/// of ignoring it.
-pub(super) fn ipv6_available() -> bool {
-    UdpSocket::bind("[::]:0").is_ok()
 }
 
 async fn answer_everyone(listener: TcpListener, announcement: Announcement) {

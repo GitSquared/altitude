@@ -3,7 +3,7 @@
 use std::{
     collections::HashMap,
     fmt,
-    net::{IpAddr, Ipv6Addr, SocketAddr},
+    net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket},
     sync::{Arc, Mutex},
 };
 
@@ -15,7 +15,7 @@ use iroh::{
 
 use super::{
     LinkResult,
-    announce::{Announcement, Broadcast, ipv6_available},
+    announce::{Announcement, Broadcast},
     clients::{ClientLog, ClientRecord},
     identity::NodeIdentity,
     protocol::{
@@ -40,6 +40,14 @@ fn bind(builder: Builder, listen: SocketAddr) -> LinkResult<Builder> {
         return Ok(builder.bind_addr(anywhere)?);
     }
     Ok(builder)
+}
+
+/// Whether this host can bind IPv6 at all.
+///
+/// Probed rather than assumed, because a host without it fails the bind instead
+/// of ignoring it.
+fn ipv6_available() -> bool {
+    UdpSocket::bind("[::]:0").is_ok()
 }
 
 /// Blobs a node currently holds, keyed by digest.
@@ -167,7 +175,7 @@ impl LinkNode {
         // Announced on the same address, over TCP, so that a client which has
         // only been told where this node is can still find out who it is.
         let broadcast = Broadcast::start(
-            listen,
+            &router.endpoint().bound_sockets(),
             Announcement {
                 protocol: String::from_utf8_lossy(LINK_ALPN).into_owned(),
                 id: identity.id().to_string(),

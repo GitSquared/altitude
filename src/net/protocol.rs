@@ -18,7 +18,10 @@ use iroh::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use super::{LinkError, LinkResult, announce};
+use super::{
+    LinkError, LinkResult,
+    announce::{self, Announcement},
+};
 
 /// The one ALPN this protocol speaks. Two endpoints that do not agree on this
 /// string never complete a handshake.
@@ -166,7 +169,10 @@ impl NodeTicket {
     /// This is the one-thing-to-type path: the operator is told where a node is
     /// and nothing else. The key comes from the node's own announcement, and a
     /// caller that cares about drift compares it against what it saw last time.
-    pub async fn from_broadcast(address: &str, default_port: u16) -> LinkResult<Self> {
+    pub async fn from_broadcast(
+        address: &str,
+        default_port: u16,
+    ) -> LinkResult<(Self, Announcement)> {
         let (host, port) = split_address(address, default_port);
         let announcement = announce::ask(&host, port).await?;
         if announcement.protocol != String::from_utf8_lossy(LINK_ALPN) {
@@ -181,7 +187,8 @@ impl NodeTicket {
             .id
             .parse()
             .map_err(|error| format!("{host} announced an unreadable key: {error}"))?;
-        Self::from_address(key, &format!("{host}:{port}"), port).await
+        let ticket = Self::from_address(key, &format!("{host}:{port}"), port).await?;
+        Ok((ticket, announcement))
     }
 
     /// A ticket for a node reached at an address an operator typed.

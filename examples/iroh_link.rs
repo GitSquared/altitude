@@ -22,8 +22,8 @@ use std::{
 
 use iroh::EndpointAddr;
 use net::{
-    BlobHash, ClientRecord, LinkClient, LinkError, LinkNode, LinkReply, LinkRequest, LinkResponse,
-    NodeIdentity, NodeTicket,
+    BlobHash, ClientRecord, KnownNodes, LinkClient, LinkError, LinkNode, LinkReply, LinkRequest,
+    LinkResponse, NodeIdentity, NodeTicket, Trust,
 };
 use tokio::{runtime::Builder, time::timeout};
 
@@ -164,8 +164,59 @@ async fn run() -> Result<(), LinkError> {
         fs::metadata(&record_path)?.permissions().mode() & 0o777
     );
 
-    client.close().await?;
+    println!();
+    println!("-- remembering a node --");
+    // The operator was told an address and nothing else. What is remembered is
+    // the key that address answered with, so a *different* answer later is
+    // noticed — which is the whole protection, since the first answer was not
+    // authenticated by anything.
+    let known = KnownNodes::open(dir.join("known_nodes.json"))?;
+    let listen = format!("127.0.0.1:{port}");
+    let first = known.learn(&listen, 0).await?;
+    println!("first sighting:  {:?}", first.trust);
+    known.remember(&listen, &first)?;
+    println!(
+        "remembered:      {} as {}",
+        listen, first.announcement.label
+    );
+    let again = known.learn(&listen, 0).await?;
+    println!("second sighting: {:?}", again.trust);
+
+    // The same address, answering with a different key. A node that was
+    // replaced and a node that was never the one you thought are the same thing
+    // from here, so it is reported rather than followed.
     node.shutdown().await?;
+    let stranger = LinkNode::serve(
+        NodeIdentity::load_or_create(dir.join("stranger.key"))?,
+        ClientRecord::in_memory([]),
+        listen.parse().expect("a valid address"),
+        "a stranger".to_owned(),
+    )
+    .await?;
+    let third = known.learn(&listen, 0).await?;
+    match &third.trust {
+        Trust::Changed { previous } => println!(
+            "third sighting:  CHANGED — remembered {previous}, answered {}",
+            third.announcement.id
+        ),
+        other => println!("third sighting:  {other:?}"),
+    }
+    println!("known nodes:     {}", known.known().len());
+    // Accepting the new key is the same act as meeting a node for the first time.
+    known.remember(&listen, &third)?;
+    println!(
+        "after accepting: {:?}",
+        known.verify(&listen, &third.ticket.id())
+    );
+    // Forgetting means the next meeting is a first sighting again.
+    known.forget(&listen)?;
+    println!(
+        "after forgetting:{:?}",
+        known.verify(&listen, &third.ticket.id())
+    );
+    stranger.shutdown().await?;
+
+    client.close().await?;
     println!();
     println!("both sides closed cleanly");
     Ok(())
