@@ -8,7 +8,11 @@ use std::{
 
 use directories::ProjectDirs;
 
+use crate::net::NodeIdentity;
+
+mod serve;
 mod settings;
+pub use serve::ServeSettings;
 pub use settings::{SettingsError, SettingsFile};
 
 /// How this installation names itself.
@@ -19,12 +23,24 @@ pub use settings::{SettingsError, SettingsFile};
 /// comment knows where the work is. The id is what a machine checks, and it is
 /// deliberately not derived: a name anyone can type is not an identity.
 ///
-/// The id is a placeholder until the transport supplies a keypair to fill it;
-/// nothing outside this installation treats it as trustworthy yet.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// The id is the node's public key, and the keypair that proves it lives beside
+/// the label in the data directory. A name anyone can type is not an identity,
+/// which is why the label is only ever for reading.
+#[derive(Clone, Debug)]
 pub struct InstallationIdentity {
     pub id: String,
     pub label: String,
+}
+
+/// What is written down: the label, and nothing else.
+///
+/// The id is deliberately not recorded. It is the key, and a key written down
+/// beside a name is a second copy that can fall out of agreement with the first
+/// — which then needs a check, and an error, and an operator to resolve it. There
+/// is one source of truth instead, and nothing to keep in step.
+#[derive(Deserialize, Serialize)]
+struct RecordedLabel {
+    label: String,
 }
 
 #[derive(Clone)]
@@ -60,6 +76,30 @@ impl Config {
         &self.data_dir
     }
 
+    /// The same installation's paths, as the node role sees them.
+    ///
+    /// A node is not a client: it keeps its own key, its own record of who has
+    /// connected and its own logs, and it reads its own settings file. One
+    /// machine can be both roles without either seeing the other's state.
+    pub fn serve(&self) -> Self {
+        Self {
+            config_dir: self.config_dir.clone(),
+            data_dir: self.data_dir.join("serve"),
+            cache_dir: self.cache_dir.join("serve"),
+        }
+    }
+
+    /// Where the node role reads its settings.
+    pub fn serve_settings_path(&self) -> PathBuf {
+        self.config_dir.join("serve.toml")
+    }
+
+    /// Use a different data directory, for a caller that was told to.
+    pub fn with_data_dir(mut self, data_dir: PathBuf) -> Self {
+        self.data_dir = data_dir;
+        self
+    }
+
     /// How this installation names itself.
     ///
     /// One installation is one operator on one machine, and this is what a task
@@ -70,15 +110,38 @@ impl Config {
     pub fn identity(&self) -> io::Result<InstallationIdentity> {
         let path = self.data_dir.join("identity");
         match fs::read_to_string(&path) {
-            Ok(recorded) => serde_json::from_str(&recorded).map_err(|error| {
-                io::Error::other(format!(
-                    "{} is not a valid identity: {error}",
-                    path.display()
-                ))
-            }),
+            Ok(recorded) => {
+                let RecordedLabel { label } = serde_json::from_str(&recorded).map_err(|error| {
+                    io::Error::other(format!(
+                        "{} is not a valid identity: {error}",
+                        path.display()
+                    ))
+                })?;
+                Ok(InstallationIdentity {
+                    id: self.key()?.id().to_string(),
+                    label,
+                })
+            }
             Err(error) if error.kind() == ErrorKind::NotFound => self.claim_identity(&path),
             Err(error) => Err(error),
         }
+    }
+
+    /// The keypair that is this installation's identity.
+    ///
+    /// Beside the label rather than inside it, because the two files have
+    /// different natures: one is a secret that is never read by a human, the
+    /// other is a name that appears in task history.
+    fn key(&self) -> io::Result<NodeIdentity> {
+        let path = self.data_dir.join("node.key");
+        NodeIdentity::load_or_create(&path).map_err(|error| {
+            io::Error::other(format!(
+                "this installation's key at {} could not be read: {error}. Restore it from a \
+                 backup if you have one. Minting a new key would change which installation \
+                 this is, and the tasks already delegated under the old id would stay theirs.",
+                path.display()
+            ))
+        })
     }
 
     /// Claim a name for the first time, privately.
@@ -90,12 +153,10 @@ impl Config {
     /// tasks it already delegated were recorded under.
     fn claim_identity(&self, path: &Path) -> io::Result<InstallationIdentity> {
         let label = installation_label();
-        let identity = InstallationIdentity {
-            id: uuid::Uuid::new_v4().to_string(),
+        let recorded = serde_json::to_string_pretty(&RecordedLabel {
             label: label.clone(),
-        };
-        let recorded = serde_json::to_string_pretty(&identity)
-            .map_err(|error| io::Error::other(format!("could not encode an identity: {error}")))?;
+        })
+        .map_err(|error| io::Error::other(format!("could not encode an identity: {error}")))?;
         fs::create_dir_all(&self.data_dir)?;
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true).mode(0o600);
@@ -104,7 +165,10 @@ impl Config {
                 file.write_all(recorded.as_bytes())?;
                 file.sync_all()?;
                 tracing::info!(label = %label, "naming this installation");
-                Ok(identity)
+                Ok(InstallationIdentity {
+                    id: self.key()?.id().to_string(),
+                    label,
+                })
             }
             // Another Altitude process named this installation first; keep its name.
             Err(error) if error.kind() == ErrorKind::AlreadyExists => self.identity(),

@@ -2,8 +2,11 @@ use std::{error::Error, io};
 
 use tokio::signal::unix::{SignalKind, signal};
 
+use clap::Parser;
+
 use crate::{
     agent::AgentEngines,
+    cli::{Cli, Command},
     config::Config,
     db::Database,
     isolation::MicrosandboxIsolation,
@@ -12,12 +15,18 @@ use crate::{
 
 mod agent;
 mod capacity;
+mod cli;
 mod config;
 mod db;
 mod development;
 mod isolation;
+// The settings screen is the caller for this; until it exists nothing in the app
+// dials a remote, so nothing reads what was remembered.
+#[allow(dead_code)]
+mod known_nodes;
 mod logging;
 mod net;
+mod serve;
 mod tasks;
 mod transfer;
 mod tui;
@@ -25,6 +34,14 @@ mod vcs;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
+    match Cli::parse().command {
+        Some(Command::Serve(args)) => serve::run(args).await,
+        None => client().await,
+    }
+}
+
+/// The interactive client: a terminal, and a person at it.
+async fn client() -> Result<(), Box<dyn Error>> {
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
     let config = Config::load()?;

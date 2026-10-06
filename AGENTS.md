@@ -66,6 +66,11 @@ and implementer of bounded pieces—not an autonomous author of the whole v1.
 
 ## Principles
 
+- Prefer removing state to defending it. When a failure mode appears, first ask
+  what would make it impossible rather than what would handle it: a second copy
+  of a fact that can disagree with the first, a retry for a race that will not
+  happen, a fallback for a state that need not exist. Each one has to be
+  maintained, explained and kept in step. Delete the state, or derive it.
 - Keep the task capsule, not an external tracker, as the source of operational truth.
 - Keep portable task state separate from node-local identities, credentials, caches, and runtimes.
 - Prefer small typed protocols and deterministic state transitions over conversational glue.

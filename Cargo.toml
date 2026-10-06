@@ -14,10 +14,13 @@ absolute_paths = "warn"
 [dependencies]
 arboard = { version = "3.6.1", default-features = false }
 base64 = "0.23.1"
+blake3 = "1.8"
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
 directories = "6"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+iroh = "1.3"
 microsandbox = { version = "0.7.3", default-features = false, features = ["local", "net"] }
 # Embed Microsandbox's guest helper without running its host-runtime installer at build time.
 microsandbox-filesystem = { version = "0.7.3", default-features = false, features = ["download-binaries"] }
@@ -31,7 +34,16 @@ sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 terminput = "0.5.15"
 terminput-crossterm = "0.4.11"
 throbber-widgets-tui = { version = "0.11.1", default-features = false }
-tokio = { version = "1.53.1", features = ["rt", "macros", "signal", "sync", "time"] }
+tokio = { version = "1.53.1", features = [
+    "rt",
+    "rt-multi-thread",
+    "io-util",
+    "net",
+    "macros",
+    "signal",
+    "sync",
+    "time",
+] }
 toml = "1.1.6"
 tracing = "0.1"
 tracing-appender = "0.2"
