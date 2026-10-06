@@ -17,12 +17,10 @@ use super::SettingsError;
 
 /// The address a node listens on when nobody has said otherwise.
 ///
-/// The port is unassigned by IANA on every transport, and it is one number to
+/// 25848 is unassigned, which is all a port has to be, and it is one number to
 /// remember: on a phone keypad `ALTIT` is 25848. TCP and UDP both use it, so an
 /// operator has a single address to make reachable and a client has a single
 /// thing to be told.
-///
-/// It should be registered with IANA before this ships to anyone else.
 pub const DEFAULT_LISTEN: &str = "0.0.0.0:25848";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
