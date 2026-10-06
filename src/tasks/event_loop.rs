@@ -7,7 +7,7 @@ use tokio::{sync::mpsc, time};
 
 use crate::{
     agent::TaskReportDecoder,
-    capacity::{HostSampler, NodeCapacity, ResourceSampler, SAMPLE_INTERVAL},
+    capacity::{HostSampler, NodeCapacity, SAMPLE_INTERVAL},
     development::DevelopmentEnvironment,
     isolation::{Command, CommandEvent, CommandSession, IsolationEngine, OutputStream},
     tasks::{

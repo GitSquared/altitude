@@ -203,18 +203,6 @@ impl Default for NodeCapacity {
     }
 }
 
-/// Where the readings come from. Nothing else here touches the host, so a test or
-/// a replay can feed a window without changing the rule.
-pub trait ResourceSampler {
-    /// A fresh reading, or `None` when one is not available yet.
-    ///
-    /// `None` is not an error. CPU utilisation is a difference between two
-    /// refreshes, so the first call has nothing to compare against, and a call
-    /// arriving sooner than the platform's own minimum interval would be noise
-    /// rather than measurement.
-    fn sample(&mut self) -> Option<ResourceSample>;
-}
-
 /// This host, through `sysinfo`.
 ///
 /// Stateful because CPU utilisation is a difference between two refreshes, and
@@ -240,8 +228,14 @@ impl Default for HostSampler {
     }
 }
 
-impl ResourceSampler for HostSampler {
-    fn sample(&mut self) -> Option<ResourceSample> {
+impl HostSampler {
+    /// A fresh reading, or `None` when one is not available yet.
+    ///
+    /// `None` is not an error. CPU utilisation is a difference between two
+    /// refreshes, so the first call has nothing to compare against, and a call
+    /// arriving sooner than the platform's own minimum interval would be noise
+    /// rather than measurement.
+    pub fn sample(&mut self) -> Option<ResourceSample> {
         let now = Instant::now();
         if let Some(last) = self.last_refresh
             && now.duration_since(last) < MINIMUM_CPU_UPDATE_INTERVAL
