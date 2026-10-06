@@ -24,10 +24,21 @@ pub use settings::{SettingsError, SettingsFile};
 /// The id is the node's public key, and the keypair that proves it lives beside
 /// the label in the data directory. A name anyone can type is not an identity,
 /// which is why the label is only ever for reading.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug)]
 pub struct InstallationIdentity {
     pub id: String,
     pub label: String,
+}
+
+/// What is written down: the label, and nothing else.
+///
+/// The id is deliberately not recorded. It is the key, and a key written down
+/// beside a name is a second copy that can fall out of agreement with the first
+/// — which then needs a check, and an error, and an operator to resolve it. There
+/// is one source of truth instead, and nothing to keep in step.
+#[derive(Deserialize, Serialize)]
+struct RecordedLabel {
+    label: String,
 }
 
 #[derive(Clone)]
@@ -74,14 +85,16 @@ impl Config {
         let path = self.data_dir.join("identity");
         match fs::read_to_string(&path) {
             Ok(recorded) => {
-                let recorded: InstallationIdentity =
-                    serde_json::from_str(&recorded).map_err(|error| {
-                        io::Error::other(format!(
-                            "{} is not a valid identity: {error}",
-                            path.display()
-                        ))
-                    })?;
-                self.check_key_matches(recorded)
+                let RecordedLabel { label } = serde_json::from_str(&recorded).map_err(|error| {
+                    io::Error::other(format!(
+                        "{} is not a valid identity: {error}",
+                        path.display()
+                    ))
+                })?;
+                Ok(InstallationIdentity {
+                    id: self.key()?.id().to_string(),
+                    label,
+                })
             }
             Err(error) if error.kind() == ErrorKind::NotFound => self.claim_identity(&path),
             Err(error) => Err(error),
@@ -98,30 +111,6 @@ impl Config {
             .map_err(|error| io::Error::other(format!("could not load this node's key: {error}")))
     }
 
-    /// Whether the recorded identity is still the identity this node holds.
-    ///
-    /// A key that has been replaced under a running installation is worth
-    /// shouting about: the tasks it already delegated are recorded against a
-    /// different id, and quietly adopting the new one would make its own history
-    /// look like somebody else's.
-    fn check_key_matches(
-        &self,
-        recorded: InstallationIdentity,
-    ) -> io::Result<InstallationIdentity> {
-        let id = self.key()?.id().to_string();
-        if recorded.id != id {
-            return Err(io::Error::other(format!(
-                "this installation is recorded as {} but its key now names it {}; \
-                 remove {} to re-identify it, accepting that its earlier tasks stay \
-                 under the old id",
-                recorded.id,
-                id,
-                self.data_dir.join("identity").display()
-            )));
-        }
-        Ok(recorded)
-    }
-
     /// Claim a name for the first time, privately.
     ///
     /// Kept outside the database so the name survives a task history reset, and
@@ -131,12 +120,10 @@ impl Config {
     /// tasks it already delegated were recorded under.
     fn claim_identity(&self, path: &Path) -> io::Result<InstallationIdentity> {
         let label = installation_label();
-        let identity = InstallationIdentity {
-            id: self.key()?.id().to_string(),
+        let recorded = serde_json::to_string_pretty(&RecordedLabel {
             label: label.clone(),
-        };
-        let recorded = serde_json::to_string_pretty(&identity)
-            .map_err(|error| io::Error::other(format!("could not encode an identity: {error}")))?;
+        })
+        .map_err(|error| io::Error::other(format!("could not encode an identity: {error}")))?;
         fs::create_dir_all(&self.data_dir)?;
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true).mode(0o600);
@@ -145,7 +132,10 @@ impl Config {
                 file.write_all(recorded.as_bytes())?;
                 file.sync_all()?;
                 tracing::info!(label = %label, "naming this installation");
-                Ok(identity)
+                Ok(InstallationIdentity {
+                    id: self.key()?.id().to_string(),
+                    label,
+                })
             }
             // Another Altitude process named this installation first; keep its name.
             Err(error) if error.kind() == ErrorKind::AlreadyExists => self.identity(),
