@@ -72,6 +72,29 @@ and implementer of bounded pieces—not an autonomous author of the whole v1.
 - Never merge, deploy, release, or publish on the operator's behalf.
 - Preserve unrelated work and do not modify the existing Straylight deployment while extracting ideas from it.
 
+## Writing
+
+A comment says **why**. If it says **what**, either the code says it or the name
+should. Four kinds, and what happens to each:
+
+- **A decision** — why this and not the obvious thing — stays. Delete it and the
+  code looks like a mistake: the missing relay, the epoch that was deliberately
+  not added, the state that is derived rather than kept. These are the comments
+  worth having, and there are not many of them.
+- **A restatement** — `/// The store.` above `struct Store`, a line explaining
+  the next line — goes. It is a second copy of the code, and it is the copy that
+  goes stale.
+- **A compensation** — a comment that explains a name — means the name is wrong.
+  Change the name.
+- **A module doc** says what the module is for and who calls it. It does not
+  list what is inside; the file already does that.
+
+Names carry the load the comments are not carrying. One word per concept, and no
+synonyms for the same thing. No abbreviations that are not words. A boolean
+reads as a predicate: `is_`, `has_`, `may_`, `wants_`. No `get_` or `set_`, and
+no repeating the type in the method. If a name needs a comment, the name is the
+bug.
+
 ## Tooling
 
 - Use Rust for the active core, with Ratatui, Microsandbox, and Iroh as the
