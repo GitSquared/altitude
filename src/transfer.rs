@@ -9,8 +9,9 @@
 //! Break either rule and two machines can run the same task. Keep both and the
 //! worst case is that nobody runs it for a moment, which is self-repairing.
 //!
-//! Pure. No I/O, no database, no network. See `design/decisions.md` (Q12) for why
-//! authority is possession rather than a version number.
+//! Pure: no I/O, no database, no network. Authority is possession rather than a
+//! version number, because a counter would need a second party to be monotonic
+//! relative to and there is no shared record left to version.
 
 #![allow(dead_code)] // Remove once this module is wired into the application.
 

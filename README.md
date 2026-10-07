@@ -37,7 +37,6 @@ On restart, Watchexec sends SIGTERM and waits for the app to restore the termina
 
 Check changes with `cargo fmt --check`, `cargo check`, and `cargo clippy -- -D warnings`.
 
-Earlier experiments live in `previous/gpt-v1/` (capabilities) and `previous/handwritten-v2/` (UX). They are reference material and are not part of the Rust build.
 
 ## License
 

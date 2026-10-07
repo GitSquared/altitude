@@ -56,13 +56,7 @@ and implementer of bounded pieces—not an autonomous author of the whole v1.
 - The active implementation is moving to Rust at the repository root, starting
   from the handwritten Rust starter. Until that move is complete, do not assume
   the existing TypeScript files are the new implementation.
-- The intended reference layout is `previous/generated-typescript/` and
-  `previous/handwritten-typescript/`. These are historical experiments, not
-  maintained packages, compatibility requirements, or code to port wholesale.
-- Consult previous implementations selectively for behavior and lessons. Keep
-  them out of the active build and test workflow after the move.
-- Preserve local changes during the transition. Moving implementations is a
-  separate task; do not reorganize them incidentally during feature work.
+- Preserve local changes during the transition.
 
 ## Principles
 

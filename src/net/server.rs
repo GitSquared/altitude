@@ -53,7 +53,7 @@ fn ipv6_available() -> bool {
 /// Blobs a server currently holds, keyed by digest.
 ///
 /// In memory on purpose: this spike does not touch the capsule store, and a
-/// restart loses them. See `design/decisions.md` (Q4, Q15).
+/// restart loses them.
 #[derive(Default)]
 struct BlobStore(Mutex<HashMap<BlobHash, Vec<u8>>>);
 

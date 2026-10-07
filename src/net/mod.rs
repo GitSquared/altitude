@@ -1,8 +1,7 @@
 //! Reaching a remote from a client.
 //!
-//! Remotes are dialled by public key. The client↔remote path needs no inbound port
-//! and no public URL; tracker ingress is a separate concern. See
-//! `design/decisions.md` (Q8) for the reasoning.
+//! Remotes are dialled by public key. The client↔remote path needs no inbound
+//! port and no public URL; tracker ingress is a separate concern.
 //!
 //! The serve side is in use: `altitude serve` binds a server, announces it, and
 //! records whoever connects. The dial side has no caller yet — nothing in the app
