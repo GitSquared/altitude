@@ -9,17 +9,14 @@
 //! - [`next_slot_limit`] is the rule that turns readings and demand into a limit.
 //! - [`HostSampler`] is where the readings come from.
 //!
-//! It also owns the base resources a capsule is created with, so the unit of
-//! work and the limit on how many units run at once live together.
-//!
 //! The caller owns the current limit, including the value it starts at. That is
 //! deliberate: the starting value is a product decision, not a property of the
 //! rule, and [`optimistic_start`] is the recommended one.
 //!
-//! Nothing here is bounded by the per-task CPU and memory caps a capsule is
-//! created with. Those are ceilings, not pre-allocations — most tasks use a
-//! fraction of them most of the time — so a limit derived from them would cap a
-//! host far below what it can actually carry. Observation decides instead.
+//! Nothing here is bounded by the CPU and memory a capsule is created with.
+//! Those are ceilings, not pre-allocations — most tasks use a fraction of them
+//! most of the time — so a limit derived from them would cap a host far below
+//! what it can actually carry. Observation decides instead.
 
 use std::{
     cmp::Ordering,
@@ -46,18 +43,6 @@ pub const CPU_TARGET_PERCENT: f64 = 75.0;
 /// Higher than the CPU target: memory is not reclaimed as quickly, and a capsule
 /// that runs out of it fails rather than slows down.
 pub const MEMORY_TARGET_PERCENT: f64 = 80.0;
-
-/// The base resources one capsule is created with.
-///
-/// These are ceilings the sandbox enforces, not reservations: most tasks use a
-/// fraction of them most of the time, which is why how many run at once is
-/// observed rather than derived from these. Nothing changes them once a capsule
-/// exists, and they are deliberately not configurable per environment: one
-/// allocation for every capsule, for now. The values themselves are still
-/// arbitrary placeholders.
-pub const CAPSULE_CPUS: u8 = 4;
-pub const CAPSULE_MEMORY_MIB: u32 = 5 * 1_024;
-pub const CAPSULE_DISK_MIB: u32 = 15 * 1_024;
 
 /// The fewest readings at which the window says anything worth acting on.
 ///

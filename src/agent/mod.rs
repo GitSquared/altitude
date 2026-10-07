@@ -1,5 +1,5 @@
 use crate::isolation::EnvironmentRecipe;
-use crate::tasks::{TaskAgentTurnContext, TaskAgentTurnReport};
+use crate::task::{TaskAgentTurnContext, TaskAgentTurnReport};
 use serde::{Deserialize, Serialize};
 use sqlx::Type;
 use std::{error::Error as StdError, fmt, str::FromStr};

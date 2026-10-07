@@ -10,8 +10,10 @@ use crate::{
 use futures_util::future::join_all;
 use std::{collections::HashMap, error::Error, fmt, path::PathBuf};
 use uuid::Uuid;
+mod capacity;
 mod event_loop;
 mod state;
+mod transfer;
 pub use event_loop::{TaskEventLoop, TaskExecutionUpdate};
 mod progress;
 mod store;

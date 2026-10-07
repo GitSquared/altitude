@@ -10,7 +10,7 @@ use chrono::{Local, TimeZone};
 
 use super::palette;
 use crate::{
-    tasks::{TaskOperatorSignal, TaskOperatorSignalKind, TaskOperatorSignalPriority},
+    task::{TaskOperatorSignal, TaskOperatorSignalKind, TaskOperatorSignalPriority},
     tui::utils::centered_width,
 };
 

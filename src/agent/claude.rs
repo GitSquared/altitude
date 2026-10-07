@@ -4,7 +4,7 @@ use super::{
 use crate::isolation::{
     DefaultFile, EnvironmentRecipe, GuestPath, PersistentDirectory, shell_quote,
 };
-use crate::tasks::{TaskAgentTurnContext, TaskAgentTurnReport};
+use crate::task::{TaskAgentTurnContext, TaskAgentTurnReport};
 use serde_json::Value;
 use std::mem;
 use uuid::Uuid;

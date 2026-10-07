@@ -9,7 +9,7 @@ use ratatui::{
 
 use crate::{
     isolation::EnvironmentProgress,
-    tasks::{
+    task::{
         Task, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
         TaskOperatorAttentionLevel, TaskOperatorSignalKind,
     },

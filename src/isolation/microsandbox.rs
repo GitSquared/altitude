@@ -17,7 +17,6 @@ use microsandbox::{
 };
 use tokio::sync::{Mutex, mpsc, watch};
 
-use crate::capacity::{CAPSULE_CPUS, CAPSULE_DISK_MIB, CAPSULE_MEMORY_MIB};
 use crate::config::Config;
 use crate::development::DevelopmentEnvironment;
 
@@ -29,6 +28,16 @@ use super::{
 };
 
 const BASE_IMAGE: &str = "alpine";
+
+/// What one capsule is created with.
+///
+/// Ceilings the sandbox enforces, not reservations: most tasks use a fraction of
+/// them most of the time, which is why how many run at once is observed rather
+/// than derived from these. Deliberately not configurable per environment — one
+/// allocation for every capsule, for now — and the values are still arbitrary.
+const CAPSULE_CPUS: u8 = 4;
+const CAPSULE_MEMORY_MIB: u32 = 5 * 1_024;
+const CAPSULE_DISK_MIB: u32 = 15 * 1_024;
 
 /// The packages every sandbox gets, before any environment adds its own.
 ///

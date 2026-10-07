@@ -11,11 +11,10 @@ use crate::{
     db::Database,
     isolation::MicrosandboxIsolation,
     remote::RemoteKeys,
-    tasks::{TaskEventLoop, TaskService, TaskStore},
+    task::{TaskEventLoop, TaskService, TaskStore},
 };
 
 mod agent;
-mod capacity;
 mod cli;
 mod config;
 mod db;
@@ -25,8 +24,7 @@ mod isolation;
 // dials a remote, so nothing reads what was remembered.
 mod logging;
 mod remote;
-mod tasks;
-mod transfer;
+mod task;
 mod tui;
 mod vcs;
 

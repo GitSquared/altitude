@@ -22,11 +22,11 @@ use crate::{
     development::DevelopmentEnvironment,
     isolation::{EnvironmentDescription, EnvironmentProgress, IsolationEngine, ProfileSummary},
     remote::{RemoteKey, RemoteKeys},
-    tasks::{
+    task::{
         Task, TaskExecutionMode, TaskExecutionStatus, TaskOperatorSignal, TaskService,
         TaskServiceError,
     },
-    tasks::{TaskEventLoop, TaskExecutionUpdate},
+    task::{TaskEventLoop, TaskExecutionUpdate},
 };
 
 mod boot;
