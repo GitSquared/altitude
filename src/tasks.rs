@@ -18,7 +18,9 @@ mod store;
 pub use state::*;
 pub use store::TaskStore;
 
-use crate::isolation::{EnvironmentDescription, EnvironmentProgress};
+use crate::isolation::{
+    EnvironmentDescription, EnvironmentProgress, ProfileMount, ProfileSummary, guest_path,
+};
 use progress::EnvironmentProgressRegistry;
 
 #[derive(Clone)]
@@ -667,6 +669,32 @@ where
     /// Recovery is not starting. This puts a task's work back on disk and leaves
     /// it waiting, so the caller decides what the host can carry; starting here
     /// would run everything at once on the way up.
+    /// Every profile a task mounts, so an interface can say what logins exist.
+    ///
+    /// Built from the same recipes a task is provisioned with, so this cannot
+    /// drift from what is actually mounted.
+    pub fn profiles(&self) -> Vec<ProfileSummary> {
+        let recipes = [
+            self.agents.engine(AgentKind::Pi).environment_recipe(),
+            self.agents.engine(AgentKind::Claude).environment_recipe(),
+            GitHub::environment_recipe(),
+        ];
+        recipes
+            .into_iter()
+            .map(|recipe| ProfileSummary {
+                profile: recipe.profile,
+                mounts: recipe
+                    .directories
+                    .iter()
+                    .map(|directory| ProfileMount {
+                        path: directory.relative_path,
+                        guest: guest_path(&directory.guest_path),
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
     /// What the workspace base says about itself, for an interface that
     /// describes environments rather than runs them.
     pub fn base_description(&self) -> Option<EnvironmentDescription> {

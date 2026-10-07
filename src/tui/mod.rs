@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
-    io,
+    fs, io,
+    path::Path,
     time::Duration,
 };
 
@@ -20,7 +21,9 @@ use crate::{
     agent::AgentKind,
     config::{Config, SettingsError, SettingsFile},
     development::DevelopmentEnvironment,
-    isolation::{EnvironmentDescription, EnvironmentProgress, IsolationEngine, OutputStream},
+    isolation::{
+        EnvironmentDescription, EnvironmentProgress, IsolationEngine, OutputStream, ProfileSummary,
+    },
     remote_keys::{RemoteKey, RemoteKeys},
     tasks::{
         Task, TaskExecutionMode, TaskExecutionStatus, TaskOperatorSignal, TaskService,
@@ -48,7 +51,9 @@ use chrome::Hint;
 use confirm::{Confirm, Decision};
 use keys::{is_dismiss, is_help, is_remove};
 use prompt::{Prompt, PromptAction};
-use settings_panel::{Depth, Focus, Form, Panel, Row, RowKind, Section, Setting, Target, View};
+use settings_panel::{
+    Depth, Focus, Form, Identity, IdentityKind, Panel, Row, RowKind, Section, Setting, Target, View,
+};
 use shell::Shell;
 
 pub use boot::{
@@ -105,6 +110,8 @@ pub struct App {
     remembered_keys: Vec<RemoteKey>,
     /// What the built base environment is made of, as of the panel being opened.
     base_description: Option<EnvironmentDescription>,
+    /// The profiles a task mounts, read when the panel opens.
+    profiles: Vec<ProfileSummary>,
 }
 
 impl App {
@@ -163,6 +170,7 @@ impl App {
             remote_keys,
             remembered_keys: Vec::new(),
             base_description: None,
+            profiles: Vec::new(),
             environment_builds: HashMap::new(),
             shimmer: 0,
             capacity: None,
@@ -345,12 +353,49 @@ impl App {
             }],
             Section::Identity => Vec::new(),
         };
+        let identities = self.identities();
         View {
             rows,
-            identity_label: self.identity_label(),
-            identity_key: self.identity_key(),
+            identities,
             base: self.base_description.clone(),
         }
+    }
+
+    /// The identities this machine holds: the installation, then each login a
+    /// task is given.
+    ///
+    /// Names and places only. A credential is never read, and never shown.
+    fn identities(&self) -> Vec<Identity> {
+        let mut identities = Vec::new();
+        let identity = self.config.identity();
+        identities.push(Identity {
+            label: "Altitude".to_owned(),
+            kind: IdentityKind::Installation {
+                label: identity
+                    .as_ref()
+                    .map(|identity| identity.label.clone())
+                    .unwrap_or_else(|error| format!("unreadable: {error}")),
+                key: identity
+                    .as_ref()
+                    .map(|identity| identity.id.clone())
+                    .unwrap_or_else(|error| format!("unreadable: {error}")),
+                data_dir: self.config.data_dir().display().to_string(),
+            },
+        });
+        for profile in self.profiles.iter() {
+            let directory = self.config.profile_dir(profile.profile);
+            identities.push(Identity {
+                label: profile_label(profile.profile).to_owned(),
+                kind: IdentityKind::Profile {
+                    profile: profile.profile.to_owned(),
+                    present: directory.is_dir(),
+                    account: account_name(&directory),
+                    directory: directory.display().to_string(),
+                    mounts: profile.mounts.clone(),
+                },
+            });
+        }
+        identities
     }
 
     /// The addresses the settings file configures.
@@ -361,20 +406,7 @@ impl App {
             .unwrap_or_default()
     }
 
-    fn identity_label(&self) -> String {
-        self.config
-            .identity()
-            .map(|identity| identity.label)
-            .unwrap_or_else(|error| format!("unreadable: {error}"))
-    }
-
-    fn identity_key(&self) -> String {
-        self.config
-            .identity()
-            .map(|identity| identity.id)
-            .unwrap_or_else(|error| format!("unreadable: {error}"))
-    }
-
+    /// How the rows of the focused list are counted, which is what moving needs.
     /// How many rows the focused list holds, which is what moving needs.
     fn row_count(&self) -> usize {
         match self.panel.section {
@@ -382,7 +414,7 @@ impl App {
             Section::Agent => 2,
             Section::Remotes => self.configured_remotes().len(),
             Section::Interface => 1,
-            Section::Identity => 0,
+            Section::Identity => self.profiles.len() + 1,
         }
     }
 
@@ -1116,10 +1148,35 @@ where
         return;
     }
     app.base_description = task_service.base_description();
+    app.profiles = task_service.profiles();
     match app.remote_keys.list().await {
         Ok(keys) => app.remembered_keys = keys,
         Err(error) => app.notice = Some(format!("could not read remembered remotes: {error}")),
     }
+}
+
+/// A profile's name, for a list that has no room for its path.
+fn profile_label(profile: &str) -> &str {
+    match profile.rsplit('/').next().unwrap_or(profile) {
+        "claude" => "Claude Code",
+        "pi" => "Pi",
+        "github" => "GitHub",
+        other => other,
+    }
+}
+
+/// The account a profile is signed in as, where a name can be read without
+/// reading a credential.
+///
+/// The GitHub CLI keeps the account name beside the token in its hosts file, and
+/// only the name is read.
+fn account_name(directory: &Path) -> Option<String> {
+    let hosts = fs::read_to_string(directory.join("gh/hosts.yml")).ok()?;
+    hosts.lines().find_map(|line| {
+        let value = line.trim().strip_prefix("user:")?;
+        let value = value.trim().trim_matches('"');
+        (!value.is_empty()).then(|| value.to_owned())
+    })
 }
 
 fn show_task_error(app: &mut App, id: &str, error: TaskServiceError) {

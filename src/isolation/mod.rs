@@ -114,6 +114,35 @@ pub struct BaseSandboxSnapshot {
     pub setup_command: String,
 }
 
+/// A profile a task mounts into its sandbox: where it lives on this machine, and
+/// where a task sees it.
+///
+/// A profile is how a login survives between tasks, so this is the shape of the
+/// answer to "what identity is logged in": the names and the places, never the
+/// contents.
+#[derive(Clone, Debug)]
+pub struct ProfileSummary {
+    /// The recipe's stable profile identity, e.g. `agents/claude`.
+    pub profile: &'static str,
+    /// Each mounted directory, as its path inside the profile and where a task
+    /// finds it.
+    pub mounts: Vec<ProfileMount>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProfileMount {
+    pub path: &'static str,
+    pub guest: String,
+}
+
+/// Where a task finds a mounted directory.
+pub fn guest_path(guest: &GuestPath) -> String {
+    match guest {
+        GuestPath::Absolute(path) => (*path).to_owned(),
+        GuestPath::HomeRelative(path) => format!("~/{path}"),
+    }
+}
+
 /// What a built environment says about itself.
 ///
 /// Read back from the snapshot rather than derived from configuration, because

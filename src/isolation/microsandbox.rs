@@ -29,12 +29,38 @@ use super::{
 };
 
 const BASE_IMAGE: &str = "alpine";
-const WORKSPACE_SETUP: &str = concat!(
-    "set -eu\napk upgrade --no-cache\napk add --no-cache bash curl python3 py3-pip jq coreutils findutils sed grep nodejs npm ripgrep libgcc libstdc++",
-    "\ncat > /root/README.md <<'ALTITUDE_WORKSPACE_README'\n",
-    include_str!("assets/workspace.md"),
-    "ALTITUDE_WORKSPACE_README\n",
-);
+
+/// The packages every sandbox gets, before any environment adds its own.
+///
+/// Named once, because two things derive from the list: the command that
+/// installs them, and the command that asks a finished snapshot what versions it
+/// ended up with. The image's own plumbing is deliberately absent — it is true
+/// of every sandbox and tells an operator nothing.
+const WORKSPACE_PACKAGES: &[&str] = &[
+    "bash",
+    "curl",
+    "python3",
+    "py3-pip",
+    "jq",
+    "coreutils",
+    "findutils",
+    "sed",
+    "grep",
+    "nodejs",
+    "npm",
+    "ripgrep",
+    "libgcc",
+    "libstdc++",
+];
+
+/// What the workspace is built from, as the build runs it.
+fn workspace_setup() -> String {
+    format!(
+        "set -eu\napk upgrade --no-cache\napk add --no-cache {}\ncat > /root/README.md <<'ALTITUDE_WORKSPACE_README'\n{}ALTITUDE_WORKSPACE_README\n",
+        WORKSPACE_PACKAGES.join(" "),
+        include_str!("assets/workspace.md"),
+    )
+}
 const PREPARATION_SANDBOX: &str = "altitude-base-image-setup";
 
 /// What a finished snapshot is made of, asked inside it.
@@ -45,13 +71,20 @@ const PREPARATION_SANDBOX: &str = "altitude-base-image-setup";
 /// versions, so nothing outside the snapshot can say what an operator ended up
 /// with.
 ///
-/// The packages are the ones the build *asked* for (`/etc/apk/world`) rather than
-/// everything present. Both are true; the requested list is the one a person can
-/// read, and it is what an environment is actually made of.
-const DESCRIPTION_COMMAND: &str = concat!(
-    "printf 'alpine\\t%s\\n' \"$(cat /etc/alpine-release 2>/dev/null || echo unknown)\"\n",
-    "printf 'packages\\t%s\\n' \"$(tr '\\n' ' ' < /etc/apk/world 2>/dev/null)\"\n",
-);
+/// The packages are the ones the workspace asked for, with their versions,
+/// rather than everything present: the image's own plumbing is true of every
+/// sandbox and tells an operator nothing, while the version of Python they got
+/// is worth knowing.
+fn description_command() -> String {
+    // `apk info -v` with no arguments lists every installed package as
+    // `name-version`; the list is filtered to the ones the workspace asked for,
+    // because the image's own plumbing is true of every sandbox and tells an
+    // operator nothing.
+    format!(
+        "printf 'alpine\\t%s\\n' \"$(cat /etc/alpine-release 2>/dev/null || echo unknown)\"\nprintf 'packages\\t%s\\n' \"$(apk info -v 2>/dev/null | grep -E '^({})-[0-9]' | tr '\\n' ' ')\"\n",
+        WORKSPACE_PACKAGES.join("|"),
+    )
+}
 
 #[derive(Clone)]
 pub struct MicrosandboxIsolation {
@@ -166,7 +199,7 @@ impl MicrosandboxIsolation {
                 Duration::from_secs(72 * 60 * 60),
                 vec![SetupStep::new(
                     "preparing workspace packages",
-                    WORKSPACE_SETUP,
+                    workspace_setup(),
                 )],
             ),
             None,
@@ -319,7 +352,8 @@ impl MicrosandboxIsolation {
             tracing::warn!("the sandbox would not describe itself");
             (String::new(), String::new())
         };
-        let Ok((0, output)) = self.run_to_end(sandbox_id, DESCRIPTION_COMMAND).await else {
+        let command = description_command();
+        let Ok((0, output)) = self.run_to_end(sandbox_id, &command).await else {
             return unreadable();
         };
         let mut alpine = String::new();

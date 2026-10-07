@@ -23,7 +23,7 @@ use ratatui::{
 
 use crate::{
     agent::AgentKind,
-    isolation::{EnvironmentDescription, REFRESH_AFTER},
+    isolation::{EnvironmentDescription, ProfileMount, REFRESH_AFTER},
     remote_keys::RemoteKey,
     tui::text::{Field, FieldStyle, TextBox},
 };
@@ -170,10 +170,35 @@ impl Row {
 /// remembered keys, and the built environments.
 pub struct View {
     pub rows: Vec<Row>,
-    pub identity_label: String,
-    pub identity_key: String,
+    /// The identities on this machine: this installation, then each login a task
+    /// is given.
+    pub identities: Vec<Identity>,
     /// What the base environment is made of, once it has been built here.
     pub base: Option<EnvironmentDescription>,
+}
+
+/// One identity, as the list shows it.
+pub struct Identity {
+    pub label: String,
+    pub kind: IdentityKind,
+}
+
+pub enum IdentityKind {
+    /// This installation: the key that names it and where its state lives.
+    Installation {
+        label: String,
+        key: String,
+        data_dir: String,
+    },
+    /// A profile a task mounts. Presence and place only: never the contents.
+    Profile {
+        profile: String,
+        directory: String,
+        present: bool,
+        /// The account name, where one can be read without reading a credential.
+        account: Option<String>,
+        mounts: Vec<ProfileMount>,
+    },
 }
 
 // ------------------------------------------------------------------ the state
@@ -463,24 +488,12 @@ fn detail(panel: &Panel, view: &View, focused: bool) -> Paragraph<'static> {
     };
 
     match panel.section {
-        Section::Identity => Paragraph::new(vec![
-            heading("This installation".to_owned()),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("label     ", palette::muted()),
-                view.identity_label.clone().into(),
-            ]),
-            Line::from(vec![
-                Span::styled("key       ", palette::muted()),
-                view.identity_key.clone().into(),
-            ]),
-            Line::from(""),
-            Line::styled(
-                "Read-only: the key names this machine, and cannot be edited here.",
-                palette::muted(),
-            ),
-        ])
-        .wrap(Wrap { trim: true }),
+        Section::Identity => match view.identities.get(panel.selected) {
+            Some(identity) => {
+                Paragraph::new(identity_lines(identity, heading)).wrap(Wrap { trim: true })
+            }
+            None => Paragraph::new(Span::styled("", palette::muted())),
+        },
 
         _ => match panel.selected_row(view) {
             Some(Row {
@@ -632,6 +645,8 @@ fn base_lines(
 ) -> Vec<Line<'static>> {
     let mut lines = vec![
         heading("Base environment".to_owned()),
+        // The subtitle rather than a postscript: it is true of the whole page.
+        Line::styled("built in · cannot be edited or deleted", palette::muted()),
         Line::from(""),
         Line::from(
             "Altitude runs your tasks in sandboxes that move between machines as you delegate \
@@ -646,11 +661,20 @@ fn base_lines(
                 description.alpine_release
             )));
             lines.push(Line::from(""));
-            lines.push(Line::from(if description.packages.is_empty() {
-                "nothing beyond the base image".to_owned()
+            // One package a line: a list of versions is read, not scanned.
+            if description.packages.is_empty() {
+                lines.push(Line::styled(
+                    "nothing beyond the base image",
+                    palette::muted(),
+                ));
             } else {
-                description.packages.join(" ")
-            }));
+                lines.extend(
+                    description
+                        .packages
+                        .iter()
+                        .map(|package| Line::from(package.clone())),
+                );
+            }
             lines.push(Line::from(""));
             lines.push(Line::from(format!(
                 "Built {}, and refreshed automatically every {} hours, so security patches \
@@ -666,11 +690,87 @@ fn base_lines(
             ));
         }
     }
-    lines.push(Line::from(""));
-    lines.push(Line::styled(
-        "Built in: it cannot be edited or deleted.",
-        palette::muted(),
-    ));
+    lines
+}
+
+/// What is known about one identity.
+fn identity_lines(
+    identity: &Identity,
+    heading: impl Fn(String) -> Line<'static>,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![heading(identity.label.clone()), Line::from("")];
+    match &identity.kind {
+        IdentityKind::Installation {
+            label,
+            key,
+            data_dir,
+        } => {
+            lines.push(Line::from(vec![
+                Span::styled("label     ", palette::muted()),
+                label.clone().into(),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("key       ", palette::muted()),
+                key.clone().into(),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("state     ", palette::muted()),
+                data_dir.clone().into(),
+            ]));
+            lines.push(Line::from(""));
+            lines.push(Line::styled(
+                "The key names this machine and cannot be edited here. It is what a tracker's \
+                 actor is mapped to, and what a remote checks.",
+                palette::muted(),
+            ));
+        }
+        IdentityKind::Profile {
+            profile,
+            directory,
+            present,
+            account,
+            mounts,
+        } => {
+            lines.push(Line::styled(
+                if *present { "set up" } else { "not set up yet" },
+                if *present {
+                    palette::good()
+                } else {
+                    palette::muted()
+                },
+            ));
+            lines.push(Line::from(""));
+            if let Some(account) = account {
+                lines.push(Line::from(vec![
+                    Span::styled("account   ", palette::muted()),
+                    account.clone().into(),
+                ]));
+            }
+            lines.push(Line::from(vec![
+                Span::styled("profile   ", palette::muted()),
+                profile.clone().into(),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("on disk   ", palette::muted()),
+                directory.clone().into(),
+            ]));
+            if !mounts.is_empty() {
+                lines.push(Line::from(""));
+                lines.push(Line::styled("A task sees", palette::muted()));
+                lines.extend(
+                    mounts
+                        .iter()
+                        .map(|mount| Line::from(format!("{}  →  {}", mount.guest, mount.path))),
+                );
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::styled(
+                "A login is kept here and mounted into every task, so it survives between them. \
+                 Altitude shows where it lives and never its contents.",
+                palette::muted(),
+            ));
+        }
+    }
     lines
 }
 
