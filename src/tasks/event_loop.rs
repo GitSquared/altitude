@@ -6,7 +6,7 @@ use std::{
 use tokio::{sync::mpsc, time};
 
 use crate::{
-    agent::TaskReportDecoder,
+    agent::{AgentKind, TaskReportDecoder},
     capacity::{HostCapacity, HostSampler, SAMPLE_INTERVAL},
     development::DevelopmentEnvironment,
     isolation::{Command, CommandEvent, CommandSession, IsolationEngine, OutputStream},
@@ -377,11 +377,11 @@ where
         }
     }
 
-    pub fn create(&self, prompt: String, environment: DevelopmentEnvironment) {
-        tracing::info!(harness = %environment.harness, "creating task");
+    pub fn create(&self, prompt: String, environment: DevelopmentEnvironment, agent: AgentKind) {
+        tracing::info!(agent = %agent, environment = %environment.name, "creating task");
         let event_loop = self.clone();
         tokio::spawn(async move {
-            let task = match event_loop.service.create(prompt, environment).await {
+            let task = match event_loop.service.create(prompt, environment, agent).await {
                 Ok(task) => task,
                 Err(error) => {
                     let _ = event_loop

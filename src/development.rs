@@ -1,4 +1,3 @@
-use crate::agent::AgentKind;
 use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt};
 
@@ -13,10 +12,6 @@ pub const BASE_NAME: &str = "base";
 pub struct DevelopmentEnvironment {
     pub name: String,
     pub setup_command: String,
-    /// The coding harness Altitude drives in this environment. Isolation
-    /// ignores it; task execution uses it to pick an agent engine.
-    #[serde(default)]
-    pub harness: AgentKind,
 }
 
 impl DevelopmentEnvironment {
@@ -31,7 +26,6 @@ impl DevelopmentEnvironment {
         Self {
             name: BASE_NAME.to_owned(),
             setup_command: String::new(),
-            harness: AgentKind::default(),
         }
     }
 

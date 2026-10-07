@@ -70,13 +70,17 @@ where
         self.store.list().await.map_err(TaskServiceError::Task)
     }
 
-    /// Start a task in the harness its environment names.
+    /// Start a task, driven by `agent` in `environment`.
+    ///
+    /// The two are independent: the environment says what is installed, and the
+    /// agent says what works in it.
     pub async fn create(
         &self,
         intent: String,
         environment: DevelopmentEnvironment,
+        agent: AgentKind,
     ) -> Result<Task, TaskServiceError> {
-        let kind = environment.harness;
+        let kind = agent;
         self.store
             .create_with_agent(
                 intent,

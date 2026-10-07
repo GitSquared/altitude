@@ -35,10 +35,7 @@ pub fn draw(
             } else {
                 ""
             };
-            ListItem::new(Line::from(format!(
-                "{} · {}{marker}",
-                environment.name, environment.harness
-            )))
+            ListItem::new(Line::from(format!("{}{marker}", environment.name)))
         })
         .collect::<Vec<_>>();
     let list = List::new(items)
@@ -50,10 +47,11 @@ pub fn draw(
     let detail = environments
         .get(selected)
         .map(|environment| {
-            format!(
-                "harness: {}\n\n{}",
-                environment.harness, environment.setup_command
-            )
+            if environment.setup_command.trim().is_empty() {
+                "Nothing on top of the base.".to_owned()
+            } else {
+                environment.setup_command.clone()
+            }
         })
         .unwrap_or_else(|| "No environments are configured. Press n to add one.".to_owned());
     frame.render_widget(

@@ -37,14 +37,16 @@ const GAP: u16 = 3;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     Environments,
+    Agent,
     Remotes,
     Interface,
     Identity,
 }
 
 impl Section {
-    pub const ALL: [Section; 4] = [
+    pub const ALL: [Section; 5] = [
         Self::Environments,
+        Self::Agent,
         Self::Remotes,
         Self::Interface,
         Self::Identity,
@@ -53,6 +55,7 @@ impl Section {
     pub fn title(self) -> &'static str {
         match self {
             Self::Environments => "Environments",
+            Self::Agent => "Agent",
             Self::Remotes => "Remotes",
             Self::Interface => "Interface",
             Self::Identity => "Identity",
@@ -130,9 +133,13 @@ pub enum RowKind {
     Environment {
         /// The name as configured, which is what an edit replaces.
         name: String,
-        harness: AgentKind,
         setup: String,
         is_default: bool,
+    },
+    /// A coding agent, and whether it is the one in use.
+    Agent {
+        kind: AgentKind,
+        in_use: bool,
     },
     Remote {
         address: String,
@@ -279,13 +286,7 @@ impl Target {
         if self.is_remote() {
             &[Focus::Primary, Focus::Cancel, Focus::Save]
         } else {
-            &[
-                Focus::Primary,
-                Focus::Harness,
-                Focus::Setup,
-                Focus::Cancel,
-                Focus::Save,
-            ]
+            &[Focus::Primary, Focus::Setup, Focus::Cancel, Focus::Save]
         }
     }
 }
@@ -294,7 +295,6 @@ impl Target {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Primary,
-    Harness,
     Setup,
     Cancel,
     Save,
@@ -312,17 +312,15 @@ pub struct Form {
     pub target: Target,
     /// The environment's name, or the remote's address.
     pub primary: Field,
-    pub harness: AgentKind,
     pub setup: TextBox,
     pub focus: Focus,
 }
 
 impl Form {
-    pub fn new(target: Target, primary: &str, harness: AgentKind, setup: &str) -> Self {
+    pub fn new(target: Target, primary: &str, setup: &str) -> Self {
         Self {
             target,
             primary: Field::with(primary),
-            harness,
             setup: TextBox::new(setup),
             focus: Focus::Primary,
         }
@@ -493,20 +491,10 @@ fn detail(panel: &Panel, view: &View, focused: bool) -> Paragraph<'static> {
                 label,
                 kind:
                     RowKind::Environment {
-                        harness,
-                        setup,
-                        is_default,
-                        ..
+                        setup, is_default, ..
                     },
             }) => {
-                let mut lines = vec![
-                    heading(label.clone()),
-                    Line::from(""),
-                    Line::from(vec![
-                        Span::styled("harness   ", palette::muted()),
-                        harness.to_string().into(),
-                    ]),
-                ];
+                let mut lines = vec![heading(label.clone())];
                 if *is_default {
                     lines.push(Line::from(""));
                     lines.push(Line::styled(
@@ -524,6 +512,38 @@ fn detail(panel: &Panel, view: &View, focused: bool) -> Paragraph<'static> {
                 } else {
                     lines.push(Line::from(setup.clone()));
                 }
+                Paragraph::new(lines).wrap(Wrap { trim: true })
+            }
+            Some(Row {
+                label,
+                kind: RowKind::Agent { kind, in_use },
+            }) => {
+                let mut lines = vec![
+                    heading(label.clone()),
+                    Line::from(""),
+                    Line::styled(
+                        if *in_use { "in use" } else { "not in use" },
+                        if *in_use {
+                            palette::good()
+                        } else {
+                            palette::muted()
+                        },
+                    ),
+                    Line::from(""),
+                    Line::from(match kind {
+                        AgentKind::Pi => {
+                            "Altitude's own agent. It needs no provider login of its own."
+                        }
+                        AgentKind::Claude => {
+                            "Claude Code. Its login lives in Claude's profile on this machine, \
+                             and never travels with a task."
+                        }
+                    }),
+                ];
+                lines.push(Line::from(""));
+                lines.push(
+                    Line::from("Choose it to drive new tasks.".to_owned()).style(palette::muted()),
+                );
                 Paragraph::new(lines).wrap(Wrap { trim: true })
             }
             Some(Row {
@@ -592,6 +612,7 @@ fn detail(panel: &Panel, view: &View, focused: bool) -> Paragraph<'static> {
                     "No remotes are configured. Press n to add one.",
                     palette::muted(),
                 ),
+                Section::Agent => Span::styled("", palette::muted()),
                 Section::Interface => Span::styled("", palette::muted()),
                 Section::Identity => unreachable!("identity has no rows"),
             }),
@@ -701,12 +722,8 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &Form) {
         );
         let _ = rest;
     } else {
-        let [primary, harness, setup] = Layout::vertical([
-            Constraint::Length(4),
-            Constraint::Length(3),
-            Constraint::Min(5),
-        ])
-        .areas(fields);
+        let [primary, setup] =
+            Layout::vertical([Constraint::Length(4), Constraint::Min(5)]).areas(fields);
 
         draw_label(frame, primary, form.target.primary_label());
         form.primary.draw(
@@ -717,12 +734,6 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &Form) {
                 title: None,
                 prefix: "",
             },
-        );
-
-        draw_label(frame, harness, "Harness");
-        frame.render_widget(
-            Paragraph::new(harness_line(form.harness, form.focus == Focus::Harness)),
-            field_box(harness),
         );
 
         draw_label(frame, setup, "Setup command");
@@ -751,24 +762,4 @@ fn draw_label(frame: &mut Frame, area: Rect, text: &str) {
 fn field_box(area: Rect) -> Rect {
     let [_, input] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
     input
-}
-
-fn harness_line(harness: AgentKind, focused: bool) -> Line<'static> {
-    let mut spans = Vec::new();
-    for choice in [AgentKind::Pi, AgentKind::Claude] {
-        let picked = choice == harness;
-        let text = format!(" {} {} ", if picked { "◉" } else { "○" }, choice);
-        spans.push(Span::styled(
-            text,
-            if focused && picked {
-                palette::focus()
-            } else if picked {
-                palette::accent()
-            } else {
-                palette::muted()
-            },
-        ));
-        spans.push("   ".into());
-    }
-    Line::from(spans)
 }

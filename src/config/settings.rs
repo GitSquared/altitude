@@ -1,4 +1,7 @@
-use crate::development::{BASE_NAME, DevelopmentEnvironment, is_base_name};
+use crate::{
+    agent::AgentKind,
+    development::{BASE_NAME, DevelopmentEnvironment, is_base_name},
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
@@ -37,6 +40,14 @@ pub struct Settings {
     /// How the interface behaves, as opposed to what it configures.
     #[serde(default)]
     interface: Interface,
+    /// The coding agent Altitude drives, until one has been chosen.
+    ///
+    /// Independent of environments: an environment is what is installed, an
+    /// agent is what works in it, and the same environment is useful with
+    /// either. Absent means nobody has chosen yet, which is the one thing an
+    /// interface cannot guess on someone's behalf.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent: Option<AgentKind>,
 }
 
 /// Preferences about the interface itself.
@@ -155,6 +166,16 @@ impl Settings {
     /// The addresses this host delegates to.
     pub fn remotes(&self) -> &[String] {
         &self.remotes
+    }
+
+    /// The coding agent Altitude drives, if one has been chosen.
+    pub fn agent(&self) -> Option<AgentKind> {
+        self.agent
+    }
+
+    /// Choose the coding agent Altitude drives.
+    pub fn set_agent(&mut self, agent: AgentKind) {
+        self.agent = Some(agent);
     }
 
     /// How the interface behaves.

@@ -29,6 +29,7 @@ use crate::{
     tasks::{TaskEventLoop, TaskExecutionUpdate},
 };
 
+mod agent_picker;
 mod boot;
 mod chrome;
 mod confirm;
@@ -94,6 +95,9 @@ pub struct App {
     confirm: Option<PendingConfirm>,
     /// The keys for wherever you are, shown over whatever is there.
     help: bool,
+    /// The first-run question, held while the task it was asked for waits.
+    open_agent_picker: bool,
+    selected_agent: usize,
     /// What each address last answered with. Written by the dial once there is
     /// one; read when the panel opens.
     remote_keys: RemoteKeys,
@@ -154,6 +158,8 @@ impl App {
             panel: Panel::new(),
             confirm: None,
             help: false,
+            open_agent_picker: false,
+            selected_agent: 0,
             remote_keys,
             remembered_keys: Vec::new(),
             base_description: None,
@@ -290,7 +296,6 @@ impl App {
                         } else {
                             RowKind::Environment {
                                 name: environment.name,
-                                harness: environment.harness,
                                 setup: environment.setup_command,
                                 is_default,
                             }
@@ -319,6 +324,16 @@ impl App {
                             remembered,
                         },
                     }
+                })
+                .collect(),
+            Section::Agent => [AgentKind::Pi, AgentKind::Claude]
+                .into_iter()
+                .map(|kind| Row {
+                    label: kind.to_string(),
+                    kind: RowKind::Agent {
+                        kind,
+                        in_use: self.agent() == Some(kind),
+                    },
                 })
                 .collect(),
             Section::Interface => vec![Row {
@@ -364,9 +379,31 @@ impl App {
     fn row_count(&self) -> usize {
         match self.panel.section {
             Section::Environments => self.environments().len(),
+            Section::Agent => 2,
             Section::Remotes => self.configured_remotes().len(),
             Section::Interface => 1,
             Section::Identity => 0,
+        }
+    }
+
+    /// The coding agent Altitude drives, once one has been chosen.
+    fn agent(&self) -> Option<AgentKind> {
+        self.settings_file
+            .as_ref()
+            .and_then(|file| file.settings().agent())
+    }
+
+    /// Choose the coding agent, and keep it.
+    fn set_agent(&mut self, agent: AgentKind) {
+        let Some(file) = self.settings_file.as_mut() else {
+            self.notice = Some("settings are unavailable; fix the file and reopen".to_owned());
+            return;
+        };
+        let mut proposed = file.settings().clone();
+        proposed.set_agent(agent);
+        match file.save(proposed) {
+            Ok(()) => self.notice = None,
+            Err(error) => self.notice = Some(error.to_string()),
         }
     }
 
@@ -392,6 +429,9 @@ impl App {
                 dismiss(),
                 Hint::new("?", "keys"),
             ];
+        }
+        if self.open_agent_picker {
+            return agent_picker::hints();
         }
         if self.panel.form.is_some() {
             return vec![
@@ -485,8 +525,8 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => self.panel.move_selection(false, rows),
             KeyCode::Char('n') if self.panel.section.grows() => {
                 self.panel.form = Some(match self.panel.section {
-                    Section::Remotes => Form::new(Target::NewRemote, "", AgentKind::default(), ""),
-                    _ => Form::new(Target::NewEnvironment, "", AgentKind::default(), ""),
+                    Section::Remotes => Form::new(Target::NewRemote, "", ""),
+                    _ => Form::new(Target::NewEnvironment, "", ""),
                 });
             }
             _ if is_remove(key) && self.panel.section.grows() => self.ask_to_delete(),
@@ -509,17 +549,15 @@ impl App {
                 self.toggle(setting, !on);
                 return;
             }
-            RowKind::Environment {
-                name,
-                harness,
-                setup,
-                ..
-            } => Form::new(
+            RowKind::Agent { kind, .. } => {
+                self.set_agent(kind);
+                return;
+            }
+            RowKind::Environment { name, setup, .. } => Form::new(
                 Target::Environment {
                     original: name.clone(),
                 },
                 &name,
-                harness,
                 &setup,
             ),
             RowKind::Remote { address, .. } => Form::new(
@@ -527,7 +565,6 @@ impl App {
                     original: address.clone(),
                 },
                 &address,
-                AgentKind::default(),
                 "",
             ),
         });
@@ -538,7 +575,7 @@ impl App {
             return;
         };
         let (question, action) = match row.kind {
-            RowKind::Base | RowKind::Switch { .. } => return,
+            RowKind::Base | RowKind::Switch { .. } | RowKind::Agent { .. } => return,
             RowKind::Environment { name, .. } => (
                 format!("Delete the {name} environment?"),
                 ConfirmAction::DeleteSetting(Target::Environment { original: name }),
@@ -590,12 +627,6 @@ impl App {
                 Focus::Save => save = true,
                 _ => form.move_focus(true),
             },
-            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if form.focus == Focus::Harness => {
-                form.harness = match form.harness {
-                    AgentKind::Pi => AgentKind::Claude,
-                    AgentKind::Claude => AgentKind::Pi,
-                };
-            }
             _ => match form.focus {
                 Focus::Primary => form.primary.handle_key(key),
                 Focus::Setup => form.setup.handle_key(key),
@@ -641,7 +672,6 @@ impl App {
                 proposed.add_environment(DevelopmentEnvironment {
                     name,
                     setup_command: form.setup.value(),
-                    harness: form.harness,
                 });
             }
             Target::NewRemote | Target::Remote { .. } => {
@@ -893,6 +923,10 @@ where
                 chrome::dim(frame, content);
                 confirm::draw(frame, content, &confirm.dialog);
             }
+            if app.open_agent_picker {
+                chrome::dim(frame, content);
+                agent_picker::draw(frame, content, app.selected_agent);
+            }
             if app.help {
                 chrome::dim(frame, content);
                 chrome::draw_help(frame, content, &hints);
@@ -999,6 +1033,35 @@ impl App {
 fn copy_to_clipboard(text: String) -> Result<(), arboard::Error> {
     let mut clipboard = arboard::Clipboard::new()?;
     clipboard.set_text(text)
+}
+
+/// Begin creating a task.
+///
+/// The agent comes first, because it is the one thing nobody has chosen yet on a
+/// fresh installation, and the environment is only a question when there is more
+/// than one.
+fn start_task<E>(app: &mut App, event_loop: &TaskEventLoop<E>, command: String)
+where
+    E: IsolationEngine + Clone + 'static,
+{
+    if app.agent().is_none() {
+        app.pending_command = Some(command);
+        app.open_agent_picker = true;
+        return;
+    }
+    finish_task(app, event_loop, command);
+}
+
+/// Create the task, now that the agent is known.
+fn finish_task<E>(app: &mut App, event_loop: &TaskEventLoop<E>, command: String)
+where
+    E: IsolationEngine + Clone + 'static,
+{
+    if let Some(environment) = app.single_environment() {
+        event_loop.create(command, environment, app.agent().unwrap_or_default());
+    } else {
+        app.hold_command_for_environment_pick(command);
+    }
 }
 
 /// A question waiting on an answer, and what the answer would do.
@@ -1143,12 +1206,8 @@ where
                     if !was_last {
                         app.open_operator_signals = true;
                     }
-                } else if let Some(environment) = app.single_environment() {
-                    event_loop.create(command, environment);
-                } else if app.environments().is_empty() {
-                    app.notice = Some("no environments are configured".into());
                 } else {
-                    app.hold_command_for_environment_pick(command);
+                    start_task(app, event_loop, command);
                 }
             }
             None => {}
@@ -1182,6 +1241,23 @@ where
         handle_confirm_key(app, event_loop, key).await;
         return Ok(false);
     }
+    if app.open_agent_picker {
+        match agent_picker::handle_key(key, &mut app.selected_agent) {
+            Some(agent_picker::Answer::Cancel) => {
+                app.open_agent_picker = false;
+                app.pending_command = None;
+            }
+            Some(agent_picker::Answer::Chosen(agent)) => {
+                app.open_agent_picker = false;
+                app.set_agent(agent);
+                if let Some(command) = app.pending_command.take() {
+                    finish_task(app, event_loop, command);
+                }
+            }
+            None => {}
+        }
+        return Ok(false);
+    }
     if app.panel.form.is_some() {
         app.panel_form_key(key);
         return Ok(false);
@@ -1205,7 +1281,7 @@ where
                     (app.pending_command.take(), app.chosen_environment())
                 {
                     app.open_environment_picker = false;
-                    event_loop.create(command, environment);
+                    event_loop.create(command, environment, app.agent().unwrap_or_default());
                 }
             }
             _ => {}
