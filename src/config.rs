@@ -8,7 +8,7 @@ use std::{
 
 use directories::ProjectDirs;
 
-use crate::net::InstallationKey;
+use crate::remote::InstallationKey;
 
 mod serve;
 mod settings;

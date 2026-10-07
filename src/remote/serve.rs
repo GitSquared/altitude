@@ -13,7 +13,7 @@ use crate::{
     cli::ServeArgs,
     config::{Config, ServeSettings},
     logging,
-    net::{ClientRecord, InstallationKey, LinkServer},
+    remote::{ClientRecord, InstallationKey, LinkServer},
 };
 
 /// Runs a server until it is asked to stop.

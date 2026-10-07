@@ -21,7 +21,7 @@ use crate::{
     config::{Config, SettingsError, SettingsFile},
     development::DevelopmentEnvironment,
     isolation::{EnvironmentDescription, EnvironmentProgress, IsolationEngine, ProfileSummary},
-    remote_keys::{RemoteKey, RemoteKeys},
+    remote::{RemoteKey, RemoteKeys},
     tasks::{
         Task, TaskExecutionMode, TaskExecutionStatus, TaskOperatorSignal, TaskService,
         TaskServiceError,

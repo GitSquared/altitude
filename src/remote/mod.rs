@@ -38,6 +38,8 @@
 mod announce;
 mod clients;
 mod identity;
+mod keys;
+pub mod serve;
 mod server;
 
 mod client;
@@ -54,6 +56,7 @@ pub use {
     client::{LinkClient, LinkPath, LinkReply, PathKind},
     clients::ClientRecord,
     identity::InstallationKey,
+    keys::{RemoteKey, RemoteKeys},
     known::{Sighting, Trust, meet},
     protocol::{BlobHash, LINK_ALPN, LinkRequest, LinkResponse, RemoteTicket},
     server::LinkServer,

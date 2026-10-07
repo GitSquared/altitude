@@ -10,7 +10,7 @@ use crate::{
     config::Config,
     db::Database,
     isolation::MicrosandboxIsolation,
-    remote_keys::RemoteKeys,
+    remote::RemoteKeys,
     tasks::{TaskEventLoop, TaskService, TaskStore},
 };
 
@@ -24,9 +24,7 @@ mod isolation;
 // The settings screen is the caller for this; until it exists nothing in the app
 // dials a remote, so nothing reads what was remembered.
 mod logging;
-mod net;
-mod remote_keys;
-mod serve;
+mod remote;
 mod tasks;
 mod transfer;
 mod tui;
@@ -35,7 +33,7 @@ mod vcs;
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
     match Cli::parse().command {
-        Some(Command::Serve(args)) => serve::run(args).await,
+        Some(Command::Serve(args)) => remote::serve::run(args).await,
         None => client().await,
     }
 }

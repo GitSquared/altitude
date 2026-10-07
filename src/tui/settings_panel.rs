@@ -24,7 +24,7 @@ use ratatui::{
 use crate::{
     agent::AgentKind,
     isolation::{EnvironmentDescription, ProfileMount, REFRESH_AFTER},
-    remote_keys::RemoteKey,
+    remote::RemoteKey,
     tui::text::{Field, FieldStyle, TextBox},
 };
 
