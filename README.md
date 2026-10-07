@@ -16,31 +16,27 @@ it might not be a good fit if:
 
 altitude comes from my own frustrations with scaling up agentic engineering work, and the belief that agents should empower and accelerate the execution of human intent, rather than steal our attention away.
 
-## Development
+## development
 
-The active implementation is a Rust binary at the repository root.
+altitude is built as a single Rust binary.
 
 ```sh
 cargo run
 ```
 
-For automatic rebuilds and restarts on save (macOS):
+for automatic rebuilds and restarts on save (macOS):
 
 ```sh
 brew install just watchexec
 just dev
 ```
 
-This restarts the app and resets its in-memory state. Press `q` to close the TUI; the watcher stays ready for another save. Press Ctrl-C after closing the TUI to stop the watcher.
-Build errors appear in the terminal and the next save retries the build.
-On restart, Watchexec sends SIGTERM and waits for the app to restore the terminal and exit.
-
-Check changes with `cargo fmt --check`, `cargo check`, and `cargo clippy -- -D warnings`.
+check changes with `cargo fmt --check`, `cargo check`, and `cargo clippy -- -D warnings`.
 
 
-## License
+## license
 
-[Business Source License 1.1](LICENSE) — source available, non-commercial self-hosting permitted. Converts to MIT on 2050-01-01. Commercial use requires a license from the author.
+[Business Source License 1.1](LICENSE) — source available, non-commercial self-hosting permitted. converts to MIT on 2050-01-01. commercial use requires a license from the author.
 
 ---
 
