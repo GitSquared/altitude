@@ -1,6 +1,6 @@
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Rect},
     text::Line,
     widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
@@ -14,13 +14,14 @@ use crate::{development::DevelopmentEnvironment, tui::utils::centered_width};
 /// question a new task asks, so it is small and has one action.
 pub fn draw(
     frame: &mut Frame,
+    area: Rect,
     environments: &[DevelopmentEnvironment],
     default_environment: &str,
     selected: usize,
 ) {
-    let area = centered_width(frame.area(), 72, 60);
+    let area = centered_width(area, 72, 60);
     frame.render_widget(Clear, area);
-    let block = Block::bordered().title(" Environment · enter start · esc cancel ");
+    let block = Block::bordered().title(" Environment ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let [list_area, detail_area] = Layout::vertical([Constraint::Length(8), Constraint::Min(1)])

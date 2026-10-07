@@ -43,8 +43,8 @@ impl Prompt {
         }
     }
 
-    pub fn draw(&self, frame: &mut Frame) {
-        let area = centered_rect(70, 7, frame.area());
+    pub fn draw(&self, frame: &mut Frame, area: Rect) {
+        let area = centered_rect(70, 7, area);
         frame.render_widget(Clear, area);
         self.field.draw(
             frame,

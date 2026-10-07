@@ -34,6 +34,28 @@ pub struct Settings {
     /// which is state rather than configuration.
     #[serde(default)]
     remotes: Vec<String>,
+    /// How the interface behaves, as opposed to what it configures.
+    #[serde(default)]
+    interface: Interface,
+}
+
+/// Preferences about the interface itself.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Interface {
+    /// Whether the keys that work are listed at the bottom of the screen.
+    ///
+    /// The `?` popup lists them either way: a key you cannot find is a key you
+    /// do not have, so help is never something to be switched on first.
+    pub keyboard_hints: bool,
+}
+
+impl Default for Interface {
+    fn default() -> Self {
+        Self {
+            keyboard_hints: true,
+        }
+    }
 }
 
 /// A loaded file and its exact source, used to detect edits before saving.
@@ -133,6 +155,16 @@ impl Settings {
     /// The addresses this host delegates to.
     pub fn remotes(&self) -> &[String] {
         &self.remotes
+    }
+
+    /// How the interface behaves.
+    pub fn interface(&self) -> &Interface {
+        &self.interface
+    }
+
+    /// Whether the keys that work are listed at the bottom of the screen.
+    pub fn set_keyboard_hints(&mut self, on: bool) {
+        self.interface.keyboard_hints = on;
     }
 
     /// Add a configured environment, replacing one of the same name.

@@ -30,6 +30,8 @@ use crate::{
 };
 
 mod boot;
+mod chrome;
+mod confirm;
 mod environment_picker;
 mod keys;
 mod operator_signals;
@@ -41,9 +43,11 @@ mod shell;
 mod text;
 mod utils;
 
-use keys::{is_dismiss, is_remove};
+use chrome::Hint;
+use confirm::{Confirm, Decision};
+use keys::{is_dismiss, is_help, is_remove};
 use prompt::{Prompt, PromptAction};
-use settings_panel::{Confirm, Depth, Focus, Form, Panel, Row, RowKind, Section, Target, View};
+use settings_panel::{Depth, Focus, Form, Panel, Row, RowKind, Section, Setting, Target, View};
 use shell::Shell;
 
 pub use boot::{
@@ -84,8 +88,12 @@ pub struct App {
     /// Where `config.toml` lives, so the manage view can persist changes.
     config: Config,
     settings_file: Option<SettingsFile>,
-    /// The settings panel: environments, remotes, and the identity.
+    /// The settings panel: environments, remotes, the interface, and the identity.
     panel: Panel,
+    /// A question waiting on an answer, and what the answer would do.
+    confirm: Option<PendingConfirm>,
+    /// The keys for wherever you are, shown over whatever is there.
+    help: bool,
     /// What each address last answered with. Written by the dial once there is
     /// one; read when the panel opens.
     remote_keys: RemoteKeys,
@@ -144,6 +152,8 @@ impl App {
             config,
             settings_file,
             panel: Panel::new(),
+            confirm: None,
+            help: false,
             remote_keys,
             remembered_keys: Vec::new(),
             base_description: None,
@@ -311,6 +321,13 @@ impl App {
                     }
                 })
                 .collect(),
+            Section::Interface => vec![Row {
+                label: Setting::KeyboardHints.label().to_owned(),
+                kind: RowKind::Switch {
+                    setting: Setting::KeyboardHints,
+                    on: self.keyboard_hints(),
+                },
+            }],
             Section::Identity => Vec::new(),
         };
         View {
@@ -348,8 +365,98 @@ impl App {
         match self.panel.section {
             Section::Environments => self.environments().len(),
             Section::Remotes => self.configured_remotes().len(),
+            Section::Interface => 1,
             Section::Identity => 0,
         }
+    }
+
+    /// Whether the keys that work are listed at the bottom of the screen.
+    fn keyboard_hints(&self) -> bool {
+        self.settings_file
+            .as_ref()
+            .is_none_or(|file| file.settings().interface().keyboard_hints)
+    }
+
+    /// The keys that would do something where the focus is.
+    ///
+    /// The frame shows these, and the help popup lists them, so a key that
+    /// works is never a key you have to guess at.
+    fn hints(&self) -> Vec<Hint> {
+        let dismiss = || Hint::new("esc", "close");
+        if let Some(confirm) = &self.confirm {
+            return confirm.dialog.hints();
+        }
+        if self.prompt.is_some() {
+            return vec![
+                Hint::new("enter", "send"),
+                dismiss(),
+                Hint::new("?", "keys"),
+            ];
+        }
+        if self.panel.form.is_some() {
+            return vec![
+                Hint::new("tab", "move"),
+                Hint::new("enter", "validate, or add a line"),
+                Hint::new("esc", "leave the box, then the page"),
+            ];
+        }
+        if self.panel.open {
+            let mut hints = vec![Hint::new("tab", "change column"), Hint::new("j/k", "move")];
+            if self.panel.section.grows() {
+                hints.push(Hint::new("enter", "open"));
+                hints.push(Hint::new("n", "new"));
+                hints.push(Hint::new("d", "delete"));
+            } else if self.panel.section == Section::Interface {
+                hints.push(Hint::new("enter", "toggle"));
+            }
+            hints.push(dismiss());
+            return hints;
+        }
+        if self.open_operator_signals {
+            return vec![
+                Hint::new("tab", "action"),
+                Hint::new("enter", "validate"),
+                Hint::new("j/k", "signal"),
+                Hint::new("pgup/pgdn", "scroll"),
+                dismiss(),
+            ];
+        }
+        if self.open_environment_picker {
+            return vec![
+                Hint::new("j/k", "environment"),
+                Hint::new("enter", "start"),
+                dismiss(),
+            ];
+        }
+        if self.open_shell.is_some() {
+            return vec![
+                Hint::new("ctrl-c", "hand back to autopilot"),
+                Hint::new("?", "keys"),
+            ];
+        }
+        // The task list: only what there is something to do it to.
+        let mut hints = vec![Hint::new("c", "create"), Hint::new("s", "settings")];
+        if !self.tasks.is_empty() {
+            hints.extend([
+                Hint::new("i", "info"),
+                Hint::new("j/k", "select"),
+                Hint::new("enter", "shell"),
+                Hint::new("d", "remove"),
+            ]);
+        }
+        hints.push(Hint::new("?", "keys"));
+        hints.push(Hint::new("q", "quit"));
+        hints
+    }
+
+    /// Whether a text box has the keys, in which case `?` is a character.
+    fn is_typing(&self) -> bool {
+        self.prompt.is_some()
+            || self
+                .panel
+                .form
+                .as_ref()
+                .is_some_and(|form| form.focus.takes_text())
     }
 
     fn selected_row(&self) -> Option<Row> {
@@ -376,13 +483,13 @@ impl App {
             }
             KeyCode::Down | KeyCode::Char('j') => self.panel.move_selection(true, rows),
             KeyCode::Up | KeyCode::Char('k') => self.panel.move_selection(false, rows),
-            KeyCode::Char('n') if self.panel.section.editable() => {
+            KeyCode::Char('n') if self.panel.section.grows() => {
                 self.panel.form = Some(match self.panel.section {
                     Section::Remotes => Form::new(Target::NewRemote, "", AgentKind::default(), ""),
                     _ => Form::new(Target::NewEnvironment, "", AgentKind::default(), ""),
                 });
             }
-            _ if is_remove(key) && self.panel.section.editable() => self.ask_to_delete(),
+            _ if is_remove(key) && self.panel.section.grows() => self.ask_to_delete(),
             KeyCode::Enter => self.edit_selected(),
             _ => {}
         }
@@ -396,6 +503,10 @@ impl App {
             // The base has no form: it is described instead.
             RowKind::Base => {
                 self.notice = Some("the base environment is built in".to_owned());
+                return;
+            }
+            RowKind::Switch { setting, on } => {
+                self.toggle(setting, !on);
                 return;
             }
             RowKind::Environment {
@@ -426,25 +537,37 @@ impl App {
         let Some(row) = self.selected_row() else {
             return;
         };
-        let (what, target) = match row.kind {
-            RowKind::Base => {
-                self.notice = Some("the base environment is built in".to_owned());
-                return;
-            }
+        let (question, action) = match row.kind {
+            RowKind::Base | RowKind::Switch { .. } => return,
             RowKind::Environment { name, .. } => (
-                format!("the {name} environment"),
-                Target::Environment { original: name },
+                format!("Delete the {name} environment?"),
+                ConfirmAction::DeleteSetting(Target::Environment { original: name }),
             ),
             RowKind::Remote { address, .. } => (
-                format!("{address}, and the key remembered for it"),
-                Target::Remote { original: address },
+                format!("Delete {address}, and the key remembered for it?"),
+                ConfirmAction::DeleteSetting(Target::Remote { original: address }),
             ),
         };
-        self.panel.confirm = Some(Confirm {
-            question: format!("Delete {what}?"),
-            button: 0,
-            target,
+        self.confirm = Some(PendingConfirm {
+            dialog: Confirm::new(question, "delete"),
+            action,
         });
+    }
+
+    /// Turn a preference on or off, and keep it.
+    fn toggle(&mut self, setting: Setting, on: bool) {
+        let Some(file) = self.settings_file.as_mut() else {
+            self.notice = Some("settings are unavailable; fix the file and reopen".to_owned());
+            return;
+        };
+        let mut proposed = file.settings().clone();
+        match setting {
+            Setting::KeyboardHints => proposed.set_keyboard_hints(on),
+        }
+        match file.save(proposed) {
+            Ok(()) => self.notice = None,
+            Err(error) => self.notice = Some(error.to_string()),
+        }
     }
 
     fn panel_form_key(&mut self, key: KeyEvent) {
@@ -538,35 +661,6 @@ impl App {
                 self.notice = Some(error.to_string());
                 false
             }
-        }
-    }
-
-    async fn panel_confirm_key(&mut self, key: KeyEvent) {
-        let Some(button) = self.panel.confirm.as_ref().map(|confirm| confirm.button) else {
-            return;
-        };
-        match key.code {
-            _ if is_dismiss(key) => self.panel.confirm = None,
-            _ if is_remove(key) => {
-                let Some(confirm) = self.panel.confirm.take() else {
-                    return;
-                };
-                self.delete(confirm.target).await;
-            }
-            KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => {
-                if let Some(confirm) = self.panel.confirm.as_mut() {
-                    confirm.button = 1 - button;
-                }
-            }
-            KeyCode::Enter => {
-                let Some(confirm) = self.panel.confirm.take() else {
-                    return;
-                };
-                if confirm.button == 1 {
-                    self.delete(confirm.target).await;
-                }
-            }
-            _ => {}
         }
     }
 
@@ -765,34 +859,48 @@ where
             }
         }
         terminal.draw(|frame| {
-            overview::draw(frame, &mut app);
+            let hints = app.hints();
+            let content = chrome::draw(frame, &hints, app.keyboard_hints(), app.notice.as_deref());
+            overview::draw(frame, content, &mut app);
             if let Some(shell) = app.open_shell.as_ref().and_then(|id| app.shells.get(id)) {
-                shell.draw(frame);
+                shell.draw(frame, content);
             }
-            if app.open_operator_signals {
+            if app.panel.open {
+                // Fullscreen: it is the screen, not something over it.
+                let view = app.settings_view();
+                settings_panel::draw(frame, content, &app.panel, &view);
+            } else if app.open_operator_signals {
+                chrome::dim(frame, content);
                 operator_signals::draw(
                     frame,
+                    content,
                     &app.operator_signals,
                     app.selected_operator_signal,
                     app.selected_signal_action,
                     &mut app.operator_signal_scroll,
                 );
-            }
-            if app.open_environment_picker {
+            } else if app.open_environment_picker {
+                chrome::dim(frame, content);
                 environment_picker::draw(
                     frame,
+                    content,
                     &app.environments(),
                     app.default_environment(),
                     app.selected_environment,
                 );
             }
-            if app.panel.open {
-                let view = app.settings_view();
-                settings_panel::draw(frame, &app.panel, &view);
+            if let Some(confirm) = &app.confirm {
+                chrome::dim(frame, content);
+                confirm::draw(frame, content, &confirm.dialog);
+            }
+            if app.help {
+                chrome::dim(frame, content);
+                chrome::draw_help(frame, content, &hints);
             }
             // Input belongs above the settings overlay that opened it.
             if let Some(prompt) = &app.prompt {
-                prompt.draw(frame);
+                chrome::dim(frame, content);
+                prompt.draw(frame, content);
             }
         })?;
         tokio::select! {
@@ -893,6 +1001,44 @@ fn copy_to_clipboard(text: String) -> Result<(), arboard::Error> {
     clipboard.set_text(text)
 }
 
+/// A question waiting on an answer, and what the answer would do.
+struct PendingConfirm {
+    dialog: Confirm,
+    action: ConfirmAction,
+}
+
+/// What confirming would do. The dialog knows the words; the application knows
+/// the consequences.
+enum ConfirmAction {
+    RemoveTask { id: String },
+    DeleteSetting(Target),
+}
+
+/// Take an answer to the confirmation, and act on it.
+async fn handle_confirm_key<E>(app: &mut App, event_loop: &TaskEventLoop<E>, key: KeyEvent)
+where
+    E: IsolationEngine + Clone + 'static,
+{
+    let Some(mut pending) = app.confirm.take() else {
+        return;
+    };
+    match pending.dialog.handle_key(key) {
+        None => app.confirm = Some(pending),
+        Some(Decision::Cancel) => {}
+        Some(Decision::Confirm) => match pending.action {
+            ConfirmAction::RemoveTask { id } => {
+                if let Some(task) = app.tasks.iter().find(|task| task.id == id).cloned() {
+                    tracing::info!(task_id = %id, "removing task from overview");
+                    app.begin_removing(&id);
+                    app.remove_shell(&id);
+                    event_loop.remove(task);
+                }
+            }
+            ConfirmAction::DeleteSetting(target) => app.delete(target).await,
+        },
+    }
+}
+
 /// Open the settings panel, reading back the two things it cannot see for
 /// itself: what each address last answered with, and what the built base
 /// environment is made of.
@@ -903,7 +1049,6 @@ where
     app.panel.open = true;
     app.panel.depth = Depth::List;
     app.panel.form = None;
-    app.panel.confirm = None;
     if !app.reload_settings() {
         return;
     }
@@ -1024,12 +1169,21 @@ where
         }
         return Ok(false);
     }
-    if app.panel.form.is_some() {
-        app.panel_form_key(key);
+    if app.help {
+        // Anything at all closes it: a help screen is not somewhere to be.
+        app.help = false;
         return Ok(false);
     }
-    if app.panel.confirm.is_some() {
-        app.panel_confirm_key(key).await;
+    if is_help(key) && !app.is_typing() {
+        app.help = true;
+        return Ok(false);
+    }
+    if app.confirm.is_some() {
+        handle_confirm_key(app, event_loop, key).await;
+        return Ok(false);
+    }
+    if app.panel.form.is_some() {
+        app.panel_form_key(key);
         return Ok(false);
     }
     if app.panel.open {
@@ -1164,10 +1318,16 @@ where
         KeyCode::BackTab | KeyCode::Char('h') => app.select_previous(),
         _ if is_remove(key) => {
             if let Some(task) = app.selected_task() {
-                tracing::info!(task_id = %task.id, "removing task from overview");
-                app.begin_removing(&task.id);
-                app.remove_shell(&task.id);
-                event_loop.remove(task);
+                app.confirm = Some(PendingConfirm {
+                    dialog: Confirm::new(
+                        format!(
+                            "Remove \"{}\" and dispose of its capsule?",
+                            task.facts.intent
+                        ),
+                        "remove",
+                    ),
+                    action: ConfirmAction::RemoveTask { id: task.id },
+                });
             }
         }
         KeyCode::Enter => {

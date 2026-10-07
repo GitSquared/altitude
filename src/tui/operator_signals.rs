@@ -1,6 +1,6 @@
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Rect},
     style::Style,
     text::{Line, Span},
     widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap},
@@ -51,16 +51,15 @@ pub fn actions_for(kind: TaskOperatorSignalKind) -> &'static [SignalAction] {
 
 pub fn draw(
     frame: &mut Frame,
+    area: Rect,
     operator_signals: &[TaskOperatorSignal],
     selected: usize,
     focused_action: usize,
     scroll: &mut u16,
 ) {
-    let area = centered_width(frame.area(), 72, 65);
+    let area = centered_width(area, 72, 65);
     frame.render_widget(Clear, area);
-    let block = Block::bordered()
-        .title(" Signals · tab focus · enter validate · esc close ")
-        .title_bottom(" pgup/pgdn scroll · home/end · h/j select ");
+    let block = Block::bordered().title(" Signals ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let list_height = operator_signals

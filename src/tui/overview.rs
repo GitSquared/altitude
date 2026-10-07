@@ -1,12 +1,10 @@
 use super::palette;
 
-use std::mem;
-
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::Rect,
     text::{Line, Span},
-    widgets::{Block, BorderType, Padding, Paragraph, Wrap},
+    widgets::{Block, BorderType, Padding, Paragraph},
 };
 
 use crate::{
@@ -18,69 +16,8 @@ use crate::{
     tui::utils::{shimmer, truncate},
 };
 
-pub fn draw(frame: &mut Frame, app: &mut super::App) {
-    // Only the keys that would do something: a hint for a task gesture is noise
-    // when there is no task.
-    let shortcuts = shortcut_hints(frame.area().width.saturating_sub(2), !app.tasks.is_empty());
-    let footer_height = shortcuts.line_count(frame.area().width.saturating_sub(2)) as u16;
-    let message_width = usize::from(frame.area().width.saturating_sub(2).max(1));
-    let message_height = app.notice.as_deref().map_or(0, |text| {
-        text.lines()
-            .map(|line| line.chars().count().div_ceil(message_width).max(1))
-            .sum::<usize>()
-            .min(6) as u16
-    });
-    let [header, body, message, footer] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(0),
-        Constraint::Length(message_height),
-        Constraint::Length(footer_height),
-    ])
-    .margin(1)
-    .areas(frame.area());
-
-    let [title, version] =
-        Layout::horizontal([Constraint::Min(0), Constraint::Min(0)]).areas(header);
-    frame.render_widget(Line::styled("⛰  altitude", palette::heading()), title);
-    frame.render_widget(
-        Line::styled(concat!("v", env!("CARGO_PKG_VERSION")), palette::muted()).right_aligned(),
-        version,
-    );
-    draw_tasks(frame, body, app);
-
-    if let Some(notice) = app.notice.as_deref() {
-        frame.render_widget(
-            Paragraph::new(notice)
-                .style(palette::bad())
-                .wrap(Wrap { trim: false }),
-            message,
-        );
-    }
-    frame.render_widget(shortcuts, footer);
-}
-
-fn shortcut_hints(width: u16, has_task: bool) -> Paragraph<'static> {
-    let mut lines = Vec::new();
-    let mut line = String::new();
-    let mut hints = vec!["c create", "s settings"];
-    if has_task {
-        hints.extend(["i info", "h/j select", "enter shell", "d remove"]);
-    }
-    hints.push("q quit");
-    for hint in hints {
-        if !line.is_empty() {
-            if Line::from(format!("{line} · {hint}")).width() > usize::from(width) {
-                lines.push(Line::from(mem::take(&mut line)));
-            } else {
-                line.push_str(" · ");
-            }
-        }
-        line.push_str(hint);
-    }
-    lines.push(Line::from(line));
-    Paragraph::new(lines)
-        .style(palette::muted())
-        .wrap(Wrap { trim: true })
+pub fn draw(frame: &mut Frame, area: Rect, app: &mut super::App) {
+    draw_tasks(frame, area, app);
 }
 
 fn draw_tasks(frame: &mut Frame, area: Rect, app: &mut super::App) {

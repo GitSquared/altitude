@@ -10,13 +10,13 @@
 //! describes it instead, which is the only place an operator can see what a
 //! sandbox is actually made of.
 
-use super::palette;
+use super::{chrome, palette};
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ratatui::{
     Frame,
-    layout::{Constraint, Flex, Layout, Rect},
+    layout::{Constraint, Layout, Rect},
     text::{Line, Span},
     widgets::{Block, BorderType, Clear, List, ListItem, Padding, Paragraph, Wrap},
 };
@@ -38,23 +38,56 @@ const GAP: u16 = 3;
 pub enum Section {
     Environments,
     Remotes,
+    Interface,
     Identity,
 }
 
 impl Section {
-    pub const ALL: [Section; 3] = [Self::Environments, Self::Remotes, Self::Identity];
+    pub const ALL: [Section; 4] = [
+        Self::Environments,
+        Self::Remotes,
+        Self::Interface,
+        Self::Identity,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
             Self::Environments => "Environments",
             Self::Remotes => "Remotes",
+            Self::Interface => "Interface",
             Self::Identity => "Identity",
         }
     }
 
-    /// Whether the rows of this list can be added to, edited and deleted.
-    pub fn editable(self) -> bool {
-        !matches!(self, Self::Identity)
+    /// Whether this list can grow and shrink.
+    ///
+    /// The interface's list is a fixed set of preferences, so it can be changed
+    /// but neither added to nor removed from.
+    pub fn grows(self) -> bool {
+        matches!(self, Self::Environments | Self::Remotes)
+    }
+}
+
+/// A preference that is on or off.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Setting {
+    KeyboardHints,
+}
+
+impl Setting {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::KeyboardHints => "Keyboard hints",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::KeyboardHints => {
+                "List the keys that work, at the bottom of the screen. Press ? at any time to \
+                 see them, whether or not this is on."
+            }
+        }
     }
 }
 
@@ -106,6 +139,10 @@ pub enum RowKind {
         /// What that address last answered with, if it has been met.
         remembered: Option<RemoteKey>,
     },
+    Switch {
+        setting: Setting,
+        on: bool,
+    },
 }
 
 impl Row {
@@ -115,7 +152,10 @@ impl Row {
     /// configure, so selecting it is already as far as it goes, and its
     /// description is shown without a second step.
     pub fn is_actionable(&self) -> bool {
-        !matches!(self.kind, RowKind::Base)
+        matches!(
+            self.kind,
+            RowKind::Environment { .. } | RowKind::Remote { .. }
+        )
     }
 }
 
@@ -138,7 +178,6 @@ pub struct Panel {
     pub selected: usize,
     pub depth: Depth,
     pub form: Option<Form>,
-    pub confirm: Option<Confirm>,
 }
 
 impl Panel {
@@ -149,7 +188,6 @@ impl Panel {
             selected: 0,
             depth: Depth::List,
             form: None,
-            confirm: None,
         }
     }
 }
@@ -318,24 +356,12 @@ impl Form {
     }
 }
 
-/// A question asked before something is destroyed.
-pub struct Confirm {
-    pub question: String,
-    /// 0 is cancel, 1 is the destructive button.
-    pub button: usize,
-    /// What would be destroyed if the destructive button is taken.
-    pub target: Target,
-}
-
 // ----------------------------------------------------------------- the drawing
 
-pub fn draw(frame: &mut Frame, panel: &Panel, view: &View) {
-    draw_columns(frame, panel, view);
+pub fn draw(frame: &mut Frame, area: Rect, panel: &Panel, view: &View) {
+    draw_columns(frame, area, panel, view);
     if let Some(form) = &panel.form {
-        draw_form(frame, form);
-    }
-    if let Some(confirm) = &panel.confirm {
-        draw_confirm(frame, confirm);
+        draw_form(frame, area, form);
     }
 }
 
@@ -354,13 +380,11 @@ fn chip(label: &str, width: usize, focused: bool) -> Line<'static> {
     }
 }
 
-fn draw_columns(frame: &mut Frame, panel: &Panel, view: &View) {
+fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View) {
     let block = Block::bordered()
         .title(" Settings ")
-        .title_bottom(hint(panel))
         .border_type(BorderType::Rounded)
         .padding(Padding::horizontal(1));
-    let area = frame.area();
     frame.render_widget(Clear, area);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -424,15 +448,6 @@ fn draw_columns(frame: &mut Frame, panel: &Panel, view: &View) {
         },
         detail_area,
     );
-}
-
-fn hint(panel: &Panel) -> Line<'static> {
-    let text = if panel.section.editable() {
-        " tab up and down a column · j/k move · enter edit · n new · d delete · esc close "
-    } else {
-        " tab up and down a column · j/k move · esc close "
-    };
-    Line::styled(text, palette::muted())
 }
 
 /// The third column: what is known about the highlighted row.
@@ -513,6 +528,24 @@ fn detail(panel: &Panel, view: &View, focused: bool) -> Paragraph<'static> {
             }
             Some(Row {
                 label,
+                kind: RowKind::Switch { setting, on },
+            }) => Paragraph::new(vec![
+                heading(label.clone()),
+                Line::from(""),
+                Line::styled(
+                    if *on { "on" } else { "off" },
+                    if *on {
+                        palette::good()
+                    } else {
+                        palette::muted()
+                    },
+                ),
+                Line::from(""),
+                Line::from(setting.description()),
+            ])
+            .wrap(Wrap { trim: true }),
+            Some(Row {
+                label,
                 kind:
                     RowKind::Remote {
                         address,
@@ -559,6 +592,7 @@ fn detail(panel: &Panel, view: &View, focused: bool) -> Paragraph<'static> {
                     "No remotes are configured. Press n to add one.",
                     palette::muted(),
                 ),
+                Section::Interface => Span::styled("", palette::muted()),
                 Section::Identity => unreachable!("identity has no rows"),
             }),
         },
@@ -636,17 +670,11 @@ fn met_ago(seen_at_ms: i64) -> String {
 
 // ------------------------------------------------------------------ the pages
 
-fn draw_form(frame: &mut Frame, form: &Form) {
+fn draw_form(frame: &mut Frame, area: Rect, form: &Form) {
     let block = Block::bordered()
         .title(format!(" {} ", form.target.title()))
-        .title_bottom(Line::styled(
-            " tab/shift-tab move · enter validates, or adds a line in the command · esc \
-                 leaves the box, then the page ",
-            palette::muted(),
-        ))
         .border_type(BorderType::Rounded)
         .padding(Padding::horizontal(2));
-    let area = frame.area();
     frame.render_widget(Clear, area);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -710,8 +738,8 @@ fn draw_form(frame: &mut Frame, form: &Form) {
         Constraint::Length(10),
     ])
     .areas(buttons);
-    draw_button(frame, cancel, "cancel", form.focus == Focus::Cancel, false);
-    draw_button(frame, save, "save", form.focus == Focus::Save, true);
+    chrome::button(frame, cancel, "cancel", form.focus == Focus::Cancel, false);
+    chrome::button(frame, save, "save", form.focus == Focus::Save, true);
 }
 
 fn draw_label(frame: &mut Frame, area: Rect, text: &str) {
@@ -743,59 +771,4 @@ fn harness_line(harness: AgentKind, focused: bool) -> Line<'static> {
         spans.push("   ".into());
     }
     Line::from(spans)
-}
-
-fn draw_button(frame: &mut Frame, area: Rect, label: &str, focused: bool, primary: bool) {
-    let text = format!(" {label} ");
-    let style = if focused {
-        palette::focus()
-    } else if primary {
-        palette::accent()
-    } else {
-        palette::muted()
-    };
-    let [_, line, _] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(0),
-    ])
-    .areas(area);
-    frame.render_widget(Paragraph::new(Line::styled(text, style)), line);
-}
-
-fn draw_confirm(frame: &mut Frame, confirm: &Confirm) {
-    // A confirmation is a question, not a page: small, centred, and over.
-    let area = centered(60, 7, frame.area());
-    let block = Block::bordered()
-        .title(" Are you sure? ")
-        .border_type(BorderType::Rounded)
-        .padding(Padding::horizontal(2));
-    let inner = block.inner(area);
-    frame.render_widget(Clear, area);
-    frame.render_widget(block, area);
-    let [question, buttons] =
-        Layout::vertical([Constraint::Min(3), Constraint::Length(2)]).areas(inner);
-    frame.render_widget(
-        Paragraph::new(confirm.question.clone()).wrap(Wrap { trim: true }),
-        question,
-    );
-    let [_, cancel, _, delete] = Layout::horizontal([
-        Constraint::Min(1),
-        Constraint::Length(10),
-        Constraint::Length(3),
-        Constraint::Length(10),
-    ])
-    .areas(buttons);
-    draw_button(frame, cancel, "cancel", confirm.button == 0, false);
-    draw_button(frame, delete, "delete", confirm.button == 1, false);
-}
-
-fn centered(percent_x: u16, height: u16, area: Rect) -> Rect {
-    let [vertical] = Layout::vertical([Constraint::Length(height)])
-        .flex(Flex::Center)
-        .areas(area);
-    let [horizontal] = Layout::horizontal([Constraint::Percentage(percent_x)])
-        .flex(Flex::Center)
-        .areas(vertical);
-    horizontal
 }

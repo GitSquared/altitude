@@ -141,20 +141,12 @@ impl Shell {
             .set_scrollback(scrollback.saturating_sub(rows));
     }
 
-    pub fn draw(&self, frame: &mut Frame) {
-        let area = popup_area(frame.area());
+    pub fn draw(&self, frame: &mut Frame, area: Rect) {
+        let area = popup_area(area);
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(palette::accent())
-            .title(" shell ")
-            .title_bottom(
-                Line::from(if self.parser.screen().alternate_screen() {
-                    " ctrl-a back "
-                } else {
-                    " pgup/pgdn history · ctrl-a back "
-                })
-                .right_aligned(),
-            );
+            .title(" shell ");
         let block = if self.has_active_notice() {
             block.title_bottom(Line::styled(" copied to clipboard ", palette::accent()))
         } else {
