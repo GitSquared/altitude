@@ -90,8 +90,6 @@ impl SetupStep {
 pub struct EnvironmentProgress {
     /// The step in progress, in the operator's words.
     pub label: String,
-    /// The exact command running, which a caller may truncate.
-    pub command: String,
     /// Steps finished before this one, and the build's step count.
     pub completed: usize,
     pub total: usize,

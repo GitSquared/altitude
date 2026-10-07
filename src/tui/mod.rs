@@ -15,15 +15,12 @@ use crossterm::{
 use futures_util::StreamExt;
 use ratatui::DefaultTerminal;
 use tokio::{signal::unix::Signal, sync::mpsc, time};
-use tui_term::vt100;
 
 use crate::{
     agent::AgentKind,
     config::{Config, SettingsError, SettingsFile},
     development::DevelopmentEnvironment,
-    isolation::{
-        EnvironmentDescription, EnvironmentProgress, IsolationEngine, OutputStream, ProfileSummary,
-    },
+    isolation::{EnvironmentDescription, EnvironmentProgress, IsolationEngine, ProfileSummary},
     remote_keys::{RemoteKey, RemoteKeys},
     tasks::{
         Task, TaskExecutionMode, TaskExecutionStatus, TaskOperatorSignal, TaskService,
@@ -62,8 +59,10 @@ pub use boot::{
 
 pub struct App {
     tasks: Vec<Task>,
-    latest_output: HashMap<String, String>,
-    output_previews: HashMap<String, vt100::Parser>,
+    /// How many cards fit across, from the last drawing. Written by the
+    /// drawing, read by the keys, because a step within the grid is one card or
+    /// one whole row of them.
+    grid_columns: usize,
     /// What each provisioning task is waiting on, refreshed while any task is
     /// pending.
     environment_builds: HashMap<String, EnvironmentProgress>,
@@ -121,15 +120,6 @@ impl App {
         settings: Result<SettingsFile, SettingsError>,
         remote_keys: RemoteKeys,
     ) -> Self {
-        let latest_output = tasks
-            .iter()
-            .filter_map(|task| {
-                task.facts
-                    .latest_turn_summary
-                    .clone()
-                    .map(|summary| (task.id.clone(), summary))
-            })
-            .collect();
         let (settings_file, settings_error) = match settings {
             Ok(file) => (Some(file), None),
             Err(error) => (
@@ -142,8 +132,7 @@ impl App {
         };
         Self {
             tasks,
-            latest_output,
-            output_previews: HashMap::new(),
+            grid_columns: 1,
             notice: settings_error,
             removing: HashSet::new(),
             selected: 0,
@@ -184,16 +173,23 @@ impl App {
         }
     }
 
-    fn select_next(&mut self) {
-        if !self.tasks.is_empty() {
-            self.selected = (self.selected + 1) % self.tasks.len();
+    /// Move within the grid: one card across, or one row of cards.
+    ///
+    /// The grid does not wrap, because a card's neighbours are where it is and
+    /// wrapping from the last column to the first is a jump, not a step.
+    fn select_adjacent(&mut self, step: isize, columns: usize) {
+        let count = self.tasks.len();
+        if count == 0 {
+            return;
         }
+        let moved = self.selected as isize + step;
+        self.selected = moved.clamp(0, count as isize - 1) as usize;
+        let _ = columns;
     }
 
-    fn select_previous(&mut self) {
-        if !self.tasks.is_empty() {
-            self.selected = (self.selected + self.tasks.len() - 1) % self.tasks.len();
-        }
+    /// How many cards fit across the body, which is what a grid step needs.
+    fn grid_columns(&self) -> usize {
+        self.grid_columns.max(1)
     }
 
     /// Everything a task can run in, base first.
@@ -511,7 +507,7 @@ impl App {
         if !self.tasks.is_empty() {
             hints.extend([
                 Hint::new("i", "info"),
-                Hint::new("j/k", "select"),
+                Hint::new("h/j/k/l", "select"),
                 Hint::new("enter", "shell"),
                 Hint::new("d", "remove"),
             ]);
@@ -759,8 +755,6 @@ impl App {
     }
 
     fn remove_task(&mut self, id: &str) {
-        self.output_previews.remove(id);
-        self.latest_output.remove(id);
         self.removing.remove(id);
         if let Some(index) = self.tasks.iter().position(|task| task.id == id) {
             self.tasks.remove(index);
@@ -778,22 +772,6 @@ impl App {
 
     fn is_removing(&self, id: &str) -> bool {
         self.removing.contains(id)
-    }
-
-    fn append_output(&mut self, id: String, _stream: OutputStream, bytes: Vec<u8>) {
-        let parser = self
-            .output_previews
-            .entry(id.clone())
-            .or_insert_with(|| vt100::Parser::new(24, 120, 0));
-        parser.process(&bytes);
-        if let Some(line) = parser
-            .screen()
-            .contents()
-            .lines()
-            .rfind(|line| !line.trim().is_empty())
-        {
-            self.latest_output.insert(id, line.to_owned());
-        }
     }
 
     fn hide_shell(&mut self) {
@@ -937,6 +915,9 @@ where
                     frame,
                     content,
                     &app.operator_signals,
+                    app.selected_task()
+                        .and_then(|task| task.facts.latest_turn_summary)
+                        .as_deref(),
                     app.selected_operator_signal,
                     app.selected_signal_action,
                     &mut app.operator_signal_scroll,
@@ -987,11 +968,7 @@ where
             Some(event) = task_execution_updates.recv() => match event {
                 TaskExecutionUpdate::Created(Ok(task)) => app.replace_task(task),
                 TaskExecutionUpdate::Created(Err(error)) => app.notice = Some(error.to_string()),
-                TaskExecutionUpdate::Started(Ok(task)) => {
-                    app.output_previews.remove(&task.id);
-                    app.latest_output.remove(&task.id);
-                    app.replace_task(task);
-                }
+                TaskExecutionUpdate::Started(Ok(task)) => app.replace_task(task),
                 TaskExecutionUpdate::Started(Err(error)) => app.notice = Some(error.to_string()),
                 TaskExecutionUpdate::Finished(id, Ok(task)) if !app.is_removing(&id) => {
                     app.remove_shell(&id);
@@ -1009,7 +986,7 @@ where
                     show_task_error(&mut app, &id, error);
                 }
                 TaskExecutionUpdate::Output { task_id, stream, bytes } => {
-                    app.append_output(task_id.clone(), stream, bytes.clone());
+                    let _ = stream;
                     if let Some(shell) = app.shells.get_mut(&task_id)
                         && let Some(text) = shell.process(bytes)
                     {
@@ -1032,9 +1009,10 @@ where
                     app.open_shell = Some(id);
                 }
                 TaskExecutionUpdate::Report { task, summary } => {
-                    let id = task.id.clone();
+                    // The agent's own words are already recorded in the task's
+                    // history; the card does not repeat them.
+                    let _ = summary;
                     app.replace_task(task);
-                    app.latest_output.insert(id, summary);
                 }
                 _ => {}
             },
@@ -1447,8 +1425,23 @@ where
                 app.open_operator_signals = true;
             }
         }
-        KeyCode::Tab | KeyCode::Char('j') => app.select_next(),
-        KeyCode::BackTab | KeyCode::Char('h') => app.select_previous(),
+        // A grid step: one card across, or one whole row of them.
+        KeyCode::Char('j') | KeyCode::Down => {
+            let columns = app.grid_columns();
+            app.select_adjacent(columns as isize, columns);
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            let columns = app.grid_columns();
+            app.select_adjacent(-(columns as isize), columns);
+        }
+        KeyCode::Char('l') | KeyCode::Right | KeyCode::Tab => {
+            let columns = app.grid_columns();
+            app.select_adjacent(1, columns);
+        }
+        KeyCode::Char('h') | KeyCode::Left | KeyCode::BackTab => {
+            let columns = app.grid_columns();
+            app.select_adjacent(-1, columns);
+        }
         _ if is_remove(key) => {
             if let Some(task) = app.selected_task() {
                 app.confirm = Some(PendingConfirm {

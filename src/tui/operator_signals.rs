@@ -53,6 +53,9 @@ pub fn draw(
     frame: &mut Frame,
     area: Rect,
     operator_signals: &[TaskOperatorSignal],
+    // What the agent last said about the task: the whole of what this popup has
+    // to say about a task that has raised nothing.
+    latest_turn_summary: Option<&str>,
     selected: usize,
     focused_action: usize,
     scroll: &mut u16,
@@ -66,7 +69,21 @@ pub fn draw(
         .len()
         .min(8)
         .min(usize::from(inner.height / 3)) as u16;
-    let [list_area, detail_area, actions_area] = Layout::vertical([
+    // The task's own words first: this is the pop-up an operator opens to find
+    // out what is happening, and a signal is not always the answer.
+    let summary_height = latest_turn_summary.map_or(0, |summary| {
+        u16::try_from(
+            summary
+                .chars()
+                .count()
+                .div_ceil(usize::from(inner.width.max(1)))
+                + 2,
+        )
+        .unwrap_or(0)
+        .min(6)
+    });
+    let [summary_area, list_area, detail_area, actions_area] = Layout::vertical([
+        Constraint::Length(summary_height),
         Constraint::Length(list_height),
         Constraint::Min(1),
         Constraint::Length(1),
@@ -74,6 +91,14 @@ pub fn draw(
     .spacing(1)
     .margin(1)
     .areas(inner);
+    if let Some(summary) = latest_turn_summary {
+        frame.render_widget(
+            Paragraph::new(summary)
+                .style(palette::muted())
+                .wrap(Wrap { trim: true }),
+            summary_area,
+        );
+    }
     let items = operator_signals
         .iter()
         .map(|signal| {

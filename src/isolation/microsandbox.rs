@@ -246,7 +246,6 @@ impl MicrosandboxIsolation {
                 if let Some(progress) = progress {
                     progress.report(EnvironmentProgress {
                         label: step.label.clone(),
-                        command: step.command.clone(),
                         completed,
                         total: steps.len(),
                     });
