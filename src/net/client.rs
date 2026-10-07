@@ -1,5 +1,8 @@
 //! The client side: dial a remote by key and run one exchange.
 
+// The dial side of the link: nothing in the app reaches a remote until the
+// settings screen can configure one, which is the next piece of work on remotes.
+#![allow(dead_code)]
 use std::fmt;
 
 use iroh::{Endpoint, EndpointAddr, EndpointId, endpoint::Connection};

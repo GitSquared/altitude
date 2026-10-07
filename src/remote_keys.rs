@@ -38,6 +38,7 @@ impl RemoteKeys {
     /// The key this address answered with last time, if it is remembered at all.
     ///
     /// This is what a caller compares a fresh sighting against.
+    #[allow(dead_code)] // The dial reads this once a remote can be reached.
     pub async fn remembered(&self, address: &str) -> Result<Option<String>, sqlx::Error> {
         let row: Option<(String,)> =
             sqlx::query_as("SELECT key FROM remote_keys WHERE address = ?")
@@ -52,6 +53,7 @@ impl RemoteKeys {
     /// This is also how a change is accepted: remembering a new key replaces the
     /// old one, so accepting is the same act as meeting a remote for the first
     /// time.
+    #[allow(dead_code)] // The dial writes this once a remote can be reached.
     pub async fn remember(&self, address: &str, key: &str, label: &str) -> Result<(), sqlx::Error> {
         let now = chrono::Utc::now().timestamp_millis();
         sqlx::query(

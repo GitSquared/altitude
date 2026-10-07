@@ -13,7 +13,7 @@
 //! version number, because a counter would need a second party to be monotonic
 //! relative to and there is no shared record left to version.
 
-#![allow(dead_code)] // Remove once this module is wired into the application.
+#![allow(dead_code)] // No caller until a capsule can actually be moved.
 
 use std::{error::Error, fmt};
 

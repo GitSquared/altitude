@@ -40,21 +40,15 @@ mod clients;
 mod identity;
 mod server;
 
-#[allow(dead_code)]
 mod client;
-#[allow(dead_code)]
 mod known;
-#[allow(dead_code)]
 mod protocol;
 
 use std::error::Error;
 
-// The facade: one import site for the link, so a caller names what it wants from
-// `net` rather than from a module inside it. Part of this is the dialling side
-// above, which nothing in the app reaches yet, so the re-export is allowed to
-// read as unused. It stops being needed when the last `allow(dead_code)` above
-// goes.
-#[allow(unused_imports)]
+// One import site for the link, so a caller names what it wants from `net`
+// rather than from a module inside it.
+#[allow(unused_imports)] // The dial side is re-exported before it has a caller.
 pub use {
     announce::Announcement,
     client::{LinkClient, LinkPath, LinkReply, PathKind},

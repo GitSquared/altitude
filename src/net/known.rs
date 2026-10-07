@@ -11,6 +11,9 @@
 //! the link. A client keeps what it remembers in the database, and a server keeps
 //! its own record of who connected in a file; this module keeps neither.
 
+// The dial side of the link: nothing in the app reaches a remote until the
+// settings screen can configure one, which is the next piece of work on remotes.
+#![allow(dead_code)]
 use iroh::EndpointId;
 
 use super::{LinkResult, announce::Announcement, protocol::RemoteTicket};

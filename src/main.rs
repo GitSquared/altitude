@@ -25,7 +25,6 @@ mod isolation;
 // dials a remote, so nothing reads what was remembered.
 mod logging;
 mod net;
-#[allow(dead_code)]
 mod remote_keys;
 mod serve;
 mod tasks;

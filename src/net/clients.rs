@@ -69,21 +69,6 @@ impl ClientRecord {
         Ok(first)
     }
 
-    /// Every client seen, in a stable order.
-    ///
-    /// Nothing reads this back yet. A server records who has been here so that a
-    /// new key is visible rather than silent, and the log is what an operator
-    /// reads today; this is the reader the record was written for.
-    #[allow(dead_code)]
-    pub fn seen(&self) -> Vec<EndpointId> {
-        self.seen
-            .read()
-            .expect("client record")
-            .iter()
-            .copied()
-            .collect()
-    }
-
     fn persist(&self, seen: &BTreeSet<EndpointId>) -> LinkResult<()> {
         let keys: Vec<String> = seen.iter().map(EndpointId::to_string).collect();
         let text = format!("{}\n", serde_json::to_string_pretty(&keys)?);
