@@ -18,7 +18,7 @@ use microsandbox::{
 use tokio::sync::{Mutex, mpsc, watch};
 
 use crate::config::Config;
-use crate::development::DevelopmentEnvironment;
+use crate::environment::Environment;
 
 use super::{
     BaseSandboxRecipe, BaseSandboxSnapshot, Command, CommandEvent, CommandSession,
@@ -204,7 +204,7 @@ impl MicrosandboxIsolation {
         self.ensure_snapshot(
             BaseSandboxRecipe::new(
                 "workspace",
-                self.config.environment_snapshots_dir("workspace"),
+                self.config.workspace_snapshots_dir(),
                 Duration::from_secs(72 * 60 * 60),
                 vec![SetupStep::new(
                     "preparing workspace packages",
@@ -535,7 +535,7 @@ impl IsolationEngine for MicrosandboxIsolation {
         &self,
         id: String,
         task_snapshot: Option<String>,
-        development_environment: DevelopmentEnvironment,
+        environment: Environment,
         recipes: Vec<EnvironmentRecipe>,
         progress: &dyn EnvironmentProgressSink,
     ) -> Result<(), IsolationError> {
@@ -544,7 +544,7 @@ impl IsolationEngine for MicrosandboxIsolation {
             &self.config,
             id,
             task_snapshot,
-            development_environment,
+            environment,
             recipes,
             progress,
         )
@@ -603,10 +603,8 @@ impl IsolationEngine for MicrosandboxIsolation {
         // The base environment is the workspace base: the same snapshot every
         // other environment is built on top of, so it describes itself from
         // there rather than from a `coding-base` snapshot of its own.
-        let store = BaseSandboxSnapshotStore::at(
-            self.config.environment_snapshots_dir("workspace"),
-            REFRESH_AFTER,
-        );
+        let store =
+            BaseSandboxSnapshotStore::at(self.config.workspace_snapshots_dir(), REFRESH_AFTER);
         let snapshot = store.current().ok().flatten()?;
         Some(EnvironmentDescription {
             alpine_release: snapshot.alpine_release,

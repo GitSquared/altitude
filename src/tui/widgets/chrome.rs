@@ -16,7 +16,7 @@ use ratatui::{
     widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap},
 };
 
-use super::palette;
+use crate::tui::widgets::palette;
 
 /// The name every screen wears.
 const TITLE: &str = "⛰  altitude";

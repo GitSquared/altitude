@@ -17,11 +17,11 @@ use ratatui::{
     widgets::{Block, BorderType, Clear, Padding},
 };
 
-use super::{
+use crate::tui::widgets::{
     chrome, keys, palette,
     text::{Field, FieldStyle},
 };
-use crate::{agent::AgentKind, development::DevelopmentEnvironment};
+use crate::{agent::AgentKind, environment::Environment};
 
 /// The agents on offer, in the order they are shown.
 const AGENTS: [AgentKind; 2] = [AgentKind::Pi, AgentKind::Claude];
@@ -47,7 +47,7 @@ const ORDER: [Focus; 5] = [
 /// The question, and the answers so far.
 pub struct NewTask {
     task: Field,
-    environments: Vec<DevelopmentEnvironment>,
+    environments: Vec<Environment>,
     environment: usize,
     agent: usize,
     /// Whether the agent had never been chosen, in which case this answer is the
@@ -61,7 +61,7 @@ pub enum Answer {
     Cancel,
     Create {
         task: String,
-        environment: DevelopmentEnvironment,
+        environment: Environment,
         agent: AgentKind,
         /// The agent to remember, when this was the first answer.
         remember: Option<AgentKind>,
@@ -71,7 +71,7 @@ pub enum Answer {
 impl NewTask {
     /// Ask, with the configured defaults already chosen.
     pub fn new(
-        environments: Vec<DevelopmentEnvironment>,
+        environments: Vec<Environment>,
         default_environment: &str,
         default_agent: Option<AgentKind>,
     ) -> Self {

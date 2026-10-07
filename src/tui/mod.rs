@@ -19,7 +19,7 @@ use tokio::{signal::unix::Signal, sync::mpsc, time};
 use crate::{
     agent::AgentKind,
     config::{Config, SettingsError, SettingsFile},
-    development::DevelopmentEnvironment,
+    environment::Environment,
     isolation::{EnvironmentDescription, EnvironmentProgress, IsolationEngine, ProfileSummary},
     remote::{RemoteKey, RemoteKeys},
     task::{
@@ -30,28 +30,19 @@ use crate::{
 };
 
 mod boot;
-mod chrome;
-mod confirm;
-mod keys;
-mod new_task;
-mod operator_signals;
-mod overview;
-mod palette;
-mod prompt;
-mod settings_panel;
-mod shell;
-mod text;
-mod utils;
+mod popups;
+mod screens;
+mod widgets;
 
-use chrome::Hint;
-use confirm::{Confirm, Decision};
-use keys::{is_dismiss, is_help, is_remove};
-use new_task::NewTask;
-use prompt::{Prompt, PromptAction};
-use settings_panel::{
+use popups::confirm::{Confirm, Decision};
+use popups::new_task::NewTask;
+use popups::reply::{Prompt, PromptAction};
+use screens::settings::{
     Depth, Focus, Form, Identity, IdentityKind, Panel, Row, RowKind, Section, Setting, Target, View,
 };
-use shell::Shell;
+use screens::shell::Shell;
+use widgets::chrome::Hint;
+use widgets::keys::{is_dismiss, is_help, is_remove};
 
 pub use boot::{
     database as boot_database, isolation as boot_isolation, task_resume as boot_task_resume,
@@ -189,11 +180,11 @@ impl App {
     /// Built from the settings rather than stored on the app: the list is two or
     /// three entries, and a copy kept here would be one more thing to keep in
     /// step with the file.
-    fn environments(&self) -> Vec<DevelopmentEnvironment> {
+    fn environments(&self) -> Vec<Environment> {
         self.settings_file
             .as_ref()
             .map(|file| file.settings().environments())
-            .unwrap_or_else(|| vec![DevelopmentEnvironment::base()])
+            .unwrap_or_else(|| vec![Environment::base()])
     }
 
     fn default_environment(&self) -> &str {
@@ -634,7 +625,7 @@ impl App {
                         proposed.set_default_environment(&name);
                     }
                 }
-                proposed.add_environment(DevelopmentEnvironment {
+                proposed.add_environment(Environment {
                     name,
                     setup_command: form.setup.value(),
                 });
@@ -737,10 +728,10 @@ impl App {
     }
 
     /// The actions the selected signal offers.
-    fn selected_signal_actions(&self) -> &'static [operator_signals::SignalAction] {
+    fn selected_signal_actions(&self) -> &'static [popups::signals::SignalAction] {
         self.operator_signals
             .get(self.selected_operator_signal)
-            .map_or(&[], |signal| operator_signals::actions_for(signal.kind))
+            .map_or(&[], |signal| popups::signals::actions_for(signal.kind))
     }
 
     /// Move the focus between the selected signal's actions.
@@ -837,18 +828,19 @@ where
         }
         terminal.draw(|frame| {
             let hints = app.hints();
-            let content = chrome::draw(frame, &hints, app.keyboard_hints(), app.notice.as_deref());
-            overview::draw(frame, content, &mut app);
+            let content =
+                widgets::chrome::draw(frame, &hints, app.keyboard_hints(), app.notice.as_deref());
+            screens::tasks::draw(frame, content, &mut app);
             if let Some(shell) = app.open_shell.as_ref().and_then(|id| app.shells.get(id)) {
                 shell.draw(frame, content);
             }
             if app.panel.open {
                 // Fullscreen: it is the screen, not something over it.
                 let view = app.settings_view();
-                settings_panel::draw(frame, content, &app.panel, &view);
+                screens::settings::draw(frame, content, &app.panel, &view);
             } else if app.open_operator_signals {
-                chrome::dim(frame, content);
-                operator_signals::draw(
+                widgets::chrome::dim(frame, content);
+                popups::signals::draw(
                     frame,
                     content,
                     &app.operator_signals,
@@ -861,20 +853,20 @@ where
                 );
             }
             if let Some(confirm) = &app.confirm {
-                chrome::dim(frame, content);
-                confirm::draw(frame, content, &confirm.dialog);
+                widgets::chrome::dim(frame, content);
+                popups::confirm::draw(frame, content, &confirm.dialog);
             }
             if let Some(new_task) = &app.new_task {
-                chrome::dim(frame, content);
-                new_task::draw(frame, content, new_task);
+                widgets::chrome::dim(frame, content);
+                popups::new_task::draw(frame, content, new_task);
             }
             if app.help {
-                chrome::dim(frame, content);
-                chrome::draw_help(frame, content, &hints);
+                widgets::chrome::dim(frame, content);
+                widgets::chrome::draw_help(frame, content, &hints);
             }
             // Input belongs above the settings overlay that opened it.
             if let Some(prompt) = &app.prompt {
-                chrome::dim(frame, content);
+                widgets::chrome::dim(frame, content);
                 prompt.draw(frame, content);
             }
         })?;
@@ -930,7 +922,7 @@ where
                 TaskExecutionUpdate::OperatorReady(task) => {
                     let id = task.id.clone();
                     app.replace_task(task);
-                    let (rows, cols) = shell::size(terminal.size()?.into());
+                    let (rows, cols) = screens::shell::size(terminal.size()?.into());
                     let history = event_loop.cached_terminal_output(&id);
                     event_loop.resize_terminal(&id, rows, cols);
                     app.shells.insert(id.clone(), Shell::new(rows, cols, history));
@@ -1078,7 +1070,7 @@ where
     if let Event::Resize(_, _) = event
         && let Some(id) = &app.open_shell
     {
-        let (rows, cols) = shell::size(terminal.size()?.into());
+        let (rows, cols) = screens::shell::size(terminal.size()?.into());
         event_loop.resize_terminal(id, rows, cols);
         if let Some(shell) = app.shells.get_mut(id) {
             shell.resize(rows, cols);
@@ -1151,7 +1143,7 @@ where
         return Ok(false);
     }
     if let Some(id) = app.open_shell.clone() {
-        if shell::is_exit_key(key) {
+        if screens::shell::is_exit_key(key) {
             if !event_loop.return_to_autopilot(&id) {
                 app.notice =
                     Some("this task is no longer running; control stayed with autopilot".into());
@@ -1181,8 +1173,8 @@ where
         let mut question = app.new_task.take().expect("just checked");
         match question.handle_key(key) {
             None => app.new_task = Some(question),
-            Some(new_task::Answer::Cancel) => {}
-            Some(new_task::Answer::Create {
+            Some(popups::new_task::Answer::Cancel) => {}
+            Some(popups::new_task::Answer::Create {
                 task,
                 environment,
                 agent,
@@ -1242,7 +1234,7 @@ where
                     return Ok(false);
                 };
                 match action {
-                    operator_signals::SignalAction::Reply => {
+                    popups::signals::SignalAction::Reply => {
                         if app.tasks.iter().any(|task| task.id == signal.task_id) {
                             app.answering_operator_signal = Some(signal.id);
                             app.prompt = Some(Prompt::new("answer operator signal"));
@@ -1251,7 +1243,7 @@ where
                             app.notice = Some("this task is no longer in the list".into());
                         }
                     }
-                    operator_signals::SignalAction::Acknowledge => {
+                    popups::signals::SignalAction::Acknowledge => {
                         match task_service.acknowledge_operator_signal(&signal.id).await {
                             Ok(task) => {
                                 app.replace_task(task);
@@ -1260,7 +1252,7 @@ where
                             Err(error) => app.notice = Some(error.to_string()),
                         }
                     }
-                    operator_signals::SignalAction::Confirm => {
+                    popups::signals::SignalAction::Confirm => {
                         match task_service.confirm_operator_signal(&signal.id).await {
                             Ok(task) => {
                                 app.replace_task(task);
@@ -1368,7 +1360,7 @@ where
                     return Ok(false);
                 }
                 if app.shells.contains_key(&task.id) {
-                    let (rows, cols) = shell::size(terminal.size()?.into());
+                    let (rows, cols) = screens::shell::size(terminal.size()?.into());
                     event_loop.resize_terminal(&task.id, rows, cols);
                     if let Some(shell) = app.shells.get_mut(&task.id) {
                         shell.resize(rows, cols);
@@ -1380,7 +1372,7 @@ where
                 if !event_loop.has_active_run(&task.id) {
                     return Ok(false);
                 }
-                let (rows, cols) = shell::size(terminal.size()?.into());
+                let (rows, cols) = screens::shell::size(terminal.size()?.into());
                 let history = event_loop.cached_terminal_output(&task.id);
                 event_loop.resize_terminal(&task.id, rows, cols);
                 app.shells

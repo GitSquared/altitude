@@ -4,17 +4,17 @@ use std::{error::Error, fmt};
 /// The built-in environment's name.
 ///
 /// Reserved: it cannot be configured, because the built-in environment is always
-/// present. See [`DevelopmentEnvironment::base`].
+/// present. See [`Environment::base`].
 pub const BASE_NAME: &str = "base";
 
 /// A named environment a task runs in, as configured in `config.toml`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct DevelopmentEnvironment {
+pub struct Environment {
     pub name: String,
     pub setup_command: String,
 }
 
-impl DevelopmentEnvironment {
+impl Environment {
     /// The built-in environment every other one is built on top of.
     ///
     /// Not stored in the settings file, because a name that cannot be edited or
@@ -52,7 +52,7 @@ impl DevelopmentEnvironment {
         self.key() == other.key()
     }
 
-    pub fn validate(&self) -> Result<(), DevelopmentEnvironmentError> {
+    pub fn validate(&self) -> Result<(), EnvironmentError> {
         let mut characters = self.name.chars();
         let valid_first = characters
             .next()
@@ -60,7 +60,7 @@ impl DevelopmentEnvironment {
         let valid_rest = characters
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'));
         if !valid_first || !valid_rest || self.name.len() > 64 {
-            return Err(DevelopmentEnvironmentError(format!(
+            return Err(EnvironmentError(format!(
                 "environment name {:?} must be 1-64 ASCII letters, numbers, hyphens, or underscores, and start with a letter or number",
                 self.name
             )));
@@ -75,12 +75,12 @@ pub fn is_base_name(name: &str) -> bool {
 }
 
 #[derive(Debug)]
-pub struct DevelopmentEnvironmentError(String);
+pub struct EnvironmentError(String);
 
-impl fmt::Display for DevelopmentEnvironmentError {
+impl fmt::Display for EnvironmentError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
     }
 }
 
-impl Error for DevelopmentEnvironmentError {}
+impl Error for EnvironmentError {}

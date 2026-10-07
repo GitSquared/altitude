@@ -10,7 +10,7 @@
 //! describes it instead, which is the only place an operator can see what a
 //! sandbox is actually made of.
 
-use super::{chrome, palette};
+use crate::tui::widgets::{chrome, palette};
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -25,7 +25,7 @@ use crate::{
     agent::AgentKind,
     isolation::{EnvironmentDescription, ProfileMount, REFRESH_AFTER},
     remote::RemoteKey,
-    tui::text::{Field, FieldStyle, TextBox},
+    tui::widgets::text::{Field, FieldStyle, TextBox},
 };
 
 /// The gap between columns, so two focus bars can never touch.

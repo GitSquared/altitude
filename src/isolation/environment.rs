@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::config::Config;
-use crate::development::DevelopmentEnvironment;
+use crate::environment::Environment;
 
 use super::{
     BaseSandboxRecipe, CommandEvent, EnvironmentProgressSink, IsolationEngine, IsolationError,
@@ -96,23 +96,23 @@ struct EnvironmentPlan {
 impl EnvironmentPlan {
     fn compose(
         config: &Config,
-        development_environment: DevelopmentEnvironment,
+        environment: Environment,
         recipes: Vec<EnvironmentRecipe>,
     ) -> Result<Self, IsolationError> {
-        development_environment
+        environment
             .validate()
             .map_err(|error| IsolationError::new(error.to_string()))?;
-        let environment_name = development_environment.name;
+        let environment_name = environment.name;
         let mut plan = Self {
             recipe: BaseSandboxRecipe::new(
                 format!("coding-{environment_name}"),
-                config.development_environment_snapshots_dir(&environment_name),
+                config.environment_snapshots_dir(&environment_name),
                 REFRESH_AFTER,
                 // Each contributor to the build is its own step, so a task
                 // waiting on a cold environment can say what it is waiting for.
                 vec![SetupStep::new(
                     format!("preparing the {environment_name} environment"),
-                    development_environment.setup_command,
+                    environment.setup_command,
                 )],
             ),
             options: SandboxOptions {
@@ -293,12 +293,12 @@ pub(super) async fn provision(
     config: &Config,
     id: String,
     snapshot: Option<String>,
-    development_environment: DevelopmentEnvironment,
+    environment: Environment,
     recipes: Vec<EnvironmentRecipe>,
     progress: &dyn EnvironmentProgressSink,
 ) -> Result<(), IsolationError> {
     // Validate every recipe before creating directories or building images.
-    let mut plan = EnvironmentPlan::compose(config, development_environment, recipes)?;
+    let mut plan = EnvironmentPlan::compose(config, environment, recipes)?;
     plan.initialize(config)?;
     plan.options.snapshot_path = Some(match snapshot {
         Some(path) => path,

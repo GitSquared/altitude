@@ -6,7 +6,7 @@ use super::{
     TaskExecutionPauseReason, TaskExecutionStatus, TaskFacts, TaskHistoryEvent,
     TaskOperatorAttentionLevel, TaskOperatorSignal, TaskOperatorSignalKind,
 };
-use crate::development::DevelopmentEnvironment;
+use crate::environment::Environment;
 use crate::{
     agent::AgentKind,
     db::Database,
@@ -62,7 +62,7 @@ impl TaskStore {
     pub async fn create_with_agent(
         &self,
         intent: String,
-        environment: DevelopmentEnvironment,
+        environment: Environment,
         identity_id: String,
         identity_label: String,
         agent_kind: Option<AgentKind>,

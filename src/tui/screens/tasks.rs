@@ -1,4 +1,4 @@
-use super::palette;
+use crate::tui::{App, widgets::palette};
 
 use ratatui::{
     Frame,
@@ -13,7 +13,7 @@ use crate::{
         Task, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
         TaskOperatorAttentionLevel, TaskOperatorSignalKind,
     },
-    tui::utils::{shimmer, truncate},
+    tui::widgets::utils::{shimmer, truncate},
 };
 
 /// The narrowest a card may be and still show an intent.
@@ -31,7 +31,7 @@ fn grid(area: Rect) -> (usize, u16, u16) {
     (columns, card_width, card_height)
 }
 
-pub fn draw(frame: &mut Frame, area: Rect, app: &mut super::App) {
+pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     let (columns, card_width, height) = grid(area);
     app.grid_columns = columns;
     draw_tasks(frame, area, app, columns, card_width, height);
@@ -40,7 +40,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut super::App) {
 fn draw_tasks(
     frame: &mut Frame,
     area: Rect,
-    app: &mut super::App,
+    app: &mut App,
     columns: usize,
     card_width: u16,
     height: u16,

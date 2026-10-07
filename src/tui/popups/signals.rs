@@ -8,10 +8,10 @@ use ratatui::{
 
 use chrono::{Local, TimeZone};
 
-use super::palette;
+use crate::tui::widgets::palette;
 use crate::{
     task::{TaskOperatorSignal, TaskOperatorSignalKind, TaskOperatorSignalPriority},
-    tui::utils::centered_width,
+    tui::widgets::utils::centered_width,
 };
 
 /// What the operator can do with the signal they have selected.

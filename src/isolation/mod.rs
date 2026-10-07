@@ -2,7 +2,7 @@ use std::{error::Error as StdError, fmt, future::Future, path::PathBuf, time::Du
 
 use tokio::sync::{mpsc, watch};
 
-use crate::development::DevelopmentEnvironment;
+use crate::environment::Environment;
 
 mod environment;
 mod microsandbox;
@@ -224,7 +224,7 @@ pub trait IsolationEngine: Send + Sync {
         &self,
         id: String,
         task_snapshot: Option<String>,
-        development_environment: DevelopmentEnvironment,
+        environment: Environment,
         recipes: Vec<EnvironmentRecipe>,
         progress: &dyn EnvironmentProgressSink,
     ) -> impl Future<Output = Result<(), IsolationError>> + Send;

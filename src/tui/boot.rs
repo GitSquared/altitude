@@ -10,8 +10,8 @@ use ratatui::{
 };
 use tokio::{signal::unix::Signal, sync::watch, time};
 
-use super::palette;
-use crate::{isolation::IsolationStatus, tui::utils::shimmer};
+use crate::tui::widgets::palette;
+use crate::{isolation::IsolationStatus, tui::widgets::utils::shimmer};
 
 const TITLE: &str = "⛰  altitude";
 

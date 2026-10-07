@@ -3,7 +3,7 @@ use ratatui::{
     text::Span,
 };
 
-use super::palette;
+use crate::tui::widgets::palette;
 
 /// How many characters wide the travelling highlight is.
 const SHIMMER_WIDTH: usize = 3;

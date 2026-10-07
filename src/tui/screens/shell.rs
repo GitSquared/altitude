@@ -1,4 +1,4 @@
-use super::palette;
+use crate::tui::widgets::palette;
 
 use std::{
     sync::mpsc::{self, Receiver, Sender},

@@ -1,6 +1,6 @@
 use crate::{
     agent::AgentKind,
-    development::{BASE_NAME, DevelopmentEnvironment, is_base_name},
+    environment::{BASE_NAME, Environment, is_base_name},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -30,7 +30,7 @@ const DEFAULT_SETTINGS: &str = r#"default_environment = "base"
 pub struct Settings {
     pub default_environment: String,
     #[serde(rename = "environments", default)]
-    configured: Vec<DevelopmentEnvironment>,
+    configured: Vec<Environment>,
     /// The addresses of the machines this host delegates to.
     ///
     /// An address, not a name: what a remote is *called* is what it told you,
@@ -157,8 +157,8 @@ fn write_settings(path: &Path, contents: &str) -> Result<(), SettingsError> {
 
 impl Settings {
     /// Everything a task can run in: the built-in base, then what is configured.
-    pub fn environments(&self) -> Vec<DevelopmentEnvironment> {
-        let mut all = vec![DevelopmentEnvironment::base()];
+    pub fn environments(&self) -> Vec<Environment> {
+        let mut all = vec![Environment::base()];
         all.extend(self.configured.iter().cloned());
         all
     }
@@ -189,7 +189,7 @@ impl Settings {
     }
 
     /// Add a configured environment, replacing one of the same name.
-    pub fn add_environment(&mut self, environment: DevelopmentEnvironment) {
+    pub fn add_environment(&mut self, environment: Environment) {
         self.configured
             .retain(|existing| !existing.same_name(&environment));
         self.configured.push(environment);

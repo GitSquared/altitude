@@ -5,7 +5,7 @@ use ratatui::{
     widgets::Clear,
 };
 
-use super::text::{Field, FieldStyle};
+use crate::tui::widgets::text::{Field, FieldStyle};
 
 /// A one-line question, asked over whatever is on screen.
 pub struct Prompt {

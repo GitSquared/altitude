@@ -1,5 +1,5 @@
 use crate::config::InstallationIdentity;
-use crate::development::DevelopmentEnvironment;
+use crate::environment::Environment;
 use crate::{
     agent::{AgentEngine, AgentEngines, AgentError, AgentKind, TaskReportDecoder},
     isolation::{
@@ -81,7 +81,7 @@ where
     pub async fn create(
         &self,
         intent: String,
-        environment: DevelopmentEnvironment,
+        environment: Environment,
         agent: AgentKind,
     ) -> Result<Task, TaskServiceError> {
         let kind = agent;
@@ -261,7 +261,7 @@ where
                     .provision(
                         sandbox_id.clone(),
                         snapshot_path.clone(),
-                        task.development_environment(),
+                        task.environment(),
                         vec![
                             self.agents.engine(kind).environment_recipe(),
                             GitHub::environment_recipe(),

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::agent::AgentKind;
-use crate::development::DevelopmentEnvironment;
+use crate::environment::Environment;
 use crate::vcs::{CodeContribution, ContributionObservation};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -172,7 +172,7 @@ pub enum TaskHistoryEvent {
         sandbox_available: bool,
         snapshot_available: bool,
         intent: String,
-        environment: DevelopmentEnvironment,
+        environment: Environment,
         /// The identity this task was delegated under.
         ///
         /// Recorded with the intent because it cannot be inferred later: a machine
@@ -332,8 +332,8 @@ impl Task {
     /// The environment this task runs in.
     ///
     /// The agent it runs under is recorded separately, as the task's agent kind.
-    pub fn development_environment(&self) -> DevelopmentEnvironment {
-        DevelopmentEnvironment {
+    pub fn environment(&self) -> Environment {
+        Environment {
             name: self.facts.environment_name.clone(),
             setup_command: self.facts.environment_setup_command.clone(),
         }

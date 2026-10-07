@@ -5,7 +5,7 @@
 //! characters, indexed in bytes, and measured in terminal columns, and those are
 //! three different numbers as soon as anything outside ASCII is typed.
 
-use super::palette;
+use crate::tui::widgets::palette;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{

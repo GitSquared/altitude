@@ -12,7 +12,7 @@ use ratatui::{
     widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap},
 };
 
-use super::{chrome, keys};
+use crate::tui::widgets::{chrome, keys};
 
 /// A question with two answers, one of which cannot be undone.
 pub struct Confirm {

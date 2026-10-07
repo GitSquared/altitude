@@ -212,14 +212,17 @@ impl Config {
         self.data_dir.join(profile).join("profile")
     }
 
-    pub fn environment_snapshots_dir(&self, name: &str) -> PathBuf {
+    /// Where the workspace base is kept: the snapshot every environment is
+    /// built on top of.
+    pub fn workspace_snapshots_dir(&self) -> PathBuf {
         self.data_dir
             .join("environments")
-            .join(name)
+            .join("workspace")
             .join("snapshots")
     }
 
-    pub fn development_environment_snapshots_dir(&self, name: &str) -> PathBuf {
+    /// Where one environment's snapshot is kept.
+    pub fn environment_snapshots_dir(&self, name: &str) -> PathBuf {
         self.data_dir
             .join("environments")
             .join("coding")
