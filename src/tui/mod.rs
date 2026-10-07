@@ -31,6 +31,7 @@ use crate::{
 
 mod boot;
 mod environment_picker;
+mod keys;
 mod operator_signals;
 mod overview;
 mod prompt;
@@ -39,6 +40,7 @@ mod shell;
 mod text;
 mod utils;
 
+use keys::{is_dismiss, is_remove};
 use prompt::{Prompt, PromptAction};
 use settings_panel::{Confirm, Depth, Focus, Form, Panel, Row, RowKind, Section, Target, View};
 use shell::Shell;
@@ -359,9 +361,14 @@ impl App {
     fn panel_key(&mut self, key: KeyEvent) {
         let rows = self.row_count();
         match key.code {
-            KeyCode::Esc | KeyCode::Char('s') => self.panel.open = false,
+            _ if is_dismiss(key) || key.code == KeyCode::Char('s') => self.panel.open = false,
             KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
-                self.panel.depth = self.panel.depth.deeper()
+                // A row with nothing inside it has no deeper level to open.
+                if self.panel.depth != Depth::List
+                    || self.selected_row().is_some_and(|row| row.is_actionable())
+                {
+                    self.panel.depth = self.panel.depth.deeper();
+                }
             }
             KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
                 self.panel.depth = self.panel.depth.shallower()
@@ -374,7 +381,7 @@ impl App {
                     _ => Form::new(Target::NewEnvironment, "", AgentKind::default(), ""),
                 });
             }
-            KeyCode::Char('d') if self.panel.section.editable() => self.ask_to_delete(),
+            _ if is_remove(key) && self.panel.section.editable() => self.ask_to_delete(),
             KeyCode::Enter => self.edit_selected(),
             _ => {}
         }
@@ -450,7 +457,7 @@ impl App {
             // press, so a setup command can hold newlines without trapping the
             // operator in it.
             KeyCode::Esc if form.focus.takes_text() => form.focus = Focus::Cancel,
-            KeyCode::Esc => keep = false,
+            _ if is_dismiss(key) && !form.focus.takes_text() => keep = false,
             KeyCode::BackTab => form.move_focus(false),
             KeyCode::Tab => form.move_focus(true),
             KeyCode::Enter if form.focus == Focus::Setup => form.setup.handle_key(key),
@@ -538,7 +545,13 @@ impl App {
             return;
         };
         match key.code {
-            KeyCode::Esc => self.panel.confirm = None,
+            _ if is_dismiss(key) => self.panel.confirm = None,
+            _ if is_remove(key) => {
+                let Some(confirm) = self.panel.confirm.take() else {
+                    return;
+                };
+                self.delete(confirm.target).await;
+            }
             KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => {
                 if let Some(confirm) = self.panel.confirm.as_mut() {
                     confirm.button = 1 - button;
@@ -809,7 +822,12 @@ where
                     app.remove_shell(&id);
                     app.replace_task(task);
                 }
-                TaskExecutionUpdate::Finished(id, Err(error)) if !app.is_removing(&id) => show_task_error(&mut app, &id, error),
+                // A run's failure is the task's own news rather than the
+                // interface's: the card turns red and says so, and the reason
+                // belongs to the task rather than to the band under the list.
+                TaskExecutionUpdate::Finished(id, Err(error)) if !app.is_removing(&id) => {
+                    tracing::warn!(task_id = %id, %error, "a task's run ended with an error");
+                }
                 TaskExecutionUpdate::Removed(id, Ok(())) => app.remove_task(&id),
                 TaskExecutionUpdate::Removed(id, Err(error)) => {
                     app.cancel_removing(&id);
@@ -960,12 +978,25 @@ where
         match prompt.handle_key(key) {
             Some(PromptAction::Cancel) => {
                 app.prompt = None;
-                app.answering_operator_signal = None;
+                // Leaving the box without answering returns to the signals it
+                // was opened from, rather than all the way out to the list.
+                if app.answering_operator_signal.take().is_some() {
+                    app.open_operator_signals = true;
+                }
             }
             Some(PromptAction::Submit(command)) => {
                 app.prompt = None;
                 if let Some(signal_id) = app.answering_operator_signal.take() {
+                    // Answering the last signal leaves nothing to go back to, so
+                    // that is the one case that returns to the task list.
+                    let was_last = app
+                        .operator_signals
+                        .last()
+                        .is_some_and(|signal| signal.id == signal_id);
                     event_loop.answer_operator_signal(signal_id, command);
+                    if !was_last {
+                        app.open_operator_signals = true;
+                    }
                 } else if let Some(environment) = app.single_environment() {
                     event_loop.create(command, environment);
                 } else if app.environments().is_empty() {
@@ -1006,7 +1037,7 @@ where
     }
     if app.open_environment_picker {
         match key.code {
-            KeyCode::Esc => {
+            _ if is_dismiss(key) => {
                 app.open_environment_picker = false;
                 app.pending_command = None;
             }
@@ -1036,7 +1067,9 @@ where
             }
             KeyCode::Home => app.operator_signal_scroll = 0,
             KeyCode::End => app.operator_signal_scroll = u16::MAX,
-            KeyCode::Esc | KeyCode::Char('i') => app.open_operator_signals = false,
+            _ if is_dismiss(key) || key.code == KeyCode::Char('i') => {
+                app.open_operator_signals = false
+            }
             KeyCode::Tab => app.focus_next_signal_action(),
             KeyCode::BackTab => app.focus_previous_signal_action(),
             KeyCode::Down | KeyCode::Char('j') => app.select_next_operator_signal(),
@@ -1128,7 +1161,7 @@ where
         }
         KeyCode::Tab | KeyCode::Char('j') => app.select_next(),
         KeyCode::BackTab | KeyCode::Char('h') => app.select_previous(),
-        KeyCode::Backspace | KeyCode::Delete => {
+        _ if is_remove(key) => {
             if let Some(task) = app.selected_task() {
                 tracing::info!(task_id = %task.id, "removing task from overview");
                 app.begin_removing(&task.id);

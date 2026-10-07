@@ -107,6 +107,17 @@ pub enum RowKind {
     },
 }
 
+impl Row {
+    /// Whether this row opens into anything.
+    ///
+    /// The built-in base does not: there is no form behind it and nothing to
+    /// configure, so selecting it is already as far as it goes, and its
+    /// description is shown without a second step.
+    pub fn is_actionable(&self) -> bool {
+        !matches!(self.kind, RowKind::Base)
+    }
+}
+
 /// Everything the panel draws, assembled by the caller from settings, the
 /// remembered keys, and the built environments.
 pub struct View {
@@ -388,9 +399,14 @@ fn draw_columns(frame: &mut Frame, panel: &Panel, view: &View) {
     frame.render_widget(List::new(list_items), list_area);
 
     // The column ahead of the focus is drawn dimmed rather than withheld, so the
-    // shape of the next step is visible before it is taken.
-    let detail_focused = panel.depth == Depth::Detail;
-    let pane = detail(panel, view);
+    // shape of the next step is visible before it is taken. A row with no deeper
+    // level has no next step, so its column is already the one you are in.
+    let detail_focused = panel.depth == Depth::Detail
+        || (panel.depth == Depth::List
+            && panel
+                .selected_row(view)
+                .is_some_and(|row| !row.is_actionable()));
+    let pane = detail(panel, view, detail_focused);
     frame.render_widget(if detail_focused { pane } else { pane.dim() }, detail_area);
 }
 
@@ -404,8 +420,10 @@ fn hint(panel: &Panel) -> Line<'static> {
 }
 
 /// The third column: what is known about the highlighted row.
-fn detail(panel: &Panel, view: &View) -> Paragraph<'static> {
-    let focused = panel.depth == Depth::Detail;
+/// The third column. `focused` is decided by the caller, because whether this
+/// column holds the focus is not the same question as how deep the focus is: a
+/// row with nothing inside it is already here.
+fn detail(panel: &Panel, view: &View, focused: bool) -> Paragraph<'static> {
     // The heading is the column's focus indicator: it has no rows to bar.
     let heading = move |text: String| {
         if focused {

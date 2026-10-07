@@ -18,7 +18,9 @@ use crate::{
 };
 
 pub fn draw(frame: &mut Frame, app: &mut super::App) {
-    let shortcuts = shortcut_hints(frame.area().width.saturating_sub(2));
+    // Only the keys that would do something: a hint for a task gesture is noise
+    // when there is no task.
+    let shortcuts = shortcut_hints(frame.area().width.saturating_sub(2), !app.tasks.is_empty());
     let footer_height = shortcuts.line_count(frame.area().width.saturating_sub(2)) as u16;
     let message_width = usize::from(frame.area().width.saturating_sub(2).max(1));
     let message_height = app.notice.as_deref().map_or(0, |text| {
@@ -34,7 +36,6 @@ pub fn draw(frame: &mut Frame, app: &mut super::App) {
         Constraint::Length(footer_height),
     ])
     .margin(1)
-    .spacing(1)
     .areas(frame.area());
 
     let [title, version] =
@@ -55,18 +56,15 @@ pub fn draw(frame: &mut Frame, app: &mut super::App) {
     frame.render_widget(shortcuts, footer);
 }
 
-fn shortcut_hints(width: u16) -> Paragraph<'static> {
+fn shortcut_hints(width: u16, has_task: bool) -> Paragraph<'static> {
     let mut lines = Vec::new();
     let mut line = String::new();
-    for hint in [
-        "c create",
-        "s settings",
-        "i info",
-        "h/j select",
-        "enter shell",
-        "delete remove",
-        "q quit",
-    ] {
+    let mut hints = vec!["c create", "s settings"];
+    if has_task {
+        hints.extend(["i info", "h/j select", "enter shell", "d remove"]);
+    }
+    hints.push("q quit");
+    for hint in hints {
         if !line.is_empty() {
             if Line::from(format!("{line} · {hint}")).width() > usize::from(width) {
                 lines.push(Line::from(mem::take(&mut line)));
@@ -132,7 +130,7 @@ fn draw_tasks(frame: &mut Frame, area: Rect, app: &mut super::App) {
         // Pending without a build to show means the host has not admitted it yet.
         let at_capacity = capacity.is_some_and(|limit| occupied >= limit);
         let mut status = if let Some(progress) = building {
-            Line::from_iter(shimmer(&build_label(progress, text_width), tick + index))
+            Line::from_iter(shimmer(&build_label(progress, text_width), tick))
         } else {
             match &task.facts.execution_status {
                 TaskExecutionStatus::Pending => {
@@ -144,7 +142,7 @@ fn draw_tasks(frame: &mut Frame, area: Rect, app: &mut super::App) {
                     } else {
                         "starting up..."
                     };
-                    Line::from_iter(shimmer(label, tick + index)).dim()
+                    Line::from_iter(shimmer(label, tick))
                 }
                 TaskExecutionStatus::Running => Line::from(match task.facts.execution_mode {
                     TaskExecutionMode::Autopilot => "autopilot · working",
