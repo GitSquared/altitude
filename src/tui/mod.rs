@@ -29,12 +29,11 @@ use crate::{
     tasks::{TaskEventLoop, TaskExecutionUpdate},
 };
 
-mod agent_picker;
 mod boot;
 mod chrome;
 mod confirm;
-mod environment_picker;
 mod keys;
+mod new_task;
 mod operator_signals;
 mod overview;
 mod palette;
@@ -47,6 +46,7 @@ mod utils;
 use chrome::Hint;
 use confirm::{Confirm, Decision};
 use keys::{is_dismiss, is_help, is_remove};
+use new_task::NewTask;
 use prompt::{Prompt, PromptAction};
 use settings_panel::{
     Depth, Focus, Form, Identity, IdentityKind, Panel, Row, RowKind, Section, Setting, Target, View,
@@ -85,11 +85,8 @@ pub struct App {
     operator_signal_scroll: u16,
     open_operator_signals: bool,
     answering_operator_signal: Option<String>,
-    selected_environment: usize,
-    /// True while the picker is asking which environment a new task uses.
-    open_environment_picker: bool,
-    /// The new-task prompt held while the picker is open.
-    pending_command: Option<String>,
+    /// The creation question, holding the prompt until it is answered.
+    new_task: Option<NewTask>,
     /// Where `config.toml` lives, so the manage view can persist changes.
     config: Config,
     settings_file: Option<SettingsFile>,
@@ -99,9 +96,7 @@ pub struct App {
     confirm: Option<PendingConfirm>,
     /// The keys for wherever you are, shown over whatever is there.
     help: bool,
-    /// The first-run question, held while the task it was asked for waits.
-    open_agent_picker: bool,
-    selected_agent: usize,
+
     /// What each address last answered with. Written by the dial once there is
     /// one; read when the panel opens.
     remote_keys: RemoteKeys,
@@ -146,16 +141,13 @@ impl App {
             operator_signal_scroll: 0,
             open_operator_signals: false,
             answering_operator_signal: None,
-            selected_environment: 0,
-            open_environment_picker: false,
-            pending_command: None,
+            new_task: None,
             config,
             settings_file,
             panel: Panel::new(),
             confirm: None,
             help: false,
-            open_agent_picker: false,
-            selected_agent: 0,
+
             remote_keys,
             remembered_keys: Vec::new(),
             base_description: None,
@@ -209,54 +201,6 @@ impl App {
             .as_ref()
             .map(|file| file.settings().default_environment.as_str())
             .unwrap_or_default()
-    }
-
-    /// The only environment on offer, when there is exactly one.
-    ///
-    /// A single environment is not a decision, so the picker is skipped rather
-    /// than shown with one row. A fresh install is exactly this case: the base,
-    /// and nothing configured.
-    fn single_environment(&self) -> Option<DevelopmentEnvironment> {
-        match self.environments().as_slice() {
-            [environment] => Some(environment.clone()),
-            _ => None,
-        }
-    }
-
-    /// Hold a new-task prompt until the operator picks an environment.
-    ///
-    /// Selection starts on the configured default so the common case is a
-    /// single Enter.
-    fn hold_command_for_environment_pick(&mut self, command: String) {
-        self.selected_environment = self
-            .environments()
-            .iter()
-            .position(|environment| {
-                environment
-                    .name
-                    .eq_ignore_ascii_case(self.default_environment())
-            })
-            .unwrap_or(0);
-        self.pending_command = Some(command);
-        self.open_environment_picker = true;
-    }
-
-    fn chosen_environment(&self) -> Option<DevelopmentEnvironment> {
-        self.environments().get(self.selected_environment).cloned()
-    }
-
-    fn select_next_environment(&mut self) {
-        let count = self.environments().len();
-        if count > 0 {
-            self.selected_environment = (self.selected_environment + 1) % count;
-        }
-    }
-
-    fn select_previous_environment(&mut self) {
-        let count = self.environments().len();
-        if count > 0 {
-            self.selected_environment = (self.selected_environment + count - 1) % count;
-        }
     }
 
     fn reload_settings(&mut self) -> bool {
@@ -458,8 +402,8 @@ impl App {
                 Hint::new("?", "keys"),
             ];
         }
-        if self.open_agent_picker {
-            return agent_picker::hints();
+        if let Some(new_task) = &self.new_task {
+            return new_task.hints();
         }
         if self.panel.form.is_some() {
             return vec![
@@ -486,13 +430,6 @@ impl App {
                 Hint::new("enter", "validate"),
                 Hint::new("j/k", "signal"),
                 Hint::new("pgup/pgdn", "scroll"),
-                dismiss(),
-            ];
-        }
-        if self.open_environment_picker {
-            return vec![
-                Hint::new("j/k", "environment"),
-                Hint::new("enter", "start"),
                 dismiss(),
             ];
         }
@@ -922,23 +859,14 @@ where
                     app.selected_signal_action,
                     &mut app.operator_signal_scroll,
                 );
-            } else if app.open_environment_picker {
-                chrome::dim(frame, content);
-                environment_picker::draw(
-                    frame,
-                    content,
-                    &app.environments(),
-                    app.default_environment(),
-                    app.selected_environment,
-                );
             }
             if let Some(confirm) = &app.confirm {
                 chrome::dim(frame, content);
                 confirm::draw(frame, content, &confirm.dialog);
             }
-            if app.open_agent_picker {
+            if let Some(new_task) = &app.new_task {
                 chrome::dim(frame, content);
-                agent_picker::draw(frame, content, app.selected_agent);
+                new_task::draw(frame, content, new_task);
             }
             if app.help {
                 chrome::dim(frame, content);
@@ -1043,35 +971,6 @@ impl App {
 fn copy_to_clipboard(text: String) -> Result<(), arboard::Error> {
     let mut clipboard = arboard::Clipboard::new()?;
     clipboard.set_text(text)
-}
-
-/// Begin creating a task.
-///
-/// The agent comes first, because it is the one thing nobody has chosen yet on a
-/// fresh installation, and the environment is only a question when there is more
-/// than one.
-fn start_task<E>(app: &mut App, event_loop: &TaskEventLoop<E>, command: String)
-where
-    E: IsolationEngine + Clone + 'static,
-{
-    if app.agent().is_none() {
-        app.pending_command = Some(command);
-        app.open_agent_picker = true;
-        return;
-    }
-    finish_task(app, event_loop, command);
-}
-
-/// Create the task, now that the agent is known.
-fn finish_task<E>(app: &mut App, event_loop: &TaskEventLoop<E>, command: String)
-where
-    E: IsolationEngine + Clone + 'static,
-{
-    if let Some(environment) = app.single_environment() {
-        event_loop.create(command, environment, app.agent().unwrap_or_default());
-    } else {
-        app.hold_command_for_environment_pick(command);
-    }
 }
 
 /// A question waiting on an answer, and what the answer would do.
@@ -1242,7 +1141,12 @@ where
                         app.open_operator_signals = true;
                     }
                 } else {
-                    start_task(app, event_loop, command);
+                    app.new_task = Some(NewTask::new(
+                        command,
+                        app.environments(),
+                        app.default_environment(),
+                        app.agent(),
+                    ));
                 }
             }
             None => {}
@@ -1276,20 +1180,23 @@ where
         handle_confirm_key(app, event_loop, key).await;
         return Ok(false);
     }
-    if app.open_agent_picker {
-        match agent_picker::handle_key(key, &mut app.selected_agent) {
-            Some(agent_picker::Answer::Cancel) => {
-                app.open_agent_picker = false;
-                app.pending_command = None;
-            }
-            Some(agent_picker::Answer::Chosen(agent)) => {
-                app.open_agent_picker = false;
-                app.set_agent(agent);
-                if let Some(command) = app.pending_command.take() {
-                    finish_task(app, event_loop, command);
+    if app.new_task.is_some() {
+        let mut question = app.new_task.take().expect("just checked");
+        match question.handle_key(key) {
+            None => app.new_task = Some(question),
+            Some(new_task::Answer::Cancel) => {}
+            Some(new_task::Answer::Create {
+                environment,
+                agent,
+                remember,
+            }) => {
+                // The first answer becomes the default, because there was
+                // nothing to default to and guessing is not Altitude's to do.
+                if let Some(agent) = remember {
+                    app.set_agent(agent);
                 }
+                event_loop.create(question.command.clone(), environment, agent);
             }
-            None => {}
         }
         return Ok(false);
     }
@@ -1299,28 +1206,6 @@ where
     }
     if app.panel.open {
         app.panel_key(key);
-        return Ok(false);
-    }
-    if app.open_environment_picker {
-        match key.code {
-            _ if is_dismiss(key) => {
-                app.open_environment_picker = false;
-                app.pending_command = None;
-            }
-            KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') => app.select_next_environment(),
-            KeyCode::BackTab | KeyCode::Up | KeyCode::Char('h') => {
-                app.select_previous_environment()
-            }
-            KeyCode::Enter => {
-                if let (Some(command), Some(environment)) =
-                    (app.pending_command.take(), app.chosen_environment())
-                {
-                    app.open_environment_picker = false;
-                    event_loop.create(command, environment, app.agent().unwrap_or_default());
-                }
-            }
-            _ => {}
-        }
         return Ok(false);
     }
     if app.open_operator_signals {
