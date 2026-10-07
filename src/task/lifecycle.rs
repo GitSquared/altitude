@@ -2,7 +2,7 @@
 
 use crate::{
     agent::AgentKind,
-    environment::Environment,
+    isolation::Environment,
     isolation::{CommandEvent, CommandSession, IsolationEngine, SandboxOptions},
     vcs::GitHub,
 };
@@ -10,7 +10,11 @@ use futures_util::future::join_all;
 use std::path::PathBuf;
 use uuid::Uuid;
 
-use super::*;
+use super::{
+    Task, TaskAgentRun, TaskAgentRunOutcome, TaskError, TaskExecutionMode,
+    TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent, TaskService, TaskServiceError,
+    failure_events, run_ended, should_resume, should_suspend, snapshot_name,
+};
 
 impl<E> TaskService<E>
 where

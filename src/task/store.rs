@@ -6,7 +6,7 @@ use super::{
     TaskExecutionPauseReason, TaskExecutionStatus, TaskFacts, TaskHistoryEvent,
     TaskOperatorAttentionLevel, TaskOperatorSignal, TaskOperatorSignalKind,
 };
-use crate::environment::Environment;
+use crate::isolation::Environment;
 use crate::{
     agent::AgentKind,
     db::Database,

@@ -2,7 +2,10 @@
 
 use crate::isolation::{CommandSession, IsolationEngine};
 
-use super::*;
+use super::{
+    Task, TaskAgentRun, TaskExecutionStatus, TaskHistoryEvent, TaskOperatorSignal, TaskService,
+    TaskServiceError,
+};
 
 impl<E> TaskService<E>
 where

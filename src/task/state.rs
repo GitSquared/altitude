@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::agent::AgentKind;
-use crate::environment::Environment;
+use crate::isolation::Environment;
 use crate::vcs::{CodeContribution, ContributionObservation};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

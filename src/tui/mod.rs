@@ -19,7 +19,7 @@ use tokio::{signal::unix::Signal, sync::mpsc, time};
 use crate::{
     agent::AgentKind,
     config::{Config, SettingsError, SettingsFile},
-    environment::Environment,
+    isolation::Environment,
     isolation::{EnvironmentDescription, EnvironmentProgress, IsolationEngine, ProfileSummary},
     remote::{RemoteKey, RemoteKeys},
     task::{

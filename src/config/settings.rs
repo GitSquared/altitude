@@ -1,6 +1,6 @@
 use crate::{
     agent::AgentKind,
-    environment::{BASE_NAME, Environment, is_base_name},
+    isolation::{BASE_NAME, Environment, is_base_name},
 };
 use serde::{Deserialize, Serialize};
 use std::{

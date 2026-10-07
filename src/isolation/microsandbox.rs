@@ -18,7 +18,7 @@ use microsandbox::{
 use tokio::sync::{Mutex, mpsc, watch};
 
 use crate::config::Config;
-use crate::environment::Environment;
+use crate::isolation::Environment;
 
 use super::{
     BaseSandboxRecipe, BaseSandboxSnapshot, Command, CommandEvent, CommandSession,

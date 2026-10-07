@@ -1,15 +1,19 @@
 use crate::{
-    agent::{AgentEngines, AgentError},
+    agent::{AgentEngines, AgentError, AgentKind},
     config::InstallationIdentity,
-    isolation::IsolationError,
+    isolation::{
+        EnvironmentDescription, EnvironmentProgress, IsolationEngine, IsolationError, ProfileMount,
+        ProfileSummary, guest_path,
+    },
+    vcs::GitHub,
 };
-use std::{error::Error, fmt, path::PathBuf};
+use std::{collections::HashMap, error::Error, fmt, path::PathBuf};
 use uuid::Uuid;
 
+mod agents;
 mod capacity;
 mod event_loop;
 mod lifecycle;
-mod service;
 mod signals;
 mod state;
 mod transfer;
@@ -143,4 +147,71 @@ fn should_suspend(task: &Task) -> bool {
             task.facts.execution_status,
             TaskExecutionStatus::Running | TaskExecutionStatus::Failed
         )
+}
+
+impl<E> TaskService<E>
+where
+    E: IsolationEngine + Clone,
+{
+    pub fn new(
+        store: TaskStore,
+        isolation: E,
+        snapshots_dir: PathBuf,
+        agents: AgentEngines,
+        identity: InstallationIdentity,
+    ) -> Self {
+        Self {
+            store,
+            isolation,
+            snapshots_dir,
+            agents,
+            identity,
+            environment_progress: EnvironmentProgressRegistry::default(),
+        }
+    }
+    // The identity every task this installation founds is recorded under.
+    /// What each task's environment build is doing, for an interface to show.
+    ///
+    /// Keyed by task, and only present while this service is building for it.
+    pub fn environment_builds(&self) -> HashMap<String, EnvironmentProgress> {
+        self.environment_progress.published()
+    }
+    pub async fn list(&self) -> Result<Vec<Task>, TaskServiceError> {
+        self.store.list().await.map_err(TaskServiceError::Task)
+    }
+    /// Bring back what was running, and return the tasks that want a slot.
+    ///
+    /// Recovery is not starting. This puts a task's work back on disk and leaves
+    /// it waiting, so the caller decides what the host can carry; starting here
+    /// would run everything at once on the way up.
+    /// Every profile a task mounts, so an interface can say what logins exist.
+    ///
+    /// Built from the same recipes a task is provisioned with, so this cannot
+    /// drift from what is actually mounted.
+    pub fn profiles(&self) -> Vec<ProfileSummary> {
+        let recipes = [
+            self.agents.engine(AgentKind::Pi).environment_recipe(),
+            self.agents.engine(AgentKind::Claude).environment_recipe(),
+            GitHub::environment_recipe(),
+        ];
+        recipes
+            .into_iter()
+            .map(|recipe| ProfileSummary {
+                profile: recipe.profile,
+                mounts: recipe
+                    .directories
+                    .iter()
+                    .map(|directory| ProfileMount {
+                        path: directory.relative_path,
+                        guest: guest_path(&directory.guest_path),
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+    /// What the workspace base says about itself, for an interface that
+    /// describes environments rather than runs them.
+    pub fn base_description(&self) -> Option<EnvironmentDescription> {
+        self.isolation.base_description()
+    }
 }

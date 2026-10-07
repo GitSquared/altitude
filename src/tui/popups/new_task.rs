@@ -21,7 +21,7 @@ use crate::tui::widgets::{
     chrome, keys, palette,
     text::{Field, FieldStyle},
 };
-use crate::{agent::AgentKind, environment::Environment};
+use crate::{agent::AgentKind, isolation::Environment};
 
 /// The agents on offer, in the order they are shown.
 const AGENTS: [AgentKind; 2] = [AgentKind::Pi, AgentKind::Claude];

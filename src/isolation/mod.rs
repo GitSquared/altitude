@@ -2,8 +2,6 @@ use std::{error::Error as StdError, fmt, future::Future, path::PathBuf, time::Du
 
 use tokio::sync::{mpsc, watch};
 
-use crate::environment::Environment;
-
 mod environment;
 mod microsandbox;
 /// How long a built environment is kept before it is rebuilt, for the interface
@@ -11,7 +9,10 @@ mod microsandbox;
 pub use environment::REFRESH_AFTER;
 /// Shared with the VCS providers so capsule commands are quoted one way.
 pub(crate) use environment::shell_quote;
-pub use environment::{DefaultFile, EnvironmentRecipe, GuestPath, PersistentDirectory};
+pub use environment::{
+    BASE_NAME, DefaultFile, Environment, EnvironmentRecipe, GuestPath, PersistentDirectory,
+    is_base_name,
+};
 pub use microsandbox::MicrosandboxIsolation;
 
 #[derive(Clone, Debug)]
