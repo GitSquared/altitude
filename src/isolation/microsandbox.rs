@@ -23,9 +23,9 @@ use crate::development::DevelopmentEnvironment;
 
 use super::{
     BaseSandboxRecipe, BaseSandboxSnapshot, Command, CommandEvent, CommandSession,
-    EnvironmentProgress, EnvironmentProgressSink, EnvironmentRecipe, IsolationEngine,
-    IsolationError, IsolationStatus, OutputStream, SandboxOptions, SetupStep,
-    environment::{self, private_directory},
+    EnvironmentDescription, EnvironmentProgress, EnvironmentProgressSink, EnvironmentRecipe,
+    IsolationEngine, IsolationError, IsolationStatus, OutputStream, SandboxOptions, SetupStep,
+    environment::{self, REFRESH_AFTER, private_directory},
 };
 
 const BASE_IMAGE: &str = "alpine";
@@ -36,6 +36,22 @@ const WORKSPACE_SETUP: &str = concat!(
     "ALTITUDE_WORKSPACE_README\n",
 );
 const PREPARATION_SANDBOX: &str = "altitude-base-image-setup";
+
+/// What a finished snapshot is made of, asked inside it.
+///
+/// One command, so the answer is one round trip, and one `key<TAB>value` line
+/// each, so the manifest can hold them on lines of its own. Recorded rather than
+/// inferred: the base image is a rolling tag and the setup commands name no
+/// versions, so nothing outside the snapshot can say what an operator ended up
+/// with.
+///
+/// The packages are the ones the build *asked* for (`/etc/apk/world`) rather than
+/// everything present. Both are true; the requested list is the one a person can
+/// read, and it is what an environment is actually made of.
+const DESCRIPTION_COMMAND: &str = concat!(
+    "printf 'alpine\\t%s\\n' \"$(cat /etc/alpine-release 2>/dev/null || echo unknown)\"\n",
+    "printf 'packages\\t%s\\n' \"$(tr '\\n' ' ' < /etc/apk/world 2>/dev/null)\"\n",
+);
 
 #[derive(Clone)]
 pub struct MicrosandboxIsolation {
@@ -177,9 +193,14 @@ impl MicrosandboxIsolation {
             return Ok(current.expect("a base snapshot was present"));
         }
 
+        let steps: Vec<&SetupStep> = recipe
+            .steps
+            .iter()
+            .filter(|step| !step.command.trim().is_empty())
+            .collect();
         let sandbox_id = format!("altitude-{}-setup", recipe.name);
         let created_at_ms = now_ms();
-        tracing::info!(environment = %recipe.name, steps = recipe.steps.len(), "building environment base sandbox snapshot");
+        tracing::info!(environment = %recipe.name, steps = steps.len(), "building environment base sandbox snapshot");
         self.remove_leftover(&sandbox_id).await;
         let mut options = SandboxOptions::isolated(
             parent.map(|snapshot| snapshot.path.to_string_lossy().into_owned()),
@@ -188,17 +209,20 @@ impl MicrosandboxIsolation {
         self.create_sandbox(sandbox_id.clone(), options, PullPolicy::Always)
             .await?;
         let result = async {
-            for (completed, step) in recipe.steps.iter().enumerate() {
+            for (completed, step) in steps.iter().enumerate() {
                 if let Some(progress) = progress {
                     progress.report(EnvironmentProgress {
                         label: step.label.clone(),
                         command: step.command.clone(),
                         completed,
-                        total: recipe.steps.len(),
+                        total: steps.len(),
                     });
                 }
                 self.run_setup_step(&sandbox_id, step).await?;
             }
+            // Asked while the sandbox is still running, and before the snapshot
+            // is taken, because it can only be asked of a live machine.
+            let (alpine_release, packages) = self.describe_snapshot(&sandbox_id).await;
             let path = self.suspend(
                 sandbox_id.clone(),
                 format!("base-{created_at_ms}"),
@@ -207,6 +231,8 @@ impl MicrosandboxIsolation {
             let snapshot = BaseSandboxSnapshot {
                 path,
                 created_at_ms,
+                alpine_release,
+                packages,
                 setup_command: recipe.setup_command(),
             };
             store.publish(&snapshot)?;
@@ -239,34 +265,76 @@ impl MicrosandboxIsolation {
         sandbox_id: &str,
         step: &SetupStep,
     ) -> Result<(), IsolationError> {
+        let (status, output) = self.run_to_end(sandbox_id, &step.command).await?;
+        match status {
+            0 => Ok(()),
+            code => Err(IsolationError::new(format!(
+                "{} exited with code {code}: {}",
+                step.label,
+                output_tail(&output)
+            ))),
+        }
+    }
+
+    /// Runs a command to completion, returning its exit status and its output.
+    ///
+    /// Output is kept because some commands are asked questions rather than told
+    /// to do things; a build step and a description both run through here.
+    async fn run_to_end(
+        &self,
+        sandbox_id: &str,
+        command: &str,
+    ) -> Result<(i32, String), IsolationError> {
         let mut session = self
-            .run_command(sandbox_id.to_owned(), format!("set -eu\n{}", step.command))
+            .run_command(sandbox_id.to_owned(), format!("set -eu\n{command}"))
             .await?;
         let mut output = String::new();
         loop {
             let Some(event) = session.events.recv().await else {
-                return Err(IsolationError::new(format!(
-                    "{} stopped without an exit status",
-                    step.label
-                )));
+                return Err(IsolationError::new(
+                    "a command stopped without an exit status",
+                ));
             };
             match event {
                 CommandEvent::Output { bytes, .. } => {
                     output.push_str(&String::from_utf8_lossy(&bytes))
                 }
-                CommandEvent::Exited(0) => return Ok(()),
-                CommandEvent::Exited(code) => {
-                    return Err(IsolationError::new(format!(
-                        "{} exited with code {code}: {}",
-                        step.label,
-                        output_tail(&output)
-                    )));
-                }
-                CommandEvent::Failed(error) => {
-                    return Err(IsolationError::new(format!("{}: {error}", step.label)));
-                }
+                CommandEvent::Exited(status) => return Ok((status, output)),
+                CommandEvent::Failed(error) => return Err(IsolationError::new(error)),
             }
         }
+    }
+
+    /// What the finished snapshot actually contains, asked of the sandbox itself.
+    ///
+    /// Recorded rather than inferred: the base image is a rolling tag and the
+    /// workspace packages are installed from a command with no versions in it, so
+    /// nothing outside the snapshot can say what an operator ended up with.
+    ///
+    /// Failing to ask is not failing to build. A snapshot that cannot describe
+    /// itself is still usable, and the panel says so rather than inventing a
+    /// version.
+    async fn describe_snapshot(&self, sandbox_id: &str) -> (String, String) {
+        let unreadable = || {
+            tracing::warn!("the sandbox would not describe itself");
+            (String::new(), String::new())
+        };
+        let Ok((0, output)) = self.run_to_end(sandbox_id, DESCRIPTION_COMMAND).await else {
+            return unreadable();
+        };
+        let mut alpine = String::new();
+        let mut packages = String::new();
+        for line in output.lines() {
+            match line.split_once('\t') {
+                Some(("alpine", value)) => alpine = value.trim().to_owned(),
+                Some(("packages", value)) => packages = value.trim().to_owned(),
+                _ => {}
+            }
+        }
+        if alpine.is_empty() && packages.is_empty() {
+            return unreadable();
+        }
+        (alpine, packages)
     }
 
     fn ensure_socket_safe_home(&self) -> Result<PathBuf, IsolationError> {
@@ -301,9 +369,17 @@ struct BaseSandboxSnapshotStore {
 
 impl BaseSandboxSnapshotStore {
     fn new(recipe: &BaseSandboxRecipe) -> Self {
+        Self::at(recipe.snapshots_dir.clone(), recipe.refresh_after)
+    }
+
+    /// The store for an environment's snapshots, by directory.
+    ///
+    /// A caller that only means to read what a snapshot says does not have a
+    /// recipe to hand, and should not need one.
+    fn at(snapshots_dir: PathBuf, refresh_after: Duration) -> Self {
         Self {
-            snapshots_dir: recipe.snapshots_dir.clone(),
-            refresh_after: recipe.refresh_after,
+            snapshots_dir,
+            refresh_after,
         }
     }
 
@@ -313,7 +389,9 @@ impl BaseSandboxSnapshotStore {
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(IsolationError::new(error.to_string())),
         };
-        let mut fields = manifest.splitn(3, '\n');
+        // Every field but the last is single-line by nature, and the setup
+        // command is last because it is not.
+        let mut fields = manifest.splitn(5, '\n');
         let Some(relative_path) = fields.next().filter(|path| !path.is_empty()) else {
             return Err(IsolationError::new(
                 "base snapshot manifest has no snapshot path",
@@ -337,6 +415,8 @@ impl BaseSandboxSnapshotStore {
         Ok(Some(BaseSandboxSnapshot {
             path,
             created_at_ms,
+            alpine_release: fields.next().unwrap_or_default().to_owned(),
+            packages: fields.next().unwrap_or_default().to_owned(),
             setup_command: fields.next().unwrap_or_default().to_owned(),
         }))
     }
@@ -369,8 +449,11 @@ impl BaseSandboxSnapshotStore {
         fs::write(
             &temporary_path,
             format!(
-                "{relative_path}\n{}\n{}",
-                snapshot.created_at_ms, snapshot.setup_command
+                "{relative_path}\n{}\n{}\n{}\n{}",
+                snapshot.created_at_ms,
+                snapshot.alpine_release,
+                snapshot.packages,
+                snapshot.setup_command
             ),
         )
         .map_err(|error| IsolationError::new(error.to_string()))?;
@@ -472,6 +555,24 @@ impl IsolationEngine for MicrosandboxIsolation {
 
     async fn create(&self, id: String, options: SandboxOptions) -> Result<(), IsolationError> {
         self.create_sandbox(id, options, PullPolicy::Never).await
+    }
+
+    fn environment_description(&self, environment: &str) -> Option<EnvironmentDescription> {
+        let store = BaseSandboxSnapshotStore::at(
+            self.config
+                .development_environment_snapshots_dir(environment),
+            REFRESH_AFTER,
+        );
+        let snapshot = store.current().ok().flatten()?;
+        Some(EnvironmentDescription {
+            alpine_release: snapshot.alpine_release,
+            packages: snapshot
+                .packages
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect(),
+            built_at_ms: snapshot.created_at_ms,
+        })
     }
 
     async fn ensure_base(

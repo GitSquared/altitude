@@ -171,11 +171,16 @@ impl App {
         }
     }
 
-    fn environments(&self) -> &[DevelopmentEnvironment] {
+    /// Everything a task can run in, base first.
+    ///
+    /// Built from the settings rather than stored on the app: the list is two or
+    /// three entries, and a copy kept here would be one more thing to keep in
+    /// step with the file.
+    fn environments(&self) -> Vec<DevelopmentEnvironment> {
         self.settings_file
             .as_ref()
-            .map(|file| file.settings().environments.as_slice())
-            .unwrap_or_default()
+            .map(|file| file.settings().environments())
+            .unwrap_or_else(|| vec![DevelopmentEnvironment::base()])
     }
 
     fn default_environment(&self) -> &str {
@@ -185,12 +190,13 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// The only configured environment, when there is exactly one.
+    /// The only environment on offer, when there is exactly one.
     ///
     /// A single environment is not a decision, so the picker is skipped rather
-    /// than shown with one row.
+    /// than shown with one row. A fresh install is exactly this case: the base,
+    /// and nothing configured.
     fn single_environment(&self) -> Option<DevelopmentEnvironment> {
-        match self.environments() {
+        match self.environments().as_slice() {
             [environment] => Some(environment.clone()),
             _ => None,
         }
@@ -219,15 +225,16 @@ impl App {
     }
 
     fn select_next_environment(&mut self) {
-        if !self.environments().is_empty() {
-            self.selected_environment = (self.selected_environment + 1) % self.environments().len();
+        let count = self.environments().len();
+        if count > 0 {
+            self.selected_environment = (self.selected_environment + 1) % count;
         }
     }
 
     fn select_previous_environment(&mut self) {
-        if !self.environments().is_empty() {
-            self.selected_environment = (self.selected_environment + self.environments().len() - 1)
-                % self.environments().len();
+        let count = self.environments().len();
+        if count > 0 {
+            self.selected_environment = (self.selected_environment + count - 1) % count;
         }
     }
 
@@ -294,10 +301,10 @@ impl App {
                     return;
                 };
                 let mut proposed = file.settings().clone();
-                proposed.environments.push(environment);
+                proposed.add_environment(environment);
                 match file.save(proposed) {
                     Ok(()) => {
-                        self.selected_environment = file.settings().environments.len() - 1;
+                        self.selected_environment = file.settings().environments().len() - 1;
                         self.notice = None;
                     }
                     Err(error) => self.notice = Some(error.to_string()),
@@ -490,7 +497,7 @@ where
                 environment_picker::draw(
                     frame,
                     environment_picker::Purpose::NewTask,
-                    app.environments(),
+                    &app.environments(),
                     app.default_environment(),
                     app.selected_environment,
                 );
@@ -499,7 +506,7 @@ where
                 environment_picker::draw(
                     frame,
                     environment_picker::Purpose::Manage,
-                    app.environments(),
+                    &app.environments(),
                     app.default_environment(),
                     app.selected_environment,
                 );
@@ -717,7 +724,7 @@ where
                     && let Some(file) = app.settings_file.as_mut()
                 {
                     let mut proposed = file.settings().clone();
-                    proposed.default_environment = environment.name;
+                    proposed.set_default_environment(&environment.name);
                     match file.save(proposed) {
                         Ok(()) => app.notice = None,
                         Err(error) => app.notice = Some(error.to_string()),

@@ -9,7 +9,6 @@ mod microsandbox;
 /// Shared with the VCS providers so capsule commands are quoted one way.
 pub(crate) use environment::shell_quote;
 pub use environment::{DefaultFile, EnvironmentRecipe, GuestPath, PersistentDirectory};
-
 pub use microsandbox::MicrosandboxIsolation;
 
 #[derive(Clone, Debug)]
@@ -105,7 +104,27 @@ pub trait EnvironmentProgressSink: Send + Sync {
 pub struct BaseSandboxSnapshot {
     pub path: PathBuf,
     pub created_at_ms: i64,
+    /// What the snapshot reported about its image and packages, empty when it
+    /// could not be asked. See [`EnvironmentDescription`].
+    pub alpine_release: String,
+    pub packages: String,
     pub setup_command: String,
+}
+
+/// What a built environment says about itself.
+///
+/// Read back from the snapshot rather than derived from configuration, because
+/// it records what was installed rather than what was asked for. Nothing else
+/// can answer this: the image is a rolling tag and the setup commands name no
+/// versions.
+#[derive(Clone, Debug)]
+#[allow(dead_code)] // Read by the settings panel, which arrives with it.
+pub struct EnvironmentDescription {
+    /// The image's release, e.g. `3.21.3`.
+    pub alpine_release: String,
+    /// Installed packages as `name-version`, in the order the build listed them.
+    pub packages: Vec<String>,
+    pub built_at_ms: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -197,6 +216,14 @@ pub trait IsolationEngine: Send + Sync {
         recipe: BaseSandboxRecipe,
         progress: &dyn EnvironmentProgressSink,
     ) -> impl Future<Output = Result<BaseSandboxSnapshot, IsolationError>> + Send;
+
+    /// What a built environment says about itself, if one has been built.
+    ///
+    /// Synchronous because it reads a manifest rather than a machine: the answer
+    /// was recorded when the snapshot was built, because only a live sandbox can
+    /// say it and by the time an operator asks there is none.
+    #[allow(dead_code)] // The settings panel is the caller: it describes the base environment.
+    fn environment_description(&self, environment: &str) -> Option<EnvironmentDescription>;
 
     fn run_command(
         &self,

@@ -17,7 +17,7 @@ use super::{
 
 // The current Alpine environment runs as root. Resolve home-relative requirements here.
 const GUEST_HOME: &str = "/root";
-const REFRESH_AFTER: Duration = Duration::from_secs(72 * 60 * 60);
+pub(super) const REFRESH_AFTER: Duration = Duration::from_secs(72 * 60 * 60);
 
 /// Knowledge supplied by an agent or VCS module. No host I/O or lifecycle hooks.
 pub struct EnvironmentRecipe {

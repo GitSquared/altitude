@@ -1,4 +1,4 @@
-use crate::development::DevelopmentEnvironment;
+use crate::development::{BASE_NAME, DevelopmentEnvironment, is_base_name};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
@@ -10,18 +10,30 @@ use std::{
 };
 use toml::{de::Error as ParseError, ser::Error as SerializeError};
 
-const DEFAULT_SETTINGS: &str = r#"default_environment = "rust"
-
-[[environments]]
-name = "rust"
-setup_command = "apk add --no-cache rust cargo rustfmt rust-clippy build-base cmake"
-harness = "pi"
+const DEFAULT_SETTINGS: &str = r#"default_environment = "base"
 "#;
 
+/// What is configured, as `config.toml` holds it.
+///
+/// The built-in base environment is deliberately absent: it cannot be edited or
+/// deleted, so writing it down would record a preference nobody has. Everything
+/// that lists environments uses [`Settings::environments`], which adds it.
+///
+/// Fields are private and edited through the methods below, so that the rules
+/// that go with each list — the base cannot be configured, a default never
+/// points at nothing, an address appears once — live in one place instead of at
+/// every call site.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Settings {
     pub default_environment: String,
-    pub environments: Vec<DevelopmentEnvironment>,
+    #[serde(rename = "environments", default)]
+    configured: Vec<DevelopmentEnvironment>,
+    /// The addresses of the machines this host delegates to.
+    ///
+    /// An address, not a name: what a remote is *called* is what it told you,
+    /// which is state rather than configuration.
+    #[serde(default)]
+    remotes: Vec<String>,
 }
 
 /// A loaded file and its exact source, used to detect edits before saving.
@@ -111,40 +123,150 @@ fn write_settings(path: &Path, contents: &str) -> Result<(), SettingsError> {
 }
 
 impl Settings {
+    /// Everything a task can run in: the built-in base, then what is configured.
+    pub fn environments(&self) -> Vec<DevelopmentEnvironment> {
+        let mut all = vec![DevelopmentEnvironment::base()];
+        all.extend(self.configured.iter().cloned());
+        all
+    }
+
+    /// The addresses this host delegates to.
+    #[allow(dead_code)] // The settings panel is the caller, and it arrives with the panel.
+    pub fn remotes(&self) -> &[String] {
+        &self.remotes
+    }
+
+    /// Add a configured environment, replacing one of the same name.
+    #[allow(dead_code)] // The settings panel is the caller.
+    pub fn add_environment(&mut self, environment: DevelopmentEnvironment) {
+        self.configured
+            .retain(|existing| !existing.same_name(&environment));
+        self.configured.push(environment);
+    }
+
+    /// Remove a configured environment.
+    #[allow(dead_code)] // The settings panel is the caller.
+    // (the attribute sits on the item below)
+    ///
+    ///
+    /// The default is never left pointing at nothing: removing the default hands
+    /// it back to the base, which always exists.
+    pub fn remove_environment(&mut self, name: &str) {
+        self.configured
+            .retain(|existing| !existing.name.eq_ignore_ascii_case(name));
+        if self.default_environment.eq_ignore_ascii_case(name) {
+            self.default_environment = BASE_NAME.to_owned();
+        }
+    }
+
+    /// Choose the environment a new task runs in unless one is picked.
+    pub fn set_default_environment(&mut self, name: &str) {
+        self.default_environment = name.to_owned();
+    }
+
+    /// Add a remote address, replacing any entry for the same address.
+    #[allow(dead_code)] // The settings panel is the caller.
+    pub fn add_remote(&mut self, address: &str) {
+        let address = address.trim();
+        self.remotes
+            .retain(|existing| !existing.eq_ignore_ascii_case(address));
+        self.remotes.push(address.to_owned());
+    }
+
+    /// Forget a remote address.
+    #[allow(dead_code)] // The settings panel is the caller.
+    pub fn remove_remote(&mut self, address: &str) {
+        self.remotes
+            .retain(|existing| !existing.eq_ignore_ascii_case(address));
+    }
+
     fn validate(&self) -> Result<(), SettingsError> {
         let mut names = HashSet::new();
-        for environment in &self.environments {
+        for environment in &self.configured {
             environment
                 .validate()
                 .map_err(|error| SettingsError::Invalid(error.to_string()))?;
-            if !names.insert(environment_key(&environment.name)) {
+            if environment.is_base() {
+                return Err(SettingsError::Invalid(format!(
+                    "{BASE_NAME} is built in and cannot be configured"
+                )));
+            }
+            if !names.insert(environment.key()) {
                 return Err(SettingsError::Invalid(format!(
                     "duplicate environment name: {}",
                     environment.name
                 )));
             }
         }
-        if !names.contains(&environment_key(&self.default_environment)) {
+        // The base is always available, so a default that resolves to nothing is
+        // a mistake to report rather than a condition to fall back from.
+        if !is_base_name(&self.default_environment)
+            && !names.contains(&self.default_environment.to_ascii_lowercase())
+        {
             return Err(SettingsError::Invalid(format!(
                 "default environment {:?} is not configured",
                 self.default_environment
             )));
         }
+        let mut addresses = HashSet::new();
+        for address in &self.remotes {
+            validate_remote_address(address)?;
+            if !addresses.insert(address.to_ascii_lowercase()) {
+                return Err(SettingsError::Invalid(format!(
+                    "duplicate remote address: {address}"
+                )));
+            }
+        }
         Ok(())
     }
 }
 
-/// The key two environment names are compared by.
+/// A remote is an address: where it is, and optionally the port it serves on.
 ///
-/// An environment name becomes a snapshot directory name (`coding-{name}`), and
-/// macOS filesystems are case-insensitive by default. Treating `rust` and `Rust`
-/// as distinct would let both pass validation and then share one snapshot
-/// directory, so distinct setup commands would silently reuse each other's
-/// environment. Comparison is case-insensitive to keep one environment per
-/// directory; the configured spelling is preserved everywhere it is stored, so
-/// a task still records the name as written.
-fn environment_key(name: &str) -> String {
-    name.to_ascii_lowercase()
+/// Checked only far enough to catch a typo. Proving an address reaches something
+/// means dialling it, which the link does and reports on its own.
+fn validate_remote_address(address: &str) -> Result<(), SettingsError> {
+    let invalid = |why: &str| {
+        Err(SettingsError::Invalid(format!(
+            "remote address {address:?} {why}"
+        )))
+    };
+    let trimmed = address.trim();
+    if trimmed.is_empty() {
+        return invalid("is empty");
+    }
+    if trimmed.len() > 255 {
+        return invalid("is longer than 255 characters");
+    }
+    if trimmed.chars().any(char::is_whitespace) {
+        return invalid("contains whitespace");
+    }
+    if trimmed.contains('/') {
+        return invalid(
+            "contains a path; give a host, and a port if it does not serve on the default",
+        );
+    }
+    if let Some(rest) = trimmed.strip_prefix('[') {
+        let Some((host, port)) = rest.split_once("]:") else {
+            return invalid("names an address in brackets but no port after them");
+        };
+        if host.is_empty() || port.parse::<u16>().is_err() {
+            return invalid("does not end in a port number");
+        }
+        return Ok(());
+    }
+    if trimmed.matches(':').count() > 1 {
+        return invalid("looks like an IPv6 address; write it in brackets, as [::1]:25848");
+    }
+    if let Some((host, port)) = trimmed.rsplit_once(':') {
+        if host.is_empty() {
+            return invalid("has no host");
+        }
+        if port.parse::<u16>().is_err() {
+            return invalid("does not end in a port number");
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
