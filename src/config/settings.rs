@@ -131,13 +131,11 @@ impl Settings {
     }
 
     /// The addresses this host delegates to.
-    #[allow(dead_code)] // The settings panel is the caller, and it arrives with the panel.
     pub fn remotes(&self) -> &[String] {
         &self.remotes
     }
 
     /// Add a configured environment, replacing one of the same name.
-    #[allow(dead_code)] // The settings panel is the caller.
     pub fn add_environment(&mut self, environment: DevelopmentEnvironment) {
         self.configured
             .retain(|existing| !existing.same_name(&environment));
@@ -145,7 +143,6 @@ impl Settings {
     }
 
     /// Remove a configured environment.
-    #[allow(dead_code)] // The settings panel is the caller.
     // (the attribute sits on the item below)
     ///
     ///
@@ -165,7 +162,6 @@ impl Settings {
     }
 
     /// Add a remote address, replacing any entry for the same address.
-    #[allow(dead_code)] // The settings panel is the caller.
     pub fn add_remote(&mut self, address: &str) {
         let address = address.trim();
         self.remotes
@@ -174,7 +170,6 @@ impl Settings {
     }
 
     /// Forget a remote address.
-    #[allow(dead_code)] // The settings panel is the caller.
     pub fn remove_remote(&mut self, address: &str) {
         self.remotes
             .retain(|existing| !existing.eq_ignore_ascii_case(address));

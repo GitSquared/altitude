@@ -7,7 +7,7 @@ use std::{
 use crossterm::{
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, EventStream, KeyCode, KeyModifiers,
+        Event, EventStream, KeyCode, KeyEvent, KeyModifiers,
     },
     execute,
 };
@@ -20,7 +20,8 @@ use crate::{
     agent::AgentKind,
     config::{Config, SettingsError, SettingsFile},
     development::DevelopmentEnvironment,
-    isolation::{EnvironmentProgress, IsolationEngine, OutputStream},
+    isolation::{EnvironmentDescription, EnvironmentProgress, IsolationEngine, OutputStream},
+    remote_keys::{RemoteKey, RemoteKeys},
     tasks::{
         Task, TaskExecutionMode, TaskExecutionStatus, TaskOperatorSignal, TaskService,
         TaskServiceError,
@@ -33,25 +34,18 @@ mod environment_picker;
 mod operator_signals;
 mod overview;
 mod prompt;
+mod settings_panel;
 mod shell;
+mod text;
 mod utils;
 
 use prompt::{Prompt, PromptAction};
+use settings_panel::{Confirm, Depth, Focus, Form, Panel, Row, RowKind, Section, Target, View};
 use shell::Shell;
 
 pub use boot::{
     database as boot_database, isolation as boot_isolation, task_resume as boot_task_resume,
 };
-
-/// A step of the add-environment prompt chain.
-///
-/// The chain reuses the single-line prompt rather than introducing a form
-/// widget: it already handles editing, cancellation, and resize.
-enum SettingsPrompt {
-    Name,
-    Harness,
-    SetupCommand,
-}
 
 pub struct App {
     tasks: Vec<Task>,
@@ -87,12 +81,15 @@ pub struct App {
     /// Where `config.toml` lives, so the manage view can persist changes.
     config: Config,
     settings_file: Option<SettingsFile>,
-    open_environment_settings: bool,
-    settings_prompt: Option<SettingsPrompt>,
-    /// Name collected by the add-environment chain, held until its harness and
-    /// setup command arrive.
-    pending_environment_name: Option<String>,
-    pending_environment_harness: Option<AgentKind>,
+    /// The settings panel: environments, remotes, and the identity.
+    panel: Panel,
+    /// What each address last answered with. Written by the dial once there is
+    /// one; read when the panel opens.
+    remote_keys: RemoteKeys,
+    /// What those addresses answered with, as of the panel being opened.
+    remembered_keys: Vec<RemoteKey>,
+    /// What the built base environment is made of, as of the panel being opened.
+    base_description: Option<EnvironmentDescription>,
 }
 
 impl App {
@@ -100,6 +97,7 @@ impl App {
         tasks: Vec<Task>,
         config: Config,
         settings: Result<SettingsFile, SettingsError>,
+        remote_keys: RemoteKeys,
     ) -> Self {
         let latest_output = tasks
             .iter()
@@ -142,10 +140,10 @@ impl App {
             pending_command: None,
             config,
             settings_file,
-            open_environment_settings: false,
-            settings_prompt: None,
-            pending_environment_name: None,
-            pending_environment_harness: None,
+            panel: Panel::new(),
+            remote_keys,
+            remembered_keys: Vec::new(),
+            base_description: None,
             environment_builds: HashMap::new(),
             shimmer: 0,
             capacity: None,
@@ -257,59 +255,332 @@ impl App {
         }
     }
 
-    /// Continue the add-environment prompt chain.
-    fn continue_settings_prompt(&mut self, step: SettingsPrompt, input: String) {
-        match step {
-            SettingsPrompt::Name => {
-                self.pending_environment_name = Some(input);
-                self.settings_prompt = Some(SettingsPrompt::Harness);
-                self.prompt = Some(Prompt::new("harness: claude or pi"));
-            }
-            SettingsPrompt::Harness => {
-                let harness = if input.trim().is_empty() {
-                    AgentKind::default()
-                } else {
-                    match input.trim().parse::<AgentKind>() {
-                        Ok(harness) => harness,
-                        Err(error) => {
-                            // The chain keeps its collected name and asks again
-                            // rather than discarding the operator's input.
-                            self.notice = Some(error.to_string());
-                            self.settings_prompt = Some(SettingsPrompt::Harness);
-                            self.prompt = Some(Prompt::new("harness: claude or pi"));
-                            return;
-                        }
+    /// Everything the panel draws, assembled from the settings file and from
+    /// what was read back about each remote and about the base environment.
+    fn settings_view(&self) -> View {
+        let default_environment = self.default_environment().to_owned();
+        let rows = match self.panel.section {
+            Section::Environments => self
+                .environments()
+                .into_iter()
+                .map(|environment| {
+                    let built_in = environment.is_base();
+                    let is_default = environment.name.eq_ignore_ascii_case(&default_environment);
+                    Row {
+                        label: match (built_in, is_default) {
+                            (true, _) => format!("{} (built in)", environment.name),
+                            (false, true) => format!("{} (default)", environment.name),
+                            (false, false) => environment.name.clone(),
+                        },
+                        kind: if built_in {
+                            RowKind::Base
+                        } else {
+                            RowKind::Environment {
+                                name: environment.name,
+                                harness: environment.harness,
+                                setup: environment.setup_command,
+                                is_default,
+                            }
+                        },
                     }
-                };
-                self.pending_environment_harness = Some(harness);
-                self.settings_prompt = Some(SettingsPrompt::SetupCommand);
-                self.prompt = Some(Prompt::new("setup command"));
+                })
+                .collect(),
+            Section::Remotes => self
+                .configured_remotes()
+                .into_iter()
+                .map(|address| {
+                    let remembered = self
+                        .remembered_keys
+                        .iter()
+                        .find(|key| key.address.eq_ignore_ascii_case(&address))
+                        .cloned();
+                    Row {
+                        // A name is what the remote called itself, so an address
+                        // that has never answered shows itself instead.
+                        label: match &remembered {
+                            Some(key) => key.label.clone(),
+                            None => address.clone(),
+                        },
+                        kind: RowKind::Remote {
+                            address,
+                            remembered,
+                        },
+                    }
+                })
+                .collect(),
+            Section::Identity => Vec::new(),
+        };
+        View {
+            rows,
+            identity_label: self.identity_label(),
+            identity_key: self.identity_key(),
+            base: self.base_description.clone(),
+        }
+    }
+
+    /// The addresses the settings file configures.
+    fn configured_remotes(&self) -> Vec<String> {
+        self.settings_file
+            .as_ref()
+            .map(|file| file.settings().remotes().to_vec())
+            .unwrap_or_default()
+    }
+
+    fn identity_label(&self) -> String {
+        self.config
+            .identity()
+            .map(|identity| identity.label)
+            .unwrap_or_else(|error| format!("unreadable: {error}"))
+    }
+
+    fn identity_key(&self) -> String {
+        self.config
+            .identity()
+            .map(|identity| identity.id)
+            .unwrap_or_else(|error| format!("unreadable: {error}"))
+    }
+
+    /// How many rows the focused list holds, which is what moving needs.
+    fn row_count(&self) -> usize {
+        match self.panel.section {
+            Section::Environments => self.environments().len(),
+            Section::Remotes => self.configured_remotes().len(),
+            Section::Identity => 0,
+        }
+    }
+
+    fn selected_row(&self) -> Option<Row> {
+        self.settings_view()
+            .rows
+            .into_iter()
+            .nth(self.panel.selected)
+    }
+
+    fn panel_key(&mut self, key: KeyEvent) {
+        let rows = self.row_count();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('s') => self.panel.open = false,
+            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
+                self.panel.depth = self.panel.depth.deeper()
             }
-            SettingsPrompt::SetupCommand => {
-                let (Some(name), Some(harness)) = (
-                    self.pending_environment_name.take(),
-                    self.pending_environment_harness.take(),
-                ) else {
-                    return;
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
+                self.panel.depth = self.panel.depth.shallower()
+            }
+            KeyCode::Down | KeyCode::Char('j') => self.panel.move_selection(true, rows),
+            KeyCode::Up | KeyCode::Char('k') => self.panel.move_selection(false, rows),
+            KeyCode::Char('n') if self.panel.section.editable() => {
+                self.panel.form = Some(match self.panel.section {
+                    Section::Remotes => Form::new(Target::NewRemote, "", AgentKind::default(), ""),
+                    _ => Form::new(Target::NewEnvironment, "", AgentKind::default(), ""),
+                });
+            }
+            KeyCode::Char('d') if self.panel.section.editable() => self.ask_to_delete(),
+            KeyCode::Enter => self.edit_selected(),
+            _ => {}
+        }
+    }
+
+    fn edit_selected(&mut self) {
+        let Some(row) = self.selected_row() else {
+            return;
+        };
+        self.panel.form = Some(match row.kind {
+            // The base has no form: it is described instead.
+            RowKind::Base => {
+                self.notice = Some("the base environment is built in".to_owned());
+                return;
+            }
+            RowKind::Environment {
+                name,
+                harness,
+                setup,
+                ..
+            } => Form::new(
+                Target::Environment {
+                    original: name.clone(),
+                },
+                &name,
+                harness,
+                &setup,
+            ),
+            RowKind::Remote { address, .. } => Form::new(
+                Target::Remote {
+                    original: address.clone(),
+                },
+                &address,
+                AgentKind::default(),
+                "",
+            ),
+        });
+    }
+
+    fn ask_to_delete(&mut self) {
+        let Some(row) = self.selected_row() else {
+            return;
+        };
+        let (what, target) = match row.kind {
+            RowKind::Base => {
+                self.notice = Some("the base environment is built in".to_owned());
+                return;
+            }
+            RowKind::Environment { name, .. } => (
+                format!("the {name} environment"),
+                Target::Environment { original: name },
+            ),
+            RowKind::Remote { address, .. } => (
+                format!("{address}, and the key remembered for it"),
+                Target::Remote { original: address },
+            ),
+        };
+        self.panel.confirm = Some(Confirm {
+            question: format!("Delete {what}?"),
+            button: 0,
+            target,
+        });
+    }
+
+    fn panel_form_key(&mut self, key: KeyEvent) {
+        let Some(mut form) = self.panel.form.take() else {
+            return;
+        };
+        let mut keep = true;
+        let mut save = false;
+        match key.code {
+            // Escape leaves the text box first, and the page only on the second
+            // press, so a setup command can hold newlines without trapping the
+            // operator in it.
+            KeyCode::Esc if form.focus.takes_text() => form.focus = Focus::Cancel,
+            KeyCode::Esc => keep = false,
+            KeyCode::BackTab => form.move_focus(false),
+            KeyCode::Tab => form.move_focus(true),
+            KeyCode::Enter if form.focus == Focus::Setup => form.setup.handle_key(key),
+            KeyCode::Enter => match form.focus {
+                Focus::Cancel => keep = false,
+                Focus::Save => save = true,
+                _ => form.move_focus(true),
+            },
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if form.focus == Focus::Harness => {
+                form.harness = match form.harness {
+                    AgentKind::Pi => AgentKind::Claude,
+                    AgentKind::Claude => AgentKind::Pi,
                 };
-                let environment = DevelopmentEnvironment {
+            }
+            _ => match form.focus {
+                Focus::Primary => form.primary.handle_key(key),
+                Focus::Setup => form.setup.handle_key(key),
+                _ => {}
+            },
+        }
+        if save {
+            // A refused save keeps the page open, so the reason and the work
+            // are both still there.
+            if !self.save_form(&form) {
+                self.panel.form = Some(form);
+            }
+        } else if keep {
+            self.panel.form = Some(form);
+        }
+    }
+
+    /// Save what a form holds, answering whether it was saved.
+    fn save_form(&mut self, form: &Form) -> bool {
+        // Refused before the file is touched, so the reason is the form's rather
+        // than a validation message about a name that was never given.
+        if let Some(refusal) = form.refusal() {
+            self.notice = Some(refusal.to_owned());
+            return false;
+        }
+        let Some(file) = self.settings_file.as_mut() else {
+            self.notice = Some("settings are unavailable; fix the file and reopen".to_owned());
+            return false;
+        };
+        let mut proposed = file.settings().clone();
+        match &form.target {
+            Target::NewEnvironment | Target::Environment { .. } => {
+                let name = form.primary.value().trim().to_owned();
+                if let Some(original) = form.target.original() {
+                    // Renaming the default must not quietly hand the default
+                    // back to the base, so it is carried across the change.
+                    let was_default = proposed.default_environment.eq_ignore_ascii_case(original);
+                    proposed.remove_environment(original);
+                    if was_default {
+                        proposed.set_default_environment(&name);
+                    }
+                }
+                proposed.add_environment(DevelopmentEnvironment {
                     name,
-                    setup_command: input,
-                    harness,
-                };
-                let Some(file) = self.settings_file.as_mut() else {
-                    return;
-                };
-                let mut proposed = file.settings().clone();
-                proposed.add_environment(environment);
-                match file.save(proposed) {
-                    Ok(()) => {
-                        self.selected_environment = file.settings().environments().len() - 1;
-                        self.notice = None;
-                    }
-                    Err(error) => self.notice = Some(error.to_string()),
+                    setup_command: form.setup.value(),
+                    harness: form.harness,
+                });
+            }
+            Target::NewRemote | Target::Remote { .. } => {
+                if let Some(original) = form.target.original() {
+                    proposed.remove_remote(original);
+                }
+                proposed.add_remote(form.primary.value());
+            }
+        }
+        match file.save(proposed) {
+            Ok(()) => {
+                self.panel.form = None;
+                self.notice = None;
+                true
+            }
+            Err(error) => {
+                self.notice = Some(error.to_string());
+                false
+            }
+        }
+    }
+
+    async fn panel_confirm_key(&mut self, key: KeyEvent) {
+        let Some(button) = self.panel.confirm.as_ref().map(|confirm| confirm.button) else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => self.panel.confirm = None,
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => {
+                if let Some(confirm) = self.panel.confirm.as_mut() {
+                    confirm.button = 1 - button;
                 }
             }
+            KeyCode::Enter => {
+                let Some(confirm) = self.panel.confirm.take() else {
+                    return;
+                };
+                if confirm.button == 1 {
+                    self.delete(confirm.target).await;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Destroy what a confirmation was about.
+    async fn delete(&mut self, target: Target) {
+        let Some(file) = self.settings_file.as_mut() else {
+            return;
+        };
+        let mut proposed = file.settings().clone();
+        match &target {
+            Target::Environment { original } => proposed.remove_environment(original),
+            Target::Remote { original } => {
+                proposed.remove_remote(original);
+                // A forgotten remote's key is forgotten with it: the next
+                // sighting is a first sighting again, which is what forgetting
+                // means.
+                if let Err(error) = self.remote_keys.forget(original).await {
+                    self.notice = Some(format!("could not forget the key for {original}: {error}"));
+                }
+            }
+            _ => {}
+        }
+        match file.save(proposed) {
+            Ok(()) => {
+                self.panel.selected = self.panel.selected.saturating_sub(1);
+                self.notice = None;
+            }
+            Err(error) => self.notice = Some(error.to_string()),
         }
     }
 
@@ -496,20 +767,14 @@ where
             if app.open_environment_picker {
                 environment_picker::draw(
                     frame,
-                    environment_picker::Purpose::NewTask,
                     &app.environments(),
                     app.default_environment(),
                     app.selected_environment,
                 );
             }
-            if app.open_environment_settings {
-                environment_picker::draw(
-                    frame,
-                    environment_picker::Purpose::Manage,
-                    &app.environments(),
-                    app.default_environment(),
-                    app.selected_environment,
-                );
+            if app.panel.open {
+                let view = app.settings_view();
+                settings_panel::draw(frame, &app.panel, &view);
             }
             // Input belongs above the settings overlay that opened it.
             if let Some(prompt) = &app.prompt {
@@ -609,6 +874,27 @@ fn copy_to_clipboard(text: String) -> Result<(), arboard::Error> {
     clipboard.set_text(text)
 }
 
+/// Open the settings panel, reading back the two things it cannot see for
+/// itself: what each address last answered with, and what the built base
+/// environment is made of.
+async fn open_panel<E>(app: &mut App, task_service: &TaskService<E>)
+where
+    E: IsolationEngine + Clone + 'static,
+{
+    app.panel.open = true;
+    app.panel.depth = Depth::List;
+    app.panel.form = None;
+    app.panel.confirm = None;
+    if !app.reload_settings() {
+        return;
+    }
+    app.base_description = task_service.base_description();
+    match app.remote_keys.list().await {
+        Ok(keys) => app.remembered_keys = keys,
+        Err(error) => app.notice = Some(format!("could not read remembered remotes: {error}")),
+    }
+}
+
 fn show_task_error(app: &mut App, id: &str, error: TaskServiceError) {
     let title = app
         .tasks
@@ -641,6 +927,12 @@ where
     if let Event::Paste(text) = event {
         if let Some(prompt) = &mut app.prompt {
             prompt.paste(&text);
+        } else if let Some(form) = &mut app.panel.form {
+            match form.focus {
+                Focus::Primary => form.primary.paste(&text),
+                Focus::Setup => form.setup.paste(&text),
+                _ => {}
+            }
         } else if let Some(id) = &app.open_shell
             && let Some(shell) = app.shells.get(id)
             && let Some(bytes) = shell.paste_bytes(text)
@@ -668,20 +960,12 @@ where
         match prompt.handle_key(key) {
             Some(PromptAction::Cancel) => {
                 app.prompt = None;
-                // A cancelled settings prompt must not swallow the next task
-                // prompt, so the chain is abandoned here rather than left
-                // half-open.
-                app.settings_prompt = None;
-                app.pending_environment_name = None;
-                app.pending_environment_harness = None;
                 app.answering_operator_signal = None;
             }
             Some(PromptAction::Submit(command)) => {
                 app.prompt = None;
                 if let Some(signal_id) = app.answering_operator_signal.take() {
                     event_loop.answer_operator_signal(signal_id, command);
-                } else if let Some(step) = app.settings_prompt.take() {
-                    app.continue_settings_prompt(step, command);
                 } else if let Some(environment) = app.single_environment() {
                     event_loop.create(command, environment);
                 } else if app.environments().is_empty() {
@@ -708,31 +992,16 @@ where
         }
         return Ok(false);
     }
-    if app.open_environment_settings {
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('s') => app.open_environment_settings = false,
-            KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') => app.select_next_environment(),
-            KeyCode::BackTab | KeyCode::Up | KeyCode::Char('h') => {
-                app.select_previous_environment()
-            }
-            KeyCode::Char('n') => {
-                app.settings_prompt = Some(SettingsPrompt::Name);
-                app.prompt = Some(Prompt::new("new environment name"));
-            }
-            KeyCode::Enter => {
-                if let Some(environment) = app.chosen_environment()
-                    && let Some(file) = app.settings_file.as_mut()
-                {
-                    let mut proposed = file.settings().clone();
-                    proposed.set_default_environment(&environment.name);
-                    match file.save(proposed) {
-                        Ok(()) => app.notice = None,
-                        Err(error) => app.notice = Some(error.to_string()),
-                    }
-                }
-            }
-            _ => {}
-        }
+    if app.panel.form.is_some() {
+        app.panel_form_key(key);
+        return Ok(false);
+    }
+    if app.panel.confirm.is_some() {
+        app.panel_confirm_key(key).await;
+        return Ok(false);
+    }
+    if app.panel.open {
+        app.panel_key(key);
         return Ok(false);
     }
     if app.open_environment_picker {
@@ -835,19 +1104,7 @@ where
             }
         }
         KeyCode::Char('s') => {
-            if !app.reload_settings() {
-                return Ok(false);
-            }
-            app.selected_environment = app
-                .environments()
-                .iter()
-                .position(|environment| {
-                    environment
-                        .name
-                        .eq_ignore_ascii_case(app.default_environment())
-                })
-                .unwrap_or(0);
-            app.open_environment_settings = true;
+            open_panel(app, task_service).await;
         }
         KeyCode::Char('i') => {
             if let Some(task) = app.selected_task() {

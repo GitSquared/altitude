@@ -557,10 +557,12 @@ impl IsolationEngine for MicrosandboxIsolation {
         self.create_sandbox(id, options, PullPolicy::Never).await
     }
 
-    fn environment_description(&self, environment: &str) -> Option<EnvironmentDescription> {
+    fn base_description(&self) -> Option<EnvironmentDescription> {
+        // The base environment is the workspace base: the same snapshot every
+        // other environment is built on top of, so it describes itself from
+        // there rather than from a `coding-base` snapshot of its own.
         let store = BaseSandboxSnapshotStore::at(
-            self.config
-                .development_environment_snapshots_dir(environment),
+            self.config.environment_snapshots_dir("workspace"),
             REFRESH_AFTER,
         );
         let snapshot = store.current().ok().flatten()?;

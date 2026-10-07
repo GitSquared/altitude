@@ -10,6 +10,7 @@ use crate::{
     config::Config,
     db::Database,
     isolation::MicrosandboxIsolation,
+    remote_keys::RemoteKeys,
     tasks::{TaskEventLoop, TaskService, TaskStore},
 };
 
@@ -99,6 +100,9 @@ async fn client() -> Result<(), Box<dyn Error>> {
             }
         }
         let task_rows = tasks.list().await.map_err(io::Error::other)?;
+        // What each remote address last answered with. Read by the settings
+        // panel, and written by the dial once there is one.
+        let remote_keys = RemoteKeys::new(database.pool());
         let (event_loop, task_execution_updates) = TaskEventLoop::new(tasks.clone());
         // Recovered tasks are waiting, not running: they are admitted against what
         // the host can carry, like everything else.
@@ -110,7 +114,7 @@ async fn client() -> Result<(), Box<dyn Error>> {
             &mut interrupt,
             event_loop,
             tasks,
-            tui::App::new(task_rows, config.clone(), settings),
+            tui::App::new(task_rows, config.clone(), settings, remote_keys),
             task_execution_updates,
         )
         .await

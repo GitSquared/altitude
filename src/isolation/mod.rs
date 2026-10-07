@@ -6,6 +6,9 @@ use crate::development::DevelopmentEnvironment;
 
 mod environment;
 mod microsandbox;
+/// How long a built environment is kept before it is rebuilt, for the interface
+/// that has to tell an operator when their base was last refreshed.
+pub use environment::REFRESH_AFTER;
 /// Shared with the VCS providers so capsule commands are quoted one way.
 pub(crate) use environment::shell_quote;
 pub use environment::{DefaultFile, EnvironmentRecipe, GuestPath, PersistentDirectory};
@@ -118,7 +121,6 @@ pub struct BaseSandboxSnapshot {
 /// can answer this: the image is a rolling tag and the setup commands name no
 /// versions.
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // Read by the settings panel, which arrives with it.
 pub struct EnvironmentDescription {
     /// The image's release, e.g. `3.21.3`.
     pub alpine_release: String,
@@ -217,13 +219,12 @@ pub trait IsolationEngine: Send + Sync {
         progress: &dyn EnvironmentProgressSink,
     ) -> impl Future<Output = Result<BaseSandboxSnapshot, IsolationError>> + Send;
 
-    /// What a built environment says about itself, if one has been built.
+    /// What the workspace base says about itself, if it has been built.
     ///
     /// Synchronous because it reads a manifest rather than a machine: the answer
     /// was recorded when the snapshot was built, because only a live sandbox can
     /// say it and by the time an operator asks there is none.
-    #[allow(dead_code)] // The settings panel is the caller: it describes the base environment.
-    fn environment_description(&self, environment: &str) -> Option<EnvironmentDescription>;
+    fn base_description(&self) -> Option<EnvironmentDescription>;
 
     fn run_command(
         &self,

@@ -18,7 +18,7 @@ mod store;
 pub use state::*;
 pub use store::TaskStore;
 
-use crate::isolation::EnvironmentProgress;
+use crate::isolation::{EnvironmentDescription, EnvironmentProgress};
 use progress::EnvironmentProgressRegistry;
 
 #[derive(Clone)]
@@ -663,6 +663,12 @@ where
     /// Recovery is not starting. This puts a task's work back on disk and leaves
     /// it waiting, so the caller decides what the host can carry; starting here
     /// would run everything at once on the way up.
+    /// What the workspace base says about itself, for an interface that
+    /// describes environments rather than runs them.
+    pub fn base_description(&self) -> Option<EnvironmentDescription> {
+        self.isolation.base_description()
+    }
+
     pub async fn recover_all(&self) -> Vec<Result<Task, TaskServiceError>> {
         let tasks = match self.list().await {
             Ok(tasks) => tasks,
