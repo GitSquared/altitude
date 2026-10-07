@@ -18,23 +18,7 @@
 //! $ curl http://127.0.0.1:25848/
 //! {"protocol":"altitude/link/1","id":"…","label":"…","version":"…"}
 //! ```
-//!
-//! The pieces:
-//!
-//! - [`identity`] — the keypair that names an installation, and machine-local file
-//!   plumbing.
-//! - [`protocol`] — the wire contract, and how a peer is addressed.
-//! - [`announce`] — how a server says who it is to a client that cannot dial it yet.
-//! - [`clients`] — which clients a server has seen.
-//! - [`known`] — comparing a key to the one remembered for an address.
-//! - [`server`] — the serve side.
-//! - [`client`] — the dial side.
 
-// `identity`, `clients`, `announce` and `server` are wired into the app, so the
-// compiler reports their dead code honestly and a few accessors carry their own
-// allow. What is left is the dialling side: nothing in the app reaches a remote
-// yet, because that arrives with the settings screen. Each module loses its
-// allow as it gains a caller, the same way the server side lost its own.
 mod announce;
 mod clients;
 mod identity;
