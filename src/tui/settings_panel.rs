@@ -10,13 +10,14 @@
 //! describes it instead, which is the only place an operator can see what a
 //! sandbox is actually made of.
 
+use super::palette;
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ratatui::{
     Frame,
     layout::{Constraint, Flex, Layout, Rect},
-    style::Stylize,
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, BorderType, Clear, List, ListItem, Padding, Paragraph, Wrap},
 };
 
@@ -347,7 +348,7 @@ fn chip(label: &str, width: usize, focused: bool) -> Line<'static> {
         text.push_str(&" ".repeat(width - used));
     }
     if focused {
-        Line::from(text).black().on_cyan().bold()
+        Line::styled(text, palette::focus())
     } else {
         Line::from(text)
     }
@@ -380,7 +381,11 @@ fn draw_columns(frame: &mut Frame, panel: &Panel, view: &View) {
                 usize::from(rail.width),
                 rail_focused && *section == panel.section,
             );
-            ListItem::new(if rail_focused { row } else { row.dim() })
+            ListItem::new(if rail_focused {
+                row
+            } else {
+                row.style(palette::muted())
+            })
         })
         .collect::<Vec<_>>();
     frame.render_widget(List::new(rail_items), rail);
@@ -393,7 +398,11 @@ fn draw_columns(frame: &mut Frame, panel: &Panel, view: &View) {
         .map(|(index, row)| {
             let focused = list_focused && index == panel.selected;
             let line = chip(&row.label, usize::from(list_area.width), focused);
-            ListItem::new(if list_focused { line } else { line.dim() })
+            ListItem::new(if list_focused {
+                line
+            } else {
+                line.style(palette::muted())
+            })
         })
         .collect::<Vec<_>>();
     frame.render_widget(List::new(list_items), list_area);
@@ -407,7 +416,14 @@ fn draw_columns(frame: &mut Frame, panel: &Panel, view: &View) {
                 .selected_row(view)
                 .is_some_and(|row| !row.is_actionable()));
     let pane = detail(panel, view, detail_focused);
-    frame.render_widget(if detail_focused { pane } else { pane.dim() }, detail_area);
+    frame.render_widget(
+        if detail_focused {
+            pane
+        } else {
+            pane.style(palette::muted())
+        },
+        detail_area,
+    );
 }
 
 fn hint(panel: &Panel) -> Line<'static> {
@@ -416,7 +432,7 @@ fn hint(panel: &Panel) -> Line<'static> {
     } else {
         " tab up and down a column · j/k move · esc close "
     };
-    Line::from(text.dim())
+    Line::styled(text, palette::muted())
 }
 
 /// The third column: what is known about the highlighted row.
@@ -427,9 +443,9 @@ fn detail(panel: &Panel, view: &View, focused: bool) -> Paragraph<'static> {
     // The heading is the column's focus indicator: it has no rows to bar.
     let heading = move |text: String| {
         if focused {
-            Line::from(text.cyan().bold())
+            Line::styled(text, palette::heading())
         } else {
-            Line::from(text.bold())
+            Line::styled(text, palette::muted().bold())
         }
     };
 
@@ -437,10 +453,19 @@ fn detail(panel: &Panel, view: &View, focused: bool) -> Paragraph<'static> {
         Section::Identity => Paragraph::new(vec![
             heading("This installation".to_owned()),
             Line::from(""),
-            Line::from(vec!["label     ".dim(), view.identity_label.clone().into()]),
-            Line::from(vec!["key       ".dim(), view.identity_key.clone().into()]),
+            Line::from(vec![
+                Span::styled("label     ", palette::muted()),
+                view.identity_label.clone().into(),
+            ]),
+            Line::from(vec![
+                Span::styled("key       ", palette::muted()),
+                view.identity_key.clone().into(),
+            ]),
             Line::from(""),
-            Line::from("Read-only: the key names this machine, and cannot be edited here.".dim()),
+            Line::styled(
+                "Read-only: the key names this machine, and cannot be edited here.",
+                palette::muted(),
+            ),
         ])
         .wrap(Wrap { trim: true }),
 
@@ -462,20 +487,24 @@ fn detail(panel: &Panel, view: &View, focused: bool) -> Paragraph<'static> {
                 let mut lines = vec![
                     heading(label.clone()),
                     Line::from(""),
-                    Line::from(vec!["harness   ".dim(), harness.to_string().into()]),
+                    Line::from(vec![
+                        Span::styled("harness   ", palette::muted()),
+                        harness.to_string().into(),
+                    ]),
                 ];
                 if *is_default {
                     lines.push(Line::from(""));
-                    lines.push(Line::from(
-                        "New tasks use this environment by default.".green(),
+                    lines.push(Line::styled(
+                        "New tasks use this environment by default.",
+                        palette::good(),
                     ));
                 }
                 lines.push(Line::from(""));
-                lines.push(Line::from("setup command".dim()));
+                lines.push(Line::styled("setup command", palette::muted()));
                 if setup.trim().is_empty() {
-                    lines.push(Line::from(
-                        "Nothing on top of the base. This environment is the base, by another name."
-                            .dim(),
+                    lines.push(Line::styled(
+                        "Nothing on top of the base. This environment is the base, by another name.",
+                        palette::muted(),
                     ));
                 } else {
                     lines.push(Line::from(setup.clone()));
@@ -493,33 +522,43 @@ fn detail(panel: &Panel, view: &View, focused: bool) -> Paragraph<'static> {
                 let mut lines = vec![
                     heading(label.clone()),
                     Line::from(""),
-                    Line::from(vec!["address   ".dim(), address.clone().into()]),
+                    Line::from(vec![
+                        Span::styled("address   ", palette::muted()),
+                        address.clone().into(),
+                    ]),
                     Line::from(""),
                 ];
                 match remembered {
                     Some(key) => {
-                        lines.push(Line::from(vec!["key       ".dim(), key.key.clone().into()]));
                         lines.push(Line::from(vec![
-                            "met       ".dim(),
+                            Span::styled("key       ", palette::muted()),
+                            key.key.clone().into(),
+                        ]));
+                        lines.push(Line::from(vec![
+                            Span::styled("met       ", palette::muted()),
                             met_ago(key.seen_at_ms).into(),
                         ]));
                     }
                     None => {
-                        lines.push(Line::from("never met".dim()));
-                        lines.push(Line::from(
+                        lines.push(Line::styled("never met", palette::muted()));
+                        lines.push(Line::styled(
                             "No key is remembered for this address yet. Connecting will record \
-                             the one it answers with."
-                                .dim(),
+                             the one it answers with.",
+                            palette::muted(),
                         ));
                     }
                 }
                 Paragraph::new(lines).wrap(Wrap { trim: true })
             }
             None => Paragraph::new(match panel.section {
-                Section::Environments => {
-                    "Nothing configured. New tasks run in the base environment.".dim()
-                }
-                Section::Remotes => "No remotes are configured. Press n to add one.".dim(),
+                Section::Environments => Span::styled(
+                    "Nothing configured. New tasks run in the base environment.",
+                    palette::muted(),
+                ),
+                Section::Remotes => Span::styled(
+                    "No remotes are configured. Press n to add one.",
+                    palette::muted(),
+                ),
                 Section::Identity => unreachable!("identity has no rows"),
             }),
         },
@@ -573,7 +612,10 @@ fn base_lines(
         }
     }
     lines.push(Line::from(""));
-    lines.push(Line::from("Built in: it cannot be edited or deleted.").dim());
+    lines.push(Line::styled(
+        "Built in: it cannot be edited or deleted.",
+        palette::muted(),
+    ));
     lines
 }
 
@@ -597,11 +639,11 @@ fn met_ago(seen_at_ms: i64) -> String {
 fn draw_form(frame: &mut Frame, form: &Form) {
     let block = Block::bordered()
         .title(format!(" {} ", form.target.title()))
-        .title_bottom(
-            " tab/shift-tab move · enter validates, or adds a line in the command · esc leaves the \
-             box, then the page "
-                .dim(),
-        )
+        .title_bottom(Line::styled(
+            " tab/shift-tab move · enter validates, or adds a line in the command · esc \
+                 leaves the box, then the page ",
+            palette::muted(),
+        ))
         .border_type(BorderType::Rounded)
         .padding(Padding::horizontal(2));
     let area = frame.area();
@@ -674,7 +716,7 @@ fn draw_form(frame: &mut Frame, form: &Form) {
 
 fn draw_label(frame: &mut Frame, area: Rect, text: &str) {
     let [label, _] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-    frame.render_widget(Paragraph::new(Line::from(text).dim()), label);
+    frame.render_widget(Paragraph::new(Line::styled(text, palette::muted())), label);
 }
 
 /// The box a field's input is drawn in, one row below its label.
@@ -688,13 +730,16 @@ fn harness_line(harness: AgentKind, focused: bool) -> Line<'static> {
     for choice in [AgentKind::Pi, AgentKind::Claude] {
         let picked = choice == harness;
         let text = format!(" {} {} ", if picked { "◉" } else { "○" }, choice);
-        spans.push(if focused && picked {
-            text.black().on_cyan().bold()
-        } else if picked {
-            text.cyan()
-        } else {
-            text.dim()
-        });
+        spans.push(Span::styled(
+            text,
+            if focused && picked {
+                palette::focus()
+            } else if picked {
+                palette::accent()
+            } else {
+                palette::muted()
+            },
+        ));
         spans.push("   ".into());
     }
     Line::from(spans)
@@ -703,11 +748,11 @@ fn harness_line(harness: AgentKind, focused: bool) -> Line<'static> {
 fn draw_button(frame: &mut Frame, area: Rect, label: &str, focused: bool, primary: bool) {
     let text = format!(" {label} ");
     let style = if focused {
-        text.black().on_cyan().bold()
+        palette::focus()
     } else if primary {
-        text.cyan()
+        palette::accent()
     } else {
-        text.dim()
+        palette::muted()
     };
     let [_, line, _] = Layout::vertical([
         Constraint::Length(1),
@@ -715,7 +760,7 @@ fn draw_button(frame: &mut Frame, area: Rect, label: &str, focused: bool, primar
         Constraint::Min(0),
     ])
     .areas(area);
-    frame.render_widget(Paragraph::new(Line::from(style)), line);
+    frame.render_widget(Paragraph::new(Line::styled(text, style)), line);
 }
 
 fn draw_confirm(frame: &mut Frame, confirm: &Confirm) {

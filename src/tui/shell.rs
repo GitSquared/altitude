@@ -1,3 +1,5 @@
+use super::palette;
+
 use std::{
     sync::mpsc::{self, Receiver, Sender},
     time::{Duration, Instant},
@@ -8,7 +10,6 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, Mouse
 use ratatui::{
     Frame,
     layout::{Constraint, Flex, Layout, Rect},
-    style::{Style, Stylize},
     text::Line,
     widgets::{Block, BorderType, Clear},
 };
@@ -144,7 +145,7 @@ impl Shell {
         let area = popup_area(frame.area());
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
-            .border_style(Style::new().cyan())
+            .border_style(palette::accent())
             .title(" shell ")
             .title_bottom(
                 Line::from(if self.parser.screen().alternate_screen() {
@@ -155,7 +156,7 @@ impl Shell {
                 .right_aligned(),
             );
         let block = if self.has_active_notice() {
-            block.title_bottom(Line::from(" copied to clipboard ").cyan())
+            block.title_bottom(Line::styled(" copied to clipboard ", palette::accent()))
         } else {
             block
         };

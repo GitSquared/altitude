@@ -5,12 +5,12 @@ use futures_util::StreamExt;
 use ratatui::{
     DefaultTerminal, Frame,
     layout::{Constraint, Layout},
-    style::Stylize,
     text::Line,
     widgets::Paragraph,
 };
 use tokio::{signal::unix::Signal, sync::watch, time};
 
+use super::palette;
 use crate::{isolation::IsolationStatus, tui::utils::shimmer};
 
 const TITLE: &str = "⛰  altitude";
@@ -143,7 +143,7 @@ fn draw(frame: &mut Frame, label: &str, tick: usize) {
     .areas(frame.area());
 
     frame.render_widget(
-        Paragraph::new(Line::from(TITLE).white().bold()).centered(),
+        Paragraph::new(Line::styled(TITLE, palette::heading())).centered(),
         title_area,
     );
 

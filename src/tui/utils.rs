@@ -1,8 +1,9 @@
 use ratatui::{
     layout::{Constraint, Flex, Layout, Rect},
-    style::{Color, Style},
     text::Span,
 };
+
+use super::palette;
 
 /// How many characters wide the travelling highlight is.
 const SHIMMER_WIDTH: usize = 3;
@@ -26,9 +27,9 @@ pub fn shimmer(text: &str, tick: usize) -> Vec<Span<'static>> {
         .enumerate()
         .map(|(index, character)| {
             let style = if index.abs_diff(position) < SHIMMER_WIDTH {
-                Style::new().fg(Color::Gray)
+                palette::waiting()
             } else {
-                Style::new().fg(Color::DarkGray)
+                palette::waiting_rest()
             };
             Span::styled(character.to_string(), style)
         })

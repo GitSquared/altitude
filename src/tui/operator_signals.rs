@@ -1,13 +1,14 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Layout},
-    style::{Style, Stylize},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
 use chrono::{Local, TimeZone};
 
+use super::palette;
 use crate::{
     tasks::{TaskOperatorSignal, TaskOperatorSignalKind, TaskOperatorSignalPriority},
     tui::utils::centered_width,
@@ -85,7 +86,7 @@ pub fn draw(
             // A wrap-up request is the one signal that asks for acceptance rather
             // than attention, so it reads green instead of like a problem.
             let style = match signal.kind {
-                TaskOperatorSignalKind::InReview => Style::new().green(),
+                TaskOperatorSignalKind::InReview => palette::good(),
                 _ => Style::new(),
             };
             ListItem::new(
@@ -101,7 +102,7 @@ pub fn draw(
         .collect::<Vec<_>>();
     let list = List::new(items)
         .highlight_symbol("❯ ")
-        .highlight_style(Style::new().cyan());
+        .highlight_style(palette::accent());
     let mut state = ListState::default();
     state.select((!operator_signals.is_empty()).then_some(selected));
     frame.render_stateful_widget(list, list_area, &mut state);
@@ -109,7 +110,9 @@ pub fn draw(
         .get(selected)
         .map(|signal| signal.body.as_str())
         .unwrap_or("No unresolved signals for this task.");
-    let paragraph = Paragraph::new(detail).white().wrap(Wrap { trim: true });
+    let paragraph = Paragraph::new(detail)
+        .style(palette::primary())
+        .wrap(Wrap { trim: true });
     let max_scroll = paragraph
         .line_count(detail_area.width)
         .saturating_sub(usize::from(detail_area.height))
@@ -134,9 +137,9 @@ fn actions(signal: Option<&TaskOperatorSignal>, focused_action: usize) -> Paragr
         .enumerate()
         .flat_map(|(index, action)| {
             let style = if index == focused {
-                Style::new().black().on_cyan().bold()
+                palette::focus()
             } else {
-                Style::new().dim()
+                palette::muted()
             };
             [
                 Span::styled(format!("[ {} ]", action.label()), style),

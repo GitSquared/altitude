@@ -34,6 +34,7 @@ mod environment_picker;
 mod keys;
 mod operator_signals;
 mod overview;
+mod palette;
 mod prompt;
 mod settings_panel;
 mod shell;

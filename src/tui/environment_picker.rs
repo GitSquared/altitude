@@ -1,11 +1,11 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Layout},
-    style::Style,
     text::Line,
     widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
+use super::palette;
 use crate::{development::DevelopmentEnvironment, tui::utils::centered_width};
 
 /// Choosing the environment a new task runs in.
@@ -42,7 +42,7 @@ pub fn draw(
         .collect::<Vec<_>>();
     let list = List::new(items)
         .highlight_symbol("❯ ")
-        .highlight_style(Style::new().cyan());
+        .highlight_style(palette::accent());
     let mut state = ListState::default();
     state.select((!environments.is_empty()).then_some(selected));
     frame.render_stateful_widget(list, list_area, &mut state);

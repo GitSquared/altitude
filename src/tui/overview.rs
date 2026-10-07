@@ -1,10 +1,11 @@
+use super::palette;
+
 use std::mem;
 
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    style::{Style, Stylize},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, BorderType, Padding, Paragraph, Wrap},
 };
 
@@ -40,16 +41,18 @@ pub fn draw(frame: &mut Frame, app: &mut super::App) {
 
     let [title, version] =
         Layout::horizontal([Constraint::Min(0), Constraint::Min(0)]).areas(header);
-    frame.render_widget(Line::from("⛰  altitude".cyan().bold()), title);
+    frame.render_widget(Line::styled("⛰  altitude", palette::heading()), title);
     frame.render_widget(
-        Line::from(concat!("v", env!("CARGO_PKG_VERSION")).dim()).right_aligned(),
+        Line::styled(concat!("v", env!("CARGO_PKG_VERSION")), palette::muted()).right_aligned(),
         version,
     );
     draw_tasks(frame, body, app);
 
     if let Some(notice) = app.notice.as_deref() {
         frame.render_widget(
-            Paragraph::new(notice).red().wrap(Wrap { trim: false }),
+            Paragraph::new(notice)
+                .style(palette::bad())
+                .wrap(Wrap { trim: false }),
             message,
         );
     }
@@ -75,7 +78,9 @@ fn shortcut_hints(width: u16, has_task: bool) -> Paragraph<'static> {
         line.push_str(hint);
     }
     lines.push(Line::from(line));
-    Paragraph::new(lines).dim().wrap(Wrap { trim: true })
+    Paragraph::new(lines)
+        .style(palette::muted())
+        .wrap(Wrap { trim: true })
 }
 
 fn draw_tasks(frame: &mut Frame, area: Rect, app: &mut super::App) {
@@ -98,7 +103,10 @@ fn draw_tasks(frame: &mut Frame, area: Rect, app: &mut super::App) {
     frame.render_widget(panel, area);
 
     if tasks.is_empty() {
-        frame.render_widget(Paragraph::new("No tasks yet".dim()), content);
+        frame.render_widget(
+            Paragraph::new(Span::styled("No tasks yet", palette::muted())),
+            content,
+        );
         return;
     }
 
@@ -149,7 +157,7 @@ fn draw_tasks(frame: &mut Frame, area: Rect, app: &mut super::App) {
                     TaskExecutionMode::AutopilotReport => "autopilot · reporting",
                     TaskExecutionMode::Operator => "operator override",
                 })
-                .green(),
+                .style(palette::good()),
                 TaskExecutionStatus::Paused => {
                     Line::from(match task.facts.execution_pause_reason {
                         Some(TaskExecutionPauseReason::AwaitingOperator) => {
@@ -160,11 +168,11 @@ fn draw_tasks(frame: &mut Frame, area: Rect, app: &mut super::App) {
                         }
                         None => "paused",
                     })
-                    .yellow()
+                    .style(palette::attention())
                 }
-                TaskExecutionStatus::Completed => Line::from("completed").dim(),
+                TaskExecutionStatus::Completed => Line::styled("completed", palette::muted()),
                 TaskExecutionStatus::Failed => {
-                    Line::from("blocked · execution failed · i details").red()
+                    Line::styled("blocked · execution failed · i details", palette::bad())
                 }
             }
         };
@@ -176,37 +184,46 @@ fn draw_tasks(frame: &mut Frame, area: Rect, app: &mut super::App) {
                 // A wrap-up request is not a problem to solve. It is work waiting to
                 // be accepted, so it reads as ready rather than as an alarm.
                 Some(TaskOperatorSignalKind::InReview) => {
-                    status.spans.push(" · in review".green().bold());
+                    status
+                        .spans
+                        .push(Span::styled(" · in review", palette::good().bold()));
                 }
                 _ => match task.facts.operator_attention_level {
                     TaskOperatorAttentionLevel::Alarm => {
-                        status.spans.push(" · ALARM".red().bold());
+                        status
+                            .spans
+                            .push(Span::styled(" · ALARM", palette::bad().bold()));
                     }
                     TaskOperatorAttentionLevel::Requested => {
-                        status.spans.push(" · attention required".yellow().bold());
+                        status.spans.push(Span::styled(
+                            " · attention required",
+                            palette::attention().bold(),
+                        ));
                     }
                     TaskOperatorAttentionLevel::Nominal => {}
                 },
             }
         }
         if task.facts.unread_operator_signal_count > 0 {
-            status.spans.push(
-                format!(" · ● {}", task.facts.unread_operator_signal_count)
-                    .cyan()
-                    .bold(),
-            );
+            status.spans.push(Span::styled(
+                format!(" · ● {}", task.facts.unread_operator_signal_count),
+                palette::accent().bold(),
+            ));
         }
         match task.code_contributions.len() {
             0 => {}
-            1 => status.spans.push(" · 1 contribution".cyan()),
-            count => status
+            1 => status
                 .spans
-                .push(format!(" · {count} contributions").cyan()),
+                .push(Span::styled(" · 1 contribution", palette::accent())),
+            count => status.spans.push(Span::styled(
+                format!(" · {count} contributions"),
+                palette::accent(),
+            )),
         }
         let style = if selected {
-            Style::new().white().bold()
+            palette::primary().bold()
         } else {
-            Style::new().dim()
+            palette::muted()
         };
         let output = match building {
             Some(progress) => truncate(&progress.command, text_width),
@@ -221,7 +238,7 @@ fn draw_tasks(frame: &mut Frame, area: Rect, app: &mut super::App) {
                 .to_owned(),
         };
         frame.render_widget(
-            Paragraph::new(vec![status, Line::from(output).dim()])
+            Paragraph::new(vec![status, Line::styled(output, palette::muted())])
                 .style(style)
                 .block(
                     Block::bordered()

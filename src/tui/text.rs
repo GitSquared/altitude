@@ -5,6 +5,8 @@
 //! characters, indexed in bytes, and measured in terminal columns, and those are
 //! three different numbers as soon as anything outside ASCII is typed.
 
+use super::palette;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
@@ -268,9 +270,9 @@ impl TextBox {
 /// The border a field or box wears, so it is obvious which one has the caret.
 fn border_style(focused: bool) -> Style {
     if focused {
-        Style::new().cyan()
+        palette::accent()
     } else {
-        Style::new().dim()
+        palette::muted()
     }
 }
 
