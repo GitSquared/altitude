@@ -1088,6 +1088,8 @@ where
     if let Event::Paste(text) = event {
         if let Some(prompt) = &mut app.prompt {
             prompt.paste(&text);
+        } else if let Some(new_task) = &mut app.new_task {
+            new_task.paste(&text);
         } else if let Some(form) = &mut app.panel.form {
             match form.focus {
                 Focus::Primary => form.primary.paste(&text),
@@ -1141,12 +1143,7 @@ where
                         app.open_operator_signals = true;
                     }
                 } else {
-                    app.new_task = Some(NewTask::new(
-                        command,
-                        app.environments(),
-                        app.default_environment(),
-                        app.agent(),
-                    ));
+                    app.notice = Some("that prompt had nothing to answer".into());
                 }
             }
             None => {}
@@ -1186,6 +1183,7 @@ where
             None => app.new_task = Some(question),
             Some(new_task::Answer::Cancel) => {}
             Some(new_task::Answer::Create {
+                task,
                 environment,
                 agent,
                 remember,
@@ -1195,7 +1193,7 @@ where
                 if let Some(agent) = remember {
                     app.set_agent(agent);
                 }
-                event_loop.create(question.command.clone(), environment, agent);
+                event_loop.create(task, environment, agent);
             }
         }
         return Ok(false);
@@ -1284,7 +1282,11 @@ where
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
         KeyCode::Char('c') => {
             if app.reload_settings() {
-                app.prompt = Some(Prompt::new("what should the agent do?"));
+                app.new_task = Some(NewTask::new(
+                    app.environments(),
+                    app.default_environment(),
+                    app.agent(),
+                ));
             }
         }
         KeyCode::Char('s') => {
