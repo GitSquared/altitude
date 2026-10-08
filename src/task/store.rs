@@ -66,10 +66,14 @@ impl TaskStore {
         }
     }
 
+    /// Every task still in play, newest first.
+    ///
+    /// A removed task is not here, and is still readable by id: removing one disposes
+    /// of its capsule and keeps what was decided on it.
     pub async fn list(&self) -> Result<Vec<Task>, TaskError> {
         sqlx::query_as::<_, TaskRow>(concat!(
             include_str!("read_task.sql"),
-            " ORDER BY last_event_sequence DESC"
+            " WHERE tasks.removed_at_ms IS NULL ORDER BY last_event_sequence DESC"
         ))
         .fetch_all(&self.pool)
         .await
@@ -484,8 +488,13 @@ impl TaskStore {
         Ok(task)
     }
 
-    pub async fn delete(&self, task_id: &str) -> Result<(), TaskError> {
-        sqlx::query("DELETE FROM tasks WHERE id = ?")
+    /// Removes a task from play, keeping its record.
+    ///
+    /// The capsule is the caller's to dispose of; this is the row, and it stays so
+    /// that the signals raised on the task and the answers given to them outlive it.
+    pub async fn remove(&self, task_id: &str) -> Result<(), TaskError> {
+        sqlx::query("UPDATE tasks SET removed_at_ms = ? WHERE id = ?")
+            .bind(now_ms())
             .bind(task_id)
             .execute(&self.pool)
             .await

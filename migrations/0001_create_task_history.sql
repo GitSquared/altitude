@@ -5,6 +5,12 @@ CREATE TABLE tasks (
     -- event log because it is fixed when the task is founded, like the agent: a
     -- task that moves is a transfer, and that is its own record.
     host TEXT NOT NULL,
+    -- When the operator disposed of this task, if they have. Removal is soft: the
+    -- capsule goes and the record stays, because the record of what was asked and
+    -- decided is the point of keeping any of this. A removed task is hidden from
+    -- lists and can be read by id, so its history outlives it and can be pruned
+    -- deliberately rather than as a side effect of tidying up.
+    removed_at_ms INTEGER,
     created_at_ms INTEGER NOT NULL
 );
 

@@ -168,7 +168,7 @@ where
     pub async fn remove(&self, task: Task) -> Result<(), TaskServiceError> {
         self.release_resources(&task).await?;
         self.store
-            .delete(&task.id)
+            .remove(&task.id)
             .await
             .map_err(TaskServiceError::Task)
     }
