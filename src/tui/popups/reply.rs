@@ -8,6 +8,15 @@ use ratatui::{
 use crate::tui::widgets::text::{Field, FieldStyle};
 
 /// A one-line question, asked over whatever is on screen.
+/// A reply being written, and the signal it answers.
+///
+/// A reply exists only to answer a signal, so the signal is not optional: when
+/// the box closes, the signals are what is left to return to.
+pub(in crate::tui) struct Reply {
+    pub(in crate::tui) prompt: Prompt,
+    pub(in crate::tui) answering: String,
+}
+
 pub struct Prompt {
     title: &'static str,
     field: Field,

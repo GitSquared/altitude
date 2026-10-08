@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    io,
+    io, mem,
     time::Duration,
 };
 
@@ -35,6 +35,7 @@ mod widgets;
 
 use popups::confirm::{PendingConfirm, handle_confirm_key};
 use popups::new_task::NewTask;
+use popups::reply::Reply;
 use popups::reply::{Prompt, PromptAction};
 use screens::settings::{Depth, Focus, Form, Panel, RowKind, Section, Setting, Target};
 use screens::shell::Shell;
@@ -44,6 +45,37 @@ use widgets::keys::{is_dismiss, is_help, is_remove};
 pub use boot::{
     database as boot_database, isolation as boot_isolation, task_resume as boot_task_resume,
 };
+
+/// What the keyboard is answering to, most immediate first.
+///
+/// One value, because the order is the whole point. The keys, the guidance line
+/// and the drawing each worked it out separately, and could disagree about it:
+/// the shell offered a `?` it never sees, because every key in a shell goes to
+/// the terminal.
+///
+/// A question owns its state, because it exists only while it is in front. A
+/// view does not: the tasks, the signals, the shells and the settings are the
+/// work, and they live with the application.
+#[derive(Default)]
+enum Foreground {
+    /// The keys for wherever you are, over whatever is there. Help is stacked
+    /// rather than exclusive: dismissing it returns to what it covered.
+    Keys(Box<Foreground>),
+    /// A question waiting on an answer, and what the answer would do.
+    Confirm(PendingConfirm),
+    /// A reply being written to a signal.
+    Reply(Reply),
+    /// The creation question, holding the prompt until it is answered.
+    NewTask(NewTask),
+    /// The settings panel: environments, remotes, the interface, the identity.
+    Panel,
+    /// A task's signals, over the list it was opened from.
+    Signals,
+    /// A task's terminal, taking every key there is.
+    Shell(String),
+    #[default]
+    Tasks,
+}
 
 pub struct App {
     tasks: Vec<Task>,
@@ -63,27 +95,21 @@ pub struct App {
     removing: HashSet<String>,
     selected: usize,
     first_visible_task: usize,
-    prompt: Option<Prompt>,
     shells: HashMap<String, Shell>,
-    open_shell: Option<String>,
+    /// The selected task's signals, and where you are among them. Read when the
+    /// signals open; the pop-up is a view over what the task already recorded.
     operator_signals: Vec<TaskOperatorSignal>,
     selected_operator_signal: usize,
     /// Which of the selected signal's actions has focus.
     selected_signal_action: usize,
     operator_signal_scroll: u16,
-    open_operator_signals: bool,
-    answering_operator_signal: Option<String>,
-    /// The creation question, holding the prompt until it is answered.
-    new_task: Option<NewTask>,
     /// Where `config.toml` lives, so the manage view can persist changes.
     config: Config,
     settings_file: Option<SettingsFile>,
     /// The settings panel: environments, remotes, the interface, and the identity.
     panel: Panel,
-    /// A question waiting on an answer, and what the answer would do.
-    confirm: Option<PendingConfirm>,
-    /// The keys for wherever you are, shown over whatever is there.
-    help: bool,
+    /// What the keyboard is answering to.
+    foreground: Foreground,
 
     /// What each address last answered with. Written by the dial once there is
     /// one; read when the panel opens.
@@ -120,21 +146,15 @@ impl App {
             removing: HashSet::new(),
             selected: 0,
             first_visible_task: 0,
-            prompt: None,
             shells: HashMap::new(),
-            open_shell: None,
             operator_signals: Vec::new(),
             selected_operator_signal: 0,
             selected_signal_action: 0,
             operator_signal_scroll: 0,
-            open_operator_signals: false,
-            answering_operator_signal: None,
-            new_task: None,
             config,
             settings_file,
             panel: Panel::new(),
-            confirm: None,
-            help: false,
+            foreground: Foreground::default(),
 
             remote_keys,
             remembered_keys: Vec::new(),
@@ -241,85 +261,100 @@ impl App {
     /// The keys that would do something where the focus is.
     ///
     /// The frame shows these, and the help popup lists them, so a key that
-    /// works is never a key you have to guess at.
+    /// works is never a key you have to guess at. They follow what is in front
+    /// rather than the fields behind it, so the line cannot offer a key that
+    /// something above it would take first.
     fn hints(&self) -> Vec<Hint> {
+        self.hints_for(&self.foreground)
+    }
+
+    /// The keys of a given state, which help needs for the state it covers.
+    fn hints_for(&self, front: &Foreground) -> Vec<Hint> {
         let dismiss = || Hint::new("esc", "close");
-        if let Some(confirm) = &self.confirm {
-            return confirm.hints();
-        }
-        if self.prompt.is_some() {
-            return vec![
+        match front {
+            // Help lists the keys of what it covers, which is what the line
+            // under it goes on showing.
+            Foreground::Keys(behind) => self.hints_for(behind),
+            Foreground::Confirm(pending) => pending.hints(),
+            Foreground::Reply(_) => vec![
                 Hint::new("enter", "send"),
                 dismiss(),
                 Hint::new("?", "keys"),
-            ];
-        }
-        if let Some(new_task) = &self.new_task {
-            return new_task.hints();
-        }
-        if self.panel.form.is_some() {
-            return vec![
-                Hint::new("tab", "move"),
-                Hint::new("enter", "validate, or add a line"),
-                Hint::new("esc", "leave the box, then the page"),
-            ];
-        }
-        if self.panel.open {
-            let mut hints = vec![Hint::new("tab", "change column"), Hint::new("j/k", "move")];
-            if self.panel.section.grows() {
-                hints.push(Hint::new("enter", "open"));
-                hints.push(Hint::new("n", "new"));
-                hints.push(Hint::new("d", "delete"));
-            } else if self.panel.section == Section::Interface {
-                hints.push(Hint::new("enter", "toggle"));
+            ],
+            Foreground::NewTask(new_task) => new_task.hints(),
+            Foreground::Panel => {
+                if self.panel.form.is_some() {
+                    return vec![
+                        Hint::new("tab", "move"),
+                        Hint::new("enter", "validate, or add a line"),
+                        Hint::new("esc", "leave the box, then the page"),
+                    ];
+                }
+                let mut hints = vec![Hint::new("tab", "change column"), Hint::new("j/k", "move")];
+                if self.panel.section.grows() {
+                    hints.push(Hint::new("enter", "open"));
+                    hints.push(Hint::new("n", "new"));
+                    hints.push(Hint::new("d", "delete"));
+                } else if self.panel.section == Section::Interface {
+                    hints.push(Hint::new("enter", "toggle"));
+                }
+                hints.push(dismiss());
+                hints
             }
-            hints.push(dismiss());
-            return hints;
-        }
-        if self.open_operator_signals {
-            return vec![
+            Foreground::Signals => vec![
                 Hint::new("tab", "action"),
                 Hint::new("enter", "validate"),
                 Hint::new("j/k", "signal"),
                 Hint::new("pgup/pgdn", "scroll"),
                 dismiss(),
-            ];
+            ],
+            // A shell takes every key there is, so it has no `?` to offer.
+            Foreground::Shell(_) => vec![Hint::new("ctrl-c", "hand back to autopilot")],
+            Foreground::Tasks => {
+                // Only what there is something to do it to.
+                let mut hints = vec![Hint::new("c", "create"), Hint::new("s", "settings")];
+                if !self.tasks.is_empty() {
+                    hints.extend([
+                        Hint::new("i", "info"),
+                        Hint::new("h/j/k/l", "select"),
+                        Hint::new("enter", "shell"),
+                        Hint::new("d", "remove"),
+                    ]);
+                }
+                hints.push(Hint::new("?", "keys"));
+                hints.push(Hint::new("q", "quit"));
+                hints
+            }
         }
-        if self.open_shell.is_some() {
-            return vec![
-                Hint::new("ctrl-c", "hand back to autopilot"),
-                Hint::new("?", "keys"),
-            ];
-        }
-        // The task list: only what there is something to do it to.
-        let mut hints = vec![Hint::new("c", "create"), Hint::new("s", "settings")];
-        if !self.tasks.is_empty() {
-            hints.extend([
-                Hint::new("i", "info"),
-                Hint::new("h/j/k/l", "select"),
-                Hint::new("enter", "shell"),
-                Hint::new("d", "remove"),
-            ]);
-        }
-        hints.push(Hint::new("?", "keys"));
-        hints.push(Hint::new("q", "quit"));
-        hints
     }
 
     /// Whether a text box has the keys, in which case `?` is a character.
     fn is_typing(&self) -> bool {
-        self.prompt.is_some()
-            || self
+        match &self.foreground {
+            Foreground::Reply(_) => true,
+            Foreground::NewTask(new_task) => new_task.is_typing(),
+            _ => self
                 .panel
                 .form
                 .as_ref()
-                .is_some_and(|form| form.focus.takes_text())
+                .is_some_and(|form| form.focus.takes_text()),
+        }
+    }
+
+    /// The task whose terminal is in front, if one is.
+    fn open_shell(&self) -> Option<&str> {
+        match &self.foreground {
+            Foreground::Shell(id) => Some(id),
+            _ => None,
+        }
     }
 
     fn panel_key(&mut self, key: KeyEvent) {
         let rows = self.row_count();
         match key.code {
-            _ if is_dismiss(key) || key.code == KeyCode::Char('s') => self.panel.open = false,
+            _ if is_dismiss(key) || key.code == KeyCode::Char('s') => {
+                self.foreground = Foreground::Tasks;
+            }
             KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
                 // A row with nothing inside it has no deeper level to open.
                 if self.panel.depth != Depth::List
@@ -396,7 +431,7 @@ impl App {
                 Target::Remote { original: address },
             ),
         };
-        self.confirm = Some(PendingConfirm::deleting(target, question));
+        self.foreground = Foreground::Confirm(PendingConfirm::deleting(target, question));
     }
 
     /// Turn a preference on or off, and keep it.
@@ -555,14 +590,14 @@ impl App {
     }
 
     fn hide_shell(&mut self) {
-        tracing::info!(task_id = ?self.open_shell, "detaching terminal");
-        self.open_shell = None;
+        tracing::info!(task_id = ?self.open_shell(), "detaching terminal");
+        self.foreground = Foreground::Tasks;
     }
 
     fn remove_shell(&mut self, id: &str) {
         self.shells.remove(id);
-        if self.open_shell.as_deref() == Some(id) {
-            self.open_shell = None;
+        if self.open_shell() == Some(id) {
+            self.foreground = Foreground::Tasks;
         }
     }
 
@@ -670,8 +705,8 @@ where
     let mut shimmer = time::interval(Duration::from_millis(80));
     let mut mouse_captured = false;
     loop {
-        if mouse_captured != app.open_shell.is_some() {
-            mouse_captured = app.open_shell.is_some();
+        if mouse_captured != app.open_shell().is_some() {
+            mouse_captured = app.open_shell().is_some();
             if mouse_captured {
                 execute!(io::stdout(), EnableMouseCapture)?;
             } else {
@@ -683,14 +718,14 @@ where
             let content =
                 widgets::chrome::draw(frame, &hints, app.keyboard_hints(), app.notice.as_deref());
             screens::tasks::draw(frame, content, &mut app);
-            if let Some(shell) = app.open_shell.as_ref().and_then(|id| app.shells.get(id)) {
+            if let Some(shell) = app.open_shell().and_then(|id| app.shells.get(id)) {
                 shell.draw(frame, content);
             }
-            if app.panel.open {
+            if matches!(app.foreground, Foreground::Panel) {
                 // Fullscreen: it is the screen, not something over it.
                 let view = app.settings_view();
                 screens::settings::draw(frame, content, &app.panel, &view);
-            } else if app.open_operator_signals {
+            } else if matches!(app.foreground, Foreground::Signals) {
                 widgets::chrome::dim(frame, content);
                 popups::signals::draw(
                     frame,
@@ -704,28 +739,28 @@ where
                     &mut app.operator_signal_scroll,
                 );
             }
-            if let Some(confirm) = &app.confirm {
+            if let Foreground::Confirm(confirm) = &app.foreground {
                 widgets::chrome::dim(frame, content);
                 confirm.draw(frame, content);
             }
-            if let Some(new_task) = &app.new_task {
+            if let Foreground::NewTask(new_task) = &app.foreground {
                 widgets::chrome::dim(frame, content);
                 popups::new_task::draw(frame, content, new_task);
             }
-            if app.help {
+            if matches!(app.foreground, Foreground::Keys(_)) {
                 widgets::chrome::dim(frame, content);
                 widgets::chrome::draw_help(frame, content, &hints);
             }
             // Input belongs above the settings overlay that opened it.
-            if let Some(prompt) = &app.prompt {
+            if let Foreground::Reply(reply) = &app.foreground {
                 widgets::chrome::dim(frame, content);
-                prompt.draw(frame, content);
+                reply.prompt.draw(frame, content);
             }
         })?;
         tokio::select! {
             _ = terminate.recv() => return Ok(()),
             _ = interrupt.recv() => return Ok(()),
-            _ = refresh.tick(), if app.open_shell.is_none() => {
+            _ = refresh.tick(), if app.open_shell().is_none() => {
                 if let Ok(tasks) = event_loop.list().await {
                     app.tasks = tasks;
                     app.selected = app.selected.min(app.tasks.len().saturating_sub(1));
@@ -748,6 +783,302 @@ where
 }
 
 impl App {
+    /// Close the keys, returning to what they covered.
+    fn dismiss_keys(&mut self) {
+        if let Foreground::Keys(behind) = mem::take(&mut self.foreground) {
+            self.foreground = *behind;
+        }
+    }
+
+    /// Take the answer to a reply, and act on it.
+    fn reply_key<E>(&mut self, key: KeyEvent, event_loop: &TaskEventLoop<E>)
+    where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let Foreground::Reply(Reply {
+            mut prompt,
+            answering,
+        }) = mem::take(&mut self.foreground)
+        else {
+            return;
+        };
+        match prompt.handle_key(key) {
+            None => self.foreground = Foreground::Reply(Reply { prompt, answering }),
+            // Leaving the box without answering returns to the signals it was
+            // opened from, rather than all the way out to the list.
+            Some(PromptAction::Cancel) => self.foreground = Foreground::Signals,
+            Some(PromptAction::Submit(command)) => {
+                // Answering the last signal leaves nothing to go back to, so that
+                // is the one case that returns to the task list.
+                let was_last = self
+                    .operator_signals
+                    .last()
+                    .is_some_and(|signal| signal.id == answering);
+                event_loop.answer_operator_signal(answering, command);
+                if !was_last {
+                    self.foreground = Foreground::Signals;
+                }
+            }
+        }
+    }
+
+    /// Send a key to the terminal in front, or hand control back.
+    fn shell_key<E>(&mut self, key: KeyEvent, event_loop: &TaskEventLoop<E>)
+    where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let Some(id) = self.open_shell().map(str::to_owned) else {
+            return;
+        };
+        if screens::shell::is_exit_key(key) {
+            if !event_loop.return_to_autopilot(&id) {
+                self.notice =
+                    Some("this task is no longer running; control stayed with autopilot".into());
+            }
+            self.hide_shell();
+        } else if let Some(shell) = self.shells.get_mut(&id)
+            && let Some(bytes) = shell.key_bytes(key)
+        {
+            event_loop.send_terminal_input(&id, bytes);
+        }
+    }
+
+    /// Take the answer to the creation question, and act on it.
+    fn new_task_key<E>(&mut self, key: KeyEvent, event_loop: &TaskEventLoop<E>)
+    where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let Foreground::NewTask(mut question) = mem::take(&mut self.foreground) else {
+            return;
+        };
+        match question.handle_key(key) {
+            None => self.foreground = Foreground::NewTask(question),
+            Some(popups::new_task::Answer::Cancel) => {}
+            Some(popups::new_task::Answer::Create {
+                task,
+                environment,
+                agent,
+                remember,
+            }) => {
+                // The first answer becomes the default, because there was nothing
+                // to default to and guessing is not Altitude's to do.
+                if let Some(agent) = remember {
+                    self.set_agent(agent);
+                }
+                event_loop.create(task, environment, agent);
+            }
+        }
+    }
+
+    /// The panel's keys, which are its form's when a form is open.
+    fn panel_keys(&mut self, key: KeyEvent) {
+        if self.panel.form.is_some() {
+            self.panel_form_key(key);
+        } else {
+            self.panel_key(key);
+        }
+    }
+
+    /// The keys of the signals pop-up.
+    async fn signals_key<E>(&mut self, key: KeyEvent, task_service: &TaskService<E>)
+    where
+        E: IsolationEngine + Clone + 'static,
+    {
+        match key.code {
+            KeyCode::PageDown => {
+                self.operator_signal_scroll = self.operator_signal_scroll.saturating_add(5)
+            }
+            KeyCode::PageUp => {
+                self.operator_signal_scroll = self.operator_signal_scroll.saturating_sub(5)
+            }
+            KeyCode::Home => self.operator_signal_scroll = 0,
+            KeyCode::End => self.operator_signal_scroll = u16::MAX,
+            _ if is_dismiss(key) || key.code == KeyCode::Char('i') => {
+                self.foreground = Foreground::Tasks
+            }
+            KeyCode::Tab => self.focus_next_signal_action(),
+            KeyCode::BackTab => self.focus_previous_signal_action(),
+            KeyCode::Down | KeyCode::Char('j') => self.select_next_operator_signal(),
+            KeyCode::Up | KeyCode::Char('h') => self.select_previous_operator_signal(),
+            KeyCode::Enter => {
+                let actions = self.selected_signal_actions();
+                let Some(action) = actions
+                    .get(
+                        self.selected_signal_action
+                            .min(actions.len().saturating_sub(1)),
+                    )
+                    .copied()
+                else {
+                    return;
+                };
+                let Some(signal) = self
+                    .operator_signals
+                    .get(self.selected_operator_signal)
+                    .cloned()
+                else {
+                    return;
+                };
+                match action {
+                    popups::signals::SignalAction::Reply => {
+                        if self.tasks.iter().any(|task| task.id == signal.task_id) {
+                            self.foreground = Foreground::Reply(Reply {
+                                prompt: Prompt::new("answer operator signal"),
+                                answering: signal.id,
+                            });
+                        } else {
+                            self.notice = Some("this task is no longer in the list".into());
+                        }
+                    }
+                    popups::signals::SignalAction::Acknowledge => {
+                        match task_service.acknowledge_operator_signal(&signal.id).await {
+                            Ok(task) => {
+                                self.replace_task(task);
+                                self.resolved_operator_signal(self.selected_operator_signal);
+                            }
+                            Err(error) => self.notice = Some(error.to_string()),
+                        }
+                    }
+                    popups::signals::SignalAction::Confirm => {
+                        match task_service.confirm_operator_signal(&signal.id).await {
+                            Ok(task) => {
+                                self.replace_task(task);
+                                self.resolved_operator_signal(self.selected_operator_signal);
+                                self.notice =
+                                    Some("task closed; its capsule was disposed of".into());
+                            }
+                            Err(error) => self.notice = Some(error.to_string()),
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The keys of the task list.
+    async fn list_key<E>(
+        &mut self,
+        key: KeyEvent,
+        terminal: &DefaultTerminal,
+        event_loop: &TaskEventLoop<E>,
+        task_service: &TaskService<E>,
+    ) -> io::Result<bool>
+    where
+        E: IsolationEngine + Clone + 'static,
+    {
+        match key.code {
+            KeyCode::Char('q') => return Ok(true),
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
+            KeyCode::Char('c') => {
+                if self.reload_settings() {
+                    self.foreground = Foreground::NewTask(NewTask::new(
+                        self.environments(),
+                        self.default_environment(),
+                        self.agent(),
+                    ));
+                }
+            }
+            KeyCode::Char('s') => {
+                open_panel(self, task_service).await;
+            }
+            KeyCode::Char('i') => {
+                if let Some(task) = self.selected_task() {
+                    self.operator_signals = task_service
+                        .operator_signals(&task.id)
+                        .await
+                        .map_err(io::Error::other)?;
+                    let task = task_service
+                        .read_operator_signals(&task.id)
+                        .await
+                        .map_err(io::Error::other)?;
+                    self.replace_task(task);
+                    for signal in &mut self.operator_signals {
+                        signal.read = true;
+                    }
+                    self.selected_operator_signal = 0;
+                    self.selected_signal_action = 0;
+                    self.operator_signal_scroll = 0;
+                    self.foreground = Foreground::Signals;
+                }
+            }
+            // A grid step: one card across, or one whole row of them.
+            KeyCode::Char('j') | KeyCode::Down => {
+                let columns = self.grid_columns();
+                self.select_adjacent(columns as isize, columns);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                let columns = self.grid_columns();
+                self.select_adjacent(-(columns as isize), columns);
+            }
+            KeyCode::Char('l') | KeyCode::Right | KeyCode::Tab => {
+                let columns = self.grid_columns();
+                self.select_adjacent(1, columns);
+            }
+            KeyCode::Char('h') | KeyCode::Left | KeyCode::BackTab => {
+                let columns = self.grid_columns();
+                self.select_adjacent(-1, columns);
+            }
+            _ if is_remove(key) => {
+                if let Some(task) = self.selected_task() {
+                    let question = format!(
+                        "Remove \"{}\" and dispose of its capsule?",
+                        task.facts.intent
+                    );
+                    self.foreground =
+                        Foreground::Confirm(PendingConfirm::removing(task.id, question));
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(task) = self.selected_task() {
+                    if matches!(
+                        task.facts.execution_status,
+                        TaskExecutionStatus::Paused | TaskExecutionStatus::Failed
+                    ) {
+                        event_loop.start_operator_control(task);
+                        self.notice = Some("restoring the agent in the terminal…".into());
+                        return Ok(false);
+                    }
+                    if !matches!(task.facts.execution_status, TaskExecutionStatus::Running) {
+                        return Ok(false);
+                    }
+                    if matches!(
+                        task.facts.execution_mode,
+                        TaskExecutionMode::Autopilot | TaskExecutionMode::AutopilotReport
+                    ) {
+                        self.notice = Some(if event_loop.take_control(&task.id) {
+                            "bringing the agent to the terminal…".into()
+                        } else {
+                            "this task has no run to take over".into()
+                        });
+                        return Ok(false);
+                    }
+                    if self.shells.contains_key(&task.id) {
+                        let (rows, cols) = screens::shell::size(terminal.size()?.into());
+                        event_loop.resize_terminal(&task.id, rows, cols);
+                        if let Some(shell) = self.shells.get_mut(&task.id) {
+                            shell.resize(rows, cols);
+                        }
+                        tracing::info!(task_id = %task.id, "reattaching terminal");
+                        self.foreground = Foreground::Shell(task.id);
+                        return Ok(false);
+                    }
+                    if !event_loop.has_active_run(&task.id) {
+                        return Ok(false);
+                    }
+                    let (rows, cols) = screens::shell::size(terminal.size()?.into());
+                    let history = event_loop.cached_terminal_output(&task.id);
+                    event_loop.resize_terminal(&task.id, rows, cols);
+                    self.shells
+                        .insert(task.id.clone(), Shell::new(rows, cols, history));
+                    self.foreground = Foreground::Shell(task.id);
+                    tracing::info!("attached terminal");
+                }
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
     /// Take one change from a task's run, and make the interface match it.
     async fn apply<E>(
         &mut self,
@@ -806,7 +1137,7 @@ impl App {
                 event_loop.resize_terminal(&id, rows, cols);
                 self.shells
                     .insert(id.clone(), Shell::new(rows, cols, history));
-                self.open_shell = Some(id);
+                self.foreground = Foreground::Shell(id);
             }
             TaskExecutionUpdate::Report { task, summary } => {
                 // The agent's own words are already recorded in the task's
@@ -820,8 +1151,7 @@ impl App {
     }
 
     fn shell_has_active_notice(&self) -> bool {
-        self.open_shell
-            .as_ref()
+        self.open_shell()
             .and_then(|id| self.shells.get(id))
             .is_some_and(Shell::has_active_notice)
     }
@@ -846,7 +1176,7 @@ async fn open_panel<E>(app: &mut App, task_service: &TaskService<E>)
 where
     E: IsolationEngine + Clone + 'static,
 {
-    app.panel.open = true;
+    app.foreground = Foreground::Panel;
     app.panel.depth = Depth::List;
     app.panel.form = None;
     if !app.reload_settings() {
@@ -880,19 +1210,19 @@ where
     E: IsolationEngine + Clone + 'static,
 {
     if let Event::Resize(_, _) = event
-        && let Some(id) = &app.open_shell
+        && let Some(id) = app.open_shell().map(str::to_owned)
     {
         let (rows, cols) = screens::shell::size(terminal.size()?.into());
-        event_loop.resize_terminal(id, rows, cols);
-        if let Some(shell) = app.shells.get_mut(id) {
+        event_loop.resize_terminal(&id, rows, cols);
+        if let Some(shell) = app.shells.get_mut(&id) {
             shell.resize(rows, cols);
         }
         return Ok(false);
     }
     if let Event::Paste(text) = event {
-        if let Some(prompt) = &mut app.prompt {
-            prompt.paste(&text);
-        } else if let Some(new_task) = &mut app.new_task {
+        if let Foreground::Reply(reply) = &mut app.foreground {
+            reply.prompt.paste(&text);
+        } else if let Foreground::NewTask(new_task) = &mut app.foreground {
             new_task.paste(&text);
         } else if let Some(form) = &mut app.panel.form {
             match form.focus {
@@ -900,20 +1230,20 @@ where
                 Focus::Setup => form.setup.paste(&text),
                 _ => {}
             }
-        } else if let Some(id) = &app.open_shell
-            && let Some(shell) = app.shells.get(id)
+        } else if let Some(id) = app.open_shell().map(str::to_owned)
+            && let Some(shell) = app.shells.get(&id)
             && let Some(bytes) = shell.paste_bytes(text)
         {
-            event_loop.send_terminal_input(id, bytes);
+            event_loop.send_terminal_input(&id, bytes);
         }
         return Ok(false);
     }
     if let Event::Mouse(mouse) = event {
-        if let Some(id) = &app.open_shell
-            && let Some(shell) = app.shells.get_mut(id)
+        if let Some(id) = app.open_shell().map(str::to_owned)
+            && let Some(shell) = app.shells.get_mut(&id)
             && let Some(bytes) = shell.mouse_bytes(mouse, terminal.size()?.into())
         {
-            event_loop.send_terminal_input(id, bytes);
+            event_loop.send_terminal_input(&id, bytes);
         }
         return Ok(false);
     }
@@ -923,272 +1253,33 @@ where
     if !key.is_press() {
         return Ok(false);
     }
-    if let Some(prompt) = &mut app.prompt {
-        match prompt.handle_key(key) {
-            Some(PromptAction::Cancel) => {
-                app.prompt = None;
-                // Leaving the box without answering returns to the signals it
-                // was opened from, rather than all the way out to the list.
-                if app.answering_operator_signal.take().is_some() {
-                    app.open_operator_signals = true;
-                }
-            }
-            Some(PromptAction::Submit(command)) => {
-                app.prompt = None;
-                if let Some(signal_id) = app.answering_operator_signal.take() {
-                    // Answering the last signal leaves nothing to go back to, so
-                    // that is the one case that returns to the task list.
-                    let was_last = app
-                        .operator_signals
-                        .last()
-                        .is_some_and(|signal| signal.id == signal_id);
-                    event_loop.answer_operator_signal(signal_id, command);
-                    if !was_last {
-                        app.open_operator_signals = true;
-                    }
-                } else {
-                    app.notice = Some("that prompt had nothing to answer".into());
-                }
-            }
-            None => {}
-        }
-        return Ok(false);
-    }
-    if let Some(id) = app.open_shell.clone() {
-        if screens::shell::is_exit_key(key) {
-            if !event_loop.return_to_autopilot(&id) {
-                app.notice =
-                    Some("this task is no longer running; control stayed with autopilot".into());
-            }
-            app.hide_shell();
-        } else if let Some(shell) = app.shells.get_mut(&id)
-            && let Some(bytes) = shell.key_bytes(key)
-        {
-            event_loop.send_terminal_input(&id, bytes);
-        }
-        return Ok(false);
-    }
-    if app.help {
-        // Anything at all closes it: a help screen is not somewhere to be.
-        app.help = false;
+    // Anything at all closes help: a help screen is not somewhere to be.
+    if matches!(app.foreground, Foreground::Keys(_)) {
+        app.dismiss_keys();
         return Ok(false);
     }
     if is_help(key) && !app.is_typing() {
-        app.help = true;
+        app.foreground = Foreground::Keys(Box::new(mem::take(&mut app.foreground)));
         return Ok(false);
     }
-    if app.confirm.is_some() {
-        handle_confirm_key(app, event_loop, key).await;
-        return Ok(false);
-    }
-    if app.new_task.is_some() {
-        let mut question = app.new_task.take().expect("just checked");
-        match question.handle_key(key) {
-            None => app.new_task = Some(question),
-            Some(popups::new_task::Answer::Cancel) => {}
-            Some(popups::new_task::Answer::Create {
-                task,
-                environment,
-                agent,
-                remember,
-            }) => {
-                // The first answer becomes the default, because there was
-                // nothing to default to and guessing is not Altitude's to do.
-                if let Some(agent) = remember {
-                    app.set_agent(agent);
-                }
-                event_loop.create(task, environment, agent);
+    // In the order the states are declared: whatever is in front takes the key,
+    // and the line under it says which one that is.
+    match &app.foreground {
+        Foreground::Keys(_) => app.dismiss_keys(),
+        Foreground::Confirm(_) => handle_confirm_key(app, event_loop, key).await,
+        Foreground::Reply(_) => app.reply_key(key, event_loop),
+        Foreground::NewTask(_) => app.new_task_key(key, event_loop),
+        Foreground::Panel => app.panel_keys(key),
+        Foreground::Signals => app.signals_key(key, task_service).await,
+        Foreground::Shell(_) => app.shell_key(key, event_loop),
+        Foreground::Tasks => {
+            if app
+                .list_key(key, terminal, event_loop, task_service)
+                .await?
+            {
+                return Ok(true);
             }
         }
-        return Ok(false);
-    }
-    if app.panel.form.is_some() {
-        app.panel_form_key(key);
-        return Ok(false);
-    }
-    if app.panel.open {
-        app.panel_key(key);
-        return Ok(false);
-    }
-    if app.open_operator_signals {
-        match key.code {
-            KeyCode::PageDown => {
-                app.operator_signal_scroll = app.operator_signal_scroll.saturating_add(5)
-            }
-            KeyCode::PageUp => {
-                app.operator_signal_scroll = app.operator_signal_scroll.saturating_sub(5)
-            }
-            KeyCode::Home => app.operator_signal_scroll = 0,
-            KeyCode::End => app.operator_signal_scroll = u16::MAX,
-            _ if is_dismiss(key) || key.code == KeyCode::Char('i') => {
-                app.open_operator_signals = false
-            }
-            KeyCode::Tab => app.focus_next_signal_action(),
-            KeyCode::BackTab => app.focus_previous_signal_action(),
-            KeyCode::Down | KeyCode::Char('j') => app.select_next_operator_signal(),
-            KeyCode::Up | KeyCode::Char('h') => app.select_previous_operator_signal(),
-            KeyCode::Enter => {
-                let actions = app.selected_signal_actions();
-                let Some(action) = actions
-                    .get(
-                        app.selected_signal_action
-                            .min(actions.len().saturating_sub(1)),
-                    )
-                    .copied()
-                else {
-                    return Ok(false);
-                };
-                let Some(signal) = app
-                    .operator_signals
-                    .get(app.selected_operator_signal)
-                    .cloned()
-                else {
-                    return Ok(false);
-                };
-                match action {
-                    popups::signals::SignalAction::Reply => {
-                        if app.tasks.iter().any(|task| task.id == signal.task_id) {
-                            app.answering_operator_signal = Some(signal.id);
-                            app.prompt = Some(Prompt::new("answer operator signal"));
-                            app.open_operator_signals = false;
-                        } else {
-                            app.notice = Some("this task is no longer in the list".into());
-                        }
-                    }
-                    popups::signals::SignalAction::Acknowledge => {
-                        match task_service.acknowledge_operator_signal(&signal.id).await {
-                            Ok(task) => {
-                                app.replace_task(task);
-                                app.resolved_operator_signal(app.selected_operator_signal);
-                            }
-                            Err(error) => app.notice = Some(error.to_string()),
-                        }
-                    }
-                    popups::signals::SignalAction::Confirm => {
-                        match task_service.confirm_operator_signal(&signal.id).await {
-                            Ok(task) => {
-                                app.replace_task(task);
-                                app.resolved_operator_signal(app.selected_operator_signal);
-                                app.notice =
-                                    Some("task closed; its capsule was disposed of".into());
-                            }
-                            Err(error) => app.notice = Some(error.to_string()),
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-        return Ok(false);
-    }
-    match key.code {
-        KeyCode::Char('q') => return Ok(true),
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
-        KeyCode::Char('c') => {
-            if app.reload_settings() {
-                app.new_task = Some(NewTask::new(
-                    app.environments(),
-                    app.default_environment(),
-                    app.agent(),
-                ));
-            }
-        }
-        KeyCode::Char('s') => {
-            open_panel(app, task_service).await;
-        }
-        KeyCode::Char('i') => {
-            if let Some(task) = app.selected_task() {
-                app.operator_signals = task_service
-                    .operator_signals(&task.id)
-                    .await
-                    .map_err(io::Error::other)?;
-                let task = task_service
-                    .read_operator_signals(&task.id)
-                    .await
-                    .map_err(io::Error::other)?;
-                app.replace_task(task);
-                for signal in &mut app.operator_signals {
-                    signal.read = true;
-                }
-                app.selected_operator_signal = 0;
-                app.selected_signal_action = 0;
-                app.operator_signal_scroll = 0;
-                app.open_operator_signals = true;
-            }
-        }
-        // A grid step: one card across, or one whole row of them.
-        KeyCode::Char('j') | KeyCode::Down => {
-            let columns = app.grid_columns();
-            app.select_adjacent(columns as isize, columns);
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            let columns = app.grid_columns();
-            app.select_adjacent(-(columns as isize), columns);
-        }
-        KeyCode::Char('l') | KeyCode::Right | KeyCode::Tab => {
-            let columns = app.grid_columns();
-            app.select_adjacent(1, columns);
-        }
-        KeyCode::Char('h') | KeyCode::Left | KeyCode::BackTab => {
-            let columns = app.grid_columns();
-            app.select_adjacent(-1, columns);
-        }
-        _ if is_remove(key) => {
-            if let Some(task) = app.selected_task() {
-                let question = format!(
-                    "Remove \"{}\" and dispose of its capsule?",
-                    task.facts.intent
-                );
-                app.confirm = Some(PendingConfirm::removing(task.id, question));
-            }
-        }
-        KeyCode::Enter => {
-            if let Some(task) = app.selected_task() {
-                if matches!(
-                    task.facts.execution_status,
-                    TaskExecutionStatus::Paused | TaskExecutionStatus::Failed
-                ) {
-                    event_loop.start_operator_control(task);
-                    app.notice = Some("restoring the agent in the terminal…".into());
-                    return Ok(false);
-                }
-                if !matches!(task.facts.execution_status, TaskExecutionStatus::Running) {
-                    return Ok(false);
-                }
-                if matches!(
-                    task.facts.execution_mode,
-                    TaskExecutionMode::Autopilot | TaskExecutionMode::AutopilotReport
-                ) {
-                    app.notice = Some(if event_loop.take_control(&task.id) {
-                        "bringing the agent to the terminal…".into()
-                    } else {
-                        "this task has no run to take over".into()
-                    });
-                    return Ok(false);
-                }
-                if app.shells.contains_key(&task.id) {
-                    let (rows, cols) = screens::shell::size(terminal.size()?.into());
-                    event_loop.resize_terminal(&task.id, rows, cols);
-                    if let Some(shell) = app.shells.get_mut(&task.id) {
-                        shell.resize(rows, cols);
-                    }
-                    tracing::info!(task_id = %task.id, "reattaching terminal");
-                    app.open_shell = Some(task.id);
-                    return Ok(false);
-                }
-                if !event_loop.has_active_run(&task.id) {
-                    return Ok(false);
-                }
-                let (rows, cols) = screens::shell::size(terminal.size()?.into());
-                let history = event_loop.cached_terminal_output(&task.id);
-                event_loop.resize_terminal(&task.id, rows, cols);
-                app.shells
-                    .insert(task.id.clone(), Shell::new(rows, cols, history));
-                app.open_shell = Some(task.id);
-                tracing::info!("attached terminal");
-            }
-        }
-        _ => {}
     }
     Ok(false)
 }

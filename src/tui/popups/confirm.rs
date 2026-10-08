@@ -5,6 +5,8 @@
 //! do is the caller's business, so the caller keeps the action and hands this
 //! only the words.
 
+use std::mem;
+
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,
@@ -16,7 +18,7 @@ use crate::{
     isolation::IsolationEngine,
     task::TaskEventLoop,
     tui::{
-        App,
+        App, Foreground,
         screens::settings::Target,
         widgets::{chrome, keys},
     },
@@ -159,11 +161,11 @@ pub(in crate::tui) async fn handle_confirm_key<E>(
 ) where
     E: IsolationEngine + Clone + 'static,
 {
-    let Some(mut pending) = app.confirm.take() else {
+    let Foreground::Confirm(mut pending) = mem::take(&mut app.foreground) else {
         return;
     };
     match pending.dialog.handle_key(key) {
-        None => app.confirm = Some(pending),
+        None => app.foreground = Foreground::Confirm(pending),
         Some(Decision::Cancel) => {}
         Some(Decision::Confirm) => match pending.action {
             ConfirmAction::RemoveTask { id } => {

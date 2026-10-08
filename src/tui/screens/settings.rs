@@ -212,7 +212,6 @@ pub enum IdentityKind {
 
 /// The panel's state: where the focus is, and whatever is drawn over it.
 pub struct Panel {
-    pub open: bool,
     pub section: Section,
     pub selected: usize,
     pub depth: Depth,
@@ -222,7 +221,6 @@ pub struct Panel {
 impl Panel {
     pub fn new() -> Self {
         Self {
-            open: false,
             section: Section::Environments,
             selected: 0,
             depth: Depth::List,

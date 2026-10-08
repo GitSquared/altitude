@@ -93,6 +93,11 @@ impl NewTask {
     }
 
     /// The keys that work here, for the guidance line.
+    /// Whether the intent is taking characters, in which case `?` is one.
+    pub(in crate::tui) fn is_typing(&self) -> bool {
+        self.focus == Focus::Task
+    }
+
     pub fn hints(&self) -> Vec<chrome::Hint> {
         vec![
             chrome::Hint::new("tab", "field"),
