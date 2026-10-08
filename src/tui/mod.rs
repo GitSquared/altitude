@@ -737,57 +737,8 @@ where
                 app.shimmer = app.shimmer.wrapping_add(1);
                 app.environment_builds = task_service.environment_builds();
             }
-            Some(event) = task_execution_updates.recv() => match event {
-                TaskExecutionUpdate::Created(Ok(task)) => app.replace_task(task),
-                TaskExecutionUpdate::Created(Err(error)) => app.notice = Some(error.to_string()),
-                TaskExecutionUpdate::Started(Ok(task)) => app.replace_task(task),
-                TaskExecutionUpdate::Started(Err(error)) => app.notice = Some(error.to_string()),
-                TaskExecutionUpdate::Finished(id, Ok(task)) if !app.is_removing(&id) => {
-                    app.remove_shell(&id);
-                    app.replace_task(task);
-                }
-                // A run's failure is the task's own news rather than the
-                // interface's: the card turns red and says so, and the reason
-                // belongs to the task rather than to the band under the list.
-                TaskExecutionUpdate::Finished(id, Err(error)) if !app.is_removing(&id) => {
-                    tracing::warn!(task_id = %id, %error, "a task's run ended with an error");
-                }
-                TaskExecutionUpdate::Removed(id, Ok(())) => app.remove_task(&id),
-                TaskExecutionUpdate::Removed(id, Err(error)) => {
-                    app.cancel_removing(&id);
-                    show_task_error(&mut app, &id, error);
-                }
-                TaskExecutionUpdate::Output { task_id, stream, bytes } => {
-                    let _ = stream;
-                    if let Some(shell) = app.shells.get_mut(&task_id)
-                        && let Some(text) = shell.process(bytes)
-                    {
-                        match copy_to_clipboard(text) {
-                            Ok(()) => {
-                                shell.show_clipboard_confirmation();
-                                tracing::info!(task_id = %task_id, "copied terminal text to clipboard");
-                            }
-                            Err(error) => tracing::error!(task_id = %task_id, %error, "could not copy terminal text"),
-                        }
-                    }
-                }
-                TaskExecutionUpdate::OperatorReady(task) => {
-                    let id = task.id.clone();
-                    app.replace_task(task);
-                    let (rows, cols) = screens::shell::size(terminal.size()?.into());
-                    let history = event_loop.cached_terminal_output(&id);
-                    event_loop.resize_terminal(&id, rows, cols);
-                    app.shells.insert(id.clone(), Shell::new(rows, cols, history));
-                    app.open_shell = Some(id);
-                }
-                TaskExecutionUpdate::Report { task, summary } => {
-                    // The agent's own words are already recorded in the task's
-                    // history; the card does not repeat them.
-                    let _ = summary;
-                    app.replace_task(task);
-                }
-                _ => {}
-            },
+            Some(update) = task_execution_updates.recv() =>
+                app.apply(update, terminal, &event_loop).await?,
             event = events.next() => {
                 let Some(event) = event else { return Ok(()) };
                 if handle_event(event?, terminal, &event_loop, &task_service, &mut app).await? { return Ok(()); }
@@ -797,6 +748,77 @@ where
 }
 
 impl App {
+    /// Take one change from a task's run, and make the interface match it.
+    async fn apply<E>(
+        &mut self,
+        update: TaskExecutionUpdate,
+        terminal: &mut DefaultTerminal,
+        event_loop: &TaskEventLoop<E>,
+    ) -> io::Result<()>
+    where
+        E: IsolationEngine + Clone + 'static,
+    {
+        match update {
+            TaskExecutionUpdate::Created(Ok(task)) => self.replace_task(task),
+            TaskExecutionUpdate::Created(Err(error)) => self.notice = Some(error.to_string()),
+            TaskExecutionUpdate::Started(Ok(task)) => self.replace_task(task),
+            TaskExecutionUpdate::Started(Err(error)) => self.notice = Some(error.to_string()),
+            TaskExecutionUpdate::Finished(id, Ok(task)) if !self.is_removing(&id) => {
+                self.remove_shell(&id);
+                self.replace_task(task);
+            }
+            // A run's failure is the task's own news rather than the
+            // interface's: the card turns red and says so, and the reason
+            // belongs to the task rather than to the band under the list.
+            TaskExecutionUpdate::Finished(id, Err(error)) if !self.is_removing(&id) => {
+                tracing::warn!(task_id = %id, %error, "a task's run ended with an error");
+            }
+            TaskExecutionUpdate::Removed(id, Ok(())) => self.remove_task(&id),
+            TaskExecutionUpdate::Removed(id, Err(error)) => {
+                self.cancel_removing(&id);
+                show_task_error(self, &id, error);
+            }
+            TaskExecutionUpdate::Output {
+                task_id,
+                stream,
+                bytes,
+            } => {
+                let _ = stream;
+                if let Some(shell) = self.shells.get_mut(&task_id)
+                    && let Some(text) = shell.process(bytes)
+                {
+                    match copy_to_clipboard(text) {
+                        Ok(()) => {
+                            shell.show_clipboard_confirmation();
+                            tracing::info!(task_id = %task_id, "copied terminal text to clipboard");
+                        }
+                        Err(error) => {
+                            tracing::error!(task_id = %task_id, %error, "could not copy terminal text")
+                        }
+                    }
+                }
+            }
+            TaskExecutionUpdate::OperatorReady(task) => {
+                let id = task.id.clone();
+                self.replace_task(task);
+                let (rows, cols) = screens::shell::size(terminal.size()?.into());
+                let history = event_loop.cached_terminal_output(&id);
+                event_loop.resize_terminal(&id, rows, cols);
+                self.shells
+                    .insert(id.clone(), Shell::new(rows, cols, history));
+                self.open_shell = Some(id);
+            }
+            TaskExecutionUpdate::Report { task, summary } => {
+                // The agent's own words are already recorded in the task's
+                // history; the card does not repeat them.
+                let _ = summary;
+                self.replace_task(task);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn shell_has_active_notice(&self) -> bool {
         self.open_shell
             .as_ref()
