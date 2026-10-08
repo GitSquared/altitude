@@ -17,16 +17,90 @@ use tokio::{
 use crate::{
     agent::AgentEngines,
     cli::ServeArgs,
-    config::{Config, ServeSettings},
+    config::{Config, InstallationIdentity, ServeSettings},
+    db::Database,
     isolation::{
         self, EnvironmentProgress, EnvironmentProgressSink, IsolationStatus, MicrosandboxIsolation,
     },
     logging,
+    remote::protocol::{TaskRequest, TaskSummary},
     remote::{
-        ClientRecord, InstallationKey, LinkServer, announce::RemoteState, bundle::HeldConfig,
+        ClientRecord, InstallationKey, LinkServer,
+        announce::RemoteState,
+        bundle::HeldConfig,
+        server::{BoxFuture, ServerParts, TaskHost},
     },
+    task::{Task, TaskEventLoop, TaskService, TaskStore},
     vcs::GitHub,
 };
+
+/// The tasks this machine owns, as the link asks about them.
+///
+/// A task belongs to the machine that runs it, so this is not a view of somebody
+/// else's work: these are the only copies that exist.
+struct OwnTasks {
+    config: Arc<Config>,
+    tasks: Arc<TaskEventLoop<MicrosandboxIsolation>>,
+}
+
+impl TaskHost for OwnTasks {
+    fn run(&self, request: TaskRequest) -> BoxFuture<Result<(), String>> {
+        let config = Arc::clone(&self.config);
+        let tasks = Arc::clone(&self.tasks);
+        Box::pin(async move {
+            let settings = config
+                .load_or_create_settings()
+                .map_err(|error| error.to_string())?;
+            let environment = settings
+                .settings()
+                .environments()
+                .into_iter()
+                .find(|environment| environment.name == request.environment)
+                .ok_or_else(|| {
+                    format!("this machine has no {} environment", request.environment)
+                })?;
+            tasks.create(
+                request.intent,
+                environment,
+                request.agent,
+                Some(InstallationIdentity {
+                    id: request.identity_id,
+                    label: request.identity_label,
+                }),
+            );
+            Ok(())
+        })
+    }
+
+    fn list(&self) -> BoxFuture<Result<Vec<TaskSummary>, String>> {
+        let tasks = Arc::clone(&self.tasks);
+        Box::pin(async move {
+            let owned = tasks.list().await.map_err(|error| error.to_string())?;
+            Ok(owned.iter().map(summarise).collect())
+        })
+    }
+}
+
+/// What a card needs, which is not what a machine needs to run a task.
+fn summarise(task: &Task) -> TaskSummary {
+    let mut extras = Vec::new();
+    if task.facts.unread_operator_signal_count > 0 {
+        extras.push(format!(
+            "{} unread",
+            task.facts.unread_operator_signal_count
+        ));
+    }
+    TaskSummary {
+        id: task.id.clone(),
+        host: task.host.clone(),
+        intent: task.facts.intent.clone(),
+        environment: task.facts.environment_name.clone(),
+        agent: task.agent_kind,
+        status: task.facts.execution_status.clone(),
+        mode: task.facts.execution_mode,
+        extras,
+    }
+}
 
 /// Builds every environment the configuration names, and only then says this machine
 /// can be given work.
@@ -128,15 +202,39 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     let held = Arc::new(Mutex::new(HeldConfig::load(
         &config.data_dir().join("profiles.json"),
     )));
-    let server = LinkServer::serve(
+    // The tasks this machine owns. Its own database, because a task belongs to the
+    // machine that runs it: there is no copy of one anywhere else, and a client that
+    // wants to see these reads them from here.
+    let database = Database::open(&config).await.map_err(io::Error::other)?;
+    let tasks = TaskService::new(
+        TaskStore::new(&database),
+        isolation.clone(),
+        config.task_snapshots_dir(),
+        AgentEngines::new(),
+        config.identity().map_err(io::Error::other)?,
+    );
+    let (task_loop, mut updates) = TaskEventLoop::new(tasks);
+    let task_loop = Arc::new(task_loop);
+    // Nobody is at the keyboard here, so what happens to these tasks is said once, in
+    // the log, and nowhere else.
+    tokio::spawn(async move {
+        while updates.recv().await.is_some() {
+            tracing::debug!("a task changed");
+        }
+    });
+    let server = LinkServer::serve(ServerParts {
         identity,
         clients,
         listen,
         label,
-        config.settings_path(),
-        observed,
-        Arc::clone(&held),
-    )
+        config_path: config.settings_path(),
+        state: observed,
+        held: Arc::clone(&held),
+        tasks: Arc::new(OwnTasks {
+            config: Arc::new(config.clone()),
+            tasks: task_loop,
+        }),
+    })
     .await
     .map_err(io::Error::other)?;
     let ticket = server.ticket().map_err(io::Error::other)?;

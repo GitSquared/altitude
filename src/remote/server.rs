@@ -3,9 +3,11 @@
 use std::{
     collections::HashMap,
     fmt, fs,
+    future::Future,
     io::{self, Write},
     net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket},
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{Arc, Mutex},
 };
 
@@ -26,8 +28,8 @@ use super::{
     clients::{ClientLog, ClientRecord},
     identity::InstallationKey,
     protocol::{
-        BlobHash, LINK_ALPN, LinkRequest, LinkResponse, MAX_BLOB_BYTES, RemoteTicket, builder,
-        read_body, read_frame, write_frame,
+        BlobHash, LINK_ALPN, LinkRequest, LinkResponse, MAX_BLOB_BYTES, RemoteTicket, TaskRequest,
+        TaskSummary, builder, read_body, read_frame, write_frame,
     },
 };
 
@@ -80,6 +82,8 @@ struct LinkHandler {
     /// What this machine holds, and where that record lives.
     held: Arc<Mutex<HeldConfig>>,
     held_path: PathBuf,
+    /// The tasks this machine owns, which is the only place they exist.
+    tasks: Arc<dyn TaskHost>,
 }
 
 impl fmt::Debug for LinkHandler {
@@ -144,6 +148,35 @@ impl LinkHandler {
     }
 }
 
+/// What a server is started with: who it is, where it listens, and what it holds.
+pub struct ServerParts {
+    pub identity: InstallationKey,
+    pub clients: ClientRecord,
+    pub listen: SocketAddr,
+    pub label: String,
+    /// Where a configuration pushed by a client is written.
+    pub config_path: PathBuf,
+    /// What this machine can do with a task right now.
+    pub state: watch::Receiver<RemoteState>,
+    /// What this machine holds, for the parts a client asks about before sending.
+    pub held: Arc<Mutex<HeldConfig>>,
+    /// The tasks this machine owns, which is the only place they exist.
+    pub tasks: Arc<dyn TaskHost>,
+}
+
+/// What a link can ask of the machine it is running on.
+///
+/// The link carries a request and an answer; what a machine does with a task is that
+/// machine's business, which is why this is a trait rather than the link reaching
+/// into a task service it should know nothing about.
+pub trait TaskHost: Send + Sync + 'static {
+    fn run(&self, request: TaskRequest) -> BoxFuture<Result<(), String>>;
+    fn list(&self) -> BoxFuture<Result<Vec<TaskSummary>, String>>;
+}
+
+/// A future a trait object can hold, which an `async fn` in a trait cannot be.
+pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
+
 /// Writes a file beside the real one and moves it into place, so nothing ever reads
 /// half of it. Credentials are written for this user alone.
 fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -183,6 +216,20 @@ async fn answer(
         LinkRequest::Identify => {
             let response = LinkResponse::Identified {
                 remote: handler.id.to_string(),
+            };
+            write_frame(&mut send, &response).await?;
+        }
+        LinkRequest::RunTask { request } => {
+            let response = match handler.tasks.run(request).await {
+                Ok(()) => LinkResponse::Accepted,
+                Err(reason) => LinkResponse::Rejected { reason },
+            };
+            write_frame(&mut send, &response).await?;
+        }
+        LinkRequest::ListTasks => {
+            let response = match handler.tasks.list().await {
+                Ok(summaries) => LinkResponse::Tasks { summaries },
+                Err(reason) => LinkResponse::Rejected { reason },
             };
             write_frame(&mut send, &response).await?;
         }
@@ -235,15 +282,17 @@ impl LinkServer {
     ///
     /// `listen` is the operator's, not the operating system's: a port nobody can
     /// predict is a port nobody can configure a client to reach.
-    pub async fn serve(
-        identity: InstallationKey,
-        clients: ClientRecord,
-        listen: SocketAddr,
-        label: String,
-        config_path: PathBuf,
-        state: watch::Receiver<RemoteState>,
-        held: Arc<Mutex<HeldConfig>>,
-    ) -> LinkResult<Self> {
+    pub async fn serve(parts: ServerParts) -> LinkResult<Self> {
+        let ServerParts {
+            identity,
+            clients,
+            listen,
+            label,
+            config_path,
+            state,
+            held,
+            tasks,
+        } = parts;
         let blobs = Arc::new(BlobStore::default());
         let handler = LinkHandler {
             id: identity.id(),
@@ -251,6 +300,7 @@ impl LinkServer {
             held_path: config_path.with_file_name("profiles.json"),
             config_path,
             held: Arc::clone(&held),
+            tasks,
         };
         let log = ClientLog {
             record: clients.clone(),

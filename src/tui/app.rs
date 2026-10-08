@@ -1071,7 +1071,8 @@ impl App {
                 if let Some(agent) = remember {
                     self.set_agent(agent);
                 }
-                event_loop.create(task, environment, agent);
+                // Founded here, so whose work it is needs no saying.
+                event_loop.create(task, environment, agent, None);
             }
         }
     }

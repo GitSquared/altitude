@@ -16,6 +16,9 @@ use iroh::{
     endpoint::{Builder, presets},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+
+use crate::agent::AgentKind;
+use crate::task::{TaskExecutionMode, TaskExecutionStatus};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::{
@@ -76,6 +79,14 @@ pub enum LinkRequest {
     /// Ask the remote who it is. The answer is authenticated by the handshake,
     /// so it is really a check that both sides agree on the key.
     Identify,
+    /// Ask the remote to run a task of its own.
+    ///
+    /// A task belongs to the machine that runs it, so this is not a copy of anything:
+    /// the remote founds the task, keeps it, and is the only machine that can say
+    /// what it is doing. The client is told the id so it can ask again later.
+    RunTask { request: TaskRequest },
+    /// Ask what tasks the remote owns.
+    ListTasks,
     /// Announce an upload: `len` raw bytes follow, whose digest must be `hash`.
     PutBlob { hash: BlobHash, len: u64 },
     /// Announce a configuration: `len` raw bytes follow, whose digest must be
@@ -93,8 +104,45 @@ pub enum LinkResponse {
     Stored { hash: BlobHash, len: u64 },
     /// The configuration arrived, and the remote holds it now.
     Configured,
+    /// The remote took the task. What it called it is read from the machine rather
+    /// than returned, because the machine is where the task is.
+    Accepted,
+    /// What the remote owns, as its own cards would show it.
+    Tasks { summaries: Vec<TaskSummary> },
     /// The request was understood and refused.
     Rejected { reason: String },
+}
+
+/// What a client asks a remote to run.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskRequest {
+    pub intent: String,
+    /// Which environment, by name. The remote holds the recipe, because that is what
+    /// it was sent; it has no need of the client's copy of it.
+    pub environment: String,
+    pub agent: AgentKind,
+    /// Whose work this is, so the remote's record says what the client's would have.
+    pub identity_id: String,
+    pub identity_label: String,
+}
+
+/// A task as a card shows it.
+///
+/// The whole task does not travel: what a client needs to draw a row is not what a
+/// machine needs to run one, and a summary keeps the link's contract to the part the
+/// interface actually reads.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskSummary {
+    pub id: String,
+    /// The machine that owns it, which is the machine answering.
+    pub host: String,
+    pub intent: String,
+    pub environment: String,
+    pub agent: Option<AgentKind>,
+    pub status: TaskExecutionStatus,
+    pub mode: TaskExecutionMode,
+    /// Something the operator has to look at, in the words the card has room for.
+    pub extras: Vec<String>,
 }
 
 /// A framed message: a big-endian u32 length, then that many bytes of JSON.

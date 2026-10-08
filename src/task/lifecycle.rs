@@ -2,6 +2,7 @@
 
 use crate::{
     agent::AgentKind,
+    config::InstallationIdentity,
     isolation::Environment,
     isolation::{CommandEvent, CommandSession, IsolationEngine, SandboxOptions},
     vcs::GitHub,
@@ -24,21 +25,30 @@ where
     ///
     /// The two are independent: the environment says what is installed, and the
     /// agent says what works in it.
+    ///
+    /// `requester` is whose work this is. It is the machine's own installation unless
+    /// a client asked for the task, in which case it is the client's: a delegated
+    /// task is the operator's work on somebody else's machine, and its record should
+    /// say so.
     pub async fn create(
         &self,
         intent: String,
         environment: Environment,
         agent: AgentKind,
+        requester: Option<InstallationIdentity>,
     ) -> Result<Task, TaskServiceError> {
+        let requester = requester.unwrap_or_else(|| self.identity.clone());
         let kind = agent;
         self.store
             .create(TaskDraft {
                 intent,
                 environment,
-                identity_id: self.identity.id.clone(),
-                identity_label: self.identity.label.clone(),
+                identity_id: requester.id.clone(),
+                identity_label: requester.label.clone(),
                 // Whose work this is, and where it runs: the same machine for now,
                 // because a task is founded here until it is delegated.
+                // The machine that runs it, which is this one. A task belongs to
+                // the machine running it and to nothing else.
                 host: self.identity.label.clone(),
                 agent_kind: Some(kind),
                 agent_conversation_id: Some(self.agents.engine(kind).new_conversation_id()),

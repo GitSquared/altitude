@@ -7,6 +7,7 @@ use tokio::{sync::mpsc, time};
 
 use crate::{
     agent::{AgentKind, TaskReportDecoder},
+    config::InstallationIdentity,
     isolation::Environment,
     isolation::{Command, CommandEvent, CommandSession, IsolationEngine, OutputStream},
     task::capacity::{HostCapacity, HostSampler, SAMPLE_INTERVAL},
@@ -377,11 +378,21 @@ where
         }
     }
 
-    pub fn create(&self, prompt: String, environment: Environment, agent: AgentKind) {
+    pub fn create(
+        &self,
+        prompt: String,
+        environment: Environment,
+        agent: AgentKind,
+        requester: Option<InstallationIdentity>,
+    ) {
         tracing::info!(agent = %agent, environment = %environment.name, "creating task");
         let event_loop = self.clone();
         tokio::spawn(async move {
-            let task = match event_loop.service.create(prompt, environment, agent).await {
+            let task = match event_loop
+                .service
+                .create(prompt, environment, agent, requester)
+                .await
+            {
                 Ok(task) => task,
                 Err(error) => {
                     let _ = event_loop
