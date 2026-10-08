@@ -5,9 +5,19 @@
 //! stdout for whatever service manager started it, and it reads its own settings
 //! file rather than the client's.
 
-use std::{error::Error, io, net::SocketAddr};
+use std::{env, error::Error, fs, io, net::SocketAddr};
+
+use std::{
+    collections::HashMap,
+    io::{Read, Seek, SeekFrom},
+    path::{Path, PathBuf},
+};
 
 use std::sync::{Arc, Mutex};
+
+use microsandbox::{SaveOpts, Snapshot};
+
+use super::{CapsuleArchive, Handover, HandoverDraft, RecordedEvent};
 
 use tokio::{
     signal::unix::{SignalKind, signal},
@@ -41,9 +51,126 @@ use crate::{
 struct OwnTasks {
     config: Arc<Config>,
     tasks: Arc<TaskEventLoop<MicrosandboxIsolation>>,
+    /// Capsules already bundled for travel, and where their archives are.
+    ///
+    /// Kept until the destination confirms. A transfer nobody confirmed leaves the
+    /// task where it was rather than nowhere, which is the failure that repairs
+    /// itself.
+    handed: Arc<Mutex<HashMap<String, Handover>>>,
+    archives: Arc<Mutex<HashMap<String, PathBuf>>>,
 }
 
 impl TaskHost for OwnTasks {
+    fn hand_over(&self, task_id: String) -> BoxFuture<Result<Handover, String>> {
+        let tasks = Arc::clone(&self.tasks);
+        let handed = Arc::clone(&self.handed);
+        let archives = Arc::clone(&self.archives);
+        Box::pin(async move {
+            let owned = tasks.list().await.map_err(|error| error.to_string())?;
+            let task = owned
+                .into_iter()
+                .find(|task| task.id == task_id)
+                .ok_or_else(|| format!("this machine does not own {task_id}"))?;
+            // The source stops running a task before any of it moves, and stopping is
+            // also what settles the capsule: what travels is the disk as it is now.
+            tasks
+                .suspend(task.clone())
+                .await
+                .map_err(|error| error.to_string())?;
+            let stopped = tasks
+                .list()
+                .await
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .find(|task| task.id == task_id)
+                .ok_or_else(|| format!("{task_id} went missing while it was stopping"))?;
+            let events = tasks
+                .events(&stopped.id)
+                .await
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .map(|(recorded_at_ms, event)| RecordedEvent {
+                    recorded_at_ms,
+                    event,
+                })
+                .collect();
+            let (capsule, archive) = bundle(&stopped).await?;
+            let handover = Handover {
+                task_id: stopped.id.clone(),
+                draft: HandoverDraft {
+                    intent: stopped.facts.intent.clone(),
+                    environment: stopped.facts.environment_name.clone(),
+                    agent: stopped.agent_kind.unwrap_or_default(),
+                    agent_conversation_id: stopped.facts.agent_conversation_id.clone(),
+                },
+                events,
+                capsule,
+            };
+            handed
+                .lock()
+                .map_err(|_| "the transfers were poisoned".to_owned())?
+                .insert(stopped.id.clone(), handover.clone());
+            archives
+                .lock()
+                .map_err(|_| "the transfers were poisoned".to_owned())?
+                .insert(stopped.id, archive);
+            Ok(handover)
+        })
+    }
+
+    fn capsule_piece(
+        &self,
+        task_id: String,
+        offset: u64,
+        len: u64,
+    ) -> BoxFuture<Result<Vec<u8>, String>> {
+        let archives = Arc::clone(&self.archives);
+        Box::pin(async move {
+            let path = archives
+                .lock()
+                .map_err(|_| "the transfers were poisoned".to_owned())?
+                .get(&task_id)
+                .cloned()
+                .ok_or_else(|| format!("{task_id} has not been handed over"))?;
+            let mut file = fs::File::open(&path).map_err(|error| error.to_string())?;
+            file.seek(SeekFrom::Start(offset))
+                .map_err(|error| error.to_string())?;
+            let mut bytes = vec![0; usize::try_from(len).unwrap_or(usize::MAX)];
+            let read = file.read(&mut bytes).map_err(|error| error.to_string())?;
+            bytes.truncate(read);
+            Ok(bytes)
+        })
+    }
+
+    fn handed_over(&self, task_id: String) -> BoxFuture<Result<(), String>> {
+        let tasks = Arc::clone(&self.tasks);
+        let handed = Arc::clone(&self.handed);
+        let archives = Arc::clone(&self.archives);
+        Box::pin(async move {
+            let owned = tasks.list().await.map_err(|error| error.to_string())?;
+            let task = owned
+                .into_iter()
+                .find(|task| task.id == task_id)
+                .ok_or_else(|| format!("this machine does not own {task_id}"))?;
+            // The destination holds all of it, so this machine is not the owner any
+            // more. The record stays, because what was decided here is worth keeping
+            // even though the task has moved on.
+            tasks.remove(task);
+            handed
+                .lock()
+                .map_err(|_| "the transfers were poisoned".to_owned())?
+                .remove(&task_id);
+            let archive = archives
+                .lock()
+                .map_err(|_| "the transfers were poisoned".to_owned())?
+                .remove(&task_id);
+            if let Some(archive) = archive {
+                let _ = fs::remove_file(archive);
+            }
+            Ok(())
+        })
+    }
+
     fn run(&self, request: TaskRequest) -> BoxFuture<Result<(), String>> {
         let config = Arc::clone(&self.config);
         let tasks = Arc::clone(&self.tasks);
@@ -79,6 +206,59 @@ impl TaskHost for OwnTasks {
             Ok(owned.iter().map(summarise).collect())
         })
     }
+}
+
+/// Bundle a task's capsule for travel, and say where the archive is.
+///
+/// Microsandbox does the bundling: it writes a `.tar.zst` that understands sparse
+/// files, so a 15 GB disk whose filesystem has barely been written to costs what has
+/// actually been written and not what it could hold. Nothing here knows what a
+/// capsule is made of, which is the point.
+async fn bundle(task: &Task) -> Result<(CapsuleArchive, PathBuf), String> {
+    let Some(path) = task.facts.snapshot_path.as_ref() else {
+        return Ok((
+            CapsuleArchive {
+                len: 0,
+                digest: String::new(),
+            },
+            PathBuf::new(),
+        ));
+    };
+    let directory = env::temp_dir().join("altitude-transfers");
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let archive = directory.join(format!("{}.tar.zst", task.id));
+    let snapshot = Snapshot::open(path)
+        .await
+        .map_err(|error| error.to_string())?;
+    snapshot
+        .save_to(&archive, SaveOpts::default())
+        .await
+        .map_err(|error| error.to_string())?;
+    let len = fs::metadata(&archive)
+        .map_err(|error| error.to_string())?
+        .len();
+    Ok((
+        CapsuleArchive {
+            len,
+            digest: digest_of(&archive)?,
+        },
+        archive,
+    ))
+}
+
+/// Hash a file without holding it in memory, which an archive can be too large for.
+fn digest_of(path: &Path) -> Result<String, String> {
+    let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = vec![0; 1 << 20];
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 /// What a card needs, which is not what a machine needs to run a task.
@@ -233,6 +413,8 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         tasks: Arc::new(OwnTasks {
             config: Arc::new(config.clone()),
             tasks: task_loop,
+            handed: Arc::new(Mutex::new(HashMap::new())),
+            archives: Arc::new(Mutex::new(HashMap::new())),
         }),
     })
     .await

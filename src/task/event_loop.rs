@@ -13,7 +13,7 @@ use crate::{
     task::capacity::{HostCapacity, HostSampler, SAMPLE_INTERVAL},
     task::{
         Task, TaskAgentRequestedAction, TaskAgentRun, TaskExecutionMode, TaskExecutionStatus,
-        TaskService, TaskServiceError,
+        TaskHistoryEvent, TaskService, TaskServiceError,
     },
 };
 
@@ -440,6 +440,26 @@ where
             let id = task.id.clone();
             let _ = events.send(TaskExecutionUpdate::Removed(id, service.remove(task).await));
         });
+    }
+
+    /// Stop one task's run.
+    ///
+    /// This is the first thing a transfer does: the machine sending a task stops
+    /// running it before any of it moves, and only then is there something settled to
+    /// send.
+    pub async fn suspend(&self, task: Task) -> Result<(), TaskServiceError> {
+        for result in self.service.suspend_all(vec![task]).await {
+            result?;
+        }
+        Ok(())
+    }
+
+    /// Everything that happened to a task, in order, with when it happened.
+    pub async fn events(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<(i64, TaskHistoryEvent)>, TaskServiceError> {
+        self.service.events(task_id).await
     }
 
     pub async fn suspend_all(&self) -> Result<(), TaskServiceError> {

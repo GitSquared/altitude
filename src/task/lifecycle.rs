@@ -264,6 +264,17 @@ where
         }))
         .await
     }
+    /// Everything that happened to a task, in order, with when it happened.
+    pub async fn events(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<(i64, TaskHistoryEvent)>, TaskServiceError> {
+        self.store
+            .events(task_id)
+            .await
+            .map_err(TaskServiceError::Task)
+    }
+
     pub async fn suspend_all(&self, tasks: Vec<Task>) -> Vec<Result<(), TaskServiceError>> {
         join_all(tasks.into_iter().filter(should_suspend).map(|task| {
             let service = self.clone();

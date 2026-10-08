@@ -28,8 +28,8 @@ use super::{
     clients::{ClientLog, ClientRecord},
     identity::InstallationKey,
     protocol::{
-        BlobHash, LINK_ALPN, LinkRequest, LinkResponse, MAX_BLOB_BYTES, RemoteTicket, TaskRequest,
-        TaskSummary, builder, read_body, read_frame, write_frame,
+        BlobHash, Handover, LINK_ALPN, LinkRequest, LinkResponse, MAX_BLOB_BYTES, RemoteTicket,
+        TaskRequest, TaskSummary, builder, read_body, read_frame, write_frame,
     },
 };
 
@@ -172,6 +172,17 @@ pub struct ServerParts {
 pub trait TaskHost: Send + Sync + 'static {
     fn run(&self, request: TaskRequest) -> BoxFuture<Result<(), String>>;
     fn list(&self) -> BoxFuture<Result<Vec<TaskSummary>, String>>;
+    /// Stop a task and bundle it for another machine to continue.
+    fn hand_over(&self, task_id: String) -> BoxFuture<Result<Handover, String>>;
+    /// One stretch of a capsule archive this machine has already bundled.
+    fn capsule_piece(
+        &self,
+        task_id: String,
+        offset: u64,
+        len: u64,
+    ) -> BoxFuture<Result<Vec<u8>, String>>;
+    /// The destination holds all of it, so this machine is no longer the owner.
+    fn handed_over(&self, task_id: String) -> BoxFuture<Result<(), String>>;
 }
 
 /// A future a trait object can hold, which an `async fn` in a trait cannot be.
@@ -221,6 +232,37 @@ async fn answer(
         }
         LinkRequest::RunTask { request } => {
             let response = match handler.tasks.run(request).await {
+                Ok(()) => LinkResponse::Accepted,
+                Err(reason) => LinkResponse::Rejected { reason },
+            };
+            write_frame(&mut send, &response).await?;
+        }
+        LinkRequest::TakeTask { task_id } => {
+            let response = match handler.tasks.hand_over(task_id).await {
+                Ok(handover) => LinkResponse::Handover {
+                    handover: Box::new(handover),
+                },
+                Err(reason) => LinkResponse::Rejected { reason },
+            };
+            write_frame(&mut send, &response).await?;
+        }
+        LinkRequest::FetchCapsule {
+            task_id,
+            offset,
+            len,
+        } => {
+            match handler.tasks.capsule_piece(task_id, offset, len).await {
+                Ok(bytes) => {
+                    let announced = bytes.len() as u64;
+                    write_frame(&mut send, &LinkResponse::Capsule { len: announced }).await?;
+                    send.write_all(&bytes).await?;
+                }
+                Err(reason) => write_frame(&mut send, &LinkResponse::Rejected { reason }).await?,
+            }
+            send.finish()?;
+        }
+        LinkRequest::HandedOver { task_id } => {
+            let response = match handler.tasks.handed_over(task_id).await {
                 Ok(()) => LinkResponse::Accepted,
                 Err(reason) => LinkResponse::Rejected { reason },
             };

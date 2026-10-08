@@ -149,6 +149,27 @@ impl TaskStore {
         Ok(task)
     }
 
+    /// Everything that happened to a task, in order, with when it happened.
+    ///
+    /// The time belongs with the event, because history that happened on another
+    /// machine must not arrive claiming it happened now.
+    pub async fn events(&self, task_id: &str) -> Result<Vec<(i64, TaskHistoryEvent)>, TaskError> {
+        let rows: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT recorded_at_ms, payload FROM task_event_logs WHERE task_id = ? ORDER BY sequence",
+        )
+        .bind(task_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(TaskError::Database)?;
+        rows.into_iter()
+            .map(|(recorded_at_ms, payload)| {
+                serde_json::from_str(&payload)
+                    .map(|event| (recorded_at_ms, event))
+                    .map_err(TaskError::HistoryData)
+            })
+            .collect()
+    }
+
     async fn read_task(
         transaction: &mut Transaction<'_, Sqlite>,
         task_id: &str,

@@ -23,8 +23,8 @@ mod protocol;
 
 use std::error::Error;
 
-// Callers name the link, not the modules inside it.
-// What is still ahead of its caller: sending a request, and moving a capsule.
+// Callers name the link, not the modules inside it, and not every part of the link
+// has a caller yet.
 #[allow(unused_imports)]
 pub use {
     announce::{Announcement, RemoteState},
@@ -35,7 +35,8 @@ pub use {
     keys::{RemoteKey, RemoteKeys},
     known::{RemoteKeyStatus, Sighting, meet},
     protocol::{
-        BlobHash, LINK_ALPN, LinkRequest, LinkResponse, RemoteTicket, TaskRequest, TaskSummary,
+        BlobHash, CapsuleArchive, Handover, HandoverDraft, LINK_ALPN, LinkRequest, LinkResponse,
+        RecordedEvent, RemoteTicket, TaskRequest, TaskSummary,
     },
     server::LinkServer,
 };
