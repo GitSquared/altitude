@@ -9,6 +9,7 @@ use std::{error::Error, io, net::SocketAddr};
 
 use tokio::signal::unix::{SignalKind, signal};
 
+use crate::isolation::{self, MicrosandboxIsolation};
 use crate::{
     cli::ServeArgs,
     config::{Config, ServeSettings},
@@ -45,9 +46,21 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     // The label travels with the key, so a client that learns one learns what to
     // call this remote as well.
     let label = config.identity().map_err(io::Error::other)?.label;
-    let server = LinkServer::serve(identity, clients, listen, label, config.settings_path())
-        .await
-        .map_err(io::Error::other)?;
+    // A remote is a replica of a setup, so it builds what that setup needs before it
+    // can be given work. It answers while it builds, saying so, which is how a client
+    // tells a machine that is preparing from one that is down.
+    let isolation = MicrosandboxIsolation::new(&config);
+    let state = isolation::prepare(isolation.clone());
+    let server = LinkServer::serve(
+        identity,
+        clients,
+        listen,
+        label,
+        config.settings_path(),
+        state,
+    )
+    .await
+    .map_err(io::Error::other)?;
     let ticket = server.ticket().map_err(io::Error::other)?;
 
     // Everything an operator needs to point a client at this remote, said once and

@@ -26,7 +26,7 @@ use std::error::Error;
 // What is still ahead of its caller: sending a request, and moving a capsule.
 #[allow(unused_imports)]
 pub use {
-    announce::Announcement,
+    announce::{Announcement, RemoteState},
     client::{LinkClient, LinkPath, LinkReply, PathKind},
     clients::ClientRecord,
     identity::InstallationKey,

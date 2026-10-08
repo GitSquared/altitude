@@ -632,7 +632,7 @@ fn detail(panel: &Panel, view: &View, focused: bool) -> Paragraph<'static> {
                         lines.push(Line::styled("asking…", palette::attention()))
                     }
                     RemoteStatus::Syncing => lines.push(Line::styled(
-                        "sending this configuration…",
+                        "syncing — it is building what it needs to run a task",
                         palette::attention(),
                     )),
                     RemoteStatus::Changed => lines.push(Line::styled(

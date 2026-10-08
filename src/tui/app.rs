@@ -21,7 +21,7 @@ use crate::{
     isolation::{
         Environment, EnvironmentDescription, EnvironmentProgress, IsolationEngine, ProfileSummary,
     },
-    remote::{Announcement, LinkClient, RemoteKey, RemoteKeyStatus, RemoteKeys, meet},
+    remote::{Announcement, LinkClient, RemoteKey, RemoteKeyStatus, RemoteKeys, RemoteState, meet},
     task::{
         Task, TaskEventLoop, TaskExecutionMode, TaskExecutionStatus, TaskExecutionUpdate,
         TaskOperatorSignal, TaskService, TaskServiceError,
@@ -604,7 +604,13 @@ impl App {
                 let status = match key_status {
                     RemoteKeyStatus::New | RemoteKeyStatus::Known => {
                         self.remember(&address, &announcement).await;
-                        RemoteStatus::Reached
+                        // It answered, but a machine still building what it needs
+                        // cannot be given work, and that is worth knowing before you
+                        // delegate to it.
+                        match announcement.state {
+                            RemoteState::Preparing => RemoteStatus::Syncing,
+                            RemoteState::Ready => RemoteStatus::Reached,
+                        }
                     }
                     // Reported, and not written: accepting a changed key means
                     // forgetting the address first, which is a second act.
@@ -748,7 +754,7 @@ impl App {
         }
     }
 
-    pub(in crate::tui) fn panel_form_key(&mut self, key: KeyEvent) {
+    pub(in crate::tui) async fn panel_form_key(&mut self, key: KeyEvent) {
         let Some(mut form) = self.panel.form.take() else {
             return;
         };
@@ -775,10 +781,19 @@ impl App {
             },
         }
         if save {
+            let added = match form.target {
+                Target::NewRemote => Some(form.primary.value().trim().to_owned()),
+                _ => None,
+            };
             // A refused save keeps the page open, so the reason and the work
             // are both still there.
             if !self.save_form(&form) {
                 self.panel.form = Some(form);
+            } else if let Some(address) = added {
+                // A remote that has just been added is sent this configuration, so
+                // that it becomes a replica rather than a machine waiting to be told
+                // what to build.
+                self.push_config(&address).await;
             }
         } else if keep {
             self.panel.form = Some(form);
@@ -1049,7 +1064,7 @@ impl App {
     /// The panel's keys, which are its form's when a form is open.
     pub(in crate::tui) async fn panel_keys(&mut self, key: KeyEvent) {
         if self.panel.form.is_some() {
-            self.panel_form_key(key);
+            self.panel_form_key(key).await;
         } else {
             self.panel_key(key).await;
         }

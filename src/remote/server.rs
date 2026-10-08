@@ -8,6 +8,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use tokio::sync::watch;
+
+use crate::isolation::IsolationStatus;
+
 use iroh::{
     EndpointAddr, EndpointId,
     endpoint::{Builder, Connection, RecvStream, SendStream},
@@ -16,7 +20,7 @@ use iroh::{
 
 use super::{
     LinkResult,
-    announce::{Announcement, Broadcast},
+    announce::{Announcement, Broadcast, RemoteState},
     clients::{ClientLog, ClientRecord},
     identity::InstallationKey,
     protocol::{
@@ -176,6 +180,7 @@ impl LinkServer {
         listen: SocketAddr,
         label: String,
         config_path: PathBuf,
+        state: watch::Receiver<IsolationStatus>,
     ) -> LinkResult<Self> {
         let blobs = Arc::new(BlobStore::default());
         let handler = LinkHandler {
@@ -205,7 +210,9 @@ impl LinkServer {
                 id: identity.id().to_string(),
                 label,
                 version: env!("CARGO_PKG_VERSION").to_owned(),
+                state: RemoteState::Preparing,
             },
+            state,
         )
         .await?;
         Ok(Self {

@@ -14,6 +14,7 @@
 use std::{net::SocketAddr, time::Duration};
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -22,6 +23,7 @@ use tokio::{
 };
 
 use super::LinkResult;
+use crate::isolation::IsolationStatus;
 
 /// How long either side waits for the other before giving up.
 const EXCHANGE_LIMIT: Duration = Duration::from_secs(5);
@@ -44,6 +46,20 @@ pub struct Announcement {
     pub label: String,
     /// Which build is answering.
     pub version: String,
+    /// What it can do with a task right now.
+    pub state: RemoteState,
+}
+
+/// What a remote can do with a task right now.
+///
+/// A machine that has just been sent a configuration is building what it needs to
+/// run one. Until that finishes it answers, so a client can tell it apart from a
+/// machine that is down, and cannot be given work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteState {
+    Preparing,
+    Ready,
 }
 
 /// The listeners that answer announcements.
@@ -63,12 +79,16 @@ impl Broadcast {
     pub(super) async fn start(
         bound: &[SocketAddr],
         announcement: Announcement,
+        state: watch::Receiver<IsolationStatus>,
     ) -> LinkResult<Self> {
         let mut tasks = Vec::new();
         for address in bound {
             let listener = TcpListener::bind(address).await?;
-            let announcement = announcement.clone();
-            tasks.push(tokio::spawn(answer_everyone(listener, announcement)));
+            tasks.push(tokio::spawn(answer_everyone(
+                listener,
+                announcement.clone(),
+                state.clone(),
+            )));
         }
         Ok(Self { tasks })
     }
@@ -81,12 +101,23 @@ impl Broadcast {
     }
 }
 
-async fn answer_everyone(listener: TcpListener, announcement: Announcement) {
+async fn answer_everyone(
+    listener: TcpListener,
+    announcement: Announcement,
+    state: watch::Receiver<IsolationStatus>,
+) {
     loop {
         match listener.accept().await {
             Ok((mut stream, peer)) => {
-                let announcement = announcement.clone();
+                let mut announcement = announcement.clone();
+                let state = state.clone();
                 tokio::spawn(async move {
+                    // Read per request, not once: a remote that has just been sent a
+                    // configuration is building, and says so until it is done.
+                    announcement.state = match &*state.borrow() {
+                        IsolationStatus::Ready => RemoteState::Ready,
+                        _ => RemoteState::Preparing,
+                    };
                     if let Err(error) = answer(&mut stream, &announcement).await {
                         tracing::debug!(%peer, %error, "an announcement went unanswered");
                     }
