@@ -7,13 +7,15 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fs, io, mem,
+    env, fs, io, mem,
     time::{Duration, Instant},
 };
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{DefaultTerminal, style::Style};
 use tokio::sync::mpsc;
+
+use microsandbox::Snapshot;
 
 use crate::{
     agent::AgentKind,
@@ -27,7 +29,7 @@ use crate::{
     },
     task::{
         Task, TaskEventLoop, TaskExecutionMode, TaskExecutionStatus, TaskExecutionUpdate,
-        TaskOperatorSignal, TaskService, TaskServiceError,
+        TaskHistoryEvent, TaskOperatorSignal, TaskService, TaskServiceError,
     },
     tui::keys::{is_dismiss, is_remove},
     tui::popups,
@@ -137,6 +139,16 @@ pub(in crate::tui) enum RemoteAnswer {
 /// the sections does not reach anything.
 const ASK_AFTER: Duration = Duration::from_millis(400);
 
+/// A task another machine owns, and which machine that is.
+///
+/// Which machine matters, because a task belongs to the machine running it: asking for
+/// one is a question put to a particular machine, not to remotes in general.
+#[derive(Clone)]
+pub(in crate::tui) struct HeldTask {
+    pub(in crate::tui) address: String,
+    pub(in crate::tui) summary: TaskSummary,
+}
+
 pub struct App {
     pub(in crate::tui) tasks: Vec<Task>,
     /// How many cards fit across, from the last drawing. Written by the
@@ -178,7 +190,7 @@ pub struct App {
     /// What the remotes are holding, as of the last time each answered. Read from
     /// them rather than copied: a task belongs to the machine running it, so this is
     /// only ever as good as the last answer.
-    pub(in crate::tui) remote_tasks: Vec<TaskSummary>,
+    pub(in crate::tui) remote_tasks: Vec<HeldTask>,
     /// When this client last sent its configuration to each address. Held in
     /// memory: a restart forgets, and sending a small file again is cheaper than a
     /// record that can disagree with what the remote holds.
@@ -518,10 +530,7 @@ impl App {
     ///
     /// A remote that does not answer contributes nothing. Its tasks are its own, and
     /// there is no copy here to fall back on.
-    pub(in crate::tui) fn read_remote_tasks(
-        &self,
-        reads: &mpsc::UnboundedSender<Vec<TaskSummary>>,
-    ) {
+    pub(in crate::tui) fn read_remote_tasks(&self, reads: &mpsc::UnboundedSender<Vec<HeldTask>>) {
         let addresses: Vec<String> = self
             .configured_remotes()
             .into_iter()
@@ -538,7 +547,10 @@ impl App {
             let mut held = Vec::new();
             for address in addresses {
                 match Self::read_tasks(&address, &keys).await {
-                    Ok(tasks) => held.extend(tasks),
+                    Ok(tasks) => held.extend(tasks.into_iter().map(|summary| HeldTask {
+                        address: address.clone(),
+                        summary,
+                    })),
                     Err(error) => {
                         tracing::debug!(%error, address, "could not read a remote's tasks")
                     }
@@ -546,6 +558,102 @@ impl App {
             }
             let _ = reads.send(held);
         });
+    }
+
+    /// Bring a task home from the machine that owns it.
+    ///
+    /// The remote stops running it, its capsule travels, and it is founded here with the
+    /// history of what was decided about it — and only then is the remote told it is no
+    /// longer the owner. Everything after that is the ordinary take-over of a task that
+    /// is here, because by then it is.
+    fn bring_home<E>(
+        &mut self,
+        held: &HeldTask,
+        event_loop: &TaskEventLoop<E>,
+        landings: &mpsc::UnboundedSender<Result<String, String>>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let address = held.address.clone();
+        let summary = held.summary.clone();
+        let keys = self.remote_keys.clone();
+        let environments = self.environments();
+        let event_loop = event_loop.clone();
+        let landings = landings.clone();
+        self.notice = Some(format!("asking {address} for the task…"));
+        tokio::spawn(async move {
+            let outcome =
+                Self::carry_home(&address, &summary, &keys, &environments, &event_loop).await;
+            let _ = landings.send(outcome);
+        });
+    }
+
+    /// The asking, the carrying, and the founding, away from the interface.
+    async fn carry_home<E>(
+        address: &str,
+        summary: &TaskSummary,
+        keys: &RemoteKeys,
+        environments: &[Environment],
+        event_loop: &TaskEventLoop<E>,
+    ) -> Result<String, String>
+    where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let environment = environments
+            .iter()
+            .find(|environment| environment.name == summary.environment)
+            .cloned()
+            .ok_or_else(|| format!("this machine has no {} environment", summary.environment))?;
+        let remembered = keys.remembered(address).await.ok().flatten();
+        let sighting = meet(address, DEFAULT_PORT, remembered.as_deref())
+            .await
+            .map_err(|error| error.to_string())?;
+        let client = LinkClient::bind()
+            .await
+            .map_err(|error| error.to_string())?;
+        let landing = env::temp_dir()
+            .join("altitude-transfers")
+            .join(format!("{}.tar.zst", summary.id));
+        let handover = client
+            .take_task(sighting.ticket, &summary.id, &landing)
+            .await
+            .map_err(|error| error.to_string())?;
+        // The capsule is loaded into this machine's own store, and where it landed is
+        // what the task will run from. A machine that has not built this environment
+        // cannot unpack a capsule that was taken against it, and says so here.
+        let capsule = match handover.capsule.len {
+            0 => None,
+            _ => {
+                let loaded = Snapshot::load(&landing, None)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                Some(
+                    loaded
+                        .path()
+                        .map_err(|error| error.to_string())?
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            }
+        };
+        let history: Vec<(i64, TaskHistoryEvent)> = handover
+            .events
+            .iter()
+            .map(|recorded| (recorded.recorded_at_ms, recorded.event.clone()))
+            .collect();
+        let task = event_loop
+            .land(
+                handover.draft.intent.clone(),
+                environment,
+                handover.draft.agent,
+                handover.draft.agent_conversation_id.clone(),
+                &history,
+                capsule,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let _ = fs::remove_file(&landing);
+        Ok(task.id)
     }
 
     /// Ask a remote to run a task of its own.
@@ -606,6 +714,12 @@ impl App {
     /// Whether the selection is a task another machine owns.
     ///
     /// The list shows them after this machine's own, so the index says which it is.
+    /// The held task the selection is on, when it is on one.
+    fn selected_held(&self) -> Option<&HeldTask> {
+        self.remote_tasks
+            .get(self.selected.checked_sub(self.tasks.len())?)
+    }
+
     fn selected_is_remote(&self) -> bool {
         self.selected >= self.tasks.len()
             && self.selected < self.tasks.len() + self.remote_tasks.len()
@@ -1324,12 +1438,23 @@ impl App {
     where
         E: IsolationEngine + Clone + 'static,
     {
-        // A task on another machine is shown here and cannot be acted on. It belongs
-        // to that machine, and the only thing that could be done with it is ask for
-        // it — which is a transfer, not a keystroke.
-        if self.selected_is_remote()
-            && (key.code == KeyCode::Enter || key.code == KeyCode::Char('o') || is_remove(key))
-        {
+        // A task on another machine belongs to that machine. The only thing that can be
+        // done with it from here is ask for it, which is a transfer rather than a
+        // keystroke, and takes a moment even after it is agreed to.
+        if self.selected_is_remote() {
+            if key.code == KeyCode::Char('o')
+                && let Some(held) = self.selected_held()
+            {
+                self.foreground = Foreground::Confirm(PendingConfirm::taking_over(
+                    held.summary.id.clone(),
+                    format!(
+                        "Take over \"{}\" from {}? It stops running there, its capsule \
+                         travels here, and it becomes this machine's.",
+                        held.summary.intent, held.address
+                    ),
+                ));
+                return Ok(false);
+            }
             self.notice = Some("that task is on another machine".to_owned());
             return Ok(false);
         }
@@ -1407,9 +1532,21 @@ impl App {
         id: &str,
         terminal: &DefaultTerminal,
         event_loop: &TaskEventLoop<E>,
+        landings: &mpsc::UnboundedSender<Result<String, String>>,
     ) where
         E: IsolationEngine + Clone + 'static,
     {
+        // A task on another machine has to travel before it can be taken over, and
+        // travelling is a wait rather than a keystroke.
+        if let Some(held) = self
+            .remote_tasks
+            .iter()
+            .find(|held| held.summary.id == id)
+            .cloned()
+        {
+            self.bring_home(&held, event_loop, landings);
+            return;
+        }
         let Some(task) = self.tasks.iter().find(|task| task.id == id).cloned() else {
             return;
         };

@@ -149,6 +149,26 @@ impl TaskStore {
         Ok(task)
     }
 
+    /// Append history that happened somewhere else, at the times it happened.
+    ///
+    /// A task taken over from another machine arrives with everything that was decided
+    /// about it, and none of that happened now.
+    pub async fn append_borrowed_events(
+        &self,
+        task_id: &str,
+        events: &[(i64, TaskHistoryEvent)],
+    ) -> Result<Task, TaskError> {
+        let mut transaction = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(TaskError::Database)?;
+        Self::write_recorded_events(&mut transaction, task_id, events).await?;
+        let task = Self::read_task(&mut transaction, task_id).await?;
+        transaction.commit().await.map_err(TaskError::Database)?;
+        Ok(task)
+    }
+
     /// Everything that happened to a task, in order, with when it happened.
     ///
     /// The time belongs with the event, because history that happened on another
@@ -183,6 +203,31 @@ impl TaskStore {
         .await
         .map_err(TaskError::Database)
         .map(Task::from)
+    }
+
+    /// Write events at the times they happened, which is what arriving history needs.
+    async fn write_recorded_events(
+        transaction: &mut Transaction<'_, Sqlite>,
+        task_id: &str,
+        events: &[(i64, TaskHistoryEvent)],
+    ) -> Result<(), TaskError> {
+        for (recorded_at_ms, event) in events {
+            let payload = serde_json::to_string(event).map_err(TaskError::HistoryData)?;
+            sqlx::query(
+                r#"
+                INSERT INTO task_event_logs (id, task_id, recorded_at_ms, payload)
+                VALUES (?1, ?2, ?3, ?4)
+            "#,
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(task_id)
+            .bind(recorded_at_ms)
+            .bind(payload)
+            .execute(&mut **transaction)
+            .await
+            .map_err(TaskError::Database)?;
+        }
+        Ok(())
     }
 
     async fn write_events(

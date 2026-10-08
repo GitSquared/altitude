@@ -7,6 +7,8 @@
 
 use std::mem;
 
+use tokio::sync::mpsc;
+
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     DefaultTerminal, Frame,
@@ -164,6 +166,7 @@ pub(in crate::tui) async fn handle_confirm_key<E>(
     terminal: &DefaultTerminal,
     event_loop: &TaskEventLoop<E>,
     key: KeyEvent,
+    landings: &mpsc::UnboundedSender<Result<String, String>>,
 ) where
     E: IsolationEngine + Clone + 'static,
 {
@@ -182,7 +185,7 @@ pub(in crate::tui) async fn handle_confirm_key<E>(
                     event_loop.remove(task);
                 }
             }
-            ConfirmAction::TakeOver { id } => app.take_over(&id, terminal, event_loop),
+            ConfirmAction::TakeOver { id } => app.take_over(&id, terminal, event_loop, landings),
             ConfirmAction::DeleteSetting(target) => app.delete(target).await,
         },
     }

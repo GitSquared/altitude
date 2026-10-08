@@ -30,6 +30,37 @@ where
     /// a client asked for the task, in which case it is the client's: a delegated
     /// task is the operator's work on somebody else's machine, and its record should
     /// say so.
+    /// Found a task here, continuing a conversation it was already having.
+    ///
+    /// A task taken over from another machine was in the middle of a conversation, and
+    /// the agent should pick it up rather than meet the work for the first time. With
+    /// no conversation given, this is a task starting fresh.
+    pub async fn adopt(
+        &self,
+        intent: String,
+        environment: Environment,
+        agent: AgentKind,
+        conversation: Option<String>,
+        requester: Option<InstallationIdentity>,
+    ) -> Result<Task, TaskServiceError> {
+        let requester = requester.unwrap_or_else(|| self.identity.clone());
+        self.store
+            .create(TaskDraft {
+                intent,
+                environment,
+                identity_id: requester.id.clone(),
+                identity_label: requester.label.clone(),
+                // The machine that runs it, which is this one. A task belongs to the
+                // machine running it and to nothing else.
+                host: self.identity.label.clone(),
+                agent_kind: Some(agent),
+                agent_conversation_id: conversation
+                    .or_else(|| Some(self.agents.engine(agent).new_conversation_id())),
+            })
+            .await
+            .map_err(TaskServiceError::Task)
+    }
+
     pub async fn create(
         &self,
         intent: String,
@@ -37,24 +68,41 @@ where
         agent: AgentKind,
         requester: Option<InstallationIdentity>,
     ) -> Result<Task, TaskServiceError> {
-        let requester = requester.unwrap_or_else(|| self.identity.clone());
-        let kind = agent;
+        self.adopt(intent, environment, agent, None, requester)
+            .await
+    }
+
+    /// Append history that happened on another machine, at the times it happened.
+    pub async fn record_borrowed_history(
+        &self,
+        task_id: &str,
+        events: &[(i64, TaskHistoryEvent)],
+    ) -> Result<Task, TaskServiceError> {
         self.store
-            .create(TaskDraft {
-                intent,
-                environment,
-                identity_id: requester.id.clone(),
-                identity_label: requester.label.clone(),
-                // Whose work this is, and where it runs: the same machine for now,
-                // because a task is founded here until it is delegated.
-                // The machine that runs it, which is this one. A task belongs to
-                // the machine running it and to nothing else.
-                host: self.identity.label.clone(),
-                agent_kind: Some(kind),
-                agent_conversation_id: Some(self.agents.engine(kind).new_conversation_id()),
-            })
+            .append_borrowed_events(task_id, events)
             .await
             .map_err(TaskServiceError::Task)
+    }
+
+    /// Record that this task's capsule is here, and where it is.
+    ///
+    /// The capsule arrived from another machine, and this is what makes it this
+    /// machine's: the path it landed at is the disk the task will run from.
+    pub async fn record_capsule(
+        &self,
+        task_id: &str,
+        path: &str,
+    ) -> Result<Task, TaskServiceError> {
+        self.record(
+            task_id,
+            &[TaskHistoryEvent::ExecutionRecovered {
+                execution_status: TaskExecutionStatus::Pending,
+                sandbox_available: false,
+                snapshot_available: true,
+                snapshot_path: path.to_owned(),
+            }],
+        )
+        .await
     }
     pub(super) async fn record(
         &self,

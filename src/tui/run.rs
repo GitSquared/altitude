@@ -23,7 +23,7 @@ use crate::{
 };
 
 use super::App;
-use super::app::Foreground;
+use super::app::{Foreground, HeldTask};
 use super::keys::is_help;
 use super::popups;
 use super::popups::confirm::handle_confirm_key;
@@ -83,7 +83,10 @@ where
     let mut ask = time::interval(Duration::from_millis(250));
     // Reading a remote's tasks is a dial, so it happens on its own clock rather than
     // every frame, and away from this loop.
-    let (remote_task_reads, mut remote_tasks_read) = mpsc::unbounded_channel();
+    let (remote_task_reads, mut remote_tasks_read) = mpsc::unbounded_channel::<Vec<HeldTask>>();
+    // Bringing a task home is a dial, a transfer and a load, so it happens away from
+    // this loop and reports back with the task it landed.
+    let (landings, mut landed) = mpsc::unbounded_channel::<Result<String, String>>();
     let mut read_clock = time::interval(Duration::from_secs(3));
     loop {
         if mouse_captured != app.open_shell().is_some() {
@@ -159,6 +162,19 @@ where
                 app.read_remote_tasks(&remote_task_reads);
             }
             Some(tasks) = remote_tasks_read.recv() => app.remote_tasks = tasks,
+            Some(outcome) = landed.recv() => {
+                match outcome {
+                    Ok(id) => {
+                        if let Ok(tasks) = event_loop.list().await {
+                            app.tasks = tasks;
+                        }
+                        app.take_over(&id, terminal, &event_loop, &landings);
+                    }
+                    Err(error) => {
+                        app.notice = Some(format!("could not bring it home: {error}"));
+                    }
+                }
+            }
             _ = shell_notice.tick(), if app.shell_has_active_notice() => {}
             _ = shimmer.tick(), if app.is_preparing() || app.is_asking_remotes() => {
                 app.shimmer = app.shimmer.wrapping_add(1);
@@ -168,7 +184,7 @@ where
                 app.apply(update, terminal, &event_loop).await?,
             event = events.next() => {
                 let Some(event) = event else { return Ok(()) };
-                if handle_event(event?, terminal, &event_loop, &task_service, &mut app).await? { return Ok(()); }
+                if handle_event(event?, terminal, &event_loop, &task_service, &mut app, &landings).await? { return Ok(()); }
             }
         }
     }
@@ -180,6 +196,7 @@ async fn handle_event<E>(
     event_loop: &TaskEventLoop<E>,
     task_service: &TaskService<E>,
     app: &mut App,
+    landings: &mpsc::UnboundedSender<Result<String, String>>,
 ) -> io::Result<bool>
 where
     E: IsolationEngine + Clone + 'static,
@@ -241,7 +258,9 @@ where
     // and the line under it says which one that is.
     match &app.foreground {
         Foreground::Keys(_) => app.dismiss_keys(),
-        Foreground::Confirm(_) => handle_confirm_key(app, terminal, event_loop, key).await,
+        Foreground::Confirm(_) => {
+            handle_confirm_key(app, terminal, event_loop, key, landings).await
+        }
         Foreground::Reply(_) => app.reply_key(key, event_loop),
         Foreground::NewTask(_) => app.new_task_key(key, event_loop).await,
         Foreground::Panel => app.panel_keys(key).await,

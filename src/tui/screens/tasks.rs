@@ -142,13 +142,14 @@ fn cards(app: &App) -> Vec<Card<'_>> {
         })
         .collect();
     cards.extend(app.remote_tasks.iter().map(|held| {
+        let summary = &held.summary;
         Card {
-            intent: &held.intent,
-            environment: &held.environment,
-            agent: held.agent,
-            host: &held.host,
-            status: held_status(held),
-            extras: held
+            intent: &summary.intent,
+            environment: &summary.environment,
+            agent: summary.agent,
+            host: &summary.host,
+            status: held_status(summary),
+            extras: summary
                 .extras
                 .iter()
                 .map(|extra| Line::styled(extra.clone(), palette::attention()))

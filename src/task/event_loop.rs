@@ -454,6 +454,35 @@ where
         Ok(())
     }
 
+    /// Land a task that arrived from another machine.
+    ///
+    /// One call, because the parts are one fact: a task that exists here, carrying the
+    /// history of what was decided about it, with the capsule it will run from. A task
+    /// with a record and no capsule is a task that cannot run, and one with a capsule
+    /// and no record has lost everything that was decided about it.
+    pub async fn land(
+        &self,
+        intent: String,
+        environment: Environment,
+        agent: AgentKind,
+        conversation: Option<String>,
+        history: &[(i64, TaskHistoryEvent)],
+        capsule: Option<String>,
+    ) -> Result<Task, TaskServiceError> {
+        let task = self
+            .service
+            .adopt(intent, environment, agent, conversation, None)
+            .await?;
+        let task = self
+            .service
+            .record_borrowed_history(&task.id, history)
+            .await?;
+        let Some(capsule) = capsule else {
+            return Ok(task);
+        };
+        self.service.record_capsule(&task.id, &capsule).await
+    }
+
     /// Everything that happened to a task, in order, with when it happened.
     pub async fn events(
         &self,
