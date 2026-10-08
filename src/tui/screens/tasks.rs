@@ -164,7 +164,7 @@ fn draw_card(
         None => "no agent".to_owned(),
     };
     lines.push(Line::styled(
-        format!("{agent} on this machine"),
+        format!("{agent} on {}", task.host),
         palette::muted(),
     ));
     // Everything else the task has to say, in the space the card has for it.

@@ -1,6 +1,10 @@
 CREATE TABLE tasks (
     id TEXT PRIMARY KEY NOT NULL,
     agent_kind TEXT CHECK (agent_kind IS NULL OR agent_kind IN ('claude', 'pi')),
+    -- Which machine holds this task's capsule. Recorded here rather than in the
+    -- event log because it is fixed when the task is founded, like the agent: a
+    -- task that moves is a transfer, and that is its own record.
+    host TEXT NOT NULL,
     created_at_ms INTEGER NOT NULL
 );
 

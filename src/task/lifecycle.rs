@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use super::{
-    Task, TaskAgentRun, TaskAgentRunOutcome, TaskError, TaskExecutionMode,
+    Task, TaskAgentRun, TaskAgentRunOutcome, TaskDraft, TaskError, TaskExecutionMode,
     TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent, TaskService, TaskServiceError,
     failure_events, run_ended, should_resume, should_suspend, snapshot_name,
 };
@@ -32,14 +32,17 @@ where
     ) -> Result<Task, TaskServiceError> {
         let kind = agent;
         self.store
-            .create_with_agent(
+            .create(TaskDraft {
                 intent,
                 environment,
-                self.identity.id.clone(),
-                self.identity.label.clone(),
-                Some(kind),
-                Some(self.agents.engine(kind).new_conversation_id()),
-            )
+                identity_id: self.identity.id.clone(),
+                identity_label: self.identity.label.clone(),
+                // Whose work this is, and where it runs: the same machine for now,
+                // because a task is founded here until it is delegated.
+                host: self.identity.label.clone(),
+                agent_kind: Some(kind),
+                agent_conversation_id: Some(self.agents.engine(kind).new_conversation_id()),
+            })
             .await
             .map_err(TaskServiceError::Task)
     }

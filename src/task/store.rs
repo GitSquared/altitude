@@ -18,6 +18,7 @@ use crate::{
 struct TaskRow {
     id: String,
     agent_kind: Option<AgentKind>,
+    host: String,
     contributions: Json<Vec<CodeContribution>>,
     observations: Json<Vec<ContributionObservation>>,
     #[sqlx(flatten)]
@@ -29,11 +30,28 @@ impl From<TaskRow> for Task {
         Self {
             id: row.id,
             agent_kind: row.agent_kind,
+            host: row.host,
             code_contributions: row.contributions.0,
             code_contribution_observations: row.observations.0,
             facts: row.facts,
         }
     }
+}
+
+/// What a task is founded with: what was asked for, who asked, where it runs, and
+/// what runs it.
+#[derive(Clone, Debug)]
+pub struct TaskDraft {
+    pub intent: String,
+    pub environment: Environment,
+    /// The installation this task is delegated under, which is what a tracker's actor
+    /// is mapped to.
+    pub identity_id: String,
+    pub identity_label: String,
+    /// The machine that holds the capsule, which is the machine that may run it.
+    pub host: String,
+    pub agent_kind: Option<AgentKind>,
+    pub agent_conversation_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -59,15 +77,16 @@ impl TaskStore {
         .map_err(TaskError::Database)
     }
 
-    pub async fn create_with_agent(
-        &self,
-        intent: String,
-        environment: Environment,
-        identity_id: String,
-        identity_label: String,
-        agent_kind: Option<AgentKind>,
-        agent_conversation_id: Option<String>,
-    ) -> Result<Task, TaskError> {
+    pub async fn create(&self, draft: TaskDraft) -> Result<Task, TaskError> {
+        let TaskDraft {
+            intent,
+            environment,
+            identity_id,
+            identity_label,
+            host,
+            agent_kind,
+            agent_conversation_id,
+        } = draft;
         let task_id = Uuid::new_v4().to_string();
         let mut transaction = self
             .pool
@@ -76,12 +95,13 @@ impl TaskStore {
             .map_err(TaskError::Database)?;
         sqlx::query(
             r#"
-            INSERT INTO tasks (id, agent_kind, created_at_ms)
-            VALUES (?1, ?2, ?3)
+            INSERT INTO tasks (id, agent_kind, host, created_at_ms)
+            VALUES (?1, ?2, ?3, ?4)
         "#,
         )
         .bind(&task_id)
         .bind(agent_kind)
+        .bind(host)
         .bind(now_ms())
         .execute(&mut *transaction)
         .await

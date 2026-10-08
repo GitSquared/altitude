@@ -22,7 +22,7 @@ pub use event_loop::{TaskEventLoop, TaskExecutionUpdate};
 mod progress;
 mod store;
 pub use state::*;
-pub use store::TaskStore;
+pub use store::{TaskDraft, TaskStore};
 
 use progress::EnvironmentProgressRegistry;
 

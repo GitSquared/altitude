@@ -1,5 +1,5 @@
 -- Read facts as recorded. Absence leaves the previous value; JSON null is an explicit value.
-SELECT tasks.id, tasks.agent_kind,
+SELECT tasks.id, tasks.agent_kind, tasks.host,
     (SELECT MAX(sequence) FROM task_event_logs WHERE task_id = tasks.id) AS last_event_sequence,
     (SELECT payload ->> '$.data.intent'
      FROM task_event_logs

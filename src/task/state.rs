@@ -117,6 +117,9 @@ pub struct TaskOperatorSignal {
 pub struct Task {
     pub id: String,
     pub agent_kind: Option<AgentKind>,
+    /// The machine that holds this task's capsule, which is the machine that may run
+    /// it. Its own machine until the task is delegated.
+    pub host: String,
     pub code_contributions: Vec<CodeContribution>,
     /// Latest observed state per contribution, oldest contribution first.
     pub code_contribution_observations: Vec<ContributionObservation>,
