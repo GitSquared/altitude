@@ -235,7 +235,7 @@ where
         Foreground::Keys(_) => app.dismiss_keys(),
         Foreground::Confirm(_) => handle_confirm_key(app, terminal, event_loop, key).await,
         Foreground::Reply(_) => app.reply_key(key, event_loop),
-        Foreground::NewTask(_) => app.new_task_key(key, event_loop),
+        Foreground::NewTask(_) => app.new_task_key(key, event_loop).await,
         Foreground::Panel => app.panel_keys(key).await,
         Foreground::Signals => app.signals_key(key, task_service).await,
         Foreground::Shell(_) => app.shell_key(key, event_loop),

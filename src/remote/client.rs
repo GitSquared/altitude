@@ -10,8 +10,8 @@ use iroh::{Endpoint, EndpointAddr, EndpointId, endpoint::Connection};
 use super::{
     LinkResult,
     protocol::{
-        BlobHash, CHUNK_BYTES, LINK_ALPN, LinkRequest, LinkResponse, builder, read_frame,
-        write_frame,
+        BlobHash, CHUNK_BYTES, LINK_ALPN, LinkRequest, LinkResponse, TaskRequest, builder,
+        read_frame, write_frame,
     },
 };
 
@@ -126,6 +126,33 @@ impl LinkClient {
                 remote: connection.remote_id(),
                 path: LinkPath::observe(&connection),
             })
+        }
+        .await;
+        connection.close(0u32.into(), b"done");
+        result
+    }
+
+    /// Asks a remote to run a task of its own, and returns when it has taken it.
+    ///
+    /// Nothing is copied: the task is founded there and belongs to that machine from
+    /// the moment it exists. What the remote called it is read from the machine, not
+    /// from this answer.
+    pub async fn run_task(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        request: TaskRequest,
+    ) -> LinkResult<()> {
+        let connection = self.endpoint.connect(peer, LINK_ALPN).await?;
+        let result = async {
+            let (mut send, mut recv) = connection.open_bi().await?;
+            write_frame(&mut send, &LinkRequest::RunTask { request }).await?;
+            send.finish()?;
+            let response: LinkResponse = read_frame(&mut recv).await?;
+            match response {
+                LinkResponse::Accepted => Ok(()),
+                LinkResponse::Rejected { reason } => Err(reason.into()),
+                other => Err(format!("unexpected answer: {other:?}").into()),
+            }
         }
         .await;
         connection.close(0u32.into(), b"done");

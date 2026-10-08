@@ -34,7 +34,9 @@ pub use {
     identity::InstallationKey,
     keys::{RemoteKey, RemoteKeys},
     known::{RemoteKeyStatus, Sighting, meet},
-    protocol::{BlobHash, LINK_ALPN, LinkRequest, LinkResponse, RemoteTicket},
+    protocol::{
+        BlobHash, LINK_ALPN, LinkRequest, LinkResponse, RemoteTicket, TaskRequest, TaskSummary,
+    },
     server::LinkServer,
 };
 

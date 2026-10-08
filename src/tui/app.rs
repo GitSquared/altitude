@@ -23,7 +23,7 @@ use crate::{
     },
     remote::{
         Announcement, ConfigBundle, LinkClient, RemoteKey, RemoteKeyStatus, RemoteKeys,
-        RemoteState, meet,
+        RemoteState, TaskRequest, meet,
     },
     task::{
         Task, TaskEventLoop, TaskExecutionMode, TaskExecutionStatus, TaskExecutionUpdate,
@@ -37,7 +37,7 @@ use crate::{
 };
 
 use popups::confirm::PendingConfirm;
-use popups::new_task::NewTask;
+use popups::new_task::{Host, NewTask};
 use popups::reply::{Prompt, PromptAction, Reply};
 use screens::settings::{Depth, Focus, Form, Panel, RowKind, Section, Setting, Target};
 use screens::shell::Shell;
@@ -476,6 +476,93 @@ impl App {
         }
     }
 
+    /// The machines a task could run on: this one, then the remotes, each saying
+    /// whether it can be given work.
+    fn task_hosts(&self) -> Vec<Host> {
+        let mut hosts = vec![Host {
+            address: None,
+            label: "this machine".to_owned(),
+            ready: true,
+        }];
+        for address in self.configured_remotes() {
+            let name = self
+                .remembered_keys
+                .iter()
+                .find(|key| key.address.eq_ignore_ascii_case(&address))
+                .map_or_else(|| address.clone(), |key| key.label.clone());
+            let (label, ready) = match self.remote_status.get(&address) {
+                Some(RemoteStatus::Reached) => (name, true),
+                Some(RemoteStatus::Syncing) => (format!("{name} (syncing)"), false),
+                Some(RemoteStatus::Asking) => (format!("{name} (asking)"), false),
+                Some(RemoteStatus::Changed) => (format!("{name} (key changed)"), false),
+                Some(RemoteStatus::Unknown) | Some(RemoteStatus::Silent(_)) | None => {
+                    (format!("{name} (unreachable)"), false)
+                }
+            };
+            hosts.push(Host {
+                address: Some(address),
+                label,
+                ready,
+            });
+        }
+        hosts
+    }
+
+    /// Ask a remote to run a task of its own.
+    ///
+    /// Nothing is copied and nothing is kept here: the remote founds the task, and it
+    /// is the only machine that can say what the task is doing. If that machine goes
+    /// away, so does the task, and this client has no copy to fall back on — which is
+    /// the point, because a copy is a second answer to the same question.
+    pub(in crate::tui) async fn delegate(
+        &mut self,
+        address: &str,
+        intent: String,
+        environment: &str,
+        agent: AgentKind,
+    ) {
+        self.notice = Some(format!("sending the task to {address}…"));
+        self.notice = Some(
+            match self.send_task(address, intent, environment, agent).await {
+                Ok(()) => format!("{address} took the task"),
+                Err(error) => format!("{address} did not take it: {error}"),
+            },
+        );
+    }
+
+    /// The dial, which is what makes this delegation rather than a preference.
+    async fn send_task(
+        &mut self,
+        address: &str,
+        intent: String,
+        environment: &str,
+        agent: AgentKind,
+    ) -> Result<(), String> {
+        let remembered = self.remote_keys.remembered(address).await.ok().flatten();
+        let sighting = meet(address, DEFAULT_PORT, remembered.as_deref())
+            .await
+            .map_err(|error| error.to_string())?;
+        let identity = self.config.identity().map_err(|error| error.to_string())?;
+        let client = LinkClient::bind()
+            .await
+            .map_err(|error| error.to_string())?;
+        let sent = client
+            .run_task(
+                sighting.ticket,
+                TaskRequest {
+                    intent,
+                    environment: environment.to_owned(),
+                    agent,
+                    identity_id: identity.id,
+                    identity_label: identity.label,
+                },
+            )
+            .await
+            .map_err(|error| error.to_string());
+        let _ = client.close().await;
+        sent
+    }
+
     /// Whether a remote holds the configuration this client has.
     pub(in crate::tui) fn remote_needs_config(&self, address: &str) -> bool {
         self.remote_synced
@@ -537,8 +624,11 @@ impl App {
     /// Note whether the remotes list is showing, and start its clock when it
     /// appears.
     pub(in crate::tui) fn sync_remotes(&mut self) {
-        let showing =
-            matches!(self.foreground, Foreground::Panel) && self.panel.section == Section::Remotes;
+        // The creation question offers the machines, so it needs to know which of them
+        // can be given work, the same way the list does.
+        let showing = (matches!(self.foreground, Foreground::Panel)
+            && self.panel.section == Section::Remotes)
+            || matches!(self.foreground, Foreground::NewTask(_));
         match (showing, self.remotes_visible_since) {
             // A fresh look every time the list is opened, so what it says is about
             // now rather than about whenever it was last visited.
@@ -1050,8 +1140,11 @@ impl App {
     }
 
     /// Take the answer to the creation question, and act on it.
-    pub(in crate::tui) fn new_task_key<E>(&mut self, key: KeyEvent, event_loop: &TaskEventLoop<E>)
-    where
+    pub(in crate::tui) async fn new_task_key<E>(
+        &mut self,
+        key: KeyEvent,
+        event_loop: &TaskEventLoop<E>,
+    ) where
         E: IsolationEngine + Clone + 'static,
     {
         let Foreground::NewTask(mut question) = mem::take(&mut self.foreground) else {
@@ -1064,6 +1157,7 @@ impl App {
                 task,
                 environment,
                 agent,
+                host,
                 remember,
             }) => {
                 // The first answer becomes the default, because there was nothing
@@ -1071,8 +1165,16 @@ impl App {
                 if let Some(agent) = remember {
                     self.set_agent(agent);
                 }
-                // Founded here, so whose work it is needs no saying.
-                event_loop.create(task, environment, agent, None);
+                match host {
+                    // A task for a remote is founded there. Nothing is copied: the
+                    // machine that runs it is the machine that owns it.
+                    Some(address) => {
+                        self.delegate(&address, task, &environment.name, agent)
+                            .await;
+                    }
+                    // Founded here, so whose work it is needs no saying.
+                    None => event_loop.create(task, environment, agent, None),
+                }
             }
         }
     }
@@ -1183,6 +1285,7 @@ impl App {
                         self.environments(),
                         self.default_environment(),
                         self.agent(),
+                        self.task_hosts(),
                     ));
                 }
             }

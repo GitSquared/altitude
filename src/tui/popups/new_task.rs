@@ -13,6 +13,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
+    style::Style,
     text::Line,
     widgets::{Block, BorderType, Clear, Padding},
 };
@@ -33,24 +34,39 @@ pub enum Focus {
     Task,
     Environment,
     Agent,
+    Host,
     Cancel,
     Create,
 }
 
-const ORDER: [Focus; 5] = [
+const ORDER: [Focus; 6] = [
     Focus::Task,
     Focus::Environment,
     Focus::Agent,
+    Focus::Host,
     Focus::Cancel,
     Focus::Create,
 ];
 
 /// The question, and the answers so far.
+/// A machine a task could run on.
+pub struct Host {
+    /// Where it is reached, or nothing for this machine.
+    pub address: Option<String>,
+    pub label: String,
+    /// Whether it can be given work. One that is syncing or unreachable is shown and
+    /// cannot be chosen: a task given to it would not run.
+    pub ready: bool,
+}
+
 pub struct NewTask {
     task: Field,
     environments: Vec<Environment>,
     environment: usize,
     agent: usize,
+    /// This machine first, then the remotes.
+    hosts: Vec<Host>,
+    host: usize,
     /// Whether the agent had never been chosen, in which case this answer is the
     /// one to keep.
     agent_unchosen: bool,
@@ -64,6 +80,8 @@ pub enum Answer {
         task: String,
         environment: Environment,
         agent: AgentKind,
+        /// Where to run it: a remote's address, or nothing for this machine.
+        host: Option<String>,
         /// The agent to remember, when this was the first answer.
         remember: Option<AgentKind>,
     },
@@ -75,6 +93,7 @@ impl NewTask {
         environments: Vec<Environment>,
         default_environment: &str,
         default_agent: Option<AgentKind>,
+        hosts: Vec<Host>,
     ) -> Self {
         let environment = environments
             .iter()
@@ -88,6 +107,8 @@ impl NewTask {
             environments,
             environment,
             agent,
+            hosts,
+            host: 0,
             agent_unchosen: default_agent.is_none(),
             focus: Focus::Task,
         }
@@ -188,6 +209,22 @@ impl NewTask {
                     (self.environment + count - 1) % count
                 };
             }
+            // A machine that cannot be given work is stepped over rather than shown
+            // as chosen, because choosing it would mean nothing happens.
+            Focus::Host if self.hosts.len() > 1 => {
+                let count = self.hosts.len();
+                for step in 1..=count {
+                    let candidate = if forward {
+                        (self.host + step) % count
+                    } else {
+                        (self.host + count - step) % count
+                    };
+                    if self.hosts[candidate].ready {
+                        self.host = candidate;
+                        break;
+                    }
+                }
+            }
             Focus::Agent => {
                 self.agent = if forward {
                     (self.agent + 1) % AGENTS.len()
@@ -208,12 +245,21 @@ impl NewTask {
         }
         let environment = self.environments.get(self.environment)?.clone();
         let agent = AGENTS[self.agent];
+        let host = self.hosts.get(self.host)?.address.clone();
         Some(Answer::Create {
             task: self.task.value().trim().to_owned(),
             environment,
             agent,
+            host,
             remember: self.agent_unchosen.then_some(agent),
         })
+    }
+
+    /// What the machine this task would run on is called, as the operator reads it.
+    fn host_label(&self) -> String {
+        self.hosts
+            .get(self.host)
+            .map_or_else(|| "this machine".to_owned(), |host| host.label.clone())
     }
 
     fn environment_name(&self) -> &str {
@@ -288,8 +334,10 @@ fn choices_line(frame: &mut Frame, area: Rect, new_task: &NewTask) {
         Constraint::Min(0),
     ])
     .areas(area);
-    let [environment, separator, agent] = Layout::horizontal([
+    let [environment, first, agent, second, host] = Layout::horizontal([
         Constraint::Length(14),
+        Constraint::Length(3),
+        Constraint::Length(12),
         Constraint::Length(3),
         Constraint::Min(1),
     ])
@@ -300,21 +348,41 @@ fn choices_line(frame: &mut Frame, area: Rect, new_task: &NewTask) {
         new_task.environment_name(),
         new_task.focus == Focus::Environment,
     );
-    frame.render_widget(Line::styled(" / ", palette::muted()), separator);
+    frame.render_widget(Line::styled(" / ", palette::muted()), first);
     selector(
         frame,
         agent,
         &new_task.agent_name(),
         new_task.focus == Focus::Agent,
     );
+    frame.render_widget(Line::styled(" / ", palette::muted()), second);
+    // A machine that cannot be given work is drawn as it is rather than hidden: the
+    // reason it is not offered is worth reading.
+    let ready = new_task
+        .hosts
+        .get(new_task.host)
+        .is_some_and(|held| held.ready);
+    let unfocused = if ready {
+        palette::accent()
+    } else {
+        palette::attention()
+    };
+    selector_in(
+        frame,
+        host,
+        &new_task.host_label(),
+        new_task.focus == Focus::Host,
+        unfocused,
+    );
 }
 
 /// One value, with the marks that say it can be changed.
 fn selector(frame: &mut Frame, area: Rect, value: &str, focused: bool) {
-    let style = if focused {
-        palette::focus()
-    } else {
-        palette::accent()
-    };
+    selector_in(frame, area, value, focused, palette::accent());
+}
+
+/// The same selector, in a colour that says whether it can be chosen at all.
+fn selector_in(frame: &mut Frame, area: Rect, value: &str, focused: bool, unfocused: Style) {
+    let style = if focused { palette::focus() } else { unfocused };
     frame.render_widget(Line::styled(format!(" ‹ {value} › "), style), area);
 }
