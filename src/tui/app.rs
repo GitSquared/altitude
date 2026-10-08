@@ -603,6 +603,14 @@ impl App {
         sent
     }
 
+    /// Whether the selection is a task another machine owns.
+    ///
+    /// The list shows them after this machine's own, so the index says which it is.
+    fn selected_is_remote(&self) -> bool {
+        self.selected >= self.tasks.len()
+            && self.selected < self.tasks.len() + self.remote_tasks.len()
+    }
+
     /// Whether a remote holds the configuration this client has.
     pub(in crate::tui) fn remote_needs_config(&self, address: &str) -> bool {
         self.remote_synced
@@ -1316,6 +1324,16 @@ impl App {
     where
         E: IsolationEngine + Clone + 'static,
     {
+        // A task on another machine is shown here and cannot be acted on. It belongs
+        // to that machine, and the only thing that could be done with it is ask for
+        // it — which is a transfer, not a keystroke.
+        if self.selected_is_remote()
+            && (key.code == KeyCode::Enter || key.code == KeyCode::Char('o') || is_remove(key))
+        {
+            self.notice = Some("that task is on another machine".to_owned());
+            return Ok(false);
+        }
+
         match key.code {
             KeyCode::Char('q') => return Ok(true),
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
