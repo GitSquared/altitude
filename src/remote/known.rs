@@ -1,4 +1,4 @@
-//! What a remote's key is, next to the one you remember for its address.
+//! Whether a remote's key is the one you remember for its address.
 //!
 //! A key learned from an announcement is unauthenticated — that is what makes a
 //! first sighting possible at all — so the protection is not that the first

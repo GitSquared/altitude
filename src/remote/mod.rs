@@ -8,16 +8,6 @@
 //! reaches a remote until there is somewhere to configure one — and neither has
 //! moved a capsule, which is what this is ultimately for. Blobs are held in
 //! memory and a connection is made per operation.
-//!
-//! To see the serve side work, on one machine:
-//!
-//! ```text
-//! $ altitude serve
-//! listening on 0.0.0.0:25848 (udp)
-//! ticket       {"id":"…","addrs":[{"Ip":"…:25848"}]}
-//! $ curl http://127.0.0.1:25848/
-//! {"protocol":"altitude/link/1","id":"…","label":"…","version":"…"}
-//! ```
 
 mod announce;
 mod clients;
@@ -32,8 +22,7 @@ mod protocol;
 
 use std::error::Error;
 
-// One import site for the link, so a caller names what it wants from `net`
-// rather than from a module inside it.
+// Callers name the link, not the modules inside it.
 #[allow(unused_imports)] // The dial side is re-exported before it has a caller.
 pub use {
     announce::Announcement,
@@ -48,5 +37,5 @@ pub use {
 
 /// Boxed errors: a typed error enum would be speculation until a caller exists.
 pub type LinkError = Box<dyn Error + Send + Sync>;
-/// The module's result alias.
+
 pub type LinkResult<T> = Result<T, LinkError>;

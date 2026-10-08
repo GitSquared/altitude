@@ -5,20 +5,9 @@
 //! [`bad`] and cannot quietly decide that red means something else. The colours
 //! themselves are the terminal's own, so the theme an operator has already
 //! chosen is the one they see.
-//!
-//! Six ideas, and nothing outside them:
-//!
-//! - **focus** — the one thing you are on. The only style with a background.
-//! - **accent** — the caret's edge, and marks that invite a second look.
-//! - **heading** — what you are looking at, named.
-//! - **primary** — text that is the point of the screen.
-//! - **muted** — the interface talking about itself.
-//! - **good / attention / bad** — how the work is going.
 
 use ratatui::style::{Color, Modifier, Style};
 
-/// The one thing the focus is on.
-///
 /// The only style in the interface with a background, which is what makes it
 /// unambiguous: wherever a filled bar appears, that is where the keys go.
 pub fn focus() -> Style {
@@ -43,8 +32,7 @@ pub fn primary() -> Style {
     Style::new().fg(Color::White)
 }
 
-/// The interface talking about itself: hints, labels, metadata, anything read
-/// once and then stopped seeing.
+/// The interface talking about itself: hints, labels, metadata.
 pub fn muted() -> Style {
     Style::new().add_modifier(Modifier::DIM)
 }
