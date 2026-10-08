@@ -230,8 +230,15 @@ async fn bundle(task: &Task) -> Result<(CapsuleArchive, PathBuf), String> {
     let snapshot = Snapshot::open(path)
         .await
         .map_err(|error| error.to_string())?;
+    let since = base_every_machine_has(&snapshot).await;
     snapshot
-        .save_to(&archive, SaveOpts::default())
+        .save_to(
+            &archive,
+            SaveOpts {
+                since,
+                ..SaveOpts::default()
+            },
+        )
         .await
         .map_err(|error| error.to_string())?;
     let len = fs::metadata(&archive)
@@ -244,6 +251,29 @@ async fn bundle(task: &Task) -> Result<(CapsuleArchive, PathBuf), String> {
         },
         archive,
     ))
+}
+
+/// The base of a capsule, when that base is one every machine built for itself.
+///
+/// A task's chain starts at the environment it was built on, and every machine in a
+/// replica builds that environment from the same configuration. Omitting it is the
+/// difference between moving a task and moving a machine.
+///
+/// A task that has run and been resumed before has its own earlier capsules in the
+/// chain as well, and those are not something another machine can look up. So this
+/// answers only where the chain is the environment and nothing else, and leaves the
+/// archive whole otherwise: an archive missing a layer nobody has is not an archive.
+async fn base_every_machine_has(snapshot: &Snapshot) -> Option<String> {
+    let parent = snapshot
+        .manifest()
+        .parent
+        .as_ref()
+        .map(ToString::to_string)?;
+    let ancestor = Snapshot::open(&parent).await.ok()?;
+    match ancestor.manifest().parent {
+        Some(_) => None,
+        None => Some(parent),
+    }
 }
 
 /// Hash a file without holding it in memory, which an archive can be too large for.
