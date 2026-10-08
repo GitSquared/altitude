@@ -25,6 +25,7 @@ use super::{
     EnvironmentDescription, EnvironmentProgress, EnvironmentProgressSink, EnvironmentRecipe,
     IsolationEngine, IsolationError, IsolationStatus, OutputStream, SandboxOptions, SetupStep,
     environment::{self, REFRESH_AFTER, private_directory},
+    trust_host_roots,
 };
 
 const BASE_IMAGE: &str = "alpine";
@@ -119,9 +120,10 @@ impl MicrosandboxIsolation {
     async fn create_sandbox(
         &self,
         id: String,
-        options: SandboxOptions,
+        mut options: SandboxOptions,
         pull_policy: PullPolicy,
     ) -> Result<(), IsolationError> {
+        trust_host_roots(&mut options, self.config.data_dir());
         tracing::info!(sandbox_id = %id, network_enabled = options.network_enabled, cpus = CAPSULE_CPUS, memory_mib = CAPSULE_MEMORY_MIB, "creating sandbox");
         let result = match options.snapshot_path {
             Some(snapshot_path) => {

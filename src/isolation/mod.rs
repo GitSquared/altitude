@@ -1,4 +1,11 @@
-use std::{error::Error as StdError, fmt, future::Future, path::PathBuf, time::Duration};
+use std::{
+    env,
+    error::Error as StdError,
+    fmt, fs,
+    future::Future,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use tokio::sync::{mpsc, watch};
 
@@ -163,6 +170,71 @@ pub struct SandboxOptions {
     pub network_enabled: bool,
     pub mounts: Vec<SandboxMount>,
     pub environment: Vec<(String, String)>,
+}
+
+/// Gives a sandbox the extra roots this machine trusts.
+///
+/// A machine whose traffic is inspected — by an endpoint agent, or a proxy — verifies
+/// against roots no base image has, and a task that cannot verify a registry cannot
+/// install anything. The roots are collected into one bundle and mounted into every
+/// sandbox, build or run, rather than built into a snapshot: a snapshot can be moved
+/// to another machine, and one host's inspection root must never travel to another.
+///
+/// `NODE_EXTRA_CA_CERTS` adds to a store rather than replacing it, which is why it is
+/// safe here where `SSL_CERT_FILE` would not be. Tools that read the system store —
+/// curl, apk, git — need the bundle appended to that store, which a build step does.
+pub(crate) fn trust_host_roots(options: &mut SandboxOptions, data_dir: &Path) {
+    let roots: Vec<PathBuf> = ["NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "CURL_CA_BUNDLE"]
+        .into_iter()
+        .filter_map(env::var_os)
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .collect();
+    if roots.is_empty() {
+        return;
+    }
+    let mut bundle = String::new();
+    for root in &roots {
+        match fs::read_to_string(root) {
+            Ok(text) => {
+                bundle.push_str(&text);
+                if !bundle.ends_with('\n') {
+                    bundle.push('\n');
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, path = %root.display(), "could not read a trusted root")
+            }
+        }
+    }
+    if bundle.is_empty() {
+        return;
+    }
+    // Somewhere without spaces in the path: a sandbox mount cannot open one that has
+    // them, and an endpoint agent's own root lives under a directory that does.
+    let staged = data_dir.join("host-roots").join("host-roots.pem");
+    if let Some(parent) = staged.parent()
+        && let Err(error) = fs::create_dir_all(parent)
+    {
+        tracing::warn!(%error, "could not keep this machine's trusted roots");
+        return;
+    }
+    if let Err(error) = fs::write(&staged, bundle) {
+        tracing::warn!(%error, "could not keep this machine's trusted roots");
+        return;
+    }
+    let guest = "/etc/altitude/host-roots.pem";
+    options.mounts.push(SandboxMount {
+        host_path: staged.clone(),
+        guest_path: guest.to_owned(),
+    });
+    options
+        .environment
+        .push(("NODE_EXTRA_CA_CERTS".to_owned(), guest.to_owned()));
+    // For the tools that read the system store, and for scripts that only look here.
+    options
+        .environment
+        .push(("ALTITUDE_HOST_ROOTS".to_owned(), guest.to_owned()));
 }
 
 impl SandboxOptions {
