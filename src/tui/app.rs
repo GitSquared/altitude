@@ -383,9 +383,9 @@ impl App {
                 let mut hints = vec![Hint::new("c", "create"), Hint::new("s", "settings")];
                 if !self.tasks.is_empty() {
                     hints.extend([
-                        Hint::new("i", "info"),
+                        Hint::new("enter", "signals"),
+                        Hint::new("o", "take over"),
                         Hint::new("h/j/k/l", "select"),
-                        Hint::new("enter", "shell"),
                         Hint::new("d", "remove"),
                     ]);
                 }
@@ -1077,8 +1077,6 @@ impl App {
     pub(in crate::tui) async fn list_key<E>(
         &mut self,
         key: KeyEvent,
-        terminal: &DefaultTerminal,
-        event_loop: &TaskEventLoop<E>,
         task_service: &TaskService<E>,
     ) -> io::Result<bool>
     where
@@ -1099,27 +1097,7 @@ impl App {
             KeyCode::Char('s') => {
                 open_panel(self, task_service).await;
             }
-            KeyCode::Char('i') => {
-                if let Some(task) = self.selected_task() {
-                    self.operator_signals = task_service
-                        .operator_signals(&task.id)
-                        .await
-                        .map_err(io::Error::other)?;
-                    let task = task_service
-                        .read_operator_signals(&task.id)
-                        .await
-                        .map_err(io::Error::other)?;
-                    self.replace_task(task);
-                    for signal in &mut self.operator_signals {
-                        signal.read = true;
-                    }
-                    self.selected_operator_signal = 0;
-                    self.selected_signal_action = 0;
-                    self.operator_signal_scroll = 0;
-                    self.foreground = Foreground::Signals;
-                }
-            }
-            // A grid step: one card across, or one whole row of them.
+            KeyCode::Char('i') => self.open_signals(task_service).await,
             KeyCode::Char('j') | KeyCode::Down => {
                 let columns = self.grid_columns();
                 self.select_adjacent(columns as isize, columns);
@@ -1146,55 +1124,134 @@ impl App {
                         Foreground::Confirm(PendingConfirm::removing(task.id, question));
                 }
             }
-            KeyCode::Enter => {
+            // Enter reads what the task is asking. Taking over has a key of its
+            // own, and asks first, because it ends the agent's autonomy.
+            KeyCode::Enter => self.open_signals(task_service).await,
+            KeyCode::Char('o') => {
                 if let Some(task) = self.selected_task() {
-                    if matches!(
-                        task.facts.execution_status,
-                        TaskExecutionStatus::Paused | TaskExecutionStatus::Failed
-                    ) {
-                        event_loop.start_operator_control(task);
-                        self.notice = Some("restoring the agent in the terminal…".into());
-                        return Ok(false);
-                    }
-                    if !matches!(task.facts.execution_status, TaskExecutionStatus::Running) {
-                        return Ok(false);
-                    }
-                    if matches!(
-                        task.facts.execution_mode,
-                        TaskExecutionMode::Autopilot | TaskExecutionMode::AutopilotReport
-                    ) {
-                        self.notice = Some(if event_loop.take_control(&task.id) {
-                            "bringing the agent to the terminal…".into()
-                        } else {
-                            "this task has no run to take over".into()
-                        });
-                        return Ok(false);
-                    }
-                    if self.shells.contains_key(&task.id) {
-                        let (rows, cols) = screens::shell::size(terminal.size()?.into());
-                        event_loop.resize_terminal(&task.id, rows, cols);
-                        if let Some(shell) = self.shells.get_mut(&task.id) {
-                            shell.resize(rows, cols);
-                        }
-                        tracing::info!(task_id = %task.id, "reattaching terminal");
-                        self.foreground = Foreground::Shell(task.id);
-                        return Ok(false);
-                    }
-                    if !event_loop.has_active_run(&task.id) {
-                        return Ok(false);
-                    }
-                    let (rows, cols) = screens::shell::size(terminal.size()?.into());
-                    let history = event_loop.cached_terminal_output(&task.id);
-                    event_loop.resize_terminal(&task.id, rows, cols);
-                    self.shells
-                        .insert(task.id.clone(), Shell::new(rows, cols, history));
-                    self.foreground = Foreground::Shell(task.id);
-                    tracing::info!("attached terminal");
+                    let question = format!(
+                        "Take over \"{}\"? The agent stops and the terminal is yours; \
+                         ctrl-c hands it back.",
+                        task.facts.intent
+                    );
+                    self.foreground =
+                        Foreground::Confirm(PendingConfirm::taking_over(task.id, question));
                 }
             }
             _ => {}
         }
         Ok(false)
+    }
+
+    /// Stop the agent and give the operator its terminal.
+    ///
+    /// This is the one action never taken by accident: it ends the run's autonomy,
+    /// so it has a key of its own and it asks first. A task hosted by a remote is
+    /// also brought home by it, because a terminal has to be beside the capsule —
+    /// and handing control back sends it there again, which is the other half.
+    pub(in crate::tui) fn take_over<E>(
+        &mut self,
+        id: &str,
+        terminal: &DefaultTerminal,
+        event_loop: &TaskEventLoop<E>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let Some(task) = self.tasks.iter().find(|task| task.id == id).cloned() else {
+            return;
+        };
+        if matches!(
+            task.facts.execution_status,
+            TaskExecutionStatus::Paused | TaskExecutionStatus::Failed
+        ) {
+            event_loop.start_operator_control(task);
+            self.notice = Some("restoring the agent in the terminal…".into());
+            return;
+        }
+        if !matches!(task.facts.execution_status, TaskExecutionStatus::Running) {
+            self.notice = Some("this task is not running".into());
+            return;
+        }
+        if matches!(
+            task.facts.execution_mode,
+            TaskExecutionMode::Autopilot | TaskExecutionMode::AutopilotReport
+        ) {
+            self.notice = Some(if event_loop.take_control(&task.id) {
+                "bringing the agent to the terminal…".into()
+            } else {
+                "this task has no run to take over".into()
+            });
+            return;
+        }
+        // Already the operator's: put its terminal back in front.
+        if self.shells.contains_key(&task.id) {
+            let Some((rows, cols)) = self.shell_size(terminal) else {
+                return;
+            };
+            event_loop.resize_terminal(&task.id, rows, cols);
+            if let Some(shell) = self.shells.get_mut(&task.id) {
+                shell.resize(rows, cols);
+            }
+            self.foreground = Foreground::Shell(task.id);
+            return;
+        }
+        if !event_loop.has_active_run(&task.id) {
+            self.notice = Some("this task has no run to attach to".into());
+            return;
+        }
+        let Some((rows, cols)) = self.shell_size(terminal) else {
+            return;
+        };
+        let history = event_loop.cached_terminal_output(&task.id);
+        event_loop.resize_terminal(&task.id, rows, cols);
+        self.shells
+            .insert(task.id.clone(), Shell::new(rows, cols, history));
+        self.foreground = Foreground::Shell(task.id);
+    }
+
+    /// The size a terminal for a task should be, saying so when it cannot be read
+    /// rather than taking the whole interface down with it.
+    fn shell_size(&mut self, terminal: &DefaultTerminal) -> Option<(u16, u16)> {
+        match terminal.size() {
+            Ok(size) => Some(screens::shell::size(size.into())),
+            Err(error) => {
+                self.notice = Some(error.to_string());
+                None
+            }
+        }
+    }
+
+    /// Read what a task is asking, and show it.
+    pub(in crate::tui) async fn open_signals<E>(&mut self, task_service: &TaskService<E>)
+    where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let Some(task) = self.selected_task() else {
+            return;
+        };
+        let signals = match task_service.operator_signals(&task.id).await {
+            Ok(signals) => signals,
+            Err(error) => {
+                self.notice = Some(error.to_string());
+                return;
+            }
+        };
+        let read = match task_service.read_operator_signals(&task.id).await {
+            Ok(task) => task,
+            Err(error) => {
+                self.notice = Some(error.to_string());
+                return;
+            }
+        };
+        self.operator_signals = signals;
+        self.replace_task(read);
+        for signal in &mut self.operator_signals {
+            signal.read = true;
+        }
+        self.selected_operator_signal = 0;
+        self.selected_signal_action = 0;
+        self.operator_signal_scroll = 0;
+        self.foreground = Foreground::Signals;
     }
 
     /// Take one change from a task's run, and make the interface match it.

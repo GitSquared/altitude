@@ -9,7 +9,7 @@ use std::mem;
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
-    Frame,
+    DefaultTerminal, Frame,
     layout::{Constraint, Layout, Rect},
     widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap},
 };
@@ -125,6 +125,14 @@ impl PendingConfirm {
         }
     }
 
+    /// Confirming stops the agent and gives the operator its terminal.
+    pub(in crate::tui) fn taking_over(task_id: String, question: String) -> Self {
+        Self {
+            dialog: Confirm::new(question, "take over"),
+            action: ConfirmAction::TakeOver { id: task_id },
+        }
+    }
+
     /// Confirming removes a task from the overview and disposes of its capsule.
     pub(in crate::tui) fn removing(task_id: String, question: String) -> Self {
         Self {
@@ -146,12 +154,14 @@ impl PendingConfirm {
 /// the consequences.
 enum ConfirmAction {
     RemoveTask { id: String },
+    TakeOver { id: String },
     DeleteSetting(Target),
 }
 
 /// Take an answer to the confirmation, and act on it.
 pub(in crate::tui) async fn handle_confirm_key<E>(
     app: &mut App,
+    terminal: &DefaultTerminal,
     event_loop: &TaskEventLoop<E>,
     key: KeyEvent,
 ) where
@@ -172,6 +182,7 @@ pub(in crate::tui) async fn handle_confirm_key<E>(
                     event_loop.remove(task);
                 }
             }
+            ConfirmAction::TakeOver { id } => app.take_over(&id, terminal, event_loop),
             ConfirmAction::DeleteSetting(target) => app.delete(target).await,
         },
     }
