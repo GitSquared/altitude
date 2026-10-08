@@ -156,6 +156,8 @@ pub enum RowKind {
         remembered: Option<RemoteKey>,
         /// What it is doing now: the list says so without being asked.
         status: RemoteStatus,
+        /// Whether the configuration it holds is the one this client has.
+        needs_config: bool,
     },
     Switch {
         setting: Setting,
@@ -610,6 +612,7 @@ fn detail(panel: &Panel, view: &View, focused: bool) -> Paragraph<'static> {
                         address,
                         remembered,
                         status,
+                        needs_config,
                     },
             }) => {
                 let mut lines = vec![
@@ -628,12 +631,22 @@ fn detail(panel: &Panel, view: &View, focused: bool) -> Paragraph<'static> {
                     RemoteStatus::Asking => {
                         lines.push(Line::styled("asking…", palette::attention()))
                     }
+                    RemoteStatus::Syncing => lines.push(Line::styled(
+                        "sending this configuration…",
+                        palette::attention(),
+                    )),
                     RemoteStatus::Changed => lines.push(Line::styled(
                         "it answered with a different key than the one you have. \
                          d forgets the old one, then enter accepts this one.",
                         palette::bad(),
                     )),
                     RemoteStatus::Unknown | RemoteStatus::Reached => {}
+                }
+                if *needs_config && *status == RemoteStatus::Reached {
+                    lines.push(Line::styled(
+                        "it does not hold this configuration yet — p sends it",
+                        palette::attention(),
+                    ));
                 }
                 lines.push(Line::from(""));
                 match remembered {
@@ -962,6 +975,7 @@ impl App {
                             None => address.clone(),
                         },
                         kind: RowKind::Remote {
+                            needs_config: self.remote_needs_config(&address),
                             address,
                             remembered,
                             status,

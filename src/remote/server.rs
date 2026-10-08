@@ -2,8 +2,9 @@
 
 use std::{
     collections::HashMap,
-    fmt,
+    fmt, fs, io,
     net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket},
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -68,6 +69,8 @@ impl BlobStore {
 struct LinkHandler {
     id: EndpointId,
     blobs: Arc<BlobStore>,
+    /// Where a configuration pushed by a client is written.
+    config_path: PathBuf,
 }
 
 impl fmt::Debug for LinkHandler {
@@ -92,6 +95,19 @@ impl ProtocolHandler for LinkHandler {
     }
 }
 
+/// Writes a configuration a client pushed, replacing whatever was here.
+///
+/// Written beside the real file and moved into place, so nothing ever reads half of
+/// one configuration and half of another.
+fn write_config(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let incoming = path.with_extension("toml.incoming");
+    fs::write(&incoming, bytes)?;
+    fs::rename(&incoming, path)
+}
+
 async fn answer(
     handler: &LinkHandler,
     mut send: SendStream,
@@ -102,6 +118,23 @@ async fn answer(
         LinkRequest::Identify => {
             let response = LinkResponse::Identified {
                 remote: handler.id.to_string(),
+            };
+            write_frame(&mut send, &response).await?;
+        }
+        LinkRequest::PutConfig { hash, len } => {
+            let bytes = read_body(&mut recv, len, MAX_BLOB_BYTES).await?;
+            let actual = BlobHash::of(&bytes);
+            let response = if actual != hash {
+                LinkResponse::Rejected {
+                    reason: format!("digest mismatch: announced {hash}, received {actual}"),
+                }
+            } else {
+                match write_config(&handler.config_path, &bytes) {
+                    Ok(()) => LinkResponse::Configured,
+                    Err(error) => LinkResponse::Rejected {
+                        reason: format!("could not write the configuration: {error}"),
+                    },
+                }
             };
             write_frame(&mut send, &response).await?;
         }
@@ -142,11 +175,13 @@ impl LinkServer {
         clients: ClientRecord,
         listen: SocketAddr,
         label: String,
+        config_path: PathBuf,
     ) -> LinkResult<Self> {
         let blobs = Arc::new(BlobStore::default());
         let handler = LinkHandler {
             id: identity.id(),
             blobs: Arc::clone(&blobs),
+            config_path,
         };
         let log = ClientLog {
             record: clients.clone(),

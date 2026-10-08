@@ -132,6 +132,33 @@ impl LinkClient {
         result
     }
 
+    /// Sends a configuration, and returns when the remote holds it.
+    pub async fn put_config(&self, peer: impl Into<EndpointAddr>, bytes: &[u8]) -> LinkResult<()> {
+        let hash = BlobHash::of(bytes);
+        let request = LinkRequest::PutConfig {
+            hash,
+            len: bytes.len() as u64,
+        };
+        let connection = self.endpoint.connect(peer, LINK_ALPN).await?;
+        let result = async {
+            let (mut send, mut recv) = connection.open_bi().await?;
+            write_frame(&mut send, &request).await?;
+            for chunk in bytes.chunks(CHUNK_BYTES) {
+                send.write_all(chunk).await?;
+            }
+            send.finish()?;
+            let response: LinkResponse = read_frame(&mut recv).await?;
+            match response {
+                LinkResponse::Configured => Ok(()),
+                LinkResponse::Rejected { reason } => Err(reason.into()),
+                other => Err(format!("unexpected answer: {other:?}").into()),
+            }
+        }
+        .await;
+        connection.close(0u32.into(), b"done");
+        result
+    }
+
     /// Sends a blob and returns the digest the remote confirmed it received.
     ///
     /// The client hashes what it sends; the remote hashes what it receives and

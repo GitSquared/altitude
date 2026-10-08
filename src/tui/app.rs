@@ -7,7 +7,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    io, mem,
+    fs, io, mem,
     time::{Duration, Instant},
 };
 
@@ -21,7 +21,7 @@ use crate::{
     isolation::{
         Environment, EnvironmentDescription, EnvironmentProgress, IsolationEngine, ProfileSummary,
     },
-    remote::{Announcement, RemoteKey, RemoteKeyStatus, RemoteKeys, meet},
+    remote::{Announcement, LinkClient, RemoteKey, RemoteKeyStatus, RemoteKeys, meet},
     task::{
         Task, TaskEventLoop, TaskExecutionMode, TaskExecutionStatus, TaskExecutionUpdate,
         TaskOperatorSignal, TaskService, TaskServiceError,
@@ -82,6 +82,8 @@ pub(in crate::tui) enum RemoteStatus {
     Asking,
     /// Answered with the key remembered for it.
     Reached,
+    /// Being sent this client's configuration.
+    Syncing,
     /// Answered with a different key, which is never accepted on its own.
     Changed,
     /// Did not answer.
@@ -92,7 +94,7 @@ impl RemoteStatus {
     /// The dot in front of the name. Filled when something answered.
     pub(in crate::tui) fn glyph(&self) -> char {
         match self {
-            Self::Asking => '◌',
+            Self::Asking | Self::Syncing => '◌',
             Self::Reached | Self::Changed => '●',
             Self::Unknown | Self::Silent(_) => '○',
         }
@@ -101,13 +103,13 @@ impl RemoteStatus {
     /// Whether something is happening, in which case the dot travels like every
     /// other wait in the interface.
     pub(in crate::tui) fn is_in_progress(&self) -> bool {
-        matches!(self, Self::Asking)
+        matches!(self, Self::Asking | Self::Syncing)
     }
 
     pub(in crate::tui) fn style(&self) -> Style {
         match self {
             Self::Unknown => palette::muted(),
-            Self::Asking => palette::attention(),
+            Self::Asking | Self::Syncing => palette::attention(),
             Self::Reached => palette::good(),
             Self::Changed | Self::Silent(_) => palette::bad(),
         }
@@ -170,6 +172,10 @@ pub struct App {
     /// When the remotes list started showing, which the wait before dialling is
     /// measured from. Absent while it is not showing.
     remotes_visible_since: Option<Instant>,
+    /// When this client last sent its configuration to each address. Held in
+    /// memory: a restart forgets, and sending a small file again is cheaper than a
+    /// record that can disagree with what the remote holds.
+    remote_synced: HashMap<String, i64>,
 
     /// What each address last answered with. Written by the dial once there is
     /// one; read when the panel opens.
@@ -217,6 +223,7 @@ impl App {
             foreground: Foreground::default(),
             remote_status: HashMap::new(),
             remotes_visible_since: None,
+            remote_synced: HashMap::new(),
 
             remote_keys,
             remembered_keys: Vec::new(),
@@ -355,6 +362,7 @@ impl App {
                 let mut hints = vec![Hint::new("tab", "change column"), Hint::new("j/k", "move")];
                 if self.panel.section == Section::Remotes {
                     hints.push(Hint::new("enter", "check"));
+                    hints.push(Hint::new("p", "send config"));
                     hints.push(Hint::new("e", "edit"));
                 } else if self.panel.section.grows() {
                     hints.push(Hint::new("enter", "edit"));
@@ -437,6 +445,13 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => self.panel.move_selection(true, rows),
             KeyCode::Up | KeyCode::Char('k') => self.panel.move_selection(false, rows),
             KeyCode::Char('e') if self.panel.section.grows() => self.edit_selected(),
+            KeyCode::Char('p') if self.panel.section == Section::Remotes => {
+                if let Some(RowKind::Remote { address, .. }) =
+                    self.selected_row().map(|row| row.kind)
+                {
+                    self.push_config(&address).await;
+                }
+            }
             KeyCode::Char('n') if self.panel.section.grows() => {
                 self.panel.form = Some(match self.panel.section {
                     Section::Remotes => Form::new(Target::NewRemote, "", ""),
@@ -456,6 +471,52 @@ impl App {
             Some(RowKind::Remote { address, .. }) => self.check_remote(&address).await,
             _ => self.edit_selected(),
         }
+    }
+
+    /// Whether a remote holds the configuration this client has.
+    pub(in crate::tui) fn remote_needs_config(&self, address: &str) -> bool {
+        self.remote_synced
+            .get(address)
+            .is_none_or(|sent| *sent < self.config.stamp())
+    }
+
+    /// Send this installation's configuration to a remote, so it can build the
+    /// environments this client runs tasks in.
+    pub(in crate::tui) async fn push_config(&mut self, address: &str) {
+        self.notice = Some(format!("sending the configuration to {address}…"));
+        self.remote_status
+            .insert(address.to_owned(), RemoteStatus::Syncing);
+        let stamp = self.config.stamp();
+        match self.send_config(address).await {
+            Ok(()) => {
+                self.remote_synced.insert(address.to_owned(), stamp);
+                self.notice = Some(format!("{address} holds this configuration now"));
+            }
+            Err(error) => {
+                self.notice = Some(format!("{address} did not take it: {error}"));
+            }
+        }
+        // Asked again either way, so the dot says what is true now rather than what
+        // was hoped for.
+        self.remote_status.remove(address);
+    }
+
+    /// The dial, which is what makes this a push rather than a preference.
+    async fn send_config(&mut self, address: &str) -> Result<(), String> {
+        let bytes = fs::read(self.config.settings_path()).map_err(|e| e.to_string())?;
+        let remembered = self.remote_keys.remembered(address).await.ok().flatten();
+        let sighting = meet(address, DEFAULT_PORT, remembered.as_deref())
+            .await
+            .map_err(|error| error.to_string())?;
+        let client = LinkClient::bind()
+            .await
+            .map_err(|error| error.to_string())?;
+        let sent = client
+            .put_config(sighting.ticket, &bytes)
+            .await
+            .map_err(|error| error.to_string());
+        let _ = client.close().await;
+        sent
     }
 
     /// Note whether the remotes list is showing, and start its clock when it

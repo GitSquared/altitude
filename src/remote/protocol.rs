@@ -78,6 +78,10 @@ pub enum LinkRequest {
     Identify,
     /// Announce an upload: `len` raw bytes follow, whose digest must be `hash`.
     PutBlob { hash: BlobHash, len: u64 },
+    /// Announce a configuration: `len` raw bytes follow, whose digest must be
+    /// `hash`. It is what this client runs tasks with, so a remote that holds it
+    /// can build the same environments.
+    PutConfig { hash: BlobHash, len: u64 },
 }
 
 /// The remote's answer to a [`LinkRequest`].
@@ -87,6 +91,8 @@ pub enum LinkResponse {
     Identified { remote: String },
     /// The upload arrived and its digest matched.
     Stored { hash: BlobHash, len: u64 },
+    /// The configuration arrived, and the remote holds it now.
+    Configured,
     /// The request was understood and refused.
     Rejected { reason: String },
 }

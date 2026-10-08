@@ -45,7 +45,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     // The label travels with the key, so a client that learns one learns what to
     // call this remote as well.
     let label = config.identity().map_err(io::Error::other)?.label;
-    let server = LinkServer::serve(identity, clients, listen, label)
+    let server = LinkServer::serve(identity, clients, listen, label, config.settings_path())
         .await
         .map_err(io::Error::other)?;
     let ticket = server.ticket().map_err(io::Error::other)?;
