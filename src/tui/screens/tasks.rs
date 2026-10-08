@@ -153,6 +153,20 @@ fn draw_card(
 
     let status = card_status(task, at_capacity, tick, build);
     let mut lines = vec![status];
+    // What the work is running in and what is doing it. The host is this machine
+    // until a task can be delegated to a remote.
+    lines.push(Line::styled(
+        task.facts.environment_name.clone(),
+        palette::muted(),
+    ));
+    let agent = match task.agent_kind {
+        Some(kind) => kind.to_string(),
+        None => "no agent".to_owned(),
+    };
+    lines.push(Line::styled(
+        format!("{agent} on this machine"),
+        palette::muted(),
+    ));
     // Everything else the task has to say, in the space the card has for it.
     for extra in card_extras(task) {
         lines.push(extra);
