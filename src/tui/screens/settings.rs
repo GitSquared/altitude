@@ -34,6 +34,7 @@ use crate::{
     isolation::{EnvironmentDescription, ProfileMount, REFRESH_AFTER},
     remote::RemoteKey,
     tui::widgets::text::{Field, FieldStyle, TextBox},
+    tui::widgets::utils::shimmer,
 };
 
 /// The gap between columns, so two focus bars can never touch.
@@ -389,8 +390,8 @@ impl Form {
 
 // ----------------------------------------------------------------- the drawing
 
-pub fn draw(frame: &mut Frame, area: Rect, panel: &Panel, view: &View) {
-    draw_columns(frame, area, panel, view);
+pub fn draw(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick: usize) {
+    draw_columns(frame, area, panel, view, tick);
     if let Some(form) = &panel.form {
         draw_form(frame, area, form);
     }
@@ -411,7 +412,7 @@ fn chip(label: &str, width: usize, focused: bool) -> Line<'static> {
     }
 }
 
-fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View) {
+fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick: usize) {
     let block = Block::bordered()
         .title(" Settings ")
         .border_type(BorderType::Rounded)
@@ -457,8 +458,14 @@ fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View) {
                 // that is not about the row.
                 RowKind::Remote { status, .. } => {
                     let width = usize::from(list_area.width).saturating_sub(2);
-                    let mut spans =
-                        vec![Span::styled(format!("{} ", status.glyph()), status.style())];
+                    let dot = format!("{} ", status.glyph());
+                    // The dot travels while it waits, so a slow address looks like
+                    // something happening rather than something stuck.
+                    let mut spans = if status.is_in_progress() {
+                        shimmer(&dot, tick)
+                    } else {
+                        vec![Span::styled(dot, status.style())]
+                    };
                     spans.extend(chip(&row.label, width, focused).spans);
                     Line::from(spans)
                 }

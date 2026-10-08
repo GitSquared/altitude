@@ -98,6 +98,12 @@ impl RemoteStatus {
         }
     }
 
+    /// Whether something is happening, in which case the dot travels like every
+    /// other wait in the interface.
+    pub(in crate::tui) fn is_in_progress(&self) -> bool {
+        matches!(self, Self::Asking)
+    }
+
     pub(in crate::tui) fn style(&self) -> Style {
         match self {
             Self::Unknown => palette::muted(),
@@ -467,6 +473,14 @@ impl App {
             (false, Some(_)) => self.remotes_visible_since = None,
             _ => {}
         }
+    }
+
+    /// Whether any address is being asked about right now, which is what keeps the
+    /// dot moving while it waits.
+    pub(in crate::tui) fn is_asking_remotes(&self) -> bool {
+        self.remote_status
+            .values()
+            .any(RemoteStatus::is_in_progress)
     }
 
     /// Whether it is time to ask about another address: the list is showing, it

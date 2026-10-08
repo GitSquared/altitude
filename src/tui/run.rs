@@ -101,7 +101,7 @@ where
             if matches!(app.foreground, Foreground::Panel) {
                 // Fullscreen: it is the screen, not something over it.
                 let view = app.settings_view();
-                screens::settings::draw(frame, content, &app.panel, &view);
+                screens::settings::draw(frame, content, &app.panel, &view, app.shimmer);
             } else if matches!(app.foreground, Foreground::Signals) {
                 widgets::chrome::dim(frame, content);
                 popups::signals::draw(
@@ -152,7 +152,7 @@ where
             }
             Some(answer) = answered.recv() => app.remote_answered(answer).await,
             _ = shell_notice.tick(), if app.shell_has_active_notice() => {}
-            _ = shimmer.tick(), if app.is_preparing() => {
+            _ = shimmer.tick(), if app.is_preparing() || app.is_asking_remotes() => {
                 app.shimmer = app.shimmer.wrapping_add(1);
                 app.environment_builds = task_service.environment_builds();
             }
