@@ -1,4 +1,4 @@
-//! Comparing a remote's key to the one you remember for its address.
+//! What a remote's key is, next to the one you remember for its address.
 //!
 //! A key learned from an announcement is unauthenticated — that is what makes a
 //! first sighting possible at all — so the protection is not that the first
@@ -18,29 +18,29 @@ use iroh::EndpointId;
 
 use super::{LinkResult, announce::Announcement, protocol::RemoteTicket};
 
-/// How a remote's key compares to the one remembered for its address.
+/// The key a remote answered with, next to the one recorded for its address.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Trust {
-    /// This address has not been seen before.
-    New,
-    /// The same key as last time.
-    Known,
+pub enum SightedKey {
+    /// Nothing is recorded here: this is the first time the address answered.
+    First,
+    /// The same key as the one recorded.
+    AsRecorded,
     /// A different key.
     ///
     /// A remote that was replaced and a remote that was never the one you thought
     /// look identical from here, so this is reported and never followed
     /// silently. The operator decides.
-    Changed { previous: String },
+    Differs { recorded: String },
 }
 
-impl Trust {
-    /// Compares a key to the one remembered for an address, if any.
-    pub fn between(remembered: Option<&str>, id: &EndpointId) -> Self {
-        match remembered {
-            None => Self::New,
-            Some(previous) if previous == id.to_string() => Self::Known,
-            Some(previous) => Self::Changed {
-                previous: previous.to_owned(),
+impl SightedKey {
+    /// Records what a key is, next to whatever is recorded for its address.
+    pub fn classify(recorded: Option<&str>, answering: &EndpointId) -> Self {
+        match recorded {
+            None => Self::First,
+            Some(recorded) if recorded == answering.to_string() => Self::AsRecorded,
+            Some(recorded) => Self::Differs {
+                recorded: recorded.to_owned(),
             },
         }
     }
@@ -52,8 +52,8 @@ pub struct Sighting {
     pub ticket: RemoteTicket,
     /// What it said.
     pub announcement: Announcement,
-    /// How its key compares to the one remembered for this address.
-    pub trust: Trust,
+    /// The key it answered with, next to the one recorded for this address.
+    pub key: SightedKey,
 }
 
 /// Meets a remote at an address, and says how its key compares to what was
@@ -76,6 +76,6 @@ pub async fn meet(
     Ok(Sighting {
         ticket,
         announcement,
-        trust: Trust::between(remembered, &id),
+        key: SightedKey::classify(remembered, &id),
     })
 }
