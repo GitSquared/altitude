@@ -169,7 +169,6 @@ where
             environment_progress: EnvironmentProgressRegistry::default(),
         }
     }
-    // The identity every task this installation founds is recorded under.
     /// What each task's environment build is doing, for an interface to show.
     ///
     /// Keyed by task, and only present while this service is building for it.

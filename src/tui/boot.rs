@@ -24,11 +24,11 @@ pub async fn database<T, E>(
 where
     E: Error + Send + Sync + 'static,
 {
-    run_future(
+    wait_for(
         terminal,
         terminate,
         interrupt,
-        "migrating database...",
+        || "migrating database...",
         async { initialize.await.map_err(io::Error::other) },
     )
     .await
@@ -38,43 +38,34 @@ pub async fn isolation(
     terminal: &mut DefaultTerminal,
     terminate: &mut Signal,
     interrupt: &mut Signal,
-    mut status: watch::Receiver<IsolationStatus>,
+    status: watch::Receiver<IsolationStatus>,
 ) -> io::Result<Option<watch::Receiver<IsolationStatus>>> {
-    let mut events = EventStream::new();
-    let mut animation = time::interval(Duration::from_millis(80));
-    let mut shimmer = 0;
-
-    loop {
-        terminal.draw(|frame| draw(frame, isolation_label(&status.borrow()), shimmer))?;
-
-        let current_status = status.borrow().clone();
-        match current_status {
-            IsolationStatus::Ready => return Ok(Some(status)),
-            IsolationStatus::Failed(error) => return Err(io::Error::other(error)),
-            _ => {}
-        }
-
-        tokio::select! {
-            _ = terminate.recv() => return Ok(None),
-            _ = interrupt.recv() => return Ok(None),
-            changed = status.changed() => {
-                if changed.is_err() {
+    // Two handles: one reports what is happening, the other waits for it to
+    // change. The label is read every frame, so it follows the status.
+    let shown = status.clone();
+    let mut changes = status;
+    wait_for(
+        terminal,
+        terminate,
+        interrupt,
+        || isolation_label(&shown.borrow()),
+        async move {
+            loop {
+                // Read it out first: the guard would otherwise outlive the match,
+                // and the receiver is what gets returned.
+                let current = changes.borrow().clone();
+                match current {
+                    IsolationStatus::Ready => return Ok(changes),
+                    IsolationStatus::Failed(error) => return Err(io::Error::other(error)),
+                    _ => {}
+                }
+                if changes.changed().await.is_err() {
                     return Err(io::Error::other("isolation setup stopped unexpectedly"));
                 }
             }
-            _ = animation.tick() => shimmer = shimmer.wrapping_add(1),
-            event = events.next() => {
-                let Some(event) = event else { return Ok(None) };
-                if let Some(key) = event?.as_key_press_event()
-                    && (key.code == KeyCode::Char('q')
-                        || (key.code == KeyCode::Char('c')
-                            && key.modifiers.contains(KeyModifiers::CONTROL)))
-                {
-                    return Ok(None);
-                }
-            }
-        }
-    }
+        },
+    )
+    .await
 }
 
 pub async fn task_resume<T>(
@@ -83,17 +74,23 @@ pub async fn task_resume<T>(
     interrupt: &mut Signal,
     resume: impl Future<Output = T>,
 ) -> io::Result<Option<T>> {
-    run_future(terminal, terminate, interrupt, "resuming tasks...", async {
-        Ok(resume.await)
-    })
+    wait_for(
+        terminal,
+        terminate,
+        interrupt,
+        || "resuming tasks...",
+        async { Ok(resume.await) },
+    )
     .await
 }
 
-async fn run_future<T>(
+/// Show a labelled status while one operation finishes, and let the operator give
+/// up on it: `q` or ctrl-c returns nothing rather than an answer.
+async fn wait_for<T>(
     terminal: &mut DefaultTerminal,
     terminate: &mut Signal,
     interrupt: &mut Signal,
-    label: &'static str,
+    label: impl Fn() -> &'static str,
     operation: impl Future<Output = io::Result<T>>,
 ) -> io::Result<Option<T>> {
     let mut events = EventStream::new();
@@ -102,7 +99,7 @@ async fn run_future<T>(
     tokio::pin!(operation);
 
     loop {
-        terminal.draw(|frame| draw(frame, label, shimmer))?;
+        terminal.draw(|frame| draw(frame, label(), shimmer))?;
         tokio::select! {
             _ = terminate.recv() => return Ok(None),
             _ = interrupt.recv() => return Ok(None),

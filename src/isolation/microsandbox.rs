@@ -100,7 +100,7 @@ pub struct MicrosandboxIsolation {
     config: Config,
     data_home: PathBuf,
     cache_home: PathBuf,
-    // Microsandbox's Unix sockets exceed macOS path limits under the longer data home.
+    /// Microsandbox's Unix sockets exceed macOS path limits under the longer data home.
     socket_safe_home: PathBuf,
     base_preparation_lock: Arc<Mutex<()>>,
 }

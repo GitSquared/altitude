@@ -14,7 +14,8 @@ use super::{
     SandboxMount, SandboxOptions, SetupStep,
 };
 
-// The current Alpine environment runs as root. Resolve home-relative requirements here.
+/// The current Alpine environment runs as root, so home-relative requirements
+/// resolve from here.
 const GUEST_HOME: &str = "/root";
 pub const REFRESH_AFTER: Duration = Duration::from_secs(72 * 60 * 60);
 

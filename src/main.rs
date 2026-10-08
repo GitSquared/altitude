@@ -19,8 +19,6 @@ mod cli;
 mod config;
 mod db;
 mod isolation;
-// The settings screen is the caller for this; until it exists nothing in the app
-// dials a remote, so nothing reads what was remembered.
 mod logging;
 mod remote;
 mod task;

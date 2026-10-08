@@ -89,11 +89,34 @@ should. Four kinds, and what happens to each:
 - **A module doc** says what the module is for and who calls it. It does not
   list what is inside; the file already does that.
 
+Two kinds of comment, and the difference is not a matter of taste:
+
+- `///` and `//!` are documentation. They belong to an item — a type, a field, a
+  variant, a function, a module — and rustdoc reads them. Attributes may sit
+  between a doc and the item it documents; that is still its doc.
+- `//` is a note to whoever reads this body next. It belongs inside a function,
+  beside the line it is about.
+
+A note where documentation belongs is invisible to rustdoc. Documentation where
+a note belongs is read by it, on an item nobody meant to document. Neither is a
+judgement call.
+
+A comment sits on the line it explains. When a comment describes something the
+line under it has nothing to do with, it has drifted — the code moved and the
+comment did not — and it is worse than no comment at all, because it is
+confidently wrong. The same goes for a comment left above a line that no longer
+needs it.
+
 Names carry the load the comments are not carrying. One word per concept, and no
 synonyms for the same thing. No abbreviations that are not words. A boolean
 reads as a predicate: `is_`, `has_`, `may_`, `wants_`. No `get_` or `set_`, and
-no repeating the type in the method. If a name needs a comment, the name is the
-bug.
+no repeating the type in the method.
+
+A name says what a thing does for its reader, not how it is built. Words that
+name a mechanism rather than a job — `run_future`, `handle_data`, `process_info`,
+`manager`, `helper` — describe the shape of the code and tell the reader nothing
+they cannot see. If a name needs a paragraph to explain it, the name is the bug
+and the paragraph is the fix.
 
 ## Tooling
 
