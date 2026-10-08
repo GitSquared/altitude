@@ -18,30 +18,30 @@ use iroh::EndpointId;
 
 use super::{LinkResult, announce::Announcement, protocol::RemoteTicket};
 
-/// The key a remote answered with, next to the one recorded for its address.
+/// How the key a remote answered with stands next to the one recorded for its
+/// address.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SightedKey {
-    /// Nothing is recorded here: this is the first time the address answered.
-    First,
+pub enum RemoteKeyStatus {
+    /// Nothing is recorded for this address: it has not answered before.
+    New,
     /// The same key as the one recorded.
-    AsRecorded,
+    Known,
     /// A different key.
     ///
     /// A remote that was replaced and a remote that was never the one you thought
     /// look identical from here, so this is reported and never followed
-    /// silently. The operator decides.
-    Differs { recorded: String },
+    /// silently. The operator decides. The key it changed from is the record the
+    /// caller compared against, and is not repeated here.
+    Changed,
 }
 
-impl SightedKey {
-    /// Records what a key is, next to whatever is recorded for its address.
+impl RemoteKeyStatus {
+    /// Classifies an answering key against whatever is recorded for its address.
     pub fn classify(recorded: Option<&str>, answering: &EndpointId) -> Self {
         match recorded {
-            None => Self::First,
-            Some(recorded) if recorded == answering.to_string() => Self::AsRecorded,
-            Some(recorded) => Self::Differs {
-                recorded: recorded.to_owned(),
-            },
+            None => Self::New,
+            Some(recorded) if recorded == answering.to_string() => Self::Known,
+            Some(_) => Self::Changed,
         }
     }
 }
@@ -52,8 +52,8 @@ pub struct Sighting {
     pub ticket: RemoteTicket,
     /// What it said.
     pub announcement: Announcement,
-    /// The key it answered with, next to the one recorded for this address.
-    pub key: SightedKey,
+    /// How the key it answered with stands next to the one recorded.
+    pub key_status: RemoteKeyStatus,
 }
 
 /// Meets a remote at an address, and says how its key compares to what was
@@ -76,6 +76,6 @@ pub async fn meet(
     Ok(Sighting {
         ticket,
         announcement,
-        key: SightedKey::classify(remembered, &id),
+        key_status: RemoteKeyStatus::classify(remembered, &id),
     })
 }

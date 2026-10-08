@@ -41,7 +41,7 @@ pub use {
     clients::ClientRecord,
     identity::InstallationKey,
     keys::{RemoteKey, RemoteKeys},
-    known::{SightedKey, Sighting, meet},
+    known::{RemoteKeyStatus, Sighting, meet},
     protocol::{BlobHash, LINK_ALPN, LinkRequest, LinkResponse, RemoteTicket},
     server::LinkServer,
 };
