@@ -77,6 +77,10 @@ where
     let mut shell_notice = time::interval(Duration::from_millis(100));
     let mut shimmer = time::interval(Duration::from_millis(80));
     let mut mouse_captured = false;
+    // Reaching an address is the one thing here that waits on another machine, so
+    // it happens off this loop and reports back like a task's run does.
+    let (remote_answers, mut answered) = mpsc::unbounded_channel();
+    let mut ask = time::interval(Duration::from_millis(250));
     loop {
         if mouse_captured != app.open_shell().is_some() {
             mouse_captured = app.open_shell().is_some();
@@ -140,6 +144,13 @@ where
                 }
                 app.capacity = Some(event_loop.capacity_limit());
             }
+            _ = ask.tick() => {
+                app.sync_remotes();
+                if app.wants_remote_check() {
+                    app.ask_next_remote(&remote_answers).await;
+                }
+            }
+            Some(answer) = answered.recv() => app.remote_answered(answer).await,
             _ = shell_notice.tick(), if app.shell_has_active_notice() => {}
             _ = shimmer.tick(), if app.is_preparing() => {
                 app.shimmer = app.shimmer.wrapping_add(1);

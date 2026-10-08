@@ -12,6 +12,7 @@
 
 use crate::tui::{
     App,
+    app::RemoteStatus,
     widgets::{chrome, palette},
 };
 
@@ -152,6 +153,8 @@ pub enum RowKind {
         address: String,
         /// What that address last answered with, if it has been met.
         remembered: Option<RemoteKey>,
+        /// What it is doing now: the list says so without being asked.
+        status: RemoteStatus,
     },
     Switch {
         setting: Setting,
@@ -449,7 +452,18 @@ fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View) {
         .enumerate()
         .map(|(index, row)| {
             let focused = list_focused && index == panel.selected;
-            let line = chip(&row.label, usize::from(list_area.width), focused);
+            let line = match &row.kind {
+                // The dot keeps its own colour: it is the one thing in the row
+                // that is not about the row.
+                RowKind::Remote { status, .. } => {
+                    let width = usize::from(list_area.width).saturating_sub(2);
+                    let mut spans =
+                        vec![Span::styled(format!("{} ", status.glyph()), status.style())];
+                    spans.extend(chip(&row.label, width, focused).spans);
+                    Line::from(spans)
+                }
+                _ => chip(&row.label, usize::from(list_area.width), focused),
+            };
             ListItem::new(if list_focused {
                 line
             } else {
@@ -588,6 +602,7 @@ fn detail(panel: &Panel, view: &View, focused: bool) -> Paragraph<'static> {
                     RowKind::Remote {
                         address,
                         remembered,
+                        status,
                     },
             }) => {
                 let mut lines = vec![
@@ -597,8 +612,23 @@ fn detail(panel: &Panel, view: &View, focused: bool) -> Paragraph<'static> {
                         Span::styled("address   ", palette::muted()),
                         address.clone().into(),
                     ]),
-                    Line::from(""),
                 ];
+                match status {
+                    RemoteStatus::Silent(reason) => lines.push(Line::styled(
+                        format!("did not answer: {reason}"),
+                        palette::bad(),
+                    )),
+                    RemoteStatus::Asking => {
+                        lines.push(Line::styled("asking…", palette::attention()))
+                    }
+                    RemoteStatus::Changed => lines.push(Line::styled(
+                        "it answered with a different key than the one you have. \
+                         d forgets the old one, then enter accepts this one.",
+                        palette::bad(),
+                    )),
+                    RemoteStatus::Unknown | RemoteStatus::Reached => {}
+                }
+                lines.push(Line::from(""));
                 match remembered {
                     Some(key) => {
                         lines.push(Line::from(vec![
@@ -912,6 +942,11 @@ impl App {
                         .iter()
                         .find(|key| key.address.eq_ignore_ascii_case(&address))
                         .cloned();
+                    let status = self
+                        .remote_status
+                        .get(&address)
+                        .cloned()
+                        .unwrap_or(RemoteStatus::Unknown);
                     Row {
                         // A name is what the remote called itself, so an address
                         // that has never answered shows itself instead.
@@ -922,6 +957,7 @@ impl App {
                         kind: RowKind::Remote {
                             address,
                             remembered,
+                            status,
                         },
                     }
                 })

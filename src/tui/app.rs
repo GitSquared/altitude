@@ -8,10 +8,12 @@
 use std::{
     collections::{HashMap, HashSet},
     io, mem,
+    time::{Duration, Instant},
 };
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::DefaultTerminal;
+use ratatui::{DefaultTerminal, style::Style};
+use tokio::sync::mpsc;
 
 use crate::{
     agent::AgentKind,
@@ -28,6 +30,7 @@ use crate::{
     tui::popups,
     tui::screens,
     tui::widgets::chrome::Hint,
+    tui::widgets::palette,
 };
 
 use popups::confirm::PendingConfirm;
@@ -67,6 +70,62 @@ pub(in crate::tui) enum Foreground {
     Tasks,
 }
 
+/// What the panel last heard from an address.
+///
+/// Asking is automatic, because a status you have to ask for is one you will not
+/// see: opening the list dials every address in it, one at a time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::tui) enum RemoteStatus {
+    /// Not asked yet.
+    Unknown,
+    /// Asked, and nothing has come back.
+    Asking,
+    /// Answered with the key remembered for it.
+    Reached,
+    /// Answered with a different key, which is never accepted on its own.
+    Changed,
+    /// Did not answer.
+    Silent(String),
+}
+
+impl RemoteStatus {
+    /// The dot in front of the name. Filled when something answered.
+    pub(in crate::tui) fn glyph(&self) -> char {
+        match self {
+            Self::Asking => '◌',
+            Self::Reached | Self::Changed => '●',
+            Self::Unknown | Self::Silent(_) => '○',
+        }
+    }
+
+    pub(in crate::tui) fn style(&self) -> Style {
+        match self {
+            Self::Unknown => palette::muted(),
+            Self::Asking => palette::attention(),
+            Self::Reached => palette::good(),
+            Self::Changed | Self::Silent(_) => palette::bad(),
+        }
+    }
+}
+
+/// What came back from reaching an address. Sent from the dial, which runs on its
+/// own so a slow one cannot hold up the interface.
+pub(in crate::tui) enum RemoteAnswer {
+    Reached {
+        address: String,
+        announcement: Announcement,
+        key_status: RemoteKeyStatus,
+    },
+    Silent {
+        address: String,
+        reason: String,
+    },
+}
+
+/// How long the list is shown before its addresses are dialled, so moving through
+/// the sections does not reach anything.
+const ASK_AFTER: Duration = Duration::from_millis(400);
+
 pub struct App {
     pub(in crate::tui) tasks: Vec<Task>,
     /// How many cards fit across, from the last drawing. Written by the
@@ -100,6 +159,11 @@ pub struct App {
     pub(in crate::tui) panel: Panel,
     /// What the keyboard is answering to.
     pub(in crate::tui) foreground: Foreground,
+    /// What each address last answered, for the list to show.
+    pub(in crate::tui) remote_status: HashMap<String, RemoteStatus>,
+    /// When the remotes list started showing, which the wait before dialling is
+    /// measured from. Absent while it is not showing.
+    remotes_visible_since: Option<Instant>,
 
     /// What each address last answered with. Written by the dial once there is
     /// one; read when the panel opens.
@@ -145,6 +209,8 @@ impl App {
             settings_file,
             panel: Panel::new(),
             foreground: Foreground::default(),
+            remote_status: HashMap::new(),
+            remotes_visible_since: None,
 
             remote_keys,
             remembered_keys: Vec::new(),
@@ -383,6 +449,99 @@ impl App {
         match self.selected_row().map(|row| row.kind) {
             Some(RowKind::Remote { address, .. }) => self.check_remote(&address).await,
             _ => self.edit_selected(),
+        }
+    }
+
+    /// Note whether the remotes list is showing, and start its clock when it
+    /// appears.
+    pub(in crate::tui) fn sync_remotes(&mut self) {
+        let showing =
+            matches!(self.foreground, Foreground::Panel) && self.panel.section == Section::Remotes;
+        match (showing, self.remotes_visible_since) {
+            // A fresh look every time the list is opened, so what it says is about
+            // now rather than about whenever it was last visited.
+            (true, None) => {
+                self.remotes_visible_since = Some(Instant::now());
+                self.remote_status.clear();
+            }
+            (false, Some(_)) => self.remotes_visible_since = None,
+            _ => {}
+        }
+    }
+
+    /// Whether it is time to ask about another address: the list is showing, it
+    /// has been showing long enough to mean it, and nothing is in flight.
+    pub(in crate::tui) fn wants_remote_check(&self) -> bool {
+        let Some(since) = self.remotes_visible_since else {
+            return false;
+        };
+        since.elapsed() >= ASK_AFTER
+            && !self
+                .remote_status
+                .values()
+                .any(|s| *s == RemoteStatus::Asking)
+            && self.next_unasked_remote().is_some()
+    }
+
+    /// The first address in the list that has not been asked about.
+    fn next_unasked_remote(&self) -> Option<String> {
+        self.configured_remotes()
+            .into_iter()
+            .find(|address| !self.remote_status.contains_key(address))
+    }
+
+    /// Dial the next address in the list, and let it report back when it answers.
+    pub(in crate::tui) async fn ask_next_remote(
+        &mut self,
+        answers: &mpsc::UnboundedSender<RemoteAnswer>,
+    ) {
+        let Some(address) = self.next_unasked_remote() else {
+            return;
+        };
+        self.remote_status
+            .insert(address.clone(), RemoteStatus::Asking);
+        let remembered = self.remote_keys.remembered(&address).await.ok().flatten();
+        let answers = answers.clone();
+        tokio::spawn(async move {
+            let answer = match meet(&address, DEFAULT_PORT, remembered.as_deref()).await {
+                Ok(sighting) => RemoteAnswer::Reached {
+                    address,
+                    announcement: sighting.announcement,
+                    key_status: sighting.key_status,
+                },
+                Err(error) => RemoteAnswer::Silent {
+                    address,
+                    reason: error.to_string(),
+                },
+            };
+            let _ = answers.send(answer);
+        });
+    }
+
+    /// Take an answer from the dial, and write down what it said.
+    pub(in crate::tui) async fn remote_answered(&mut self, answer: RemoteAnswer) {
+        match answer {
+            RemoteAnswer::Reached {
+                address,
+                announcement,
+                key_status,
+            } => {
+                let status = match key_status {
+                    RemoteKeyStatus::New | RemoteKeyStatus::Known => {
+                        self.remember(&address, &announcement).await;
+                        RemoteStatus::Reached
+                    }
+                    // Reported, and not written: accepting a changed key means
+                    // forgetting the address first, which is a second act.
+                    RemoteKeyStatus::Changed => RemoteStatus::Changed,
+                };
+                self.remote_status.insert(address, status);
+                self.reload_remembered_keys().await;
+            }
+            RemoteAnswer::Silent { address, reason } => {
+                self.remote_status
+                    .insert(address, RemoteStatus::Silent(reason));
+            }
         }
     }
 
