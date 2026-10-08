@@ -7,6 +7,7 @@
 
 mod app;
 mod boot;
+mod keys;
 mod popups;
 mod run;
 mod screens;

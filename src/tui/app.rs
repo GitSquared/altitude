@@ -15,21 +15,19 @@ use ratatui::DefaultTerminal;
 
 use crate::{
     agent::AgentKind,
-    config::{Config, SettingsError, SettingsFile},
+    config::{Config, DEFAULT_PORT, SettingsError, SettingsFile},
     isolation::{
         Environment, EnvironmentDescription, EnvironmentProgress, IsolationEngine, ProfileSummary,
     },
-    remote::{RemoteKey, RemoteKeys},
+    remote::{Announcement, RemoteKey, RemoteKeyStatus, RemoteKeys, meet},
     task::{
         Task, TaskEventLoop, TaskExecutionMode, TaskExecutionStatus, TaskExecutionUpdate,
         TaskOperatorSignal, TaskService, TaskServiceError,
     },
+    tui::keys::{is_dismiss, is_remove},
     tui::popups,
     tui::screens,
-    tui::widgets::{
-        chrome::Hint,
-        keys::{is_dismiss, is_remove},
-    },
+    tui::widgets::chrome::Hint,
 };
 
 use popups::confirm::PendingConfirm;
@@ -277,17 +275,23 @@ impl App {
             Foreground::Panel => {
                 if self.panel.form.is_some() {
                     return vec![
-                        Hint::new("tab", "move"),
-                        Hint::new("enter", "validate, or add a line"),
+                        Hint::new("tab", "next"),
+                        Hint::new("enter", "next, or add a line"),
                         Hint::new("esc", "leave the box, then the page"),
                     ];
                 }
                 let mut hints = vec![Hint::new("tab", "change column"), Hint::new("j/k", "move")];
+                if self.panel.section == Section::Remotes {
+                    hints.push(Hint::new("enter", "check"));
+                    hints.push(Hint::new("e", "edit"));
+                } else if self.panel.section.grows() {
+                    hints.push(Hint::new("enter", "edit"));
+                }
                 if self.panel.section.grows() {
-                    hints.push(Hint::new("enter", "open"));
                     hints.push(Hint::new("n", "new"));
                     hints.push(Hint::new("d", "delete"));
-                } else if self.panel.section == Section::Interface {
+                }
+                if !self.panel.section.grows() && self.panel.section == Section::Interface {
                     hints.push(Hint::new("enter", "toggle"));
                 }
                 hints.push(dismiss());
@@ -341,7 +345,7 @@ impl App {
         }
     }
 
-    pub(in crate::tui) fn panel_key(&mut self, key: KeyEvent) {
+    pub(in crate::tui) async fn panel_key(&mut self, key: KeyEvent) {
         let rows = self.row_count();
         match key.code {
             _ if is_dismiss(key) || key.code == KeyCode::Char('s') => {
@@ -360,6 +364,7 @@ impl App {
             }
             KeyCode::Down | KeyCode::Char('j') => self.panel.move_selection(true, rows),
             KeyCode::Up | KeyCode::Char('k') => self.panel.move_selection(false, rows),
+            KeyCode::Char('e') if self.panel.section.grows() => self.edit_selected(),
             KeyCode::Char('n') if self.panel.section.grows() => {
                 self.panel.form = Some(match self.panel.section {
                     Section::Remotes => Form::new(Target::NewRemote, "", ""),
@@ -367,8 +372,75 @@ impl App {
                 });
             }
             _ if is_remove(key) && self.panel.section.grows() => self.ask_to_delete(),
-            KeyCode::Enter => self.edit_selected(),
+            KeyCode::Enter => self.activate_selected().await,
             _ => {}
+        }
+    }
+
+    /// What `enter` does where the focus is: the row's own action, which for a
+    /// remote is reaching it rather than editing the address it is reached at.
+    pub(in crate::tui) async fn activate_selected(&mut self) {
+        match self.selected_row().map(|row| row.kind) {
+            Some(RowKind::Remote { address, .. }) => self.check_remote(&address).await,
+            _ => self.edit_selected(),
+        }
+    }
+
+    /// Reach a remote at this address, and write down what it answers with.
+    ///
+    /// The first key an address gives is unauthenticated, so meeting it is the
+    /// operator's decision, and this is the gesture that makes it. A key that
+    /// differs from the one remembered is reported and *not* written: accepting a
+    /// change means forgetting the address first, which is a second, deliberate
+    /// act rather than something that happens because someone pressed enter.
+    pub(in crate::tui) async fn check_remote(&mut self, address: &str) {
+        self.notice = Some(format!("reaching {address}…"));
+        let remembered = self.remote_keys.remembered(address).await.ok().flatten();
+        self.notice = match meet(address, DEFAULT_PORT, remembered.as_deref()).await {
+            Ok(sighting) => {
+                let said = &sighting.announcement;
+                match sighting.key_status {
+                    RemoteKeyStatus::New => {
+                        self.remember(address, said).await;
+                        Some(format!(
+                            "{} answered, and its key is remembered",
+                            said.label
+                        ))
+                    }
+                    RemoteKeyStatus::Known => {
+                        self.remember(address, said).await;
+                        Some(format!(
+                            "{} answered with the same key as before",
+                            said.label
+                        ))
+                    }
+                    RemoteKeyStatus::Changed => Some(format!(
+                        "{address} answered with a different key. d forgets the one you have, \
+                         then enter accepts this one."
+                    )),
+                }
+            }
+            Err(error) => Some(format!("{address} did not answer: {error}")),
+        };
+        self.reload_remembered_keys().await;
+    }
+
+    /// Write down what a remote said about itself.
+    async fn remember(&mut self, address: &str, said: &Announcement) {
+        if let Err(error) = self
+            .remote_keys
+            .remember(address, &said.id, &said.label, &said.version)
+            .await
+        {
+            tracing::error!(%error, address, "could not remember a remote");
+        }
+    }
+
+    /// Read back what each address has answered with, which is what the panel shows.
+    async fn reload_remembered_keys(&mut self) {
+        match self.remote_keys.list().await {
+            Ok(keys) => self.remembered_keys = keys,
+            Err(error) => tracing::error!(%error, "could not read the remembered remotes"),
         }
     }
 
@@ -741,11 +813,11 @@ impl App {
     }
 
     /// The panel's keys, which are its form's when a form is open.
-    pub(in crate::tui) fn panel_keys(&mut self, key: KeyEvent) {
+    pub(in crate::tui) async fn panel_keys(&mut self, key: KeyEvent) {
         if self.panel.form.is_some() {
             self.panel_form_key(key);
         } else {
-            self.panel_key(key);
+            self.panel_key(key).await;
         }
     }
 

@@ -27,6 +27,8 @@ pub struct RemoteKey {
     pub address: String,
     pub key: String,
     pub label: String,
+    /// Which build answered, as it reported it.
+    pub version: String,
     pub seen_at_ms: i64,
 }
 
@@ -38,7 +40,6 @@ impl RemoteKeys {
     /// The key this address answered with last time, if it is remembered at all.
     ///
     /// This is what a caller compares a fresh sighting against.
-    #[allow(dead_code)] // The dial reads this once a remote can be reached.
     pub async fn remembered(&self, address: &str) -> Result<Option<String>, sqlx::Error> {
         let row: Option<(String,)> =
             sqlx::query_as("SELECT key FROM remote_keys WHERE address = ?")
@@ -53,18 +54,26 @@ impl RemoteKeys {
     /// This is also how a change is accepted: remembering a new key replaces the
     /// old one, so accepting is the same act as meeting a remote for the first
     /// time.
-    #[allow(dead_code)] // The dial writes this once a remote can be reached.
-    pub async fn remember(&self, address: &str, key: &str, label: &str) -> Result<(), sqlx::Error> {
+    pub async fn remember(
+        &self,
+        address: &str,
+        key: &str,
+        label: &str,
+        version: &str,
+    ) -> Result<(), sqlx::Error> {
         let now = chrono::Utc::now().timestamp_millis();
         sqlx::query(
-            "INSERT INTO remote_keys (address, key, label, seen_at_ms) VALUES (?, ?, ?, ?)
+            "INSERT INTO remote_keys (address, key, label, version, seen_at_ms)
+             VALUES (?, ?, ?, ?, ?)
              ON CONFLICT(address) DO UPDATE SET key = excluded.key,
                                                 label = excluded.label,
-                                                met_at_ms = excluded.met_at_ms",
+                                                version = excluded.version,
+                                                seen_at_ms = excluded.seen_at_ms",
         )
         .bind(address)
         .bind(key)
         .bind(label)
+        .bind(version)
         .bind(now)
         .execute(&self.pool)
         .await?;
@@ -87,7 +96,7 @@ impl RemoteKeys {
     /// Every remote remembered, by address.
     pub async fn list(&self) -> Result<Vec<RemoteKey>, sqlx::Error> {
         sqlx::query_as::<_, RemoteKey>(
-            "SELECT address, key, label, seen_at_ms FROM remote_keys ORDER BY address",
+            "SELECT address, key, label, version, seen_at_ms FROM remote_keys ORDER BY address",
         )
         .fetch_all(&self.pool)
         .await

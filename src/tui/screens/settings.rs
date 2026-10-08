@@ -606,6 +606,10 @@ fn detail(panel: &Panel, view: &View, focused: bool) -> Paragraph<'static> {
                             key.key.clone().into(),
                         ]));
                         lines.push(Line::from(vec![
+                            Span::styled("version   ", palette::muted()),
+                            key.version.clone().into(),
+                        ]));
+                        lines.push(Line::from(vec![
                             Span::styled("met       ", palette::muted()),
                             met_ago(key.seen_at_ms).into(),
                         ]));
@@ -613,8 +617,8 @@ fn detail(panel: &Panel, view: &View, focused: bool) -> Paragraph<'static> {
                     None => {
                         lines.push(Line::styled("never met", palette::muted()));
                         lines.push(Line::styled(
-                            "No key is remembered for this address yet. Connecting will record \
-                             the one it answers with.",
+                            "No key is remembered for this address yet. Press enter to reach it, \
+                             which records the key it answers with.",
                             palette::muted(),
                         ));
                     }

@@ -17,8 +17,9 @@ use ratatui::{
     widgets::{Block, BorderType, Clear, Padding},
 };
 
+use crate::tui::keys;
 use crate::tui::widgets::{
-    chrome, keys, palette,
+    chrome, palette,
     text::{Field, FieldStyle},
 };
 use crate::{agent::AgentKind, isolation::Environment};

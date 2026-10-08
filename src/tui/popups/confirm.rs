@@ -17,12 +17,7 @@ use ratatui::{
 use crate::{
     isolation::IsolationEngine,
     task::TaskEventLoop,
-    tui::{
-        App,
-        app::Foreground,
-        screens::settings::Target,
-        widgets::{chrome, keys},
-    },
+    tui::{App, app::Foreground, keys, screens::settings::Target, widgets::chrome},
 };
 
 /// A question with two answers, one of which cannot be undone.

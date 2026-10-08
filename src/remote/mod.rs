@@ -23,7 +23,8 @@ mod protocol;
 use std::error::Error;
 
 // Callers name the link, not the modules inside it.
-#[allow(unused_imports)] // The dial side is re-exported before it has a caller.
+// What is still ahead of its caller: sending a request, and moving a capsule.
+#[allow(unused_imports)]
 pub use {
     announce::Announcement,
     client::{LinkClient, LinkPath, LinkReply, PathKind},

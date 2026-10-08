@@ -12,7 +12,7 @@ use crate::remote::InstallationKey;
 
 mod serve;
 mod settings;
-pub use serve::ServeSettings;
+pub use serve::{DEFAULT_PORT, ServeSettings};
 pub use settings::{SettingsError, SettingsFile};
 
 /// How this installation names itself.

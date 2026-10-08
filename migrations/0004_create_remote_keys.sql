@@ -11,5 +11,6 @@ CREATE TABLE remote_keys (
     address TEXT PRIMARY KEY NOT NULL,
     key TEXT NOT NULL,
     label TEXT NOT NULL,
+    version TEXT NOT NULL,
     seen_at_ms INTEGER NOT NULL
 );

@@ -11,9 +11,6 @@
 //! the link. A client keeps what it remembers in the database, and a server keeps
 //! its own record of who connected in a file; this module keeps neither.
 
-// The dial side of the link: nothing in the app reaches a remote until the
-// settings screen can configure one, which is the next piece of work on remotes.
-#![allow(dead_code)]
 use iroh::EndpointId;
 
 use super::{LinkResult, announce::Announcement, protocol::RemoteTicket};
@@ -49,6 +46,7 @@ impl RemoteKeyStatus {
 /// A remote, as met: what it says about itself, and how it compares to memory.
 pub struct Sighting {
     /// Where to reach it.
+    #[allow(dead_code)] // A check reads what it said; the transfer needs where it is.
     pub ticket: RemoteTicket,
     /// What it said.
     pub announcement: Announcement,

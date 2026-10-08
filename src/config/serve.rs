@@ -16,13 +16,18 @@ use serde::{Deserialize, Serialize};
 
 use super::SettingsError;
 
-/// The address the serve role listens on when nobody has said otherwise.
+/// The port the link speaks, in both roles.
 ///
 /// 25848 is unassigned, which is all a port has to be, and it is one number to
 /// remember: on a phone keypad `ALTIT` is 25848. TCP and UDP both use it, so an
 /// operator has a single address to make reachable and a client has a single
 /// thing to be told.
-pub const DEFAULT_LISTEN: &str = "0.0.0.0:25848";
+pub const DEFAULT_PORT: u16 = 25848;
+
+/// The address a server listens on when nobody has said otherwise.
+pub fn default_listen() -> String {
+    format!("0.0.0.0:{DEFAULT_PORT}")
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ServeSettings {
@@ -33,7 +38,7 @@ pub struct ServeSettings {
 impl Default for ServeSettings {
     fn default() -> Self {
         Self {
-            listen: DEFAULT_LISTEN.to_owned(),
+            listen: default_listen(),
         }
     }
 }
