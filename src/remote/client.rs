@@ -10,8 +10,8 @@ use iroh::{Endpoint, EndpointAddr, EndpointId, endpoint::Connection};
 use super::{
     LinkResult,
     protocol::{
-        BlobHash, CHUNK_BYTES, LINK_ALPN, LinkRequest, LinkResponse, TaskRequest, builder,
-        read_frame, write_frame,
+        BlobHash, CHUNK_BYTES, LINK_ALPN, LinkRequest, LinkResponse, TaskRequest, TaskSummary,
+        builder, read_frame, write_frame,
     },
 };
 
@@ -126,6 +126,28 @@ impl LinkClient {
                 remote: connection.remote_id(),
                 path: LinkPath::observe(&connection),
             })
+        }
+        .await;
+        connection.close(0u32.into(), b"done");
+        result
+    }
+
+    /// Asks what tasks a remote owns.
+    ///
+    /// These are the only copies of them: a task belongs to the machine running it, so
+    /// this is a view that is only as good as the answer.
+    pub async fn list_tasks(&self, peer: impl Into<EndpointAddr>) -> LinkResult<Vec<TaskSummary>> {
+        let connection = self.endpoint.connect(peer, LINK_ALPN).await?;
+        let result = async {
+            let (mut send, mut recv) = connection.open_bi().await?;
+            write_frame(&mut send, &LinkRequest::ListTasks).await?;
+            send.finish()?;
+            let response: LinkResponse = read_frame(&mut recv).await?;
+            match response {
+                LinkResponse::Tasks { summaries } => Ok(summaries),
+                LinkResponse::Rejected { reason } => Err(reason.into()),
+                other => Err(format!("unexpected answer: {other:?}").into()),
+            }
         }
         .await;
         connection.close(0u32.into(), b"done");

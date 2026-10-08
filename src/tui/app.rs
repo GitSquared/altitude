@@ -23,7 +23,7 @@ use crate::{
     },
     remote::{
         Announcement, ConfigBundle, LinkClient, RemoteKey, RemoteKeyStatus, RemoteKeys,
-        RemoteState, TaskRequest, meet,
+        RemoteState, TaskRequest, TaskSummary, meet,
     },
     task::{
         Task, TaskEventLoop, TaskExecutionMode, TaskExecutionStatus, TaskExecutionUpdate,
@@ -175,6 +175,10 @@ pub struct App {
     /// When the remotes list started showing, which the wait before dialling is
     /// measured from. Absent while it is not showing.
     remotes_visible_since: Option<Instant>,
+    /// What the remotes are holding, as of the last time each answered. Read from
+    /// them rather than copied: a task belongs to the machine running it, so this is
+    /// only ever as good as the last answer.
+    pub(in crate::tui) remote_tasks: Vec<TaskSummary>,
     /// When this client last sent its configuration to each address. Held in
     /// memory: a restart forgets, and sending a small file again is cheaper than a
     /// record that can disagree with what the remote holds.
@@ -227,6 +231,7 @@ impl App {
             remote_status: HashMap::new(),
             remotes_visible_since: None,
             remote_synced: HashMap::new(),
+            remote_tasks: Vec::new(),
 
             remote_keys,
             remembered_keys: Vec::new(),
@@ -506,6 +511,41 @@ impl App {
             });
         }
         hosts
+    }
+
+    /// Ask each remote that answered what it is holding, off the event loop: reading one
+    /// is a dial, and a dial does not belong between two frames.
+    ///
+    /// A remote that does not answer contributes nothing. Its tasks are its own, and
+    /// there is no copy here to fall back on.
+    pub(in crate::tui) fn read_remote_tasks(
+        &self,
+        reads: &mpsc::UnboundedSender<Vec<TaskSummary>>,
+    ) {
+        let addresses: Vec<String> = self
+            .configured_remotes()
+            .into_iter()
+            .filter(|address| {
+                matches!(self.remote_status.get(address), Some(RemoteStatus::Reached))
+            })
+            .collect();
+        if addresses.is_empty() {
+            return;
+        }
+        let keys = self.remote_keys.clone();
+        let reads = reads.clone();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            for address in addresses {
+                match Self::read_tasks(&address, &keys).await {
+                    Ok(tasks) => held.extend(tasks),
+                    Err(error) => {
+                        tracing::debug!(%error, address, "could not read a remote's tasks")
+                    }
+                }
+            }
+            let _ = reads.send(held);
+        });
     }
 
     /// Ask a remote to run a task of its own.
@@ -1414,6 +1454,23 @@ impl App {
                 None
             }
         }
+    }
+
+    /// Asks one machine what it is holding, which is where those tasks live.
+    async fn read_tasks(address: &str, keys: &RemoteKeys) -> Result<Vec<TaskSummary>, String> {
+        let remembered = keys.remembered(address).await.ok().flatten();
+        let sighting = meet(address, DEFAULT_PORT, remembered.as_deref())
+            .await
+            .map_err(|error| error.to_string())?;
+        let client = LinkClient::bind()
+            .await
+            .map_err(|error| error.to_string())?;
+        let listed = client
+            .list_tasks(sighting.ticket)
+            .await
+            .map_err(|error| error.to_string());
+        let _ = client.close().await;
+        listed
     }
 
     /// Read what a task is asking, and show it.

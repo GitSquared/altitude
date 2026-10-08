@@ -81,6 +81,10 @@ where
     // it happens off this loop and reports back like a task's run does.
     let (remote_answers, mut answered) = mpsc::unbounded_channel();
     let mut ask = time::interval(Duration::from_millis(250));
+    // Reading a remote's tasks is a dial, so it happens on its own clock rather than
+    // every frame, and away from this loop.
+    let (remote_task_reads, mut remote_tasks_read) = mpsc::unbounded_channel();
+    let mut read_clock = time::interval(Duration::from_secs(3));
     loop {
         if mouse_captured != app.open_shell().is_some() {
             mouse_captured = app.open_shell().is_some();
@@ -151,6 +155,10 @@ where
                 }
             }
             Some(answer) = answered.recv() => app.remote_answered(answer).await,
+            _ = read_clock.tick(), if matches!(app.foreground, Foreground::Tasks) => {
+                app.read_remote_tasks(&remote_task_reads);
+            }
+            Some(tasks) = remote_tasks_read.recv() => app.remote_tasks = tasks,
             _ = shell_notice.tick(), if app.shell_has_active_notice() => {}
             _ = shimmer.tick(), if app.is_preparing() || app.is_asking_remotes() => {
                 app.shimmer = app.shimmer.wrapping_add(1);

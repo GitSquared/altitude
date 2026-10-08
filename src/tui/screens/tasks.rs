@@ -1,4 +1,8 @@
-use crate::tui::{App, widgets::palette};
+use crate::{
+    agent::AgentKind,
+    remote::TaskSummary,
+    tui::{App, widgets::palette},
+};
 
 use ratatui::{
     Frame,
@@ -45,8 +49,8 @@ fn draw_tasks(
     card_width: u16,
     height: u16,
 ) {
-    let tasks = &app.tasks;
-    if tasks.is_empty() {
+    let total = app.tasks.len() + app.remote_tasks.len();
+    if total == 0 {
         frame.render_widget(
             Paragraph::new(Span::styled("No tasks yet", palette::muted())),
             area,
@@ -57,40 +61,24 @@ fn draw_tasks(
     let page = (columns * rows).max(1);
     // Page by page rather than card by card: a grid that scrolls by one card
     // rearranges itself under the focus.
-    let first = &mut app.first_visible_task;
     let selected = app.selected;
     let selected_page = selected / page;
-    let page_count = tasks.len().div_ceil(page);
-    *first = selected_page.min(page_count.saturating_sub(1)) * page;
+    let page_count = total.div_ceil(page);
+    let first = selected_page.min(page_count.saturating_sub(1)) * page;
+    app.first_visible_task = first;
 
-    let tick = app.shimmer;
-    let capacity = app.capacity;
-    let occupied = tasks
-        .iter()
-        .filter(|task| task.facts.sandbox_available)
-        .count();
-    let at_capacity = capacity.is_some_and(|limit| occupied >= limit);
-
-    for (offset, task) in tasks.iter().skip(*first).take(page).enumerate() {
+    let cards = cards(app);
+    for (offset, card) in cards.iter().skip(first).take(page).enumerate() {
         let row = offset / columns;
         let column = offset % columns;
-        let card = Rect {
+        let area = Rect {
             x: area.x + column as u16 * card_width,
             y: area.y + row as u16 * (height + 1),
             width: card_width.saturating_sub(1),
             height,
         };
-        let index = *first + offset;
-        let focused = index == selected;
-        draw_card(
-            frame,
-            card,
-            task,
-            focused,
-            at_capacity,
-            tick,
-            app.environment_builds.get(&task.id),
-        );
+        let focused = first + offset == selected;
+        draw_card(frame, area, card, focused);
     }
 
     // Which page of how many, when there is more than one.
@@ -113,15 +101,82 @@ fn draw_tasks(
 }
 
 /// One task, as a card: what it is, and how it is going.
-fn draw_card(
-    frame: &mut Frame,
-    area: Rect,
-    task: &Task,
-    focused: bool,
-    at_capacity: bool,
-    tick: usize,
-    build: Option<&EnvironmentProgress>,
-) {
+/// What a card draws, whether the task is this machine's or one it is reading.
+struct Card<'a> {
+    intent: &'a str,
+    environment: &'a str,
+    agent: Option<AgentKind>,
+    host: &'a str,
+    /// How it is going, already in the words the card has room for.
+    status: Line<'static>,
+    /// What else it has to say, in the order it should be read.
+    extras: Vec<Line<'static>>,
+}
+
+/// The list: this machine's tasks, then what the remotes are holding.
+///
+/// A remote's tasks are read from it rather than copied, so they are here because it
+/// answered and they are gone when it does not.
+fn cards(app: &App) -> Vec<Card<'_>> {
+    let occupied = app
+        .tasks
+        .iter()
+        .filter(|task| task.facts.sandbox_available)
+        .count();
+    let at_capacity = app.capacity.is_some_and(|limit| occupied >= limit);
+    let mut cards: Vec<Card<'_>> = app
+        .tasks
+        .iter()
+        .map(|task| Card {
+            intent: &task.facts.intent,
+            environment: &task.facts.environment_name,
+            agent: task.agent_kind,
+            host: &task.host,
+            status: card_status(
+                task,
+                at_capacity,
+                app.shimmer,
+                app.environment_builds.get(&task.id),
+            ),
+            extras: card_extras(task),
+        })
+        .collect();
+    cards.extend(app.remote_tasks.iter().map(|held| {
+        Card {
+            intent: &held.intent,
+            environment: &held.environment,
+            agent: held.agent,
+            host: &held.host,
+            status: held_status(held),
+            extras: held
+                .extras
+                .iter()
+                .map(|extra| Line::styled(extra.clone(), palette::attention()))
+                .collect(),
+        }
+    }));
+    cards
+}
+
+/// How a task on another machine is going, in the words the card has room for.
+///
+/// Nothing here is live: it is what that machine said when it last answered.
+fn held_status(held: &TaskSummary) -> Line<'static> {
+    match held.status {
+        TaskExecutionStatus::Pending => Line::styled("starting up...", palette::muted()),
+        TaskExecutionStatus::Running => Line::from(match held.mode {
+            TaskExecutionMode::Autopilot => "autopilot · working",
+            TaskExecutionMode::AutopilotReport => "autopilot · reporting",
+            TaskExecutionMode::Operator => "operator override",
+        })
+        .style(palette::good()),
+        TaskExecutionStatus::Paused => Line::styled("paused", palette::attention()),
+        TaskExecutionStatus::Completed => Line::styled("in review", palette::good()),
+        TaskExecutionStatus::Failed => Line::styled("blocked · failed", palette::bad()),
+    }
+}
+
+fn draw_card(frame: &mut Frame, area: Rect, card: &Card<'_>, focused: bool) {
     let border = if focused {
         palette::accent()
     } else {
@@ -131,10 +186,7 @@ fn draw_card(
         .title(Span::styled(
             format!(
                 " {} ",
-                truncate(
-                    &task.facts.intent,
-                    usize::from(area.width.saturating_sub(4)),
-                )
+                truncate(card.intent, usize::from(area.width.saturating_sub(4)))
             ),
             if focused {
                 palette::heading()
@@ -151,26 +203,17 @@ fn draw_card(
         return;
     }
 
-    let status = card_status(task, at_capacity, tick, build);
-    let mut lines = vec![status];
-    // What the work is running in and what is doing it. The host is this machine
-    // until a task can be delegated to a remote.
-    lines.push(Line::styled(
-        task.facts.environment_name.clone(),
-        palette::muted(),
-    ));
-    let agent = match task.agent_kind {
+    let agent = match card.agent {
         Some(kind) => kind.to_string(),
         None => "no agent".to_owned(),
     };
+    let mut lines = vec![card.status.clone()];
+    lines.push(Line::styled(card.environment.to_owned(), palette::muted()));
     lines.push(Line::styled(
-        format!("{agent} on {}", task.host),
+        format!("{agent} on {}", card.host),
         palette::muted(),
     ));
-    // Everything else the task has to say, in the space the card has for it.
-    for extra in card_extras(task) {
-        lines.push(extra);
-    }
+    lines.extend(card.extras.iter().cloned());
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
