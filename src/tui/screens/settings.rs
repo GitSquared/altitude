@@ -10,9 +10,16 @@
 //! describes it instead, which is the only place an operator can see what a
 //! sandbox is actually made of.
 
-use crate::tui::widgets::{chrome, palette};
+use crate::tui::{
+    App,
+    widgets::{chrome, palette},
+};
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    fs,
+    path::Path,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use ratatui::{
     Frame,
@@ -862,4 +869,172 @@ fn draw_label(frame: &mut Frame, area: Rect, text: &str) {
 fn field_box(area: Rect) -> Rect {
     let [_, input] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
     input
+}
+
+impl App {
+    /// Everything the panel draws, assembled from the settings file and from
+    /// what was read back about each remote and about the base environment.
+    pub(in crate::tui) fn settings_view(&self) -> View {
+        let default_environment = self.default_environment().to_owned();
+        let rows = match self.panel.section {
+            Section::Environments => self
+                .environments()
+                .into_iter()
+                .map(|environment| {
+                    let built_in = environment.is_base();
+                    let is_default = environment.name.eq_ignore_ascii_case(&default_environment);
+                    Row {
+                        label: match (built_in, is_default) {
+                            (true, _) => format!("{} (built in)", environment.name),
+                            (false, true) => format!("{} (default)", environment.name),
+                            (false, false) => environment.name.clone(),
+                        },
+                        kind: if built_in {
+                            RowKind::Base
+                        } else {
+                            RowKind::Environment {
+                                name: environment.name,
+                                setup: environment.setup_command,
+                                is_default,
+                            }
+                        },
+                    }
+                })
+                .collect(),
+            Section::Remotes => self
+                .configured_remotes()
+                .into_iter()
+                .map(|address| {
+                    let remembered = self
+                        .remembered_keys
+                        .iter()
+                        .find(|key| key.address.eq_ignore_ascii_case(&address))
+                        .cloned();
+                    Row {
+                        // A name is what the remote called itself, so an address
+                        // that has never answered shows itself instead.
+                        label: match &remembered {
+                            Some(key) => key.label.clone(),
+                            None => address.clone(),
+                        },
+                        kind: RowKind::Remote {
+                            address,
+                            remembered,
+                        },
+                    }
+                })
+                .collect(),
+            Section::Agent => [AgentKind::Pi, AgentKind::Claude]
+                .into_iter()
+                .map(|kind| Row {
+                    label: kind.to_string(),
+                    kind: RowKind::Agent {
+                        kind,
+                        in_use: self.agent() == Some(kind),
+                    },
+                })
+                .collect(),
+            Section::Interface => vec![Row {
+                label: Setting::KeyboardHints.label().to_owned(),
+                kind: RowKind::Switch {
+                    setting: Setting::KeyboardHints,
+                    on: self.keyboard_hints(),
+                },
+            }],
+            Section::Identity => Vec::new(),
+        };
+        let identities = self.identities();
+        View {
+            rows,
+            identities,
+            base: self.base_description.clone(),
+        }
+    }
+
+    /// The identities this machine holds: the installation, then each login a
+    /// task is given.
+    ///
+    /// Names and places only. A credential is never read, and never shown.
+    fn identities(&self) -> Vec<Identity> {
+        let mut identities = Vec::new();
+        let identity = self.config.identity();
+        identities.push(Identity {
+            label: "Altitude".to_owned(),
+            kind: IdentityKind::Installation {
+                label: identity
+                    .as_ref()
+                    .map(|identity| identity.label.clone())
+                    .unwrap_or_else(|error| format!("unreadable: {error}")),
+                key: identity
+                    .as_ref()
+                    .map(|identity| identity.id.clone())
+                    .unwrap_or_else(|error| format!("unreadable: {error}")),
+                data_dir: self.config.data_dir().display().to_string(),
+            },
+        });
+        for profile in self.profiles.iter() {
+            let directory = self.config.profile_dir(profile.profile);
+            identities.push(Identity {
+                label: profile_label(profile.profile).to_owned(),
+                kind: IdentityKind::Profile {
+                    profile: profile.profile.to_owned(),
+                    present: directory.is_dir(),
+                    account: account_name(&directory),
+                    directory: directory.display().to_string(),
+                    mounts: profile.mounts.clone(),
+                },
+            });
+        }
+        identities
+    }
+
+    /// The addresses the settings file configures.
+    pub(in crate::tui) fn configured_remotes(&self) -> Vec<String> {
+        self.settings_file
+            .as_ref()
+            .map(|file| file.settings().remotes().to_vec())
+            .unwrap_or_default()
+    }
+
+    /// How many rows the focused list holds, which is what moving needs.
+    pub(in crate::tui) fn row_count(&self) -> usize {
+        match self.panel.section {
+            Section::Environments => self.environments().len(),
+            Section::Agent => 2,
+            Section::Remotes => self.configured_remotes().len(),
+            Section::Interface => 1,
+            Section::Identity => self.profiles.len() + 1,
+        }
+    }
+
+    pub(in crate::tui) fn selected_row(&self) -> Option<Row> {
+        self.settings_view()
+            .rows
+            .into_iter()
+            .nth(self.panel.selected)
+    }
+}
+
+/// A profile's name, for a list that has no room for its path.
+fn profile_label(profile: &str) -> &str {
+    match profile.rsplit('/').next().unwrap_or(profile) {
+        "claude" => "Claude Code",
+        "pi" => "Pi",
+        "github" => "GitHub",
+        other => other,
+    }
+}
+
+/// The account a profile is signed in as, where a name can be read without
+/// reading a credential.
+///
+/// The GitHub CLI keeps the account name beside the token in its hosts file, and
+/// only the name is read.
+fn account_name(directory: &Path) -> Option<String> {
+    let hosts = fs::read_to_string(directory.join("gh/hosts.yml")).ok()?;
+    hosts.lines().find_map(|line| {
+        let value = line.trim().strip_prefix("user:")?;
+        let value = value.trim().trim_matches('"');
+        (!value.is_empty()).then(|| value.to_owned())
+    })
 }

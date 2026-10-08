@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    fs, io,
-    path::Path,
+    io,
     time::Duration,
 };
 
@@ -34,12 +33,10 @@ mod popups;
 mod screens;
 mod widgets;
 
-use popups::confirm::{Confirm, Decision};
+use popups::confirm::{PendingConfirm, handle_confirm_key};
 use popups::new_task::NewTask;
 use popups::reply::{Prompt, PromptAction};
-use screens::settings::{
-    Depth, Focus, Form, Identity, IdentityKind, Panel, Row, RowKind, Section, Setting, Target, View,
-};
+use screens::settings::{Depth, Focus, Form, Panel, RowKind, Section, Setting, Target};
 use screens::shell::Shell;
 use widgets::chrome::Hint;
 use widgets::keys::{is_dismiss, is_help, is_remove};
@@ -213,142 +210,6 @@ impl App {
         }
     }
 
-    /// Everything the panel draws, assembled from the settings file and from
-    /// what was read back about each remote and about the base environment.
-    fn settings_view(&self) -> View {
-        let default_environment = self.default_environment().to_owned();
-        let rows = match self.panel.section {
-            Section::Environments => self
-                .environments()
-                .into_iter()
-                .map(|environment| {
-                    let built_in = environment.is_base();
-                    let is_default = environment.name.eq_ignore_ascii_case(&default_environment);
-                    Row {
-                        label: match (built_in, is_default) {
-                            (true, _) => format!("{} (built in)", environment.name),
-                            (false, true) => format!("{} (default)", environment.name),
-                            (false, false) => environment.name.clone(),
-                        },
-                        kind: if built_in {
-                            RowKind::Base
-                        } else {
-                            RowKind::Environment {
-                                name: environment.name,
-                                setup: environment.setup_command,
-                                is_default,
-                            }
-                        },
-                    }
-                })
-                .collect(),
-            Section::Remotes => self
-                .configured_remotes()
-                .into_iter()
-                .map(|address| {
-                    let remembered = self
-                        .remembered_keys
-                        .iter()
-                        .find(|key| key.address.eq_ignore_ascii_case(&address))
-                        .cloned();
-                    Row {
-                        // A name is what the remote called itself, so an address
-                        // that has never answered shows itself instead.
-                        label: match &remembered {
-                            Some(key) => key.label.clone(),
-                            None => address.clone(),
-                        },
-                        kind: RowKind::Remote {
-                            address,
-                            remembered,
-                        },
-                    }
-                })
-                .collect(),
-            Section::Agent => [AgentKind::Pi, AgentKind::Claude]
-                .into_iter()
-                .map(|kind| Row {
-                    label: kind.to_string(),
-                    kind: RowKind::Agent {
-                        kind,
-                        in_use: self.agent() == Some(kind),
-                    },
-                })
-                .collect(),
-            Section::Interface => vec![Row {
-                label: Setting::KeyboardHints.label().to_owned(),
-                kind: RowKind::Switch {
-                    setting: Setting::KeyboardHints,
-                    on: self.keyboard_hints(),
-                },
-            }],
-            Section::Identity => Vec::new(),
-        };
-        let identities = self.identities();
-        View {
-            rows,
-            identities,
-            base: self.base_description.clone(),
-        }
-    }
-
-    /// The identities this machine holds: the installation, then each login a
-    /// task is given.
-    ///
-    /// Names and places only. A credential is never read, and never shown.
-    fn identities(&self) -> Vec<Identity> {
-        let mut identities = Vec::new();
-        let identity = self.config.identity();
-        identities.push(Identity {
-            label: "Altitude".to_owned(),
-            kind: IdentityKind::Installation {
-                label: identity
-                    .as_ref()
-                    .map(|identity| identity.label.clone())
-                    .unwrap_or_else(|error| format!("unreadable: {error}")),
-                key: identity
-                    .as_ref()
-                    .map(|identity| identity.id.clone())
-                    .unwrap_or_else(|error| format!("unreadable: {error}")),
-                data_dir: self.config.data_dir().display().to_string(),
-            },
-        });
-        for profile in self.profiles.iter() {
-            let directory = self.config.profile_dir(profile.profile);
-            identities.push(Identity {
-                label: profile_label(profile.profile).to_owned(),
-                kind: IdentityKind::Profile {
-                    profile: profile.profile.to_owned(),
-                    present: directory.is_dir(),
-                    account: account_name(&directory),
-                    directory: directory.display().to_string(),
-                    mounts: profile.mounts.clone(),
-                },
-            });
-        }
-        identities
-    }
-
-    /// The addresses the settings file configures.
-    fn configured_remotes(&self) -> Vec<String> {
-        self.settings_file
-            .as_ref()
-            .map(|file| file.settings().remotes().to_vec())
-            .unwrap_or_default()
-    }
-
-    /// How the rows of the focused list are counted, which is what moving needs.
-    /// How many rows the focused list holds, which is what moving needs.
-    fn row_count(&self) -> usize {
-        match self.panel.section {
-            Section::Environments => self.environments().len(),
-            Section::Agent => 2,
-            Section::Remotes => self.configured_remotes().len(),
-            Section::Interface => 1,
-            Section::Identity => self.profiles.len() + 1,
-        }
-    }
-
     /// The coding agent Altitude drives, once one has been chosen.
     fn agent(&self) -> Option<AgentKind> {
         self.settings_file
@@ -384,7 +245,7 @@ impl App {
     fn hints(&self) -> Vec<Hint> {
         let dismiss = || Hint::new("esc", "close");
         if let Some(confirm) = &self.confirm {
-            return confirm.dialog.hints();
+            return confirm.hints();
         }
         if self.prompt.is_some() {
             return vec![
@@ -455,13 +316,6 @@ impl App {
                 .is_some_and(|form| form.focus.takes_text())
     }
 
-    fn selected_row(&self) -> Option<Row> {
-        self.settings_view()
-            .rows
-            .into_iter()
-            .nth(self.panel.selected)
-    }
-
     fn panel_key(&mut self, key: KeyEvent) {
         let rows = self.row_count();
         match key.code {
@@ -530,21 +384,19 @@ impl App {
         let Some(row) = self.selected_row() else {
             return;
         };
-        let (question, action) = match row.kind {
+        // The question is built first: it borrows the name the target then moves.
+        let (question, target) = match row.kind {
             RowKind::Base | RowKind::Switch { .. } | RowKind::Agent { .. } => return,
             RowKind::Environment { name, .. } => (
                 format!("Delete the {name} environment?"),
-                ConfirmAction::DeleteSetting(Target::Environment { original: name }),
+                Target::Environment { original: name },
             ),
             RowKind::Remote { address, .. } => (
                 format!("Delete {address}, and the key remembered for it?"),
-                ConfirmAction::DeleteSetting(Target::Remote { original: address }),
+                Target::Remote { original: address },
             ),
         };
-        self.confirm = Some(PendingConfirm {
-            dialog: Confirm::new(question, "delete"),
-            action,
-        });
+        self.confirm = Some(PendingConfirm::deleting(target, question));
     }
 
     /// Turn a preference on or off, and keep it.
@@ -854,7 +706,7 @@ where
             }
             if let Some(confirm) = &app.confirm {
                 widgets::chrome::dim(frame, content);
-                popups::confirm::draw(frame, content, &confirm.dialog);
+                confirm.draw(frame, content);
             }
             if let Some(new_task) = &app.new_task {
                 widgets::chrome::dim(frame, content);
@@ -965,44 +817,6 @@ fn copy_to_clipboard(text: String) -> Result<(), arboard::Error> {
     clipboard.set_text(text)
 }
 
-/// A question waiting on an answer, and what the answer would do.
-struct PendingConfirm {
-    dialog: Confirm,
-    action: ConfirmAction,
-}
-
-/// What confirming would do. The dialog knows the words; the application knows
-/// the consequences.
-enum ConfirmAction {
-    RemoveTask { id: String },
-    DeleteSetting(Target),
-}
-
-/// Take an answer to the confirmation, and act on it.
-async fn handle_confirm_key<E>(app: &mut App, event_loop: &TaskEventLoop<E>, key: KeyEvent)
-where
-    E: IsolationEngine + Clone + 'static,
-{
-    let Some(mut pending) = app.confirm.take() else {
-        return;
-    };
-    match pending.dialog.handle_key(key) {
-        None => app.confirm = Some(pending),
-        Some(Decision::Cancel) => {}
-        Some(Decision::Confirm) => match pending.action {
-            ConfirmAction::RemoveTask { id } => {
-                if let Some(task) = app.tasks.iter().find(|task| task.id == id).cloned() {
-                    tracing::info!(task_id = %id, "removing task from overview");
-                    app.begin_removing(&id);
-                    app.remove_shell(&id);
-                    event_loop.remove(task);
-                }
-            }
-            ConfirmAction::DeleteSetting(target) => app.delete(target).await,
-        },
-    }
-}
-
 /// Open the settings panel, reading back the two things it cannot see for
 /// itself: what each address last answered with, and what the built base
 /// environment is made of.
@@ -1022,30 +836,6 @@ where
         Ok(keys) => app.remembered_keys = keys,
         Err(error) => app.notice = Some(format!("could not read remembered remotes: {error}")),
     }
-}
-
-/// A profile's name, for a list that has no room for its path.
-fn profile_label(profile: &str) -> &str {
-    match profile.rsplit('/').next().unwrap_or(profile) {
-        "claude" => "Claude Code",
-        "pi" => "Pi",
-        "github" => "GitHub",
-        other => other,
-    }
-}
-
-/// The account a profile is signed in as, where a name can be read without
-/// reading a credential.
-///
-/// The GitHub CLI keeps the account name beside the token in its hosts file, and
-/// only the name is read.
-fn account_name(directory: &Path) -> Option<String> {
-    let hosts = fs::read_to_string(directory.join("gh/hosts.yml")).ok()?;
-    hosts.lines().find_map(|line| {
-        let value = line.trim().strip_prefix("user:")?;
-        let value = value.trim().trim_matches('"');
-        (!value.is_empty()).then(|| value.to_owned())
-    })
 }
 
 fn show_task_error(app: &mut App, id: &str, error: TaskServiceError) {
@@ -1323,16 +1113,11 @@ where
         }
         _ if is_remove(key) => {
             if let Some(task) = app.selected_task() {
-                app.confirm = Some(PendingConfirm {
-                    dialog: Confirm::new(
-                        format!(
-                            "Remove \"{}\" and dispose of its capsule?",
-                            task.facts.intent
-                        ),
-                        "remove",
-                    ),
-                    action: ConfirmAction::RemoveTask { id: task.id },
-                });
+                let question = format!(
+                    "Remove \"{}\" and dispose of its capsule?",
+                    task.facts.intent
+                );
+                app.confirm = Some(PendingConfirm::removing(task.id, question));
             }
         }
         KeyCode::Enter => {

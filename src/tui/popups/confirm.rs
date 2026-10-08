@@ -12,7 +12,15 @@ use ratatui::{
     widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap},
 };
 
-use crate::tui::widgets::{chrome, keys};
+use crate::{
+    isolation::IsolationEngine,
+    task::TaskEventLoop,
+    tui::{
+        App,
+        screens::settings::Target,
+        widgets::{chrome, keys},
+    },
+};
 
 /// A question with two answers, one of which cannot be undone.
 pub struct Confirm {
@@ -102,4 +110,71 @@ pub fn draw(frame: &mut Frame, area: Rect, confirm: &Confirm) {
         confirm.button == 1,
         true,
     );
+}
+
+/// A question waiting on an answer, and what the answer would do.
+pub(in crate::tui) struct PendingConfirm {
+    dialog: Confirm,
+    action: ConfirmAction,
+}
+
+impl PendingConfirm {
+    /// Confirming deletes a row the settings screen lists.
+    pub(in crate::tui) fn deleting(target: Target, question: String) -> Self {
+        Self {
+            dialog: Confirm::new(question, "delete"),
+            action: ConfirmAction::DeleteSetting(target),
+        }
+    }
+
+    /// Confirming removes a task from the overview and disposes of its capsule.
+    pub(in crate::tui) fn removing(task_id: String, question: String) -> Self {
+        Self {
+            dialog: Confirm::new(question, "remove"),
+            action: ConfirmAction::RemoveTask { id: task_id },
+        }
+    }
+
+    pub(in crate::tui) fn draw(&self, frame: &mut Frame, area: Rect) {
+        draw(frame, area, &self.dialog);
+    }
+
+    pub(in crate::tui) fn hints(&self) -> Vec<chrome::Hint> {
+        self.dialog.hints()
+    }
+}
+
+/// What confirming would do. The dialog knows the words; the application knows
+/// the consequences.
+enum ConfirmAction {
+    RemoveTask { id: String },
+    DeleteSetting(Target),
+}
+
+/// Take an answer to the confirmation, and act on it.
+pub(in crate::tui) async fn handle_confirm_key<E>(
+    app: &mut App,
+    event_loop: &TaskEventLoop<E>,
+    key: KeyEvent,
+) where
+    E: IsolationEngine + Clone + 'static,
+{
+    let Some(mut pending) = app.confirm.take() else {
+        return;
+    };
+    match pending.dialog.handle_key(key) {
+        None => app.confirm = Some(pending),
+        Some(Decision::Cancel) => {}
+        Some(Decision::Confirm) => match pending.action {
+            ConfirmAction::RemoveTask { id } => {
+                if let Some(task) = app.tasks.iter().find(|task| task.id == id).cloned() {
+                    tracing::info!(task_id = %id, "removing task from overview");
+                    app.begin_removing(&id);
+                    app.remove_shell(&id);
+                    event_loop.remove(task);
+                }
+            }
+            ConfirmAction::DeleteSetting(target) => app.delete(target).await,
+        },
+    }
 }
