@@ -18,7 +18,8 @@ use crate::{
     isolation::IsolationEngine,
     task::TaskEventLoop,
     tui::{
-        App, Foreground,
+        App,
+        app::Foreground,
         screens::settings::Target,
         widgets::{chrome, keys},
     },
