@@ -10,8 +10,6 @@ use std::{
 
 use tokio::sync::watch;
 
-use crate::isolation::IsolationStatus;
-
 use iroh::{
     EndpointAddr, EndpointId,
     endpoint::{Builder, Connection, RecvStream, SendStream},
@@ -180,7 +178,7 @@ impl LinkServer {
         listen: SocketAddr,
         label: String,
         config_path: PathBuf,
-        state: watch::Receiver<IsolationStatus>,
+        state: watch::Receiver<RemoteState>,
     ) -> LinkResult<Self> {
         let blobs = Arc::new(BlobStore::default());
         let handler = LinkHandler {

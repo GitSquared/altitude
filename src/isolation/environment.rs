@@ -288,6 +288,25 @@ fn io_error(error: io::Error) -> IsolationError {
     IsolationError::new(error.to_string())
 }
 
+/// Builds an environment's snapshot without making a sandbox for a task.
+///
+/// A machine that has just been sent a configuration builds what that configuration
+/// asks for before it can be given work, and this is that build: the same one a task
+/// would wait for, done ahead of the task. The snapshot is the environment's, shared
+/// by every task that runs in it and refreshed on the same clock.
+pub async fn ensure_environment(
+    engine: &impl IsolationEngine,
+    config: &Config,
+    environment: Environment,
+    recipes: Vec<EnvironmentRecipe>,
+    progress: &dyn EnvironmentProgressSink,
+) -> Result<(), IsolationError> {
+    let mut plan = EnvironmentPlan::compose(config, environment, recipes)?;
+    plan.initialize(config)?;
+    engine.ensure_base(plan.recipe, progress).await?;
+    Ok(())
+}
+
 pub(super) async fn provision(
     engine: &impl IsolationEngine,
     config: &Config,

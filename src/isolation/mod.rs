@@ -4,15 +4,15 @@ use tokio::sync::{mpsc, watch};
 
 mod environment;
 mod microsandbox;
-/// How long a built environment is kept before it is rebuilt, for the interface
-/// that has to tell an operator when their base was last refreshed.
-pub use environment::REFRESH_AFTER;
 /// Shared with the VCS providers so capsule commands are quoted one way.
 pub(crate) use environment::shell_quote;
 pub use environment::{
     BASE_NAME, DefaultFile, Environment, EnvironmentRecipe, GuestPath, PersistentDirectory,
     is_base_name,
 };
+/// How long a built environment is kept before it is rebuilt, for the interface
+/// that has to tell an operator when their base was last refreshed.
+pub use environment::{REFRESH_AFTER, ensure_environment};
 pub use microsandbox::MicrosandboxIsolation;
 
 #[derive(Clone, Debug)]

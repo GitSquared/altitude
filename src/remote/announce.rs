@@ -23,7 +23,6 @@ use tokio::{
 };
 
 use super::LinkResult;
-use crate::isolation::IsolationStatus;
 
 /// How long either side waits for the other before giving up.
 const EXCHANGE_LIMIT: Duration = Duration::from_secs(5);
@@ -79,7 +78,7 @@ impl Broadcast {
     pub(super) async fn start(
         bound: &[SocketAddr],
         announcement: Announcement,
-        state: watch::Receiver<IsolationStatus>,
+        state: watch::Receiver<RemoteState>,
     ) -> LinkResult<Self> {
         let mut tasks = Vec::new();
         for address in bound {
@@ -104,7 +103,7 @@ impl Broadcast {
 async fn answer_everyone(
     listener: TcpListener,
     announcement: Announcement,
-    state: watch::Receiver<IsolationStatus>,
+    state: watch::Receiver<RemoteState>,
 ) {
     loop {
         match listener.accept().await {
@@ -114,10 +113,7 @@ async fn answer_everyone(
                 tokio::spawn(async move {
                     // Read per request, not once: a remote that has just been sent a
                     // configuration is building, and says so until it is done.
-                    announcement.state = match &*state.borrow() {
-                        IsolationStatus::Ready => RemoteState::Ready,
-                        _ => RemoteState::Preparing,
-                    };
+                    announcement.state = *state.borrow();
                     if let Err(error) = answer(&mut stream, &announcement).await {
                         tracing::debug!(%peer, %error, "an announcement went unanswered");
                     }
