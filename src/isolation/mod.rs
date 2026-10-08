@@ -183,7 +183,7 @@ pub struct SandboxOptions {
 /// `NODE_EXTRA_CA_CERTS` adds to a store rather than replacing it, which is why it is
 /// safe here where `SSL_CERT_FILE` would not be. Tools that read the system store —
 /// curl, apk, git — need the bundle appended to that store, which a build step does.
-pub(crate) fn trust_host_roots(options: &mut SandboxOptions, data_dir: &Path) {
+pub(crate) fn trust_host_roots(options: &mut SandboxOptions, data_dir: &Path) -> bool {
     let roots: Vec<PathBuf> = ["NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "CURL_CA_BUNDLE"]
         .into_iter()
         .filter_map(env::var_os)
@@ -191,7 +191,7 @@ pub(crate) fn trust_host_roots(options: &mut SandboxOptions, data_dir: &Path) {
         .filter(|path| path.is_file())
         .collect();
     if roots.is_empty() {
-        return;
+        return false;
     }
     let mut bundle = String::new();
     for root in &roots {
@@ -208,7 +208,7 @@ pub(crate) fn trust_host_roots(options: &mut SandboxOptions, data_dir: &Path) {
         }
     }
     if bundle.is_empty() {
-        return;
+        return false;
     }
     // Somewhere without spaces in the path: a sandbox mount cannot open one that has
     // them, and an endpoint agent's own root lives under a directory that does.
@@ -217,11 +217,11 @@ pub(crate) fn trust_host_roots(options: &mut SandboxOptions, data_dir: &Path) {
         && let Err(error) = fs::create_dir_all(parent)
     {
         tracing::warn!(%error, "could not keep this machine's trusted roots");
-        return;
+        return false;
     }
     if let Err(error) = fs::write(&staged, bundle) {
         tracing::warn!(%error, "could not keep this machine's trusted roots");
-        return;
+        return false;
     }
     let guest = "/etc/altitude/host-roots.pem";
     options.mounts.push(SandboxMount {
@@ -235,6 +235,7 @@ pub(crate) fn trust_host_roots(options: &mut SandboxOptions, data_dir: &Path) {
     options
         .environment
         .push(("ALTITUDE_HOST_ROOTS".to_owned(), guest.to_owned()));
+    true
 }
 
 impl SandboxOptions {

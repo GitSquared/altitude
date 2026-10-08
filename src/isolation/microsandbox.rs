@@ -123,7 +123,7 @@ impl MicrosandboxIsolation {
         mut options: SandboxOptions,
         pull_policy: PullPolicy,
     ) -> Result<(), IsolationError> {
-        trust_host_roots(&mut options, self.config.data_dir());
+        let trusted = trust_host_roots(&mut options, self.config.data_dir());
         tracing::info!(sandbox_id = %id, network_enabled = options.network_enabled, cpus = CAPSULE_CPUS, memory_mib = CAPSULE_MEMORY_MIB, "creating sandbox");
         let result = match options.snapshot_path {
             Some(snapshot_path) => {
@@ -180,9 +180,39 @@ impl MicrosandboxIsolation {
             return Err(IsolationError::new(error.to_string()));
         }
 
+        if trusted {
+            self.append_host_roots(&id).await;
+        }
+
         tracing::info!(sandbox_id = %id, "sandbox created");
 
         Ok(())
+    }
+
+    /// Puts this machine's trusted roots into the sandbox's own store as well.
+    ///
+    /// A tool that reads the system store — curl, apk, git — has no variable to be
+    /// told with, so the bundle is appended to the store the image already has. Done
+    /// at creation rather than at build, because a snapshot can be moved to another
+    /// machine and one host's inspection root must not travel with it.
+    ///
+    /// A failure here is not a failure to create a sandbox: a sandbox without these
+    /// roots is the sandbox there was before, and most of what runs in one does not
+    /// need them.
+    async fn append_host_roots(&self, id: &str) {
+        let command = "cat /etc/altitude/host-roots.pem >> /etc/ssl/certs/ca-certificates.crt";
+        match self.run_to_end(id, command).await {
+            Ok((0, _)) => tracing::info!(sandbox_id = %id, "sandbox trusts this machine's roots"),
+            Ok((code, output)) => tracing::warn!(
+                sandbox_id = %id,
+                code,
+                output = %output_tail(&output),
+                "could not add this machine's roots to the sandbox store"
+            ),
+            Err(error) => {
+                tracing::warn!(sandbox_id = %id, %error, "could not reach the sandbox store")
+            }
+        }
     }
 
     /// Remove a sandbox left behind by a build that never finished.
