@@ -192,6 +192,12 @@ impl Config {
             .unwrap_or(0)
     }
 
+    /// Where this installation keeps what it has configured, and what it is logged
+    /// into.
+    pub fn config_dir(&self) -> &Path {
+        &self.config_dir
+    }
+
     pub fn settings_path(&self) -> PathBuf {
         self.config_dir.join("config.toml")
     }

@@ -21,7 +21,10 @@ use crate::{
     isolation::{
         Environment, EnvironmentDescription, EnvironmentProgress, IsolationEngine, ProfileSummary,
     },
-    remote::{Announcement, LinkClient, RemoteKey, RemoteKeyStatus, RemoteKeys, RemoteState, meet},
+    remote::{
+        Announcement, ConfigBundle, LinkClient, RemoteKey, RemoteKeyStatus, RemoteKeys,
+        RemoteState, meet,
+    },
     task::{
         Task, TaskEventLoop, TaskExecutionMode, TaskExecutionStatus, TaskExecutionUpdate,
         TaskOperatorSignal, TaskService, TaskServiceError,
@@ -503,11 +506,23 @@ impl App {
 
     /// The dial, which is what makes this a push rather than a preference.
     async fn send_config(&mut self, address: &str) -> Result<(), String> {
-        let bytes = fs::read(self.config.settings_path()).map_err(|e| e.to_string())?;
+        let settings =
+            fs::read_to_string(self.config.settings_path()).map_err(|e| e.to_string())?;
         let remembered = self.remote_keys.remembered(address).await.ok().flatten();
         let sighting = meet(address, DEFAULT_PORT, remembered.as_deref())
             .await
             .map_err(|error| error.to_string())?;
+        // The profiles it says it already has are left out: sending a configuration
+        // string again costs nothing, and sending a directory of logins again does.
+        let profiles: Vec<&str> = self.profiles.iter().map(|held| held.profile).collect();
+        let bundle = ConfigBundle::of(
+            settings,
+            self.config.config_dir(),
+            &profiles,
+            &sighting.announcement.profiles,
+        )
+        .map_err(|error| error.to_string())?;
+        let bytes = serde_json::to_vec(&bundle).map_err(|error| error.to_string())?;
         let client = LinkClient::bind()
             .await
             .map_err(|error| error.to_string())?;

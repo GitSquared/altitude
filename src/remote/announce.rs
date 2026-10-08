@@ -14,6 +14,8 @@
 use std::{net::SocketAddr, time::Duration};
 
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
+
 use tokio::sync::watch;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -23,6 +25,7 @@ use tokio::{
 };
 
 use super::LinkResult;
+use super::bundle::{HeldConfig, ProfileStamp};
 
 /// How long either side waits for the other before giving up.
 const EXCHANGE_LIMIT: Duration = Duration::from_secs(5);
@@ -47,6 +50,9 @@ pub struct Announcement {
     pub version: String,
     /// What it can do with a task right now.
     pub state: RemoteState,
+    /// What it holds for each profile, so a client sends only what is missing rather
+    /// than a directory of logins again.
+    pub profiles: Vec<ProfileStamp>,
 }
 
 /// What a remote can do with a task right now.
@@ -79,6 +85,7 @@ impl Broadcast {
         bound: &[SocketAddr],
         announcement: Announcement,
         state: watch::Receiver<RemoteState>,
+        held: Arc<Mutex<HeldConfig>>,
     ) -> LinkResult<Self> {
         let mut tasks = Vec::new();
         for address in bound {
@@ -87,6 +94,7 @@ impl Broadcast {
                 listener,
                 announcement.clone(),
                 state.clone(),
+                Arc::clone(&held),
             )));
         }
         Ok(Self { tasks })
@@ -104,16 +112,22 @@ async fn answer_everyone(
     listener: TcpListener,
     announcement: Announcement,
     state: watch::Receiver<RemoteState>,
+    held: Arc<Mutex<HeldConfig>>,
 ) {
     loop {
         match listener.accept().await {
             Ok((mut stream, peer)) => {
                 let mut announcement = announcement.clone();
                 let state = state.clone();
+                let held = Arc::clone(&held);
                 tokio::spawn(async move {
                     // Read per request, not once: a remote that has just been sent a
                     // configuration is building, and says so until it is done.
                     announcement.state = *state.borrow();
+                    announcement.profiles = held
+                        .lock()
+                        .map(|held| held.profiles.clone())
+                        .unwrap_or_default();
                     if let Err(error) = answer(&mut stream, &announcement).await {
                         tracing::debug!(%peer, %error, "an announcement went unanswered");
                     }

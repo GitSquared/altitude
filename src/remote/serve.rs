@@ -7,6 +7,8 @@
 
 use std::{error::Error, io, net::SocketAddr};
 
+use std::sync::{Arc, Mutex};
+
 use tokio::{
     signal::unix::{SignalKind, signal},
     sync::watch,
@@ -20,7 +22,9 @@ use crate::{
         self, EnvironmentProgress, EnvironmentProgressSink, IsolationStatus, MicrosandboxIsolation,
     },
     logging,
-    remote::{ClientRecord, InstallationKey, LinkServer, announce::RemoteState},
+    remote::{
+        ClientRecord, InstallationKey, LinkServer, announce::RemoteState, bundle::HeldConfig,
+    },
     vcs::GitHub,
 };
 
@@ -119,6 +123,11 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     // question as "is the runtime up": it is ready once what the configuration asks
     // for has been built.
     let (state, observed) = watch::channel(RemoteState::Preparing);
+    // What this machine holds, kept beside its data so a client can be told what it
+    // does not need to send again.
+    let held = Arc::new(Mutex::new(HeldConfig::load(
+        &config.data_dir().join("profiles.json"),
+    )));
     let server = LinkServer::serve(
         identity,
         clients,
@@ -126,6 +135,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         label,
         config.settings_path(),
         observed,
+        Arc::clone(&held),
     )
     .await
     .map_err(io::Error::other)?;

@@ -10,6 +10,7 @@
 //! memory and a connection is made per operation.
 
 mod announce;
+mod bundle;
 mod clients;
 mod identity;
 mod keys;
@@ -27,6 +28,7 @@ use std::error::Error;
 #[allow(unused_imports)]
 pub use {
     announce::{Announcement, RemoteState},
+    bundle::{ConfigBundle, ProfileStamp},
     client::{LinkClient, LinkPath, LinkReply, PathKind},
     clients::ClientRecord,
     identity::InstallationKey,
