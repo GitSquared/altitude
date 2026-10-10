@@ -1,4 +1,6 @@
-//! The settings panel: environments, remotes, and the installation's identity.
+//! The settings panel: what the interface shows, which agent drives a task, the
+//! credentials on this machine, the environments a task runs in, and the remotes
+//! it can be delegated to.
 //!
 //! Fullscreen, and three columns. The rail picks a list, the list picks a row,
 //! and the third column says what is known about it. Only the column holding the
@@ -42,41 +44,57 @@ const GAP: u16 = 3;
 
 // ------------------------------------------------------------------ the lists
 
-/// The three lists the panel holds.
+/// The lists the panel holds, in the order the rail shows them.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Section {
-    Environments,
-    Agent,
-    Remotes,
     Interface,
-    Identity,
+    Agents,
+    Credentials,
+    Environments,
+    Remotes,
 }
 
 impl Section {
     pub const ALL: [Section; 5] = [
-        Self::Environments,
-        Self::Agent,
-        Self::Remotes,
         Self::Interface,
-        Self::Identity,
+        Self::Agents,
+        Self::Credentials,
+        Self::Environments,
+        Self::Remotes,
     ];
 
     pub fn title(self) -> &'static str {
         match self {
-            Self::Environments => "Environments",
-            Self::Agent => "Agent",
-            Self::Remotes => "Remotes",
             Self::Interface => "Interface",
-            Self::Identity => "Identity",
+            Self::Agents => "Agents",
+            Self::Credentials => "Credentials",
+            Self::Environments => "Environments",
+            Self::Remotes => "Remotes",
         }
     }
 
     /// Whether this list can grow and shrink.
     ///
-    /// The interface's list is a fixed set of preferences, so it can be changed
-    /// but neither added to nor removed from.
+    /// Only the environments and the remotes are the operator's to add and
+    /// remove: the other lists are what the installation already holds.
     pub fn grows(self) -> bool {
         matches!(self, Self::Environments | Self::Remotes)
+    }
+
+    /// What a list that can be empty says in place of its rows.
+    ///
+    /// The remotes list is the only one that can be: the base environment is
+    /// always there, and the other lists are built from what is already
+    /// configured.
+    pub fn empty_note(self) -> Option<Line<'static>> {
+        match self {
+            Self::Remotes => Some(Line::from(vec![
+                Span::raw("No remotes are configured. Press "),
+                Span::styled("n", palette::accent()),
+                Span::raw(" to add one."),
+            ])),
+            _ => None,
+        }
     }
 }
 
@@ -145,11 +163,14 @@ pub enum RowKind {
         setup: String,
         is_default: bool,
     },
-    /// A coding agent, and whether it is the one in use.
+    /// A coding agent, and whether it is the one new tasks use.
     Agent {
         kind: AgentKind,
-        in_use: bool,
+        is_default: bool,
     },
+    /// Something a task logs in with: this installation's key, or a login a task
+    /// is given.
+    Credential(Credential),
     Remote {
         address: String,
         /// What that address last answered with, if it has been met.
@@ -183,20 +204,17 @@ impl Row {
 /// remembered keys, and the built environments.
 pub struct View {
     pub rows: Vec<Row>,
-    /// The identities on this machine: this installation, then each login a task
-    /// is given.
-    pub identities: Vec<Identity>,
     /// What the base environment is made of, once it has been built here.
     pub base: Option<EnvironmentDescription>,
 }
 
-/// One identity, as the list shows it.
-pub struct Identity {
+/// One credential, as the list shows it.
+pub struct Credential {
     pub label: String,
-    pub kind: IdentityKind,
+    pub kind: CredentialKind,
 }
 
-pub enum IdentityKind {
+pub enum CredentialKind {
     /// This installation: the key that names it and where its state lives.
     Installation {
         label: String,
@@ -227,7 +245,7 @@ pub struct Panel {
 impl Panel {
     pub fn new() -> Self {
         Self {
-            section: Section::Environments,
+            section: Section::ALL[0],
             selected: 0,
             depth: Depth::List,
             form: None,
@@ -414,6 +432,23 @@ fn chip(label: &str, width: usize, focused: bool) -> Line<'static> {
     }
 }
 
+/// The same row, with a note pushed to the right edge.
+///
+/// The note is about the row rather than part of its name, so it sits where a
+/// column of notes lines up.
+fn chip_noted(label: &str, note: &str, width: usize, focused: bool) -> Line<'static> {
+    let used = Line::from(label).width() + Line::from(note).width();
+    let padding = " ".repeat(width.saturating_sub(used).max(1));
+    if focused {
+        return Line::styled(format!("{label}{padding}{note}"), palette::focus());
+    }
+    Line::from(vec![
+        Span::raw(label.to_owned()),
+        Span::raw(padding),
+        Span::styled(note.to_owned(), palette::muted()),
+    ])
+}
+
 fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick: usize) {
     let block = Block::bordered()
         .title(" Settings ")
@@ -449,38 +484,54 @@ fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick:
     frame.render_widget(List::new(rail_items), rail);
 
     let list_focused = panel.depth == Depth::List;
-    let list_items = view
-        .rows
-        .iter()
-        .enumerate()
-        .map(|(index, row)| {
-            let focused = list_focused && index == panel.selected;
-            let line = match &row.kind {
-                // The dot keeps its own colour: it is the one thing in the row
-                // that is not about the row.
-                RowKind::Remote { status, .. } => {
-                    let width = usize::from(list_area.width).saturating_sub(2);
-                    let dot = format!("{} ", status.glyph());
-                    // The dot travels while it waits, so a slow address looks like
-                    // something happening rather than something stuck.
-                    let mut spans = if status.is_in_progress() {
-                        shimmer(&dot, tick)
-                    } else {
-                        vec![Span::styled(dot, status.style())]
-                    };
-                    spans.extend(chip(&row.label, width, focused).spans);
-                    Line::from(spans)
-                }
-                _ => chip(&row.label, usize::from(list_area.width), focused),
-            };
-            ListItem::new(if list_focused {
-                line
-            } else {
-                line.style(palette::muted())
+    if view.rows.is_empty() {
+        // An empty list says so where its rows would be, because that is where
+        // the key that fills it belongs.
+        if let Some(note) = panel.section.empty_note() {
+            frame.render_widget(
+                Paragraph::new(note)
+                    .style(palette::muted())
+                    .wrap(Wrap { trim: true }),
+                list_area,
+            );
+        }
+    } else {
+        let width = usize::from(list_area.width);
+        let list_items = view
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let focused = list_focused && index == panel.selected;
+                let line = match &row.kind {
+                    // The dot keeps its own colour: it is the one thing in the row
+                    // that is not about the row.
+                    RowKind::Remote { status, .. } => {
+                        let dot = format!("{} ", status.glyph());
+                        // The dot travels while it waits, so a slow address looks like
+                        // something happening rather than something stuck.
+                        let mut spans = if status.is_in_progress() {
+                            shimmer(&dot, tick)
+                        } else {
+                            vec![Span::styled(dot, status.style())]
+                        };
+                        spans.extend(chip(&row.label, width.saturating_sub(2), focused).spans);
+                        Line::from(spans)
+                    }
+                    RowKind::Agent {
+                        is_default: true, ..
+                    } => chip_noted(&row.label, "(default)", width, focused),
+                    _ => chip(&row.label, width, focused),
+                };
+                ListItem::new(if list_focused {
+                    line
+                } else {
+                    line.style(palette::muted())
+                })
             })
-        })
-        .collect::<Vec<_>>();
-    frame.render_widget(List::new(list_items), list_area);
+            .collect::<Vec<_>>();
+        frame.render_widget(List::new(list_items), list_area);
+    }
 
     // The column ahead of the focus is drawn dimmed rather than withheld, so the
     // shape of the next step is visible before it is taken. A row with no deeper
@@ -501,7 +552,6 @@ fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick:
     );
 }
 
-/// The third column: what is known about the highlighted row.
 /// The third column. `focused` is decided by the caller, because whether this
 /// column holds the focus is not the same question as how deep the focus is: a
 /// row with nothing inside it is already here.
@@ -514,182 +564,127 @@ fn detail(panel: &Panel, view: &View, focused: bool) -> Paragraph<'static> {
             Line::styled(text, palette::muted().bold())
         }
     };
-
-    match panel.section {
-        Section::Identity => match view.identities.get(panel.selected) {
-            Some(identity) => {
-                Paragraph::new(identity_lines(identity, heading)).wrap(Wrap { trim: true })
-            }
-            None => Paragraph::new(Span::styled("", palette::muted())),
-        },
-
-        _ => match panel.selected_row(view) {
-            Some(Row {
-                kind: RowKind::Base,
-                ..
-            }) => Paragraph::new(base_lines(view.base.as_ref(), heading)).wrap(Wrap { trim: true }),
-            Some(Row {
-                label,
-                kind:
-                    RowKind::Environment {
-                        setup, is_default, ..
-                    },
-            }) => {
-                let mut lines = vec![heading(label.clone())];
-                if *is_default {
-                    lines.push(Line::from(""));
-                    lines.push(Line::styled(
-                        "New tasks use this environment by default.",
-                        palette::good(),
-                    ));
-                }
+    let Some(row) = panel.selected_row(view) else {
+        return Paragraph::new(Span::styled("", palette::muted()));
+    };
+    let label = row.label.clone();
+    let lines = match &row.kind {
+        RowKind::Base => base_lines(view.base.as_ref(), heading),
+        RowKind::Environment {
+            setup, is_default, ..
+        } => {
+            let mut lines = vec![heading(label)];
+            if *is_default {
                 lines.push(Line::from(""));
-                lines.push(Line::styled("setup command", palette::muted()));
-                if setup.trim().is_empty() {
+                lines.push(Line::styled(
+                    "New tasks use this environment by default.",
+                    palette::good(),
+                ));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::styled("setup command", palette::muted()));
+            if setup.trim().is_empty() {
+                lines.push(Line::styled(
+                    "Nothing on top of the base. This environment is the base, by another name.",
+                    palette::muted(),
+                ));
+            } else {
+                lines.push(Line::from(setup.clone()));
+            }
+            lines
+        }
+        RowKind::Agent { kind, .. } => vec![
+            heading(label.clone()),
+            Line::from(""),
+            Line::styled(
+                match kind {
+                    AgentKind::Pi => "Pi by Earendil",
+                    AgentKind::Claude => "Claude by Anthropic",
+                },
+                palette::primary(),
+            ),
+        ],
+        RowKind::Credential(credential) => credential_lines(credential, heading),
+        RowKind::Switch { setting, on } => vec![
+            heading(label.clone()),
+            Line::from(""),
+            Line::styled(
+                if *on { "on" } else { "off" },
+                if *on {
+                    palette::good()
+                } else {
+                    palette::muted()
+                },
+            ),
+            Line::from(""),
+            Line::from(setting.description()),
+        ],
+        RowKind::Remote {
+            address,
+            remembered,
+            status,
+            needs_config,
+        } => {
+            let mut lines = vec![
+                heading(label),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("address   ", palette::muted()),
+                    address.clone().into(),
+                ]),
+            ];
+            match status {
+                RemoteStatus::Silent(reason) => lines.push(Line::styled(
+                    format!("did not answer: {reason}"),
+                    palette::bad(),
+                )),
+                RemoteStatus::Asking => lines.push(Line::styled("asking…", palette::attention())),
+                RemoteStatus::Syncing => lines.push(Line::styled(
+                    "syncing — it is building what it needs to run a task",
+                    palette::attention(),
+                )),
+                RemoteStatus::Changed => lines.push(Line::styled(
+                    "it answered with a different key than the one you have. \
+                         d forgets the old one, then enter accepts this one.",
+                    palette::bad(),
+                )),
+                RemoteStatus::Unknown | RemoteStatus::Reached => {}
+            }
+            if *needs_config && *status == RemoteStatus::Reached {
+                lines.push(Line::styled(
+                    "it does not hold this configuration yet — p sends it",
+                    palette::attention(),
+                ));
+            }
+            lines.push(Line::from(""));
+            match remembered {
+                Some(key) => {
+                    lines.push(Line::from(vec![
+                        Span::styled("key       ", palette::muted()),
+                        key.key.clone().into(),
+                    ]));
+                    lines.push(Line::from(vec![
+                        Span::styled("version   ", palette::muted()),
+                        key.version.clone().into(),
+                    ]));
+                    lines.push(Line::from(vec![
+                        Span::styled("met       ", palette::muted()),
+                        met_ago(key.seen_at_ms).into(),
+                    ]));
+                }
+                None => {
+                    lines.push(Line::styled("never met", palette::muted()));
                     lines.push(Line::styled(
-                        "Nothing on top of the base. This environment is the base, by another name.",
+                        "No key is remembered for this address yet. Press enter to reach it, \
+                             which records the key it answers with.",
                         palette::muted(),
                     ));
-                } else {
-                    lines.push(Line::from(setup.clone()));
                 }
-                Paragraph::new(lines).wrap(Wrap { trim: true })
             }
-            Some(Row {
-                label,
-                kind: RowKind::Agent { kind, in_use },
-            }) => {
-                let mut lines = vec![
-                    heading(label.clone()),
-                    Line::from(""),
-                    Line::styled(
-                        if *in_use { "in use" } else { "not in use" },
-                        if *in_use {
-                            palette::good()
-                        } else {
-                            palette::muted()
-                        },
-                    ),
-                    Line::from(""),
-                    Line::from(match kind {
-                        AgentKind::Pi => {
-                            "Altitude's own agent. It needs no provider login of its own."
-                        }
-                        AgentKind::Claude => {
-                            "Claude Code. Its login lives in Claude's profile on this machine, \
-                             and never travels with a task."
-                        }
-                    }),
-                ];
-                lines.push(Line::from(""));
-                lines.push(
-                    Line::from("Choose it to drive new tasks.".to_owned()).style(palette::muted()),
-                );
-                Paragraph::new(lines).wrap(Wrap { trim: true })
-            }
-            Some(Row {
-                label,
-                kind: RowKind::Switch { setting, on },
-            }) => Paragraph::new(vec![
-                heading(label.clone()),
-                Line::from(""),
-                Line::styled(
-                    if *on { "on" } else { "off" },
-                    if *on {
-                        palette::good()
-                    } else {
-                        palette::muted()
-                    },
-                ),
-                Line::from(""),
-                Line::from(setting.description()),
-            ])
-            .wrap(Wrap { trim: true }),
-            Some(Row {
-                label,
-                kind:
-                    RowKind::Remote {
-                        address,
-                        remembered,
-                        status,
-                        needs_config,
-                    },
-            }) => {
-                let mut lines = vec![
-                    heading(label.clone()),
-                    Line::from(""),
-                    Line::from(vec![
-                        Span::styled("address   ", palette::muted()),
-                        address.clone().into(),
-                    ]),
-                ];
-                match status {
-                    RemoteStatus::Silent(reason) => lines.push(Line::styled(
-                        format!("did not answer: {reason}"),
-                        palette::bad(),
-                    )),
-                    RemoteStatus::Asking => {
-                        lines.push(Line::styled("asking…", palette::attention()))
-                    }
-                    RemoteStatus::Syncing => lines.push(Line::styled(
-                        "syncing — it is building what it needs to run a task",
-                        palette::attention(),
-                    )),
-                    RemoteStatus::Changed => lines.push(Line::styled(
-                        "it answered with a different key than the one you have. \
-                         d forgets the old one, then enter accepts this one.",
-                        palette::bad(),
-                    )),
-                    RemoteStatus::Unknown | RemoteStatus::Reached => {}
-                }
-                if *needs_config && *status == RemoteStatus::Reached {
-                    lines.push(Line::styled(
-                        "it does not hold this configuration yet — p sends it",
-                        palette::attention(),
-                    ));
-                }
-                lines.push(Line::from(""));
-                match remembered {
-                    Some(key) => {
-                        lines.push(Line::from(vec![
-                            Span::styled("key       ", palette::muted()),
-                            key.key.clone().into(),
-                        ]));
-                        lines.push(Line::from(vec![
-                            Span::styled("version   ", palette::muted()),
-                            key.version.clone().into(),
-                        ]));
-                        lines.push(Line::from(vec![
-                            Span::styled("met       ", palette::muted()),
-                            met_ago(key.seen_at_ms).into(),
-                        ]));
-                    }
-                    None => {
-                        lines.push(Line::styled("never met", palette::muted()));
-                        lines.push(Line::styled(
-                            "No key is remembered for this address yet. Press enter to reach it, \
-                             which records the key it answers with.",
-                            palette::muted(),
-                        ));
-                    }
-                }
-                Paragraph::new(lines).wrap(Wrap { trim: true })
-            }
-            None => Paragraph::new(match panel.section {
-                Section::Environments => Span::styled(
-                    "Nothing configured. New tasks run in the base environment.",
-                    palette::muted(),
-                ),
-                Section::Remotes => Span::styled(
-                    "No remotes are configured. Press n to add one.",
-                    palette::muted(),
-                ),
-                Section::Agent => Span::styled("", palette::muted()),
-                Section::Interface => Span::styled("", palette::muted()),
-                Section::Identity => unreachable!("identity has no rows"),
-            }),
-        },
-    }
+            lines
+        }
+    };
+    Paragraph::new(lines).wrap(Wrap { trim: true })
 }
 
 /// The built-in environment, described rather than configured.
@@ -715,10 +710,14 @@ fn base_lines(
     ];
     match description.filter(|description| !description.alpine_release.is_empty()) {
         Some(description) => {
-            lines.push(Line::from(format!(
-                "New tasks are built from Alpine Linux {}, with these packages installed:",
-                description.alpine_release
-            )));
+            // What was read back from the build is accented, so the page says at
+            // a glance which parts of it are about this machine rather than about
+            // Altitude.
+            lines.push(Line::from(vec![
+                Span::raw("New tasks are built from Alpine Linux "),
+                Span::styled(description.alpine_release.clone(), palette::accent()),
+                Span::raw(", with these packages installed:"),
+            ]));
             lines.push(Line::from(""));
             // One package a line: a list of versions is read, not scanned.
             if description.packages.is_empty() {
@@ -731,16 +730,20 @@ fn base_lines(
                     description
                         .packages
                         .iter()
-                        .map(|package| Line::from(package.clone())),
+                        .map(|package| Line::styled(package.clone(), palette::accent())),
                 );
             }
             lines.push(Line::from(""));
-            lines.push(Line::from(format!(
-                "Built {}, and refreshed automatically every {} hours, so security patches \
-                 arrive without you doing anything.",
-                met_ago(description.built_at_ms),
-                REFRESH_AFTER.as_secs() / 3_600
-            )));
+            lines.push(Line::from(vec![
+                Span::raw("Built "),
+                Span::styled(met_ago(description.built_at_ms), palette::accent()),
+                Span::raw(", and refreshed automatically every "),
+                Span::styled(
+                    counted(REFRESH_AFTER.as_secs() as i64 / 3_600, "hour"),
+                    palette::accent(),
+                ),
+                Span::raw(", so security patches arrive without you doing anything."),
+            ]));
         }
         None => {
             lines.push(Line::from(
@@ -752,14 +755,14 @@ fn base_lines(
     lines
 }
 
-/// What is known about one identity.
-fn identity_lines(
-    identity: &Identity,
+/// What is known about one credential.
+fn credential_lines(
+    credential: &Credential,
     heading: impl Fn(String) -> Line<'static>,
 ) -> Vec<Line<'static>> {
-    let mut lines = vec![heading(identity.label.clone()), Line::from("")];
-    match &identity.kind {
-        IdentityKind::Installation {
+    let mut lines = vec![heading(credential.label.clone()), Line::from("")];
+    match &credential.kind {
+        CredentialKind::Installation {
             label,
             key,
             data_dir,
@@ -783,7 +786,7 @@ fn identity_lines(
                 palette::muted(),
             ));
         }
-        IdentityKind::Profile {
+        CredentialKind::Profile {
             profile,
             directory,
             present,
@@ -842,9 +845,18 @@ fn met_ago(seen_at_ms: i64) -> String {
     let minutes = now.saturating_sub(seen_at_ms).max(0) / 60_000;
     match minutes {
         0..=1 => "just now".to_owned(),
-        2..=59 => format!("{minutes} minutes ago"),
-        60..=2879 => format!("{} hours ago", minutes / 60),
-        _ => format!("{} days ago", minutes / 1_440),
+        2..=59 => format!("{} ago", counted(minutes, "minute")),
+        60..=2879 => format!("{} ago", counted(minutes / 60, "hour")),
+        _ => format!("{} ago", counted(minutes / 1_440, "day")),
+    }
+}
+
+/// A count and its unit, saying "1 hour" rather than "1 hours".
+fn counted(count: i64, unit: &str) -> String {
+    if count == 1 {
+        format!("1 {unit}")
+    } else {
+        format!("{count} {unit}s")
     }
 }
 
@@ -929,6 +941,31 @@ impl App {
     pub(in crate::tui) fn settings_view(&self) -> View {
         let default_environment = self.default_environment().to_owned();
         let rows = match self.panel.section {
+            Section::Interface => vec![Row {
+                label: Setting::KeyboardHints.label().to_owned(),
+                kind: RowKind::Switch {
+                    setting: Setting::KeyboardHints,
+                    on: self.keyboard_hints(),
+                },
+            }],
+            Section::Agents => [AgentKind::Pi, AgentKind::Claude]
+                .into_iter()
+                .map(|kind| Row {
+                    label: kind.to_string(),
+                    kind: RowKind::Agent {
+                        kind,
+                        is_default: self.agent() == Some(kind),
+                    },
+                })
+                .collect(),
+            Section::Credentials => self
+                .credentials()
+                .into_iter()
+                .map(|credential| Row {
+                    label: credential.label.clone(),
+                    kind: RowKind::Credential(credential),
+                })
+                .collect(),
             Section::Environments => self
                 .environments()
                 .into_iter()
@@ -983,43 +1020,23 @@ impl App {
                     }
                 })
                 .collect(),
-            Section::Agent => [AgentKind::Pi, AgentKind::Claude]
-                .into_iter()
-                .map(|kind| Row {
-                    label: kind.to_string(),
-                    kind: RowKind::Agent {
-                        kind,
-                        in_use: self.agent() == Some(kind),
-                    },
-                })
-                .collect(),
-            Section::Interface => vec![Row {
-                label: Setting::KeyboardHints.label().to_owned(),
-                kind: RowKind::Switch {
-                    setting: Setting::KeyboardHints,
-                    on: self.keyboard_hints(),
-                },
-            }],
-            Section::Identity => Vec::new(),
         };
-        let identities = self.identities();
         View {
             rows,
-            identities,
             base: self.base_description.clone(),
         }
     }
 
-    /// The identities this machine holds: the installation, then each login a
+    /// The credentials this machine holds: the installation, then each login a
     /// task is given.
     ///
     /// Names and places only. A credential is never read, and never shown.
-    fn identities(&self) -> Vec<Identity> {
-        let mut identities = Vec::new();
+    fn credentials(&self) -> Vec<Credential> {
+        let mut credentials = Vec::new();
         let identity = self.config.identity();
-        identities.push(Identity {
+        credentials.push(Credential {
             label: "Altitude".to_owned(),
-            kind: IdentityKind::Installation {
+            kind: CredentialKind::Installation {
                 label: identity
                     .as_ref()
                     .map(|identity| identity.label.clone())
@@ -1033,9 +1050,9 @@ impl App {
         });
         for profile in self.profiles.iter() {
             let directory = self.config.profile_dir(profile.profile);
-            identities.push(Identity {
+            credentials.push(Credential {
                 label: profile_label(profile.profile).to_owned(),
-                kind: IdentityKind::Profile {
+                kind: CredentialKind::Profile {
                     profile: profile.profile.to_owned(),
                     present: directory.is_dir(),
                     account: account_name(&directory),
@@ -1044,7 +1061,7 @@ impl App {
                 },
             });
         }
-        identities
+        credentials
     }
 
     /// The addresses the settings file configures.
@@ -1058,11 +1075,11 @@ impl App {
     /// How many rows the focused list holds, which is what moving needs.
     pub(in crate::tui) fn row_count(&self) -> usize {
         match self.panel.section {
-            Section::Environments => self.environments().len(),
-            Section::Agent => 2,
-            Section::Remotes => self.configured_remotes().len(),
             Section::Interface => 1,
-            Section::Identity => self.profiles.len() + 1,
+            Section::Agents => 2,
+            Section::Credentials => self.profiles.len() + 1,
+            Section::Environments => self.environments().len(),
+            Section::Remotes => self.configured_remotes().len(),
         }
     }
 

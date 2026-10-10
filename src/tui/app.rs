@@ -39,7 +39,9 @@ use crate::{
 use popups::confirm::PendingConfirm;
 use popups::new_task::{Host, NewTask};
 use popups::reply::{Prompt, PromptAction, Reply};
-use screens::settings::{Depth, Focus, Form, Panel, RowKind, Section, Setting, Target};
+use screens::settings::{
+    CredentialKind, Depth, Focus, Form, Panel, RowKind, Section, Setting, Target,
+};
 use screens::shell::Shell;
 
 /// What the keyboard is answering to, most immediate first.
@@ -388,13 +390,14 @@ impl App {
                     hints.push(Hint::new("e", "edit"));
                 } else if self.panel.section.grows() {
                     hints.push(Hint::new("enter", "edit"));
+                } else if self.panel.section == Section::Agents {
+                    hints.push(Hint::new("enter", "choose"));
+                } else if self.panel.section == Section::Interface {
+                    hints.push(Hint::new("enter", "toggle"));
                 }
                 if self.panel.section.grows() {
                     hints.push(Hint::new("n", "new"));
                     hints.push(Hint::new("d", "delete"));
-                }
-                if !self.panel.section.grows() && self.panel.section == Section::Interface {
-                    hints.push(Hint::new("enter", "toggle"));
                 }
                 hints.push(dismiss());
                 hints
@@ -910,6 +913,22 @@ impl App {
                 self.set_agent(kind);
                 return;
             }
+            // A credential is read here and set up where it belongs, so there is
+            // no page behind it.
+            RowKind::Credential(credential) => {
+                self.notice = Some(
+                    match credential.kind {
+                        CredentialKind::Installation { .. } => {
+                            "the key names this machine and is not edited here"
+                        }
+                        CredentialKind::Profile { .. } => {
+                            "a login is set up by signing in, not from here"
+                        }
+                    }
+                    .to_owned(),
+                );
+                return;
+            }
             RowKind::Environment { name, setup, .. } => Form::new(
                 Target::Environment {
                     original: name.clone(),
@@ -933,7 +952,10 @@ impl App {
         };
         // The question is built first: it borrows the name the target then moves.
         let (question, target) = match row.kind {
-            RowKind::Base | RowKind::Switch { .. } | RowKind::Agent { .. } => return,
+            RowKind::Base
+            | RowKind::Switch { .. }
+            | RowKind::Agent { .. }
+            | RowKind::Credential(_) => return,
             RowKind::Environment { name, .. } => (
                 format!("Delete the {name} environment?"),
                 Target::Environment { original: name },
