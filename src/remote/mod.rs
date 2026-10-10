@@ -1,26 +1,9 @@
-//! Reaching a remote from a client.
+//! Task transport between independently owned installations.
 //!
-//! Remotes are dialled by public key. The client↔remote path needs no inbound
-//! port and no public URL; tracker ingress is a separate concern.
-//!
-//! The serve side is in use: `altitude serve` binds a server, announces it, and
-//! records whoever connects. The dial side has no caller yet — nothing in the app
-//! reaches a remote until there is somewhere to configure one — and neither has
-//! moved a capsule, which is what this is ultimately for. Blobs are held in
-//! memory and a connection is made per operation.
-
-//! The link between machines, and the rules a transfer obeys.
-//!
-//! A task is owned by exactly one machine, and only that machine may run it. A transfer
-//! hands ownership to another machine, and two rules make that safe:
-//!
-//! 1. The source stops running the task before the payload leaves it.
-//! 2. The destination owns the task only once it holds the whole payload.
-//!
-//! Break either and two machines can run the same task. Keep both and the worst case is
-//! that nobody runs it for a moment, which is the failure that repairs itself. Authority
-//! is possession rather than a version number, because a counter would need a second
-//! party to be monotonic relative to and there is no shared record left to version.
+//! The source retains ownership while the destination synchronizes the exact base,
+//! imports the disk delta, and durably stages its history. The destination cannot
+//! run work until the source commits relinquishment. Prepared transfers bind all
+//! downloads and acknowledgements to one recipient and survive process restarts.
 
 mod announce;
 mod bundle;
@@ -45,7 +28,10 @@ pub use {
     identity::InstallationKey,
     keys::{RemoteKey, RemoteKeys},
     known::{RemoteKeyStatus, meet},
-    protocol::{CapsuleArchive, Handover, HandoverDraft, RecordedEvent, TaskRequest, TaskSummary},
+    protocol::{
+        EnvironmentArchive, Handover, HandoverDraft, HandoverRecord, RecordedEvent, TaskRequest,
+        TaskSummary, TransferArchive, TransferPart,
+    },
     server::LinkServer,
     takeover::bring_home,
 };

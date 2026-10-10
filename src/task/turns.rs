@@ -222,6 +222,11 @@ where
         &self,
         mut task: Task,
     ) -> Result<(Task, TaskAgentRun, CommandSession), TaskServiceError> {
+        if task.facts.execution_pause_reason == Some(TaskExecutionPauseReason::Transfer) {
+            return Err(TaskServiceError::Task(TaskError::OperationRejected(
+                "the task is awaiting transfer confirmation",
+            )));
+        }
         if !task.facts.sandbox_available {
             task = self.provision(task).await?;
         }

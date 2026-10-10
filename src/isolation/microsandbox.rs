@@ -123,6 +123,12 @@ impl MicrosandboxIsolation {
         mut options: SandboxOptions,
         pull_policy: PullPolicy,
     ) -> Result<(), IsolationError> {
+        let base = options
+            .environment_base
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| IsolationError::new(e.to_string()))?;
         let trusted = trust_host_roots(&mut options, self.config.data_dir());
         tracing::info!(sandbox_id = %id, network_enabled = options.network_enabled, cpus = CAPSULE_CPUS, memory_mib = CAPSULE_MEMORY_MIB, "creating sandbox");
         let result = match options.snapshot_path {
@@ -139,10 +145,14 @@ impl MicrosandboxIsolation {
                         restore.volume(mount.guest_path, |volume| volume.bind(mount.host_path));
                 }
                 match restore.restore().await {
-                    Ok(_) if options.environment.is_empty() => Ok(()),
+                    Ok(_) if options.environment.is_empty() && base.is_none() => Ok(()),
                     Ok(sandbox) => {
                         // Restore preserves captured env; supply this environment's values for future execs.
                         let mut modification = sandbox.modify().restart();
+                        if let Some(base) = &base {
+                            modification =
+                                modification.label(super::capsule::ENVIRONMENT_LABEL, base);
+                        }
                         for (key, value) in options.environment {
                             modification = modification.env(key, value);
                         }
@@ -779,11 +789,22 @@ impl IsolationEngine for MicrosandboxIsolation {
             .stop_with_timeout(Duration::from_secs(10))
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
+        let base = sandbox
+            .config()
+            .map_err(|e| IsolationError::new(e.to_string()))?
+            .spec
+            .labels
+            .get(super::capsule::ENVIRONMENT_LABEL)
+            .cloned();
         // Altitude keeps one checkpoint per capsule; each capture owns its snapshot group.
-        let snapshot = Snapshot::builder(&snapshot_name)
+        let mut capture = Snapshot::builder(&snapshot_name)
             .group(snapshot_name)
             .from_sandbox(&id)
-            .dest_dir(snapshots_dir)
+            .dest_dir(snapshots_dir);
+        if let Some(base) = base {
+            capture = capture.label(super::capsule::ENVIRONMENT_LABEL, base);
+        }
+        let snapshot = capture
             .create()
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;

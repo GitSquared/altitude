@@ -117,6 +117,7 @@ impl EnvironmentPlan {
             ),
             options: SandboxOptions {
                 snapshot_path: None,
+                environment_base: None,
                 network_enabled: true,
                 mounts: Vec::new(),
                 environment: vec![
@@ -318,15 +319,28 @@ pub(super) async fn provision(
     // Validate every recipe before creating directories or building images.
     let mut plan = EnvironmentPlan::compose(config, environment, recipes)?;
     plan.initialize(config)?;
-    plan.options.snapshot_path = Some(match snapshot {
-        Some(path) => path,
-        None => engine
-            .ensure_base(plan.recipe, progress)
-            .await?
-            .path
-            .to_string_lossy()
-            .into_owned(),
-    });
+    let (path, base) = match snapshot {
+        Some(path) => {
+            let base = super::capsule::EnvironmentBase::from_capsule(&path)
+                .await
+                .map_err(IsolationError::new)?;
+            (path, base)
+        }
+        None => {
+            let path = engine
+                .ensure_base(plan.recipe, progress)
+                .await?
+                .path
+                .to_string_lossy()
+                .into_owned();
+            let base = super::capsule::EnvironmentBase::from_environment(&path)
+                .await
+                .map_err(IsolationError::new)?;
+            (path, base)
+        }
+    };
+    plan.options.snapshot_path = Some(path);
+    plan.options.environment_base = Some(base);
     engine.create(id.clone(), plan.options).await?;
     if !plan.task_local_mounts.is_empty() {
         let mut command = String::from("set -eu\n");

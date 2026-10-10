@@ -85,18 +85,18 @@ impl ConfigBundle {
     /// at all, or when the copy here is newer than the one there.
     pub fn of(
         settings: String,
-        config_dir: &Path,
+        data_dir: &Path,
         profiles: &[&str],
         held: &[ProfileStamp],
     ) -> Result<Self, io::Error> {
         let mut sending = Vec::new();
         for profile in profiles {
-            let bundle = ProfileBundle::of(config_dir, profile)?;
-            let known = held
+            let bundle = ProfileBundle::of(data_dir, profile)?;
+            let is_missing_or_older = held
                 .iter()
                 .find(|stamp| stamp.profile == *profile)
                 .is_none_or(|stamp| stamp.edited_at_ms < bundle.edited_at_ms);
-            if known && !bundle.files.is_empty() {
+            if is_missing_or_older && !bundle.files.is_empty() {
                 sending.push(bundle);
             }
         }
@@ -112,8 +112,8 @@ impl ProfileBundle {
     ///
     /// A profile nobody has logged into is a directory that does not exist, which is
     /// not an error: it means there is nothing to send.
-    pub fn of(config_dir: &Path, profile: &str) -> Result<Self, io::Error> {
-        let root = config_dir.join(profile).join("profile");
+    pub fn of(data_dir: &Path, profile: &str) -> Result<Self, io::Error> {
+        let root = data_dir.join(profile).join("profile");
         let mut files = Vec::new();
         let mut edited_at_ms = 0;
         if root.is_dir() {
@@ -137,7 +137,7 @@ fn collect(
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
         let path = entry.path();
-        let meta = entry.metadata()?;
+        let meta = fs::symlink_metadata(&path)?;
         if meta.is_dir() {
             collect(root, &path, files, edited_at_ms)?;
             continue;

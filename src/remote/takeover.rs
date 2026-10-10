@@ -1,96 +1,203 @@
-//! Bringing a task home from the machine that owns it.
-//!
-//! A take-over is one thing from the operator's side and four from this one: ask the
-//! machine for the task, fetch the capsule it bundles, build the environment the capsule
-//! was taken against, and found the task here with the history it already had. None of
-//! that is the interface's business, so none of it is in the interface.
-
-use std::{env, fs};
-
-use microsandbox::Snapshot;
+//! Establish the exact environment, stage a usable capsule, then transfer ownership.
 
 use crate::{
     config::DEFAULT_PORT,
-    isolation::{Environment, IsolationEngine},
-    remote::{LinkClient, RemoteKeys, TaskSummary, meet},
-    task::{TaskEventLoop, TaskHistoryEvent},
+    isolation::{IsolationEngine, capsule::verify_environment},
+    remote::{
+        HandoverRecord, LinkClient, RemoteKeyStatus, RemoteKeys, TaskSummary, TransferPart, meet,
+    },
+    task::{Task, TaskArrival, TaskEventLoop, TaskHistoryEvent},
 };
+use microsandbox::Snapshot;
+use std::fs;
 
-/// Ask a machine for a task, and found it here.
-///
-/// The whole of a take-over that happens away from the interface: ask, fetch, unpack and
-/// found. What the interface does with the result is the interface's business, which is
-/// why none of this is in it.
 pub async fn bring_home<E>(
     address: &str,
     summary: &TaskSummary,
     keys: &RemoteKeys,
     client: &LinkClient,
-    environments: &[Environment],
     event_loop: &TaskEventLoop<E>,
 ) -> Result<String, String>
 where
     E: IsolationEngine + Clone + 'static,
 {
-    let environment = environments
-        .iter()
-        .find(|environment| environment.name == summary.environment)
-        .cloned()
-        .ok_or_else(|| format!("this machine has no {} environment", summary.environment))?;
-    let remembered = keys.remembered(address).await.ok().flatten();
+    let remembered = keys.remembered(address).await.map_err(|e| e.to_string())?;
     let sighting = meet(address, DEFAULT_PORT, remembered.as_deref())
         .await
-        .map_err(|error| error.to_string())?;
-    // Arrivals land in their own place, so a machine that both serves and takes over
-    // is not reading an archive it is still writing.
-    let landing = env::temp_dir()
-        .join("altitude-incoming")
-        .join(format!("{}.tar.zst", summary.id));
+        .map_err(|e| e.to_string())?;
+    if sighting.key_status == RemoteKeyStatus::Changed {
+        return Err("the remote's key changed; approve its identity before taking a task".into());
+    }
+    let peer: iroh::EndpointAddr = sighting.ticket.into();
     let handover = client
-        .take_task(sighting.ticket, &summary.id, &landing)
+        .prepare_take(&peer, &summary.id)
         .await
-        .map_err(|error| error.to_string())?;
-    // What travelled is the layers above the environment, so that environment has to
-    // exist here first: the same work a first run would do, done now because the capsule
-    // needs something to land on, and its snapshot is what resolves the layers that
-    // stayed behind.
-    let base = event_loop
-        .prepare_environment(&environment, handover.draft.agent)
-        .await
-        .map_err(|error| error.to_string())?;
-    // The capsule is loaded into this machine's own store, and where it landed is
-    // what the task will run from.
-    let capsule = match handover.capsule.len {
-        0 => None,
-        _ => {
-            let loaded = Snapshot::load_with_base(&landing, None, &base.to_string_lossy())
-                .await
-                .map_err(|error| error.to_string())?;
-            Some(
-                loaded
-                    .path()
-                    .map_err(|error| error.to_string())?
-                    .to_string_lossy()
-                    .into_owned(),
-            )
+        .map_err(|e| e.to_string())?;
+    if handover.task_id != summary.id {
+        return Err("the remote prepared another task".into());
+    }
+    uuid::Uuid::parse_str(&handover.transfer_id)
+        .map_err(|_| "invalid transfer identifier".to_owned())?;
+    // The staged record survives a lost acknowledgement or either process restarting.
+    for task in event_loop.list().await.map_err(|e| e.to_string())? {
+        let history = event_loop
+            .events(&task.id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let is_arrival = history.iter().any(|(_, event)| {
+            matches!(event,
+            TaskHistoryEvent::TransferStaged { transfer_id, peer: source, .. }
+            if transfer_id == &handover.transfer_id && source == &peer.id.to_string())
+        });
+        if !is_arrival {
+            continue;
         }
-    };
-    let history: Vec<(i64, TaskHistoryEvent)> = handover
-        .events
-        .iter()
-        .map(|recorded| (recorded.recorded_at_ms, recorded.event.clone()))
-        .collect();
-    let task = event_loop
-        .land(
-            handover.draft.intent.clone(),
-            environment,
-            handover.draft.agent,
-            handover.draft.agent_conversation_id.clone(),
-            &history,
-            capsule,
+        let is_landed = history.iter().any(|(_, event)| matches!(event,
+            TaskHistoryEvent::TransferLanded { transfer_id, .. } if transfer_id == &handover.transfer_id));
+        if !is_landed {
+            complete_landing(&peer, &handover.transfer_id, client, event_loop, &task).await?;
+        }
+        return Ok(task.id);
+    }
+    let landing = tempfile::tempdir().map_err(|e| e.to_string())?;
+    if handover.history.len > super::protocol::MAX_BLOB_BYTES {
+        return Err("task history exceeds the transfer limit".into());
+    }
+    let history_path = landing.path().join("history.json");
+    client
+        .fetch_part(
+            &peer,
+            &handover.transfer_id,
+            TransferPart::History,
+            &handover.history,
+            &history_path,
         )
         .await
-        .map_err(|error| error.to_string())?;
-    let _ = fs::remove_file(&landing);
+        .map_err(|e| e.to_string())?;
+    let record: HandoverRecord =
+        serde_json::from_reader(fs::File::open(history_path).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    let environment = record.draft.environment;
+    event_loop
+        .prepare_environment(&environment, record.draft.agent)
+        .await
+        .map_err(|e| e.to_string())?;
+    let base = match &handover.environment {
+        Some(base) => {
+            let cached = Snapshot::open(&base.snapshot_id)
+                .await
+                .ok()
+                .filter(|snapshot| snapshot.digest() == base.descriptor_digest);
+            let snapshot = match cached {
+                Some(snapshot) => snapshot,
+                None => {
+                    let path = landing.path().join("environment.tar.zst");
+                    client
+                        .fetch_part(
+                            &peer,
+                            &handover.transfer_id,
+                            TransferPart::Environment,
+                            &base.archive,
+                            &path,
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let snapshot = Snapshot::load(&path, None)
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .open()
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    if snapshot.digest() != base.descriptor_digest
+                        || snapshot.manifest().snapshot_id.to_string() != base.snapshot_id
+                    {
+                        return Err(
+                            "the environment descriptor differs from the prepared base".into()
+                        );
+                    }
+                    snapshot
+                }
+            };
+            verify_environment(&snapshot, &base.layer_roots).await?;
+            Some(snapshot)
+        }
+        None if handover.capsule.len == 0 => None,
+        None => return Err("the disk capsule has no exact environment".into()),
+    };
+    let capsule = if handover.capsule.len == 0 {
+        None
+    } else {
+        let path = landing.path().join("capsule.tar.zst");
+        client
+            .fetch_part(
+                &peer,
+                &handover.transfer_id,
+                TransferPart::Capsule,
+                &handover.capsule,
+                &path,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        let base = base
+            .as_ref()
+            .ok_or_else(|| "the environment is missing".to_owned())?;
+        let loaded = Snapshot::load_with_base(
+            &path,
+            None,
+            &base.path().map_err(|e| e.to_string())?.to_string_lossy(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        Some(
+            loaded
+                .path()
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .into_owned(),
+        )
+    };
+    let history = record
+        .events
+        .into_iter()
+        .map(|recorded| (recorded.recorded_at_ms, recorded.event))
+        .collect::<Vec<_>>();
+    let task = event_loop
+        .land(TaskArrival {
+            intent: record.draft.intent,
+            environment,
+            agent: record.draft.agent,
+            conversation: record.draft.agent_conversation_id,
+            history,
+            capsule,
+            transfer_id: handover.transfer_id.clone(),
+            peer: peer.id.to_string(),
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    complete_landing(&peer, &handover.transfer_id, client, event_loop, &task).await?;
     Ok(task.id)
+}
+
+async fn complete_landing<E>(
+    peer: &iroh::EndpointAddr,
+    transfer_id: &str,
+    client: &LinkClient,
+    event_loop: &TaskEventLoop<E>,
+    task: &Task,
+) -> Result<(), String>
+where
+    E: IsolationEngine + Clone + 'static,
+{
+    event_loop
+        .verify_landing(task.clone())
+        .await
+        .map_err(|e| e.to_string())?;
+    client
+        .confirm_take(peer, transfer_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    event_loop
+        .finish_transfer(&task.id, transfer_id)
+        .await
+        .map_err(|e| e.to_string())
 }

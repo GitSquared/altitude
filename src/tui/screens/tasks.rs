@@ -256,6 +256,7 @@ fn card_status(
         TaskExecutionStatus::Paused => Line::from(match task.facts.execution_pause_reason {
             Some(TaskExecutionPauseReason::AwaitingOperator) => "paused · awaiting operator",
             Some(TaskExecutionPauseReason::ApplicationShutdown) => "paused · app stopped",
+            Some(TaskExecutionPauseReason::Transfer) => "paused · transferring",
             None => "paused",
         })
         .style(palette::attention()),

@@ -90,6 +90,7 @@ impl TaskStore {
         &self,
         draft: TaskDraft,
         history: Option<&[(i64, TaskHistoryEvent)]>,
+        arrival: &[TaskHistoryEvent],
     ) -> Result<Task, TaskError> {
         let TaskDraft {
             intent,
@@ -143,6 +144,7 @@ impl TaskStore {
                 .await?;
             }
         }
+        Self::write_events(&mut transaction, &task_id, arrival).await?;
         let task = Self::read_task(&mut transaction, &task_id).await?;
         transaction.commit().await.map_err(TaskError::Database)?;
         Ok(task)
@@ -548,6 +550,36 @@ impl TaskStore {
         let task = Self::read_task(&mut transaction, &task_id).await?;
         transaction.commit().await.map_err(TaskError::Database)?;
         Ok(task)
+    }
+
+    /// Commit the ownership change and removal together so an acknowledgement can be retried.
+    pub async fn relinquish(
+        &self,
+        task_id: &str,
+        transfer_id: &str,
+        recipient: &str,
+    ) -> Result<(), TaskError> {
+        let mut transaction = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(TaskError::Database)?;
+        Self::write_events(
+            &mut transaction,
+            task_id,
+            &[TaskHistoryEvent::TransferCommitted {
+                transfer_id: transfer_id.to_owned(),
+                recipient: recipient.to_owned(),
+            }],
+        )
+        .await?;
+        sqlx::query("UPDATE tasks SET removed_at_ms = ? WHERE id = ?")
+            .bind(now_ms())
+            .bind(task_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(TaskError::Database)?;
+        transaction.commit().await.map_err(TaskError::Database)
     }
 
     /// Removes a task from play, keeping its record.

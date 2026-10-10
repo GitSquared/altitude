@@ -2,8 +2,8 @@ use crate::{
     agent::{AgentEngines, AgentError, AgentKind},
     config::InstallationIdentity,
     isolation::{
-        EnvironmentDescription, EnvironmentProgress, IsolationEngine, IsolationError, ProfileMount,
-        ProfileSummary, guest_path,
+        Environment, EnvironmentDescription, EnvironmentProgress, IsolationEngine, IsolationError,
+        ProfileMount, ProfileSummary, guest_path,
     },
     vcs::GitHub,
 };
@@ -24,6 +24,17 @@ pub use state::*;
 pub use store::{TaskDraft, TaskStore};
 
 use progress::EnvironmentProgressRegistry;
+
+pub struct TaskArrival {
+    pub intent: String,
+    pub environment: Environment,
+    pub agent: AgentKind,
+    pub conversation: Option<String>,
+    pub history: Vec<(i64, TaskHistoryEvent)>,
+    pub capsule: Option<String>,
+    pub transfer_id: String,
+    pub peer: String,
+}
 
 #[derive(Clone)]
 pub struct TaskService<E> {

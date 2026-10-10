@@ -7,8 +7,8 @@ use iroh::{Endpoint, EndpointAddr, EndpointId, endpoint::Connection};
 use super::{
     LinkResult,
     protocol::{
-        BlobHash, CHUNK_BYTES, CapsuleArchive, Handover, LINK_ALPN, LinkRequest, LinkResponse,
-        MAX_BLOB_BYTES, TaskRequest, TaskSummary, builder, read_body, read_frame, write_frame,
+        BlobHash, CHUNK_BYTES, Handover, LINK_ALPN, LinkRequest, LinkResponse, TaskRequest,
+        TaskSummary, TransferArchive, builder, read_body, read_frame, write_frame,
     },
 };
 
@@ -81,9 +81,16 @@ pub struct LinkClient {
 
 impl LinkClient {
     /// Binds a client endpoint. Nothing about a remote is needed to do this.
-    pub async fn bind() -> LinkResult<Self> {
-        let endpoint = builder().bind().await?;
+    pub async fn bind(identity: &super::InstallationKey) -> LinkResult<Self> {
+        let endpoint = builder()
+            .secret_key(identity.secret_key().clone())
+            .bind()
+            .await?;
         Ok(Self { endpoint })
+    }
+
+    pub async fn shutdown(&self) {
+        self.endpoint.close().await;
     }
 
     /// Dials a remote, and closes the connection however the exchange ends.
@@ -140,7 +147,9 @@ impl LinkClient {
         write_frame(&mut send, request).await?;
         send.finish()?;
         match read_frame::<_, LinkResponse>(&mut recv).await? {
-            LinkResponse::Capsule { len } => read_body(&mut recv, len, MAX_BLOB_BYTES).await,
+            LinkResponse::TransferPiece { len } => {
+                read_body(&mut recv, len, super::protocol::TRANSFER_PIECE_BYTES).await
+            }
             LinkResponse::Rejected { reason } => Err(reason.into()),
             other => Err(format!("unexpected answer: {other:?}").into()),
         }
@@ -155,38 +164,7 @@ impl LinkClient {
         }
     }
 
-    /// Takes a task over from a remote, and returns what has to continue here.
-    ///
-    /// The remote stops running the task and bundles its capsule. This fetches the
-    /// bundle in stretches, checks it against the digest the remote gave, and only then
-    /// says it holds all of it. Until that moment the remote is still the owner, which
-    /// is the failure that repairs itself: nobody runs the task for a moment, and the
-    /// task is still where it was.
-    pub async fn take_task(
-        &self,
-        peer: impl Into<EndpointAddr>,
-        task_id: &str,
-        landing: &Path,
-    ) -> LinkResult<Handover> {
-        let peer = peer.into();
-        let handover = self.ask_take(&peer, task_id).await?;
-        if handover.capsule.len == 0 {
-            self.confirm_take(&peer, task_id).await?;
-            return Ok(handover);
-        }
-        self.fetch_capsule(&peer, task_id, &handover.capsule, landing)
-            .await?;
-        self.confirm_take(&peer, task_id).await?;
-        Ok(handover)
-    }
-
-    /// How much of a capsule archive to ask for at a time.
-    ///
-    /// Large enough that a capsule is not thousands of round trips, and well inside
-    /// what a single frame can carry.
-    const CAPSULE_STRETCH: u64 = 4 << 20;
-
-    async fn ask_take(&self, peer: &EndpointAddr, task_id: &str) -> LinkResult<Handover> {
+    pub async fn prepare_take(&self, peer: &EndpointAddr, task_id: &str) -> LinkResult<Handover> {
         match self
             .say(
                 peer.clone(),
@@ -202,11 +180,12 @@ impl LinkClient {
         }
     }
 
-    async fn fetch_capsule(
+    pub async fn fetch_part(
         &self,
         peer: &EndpointAddr,
-        task_id: &str,
-        capsule: &CapsuleArchive,
+        transfer_id: &str,
+        part: super::TransferPart,
+        archive: &TransferArchive,
         landing: &Path,
     ) -> LinkResult<()> {
         if let Some(parent) = landing.parent() {
@@ -215,44 +194,41 @@ impl LinkClient {
         let mut file = fs::File::create(landing)?;
         let mut hasher = blake3::Hasher::new();
         let mut offset = 0;
-        while offset < capsule.len {
-            let len = Self::CAPSULE_STRETCH.min(capsule.len - offset);
+        while offset < archive.len {
+            let len = super::protocol::TRANSFER_PIECE_BYTES.min(archive.len - offset);
             let bytes = self
                 .ask_for_body(
                     peer.clone(),
-                    &LinkRequest::FetchCapsule {
-                        task_id: task_id.to_owned(),
+                    &LinkRequest::FetchTransferPart {
+                        transfer_id: transfer_id.to_owned(),
+                        part,
                         offset,
                         len,
                     },
                 )
                 .await?;
-            if bytes.is_empty() {
-                break;
+            if bytes.len() as u64 != len {
+                return Err("the transfer piece was truncated".into());
             }
             hasher.update(&bytes);
             file.write_all(&bytes)?;
-            offset += bytes.len() as u64;
+            offset += len;
         }
-        file.flush()?;
+        file.sync_all()?;
         let arrived = hasher.finalize().to_hex().to_string();
-        tracing::info!(task = %task_id, bytes = offset, "fetched a capsule");
-        if arrived != capsule.digest {
-            return Err(format!(
-                "the capsule arrived as {arrived} rather than {}",
-                capsule.digest
-            )
-            .into());
+        if arrived != archive.digest {
+            return Err(format!("archive digest mismatch: {arrived}").into());
         }
+        tracing::info!(%transfer_id, ?part, bytes = offset, "fetched a transfer archive");
         Ok(())
     }
 
-    async fn confirm_take(&self, peer: &EndpointAddr, task_id: &str) -> LinkResult<()> {
+    pub async fn confirm_take(&self, peer: &EndpointAddr, transfer_id: &str) -> LinkResult<()> {
         match self
             .say(
                 peer.clone(),
                 &LinkRequest::HandedOver {
-                    task_id: task_id.to_owned(),
+                    transfer_id: transfer_id.to_owned(),
                 },
             )
             .await?
