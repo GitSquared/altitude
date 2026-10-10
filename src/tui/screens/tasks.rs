@@ -36,9 +36,16 @@ fn grid(area: Rect) -> (usize, u16, u16) {
 }
 
 pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
-    let (columns, card_width, height) = grid(area);
+    // The list sits in a frame like every other screen, and the grid is laid out in
+    // what the frame leaves rather than in the whole area.
+    let panel = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .padding(Padding::uniform(1));
+    let content = panel.inner(area);
+    frame.render_widget(panel, area);
+    let (columns, card_width, height) = grid(content);
     app.grid_columns = columns;
-    draw_tasks(frame, area, app, columns, card_width, height);
+    draw_tasks(frame, content, app, columns, card_width, height);
 }
 
 fn draw_tasks(

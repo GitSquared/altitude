@@ -23,8 +23,12 @@ pub fn accent() -> Style {
 }
 
 /// What you are looking at, named.
+///
+/// White rather than the accent, because the accent is for the edge of the thing you
+/// are on: a heading is not a caret, and a screen whose headings and focus share a
+/// colour makes you look for the caret.
 pub fn heading() -> Style {
-    accent().add_modifier(Modifier::BOLD)
+    Style::new().fg(Color::White).add_modifier(Modifier::BOLD)
 }
 
 /// Text that is the point of the screen rather than its furniture.
