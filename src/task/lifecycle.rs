@@ -8,6 +8,8 @@ use crate::{
     vcs::GitHub,
 };
 use futures_util::future::join_all;
+
+use crate::isolation::Unwatched;
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -23,18 +25,18 @@ where
 {
     /// Start a task, driven by `agent` in `environment`.
     ///
-    /// The two are independent: the environment says what is installed, and the
-    /// agent says what works in it.
+    /// Found a task, with the history it already had if it has one.
     ///
-    /// `requester` is whose work this is. It is the machine's own installation unless
-    /// a client asked for the task, in which case it is the client's: a delegated
-    /// task is the operator's work on somebody else's machine, and its record should
-    /// say so.
-    /// Found a task here, continuing a conversation it was already having.
+    /// The environment and the agent are independent: the environment says what is
+    /// installed, and the agent says what works in it.
     ///
-    /// A task taken over from another machine was in the middle of a conversation, and
-    /// the agent should pick it up rather than meet the work for the first time. With
-    /// no conversation given, this is a task starting fresh.
+    /// `requester` is whose work this is. It is the machine's own installation unless a
+    /// client asked for the task, in which case it is the client's: a delegated task is
+    /// the operator's work on somebody else's machine, and its record should say so.
+    ///
+    /// A task taken over from another machine was in the middle of a conversation and
+    /// has a history, so the agent picks up where it left off and the record continues
+    /// rather than starting again.
     pub async fn adopt(
         &self,
         intent: String,
@@ -42,25 +44,30 @@ where
         agent: AgentKind,
         conversation: Option<String>,
         requester: Option<InstallationIdentity>,
+        history: Option<&[(i64, TaskHistoryEvent)]>,
     ) -> Result<Task, TaskServiceError> {
         let requester = requester.unwrap_or_else(|| self.identity.clone());
         self.store
-            .create(TaskDraft {
-                intent,
-                environment,
-                identity_id: requester.id.clone(),
-                identity_label: requester.label.clone(),
-                // The machine that runs it, which is this one. A task belongs to the
-                // machine running it and to nothing else.
-                host: self.identity.label.clone(),
-                agent_kind: Some(agent),
-                agent_conversation_id: conversation
-                    .or_else(|| Some(self.agents.engine(agent).new_conversation_id())),
-            })
+            .create(
+                TaskDraft {
+                    intent,
+                    environment,
+                    identity_id: requester.id.clone(),
+                    identity_label: requester.label.clone(),
+                    // The machine that runs it, which is this one. A task belongs to the
+                    // machine running it and to nothing else.
+                    host: self.identity.label.clone(),
+                    agent_kind: Some(agent),
+                    agent_conversation_id: conversation
+                        .or_else(|| Some(self.agents.engine(agent).new_conversation_id())),
+                },
+                history,
+            )
             .await
             .map_err(TaskServiceError::Task)
     }
 
+    /// Found a task here that has no history yet.
     pub async fn create(
         &self,
         intent: String,
@@ -68,20 +75,33 @@ where
         agent: AgentKind,
         requester: Option<InstallationIdentity>,
     ) -> Result<Task, TaskServiceError> {
-        self.adopt(intent, environment, agent, None, requester)
+        self.adopt(intent, environment, agent, None, requester, None)
             .await
     }
 
-    /// Append history that happened on another machine, at the times it happened.
-    pub async fn record_borrowed_history(
+    /// Build what a task's environment needs, and say where its snapshot is.
+    ///
+    /// A capsule from another machine is only the layers above the environment it was
+    /// built on, because every machine builds that environment for itself from the same
+    /// configuration. Landing one needs that environment here first, and the snapshot it
+    /// lands on is what resolves the layers that stayed behind.
+    pub async fn prepare_environment(
         &self,
-        task_id: &str,
-        events: &[(i64, TaskHistoryEvent)],
-    ) -> Result<Task, TaskServiceError> {
-        self.store
-            .append_borrowed_events(task_id, events)
+        environment: &Environment,
+        agent: AgentKind,
+    ) -> Result<PathBuf, TaskServiceError> {
+        self.isolation
+            .ensure_environment(
+                environment.clone(),
+                vec![
+                    self.agents.engine(agent).environment_recipe(),
+                    GitHub::environment_recipe(),
+                ],
+                &Unwatched,
+            )
             .await
-            .map_err(TaskServiceError::Task)
+            .map(|snapshot| snapshot.path)
+            .map_err(TaskServiceError::Isolation)
     }
 
     /// Record that this task's capsule is here, and where it is.

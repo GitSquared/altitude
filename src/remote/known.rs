@@ -46,7 +46,6 @@ impl RemoteKeyStatus {
 /// A remote, as met: what it says about itself, and how it compares to memory.
 pub struct Sighting {
     /// Where to reach it.
-    #[allow(dead_code)] // A check reads what it said; the transfer needs where it is.
     pub ticket: RemoteTicket,
     /// What it said.
     pub announcement: Announcement,

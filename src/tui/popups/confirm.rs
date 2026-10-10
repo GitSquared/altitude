@@ -52,7 +52,8 @@ impl Confirm {
     pub fn hints(&self) -> Vec<chrome::Hint> {
         vec![
             chrome::Hint::new("tab", "switch"),
-            chrome::Hint::new("enter", "confirm"),
+            chrome::Hint::new("enter", "the one chosen"),
+            chrome::Hint::new("d", "go through"),
             chrome::Hint::new("esc", "cancel"),
         ]
     }

@@ -10,8 +10,8 @@ use std::{
 use crate::config::Config;
 
 use super::{
-    BaseSandboxRecipe, CommandEvent, EnvironmentProgressSink, IsolationEngine, IsolationError,
-    SandboxMount, SandboxOptions, SetupStep,
+    BaseSandboxRecipe, BaseSandboxSnapshot, CommandEvent, EnvironmentProgressSink, IsolationEngine,
+    IsolationError, SandboxMount, SandboxOptions, SetupStep,
 };
 
 /// The current Alpine environment runs as root, so home-relative requirements
@@ -300,11 +300,10 @@ pub async fn ensure_environment(
     environment: Environment,
     recipes: Vec<EnvironmentRecipe>,
     progress: &dyn EnvironmentProgressSink,
-) -> Result<(), IsolationError> {
+) -> Result<BaseSandboxSnapshot, IsolationError> {
     let mut plan = EnvironmentPlan::compose(config, environment, recipes)?;
     plan.initialize(config)?;
-    engine.ensure_base(plan.recipe, progress).await?;
-    Ok(())
+    engine.ensure_base(plan.recipe, progress).await
 }
 
 pub(super) async fn provision(

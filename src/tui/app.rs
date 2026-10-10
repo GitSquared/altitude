@@ -7,15 +7,13 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    env, fs, io, mem,
+    fs, io, mem,
     time::{Duration, Instant},
 };
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{DefaultTerminal, style::Style};
 use tokio::sync::mpsc;
-
-use microsandbox::Snapshot;
 
 use crate::{
     agent::AgentKind,
@@ -25,11 +23,11 @@ use crate::{
     },
     remote::{
         Announcement, ConfigBundle, LinkClient, RemoteKey, RemoteKeyStatus, RemoteKeys,
-        RemoteState, TaskRequest, TaskSummary, meet,
+        RemoteState, TaskRequest, TaskSummary, bring_home, meet,
     },
     task::{
         Task, TaskEventLoop, TaskExecutionMode, TaskExecutionStatus, TaskExecutionUpdate,
-        TaskHistoryEvent, TaskOperatorSignal, TaskService, TaskServiceError,
+        TaskOperatorSignal, TaskService, TaskServiceError,
     },
     tui::keys::{is_dismiss, is_remove},
     tui::popups,
@@ -178,6 +176,8 @@ pub struct App {
     /// Where `config.toml` lives, so the manage view can persist changes.
     pub(in crate::tui) config: Config,
     pub(in crate::tui) settings_file: Option<SettingsFile>,
+    /// The one link to remotes, shared by every exchange rather than bound per dial.
+    pub(in crate::tui) link: LinkClient,
     /// The settings panel: environments, remotes, the interface, and the identity.
     pub(in crate::tui) panel: Panel,
     /// What the keyboard is answering to.
@@ -213,6 +213,7 @@ impl App {
         config: Config,
         settings: Result<SettingsFile, SettingsError>,
         remote_keys: RemoteKeys,
+        link: LinkClient,
     ) -> Self {
         let (settings_file, settings_error) = match settings {
             Ok(file) => (Some(file), None),
@@ -237,6 +238,7 @@ impl App {
             selected_signal_action: 0,
             operator_signal_scroll: 0,
             config,
+            link,
             settings_file,
             panel: Panel::new(),
             foreground: Foreground::default(),
@@ -405,7 +407,7 @@ impl App {
                 dismiss(),
             ],
             // A shell takes every key there is, so it has no `?` to offer.
-            Foreground::Shell(_) => vec![Hint::new("ctrl-c", "hand back to autopilot")],
+            Foreground::Shell(_) => vec![Hint::new("ctrl-a", "hand back to autopilot")],
             Foreground::Tasks => {
                 // Only what there is something to do it to.
                 let mut hints = vec![Hint::new("c", "create"), Hint::new("s", "settings")];
@@ -542,11 +544,12 @@ impl App {
             return;
         }
         let keys = self.remote_keys.clone();
+        let client = self.link.clone();
         let reads = reads.clone();
         tokio::spawn(async move {
             let mut held = Vec::new();
             for address in addresses {
-                match Self::read_tasks(&address, &keys).await {
+                match Self::read_tasks(&address, &keys, &client).await {
                     Ok(tasks) => held.extend(tasks.into_iter().map(|summary| HeldTask {
                         address: address.clone(),
                         summary,
@@ -566,7 +569,7 @@ impl App {
     /// history of what was decided about it — and only then is the remote told it is no
     /// longer the owner. Everything after that is the ordinary take-over of a task that
     /// is here, because by then it is.
-    fn bring_home<E>(
+    fn ask_for_task<E>(
         &mut self,
         held: &HeldTask,
         event_loop: &TaskEventLoop<E>,
@@ -577,83 +580,29 @@ impl App {
         let address = held.address.clone();
         let summary = held.summary.clone();
         let keys = self.remote_keys.clone();
+        let client = self.link.clone();
         let environments = self.environments();
         let event_loop = event_loop.clone();
         let landings = landings.clone();
         self.notice = Some(format!("asking {address} for the task…"));
         tokio::spawn(async move {
-            let outcome =
-                Self::carry_home(&address, &summary, &keys, &environments, &event_loop).await;
+            let outcome = bring_home(
+                &address,
+                &summary,
+                &keys,
+                &client,
+                &environments,
+                &event_loop,
+            )
+            .await;
+            // A take-over runs away from the interface, so where it stopped is a log
+            // line rather than only a notice that has already been replaced.
+            match &outcome {
+                Ok(id) => tracing::info!(task = %id, address, "brought a task home"),
+                Err(error) => tracing::warn!(%error, address, "could not bring a task home"),
+            }
             let _ = landings.send(outcome);
         });
-    }
-
-    /// The asking, the carrying, and the founding, away from the interface.
-    async fn carry_home<E>(
-        address: &str,
-        summary: &TaskSummary,
-        keys: &RemoteKeys,
-        environments: &[Environment],
-        event_loop: &TaskEventLoop<E>,
-    ) -> Result<String, String>
-    where
-        E: IsolationEngine + Clone + 'static,
-    {
-        let environment = environments
-            .iter()
-            .find(|environment| environment.name == summary.environment)
-            .cloned()
-            .ok_or_else(|| format!("this machine has no {} environment", summary.environment))?;
-        let remembered = keys.remembered(address).await.ok().flatten();
-        let sighting = meet(address, DEFAULT_PORT, remembered.as_deref())
-            .await
-            .map_err(|error| error.to_string())?;
-        let client = LinkClient::bind()
-            .await
-            .map_err(|error| error.to_string())?;
-        let landing = env::temp_dir()
-            .join("altitude-transfers")
-            .join(format!("{}.tar.zst", summary.id));
-        let handover = client
-            .take_task(sighting.ticket, &summary.id, &landing)
-            .await
-            .map_err(|error| error.to_string())?;
-        // The capsule is loaded into this machine's own store, and where it landed is
-        // what the task will run from. A machine that has not built this environment
-        // cannot unpack a capsule that was taken against it, and says so here.
-        let capsule = match handover.capsule.len {
-            0 => None,
-            _ => {
-                let loaded = Snapshot::load(&landing, None)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                Some(
-                    loaded
-                        .path()
-                        .map_err(|error| error.to_string())?
-                        .to_string_lossy()
-                        .into_owned(),
-                )
-            }
-        };
-        let history: Vec<(i64, TaskHistoryEvent)> = handover
-            .events
-            .iter()
-            .map(|recorded| (recorded.recorded_at_ms, recorded.event.clone()))
-            .collect();
-        let task = event_loop
-            .land(
-                handover.draft.intent.clone(),
-                environment,
-                handover.draft.agent,
-                handover.draft.agent_conversation_id.clone(),
-                &history,
-                capsule,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        let _ = fs::remove_file(&landing);
-        Ok(task.id)
     }
 
     /// Ask a remote to run a task of its own.
@@ -691,10 +640,8 @@ impl App {
             .await
             .map_err(|error| error.to_string())?;
         let identity = self.config.identity().map_err(|error| error.to_string())?;
-        let client = LinkClient::bind()
-            .await
-            .map_err(|error| error.to_string())?;
-        let sent = client
+        let client = self.link.clone();
+        client
             .run_task(
                 sighting.ticket,
                 TaskRequest {
@@ -706,9 +653,7 @@ impl App {
                 },
             )
             .await
-            .map_err(|error| error.to_string());
-        let _ = client.close().await;
-        sent
+            .map_err(|error| error.to_string())
     }
 
     /// Whether the selection is a task another machine owns.
@@ -772,15 +717,11 @@ impl App {
         )
         .map_err(|error| error.to_string())?;
         let bytes = serde_json::to_vec(&bundle).map_err(|error| error.to_string())?;
-        let client = LinkClient::bind()
-            .await
-            .map_err(|error| error.to_string())?;
-        let sent = client
+        let client = self.link.clone();
+        client
             .put_config(sighting.ticket, &bytes)
             .await
-            .map_err(|error| error.to_string());
-        let _ = client.close().await;
-        sent
+            .map_err(|error| error.to_string())
     }
 
     /// Note whether the remotes list is showing, and start its clock when it
@@ -1438,9 +1379,10 @@ impl App {
     where
         E: IsolationEngine + Clone + 'static,
     {
-        // A task on another machine belongs to that machine. The only thing that can be
-        // done with it from here is ask for it, which is a transfer rather than a
-        // keystroke, and takes a moment even after it is agreed to.
+        // A task on another machine belongs to that machine. `o` asks for it, which is a
+        // transfer rather than a keystroke, and the other task keys have nothing here to
+        // act on. Everything else is the list's own business and falls through — a guard
+        // that took every key would be a list you cannot quit from.
         if self.selected_is_remote() {
             if key.code == KeyCode::Char('o')
                 && let Some(held) = self.selected_held()
@@ -1455,8 +1397,10 @@ impl App {
                 ));
                 return Ok(false);
             }
-            self.notice = Some("that task is on another machine".to_owned());
-            return Ok(false);
+            if key.code == KeyCode::Enter || is_remove(key) {
+                self.notice = Some("that task is on another machine".to_owned());
+                return Ok(false);
+            }
         }
 
         match key.code {
@@ -1509,7 +1453,7 @@ impl App {
                 if let Some(task) = self.selected_task() {
                     let question = format!(
                         "Take over \"{}\"? The agent stops and the terminal is yours; \
-                         ctrl-c hands it back.",
+                         ctrl-a hands it back.",
                         task.facts.intent
                     );
                     self.foreground =
@@ -1544,7 +1488,7 @@ impl App {
             .find(|held| held.summary.id == id)
             .cloned()
         {
-            self.bring_home(&held, event_loop, landings);
+            self.ask_for_task(&held, event_loop, landings);
             return;
         }
         let Some(task) = self.tasks.iter().find(|task| task.id == id).cloned() else {
@@ -1612,20 +1556,19 @@ impl App {
     }
 
     /// Asks one machine what it is holding, which is where those tasks live.
-    async fn read_tasks(address: &str, keys: &RemoteKeys) -> Result<Vec<TaskSummary>, String> {
+    async fn read_tasks(
+        address: &str,
+        keys: &RemoteKeys,
+        client: &LinkClient,
+    ) -> Result<Vec<TaskSummary>, String> {
         let remembered = keys.remembered(address).await.ok().flatten();
         let sighting = meet(address, DEFAULT_PORT, remembered.as_deref())
             .await
             .map_err(|error| error.to_string())?;
-        let client = LinkClient::bind()
-            .await
-            .map_err(|error| error.to_string())?;
-        let listed = client
+        client
             .list_tasks(sighting.ticket)
             .await
-            .map_err(|error| error.to_string());
-        let _ = client.close().await;
-        listed
+            .map_err(|error| error.to_string())
     }
 
     /// Read what a task is asking, and show it.

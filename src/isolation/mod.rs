@@ -109,6 +109,13 @@ pub trait EnvironmentProgressSink: Send + Sync {
     fn report(&self, progress: EnvironmentProgress);
 }
 
+/// A build nobody is watching, for when a caller has no task to report progress to.
+pub struct Unwatched;
+
+impl EnvironmentProgressSink for Unwatched {
+    fn report(&self, _progress: EnvironmentProgress) {}
+}
+
 #[derive(Clone, Debug)]
 pub struct BaseSandboxSnapshot {
     pub path: PathBuf,
@@ -313,6 +320,20 @@ pub trait IsolationEngine: Send + Sync {
         id: String,
         options: SandboxOptions,
     ) -> impl Future<Output = Result<(), IsolationError>> + Send;
+
+    /// Build an environment's snapshot if it is not already here, and say where it is.
+    ///
+    /// A capsule travelling from another machine leaves out the environment it was
+    /// built on, because every machine builds that environment for itself from the same
+    /// configuration. Landing one therefore needs the environment here first — the work
+    /// a task would do on its first run, done ahead of the capsule rather than by it —
+    /// and the snapshot it lands on is what resolves the layers that stayed behind.
+    fn ensure_environment(
+        &self,
+        environment: Environment,
+        recipes: Vec<EnvironmentRecipe>,
+        progress: &dyn EnvironmentProgressSink,
+    ) -> impl Future<Output = Result<BaseSandboxSnapshot, IsolationError>> + Send;
 
     fn ensure_base(
         &self,

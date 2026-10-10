@@ -5,7 +5,13 @@
 //! stdout for whatever service manager started it, and it reads its own settings
 //! file rather than the client's.
 
-use std::{env, error::Error, fs, io, net::SocketAddr};
+use std::{
+    env,
+    error::Error,
+    fs, io,
+    net::SocketAddr,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use std::{
     collections::HashMap,
@@ -15,7 +21,7 @@ use std::{
 
 use std::sync::{Arc, Mutex};
 
-use microsandbox::{SaveOpts, Snapshot};
+use microsandbox::{SaveOpts, Snapshot, SnapshotState};
 
 use super::{CapsuleArchive, Handover, HandoverDraft, RecordedEvent};
 
@@ -29,9 +35,7 @@ use crate::{
     cli::ServeArgs,
     config::{Config, InstallationIdentity, ServeSettings},
     db::Database,
-    isolation::{
-        self, EnvironmentProgress, EnvironmentProgressSink, IsolationStatus, MicrosandboxIsolation,
-    },
+    isolation::{self, IsolationStatus, MicrosandboxIsolation, Unwatched},
     logging,
     remote::protocol::{TaskRequest, TaskSummary},
     remote::{
@@ -40,6 +44,7 @@ use crate::{
         bundle::HeldConfig,
         server::{BoxFuture, ServerParts, TaskHost},
     },
+    task::TaskHistoryEvent,
     task::{Task, TaskEventLoop, TaskService, TaskStore},
     vcs::GitHub,
 };
@@ -51,19 +56,18 @@ use crate::{
 struct OwnTasks {
     config: Arc<Config>,
     tasks: Arc<TaskEventLoop<MicrosandboxIsolation>>,
-    /// Capsules already bundled for travel, and where their archives are.
+    /// Capsules already bundled for travel, by task, and where their archives are.
     ///
     /// Kept until the destination confirms. A transfer nobody confirmed leaves the
     /// task where it was rather than nowhere, which is the failure that repairs
     /// itself.
-    handed: Arc<Mutex<HashMap<String, Handover>>>,
     archives: Arc<Mutex<HashMap<String, PathBuf>>>,
 }
 
 impl TaskHost for OwnTasks {
     fn hand_over(&self, task_id: String) -> BoxFuture<Result<Handover, String>> {
+        tracing::info!(task = %task_id, "handing a task over");
         let tasks = Arc::clone(&self.tasks);
-        let handed = Arc::clone(&self.handed);
         let archives = Arc::clone(&self.archives);
         Box::pin(async move {
             let owned = tasks.list().await.map_err(|error| error.to_string())?;
@@ -84,17 +88,21 @@ impl TaskHost for OwnTasks {
                 .into_iter()
                 .find(|task| task.id == task_id)
                 .ok_or_else(|| format!("{task_id} went missing while it was stopping"))?;
+            // Where a capsule is is a place on this machine, and the machine receiving
+            // it has no such place. Those events stay here; the destination records its
+            // own when the capsule lands on it.
             let events = tasks
                 .events(&stopped.id)
                 .await
                 .map_err(|error| error.to_string())?
                 .into_iter()
+                .filter(|(_, event)| !says_where_a_capsule_is(event))
                 .map(|(recorded_at_ms, event)| RecordedEvent {
                     recorded_at_ms,
                     event,
                 })
                 .collect();
-            let (capsule, archive) = bundle(&stopped).await?;
+            let (capsule, archive) = bundle_capsule(&stopped).await?;
             let handover = Handover {
                 task_id: stopped.id.clone(),
                 draft: HandoverDraft {
@@ -106,10 +114,6 @@ impl TaskHost for OwnTasks {
                 events,
                 capsule,
             };
-            handed
-                .lock()
-                .map_err(|_| "the transfers were poisoned".to_owned())?
-                .insert(stopped.id.clone(), handover.clone());
             archives
                 .lock()
                 .map_err(|_| "the transfers were poisoned".to_owned())?
@@ -132,6 +136,7 @@ impl TaskHost for OwnTasks {
                 .get(&task_id)
                 .cloned()
                 .ok_or_else(|| format!("{task_id} has not been handed over"))?;
+            tracing::debug!(task = %task_id, offset, len, "serving a capsule piece");
             let mut file = fs::File::open(&path).map_err(|error| error.to_string())?;
             file.seek(SeekFrom::Start(offset))
                 .map_err(|error| error.to_string())?;
@@ -144,7 +149,6 @@ impl TaskHost for OwnTasks {
 
     fn handed_over(&self, task_id: String) -> BoxFuture<Result<(), String>> {
         let tasks = Arc::clone(&self.tasks);
-        let handed = Arc::clone(&self.handed);
         let archives = Arc::clone(&self.archives);
         Box::pin(async move {
             let owned = tasks.list().await.map_err(|error| error.to_string())?;
@@ -156,10 +160,6 @@ impl TaskHost for OwnTasks {
             // more. The record stays, because what was decided here is worth keeping
             // even though the task has moved on.
             tasks.remove(task);
-            handed
-                .lock()
-                .map_err(|_| "the transfers were poisoned".to_owned())?
-                .remove(&task_id);
             let archive = archives
                 .lock()
                 .map_err(|_| "the transfers were poisoned".to_owned())?
@@ -208,13 +208,50 @@ impl TaskHost for OwnTasks {
     }
 }
 
+/// The layers a capsule is made of, oldest first.
+fn capsule_layers(snapshot: &Snapshot) -> Vec<String> {
+    match snapshot.state() {
+        SnapshotState::File(state) => state
+            .layers
+            .iter()
+            .map(|layer| layer.layer_id.to_string())
+            .collect(),
+        SnapshotState::Checkpoint(_) => Vec::new(),
+    }
+}
+
+/// How many of a capsule's layers are the task's rather than the environment's.
+///
+/// The chain is oldest first and the layer below the task is the environment it was
+/// built on. A chain that cannot be walked is sent whole, because an archive missing a
+/// layer nobody has is not an archive.
+async fn task_owned_layers(snapshot: &Snapshot) -> usize {
+    let own = capsule_layers(snapshot).len();
+    let Some(parent) = snapshot.manifest().parent.as_ref().map(ToString::to_string) else {
+        return own;
+    };
+    match Snapshot::open(&parent).await {
+        Ok(environment) => own.saturating_sub(capsule_layers(&environment).len()),
+        Err(_) => own,
+    }
+}
+
+/// Whether an event says where a capsule is, which only means something on the machine
+/// that wrote it.
+fn says_where_a_capsule_is(event: &TaskHistoryEvent) -> bool {
+    matches!(
+        event,
+        TaskHistoryEvent::TaskSnapshotSaved { .. } | TaskHistoryEvent::ExecutionRecovered { .. }
+    )
+}
+
 /// Bundle a task's capsule for travel, and say where the archive is.
 ///
 /// Microsandbox does the bundling: it writes a `.tar.zst` that understands sparse
 /// files, so a 15 GB disk whose filesystem has barely been written to costs what has
 /// actually been written and not what it could hold. Nothing here knows what a
 /// capsule is made of, which is the point.
-async fn bundle(task: &Task) -> Result<(CapsuleArchive, PathBuf), String> {
+async fn bundle_capsule(task: &Task) -> Result<(CapsuleArchive, PathBuf), String> {
     let Some(path) = task.facts.snapshot_path.as_ref() else {
         return Ok((
             CapsuleArchive {
@@ -226,16 +263,30 @@ async fn bundle(task: &Task) -> Result<(CapsuleArchive, PathBuf), String> {
     };
     let directory = env::temp_dir().join("altitude-transfers");
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    let archive = directory.join(format!("{}.tar.zst", task.id));
+    // Named for this hand-over rather than for the task: a task handed over twice, or
+    // asked for again while the first archive is still being read, must not have the
+    // second bundle truncate the first one's file.
+    let archive = directory.join(format!(
+        "{}-{:x}.tar.zst",
+        task.id,
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|since| since.as_nanos())
+            .unwrap_or_default()
+    ));
     let snapshot = Snapshot::open(path)
         .await
         .map_err(|error| error.to_string())?;
-    let since = base_every_machine_has(&snapshot).await;
+    // Everything below the task is the environment, which every machine builds for
+    // itself from the same configuration. Only what is above it has to travel, and the
+    // machine receiving it resolves the rest against the environment it built.
+    let owned = task_owned_layers(&snapshot).await;
+    tracing::info!(task = %task.id, layers = owned, "bundling a capsule for travel");
     snapshot
         .save_to(
             &archive,
             SaveOpts {
-                since,
+                last_layers: Some(owned),
                 ..SaveOpts::default()
             },
         )
@@ -244,36 +295,14 @@ async fn bundle(task: &Task) -> Result<(CapsuleArchive, PathBuf), String> {
     let len = fs::metadata(&archive)
         .map_err(|error| error.to_string())?
         .len();
-    Ok((
-        CapsuleArchive {
-            len,
-            digest: digest_of(&archive)?,
-        },
-        archive,
-    ))
-}
-
-/// The base of a capsule, when that base is one every machine built for itself.
-///
-/// A task's chain starts at the environment it was built on, and every machine in a
-/// replica builds that environment from the same configuration. Omitting it is the
-/// difference between moving a task and moving a machine.
-///
-/// A task that has run and been resumed before has its own earlier capsules in the
-/// chain as well, and those are not something another machine can look up. So this
-/// answers only where the chain is the environment and nothing else, and leaves the
-/// archive whole otherwise: an archive missing a layer nobody has is not an archive.
-async fn base_every_machine_has(snapshot: &Snapshot) -> Option<String> {
-    let parent = snapshot
-        .manifest()
-        .parent
-        .as_ref()
-        .map(ToString::to_string)?;
-    let ancestor = Snapshot::open(&parent).await.ok()?;
-    match ancestor.manifest().parent {
-        Some(_) => None,
-        None => Some(parent),
-    }
+    let digest = digest_of(&archive)?;
+    tracing::info!(
+        task = %task.id,
+        bytes = len,
+        %digest,
+        "bundled a capsule for travel"
+    );
+    Ok((CapsuleArchive { len, digest }, archive))
 }
 
 /// Hash a file without holding it in memory, which an archive can be too large for.
@@ -361,14 +390,6 @@ async fn build_environments(
     Ok(())
 }
 
-/// Nobody waits on a remote's build: the isolation layer logs its steps, and a task's
-/// progress has nothing to do with it.
-struct Unwatched;
-
-impl EnvironmentProgressSink for Unwatched {
-    fn report(&self, _progress: EnvironmentProgress) {}
-}
-
 /// Runs a server until it is asked to stop.
 pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     logging::init_service();
@@ -443,7 +464,6 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         tasks: Arc::new(OwnTasks {
             config: Arc::new(config.clone()),
             tasks: task_loop,
-            handed: Arc::new(Mutex::new(HashMap::new())),
             archives: Arc::new(Mutex::new(HashMap::new())),
         }),
     })

@@ -16,7 +16,6 @@ mod event_loop;
 mod lifecycle;
 mod signals;
 mod state;
-mod transfer;
 mod turns;
 pub use event_loop::{TaskEventLoop, TaskExecutionUpdate};
 mod progress;

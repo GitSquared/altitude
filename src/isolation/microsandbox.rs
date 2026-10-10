@@ -563,6 +563,15 @@ fn now_ms() -> i64 {
 }
 
 impl IsolationEngine for MicrosandboxIsolation {
+    async fn ensure_environment(
+        &self,
+        environment: Environment,
+        recipes: Vec<EnvironmentRecipe>,
+        progress: &dyn EnvironmentProgressSink,
+    ) -> Result<BaseSandboxSnapshot, IsolationError> {
+        environment::ensure_environment(self, &self.config, environment, recipes, progress).await
+    }
+
     async fn provision(
         &self,
         id: String,

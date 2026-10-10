@@ -10,7 +10,7 @@ use crate::{
     config::Config,
     db::Database,
     isolation::MicrosandboxIsolation,
-    remote::RemoteKeys,
+    remote::{LinkClient, RemoteKeys},
     task::{TaskEventLoop, TaskService, TaskStore},
 };
 
@@ -106,7 +106,13 @@ async fn client() -> Result<(), Box<dyn Error>> {
             &mut interrupt,
             event_loop,
             tasks,
-            tui::App::new(task_rows, config.clone(), settings, remote_keys),
+            tui::App::new(
+                task_rows,
+                config.clone(),
+                settings,
+                remote_keys,
+                LinkClient::bind().await.map_err(io::Error::other)?,
+            ),
             task_execution_updates,
         )
         .await

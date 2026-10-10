@@ -1,8 +1,5 @@
 //! The client side: dial a remote by key and run one exchange.
 
-// The dial side of the link. Taking a task over is reachable here before it is
-// reachable from the interface, which is the next piece of work on remotes.
-#![allow(dead_code)]
 use std::{fmt, fs, io::Write, path::Path};
 
 use iroh::{Endpoint, EndpointAddr, EndpointId, endpoint::Connection};
@@ -71,18 +68,13 @@ impl fmt::Display for LinkPath {
     }
 }
 
-/// A completed exchange, plus what the client could see about the peer.
-pub struct LinkReply<T> {
-    /// The answer itself.
-    pub value: T,
-    /// The key that answered. The handshake authenticates this, so it is the
-    /// proof that dialling a public key reached that public key.
-    pub remote: EndpointId,
-    /// How the bytes travelled.
-    pub path: LinkPath,
-}
-
 /// The client side of the link: an endpoint that dials remotes by public key.
+///
+/// Cloning shares the one endpoint. Binding one per exchange would give this machine a
+/// new identity to every remote it speaks to, which is both a handshake each time and a
+/// stranger each time: a remote that keeps a record of its clients would see a new one
+/// every few seconds.
+#[derive(Clone)]
 pub struct LinkClient {
     endpoint: Endpoint,
 }
@@ -94,64 +86,73 @@ impl LinkClient {
         Ok(Self { endpoint })
     }
 
-    /// The client's own public key.
-    pub fn id(&self) -> EndpointId {
-        self.endpoint.id()
+    /// Dials a remote, and closes the connection however the exchange ends.
+    async fn dial(&self, peer: impl Into<EndpointAddr>) -> LinkResult<Dial> {
+        Ok(Dial(self.endpoint.connect(peer, LINK_ALPN).await?))
     }
 
-    /// Closes the endpoint.
-    pub async fn close(self) -> LinkResult<()> {
-        self.endpoint.close().await;
-        Ok(())
-    }
-
-    /// Dials a remote and runs one request/response exchange.
+    /// The one exchange every operation is: say one thing, hear one thing.
     ///
-    /// `peer` may be a bare [`EndpointId`] — no URL, no port — in which case
-    /// the address has to be discoverable — a [`RemoteTicket`], or an
-    /// [`EndpointAddr`].
-    pub async fn request(
+    /// Each operation differs only in what follows the frame and whether the answer has
+    /// a body of its own, so this is where a connection is opened and closed and where
+    /// the answer says how it travelled.
+    async fn say(
         &self,
         peer: impl Into<EndpointAddr>,
         request: &LinkRequest,
-    ) -> LinkResult<LinkReply<LinkResponse>> {
-        let connection = self.endpoint.connect(peer, LINK_ALPN).await?;
-        let result = async {
-            let (mut send, mut recv) = connection.open_bi().await?;
-            write_frame(&mut send, request).await?;
-            send.finish()?;
-            let value = read_frame(&mut recv).await?;
-            Ok(LinkReply {
-                value,
-                remote: connection.remote_id(),
-                path: LinkPath::observe(&connection),
-            })
+    ) -> LinkResult<LinkResponse> {
+        let dial = self.dial(peer).await?;
+        let (mut send, mut recv) = dial.0.open_bi().await?;
+        write_frame(&mut send, request).await?;
+        send.finish()?;
+        let answer = read_frame(&mut recv).await;
+        tracing::debug!(remote = %dial.remote(), path = %dial.path(), "spoke to a remote");
+        answer
+    }
+
+    /// Say one thing, send a body after it, and hear one answer.
+    async fn say_with_body(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        request: &LinkRequest,
+        body: &[u8],
+    ) -> LinkResult<LinkResponse> {
+        let dial = self.dial(peer).await?;
+        let (mut send, mut recv) = dial.0.open_bi().await?;
+        write_frame(&mut send, request).await?;
+        for chunk in body.chunks(CHUNK_BYTES) {
+            send.write_all(chunk).await?;
         }
-        .await;
-        connection.close(0u32.into(), b"done");
-        result
+        send.finish()?;
+        let answer = read_frame(&mut recv).await;
+        tracing::debug!(remote = %dial.remote(), path = %dial.path(), "spoke to a remote");
+        answer
+    }
+
+    /// Say one thing, and read the body of the answer.
+    async fn ask_for_body(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        request: &LinkRequest,
+    ) -> LinkResult<Vec<u8>> {
+        let dial = self.dial(peer).await?;
+        let (mut send, mut recv) = dial.0.open_bi().await?;
+        write_frame(&mut send, request).await?;
+        send.finish()?;
+        match read_frame::<_, LinkResponse>(&mut recv).await? {
+            LinkResponse::Capsule { len } => read_body(&mut recv, len, MAX_BLOB_BYTES).await,
+            LinkResponse::Rejected { reason } => Err(reason.into()),
+            other => Err(format!("unexpected answer: {other:?}").into()),
+        }
     }
 
     /// Asks what tasks a remote owns.
-    ///
-    /// These are the only copies of them: a task belongs to the machine running it, so
-    /// this is a view that is only as good as the answer.
     pub async fn list_tasks(&self, peer: impl Into<EndpointAddr>) -> LinkResult<Vec<TaskSummary>> {
-        let connection = self.endpoint.connect(peer, LINK_ALPN).await?;
-        let result = async {
-            let (mut send, mut recv) = connection.open_bi().await?;
-            write_frame(&mut send, &LinkRequest::ListTasks).await?;
-            send.finish()?;
-            let response: LinkResponse = read_frame(&mut recv).await?;
-            match response {
-                LinkResponse::Tasks { summaries } => Ok(summaries),
-                LinkResponse::Rejected { reason } => Err(reason.into()),
-                other => Err(format!("unexpected answer: {other:?}").into()),
-            }
+        match self.say(peer, &LinkRequest::ListTasks).await? {
+            LinkResponse::Tasks { summaries } => Ok(summaries),
+            LinkResponse::Rejected { reason } => Err(reason.into()),
+            other => Err(format!("unexpected answer: {other:?}").into()),
         }
-        .await;
-        connection.close(0u32.into(), b"done");
-        result
     }
 
     /// Takes a task over from a remote, and returns what has to continue here.
@@ -186,26 +187,19 @@ impl LinkClient {
     const CAPSULE_STRETCH: u64 = 4 << 20;
 
     async fn ask_take(&self, peer: &EndpointAddr, task_id: &str) -> LinkResult<Handover> {
-        let connection = self.endpoint.connect(peer.clone(), LINK_ALPN).await?;
-        let result = async {
-            let (mut send, mut recv) = connection.open_bi().await?;
-            write_frame(
-                &mut send,
+        match self
+            .say(
+                peer.clone(),
                 &LinkRequest::TakeTask {
                     task_id: task_id.to_owned(),
                 },
             )
-            .await?;
-            send.finish()?;
-            match read_frame::<_, LinkResponse>(&mut recv).await? {
-                LinkResponse::Handover { handover } => Ok(*handover),
-                LinkResponse::Rejected { reason } => Err(reason.into()),
-                other => Err(format!("unexpected answer: {other:?}").into()),
-            }
+            .await?
+        {
+            LinkResponse::Handover { handover } => Ok(*handover),
+            LinkResponse::Rejected { reason } => Err(reason.into()),
+            other => Err(format!("unexpected answer: {other:?}").into()),
         }
-        .await;
-        connection.close(0u32.into(), b"done");
-        result
     }
 
     async fn fetch_capsule(
@@ -223,11 +217,9 @@ impl LinkClient {
         let mut offset = 0;
         while offset < capsule.len {
             let len = Self::CAPSULE_STRETCH.min(capsule.len - offset);
-            let connection = self.endpoint.connect(peer.clone(), LINK_ALPN).await?;
-            let piece = async {
-                let (mut send, mut recv) = connection.open_bi().await?;
-                write_frame(
-                    &mut send,
+            let bytes = self
+                .ask_for_body(
+                    peer.clone(),
                     &LinkRequest::FetchCapsule {
                         task_id: task_id.to_owned(),
                         offset,
@@ -235,18 +227,6 @@ impl LinkClient {
                     },
                 )
                 .await?;
-                send.finish()?;
-                match read_frame::<_, LinkResponse>(&mut recv).await? {
-                    LinkResponse::Capsule { len } => {
-                        read_body(&mut recv, len, MAX_BLOB_BYTES).await
-                    }
-                    LinkResponse::Rejected { reason } => Err(reason.into()),
-                    other => Err(format!("unexpected answer: {other:?}").into()),
-                }
-            }
-            .await;
-            connection.close(0u32.into(), b"done");
-            let bytes = piece?;
             if bytes.is_empty() {
                 break;
             }
@@ -256,6 +236,7 @@ impl LinkClient {
         }
         file.flush()?;
         let arrived = hasher.finalize().to_hex().to_string();
+        tracing::info!(task = %task_id, bytes = offset, "fetched a capsule");
         if arrived != capsule.digest {
             return Err(format!(
                 "the capsule arrived as {arrived} rather than {}",
@@ -267,120 +248,72 @@ impl LinkClient {
     }
 
     async fn confirm_take(&self, peer: &EndpointAddr, task_id: &str) -> LinkResult<()> {
-        let connection = self.endpoint.connect(peer.clone(), LINK_ALPN).await?;
-        let result = async {
-            let (mut send, mut recv) = connection.open_bi().await?;
-            write_frame(
-                &mut send,
+        match self
+            .say(
+                peer.clone(),
                 &LinkRequest::HandedOver {
                     task_id: task_id.to_owned(),
                 },
             )
-            .await?;
-            send.finish()?;
-            match read_frame::<_, LinkResponse>(&mut recv).await? {
-                LinkResponse::Accepted => Ok(()),
-                LinkResponse::Rejected { reason } => Err(reason.into()),
-                other => Err(format!("unexpected answer: {other:?}").into()),
-            }
+            .await?
+        {
+            LinkResponse::Accepted => Ok(()),
+            LinkResponse::Rejected { reason } => Err(reason.into()),
+            other => Err(format!("unexpected answer: {other:?}").into()),
         }
-        .await;
-        connection.close(0u32.into(), b"done");
-        result
     }
 
     /// Asks a remote to run a task of its own, and returns when it has taken it.
     ///
     /// Nothing is copied: the task is founded there and belongs to that machine from
-    /// the moment it exists. What the remote called it is read from the machine, not
-    /// from this answer.
+    /// the moment it accepts, which is why the answer is an acceptance and not a receipt.
     pub async fn run_task(
         &self,
         peer: impl Into<EndpointAddr>,
         request: TaskRequest,
     ) -> LinkResult<()> {
-        let connection = self.endpoint.connect(peer, LINK_ALPN).await?;
-        let result = async {
-            let (mut send, mut recv) = connection.open_bi().await?;
-            write_frame(&mut send, &LinkRequest::RunTask { request }).await?;
-            send.finish()?;
-            let response: LinkResponse = read_frame(&mut recv).await?;
-            match response {
-                LinkResponse::Accepted => Ok(()),
-                LinkResponse::Rejected { reason } => Err(reason.into()),
-                other => Err(format!("unexpected answer: {other:?}").into()),
-            }
+        match self.say(peer, &LinkRequest::RunTask { request }).await? {
+            LinkResponse::Accepted => Ok(()),
+            LinkResponse::Rejected { reason } => Err(reason.into()),
+            other => Err(format!("unexpected answer: {other:?}").into()),
         }
-        .await;
-        connection.close(0u32.into(), b"done");
-        result
     }
 
-    /// Sends a configuration, and returns when the remote holds it.
+    /// Sends this machine's configuration for a remote to build from.
     pub async fn put_config(&self, peer: impl Into<EndpointAddr>, bytes: &[u8]) -> LinkResult<()> {
-        let hash = BlobHash::of(bytes);
         let request = LinkRequest::PutConfig {
-            hash,
+            hash: BlobHash::of(bytes),
             len: bytes.len() as u64,
         };
-        let connection = self.endpoint.connect(peer, LINK_ALPN).await?;
-        let result = async {
-            let (mut send, mut recv) = connection.open_bi().await?;
-            write_frame(&mut send, &request).await?;
-            for chunk in bytes.chunks(CHUNK_BYTES) {
-                send.write_all(chunk).await?;
-            }
-            send.finish()?;
-            let response: LinkResponse = read_frame(&mut recv).await?;
-            match response {
-                LinkResponse::Configured => Ok(()),
-                LinkResponse::Rejected { reason } => Err(reason.into()),
-                other => Err(format!("unexpected answer: {other:?}").into()),
-            }
+        match self.say_with_body(peer, &request, bytes).await? {
+            LinkResponse::Configured => Ok(()),
+            LinkResponse::Rejected { reason } => Err(reason.into()),
+            other => Err(format!("unexpected answer: {other:?}").into()),
         }
-        .await;
-        connection.close(0u32.into(), b"done");
-        result
+    }
+}
+
+/// A connection to a remote, closed when it goes out of scope.
+///
+/// Every exchange opens one, and the ones that forget leave it up until the endpoint
+/// notices. Closing here means no operation has to remember to.
+struct Dial(Connection);
+
+impl Dial {
+    /// The key that answered, which the handshake has authenticated.
+    fn remote(&self) -> EndpointId {
+        self.0.remote_id()
     }
 
-    /// Sends a blob and returns the digest the remote confirmed it received.
-    ///
-    /// The client hashes what it sends; the remote hashes what it receives and
-    /// answers with the digest only when the two agree.
-    pub async fn put_blob(
-        &self,
-        peer: impl Into<EndpointAddr>,
-        bytes: &[u8],
-    ) -> LinkResult<LinkReply<BlobHash>> {
-        let hash = BlobHash::of(bytes);
-        let request = LinkRequest::PutBlob {
-            hash: hash.clone(),
-            len: bytes.len() as u64,
-        };
-        let connection = self.endpoint.connect(peer, LINK_ALPN).await?;
-        let result = async {
-            let (mut send, mut recv) = connection.open_bi().await?;
-            write_frame(&mut send, &request).await?;
-            for chunk in bytes.chunks(CHUNK_BYTES) {
-                send.write_all(chunk).await?;
-            }
-            send.finish()?;
-            let response: LinkResponse = read_frame(&mut recv).await?;
-            let value = match response {
-                LinkResponse::Stored {
-                    hash: confirmed, ..
-                } if confirmed == hash => confirmed,
-                LinkResponse::Rejected { reason } => return Err(reason.into()),
-                other => return Err(format!("unexpected answer: {other:?}").into()),
-            };
-            Ok(LinkReply {
-                value,
-                remote: connection.remote_id(),
-                path: LinkPath::observe(&connection),
-            })
-        }
-        .await;
-        connection.close(0u32.into(), b"done");
-        result
+    /// How the bytes travelled, which is the difference between hole punching working
+    /// and paying for a relay.
+    fn path(&self) -> LinkPath {
+        LinkPath::observe(&self.0)
+    }
+}
+
+impl Drop for Dial {
+    fn drop(&mut self) {
+        self.0.close(0u32.into(), b"done");
     }
 }

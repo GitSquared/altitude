@@ -81,7 +81,16 @@ impl TaskStore {
         .map_err(TaskError::Database)
     }
 
-    pub async fn create(&self, draft: TaskDraft) -> Result<Task, TaskError> {
+    /// Found a task, with the history it already had if it has one.
+    ///
+    /// A task born here is born with the intent that asked for it. A task that arrived
+    /// from another machine was asked for there, at a time that is part of its record,
+    /// so it is born with that instead of a second version of the same fact.
+    pub async fn create(
+        &self,
+        draft: TaskDraft,
+        history: Option<&[(i64, TaskHistoryEvent)]>,
+    ) -> Result<Task, TaskError> {
         let TaskDraft {
             intent,
             environment,
@@ -110,23 +119,30 @@ impl TaskStore {
         .execute(&mut *transaction)
         .await
         .map_err(TaskError::Database)?;
-        Self::write_events(
-            &mut transaction,
-            &task_id,
-            &[TaskHistoryEvent::IntentExpressed {
-                execution_status: TaskExecutionStatus::Pending,
-                execution_mode: TaskExecutionMode::Autopilot,
-                operator_attention_level: TaskOperatorAttentionLevel::Nominal,
-                sandbox_available: false,
-                snapshot_available: false,
-                intent,
-                environment,
-                identity_id,
-                identity_label,
-                agent_conversation_id,
-            }],
-        )
-        .await?;
+        match history {
+            Some(history) => {
+                Self::write_recorded_events(&mut transaction, &task_id, history).await?;
+            }
+            None => {
+                Self::write_events(
+                    &mut transaction,
+                    &task_id,
+                    &[TaskHistoryEvent::IntentExpressed {
+                        execution_status: TaskExecutionStatus::Pending,
+                        execution_mode: TaskExecutionMode::Autopilot,
+                        operator_attention_level: TaskOperatorAttentionLevel::Nominal,
+                        sandbox_available: false,
+                        snapshot_available: false,
+                        intent,
+                        environment,
+                        identity_id,
+                        identity_label,
+                        agent_conversation_id,
+                    }],
+                )
+                .await?;
+            }
+        }
         let task = Self::read_task(&mut transaction, &task_id).await?;
         transaction.commit().await.map_err(TaskError::Database)?;
         Ok(task)
@@ -144,26 +160,6 @@ impl TaskStore {
             .await
             .map_err(TaskError::Database)?;
         Self::write_events(&mut transaction, task_id, events).await?;
-        let task = Self::read_task(&mut transaction, task_id).await?;
-        transaction.commit().await.map_err(TaskError::Database)?;
-        Ok(task)
-    }
-
-    /// Append history that happened somewhere else, at the times it happened.
-    ///
-    /// A task taken over from another machine arrives with everything that was decided
-    /// about it, and none of that happened now.
-    pub async fn append_borrowed_events(
-        &self,
-        task_id: &str,
-        events: &[(i64, TaskHistoryEvent)],
-    ) -> Result<Task, TaskError> {
-        let mut transaction = self
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(TaskError::Database)?;
-        Self::write_recorded_events(&mut transaction, task_id, events).await?;
         let task = Self::read_task(&mut transaction, task_id).await?;
         transaction.commit().await.map_err(TaskError::Database)?;
         Ok(task)

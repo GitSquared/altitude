@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
@@ -454,6 +455,15 @@ where
         Ok(())
     }
 
+    /// Build what a task's environment needs, and say where its snapshot is.
+    pub async fn prepare_environment(
+        &self,
+        environment: &Environment,
+        agent: AgentKind,
+    ) -> Result<PathBuf, TaskServiceError> {
+        self.service.prepare_environment(environment, agent).await
+    }
+
     /// Land a task that arrived from another machine.
     ///
     /// One call, because the parts are one fact: a task that exists here, carrying the
@@ -471,11 +481,14 @@ where
     ) -> Result<Task, TaskServiceError> {
         let task = self
             .service
-            .adopt(intent, environment, agent, conversation, None)
-            .await?;
-        let task = self
-            .service
-            .record_borrowed_history(&task.id, history)
+            .adopt(
+                intent,
+                environment,
+                agent,
+                conversation,
+                None,
+                Some(history),
+            )
             .await?;
         let Some(capsule) = capsule else {
             return Ok(task);
