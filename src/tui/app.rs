@@ -909,7 +909,7 @@ impl App {
                 self.toggle(setting, !on);
                 return;
             }
-            RowKind::Agent { kind, .. } => {
+            RowKind::Agent(kind) => {
                 self.set_agent(kind);
                 return;
             }
@@ -952,10 +952,9 @@ impl App {
         };
         // The question is built first: it borrows the name the target then moves.
         let (question, target) = match row.kind {
-            RowKind::Base
-            | RowKind::Switch { .. }
-            | RowKind::Agent { .. }
-            | RowKind::Credential(_) => return,
+            RowKind::Base | RowKind::Switch { .. } | RowKind::Agent(_) | RowKind::Credential(_) => {
+                return;
+            }
             RowKind::Environment { name, .. } => (
                 format!("Delete the {name} environment?"),
                 Target::Environment { original: name },

@@ -147,10 +147,17 @@ impl Depth {
 }
 
 /// One row of the focused list.
+///
+/// A row is three places: a mark at the left edge where it has a status of its
+/// own, its name, and a note at the right edge where there is more to say about
+/// it than the name. Only the name is always there.
 pub struct Row {
     /// What the list shows: a name where there is one, an address where there is
     /// not yet.
     pub label: String,
+    /// Said at the right edge, so a column of notes lines up rather than each
+    /// one sitting wherever its name happens to end.
+    pub note: Option<&'static str>,
     pub kind: RowKind,
 }
 
@@ -163,11 +170,8 @@ pub enum RowKind {
         setup: String,
         is_default: bool,
     },
-    /// A coding agent, and whether it is the one new tasks use.
-    Agent {
-        kind: AgentKind,
-        is_default: bool,
-    },
+    /// A coding agent, which may be the one new tasks use.
+    Agent(AgentKind),
     /// Something a task logs in with: this installation's key, or a login a task
     /// is given.
     Credential(Credential),
@@ -417,36 +421,53 @@ pub fn draw(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick: usi
     }
 }
 
-/// A row of a list: inverted when it holds the focus, padded so the background
-/// reads as a bar rather than as a word.
-fn chip(label: &str, width: usize, focused: bool) -> Line<'static> {
-    let mut text = label.to_owned();
-    let used = Line::from(text.as_str()).width();
-    if used < width {
-        text.push_str(&" ".repeat(width - used));
-    }
+/// One item of a list, in the three places it can hold something: a mark at the
+/// left edge, the title, and a note at the right edge. Only the title is always
+/// there.
+///
+/// The note goes to the right edge rather than after the title, so a column of
+/// notes lines up instead of each one sitting wherever its title happens to end.
+/// The mark is passed in rather than read, because a mark can be the one that
+/// travels while it waits, and only the drawing knows where the frame is.
+fn item(
+    mark: Vec<Span<'static>>,
+    title: &str,
+    note: Option<&str>,
+    width: usize,
+    focused: bool,
+) -> Line<'static> {
+    let note = note.unwrap_or_default();
+    let used = mark.iter().map(Span::width).sum::<usize>()
+        + Line::from(title).width()
+        + Line::from(note).width();
+    let padding = " ".repeat(width.saturating_sub(used).max(1));
+    let mut spans = mark;
     if focused {
-        Line::styled(text, palette::focus())
-    } else {
-        Line::from(text)
+        // Inverted across the row, which is what makes the mark's own colour read
+        // as not being part of the bar.
+        spans.push(Span::styled(
+            format!("{title}{padding}{note}"),
+            palette::focus(),
+        ));
+        return Line::from(spans);
     }
+    spans.push(Span::raw(title.to_owned()));
+    spans.push(Span::raw(padding));
+    if !note.is_empty() {
+        spans.push(Span::styled(note.to_owned(), palette::muted()));
+    }
+    Line::from(spans)
 }
 
-/// The same row, with a note pushed to the right edge.
-///
-/// The note is about the row rather than part of its name, so it sits where a
-/// column of notes lines up.
-fn chip_noted(label: &str, note: &str, width: usize, focused: bool) -> Line<'static> {
-    let used = Line::from(label).width() + Line::from(note).width();
-    let padding = " ".repeat(width.saturating_sub(used).max(1));
-    if focused {
-        return Line::styled(format!("{label}{padding}{note}"), palette::focus());
+/// A remote's dot, which travels while it waits, so a slow address looks like
+/// something happening rather than something stuck.
+fn dot(status: &RemoteStatus, tick: usize) -> Vec<Span<'static>> {
+    let dot = format!("{} ", status.glyph());
+    if status.is_in_progress() {
+        shimmer(&dot, tick)
+    } else {
+        vec![Span::styled(dot, status.style())]
     }
-    Line::from(vec![
-        Span::raw(label.to_owned()),
-        Span::raw(padding),
-        Span::styled(note.to_owned(), palette::muted()),
-    ])
 }
 
 fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick: usize) {
@@ -469,10 +490,13 @@ fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick:
     let rail_items = Section::ALL
         .iter()
         .map(|section| {
-            let row = chip(
+            let focused = rail_focused && *section == panel.section;
+            let row = item(
+                Vec::new(),
                 section.title(),
+                None,
                 usize::from(rail.width),
-                rail_focused && *section == panel.section,
+                focused,
             );
             ListItem::new(if rail_focused {
                 row
@@ -502,27 +526,17 @@ fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick:
             .iter()
             .enumerate()
             .map(|(index, row)| {
-                let focused = list_focused && index == panel.selected;
-                let line = match &row.kind {
-                    // The dot keeps its own colour: it is the one thing in the row
-                    // that is not about the row.
-                    RowKind::Remote { status, .. } => {
-                        let dot = format!("{} ", status.glyph());
-                        // The dot travels while it waits, so a slow address looks like
-                        // something happening rather than something stuck.
-                        let mut spans = if status.is_in_progress() {
-                            shimmer(&dot, tick)
-                        } else {
-                            vec![Span::styled(dot, status.style())]
-                        };
-                        spans.extend(chip(&row.label, width.saturating_sub(2), focused).spans);
-                        Line::from(spans)
-                    }
-                    RowKind::Agent {
-                        is_default: true, ..
-                    } => chip_noted(&row.label, "(default)", width, focused),
-                    _ => chip(&row.label, width, focused),
+                let mark = match &row.kind {
+                    RowKind::Remote { status, .. } => dot(status, tick),
+                    _ => Vec::new(),
                 };
+                let line = item(
+                    mark,
+                    &row.label,
+                    row.note,
+                    width,
+                    list_focused && index == panel.selected,
+                );
                 ListItem::new(if list_focused {
                     line
                 } else {
@@ -593,7 +607,7 @@ fn detail(panel: &Panel, view: &View, focused: bool) -> Paragraph<'static> {
             }
             lines
         }
-        RowKind::Agent { kind, .. } => vec![
+        RowKind::Agent(kind) => vec![
             heading(label.clone()),
             Line::from(""),
             Line::styled(
@@ -943,6 +957,7 @@ impl App {
         let rows = match self.panel.section {
             Section::Interface => vec![Row {
                 label: Setting::KeyboardHints.label().to_owned(),
+                note: None,
                 kind: RowKind::Switch {
                     setting: Setting::KeyboardHints,
                     on: self.keyboard_hints(),
@@ -952,10 +967,8 @@ impl App {
                 .into_iter()
                 .map(|kind| Row {
                     label: kind.to_string(),
-                    kind: RowKind::Agent {
-                        kind,
-                        is_default: self.agent() == Some(kind),
-                    },
+                    note: (self.agent() == Some(kind)).then_some("(default)"),
+                    kind: RowKind::Agent(kind),
                 })
                 .collect(),
             Section::Credentials => self
@@ -963,6 +976,7 @@ impl App {
                 .into_iter()
                 .map(|credential| Row {
                     label: credential.label.clone(),
+                    note: None,
                     kind: RowKind::Credential(credential),
                 })
                 .collect(),
@@ -973,10 +987,13 @@ impl App {
                     let built_in = environment.is_base();
                     let is_default = environment.name.eq_ignore_ascii_case(&default_environment);
                     Row {
-                        label: match (built_in, is_default) {
-                            (true, _) => format!("{} (built in)", environment.name),
-                            (false, true) => format!("{} (default)", environment.name),
-                            (false, false) => environment.name.clone(),
+                        label: environment.name.clone(),
+                        // The built-in one says what it is rather than what it is
+                        // used for: there is nothing to choose about it.
+                        note: if built_in {
+                            Some("(built in)")
+                        } else {
+                            is_default.then_some("(default)")
                         },
                         kind: if built_in {
                             RowKind::Base
@@ -1011,6 +1028,7 @@ impl App {
                             Some(key) => key.label.clone(),
                             None => address.clone(),
                         },
+                        note: None,
                         kind: RowKind::Remote {
                             needs_config: self.remote_needs_config(&address),
                             address,
