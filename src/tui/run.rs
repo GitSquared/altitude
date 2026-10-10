@@ -9,7 +9,8 @@ use std::{io, mem, time::Duration};
 use crossterm::{
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, EventStream,
+        Event, EventStream, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     execute,
 };
@@ -53,9 +54,16 @@ where
         task_execution_updates,
     )
     .await;
-    let mouse_cleanup = execute!(io::stdout(), DisableMouseCapture, DisableBracketedPaste);
+    // Given back whether or not it was asked for: a terminal that never took it
+    // ignores the sequence, and one that did must not be left holding it.
+    let terminal_cleanup = execute!(
+        io::stdout(),
+        DisableMouseCapture,
+        DisableBracketedPaste,
+        PopKeyboardEnhancementFlags
+    );
     event_loop.suspend_all().await.map_err(io::Error::other)?;
-    mouse_cleanup?;
+    terminal_cleanup?;
     result
 }
 
@@ -77,6 +85,8 @@ where
     let mut shell_notice = time::interval(Duration::from_millis(100));
     let mut shimmer = time::interval(Duration::from_millis(80));
     let mut mouse_captured = false;
+    // Whether the terminal is reporting the keys the creation question needs.
+    let mut keys_enhanced = false;
     // Reaching an address is the one thing here that waits on another machine, so
     // it happens off this loop and reports back like a task's run does.
     let (remote_answers, mut answered) = mpsc::unbounded_channel();
@@ -95,6 +105,23 @@ where
                 execute!(io::stdout(), EnableMouseCapture)?;
             } else {
                 execute!(io::stdout(), DisableMouseCapture)?;
+            }
+        }
+        // A second line of intent in the creation question needs shift-enter to
+        // arrive as a key of its own, which is the terminal's to say and only
+        // while it is asked. Held for that page alone, so nothing else has to
+        // read its keys differently.
+        if keys_enhanced != matches!(app.foreground, Foreground::NewTask(_)) {
+            keys_enhanced = !keys_enhanced;
+            if keys_enhanced {
+                execute!(
+                    io::stdout(),
+                    PushKeyboardEnhancementFlags(
+                        KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    )
+                )?;
+            } else {
+                execute!(io::stdout(), PopKeyboardEnhancementFlags)?;
             }
         }
         terminal.draw(|frame| {

@@ -61,7 +61,12 @@ impl Field {
 
     pub fn handle_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char(character) => {
+            // A chord is not text: ctrl-c is not the letter c.
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER) =>
+            {
                 self.value.insert(self.byte_index(), character);
                 self.cursor += 1;
             }
@@ -188,7 +193,12 @@ impl TextBox {
                 self.row += 1;
                 self.column = 0;
             }
-            KeyCode::Char(character) => {
+            // A chord is not text: ctrl-c is not the letter c.
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER) =>
+            {
                 let at = self.byte_column();
                 self.lines[self.row].insert(at, character);
                 self.column += 1;
