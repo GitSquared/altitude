@@ -10,7 +10,7 @@ use crate::{
     config::Config,
     db::Database,
     isolation::MicrosandboxIsolation,
-    remote::{LinkClient, RemoteKeys},
+    remote::{InstallationKey, LinkClient, RemoteKeys},
     task::{TaskEventLoop, TaskService, TaskStore},
 };
 
@@ -100,7 +100,13 @@ async fn client() -> Result<(), Box<dyn Error>> {
         // the host can carry, like everything else.
         event_loop.admit();
 
-        tui::run(
+        let link = LinkClient::bind(
+            &InstallationKey::load_or_create(config.data_dir().join("identity.key"))
+                .map_err(io::Error::other)?,
+        )
+        .await
+        .map_err(io::Error::other)?;
+        let result = tui::run(
             &mut terminal,
             &mut terminate,
             &mut interrupt,
@@ -111,11 +117,13 @@ async fn client() -> Result<(), Box<dyn Error>> {
                 config.clone(),
                 settings,
                 remote_keys,
-                LinkClient::bind().await.map_err(io::Error::other)?,
+                link.clone(),
             ),
             task_execution_updates,
         )
-        .await
+        .await;
+        link.shutdown().await;
+        result
     }
     .await;
     ratatui::restore();

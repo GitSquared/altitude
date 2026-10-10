@@ -9,17 +9,18 @@ use std::{
 
 use tokio::sync::{mpsc, watch};
 
+pub(crate) mod capsule;
 mod environment;
 mod microsandbox;
+/// How long a built environment is kept before it is rebuilt, for the interface
+/// that has to tell an operator when their base was last refreshed.
+pub use environment::REFRESH_AFTER;
 /// Shared with the VCS providers so capsule commands are quoted one way.
 pub(crate) use environment::shell_quote;
 pub use environment::{
     BASE_NAME, DefaultFile, Environment, EnvironmentRecipe, GuestPath, PersistentDirectory,
     is_base_name,
 };
-/// How long a built environment is kept before it is rebuilt, for the interface
-/// that has to tell an operator when their base was last refreshed.
-pub use environment::{REFRESH_AFTER, ensure_environment};
 pub use microsandbox::MicrosandboxIsolation;
 
 #[derive(Clone, Debug)]
@@ -174,6 +175,7 @@ pub struct EnvironmentDescription {
 #[derive(Clone, Debug)]
 pub struct SandboxOptions {
     pub snapshot_path: Option<String>,
+    pub(crate) environment_base: Option<capsule::EnvironmentBase>,
     pub network_enabled: bool,
     pub mounts: Vec<SandboxMount>,
     pub environment: Vec<(String, String)>,
@@ -249,6 +251,7 @@ impl SandboxOptions {
     pub fn isolated(snapshot_path: Option<String>) -> Self {
         Self {
             snapshot_path,
+            environment_base: None,
             network_enabled: false,
             mounts: Vec::new(),
             environment: Vec::new(),

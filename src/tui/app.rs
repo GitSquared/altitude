@@ -26,8 +26,8 @@ use crate::{
         RemoteState, TaskRequest, TaskSummary, bring_home, meet,
     },
     task::{
-        Task, TaskEventLoop, TaskExecutionMode, TaskExecutionStatus, TaskExecutionUpdate,
-        TaskOperatorSignal, TaskService, TaskServiceError,
+        Task, TaskEventLoop, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
+        TaskExecutionUpdate, TaskOperatorSignal, TaskService, TaskServiceError,
     },
     tui::keys::{is_dismiss, is_remove},
     tui::popups,
@@ -584,20 +584,11 @@ impl App {
         let summary = held.summary.clone();
         let keys = self.remote_keys.clone();
         let client = self.link.clone();
-        let environments = self.environments();
         let event_loop = event_loop.clone();
         let landings = landings.clone();
         self.notice = Some(format!("asking {address} for the task…"));
         tokio::spawn(async move {
-            let outcome = bring_home(
-                &address,
-                &summary,
-                &keys,
-                &client,
-                &environments,
-                &event_loop,
-            )
-            .await;
+            let outcome = bring_home(&address, &summary, &keys, &client, &event_loop).await;
             // A take-over runs away from the interface, so where it stopped is a log
             // line rather than only a notice that has already been replaced.
             match &outcome {
@@ -714,7 +705,7 @@ impl App {
         let profiles: Vec<&str> = self.profiles.iter().map(|held| held.profile).collect();
         let bundle = ConfigBundle::of(
             settings,
-            self.config.config_dir(),
+            self.config.data_dir(),
             &profiles,
             &sighting.announcement.profiles,
         )
@@ -1516,6 +1507,10 @@ impl App {
         let Some(task) = self.tasks.iter().find(|task| task.id == id).cloned() else {
             return;
         };
+        if task.facts.execution_pause_reason == Some(TaskExecutionPauseReason::Transfer) {
+            self.notice = Some("this task is awaiting transfer confirmation".into());
+            return;
+        }
         if matches!(
             task.facts.execution_status,
             TaskExecutionStatus::Paused | TaskExecutionStatus::Failed

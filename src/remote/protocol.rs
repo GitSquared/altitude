@@ -17,8 +17,8 @@ use iroh::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::agent::AgentKind;
 use crate::task::{TaskExecutionMode, TaskExecutionStatus, TaskHistoryEvent};
+use crate::{agent::AgentKind, isolation::Environment};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::{
@@ -34,10 +34,11 @@ pub const LINK_ALPN: &[u8] = b"altitude/link/1";
 /// outside the frame.
 const MAX_FRAME_BYTES: usize = 64 * 1024;
 /// Upper bound on a single blob, so a peer cannot make a remote allocate
-/// without limit. The capsule sizes this has to carry are not yet known.
+/// without limit. Disk archives travel as bounded pieces instead.
 pub(super) const MAX_BLOB_BYTES: u64 = 64 * 1024 * 1024;
 /// Write granularity for blob bytes.
 pub(super) const CHUNK_BYTES: usize = 64 * 1024;
+pub(super) const TRANSFER_PIECE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// The endpoint both sides bind.
 ///
@@ -89,19 +90,18 @@ pub enum LinkRequest {
     ListTasks,
     /// Ask the remote to hand a task over.
     ///
-    /// The machine running a task is the machine that owns it, so this is the whole of
-    /// taking one over: the source stops running it, the capsule travels, and the
-    /// destination owns it once it holds all of it. Nothing is copied on the way.
+    /// Preparation stops the task but keeps ownership at the source until the
+    /// recipient has durably staged its history and booted the capsule.
     TakeTask { task_id: String },
-    /// Ask for a stretch of a handed-over capsule, as an offset into its archive.
-    FetchCapsule {
-        task_id: String,
+    FetchTransferPart {
+        transfer_id: String,
+        part: TransferPart,
         offset: u64,
         len: u64,
     },
-    /// The destination holds all of it, which is the last thing a transfer needs.
-    /// Without it the task stays where it was rather than nowhere.
-    HandedOver { task_id: String },
+    /// The prepared recipient has staged and verified the task. Committing the
+    /// source removal is idempotent so a lost acknowledgement cannot lose ownership.
+    HandedOver { transfer_id: String },
     /// Announce an upload: `len` raw bytes follow, whose digest must be `hash`.
     PutBlob { hash: BlobHash, len: u64 },
     /// Announce a configuration: `len` raw bytes follow, whose digest must be
@@ -114,22 +114,34 @@ pub enum LinkRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum LinkResponse {
     /// Who the remote is.
-    Identified { remote: String },
+    Identified {
+        remote: String,
+    },
     /// The upload arrived and its digest matched.
-    Stored { hash: BlobHash, len: u64 },
+    Stored {
+        hash: BlobHash,
+        len: u64,
+    },
     /// The configuration arrived, and the remote holds it now.
     Configured,
     /// The remote took the task. What it called it is read from the machine rather
     /// than returned, because the machine is where the task is.
     Accepted,
     /// What the remote owns, as its own cards would show it.
-    Tasks { summaries: Vec<TaskSummary> },
+    Tasks {
+        summaries: Vec<TaskSummary>,
+    },
     /// The task is stopped, and this is what has to travel for it to continue.
-    Handover { handover: Box<Handover> },
-    /// This many raw bytes of the capsule archive follow.
-    Capsule { len: u64 },
+    Handover {
+        handover: Box<Handover>,
+    },
+    TransferPiece {
+        len: u64,
+    },
     /// The request was understood and refused.
-    Rejected { reason: String },
+    Rejected {
+        reason: String,
+    },
 }
 
 /// What a client asks a remote to run.
@@ -168,13 +180,31 @@ pub struct TaskSummary {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Handover {
     pub task_id: String,
-    /// The task as it was founded: what was asked, in what, by what, and as whom.
+    pub transfer_id: String,
+    pub environment: Option<EnvironmentArchive>,
+    pub history: TransferArchive,
+    pub capsule: TransferArchive,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum TransferPart {
+    Environment,
+    History,
+    Capsule,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EnvironmentArchive {
+    pub snapshot_id: String,
+    pub descriptor_digest: String,
+    pub layer_roots: Vec<String>,
+    pub archive: TransferArchive,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HandoverRecord {
     pub draft: HandoverDraft,
-    /// Everything that happened to it, so its record continues rather than starts
-    /// again.
     pub events: Vec<RecordedEvent>,
-    /// The capsule, as an archive this machine can unpack and boot.
-    pub capsule: CapsuleArchive,
 }
 
 /// One thing that happened, and when it happened.
@@ -189,15 +219,14 @@ pub struct RecordedEvent {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HandoverDraft {
     pub intent: String,
-    pub environment: String,
+    pub environment: Environment,
     pub agent: AgentKind,
     /// The conversation to continue, so the agent picks up where it left off.
     pub agent_conversation_id: Option<String>,
 }
 
-/// A capsule bundled for travel, and how to tell it arrived whole.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CapsuleArchive {
+pub struct TransferArchive {
     pub len: u64,
     /// Hex blake3 of the archive, checked where it lands.
     pub digest: String,

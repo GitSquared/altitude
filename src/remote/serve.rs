@@ -6,24 +6,26 @@
 //! file rather than the client's.
 
 use std::{
-    env,
     error::Error,
     fs, io,
-    net::SocketAddr,
-    time::{SystemTime, UNIX_EPOCH},
-};
-
-use std::{
-    collections::HashMap,
     io::{Read, Seek, SeekFrom},
+    net::SocketAddr,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 
-use std::sync::{Arc, Mutex};
+use crate::{
+    isolation::capsule::{ENVIRONMENT_LABEL, EnvironmentBase},
+    task::TaskExecutionPauseReason,
+};
+use iroh::EndpointId;
+use microsandbox::{SaveOpts, Snapshot};
+use tokio::{
+    sync::{Mutex as AsyncMutex, Semaphore},
+    task::spawn_blocking,
+};
 
-use microsandbox::{SaveOpts, Snapshot, SnapshotState};
-
-use super::{CapsuleArchive, Handover, HandoverDraft, RecordedEvent};
+use super::{Handover, HandoverDraft, RecordedEvent, TransferArchive};
 
 use tokio::{
     signal::unix::{SignalKind, signal},
@@ -35,7 +37,7 @@ use crate::{
     cli::ServeArgs,
     config::{Config, InstallationIdentity, ServeSettings},
     db::Database,
-    isolation::{self, IsolationStatus, MicrosandboxIsolation, Unwatched},
+    isolation::{self, IsolationStatus, MicrosandboxIsolation},
     logging,
     remote::protocol::{TaskRequest, TaskSummary},
     remote::{
@@ -46,127 +48,288 @@ use crate::{
     },
     task::TaskHistoryEvent,
     task::{Task, TaskEventLoop, TaskService, TaskStore},
-    vcs::GitHub,
 };
 
-/// The tasks this machine owns, as the link asks about them.
-///
-/// A task belongs to the machine that runs it, so this is not a view of somebody
-/// else's work: these are the only copies that exist.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct PreparedTransfer {
+    recipient: String,
+    handover: Handover,
+}
+
 struct OwnTasks {
     config: Arc<Config>,
     tasks: Arc<TaskEventLoop<MicrosandboxIsolation>>,
-    /// Capsules already bundled for travel, by task, and where their archives are.
-    ///
-    /// Kept until the destination confirms. A transfer nobody confirmed leaves the
-    /// task where it was rather than nowhere, which is the failure that repairs
-    /// itself.
-    archives: Arc<Mutex<HashMap<String, PathBuf>>>,
+    preparation_lock: Arc<AsyncMutex<()>>,
+    read_slots: Arc<Semaphore>,
+    readiness: watch::Sender<RemoteState>,
+    runtime: watch::Receiver<IsolationStatus>,
+}
+
+impl OwnTasks {
+    fn transfer_directory(&self, id: &str) -> Result<PathBuf, String> {
+        let id = uuid::Uuid::parse_str(id).map_err(|_| "invalid transfer identifier".to_owned())?;
+        Ok(self
+            .config
+            .data_dir()
+            .join("transfers")
+            .join(id.to_string()))
+    }
 }
 
 impl TaskHost for OwnTasks {
-    fn hand_over(&self, task_id: String) -> BoxFuture<Result<Handover, String>> {
-        tracing::info!(task = %task_id, "handing a task over");
+    fn hand_over(&self, peer: EndpointId, task_id: String) -> BoxFuture<Result<Handover, String>> {
         let tasks = Arc::clone(&self.tasks);
-        let archives = Arc::clone(&self.archives);
+        let preparation_lock = Arc::clone(&self.preparation_lock);
+        let root = self.config.data_dir().join("transfers");
         Box::pin(async move {
-            let owned = tasks.list().await.map_err(|error| error.to_string())?;
+            let _preparing = preparation_lock.lock().await;
+            fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+            for entry in fs::read_dir(&root).map_err(|e| e.to_string())? {
+                let entry = entry.map_err(|e| e.to_string())?;
+                let Ok(bytes) = fs::read(entry.path().join("transfer.json")) else {
+                    continue;
+                };
+                let prepared: PreparedTransfer =
+                    serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+                if prepared.handover.task_id == task_id {
+                    if prepared.recipient != peer.to_string() {
+                        return Err("another recipient is already taking this task".into());
+                    }
+                    return Ok(prepared.handover);
+                }
+            }
+            let owned = tasks.list().await.map_err(|e| e.to_string())?;
             let task = owned
-                .into_iter()
+                .iter()
                 .find(|task| task.id == task_id)
-                .ok_or_else(|| format!("this machine does not own {task_id}"))?;
-            // The source stops running a task before any of it moves, and stopping is
-            // also what settles the capsule: what travels is the disk as it is now.
-            tasks
-                .suspend(task.clone())
+                .ok_or_else(|| "this machine does not own that task".to_owned())?;
+            let held = tasks
+                .events(&task_id)
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .rev()
+                .find_map(|(_, event)| match event {
+                    TaskHistoryEvent::TransferStaged {
+                        transfer_id, peer, ..
+                    } => Some((transfer_id, peer)),
+                    _ => None,
+                });
+            let transfer_id =
+                if task.facts.execution_pause_reason == Some(TaskExecutionPauseReason::Transfer) {
+                    let (id, recipient) =
+                        held.ok_or_else(|| "the staged transfer has no recipient".to_owned())?;
+                    if recipient != peer.to_string() {
+                        return Err("another recipient is already taking this task".into());
+                    }
+                    id
+                } else {
+                    if owned
+                        .iter()
+                        .filter(|task| {
+                            task.facts.execution_pause_reason
+                                == Some(TaskExecutionPauseReason::Transfer)
+                        })
+                        .count()
+                        >= 4
+                    {
+                        return Err("four transfers are already awaiting confirmation".into());
+                    }
+                    uuid::Uuid::new_v4().to_string()
+                };
+            let directory = root.join(&transfer_id);
+            fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+            for name in ["capsule.tar.zst", "environment.tar.zst"] {
+                let _ = fs::remove_file(directory.join(name));
+            }
             let stopped = tasks
-                .list()
+                .stage_transfer(&task_id, &transfer_id, &peer.to_string())
                 .await
-                .map_err(|error| error.to_string())?
-                .into_iter()
-                .find(|task| task.id == task_id)
-                .ok_or_else(|| format!("{task_id} went missing while it was stopping"))?;
-            // Where a capsule is is a place on this machine, and the machine receiving
-            // it has no such place. Those events stay here; the destination records its
-            // own when the capsule lands on it.
+                .map_err(|e| e.to_string())?;
             let events = tasks
                 .events(&stopped.id)
                 .await
-                .map_err(|error| error.to_string())?
+                .map_err(|e| e.to_string())?
                 .into_iter()
-                .filter(|(_, event)| !says_where_a_capsule_is(event))
+                .filter(|(_, event)| !is_machine_local_event(event))
                 .map(|(recorded_at_ms, event)| RecordedEvent {
                     recorded_at_ms,
                     event,
                 })
                 .collect();
-            let (capsule, archive) = bundle_capsule(&stopped).await?;
-            let handover = Handover {
-                task_id: stopped.id.clone(),
+            let record = super::HandoverRecord {
                 draft: HandoverDraft {
                     intent: stopped.facts.intent.clone(),
-                    environment: stopped.facts.environment_name.clone(),
+                    environment: stopped.environment(),
                     agent: stopped.agent_kind.unwrap_or_default(),
                     agent_conversation_id: stopped.facts.agent_conversation_id.clone(),
                 },
                 events,
-                capsule,
             };
-            archives
-                .lock()
-                .map_err(|_| "the transfers were poisoned".to_owned())?
-                .insert(stopped.id, archive);
+            let history_path = directory.join("history.json");
+            let file = fs::File::create(&history_path).map_err(|e| e.to_string())?;
+            serde_json::to_writer(&file, &record).map_err(|e| e.to_string())?;
+            file.sync_all().map_err(|e| e.to_string())?;
+            let history = archive_description(&history_path)?;
+            if history.len > super::protocol::MAX_BLOB_BYTES {
+                return Err("task history exceeds the transfer limit".into());
+            }
+            let (capsule, environment) = bundle_capsule(&stopped, &directory).await?;
+            let handover = Handover {
+                task_id,
+                transfer_id,
+                history,
+                capsule,
+                environment,
+            };
+            let prepared = PreparedTransfer {
+                recipient: peer.to_string(),
+                handover: handover.clone(),
+            };
+            let file = fs::File::create(directory.join("transfer.json.incoming"))
+                .map_err(|e| e.to_string())?;
+            serde_json::to_writer(&file, &prepared).map_err(|e| e.to_string())?;
+            file.sync_all().map_err(|e| e.to_string())?;
+            fs::rename(
+                directory.join("transfer.json.incoming"),
+                directory.join("transfer.json"),
+            )
+            .map_err(|e| e.to_string())?;
             Ok(handover)
         })
     }
 
-    fn capsule_piece(
+    fn transfer_piece(
         &self,
-        task_id: String,
+        peer: EndpointId,
+        transfer_id: String,
+        part: super::TransferPart,
         offset: u64,
         len: u64,
     ) -> BoxFuture<Result<Vec<u8>, String>> {
-        let archives = Arc::clone(&self.archives);
+        let directory = self.transfer_directory(&transfer_id);
+        let read_slots = Arc::clone(&self.read_slots);
         Box::pin(async move {
-            let path = archives
-                .lock()
-                .map_err(|_| "the transfers were poisoned".to_owned())?
-                .get(&task_id)
-                .cloned()
-                .ok_or_else(|| format!("{task_id} has not been handed over"))?;
-            tracing::debug!(task = %task_id, offset, len, "serving a capsule piece");
-            let mut file = fs::File::open(&path).map_err(|error| error.to_string())?;
-            file.seek(SeekFrom::Start(offset))
-                .map_err(|error| error.to_string())?;
-            let mut bytes = vec![0; usize::try_from(len).unwrap_or(usize::MAX)];
-            let read = file.read(&mut bytes).map_err(|error| error.to_string())?;
-            bytes.truncate(read);
-            Ok(bytes)
+            if len == 0 || len > super::protocol::TRANSFER_PIECE_BYTES {
+                return Err("invalid transfer piece length".into());
+            }
+            let _permit = read_slots
+                .acquire_owned()
+                .await
+                .map_err(|e| e.to_string())?;
+            let directory = directory?;
+            let prepared: PreparedTransfer = serde_json::from_slice(
+                &fs::read(directory.join("transfer.json")).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            if prepared.recipient != peer.to_string() {
+                return Err("this transfer belongs to another recipient".into());
+            }
+            let filename = match part {
+                super::TransferPart::Environment => "environment.tar.zst",
+                super::TransferPart::History => "history.json",
+                super::TransferPart::Capsule => "capsule.tar.zst",
+            };
+            let path = directory.join(filename);
+            spawn_blocking(move || {
+                let mut file = fs::File::open(path).map_err(|e| e.to_string())?;
+                let size = file.metadata().map_err(|e| e.to_string())?.len();
+                if offset.checked_add(len).is_none_or(|end| end > size) {
+                    return Err("transfer piece is outside the archive".into());
+                }
+                file.seek(SeekFrom::Start(offset))
+                    .map_err(|e| e.to_string())?;
+                let mut bytes = vec![0; len as usize];
+                file.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+                Ok(bytes)
+            })
+            .await
+            .map_err(|e| e.to_string())?
         })
     }
 
-    fn handed_over(&self, task_id: String) -> BoxFuture<Result<(), String>> {
+    fn handed_over(&self, peer: EndpointId, transfer_id: String) -> BoxFuture<Result<(), String>> {
+        let directory = self.transfer_directory(&transfer_id);
         let tasks = Arc::clone(&self.tasks);
-        let archives = Arc::clone(&self.archives);
+        let preparation_lock = Arc::clone(&self.preparation_lock);
         Box::pin(async move {
-            let owned = tasks.list().await.map_err(|error| error.to_string())?;
-            let task = owned
-                .into_iter()
-                .find(|task| task.id == task_id)
-                .ok_or_else(|| format!("this machine does not own {task_id}"))?;
-            // The destination holds all of it, so this machine is not the owner any
-            // more. The record stays, because what was decided here is worth keeping
-            // even though the task has moved on.
-            tasks.remove(task);
-            let archive = archives
-                .lock()
-                .map_err(|_| "the transfers were poisoned".to_owned())?
-                .remove(&task_id);
-            if let Some(archive) = archive {
-                let _ = fs::remove_file(archive);
+            let _preparing = preparation_lock.lock().await;
+            let directory = directory?;
+            let prepared: PreparedTransfer = serde_json::from_slice(
+                &fs::read(directory.join("transfer.json")).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            if prepared.recipient != peer.to_string() {
+                return Err("this transfer belongs to another recipient".into());
             }
+            if transfer_committed(&tasks, &prepared).await? {
+                return Ok(());
+            }
+            let task = tasks
+                .list()
+                .await
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .find(|task| task.id == prepared.handover.task_id)
+                .ok_or_else(|| "the source task is missing".to_owned())?;
+            if task.facts.execution_pause_reason != Some(TaskExecutionPauseReason::Transfer) {
+                return Err("the source task is no longer staged for transfer".into());
+            }
+            let matches_preparation = tasks
+                .events(&task.id)
+                .await
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .rev()
+                .find_map(|(_, event)| match event {
+                    TaskHistoryEvent::TransferStaged {
+                        transfer_id: current,
+                        peer: recipient,
+                        ..
+                    } => Some(current == transfer_id && recipient == peer.to_string()),
+                    _ => None,
+                })
+                .unwrap_or(false);
+            if !matches_preparation {
+                return Err("the task belongs to another transfer preparation".into());
+            }
+            tasks
+                .relinquish(task, &transfer_id, &peer.to_string())
+                .await
+                .map_err(|e| e.to_string())?;
+            for name in ["environment.tar.zst", "capsule.tar.zst", "history.json"] {
+                let _ = fs::remove_file(directory.join(name));
+            }
+            Ok(())
+        })
+    }
+
+    fn configure(&self) -> BoxFuture<Result<(), String>> {
+        let config = Arc::clone(&self.config);
+        let tasks = Arc::clone(&self.tasks);
+        let state = self.readiness.clone();
+        let mut runtime = self.runtime.clone();
+        Box::pin(async move {
+            state.send_replace(RemoteState::Preparing);
+            loop {
+                match &*runtime.borrow_and_update() {
+                    IsolationStatus::Ready => break,
+                    IsolationStatus::Failed(error) => return Err(error.clone()),
+                    _ => {}
+                }
+                runtime.changed().await.map_err(|e| e.to_string())?;
+            }
+            let settings = config
+                .load_or_create_settings()
+                .map_err(|e| e.to_string())?;
+            let agent = settings.settings().agent().unwrap_or_default();
+            for environment in settings.settings().environments() {
+                tasks
+                    .prepare_environment(&environment, agent)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+            state.send_replace(RemoteState::Ready);
             Ok(())
         })
     }
@@ -177,7 +340,7 @@ impl TaskHost for OwnTasks {
         Box::pin(async move {
             let settings = config
                 .load_or_create_settings()
-                .map_err(|error| error.to_string())?;
+                .map_err(|e| e.to_string())?;
             let environment = settings
                 .settings()
                 .environments()
@@ -186,6 +349,10 @@ impl TaskHost for OwnTasks {
                 .ok_or_else(|| {
                     format!("this machine has no {} environment", request.environment)
                 })?;
+            tasks
+                .prepare_environment(&environment, request.agent)
+                .await
+                .map_err(|e| e.to_string())?;
             tasks.create(
                 request.intent,
                 environment,
@@ -202,111 +369,119 @@ impl TaskHost for OwnTasks {
     fn list(&self) -> BoxFuture<Result<Vec<TaskSummary>, String>> {
         let tasks = Arc::clone(&self.tasks);
         Box::pin(async move {
-            let owned = tasks.list().await.map_err(|error| error.to_string())?;
-            Ok(owned.iter().map(summarise).collect())
+            Ok(tasks
+                .list()
+                .await
+                .map_err(|e| e.to_string())?
+                .iter()
+                .map(summarise)
+                .collect())
         })
     }
 }
 
-/// The layers a capsule is made of, oldest first.
-fn capsule_layers(snapshot: &Snapshot) -> Vec<String> {
-    match snapshot.state() {
-        SnapshotState::File(state) => state
-            .layers
-            .iter()
-            .map(|layer| layer.layer_id.to_string())
-            .collect(),
-        SnapshotState::Checkpoint(_) => Vec::new(),
-    }
+async fn transfer_committed(
+    tasks: &TaskEventLoop<MicrosandboxIsolation>,
+    prepared: &PreparedTransfer,
+) -> Result<bool, String> {
+    let history = tasks
+        .events(&prepared.handover.task_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(history.iter().any(|(_, event)| {
+        matches!(event,
+            TaskHistoryEvent::TransferCommitted { transfer_id, recipient }
+            if transfer_id == &prepared.handover.transfer_id && recipient == &prepared.recipient)
+    }))
 }
 
-/// How many of a capsule's layers are the task's rather than the environment's.
-///
-/// The chain is oldest first and the layer below the task is the environment it was
-/// built on. A chain that cannot be walked is sent whole, because an archive missing a
-/// layer nobody has is not an archive.
-async fn task_owned_layers(snapshot: &Snapshot) -> usize {
-    let own = capsule_layers(snapshot).len();
-    let Some(parent) = snapshot.manifest().parent.as_ref().map(ToString::to_string) else {
-        return own;
-    };
-    match Snapshot::open(&parent).await {
-        Ok(environment) => own.saturating_sub(capsule_layers(&environment).len()),
-        Err(_) => own,
-    }
-}
-
-/// Whether an event says where a capsule is, which only means something on the machine
-/// that wrote it.
-fn says_where_a_capsule_is(event: &TaskHistoryEvent) -> bool {
+fn is_machine_local_event(event: &TaskHistoryEvent) -> bool {
     matches!(
         event,
-        TaskHistoryEvent::TaskSnapshotSaved { .. } | TaskHistoryEvent::ExecutionRecovered { .. }
+        TaskHistoryEvent::TaskSnapshotSaved { .. }
+            | TaskHistoryEvent::ExecutionRecovered { .. }
+            | TaskHistoryEvent::ExecutionPaused { .. }
+            | TaskHistoryEvent::TransferStaged { .. }
+            | TaskHistoryEvent::TransferCommitted { .. }
+            | TaskHistoryEvent::TransferLanded { .. }
+            | TaskHistoryEvent::SandboxProvisioned { .. }
+            | TaskHistoryEvent::SandboxRemoved { .. }
+            | TaskHistoryEvent::SnapshotRemoved { .. }
     )
 }
 
-/// Bundle a task's capsule for travel, and say where the archive is.
-///
-/// Microsandbox does the bundling: it writes a `.tar.zst` that understands sparse
-/// files, so a 15 GB disk whose filesystem has barely been written to costs what has
-/// actually been written and not what it could hold. Nothing here knows what a
-/// capsule is made of, which is the point.
-async fn bundle_capsule(task: &Task) -> Result<(CapsuleArchive, PathBuf), String> {
-    let Some(path) = task.facts.snapshot_path.as_ref() else {
+async fn bundle_capsule(
+    task: &Task,
+    directory: &Path,
+) -> Result<(TransferArchive, Option<super::EnvironmentArchive>), String> {
+    let Some(path) = task
+        .facts
+        .snapshot_path
+        .as_ref()
+        .filter(|_| task.facts.snapshot_available)
+    else {
         return Ok((
-            CapsuleArchive {
+            TransferArchive {
                 len: 0,
-                digest: String::new(),
+                digest: blake3::hash(&[]).to_hex().to_string(),
             },
-            PathBuf::new(),
+            None,
         ));
     };
-    let directory = env::temp_dir().join("altitude-transfers");
-    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    // Named for this hand-over rather than for the task: a task handed over twice, or
-    // asked for again while the first archive is still being read, must not have the
-    // second bundle truncate the first one's file.
-    let archive = directory.join(format!(
-        "{}-{:x}.tar.zst",
-        task.id,
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|since| since.as_nanos())
-            .unwrap_or_default()
-    ));
-    let snapshot = Snapshot::open(path)
-        .await
-        .map_err(|error| error.to_string())?;
-    // Everything below the task is the environment, which every machine builds for
-    // itself from the same configuration. Only what is above it has to travel, and the
-    // machine receiving it resolves the rest against the environment it built.
-    let owned = task_owned_layers(&snapshot).await;
-    tracing::info!(task = %task.id, layers = owned, "bundling a capsule for travel");
-    snapshot
+    let snapshot = Snapshot::open(path).await.map_err(|e| e.to_string())?;
+    let encoded = snapshot.labels().get(ENVIRONMENT_LABEL).ok_or_else(|| {
+        "the capsule has no recorded environment boundary; rebuild its task state explicitly before transferring".to_owned()
+    })?;
+    let base: EnvironmentBase = serde_json::from_str(encoded).map_err(|e| e.to_string())?;
+    let staging = tempfile::tempdir_in(directory).map_err(|e| e.to_string())?;
+    let (environment, capsule) = base.stage(&snapshot, staging.path()).await?;
+    environment
         .save_to(
-            &archive,
+            &directory.join("environment.tar.zst"),
             SaveOpts {
-                last_layers: Some(owned),
+                with_image: true,
                 ..SaveOpts::default()
             },
         )
         .await
-        .map_err(|error| error.to_string())?;
-    let len = fs::metadata(&archive)
-        .map_err(|error| error.to_string())?
-        .len();
-    let digest = digest_of(&archive)?;
-    tracing::info!(
-        task = %task.id,
-        bytes = len,
-        %digest,
-        "bundled a capsule for travel"
-    );
-    Ok((CapsuleArchive { len, digest }, archive))
+        .map_err(|e| e.to_string())?;
+    capsule
+        .save_to(
+            &directory.join("capsule.tar.zst"),
+            SaveOpts {
+                since: Some(
+                    environment
+                        .path()
+                        .map_err(|e| e.to_string())?
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                ..SaveOpts::default()
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let descriptor_digest = environment.digest().to_owned();
+    let snapshot_id = environment.manifest().snapshot_id.to_string();
+    Ok((
+        archive_description(&directory.join("capsule.tar.zst"))?,
+        Some(super::EnvironmentArchive {
+            snapshot_id,
+            descriptor_digest,
+            layer_roots: base.roots,
+            archive: archive_description(&directory.join("environment.tar.zst"))?,
+        }),
+    ))
 }
 
-/// Hash a file without holding it in memory, which an archive can be too large for.
-fn digest_of(path: &Path) -> Result<String, String> {
+fn archive_description(path: &Path) -> Result<TransferArchive, String> {
+    Ok(TransferArchive {
+        len: fs::metadata(path).map_err(|e| e.to_string())?.len(),
+        digest: file_digest(path)?,
+    })
+}
+
+fn file_digest(path: &Path) -> Result<String, String> {
     let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
     let mut hasher = blake3::Hasher::new();
     let mut buffer = vec![0; 1 << 20];
@@ -320,7 +495,6 @@ fn digest_of(path: &Path) -> Result<String, String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
-/// What a card needs, which is not what a machine needs to run a task.
 fn summarise(task: &Task) -> TaskSummary {
     let mut extras = Vec::new();
     if task.facts.unread_operator_signal_count > 0 {
@@ -341,56 +515,6 @@ fn summarise(task: &Task) -> TaskSummary {
     }
 }
 
-/// Builds every environment the configuration names, and only then says this machine
-/// can be given work.
-///
-/// A remote that answered "ready" while an environment was missing would fail the
-/// first task that asked for it. Building here puts that wait before anything is
-/// delegated, rather than inside somebody's task.
-async fn build_environments(
-    config: &Config,
-    isolation: MicrosandboxIsolation,
-    prepared: &mut watch::Receiver<IsolationStatus>,
-    state: &watch::Sender<RemoteState>,
-) -> Result<(), Box<dyn Error>> {
-    loop {
-        match &*prepared.borrow_and_update() {
-            IsolationStatus::Ready => break,
-            IsolationStatus::Failed(error) => return Err(io::Error::other(error.clone()).into()),
-            _ => {}
-        }
-        if prepared.changed().await.is_err() {
-            return Err(io::Error::other("isolation stopped unexpectedly").into());
-        }
-    }
-    let settings = config.load_or_create_settings()?;
-    let agents = AgentEngines::new();
-    let kind = settings.settings().agent().unwrap_or_default();
-    for environment in settings.settings().environments() {
-        // The base is the workspace the runtime was prepared with, and every
-        // environment is built on top of it. It is not built again here.
-        if environment.is_base() {
-            continue;
-        }
-        tracing::info!(environment = %environment.name, "building an environment");
-        isolation::ensure_environment(
-            &isolation,
-            config,
-            environment,
-            vec![
-                agents.engine(kind).environment_recipe(),
-                GitHub::environment_recipe(),
-            ],
-            &Unwatched,
-        )
-        .await
-        .map_err(io::Error::other)?;
-    }
-    state.send_replace(RemoteState::Ready);
-    Ok(())
-}
-
-/// Runs a server until it is asked to stop.
 pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     logging::init_service();
 
@@ -416,42 +540,37 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         .map_err(io::Error::other)?;
     let clients =
         ClientRecord::open(config.data_dir().join("clients.json")).map_err(io::Error::other)?;
-    // The label travels with the key, so a client that learns one learns what to
-    // call this remote as well.
     let label = config.identity().map_err(io::Error::other)?.label;
-    // A remote is a replica of a setup, so it builds what that setup needs before it
-    // can be given work. It answers while it builds, saying so, which is how a client
-    // tells a machine that is preparing from one that is down.
     let isolation = MicrosandboxIsolation::new(&config);
     let prepared = isolation::prepare(isolation.clone());
     // This machine's own answer to "can you be given work", which is not the same
     // question as "is the runtime up": it is ready once what the configuration asks
     // for has been built.
     let (state, observed) = watch::channel(RemoteState::Preparing);
-    // What this machine holds, kept beside its data so a client can be told what it
-    // does not need to send again.
     let held = Arc::new(Mutex::new(HeldConfig::load(
         &config.data_dir().join("profiles.json"),
     )));
-    // The tasks this machine owns. Its own database, because a task belongs to the
-    // machine that runs it: there is no copy of one anywhere else, and a client that
-    // wants to see these reads them from here.
     let database = Database::open(&config).await.map_err(io::Error::other)?;
     let tasks = TaskService::new(
         TaskStore::new(&database),
-        isolation.clone(),
+        isolation,
         config.task_snapshots_dir(),
         AgentEngines::new(),
         config.identity().map_err(io::Error::other)?,
     );
     let (task_loop, mut updates) = TaskEventLoop::new(tasks);
-    let task_loop = Arc::new(task_loop);
-    // Nobody is at the keyboard here, so what happens to these tasks is said once, in
-    // the log, and nowhere else.
     tokio::spawn(async move {
         while updates.recv().await.is_some() {
             tracing::debug!("a task changed");
         }
+    });
+    let host = Arc::new(OwnTasks {
+        config: Arc::new(config.clone()),
+        tasks: Arc::new(task_loop),
+        preparation_lock: Arc::new(AsyncMutex::new(())),
+        read_slots: Arc::new(Semaphore::new(4)),
+        readiness: state,
+        runtime: prepared,
     });
     let server = LinkServer::serve(ServerParts {
         identity,
@@ -459,20 +578,15 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         listen,
         label,
         config_path: config.settings_path(),
+        data_dir: config.data_dir().to_owned(),
         state: observed,
-        held: Arc::clone(&held),
-        tasks: Arc::new(OwnTasks {
-            config: Arc::new(config.clone()),
-            tasks: task_loop,
-            archives: Arc::new(Mutex::new(HashMap::new())),
-        }),
+        held,
+        tasks: host.clone(),
     })
     .await
     .map_err(io::Error::other)?;
     let ticket = server.ticket().map_err(io::Error::other)?;
 
-    // Everything an operator needs to point a client at this remote, said once and
-    // said at the place they will be looking.
     tracing::info!(
         listening = %listen,
         settings = %settings_path.display(),
@@ -487,14 +601,9 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
 
     // Built behind the server, so the answer to "what can you do" is available while
     // the answer is still "not yet".
-    tokio::spawn({
-        let config = config.clone();
-        async move {
-            let mut prepared = prepared;
-            if let Err(error) = build_environments(&config, isolation, &mut prepared, &state).await
-            {
-                tracing::error!(%error, "could not build what the configuration asks for");
-            }
+    tokio::spawn(async move {
+        if let Err(error) = host.configure().await {
+            tracing::error!(%error, "could not prepare the configured environments");
         }
     });
 

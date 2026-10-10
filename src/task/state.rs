@@ -84,6 +84,7 @@ pub enum TaskExecutionStatus {
 pub enum TaskExecutionPauseReason {
     AwaitingOperator,
     ApplicationShutdown,
+    Transfer,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
@@ -267,6 +268,25 @@ pub enum TaskHistoryEvent {
     ExecutionFailed {
         execution_status: TaskExecutionStatus,
         error: String,
+    },
+    TransferStaged {
+        transfer_id: String,
+        peer: String,
+        execution_status: TaskExecutionStatus,
+        execution_pause_reason: TaskExecutionPauseReason,
+        execution_mode: TaskExecutionMode,
+        sandbox_available: bool,
+        snapshot_available: bool,
+        snapshot_path: Option<String>,
+    },
+    TransferLanded {
+        transfer_id: String,
+        execution_status: TaskExecutionStatus,
+        execution_pause_reason: TaskExecutionPauseReason,
+    },
+    TransferCommitted {
+        transfer_id: String,
+        recipient: String,
     },
     ExecutionQueued {
         execution_status: TaskExecutionStatus,

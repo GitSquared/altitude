@@ -197,10 +197,14 @@ where
         // The list arrives newest first; the queue is served oldest first.
         waiting.reverse();
         for task in waiting.into_iter().take(room) {
-            self.starting
+            if !self
+                .starting
                 .lock()
                 .expect("starting lock poisoned")
-                .insert(task.id.clone());
+                .insert(task.id.clone())
+            {
+                continue;
+            }
             let event_loop = self.clone();
             tokio::spawn(async move {
                 let result = event_loop.service.start(task.clone()).await;
@@ -449,9 +453,105 @@ where
     /// running it before any of it moves, and only then is there something settled to
     /// send.
     pub async fn suspend(&self, task: Task) -> Result<(), TaskServiceError> {
+        self.mark_suspending(&task.id);
         for result in self.service.suspend_all(vec![task]).await {
             result?;
         }
+        Ok(())
+    }
+
+    pub async fn stage_transfer(
+        &self,
+        task_id: &str,
+        transfer_id: &str,
+        peer: &str,
+    ) -> Result<Task, TaskServiceError> {
+        let task = self
+            .list()
+            .await?
+            .into_iter()
+            .find(|task| task.id == task_id)
+            .ok_or(TaskServiceError::Task(super::TaskError::MissingSandbox))?;
+        let is_staged =
+            task.facts.execution_pause_reason == Some(super::TaskExecutionPauseReason::Transfer);
+        if is_staged && !task.facts.sandbox_available {
+            return Ok(task);
+        }
+        if !is_staged
+            && !self
+                .starting
+                .lock()
+                .expect("starting lock poisoned")
+                .insert(task.id.clone())
+        {
+            return Err(TaskServiceError::Task(super::TaskError::OperationRejected(
+                "the task is still starting",
+            )));
+        }
+        self.service
+            .record(
+                task_id,
+                &[TaskHistoryEvent::TransferStaged {
+                    transfer_id: transfer_id.to_owned(),
+                    peer: peer.to_owned(),
+                    execution_status: TaskExecutionStatus::Paused,
+                    execution_pause_reason: super::TaskExecutionPauseReason::Transfer,
+                    execution_mode: task.facts.execution_mode,
+                    sandbox_available: task.facts.sandbox_available,
+                    snapshot_available: task.facts.snapshot_available,
+                    snapshot_path: task.facts.snapshot_path.clone(),
+                }],
+            )
+            .await?;
+        let mut capture = task;
+        if is_staged {
+            capture.facts.execution_status = TaskExecutionStatus::Running;
+        }
+        self.suspend(capture).await?;
+        let stopped = self
+            .list()
+            .await?
+            .into_iter()
+            .find(|task| task.id == task_id)
+            .ok_or(TaskServiceError::Task(super::TaskError::MissingSandbox))?;
+        self.service
+            .record(
+                task_id,
+                &[TaskHistoryEvent::TransferStaged {
+                    transfer_id: transfer_id.to_owned(),
+                    peer: peer.to_owned(),
+                    execution_status: TaskExecutionStatus::Paused,
+                    execution_pause_reason: super::TaskExecutionPauseReason::Transfer,
+                    execution_mode: stopped.facts.execution_mode,
+                    sandbox_available: false,
+                    snapshot_available: stopped.facts.snapshot_available,
+                    snapshot_path: stopped.facts.snapshot_path.clone(),
+                }],
+            )
+            .await
+    }
+
+    pub async fn relinquish(
+        &self,
+        task: Task,
+        transfer_id: &str,
+        recipient: &str,
+    ) -> Result<(), TaskServiceError> {
+        self.service
+            .store
+            .relinquish(&task.id, transfer_id, recipient)
+            .await
+            .map_err(TaskServiceError::Task)?;
+        if let Err(error) = self.service.release_resources(&task).await {
+            tracing::warn!(task = %task.id, %error, "transferred task storage needs cleanup");
+        }
+        self.starting
+            .lock()
+            .expect("starting lock poisoned")
+            .remove(&task.id);
+        let _ = self
+            .events
+            .send(TaskExecutionUpdate::Removed(task.id, Ok(())));
         Ok(())
     }
 
@@ -464,36 +564,85 @@ where
         self.service.prepare_environment(environment, agent).await
     }
 
-    /// Land a task that arrived from another machine.
-    ///
-    /// One call, because the parts are one fact: a task that exists here, carrying the
-    /// history of what was decided about it, with the capsule it will run from. A task
-    /// with a record and no capsule is a task that cannot run, and one with a capsule
-    /// and no record has lost everything that was decided about it.
-    pub async fn land(
-        &self,
-        intent: String,
-        environment: Environment,
-        agent: AgentKind,
-        conversation: Option<String>,
-        history: &[(i64, TaskHistoryEvent)],
-        capsule: Option<String>,
-    ) -> Result<Task, TaskServiceError> {
-        let task = self
-            .service
+    /// History and the transfer hold are one transaction, so an arriving task
+    /// cannot enter the execution queue before the source relinquishes ownership.
+    pub async fn land(&self, arrival: super::TaskArrival) -> Result<Task, TaskServiceError> {
+        let super::TaskArrival {
+            intent,
+            environment,
+            agent,
+            conversation,
+            history,
+            capsule,
+            transfer_id,
+            peer,
+        } = arrival;
+        self.service
             .adopt(
-                intent,
-                environment,
-                agent,
-                conversation,
-                None,
-                Some(history),
+                self.service
+                    .draft(intent, environment, agent, conversation, None),
+                Some(&history),
+                &[TaskHistoryEvent::TransferStaged {
+                    transfer_id: transfer_id.to_owned(),
+                    peer: peer.to_owned(),
+                    execution_status: TaskExecutionStatus::Paused,
+                    execution_pause_reason: super::TaskExecutionPauseReason::Transfer,
+                    execution_mode: TaskExecutionMode::Operator,
+                    sandbox_available: false,
+                    snapshot_available: capsule.is_some(),
+                    snapshot_path: capsule,
+                }],
+            )
+            .await
+    }
+
+    pub async fn verify_landing(&self, task: Task) -> Result<(), TaskServiceError> {
+        let task = if task.facts.sandbox_available {
+            task
+        } else {
+            self.service.provision(task).await?
+        };
+        let id = task
+            .facts
+            .sandbox_id
+            .clone()
+            .ok_or(TaskServiceError::Task(super::TaskError::MissingSandbox))?;
+        let mut session = self
+            .service
+            .isolation
+            .run_command(id, "true".to_owned())
+            .await
+            .map_err(TaskServiceError::Isolation)?;
+        while let Some(event) = session.events.recv().await {
+            match event {
+                CommandEvent::Exited(0) => return Ok(()),
+                CommandEvent::Output { .. } => {}
+                _ => {
+                    return Err(TaskServiceError::Task(super::TaskError::OperationRejected(
+                        "the landed capsule did not boot",
+                    )));
+                }
+            }
+        }
+        Err(TaskServiceError::Task(super::TaskError::MissingSandbox))
+    }
+
+    pub async fn finish_transfer(
+        &self,
+        task_id: &str,
+        transfer_id: &str,
+    ) -> Result<(), TaskServiceError> {
+        self.service
+            .record(
+                task_id,
+                &[TaskHistoryEvent::TransferLanded {
+                    transfer_id: transfer_id.to_owned(),
+                    execution_status: TaskExecutionStatus::Paused,
+                    execution_pause_reason: super::TaskExecutionPauseReason::AwaitingOperator,
+                }],
             )
             .await?;
-        let Some(capsule) = capsule else {
-            return Ok(task);
-        };
-        self.service.record_capsule(&task.id, &capsule).await
+        Ok(())
     }
 
     /// Everything that happened to a task, in order, with when it happened.

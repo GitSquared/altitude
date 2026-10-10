@@ -23,51 +23,39 @@ impl<E> TaskService<E>
 where
     E: IsolationEngine + Clone,
 {
-    /// Start a task, driven by `agent` in `environment`.
-    ///
-    /// Found a task, with the history it already had if it has one.
-    ///
-    /// The environment and the agent are independent: the environment says what is
-    /// installed, and the agent says what works in it.
-    ///
-    /// `requester` is whose work this is. It is the machine's own installation unless a
-    /// client asked for the task, in which case it is the client's: a delegated task is
-    /// the operator's work on somebody else's machine, and its record should say so.
-    ///
-    /// A task taken over from another machine was in the middle of a conversation and
-    /// has a history, so the agent picks up where it left off and the record continues
-    /// rather than starting again.
-    pub async fn adopt(
+    pub(super) fn draft(
         &self,
         intent: String,
         environment: Environment,
         agent: AgentKind,
         conversation: Option<String>,
         requester: Option<InstallationIdentity>,
-        history: Option<&[(i64, TaskHistoryEvent)]>,
-    ) -> Result<Task, TaskServiceError> {
+    ) -> TaskDraft {
         let requester = requester.unwrap_or_else(|| self.identity.clone());
+        TaskDraft {
+            intent,
+            environment,
+            identity_id: requester.id,
+            identity_label: requester.label,
+            host: self.identity.label.clone(),
+            agent_kind: Some(agent),
+            agent_conversation_id: conversation
+                .or_else(|| Some(self.agents.engine(agent).new_conversation_id())),
+        }
+    }
+
+    pub(super) async fn adopt(
+        &self,
+        draft: TaskDraft,
+        history: Option<&[(i64, TaskHistoryEvent)]>,
+        arrival: &[TaskHistoryEvent],
+    ) -> Result<Task, TaskServiceError> {
         self.store
-            .create(
-                TaskDraft {
-                    intent,
-                    environment,
-                    identity_id: requester.id.clone(),
-                    identity_label: requester.label.clone(),
-                    // The machine that runs it, which is this one. A task belongs to the
-                    // machine running it and to nothing else.
-                    host: self.identity.label.clone(),
-                    agent_kind: Some(agent),
-                    agent_conversation_id: conversation
-                        .or_else(|| Some(self.agents.engine(agent).new_conversation_id())),
-                },
-                history,
-            )
+            .create(draft, history, arrival)
             .await
             .map_err(TaskServiceError::Task)
     }
 
-    /// Found a task here that has no history yet.
     pub async fn create(
         &self,
         intent: String,
@@ -75,16 +63,18 @@ where
         agent: AgentKind,
         requester: Option<InstallationIdentity>,
     ) -> Result<Task, TaskServiceError> {
-        self.adopt(intent, environment, agent, None, requester, None)
-            .await
+        self.adopt(
+            self.draft(intent, environment, agent, None, requester),
+            None,
+            &[],
+        )
+        .await
     }
 
     /// Build what a task's environment needs, and say where its snapshot is.
     ///
-    /// A capsule from another machine is only the layers above the environment it was
-    /// built on, because every machine builds that environment for itself from the same
-    /// configuration. Landing one needs that environment here first, and the snapshot it
-    /// lands on is what resolves the layers that stayed behind.
+    /// Local tools and profile mounts must be ready before a task arrives. Physical
+    /// disk dependencies are synchronized separately against their exact snapshot.
     pub async fn prepare_environment(
         &self,
         environment: &Environment,
@@ -104,26 +94,6 @@ where
             .map_err(TaskServiceError::Isolation)
     }
 
-    /// Record that this task's capsule is here, and where it is.
-    ///
-    /// The capsule arrived from another machine, and this is what makes it this
-    /// machine's: the path it landed at is the disk the task will run from.
-    pub async fn record_capsule(
-        &self,
-        task_id: &str,
-        path: &str,
-    ) -> Result<Task, TaskServiceError> {
-        self.record(
-            task_id,
-            &[TaskHistoryEvent::ExecutionRecovered {
-                execution_status: TaskExecutionStatus::Pending,
-                sandbox_available: false,
-                snapshot_available: true,
-                snapshot_path: path.to_owned(),
-            }],
-        )
-        .await
-    }
     pub(super) async fn record(
         &self,
         task_id: &str,

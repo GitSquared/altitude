@@ -6,12 +6,13 @@ use std::{
     future::Future,
     io::{self, Write},
     net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     pin::Pin,
     sync::{Arc, Mutex},
 };
 
-use tokio::sync::watch;
+use cap_std::fs::{Dir, OpenOptions, OpenOptionsExt, Permissions, PermissionsExt};
+use tokio::sync::{Mutex as AsyncMutex, watch};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 
@@ -79,6 +80,8 @@ struct LinkHandler {
     blobs: Arc<BlobStore>,
     /// Where a configuration pushed by a client is written.
     config_path: PathBuf,
+    data_dir: PathBuf,
+    config_lock: Arc<AsyncMutex<()>>,
     /// What this machine holds, and where that record lives.
     held: Arc<Mutex<HeldConfig>>,
     held_path: PathBuf,
@@ -100,7 +103,7 @@ impl ProtocolHandler for LinkHandler {
         let Ok((send, recv)) = connection.accept_bi().await else {
             return Ok(());
         };
-        if let Err(err) = answer(self, send, recv).await {
+        if let Err(err) = answer(self, connection.remote_id(), send, recv).await {
             tracing::warn!(%err, "link stream failed");
         }
         connection.closed().await;
@@ -118,20 +121,49 @@ impl LinkHandler {
     fn write_config(&self, bytes: &[u8]) -> io::Result<()> {
         let bundle: ConfigBundle = serde_json::from_slice(bytes)
             .map_err(|error| io::Error::other(format!("not a configuration: {error}")))?;
-        write_atomically(&self.config_path, bundle.settings.as_bytes())?;
-        let root = self
-            .config_path
-            .parent()
-            .ok_or_else(|| io::Error::other("the configuration has no directory"))?;
+        let mut decoded = Vec::new();
         for profile in &bundle.profiles {
+            if !["agents/pi", "agents/claude", "vcs/github"].contains(&profile.profile.as_str()) {
+                return Err(io::Error::other("unknown credential profile"));
+            }
             for file in &profile.files {
-                let path = root.join(&profile.profile).join("profile").join(&file.path);
-                let contents = BASE64
-                    .decode(&file.contents)
-                    .map_err(|error| io::Error::other(format!("unreadable file: {error}")))?;
-                write_atomically(&path, &contents)?;
+                if file.path.is_empty()
+                    || Path::new(&file.path)
+                        .components()
+                        .any(|component| !matches!(component, Component::Normal(_)))
+                {
+                    return Err(io::Error::other(
+                        "profile file must have a confined relative path",
+                    ));
+                }
+                decoded.push((
+                    Path::new(&profile.profile).join("profile").join(&file.path),
+                    BASE64.decode(&file.contents).map_err(io::Error::other)?,
+                ));
             }
         }
+        fs::create_dir_all(&self.data_dir)?;
+        let root = Dir::open_ambient_dir(&self.data_dir, cap_std::ambient_authority())?;
+        for (path, contents) in decoded {
+            let parent = path
+                .parent()
+                .ok_or_else(|| io::Error::other("missing profile directory"))?;
+            root.create_dir_all(parent)?;
+            let directory = root.open_dir(parent)?;
+            let filename = path
+                .file_name()
+                .ok_or_else(|| io::Error::other("missing profile filename"))?;
+            let incoming = format!(".incoming-{}", uuid::Uuid::new_v4());
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true).mode(0o600);
+            directory.set_permissions(".", Permissions::from_mode(0o700))?;
+            let mut file = directory.open_with(&incoming, &options)?;
+            file.set_permissions(Permissions::from_mode(0o600))?;
+            file.write_all(&contents)?;
+            file.sync_all()?;
+            directory.rename(&incoming, &directory, filename)?;
+        }
+        write_atomically(&self.config_path, bundle.settings.as_bytes())?;
         let mut held = self
             .held
             .lock()
@@ -156,6 +188,7 @@ pub struct ServerParts {
     pub label: String,
     /// Where a configuration pushed by a client is written.
     pub config_path: PathBuf,
+    pub data_dir: PathBuf,
     /// What this machine can do with a task right now.
     pub state: watch::Receiver<RemoteState>,
     /// What this machine holds, for the parts a client asks about before sending.
@@ -170,19 +203,21 @@ pub struct ServerParts {
 /// machine's business, which is why this is a trait rather than the link reaching
 /// into a task service it should know nothing about.
 pub trait TaskHost: Send + Sync + 'static {
+    fn configure(&self) -> BoxFuture<Result<(), String>>;
     fn run(&self, request: TaskRequest) -> BoxFuture<Result<(), String>>;
     fn list(&self) -> BoxFuture<Result<Vec<TaskSummary>, String>>;
     /// Stop a task and bundle it for another machine to continue.
-    fn hand_over(&self, task_id: String) -> BoxFuture<Result<Handover, String>>;
-    /// One stretch of a capsule archive this machine has already bundled.
-    fn capsule_piece(
+    fn hand_over(&self, peer: EndpointId, task_id: String) -> BoxFuture<Result<Handover, String>>;
+    fn transfer_piece(
         &self,
-        task_id: String,
+        peer: EndpointId,
+        transfer_id: String,
+        part: super::TransferPart,
         offset: u64,
         len: u64,
     ) -> BoxFuture<Result<Vec<u8>, String>>;
-    /// The destination holds all of it, so this machine is no longer the owner.
-    fn handed_over(&self, task_id: String) -> BoxFuture<Result<(), String>>;
+    /// Commit source removal after the prepared recipient verifies its arrival.
+    fn handed_over(&self, peer: EndpointId, transfer_id: String) -> BoxFuture<Result<(), String>>;
 }
 
 /// A future a trait object can hold, which an `async fn` in a trait cannot be.
@@ -219,6 +254,7 @@ fn set_private(_path: &Path) -> io::Result<()> {
 
 async fn answer(
     handler: &LinkHandler,
+    peer: EndpointId,
     mut send: SendStream,
     mut recv: RecvStream,
 ) -> LinkResult<()> {
@@ -238,7 +274,7 @@ async fn answer(
             write_frame(&mut send, &response).await?;
         }
         LinkRequest::TakeTask { task_id } => {
-            let response = match handler.tasks.hand_over(task_id).await {
+            let response = match handler.tasks.hand_over(peer, task_id).await {
                 Ok(handover) => LinkResponse::Handover {
                     handover: Box::new(handover),
                 },
@@ -246,23 +282,27 @@ async fn answer(
             };
             write_frame(&mut send, &response).await?;
         }
-        LinkRequest::FetchCapsule {
-            task_id,
+        LinkRequest::FetchTransferPart {
+            transfer_id,
+            part,
             offset,
             len,
         } => {
-            match handler.tasks.capsule_piece(task_id, offset, len).await {
+            match handler
+                .tasks
+                .transfer_piece(peer, transfer_id, part, offset, len)
+                .await
+            {
                 Ok(bytes) => {
                     let announced = bytes.len() as u64;
-                    write_frame(&mut send, &LinkResponse::Capsule { len: announced }).await?;
+                    write_frame(&mut send, &LinkResponse::TransferPiece { len: announced }).await?;
                     send.write_all(&bytes).await?;
                 }
                 Err(reason) => write_frame(&mut send, &LinkResponse::Rejected { reason }).await?,
             }
-            send.finish()?;
         }
-        LinkRequest::HandedOver { task_id } => {
-            let response = match handler.tasks.handed_over(task_id).await {
+        LinkRequest::HandedOver { transfer_id } => {
+            let response = match handler.tasks.handed_over(peer, transfer_id).await {
                 Ok(()) => LinkResponse::Accepted,
                 Err(reason) => LinkResponse::Rejected { reason },
             };
@@ -283,8 +323,12 @@ async fn answer(
                     reason: format!("digest mismatch: announced {hash}, received {actual}"),
                 }
             } else {
+                let _writing = handler.config_lock.lock().await;
                 match handler.write_config(&bytes) {
-                    Ok(()) => LinkResponse::Configured,
+                    Ok(()) => match handler.tasks.configure().await {
+                        Ok(()) => LinkResponse::Configured,
+                        Err(reason) => LinkResponse::Rejected { reason },
+                    },
                     Err(error) => LinkResponse::Rejected {
                         reason: format!("could not take the configuration: {error}"),
                     },
@@ -331,6 +375,7 @@ impl LinkServer {
             listen,
             label,
             config_path,
+            data_dir,
             state,
             held,
             tasks,
@@ -339,8 +384,10 @@ impl LinkServer {
         let handler = LinkHandler {
             id: identity.id(),
             blobs: Arc::clone(&blobs),
-            held_path: config_path.with_file_name("profiles.json"),
+            held_path: data_dir.join("profiles.json"),
             config_path,
+            data_dir,
+            config_lock: Arc::new(AsyncMutex::new(())),
             held: Arc::clone(&held),
             tasks,
         };
