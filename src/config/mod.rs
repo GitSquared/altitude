@@ -224,6 +224,15 @@ impl Config {
         self.data_dir.join("snapshots")
     }
 
+    /// Where each task's agent channel listens.
+    ///
+    /// Under the cache rather than the data directory because a Unix socket
+    /// path is length-limited, and the data path plus a task id is already at
+    /// the limit on macOS.
+    pub fn agent_channel_dir(&self) -> PathBuf {
+        self.cache_dir.join("control")
+    }
+
     pub fn profile_dir(&self, profile: &str) -> PathBuf {
         self.data_dir.join(profile).join("profile")
     }

@@ -110,7 +110,7 @@ fn draw_tasks(
 /// One task, as a card: what it is, and how it is going.
 /// What a card draws, whether the task is this machine's or one it is reading.
 struct Card<'a> {
-    intent: &'a str,
+    title: &'a str,
     environment: &'a str,
     agent: Option<AgentKind>,
     host: &'a str,
@@ -135,7 +135,7 @@ fn cards(app: &App) -> Vec<Card<'_>> {
         .tasks
         .iter()
         .map(|task| Card {
-            intent: &task.facts.intent,
+            title: task.title(),
             environment: &task.facts.environment_name,
             agent: task.agent_kind,
             host: &task.host,
@@ -151,7 +151,7 @@ fn cards(app: &App) -> Vec<Card<'_>> {
     cards.extend(app.remote_tasks.iter().map(|held| {
         let summary = &held.summary;
         Card {
-            intent: &summary.intent,
+            title: summary.title.as_deref().unwrap_or(&summary.intent),
             environment: &summary.environment,
             agent: summary.agent,
             host: &summary.host,
@@ -194,7 +194,7 @@ fn draw_card(frame: &mut Frame, area: Rect, card: &Card<'_>, focused: bool) {
         .title(Span::styled(
             format!(
                 " {} ",
-                truncate(card.intent, usize::from(area.width.saturating_sub(4)))
+                truncate(card.title, usize::from(area.width.saturating_sub(4)))
             ),
             if focused {
                 palette::heading()

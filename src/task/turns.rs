@@ -318,20 +318,25 @@ where
                 return Err(TaskServiceError::Isolation(error));
             }
         };
-        self.record_snapshot(
-            task,
-            &[
-                run_ended(agent_run, TaskAgentRunOutcome::AwaitingOperator, Some(0)),
-                TaskHistoryEvent::ExecutionPaused {
-                    execution_status: TaskExecutionStatus::Paused,
-                    sandbox_available: false,
-                    snapshot_available: true,
-                    execution_pause_reason: TaskExecutionPauseReason::AwaitingOperator,
-                    snapshot_path: snapshot_path.to_string_lossy().into_owned(),
-                },
-            ],
-        )
-        .await
+        let task = self
+            .record_snapshot(
+                task,
+                &[
+                    run_ended(agent_run, TaskAgentRunOutcome::AwaitingOperator, Some(0)),
+                    TaskHistoryEvent::ExecutionPaused {
+                        execution_status: TaskExecutionStatus::Paused,
+                        sandbox_available: false,
+                        snapshot_available: true,
+                        execution_pause_reason: TaskExecutionPauseReason::AwaitingOperator,
+                        snapshot_path: snapshot_path.to_string_lossy().into_owned(),
+                    },
+                ],
+            )
+            .await?;
+        // The sandbox is gone, so nothing can reach the channel until the task
+        // is provisioned again.
+        self.release_agent_channel(&task.id);
+        Ok(task)
     }
     pub async fn continue_turn(&self, agent_run: &TaskAgentRun) -> Result<(), TaskServiceError> {
         self.record(

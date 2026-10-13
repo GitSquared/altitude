@@ -27,6 +27,22 @@ const DEFAULT_SETTINGS: &str = r#"{
 }
 "#;
 
+/// Pi's view of Altitude's channel: the bridge this recipe writes as a managed
+/// file, exposed directly so the model calls the tools without searching for
+/// them. Which tools exist is decided at the binding point,
+/// `TaskService::agent_tools`.
+const DEFAULT_MCP: &str = r#"{
+  "mcpServers": {
+    "altitude": {
+      "command": "python3",
+      "args": ["/altitude/pi/altitude-bridge.py"],
+      "exposure": "direct",
+      "description": "Altitude's control plane for this task: its title, and the signals it and the operator exchange."
+    }
+  }
+}
+"#;
+
 /// Where the report turn writes the generated extension inside the capsule.
 const REPORT_EXTENSION_PATH: &str = "/tmp/altitude-report.ts";
 /// The channel the schema travels on, so the report contract stays Altitude's.
@@ -250,11 +266,18 @@ impl AgentEngine for PiCode {
                 PersistentDirectory::root(
                     GuestPath::Absolute("/altitude/pi"),
                     include_str!("assets/pi.md"),
-                    vec![DefaultFile {
-                        path: "settings.json",
-                        contents: DEFAULT_SETTINGS,
-                    }],
+                    vec![
+                        DefaultFile {
+                            path: "settings.json",
+                            contents: DEFAULT_SETTINGS,
+                        },
+                        DefaultFile {
+                            path: "mcp.json",
+                            contents: DEFAULT_MCP,
+                        },
+                    ],
                 )
+                .with_managed_file("altitude-bridge.py", include_str!("assets/bridge.py"))
                 // Conversations live on the task's disk and travel with its
                 // snapshot; the rest of the profile is shared across tasks.
                 .with_task_local_subdirectories(&["sessions"]),

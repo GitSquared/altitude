@@ -1676,7 +1676,11 @@ impl App {
                     format!(
                         "Take over \"{}\" from {}? It stops running there, its capsule \
                          travels here, and it becomes this machine's.",
-                        held.summary.intent, held.address
+                        held.summary
+                            .title
+                            .as_deref()
+                            .unwrap_or(&held.summary.intent),
+                        held.address
                     ),
                 ));
                 return Ok(false);
@@ -1722,10 +1726,8 @@ impl App {
             }
             _ if is_remove(key) => {
                 if let Some(task) = self.selected_task() {
-                    let question = format!(
-                        "Remove \"{}\" and dispose of its capsule?",
-                        task.facts.intent
-                    );
+                    let question =
+                        format!("Remove \"{}\" and dispose of its capsule?", task.title());
                     self.foreground =
                         Foreground::Confirm(PendingConfirm::removing(task.id, question));
                 }
@@ -1738,7 +1740,7 @@ impl App {
                     let question = format!(
                         "Take over \"{}\"? The agent stops and the terminal is yours; \
                          ctrl-a hands it back.",
-                        task.facts.intent
+                        task.title()
                     );
                     self.foreground =
                         Foreground::Confirm(PendingConfirm::taking_over(task.id, question));
@@ -2078,6 +2080,6 @@ fn show_task_error(app: &mut App, id: &str, error: TaskServiceError) {
         .tasks
         .iter()
         .find(|task| task.id == id)
-        .map_or(id, |task| task.facts.intent.as_str());
+        .map_or(id, |task| task.title());
     app.notice = Some(format!("{title}: {error}"));
 }

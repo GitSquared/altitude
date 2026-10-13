@@ -131,6 +131,8 @@ pub struct Task {
 #[derive(Clone, Debug, sqlx::FromRow)]
 pub struct TaskFacts {
     pub intent: String,
+    /// The short name the agent chose for the task, when it has chosen one.
+    pub title: Option<String>,
     pub environment_name: String,
     pub environment_setup_command: String,
     pub agent_conversation_id: Option<String>,
@@ -169,6 +171,13 @@ impl fmt::Display for TaskOperatorAnswer {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum TaskHistoryEvent {
+    /// The agent renamed the task, which is a fact about what it turned out to be.
+    ///
+    /// Recorded as history rather than overwritten: the task's earlier names say what
+    /// it was mistaken for, and the latest one is what a list reads.
+    TaskTitleSet {
+        title: String,
+    },
     IntentExpressed {
         execution_status: TaskExecutionStatus,
         execution_mode: TaskExecutionMode,
@@ -310,10 +319,29 @@ pub enum TaskAgentRunOutcome {
     Failed,
 }
 
+/// What Altitude tells an agent about the task it is driving, at the start of a
+/// turn.
+///
+/// This is the whole of what an agent can know about its situation from Altitude:
+/// which machine and harness it is, what environment it runs in, what the task is
+/// called and how far along it is, and what the operator last said. It is read as
+/// prose by the harness, so the display is the interface.
 #[derive(Clone, Debug)]
 pub struct TaskAgentTurnContext {
+    pub task_id: String,
+    /// The task's current title, which may still be the intent before the agent
+    /// has named it.
+    pub title: String,
+    /// The machine this task's capsule runs on.
+    pub host: String,
+    pub environment: String,
+    pub agent: Option<AgentKind>,
     pub execution_status: TaskExecutionStatus,
     pub execution_mode: TaskExecutionMode,
+    pub operator_attention_level: TaskOperatorAttentionLevel,
+    pub awaiting_signal_kind: Option<TaskOperatorSignalKind>,
+    pub unread_operator_signal_count: u32,
+    pub last_error: Option<String>,
     pub datetime: String,
     pub latest_operator_answer: Option<TaskOperatorAnswer>,
     /// What the linked contributions currently look like outside Altitude.
@@ -322,21 +350,36 @@ pub struct TaskAgentTurnContext {
 
 impl fmt::Display for TaskAgentTurnContext {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
+        writeln!(
             formatter,
-            "execution_status={:?}; execution_mode={:?}; current_datetime={}; latest_operator_answer={}",
+            "task_id={}; title={:?}; harness={}; host={}; environment={}",
+            self.task_id,
+            self.title,
+            self.agent
+                .map(|kind| kind.to_string())
+                .unwrap_or_else(|| "none".into()),
+            self.host,
+            self.environment,
+        )?;
+        writeln!(
+            formatter,
+            "execution_status={:?}; execution_mode={:?}; attention={:?}; \
+             awaiting_signal={:?}; unread_operator_signals={}; last_error={}",
             self.execution_status,
             self.execution_mode,
-            self.datetime,
-            self.latest_operator_answer
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_else(|| "none".into())
+            self.operator_attention_level,
+            self.awaiting_signal_kind,
+            self.unread_operator_signal_count,
+            self.last_error.as_deref().unwrap_or("none"),
         )?;
+        write!(formatter, "current_datetime={}", self.datetime)?;
+        if let Some(answer) = &self.latest_operator_answer {
+            write!(formatter, "\nlatest_operator_answer={answer}")?;
+        }
         if self.code_contribution_observations.is_empty() {
             return Ok(());
         }
-        write!(formatter, "; code_contributions=[")?;
+        write!(formatter, "\ncode_contributions=")?;
         for (index, observation) in self.code_contribution_observations.iter().enumerate() {
             if index > 0 {
                 write!(formatter, "; ")?;
@@ -347,11 +390,52 @@ impl fmt::Display for TaskAgentTurnContext {
                 observation.contribution_id, observation.state.head_sha, observation.summary
             )?;
         }
-        write!(formatter, "]")
+        Ok(())
     }
 }
 
+/// The longest a task title may be before it stops being readable in a list.
+const TITLE_LIMIT: usize = 48;
+
+/// A title, normalized to what a list can show.
+///
+/// Collapsed to one line and cut at a word boundary, because a title is read
+/// rather than parsed. `None` for a title that says nothing, so a blank title
+/// never replaces a real one.
+pub fn normalize_title(title: &str) -> Option<String> {
+    let collapsed = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    if collapsed.chars().count() <= TITLE_LIMIT {
+        return Some(collapsed);
+    }
+    let mut short = String::new();
+    for word in collapsed.split(' ') {
+        let separator = usize::from(!short.is_empty());
+        if short.chars().count() + separator + word.chars().count() > TITLE_LIMIT {
+            break;
+        }
+        if separator == 1 {
+            short.push(' ');
+        }
+        short.push_str(word);
+    }
+    // A single word longer than the limit is cut, because a title with no words
+    // in it is worse than a truncated one.
+    if short.is_empty() {
+        return Some(collapsed.chars().take(TITLE_LIMIT).collect());
+    }
+    Some(short)
+}
+
 impl Task {
+    /// What a list calls this task: the agent's title, or what was asked for
+    /// before the agent has chosen one.
+    pub fn title(&self) -> &str {
+        self.facts.title.as_deref().unwrap_or(&self.facts.intent)
+    }
+
     /// The environment this task runs in.
     ///
     /// The agent it runs under is recorded separately, as the task's agent kind.
@@ -364,8 +448,17 @@ impl Task {
 
     pub fn turn_context(&self, execution_mode: TaskExecutionMode) -> TaskAgentTurnContext {
         TaskAgentTurnContext {
+            task_id: self.id.clone(),
+            title: self.title().to_owned(),
+            host: self.host.clone(),
+            environment: self.facts.environment_name.clone(),
+            agent: self.agent_kind,
             execution_status: TaskExecutionStatus::Running,
             execution_mode,
+            operator_attention_level: self.facts.operator_attention_level.clone(),
+            awaiting_signal_kind: self.facts.awaiting_signal_kind,
+            unread_operator_signal_count: self.facts.unread_operator_signal_count,
+            last_error: self.facts.last_error.clone(),
             datetime: Local::now().to_rfc3339_opts(SecondsFormat::Secs, true),
             latest_operator_answer: self.facts.latest_operator_answer.clone(),
             code_contribution_observations: self.code_contribution_observations.clone(),

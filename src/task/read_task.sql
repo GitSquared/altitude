@@ -6,6 +6,11 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      WHERE task_id = tasks.id
        AND json_type(payload, '$.data.intent') IS NOT NULL
      ORDER BY sequence DESC LIMIT 1) AS intent,
+    (SELECT payload ->> '$.data.title'
+     FROM task_event_logs
+     WHERE task_id = tasks.id
+       AND json_type(payload, '$.data.title') IS NOT NULL
+     ORDER BY sequence DESC LIMIT 1) AS title,
     (SELECT payload ->> '$.data.environment.name'
      FROM task_event_logs
      WHERE task_id = tasks.id

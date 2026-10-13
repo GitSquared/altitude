@@ -1,14 +1,24 @@
 use crate::{
-    agent::{AgentEngines, AgentError, AgentKind},
+    agent::{AgentEngines, AgentError, AgentKind, mcp, tools::AgentToolRegistry},
     config::InstallationIdentity,
     isolation::{
         Environment, EnvironmentDescription, EnvironmentProgress, EnvironmentRecipe,
         IsolationEngine, IsolationError, ProfileMount, ProfileSummary, guest_path,
+        private_directory,
     },
     vcs::GitHub,
 };
-use std::{collections::HashMap, error::Error, fmt, path::PathBuf};
+use std::{
+    collections::HashMap,
+    error::Error,
+    fmt, fs, io,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
+use tokio::{net::UnixListener, task::JoinHandle};
 use uuid::Uuid;
+
+use tools::TaskAgentTools;
 
 mod agents;
 mod capacity;
@@ -22,6 +32,7 @@ pub use credential::{CredentialShell, CredentialShellEvent, credential_shell_id}
 pub use event_loop::{TaskEventLoop, TaskExecutionUpdate};
 mod progress;
 mod store;
+mod tools;
 pub use state::*;
 pub use store::{TaskDraft, TaskStore};
 
@@ -51,6 +62,16 @@ pub struct TaskService<E> {
     /// apart.
     identity: InstallationIdentity,
     environment_progress: EnvironmentProgressRegistry,
+    /// Where each running task's agent channel listens.
+    agent_channel_dir: PathBuf,
+    agent_channels: Arc<Mutex<HashMap<String, AgentChannel>>>,
+}
+
+/// One task's agent channel: the listener serving its tools, and the socket it is
+/// on.
+struct AgentChannel {
+    handle: JoinHandle<()>,
+    path: PathBuf,
 }
 
 fn failure_events(task: &Task, error: String) -> [TaskHistoryEvent; 2] {
@@ -118,6 +139,7 @@ pub enum TaskServiceError {
     Task(TaskError),
     Isolation(IsolationError),
     InvalidReport(String),
+    AgentChannel(io::Error),
 }
 impl fmt::Display for TaskServiceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -126,6 +148,7 @@ impl fmt::Display for TaskServiceError {
             Self::Task(error) => error.fmt(formatter),
             Self::Isolation(error) => error.fmt(formatter),
             Self::InvalidReport(error) => write!(formatter, "invalid agent turn report: {error}"),
+            Self::AgentChannel(error) => write!(formatter, "agent channel error: {error}"),
         }
     }
 }
@@ -171,6 +194,7 @@ where
         snapshots_dir: PathBuf,
         agents: AgentEngines,
         identity: InstallationIdentity,
+        agent_channel_dir: PathBuf,
     ) -> Self {
         Self {
             store,
@@ -179,6 +203,77 @@ where
             agents,
             identity,
             environment_progress: EnvironmentProgressRegistry::default(),
+            agent_channel_dir,
+            agent_channels: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// The one place Altitude's subsystems are bound into an agent's tool set.
+    ///
+    /// Every agent-facing capability Altitude has is registered here and nowhere
+    /// else, so this is what to read when asking what an agent can do. The MCP
+    /// server serves whatever this returns and names no tool itself.
+    fn agent_tools(&self, task_id: &str) -> AgentToolRegistry {
+        let mut tools = AgentToolRegistry::new();
+        tools.register(TaskAgentTools::new(self.store.clone(), task_id.to_owned()));
+        tools
+    }
+
+    /// Open the channel this task's agent reaches Altitude through, and say
+    /// where the sandbox finds it.
+    ///
+    /// Bound on every provisioning rather than kept: a restored capsule gets a
+    /// new sandbox, and a vsock route is fixed when the sandbox is made.
+    pub(super) fn bind_agent_channel(&self, task_id: &str) -> Result<PathBuf, TaskServiceError> {
+        self.release_agent_channel(task_id);
+        private_directory(&self.agent_channel_dir).map_err(TaskServiceError::Isolation)?;
+        let path = self.agent_channel_dir.join(format!("{task_id}.sock"));
+        let _ = fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).map_err(TaskServiceError::AgentChannel)?;
+        let tools = self.agent_tools(task_id);
+        let listening = task_id.to_owned();
+        let handle = tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        let tools = tools.clone();
+                        tokio::spawn(async move {
+                            let (reader, writer) = stream.into_split();
+                            if let Err(error) = mcp::serve_agent(tools, reader, writer).await {
+                                tracing::debug!(%error, "an agent session ended");
+                            }
+                        });
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, task_id = %listening, "the agent channel stopped listening");
+                        break;
+                    }
+                }
+            }
+        });
+        self.agent_channels
+            .lock()
+            .expect("agent channel lock poisoned")
+            .insert(
+                task_id.to_owned(),
+                AgentChannel {
+                    handle,
+                    path: path.clone(),
+                },
+            );
+        Ok(path)
+    }
+
+    /// Close a task's agent channel and remove the socket behind it.
+    pub(super) fn release_agent_channel(&self, task_id: &str) {
+        if let Some(channel) = self
+            .agent_channels
+            .lock()
+            .expect("agent channel lock poisoned")
+            .remove(task_id)
+        {
+            channel.handle.abort();
+            let _ = fs::remove_file(&channel.path);
         }
     }
     /// What each task's environment build is doing, for an interface to show.

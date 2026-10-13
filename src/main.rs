@@ -75,6 +75,7 @@ async fn client() -> Result<(), Box<dyn Error>> {
             config.task_snapshots_dir(),
             AgentEngines::new(),
             identity,
+            config.agent_channel_dir(),
         );
         let Some(recovered) = tui::boot_task_resume(
             &mut terminal,

@@ -11,7 +11,7 @@ use crate::config::Config;
 
 use super::{
     BaseSandboxRecipe, BaseSandboxSnapshot, CommandEvent, EnvironmentProgressSink, IsolationEngine,
-    IsolationError, SandboxMount, SandboxOptions, SetupStep,
+    IsolationError, SandboxMount, SandboxOptions, SetupStep, VsockRoute,
 };
 
 /// The current Alpine environment runs as root, so home-relative requirements
@@ -48,6 +48,9 @@ pub struct PersistentDirectory {
     pub relative_path: &'static str,
     pub guest_path: GuestPath,
     pub defaults: Vec<DefaultFile>,
+    /// Files Altitude owns and refreshes on every provisioning, unlike a default
+    /// the operator may have edited.
+    pub managed: Vec<(&'static str, &'static str)>,
     pub instructions: &'static str,
     /// Redirect these guest subdirectories to the task disk, outside the shared profile.
     pub task_local_subdirectories: Vec<&'static str>,
@@ -63,6 +66,7 @@ impl PersistentDirectory {
             relative_path,
             guest_path,
             defaults: Vec::new(),
+            managed: Vec::new(),
             instructions,
             task_local_subdirectories: Vec::new(),
         }
@@ -77,6 +81,7 @@ impl PersistentDirectory {
             relative_path: "",
             guest_path,
             defaults,
+            managed: Vec::new(),
             instructions,
             task_local_subdirectories: Vec::new(),
         }
@@ -84,6 +89,11 @@ impl PersistentDirectory {
 
     pub fn with_task_local_subdirectories(mut self, paths: &[&'static str]) -> Self {
         self.task_local_subdirectories = paths.to_vec();
+        self
+    }
+
+    pub fn with_managed_file(mut self, path: &'static str, contents: &'static str) -> Self {
+        self.managed.push((path, contents));
         self
     }
 }
@@ -97,7 +107,7 @@ struct EnvironmentPlan {
     recipe: BaseSandboxRecipe,
     options: SandboxOptions,
     defaults: Vec<(PathBuf, &'static str)>,
-    readmes: Vec<(PathBuf, String)>,
+    managed_files: Vec<(PathBuf, String)>,
     /// Subdirectories that must not reach the shared profile, as the path they
     /// have under whichever root the sandbox gives them, and where a task sees
     /// them.
@@ -138,9 +148,10 @@ impl EnvironmentPlan {
                     // opener Altitude answers, not a browser that is not there.
                     ("BROWSER".into(), OPENER.into()),
                 ],
+                vsock: Vec::new(),
             },
             defaults: Vec::new(),
-            readmes: Vec::new(),
+            managed_files: Vec::new(),
             local_mounts: Vec::new(),
         };
         let mut profiles = HashSet::new();
@@ -184,7 +195,13 @@ impl EnvironmentPlan {
                     .replace("{{guest_path}}", &guest_path.to_string_lossy())
                     .replace("{{host_path}}", &host_path.to_string_lossy())
                     .replace("{{instructions}}", directory.instructions);
-                plan.readmes.push((host_path.join("README.md"), readme));
+                plan.managed_files
+                    .push((host_path.join("README.md"), readme));
+                for (path, contents) in directory.managed {
+                    relative_path(path, false)?;
+                    plan.managed_files
+                        .push((host_path.join(path), contents.to_owned()));
+                }
                 for path in directory.task_local_subdirectories {
                     relative_path(path, false)?;
                     let source = Path::new(recipe.profile)
@@ -229,16 +246,16 @@ impl EnvironmentPlan {
             private_directory(&mount.host_path)?;
             mount.host_path = fs::canonicalize(&mount.host_path).map_err(io_error)?;
         }
-        for (path, readme) in &self.readmes {
-            // Replace the managed note without following a guest-created symlink.
-            let temporary = path.with_file_name(format!(".README-{}", uuid::Uuid::new_v4()));
+        for (path, contents) in &self.managed_files {
+            // Replace Altitude's own file without following a guest-created symlink.
+            let temporary = path.with_file_name(format!(".managed-{}", uuid::Uuid::new_v4()));
             let mut file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
                 .open(&temporary)
                 .map_err(io_error)?;
-            file.write_all(readme.as_bytes()).map_err(io_error)?;
+            file.write_all(contents.as_bytes()).map_err(io_error)?;
             fs::rename(&temporary, path).map_err(io_error)?;
         }
         for (path, contents) in &self.defaults {
@@ -294,7 +311,7 @@ pub(super) fn relative_path(path: &str, allow_empty: bool) -> Result<(), Isolati
     Ok(())
 }
 
-pub(super) fn private_directory(path: &Path) -> Result<(), IsolationError> {
+pub(crate) fn private_directory(path: &Path) -> Result<(), IsolationError> {
     if let Ok(metadata) = fs::symlink_metadata(path)
         && !metadata.file_type().is_dir()
     {
@@ -360,17 +377,31 @@ impl SandboxKind {
     }
 }
 
+/// What one provisioning call builds: the sandbox's identity, and what goes in
+/// it.
+pub(super) struct ProvisionRequest {
+    pub id: String,
+    pub snapshot: Option<String>,
+    pub environment: Environment,
+    pub recipes: Vec<EnvironmentRecipe>,
+    pub vsock: Vec<VsockRoute>,
+}
+
 pub(super) async fn provision(
     engine: &impl IsolationEngine,
     config: &Config,
-    id: String,
-    snapshot: Option<String>,
-    environment: Environment,
-    recipes: Vec<EnvironmentRecipe>,
+    request: ProvisionRequest,
     progress: &dyn EnvironmentProgressSink,
 ) -> Result<(), IsolationError> {
-    // Validate every recipe before creating directories or building images.
-    let plan = EnvironmentPlan::compose(config, environment, recipes)?;
+    let ProvisionRequest {
+        id,
+        snapshot,
+        environment,
+        recipes,
+        vsock,
+    } = request;
+    let mut plan = EnvironmentPlan::compose(config, environment, recipes)?;
+    plan.options.vsock = vsock;
     create(
         engine,
         config,

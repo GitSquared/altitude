@@ -167,6 +167,10 @@ pub struct TaskSummary {
     pub id: String,
     /// The machine that owns it, which is the machine answering.
     pub host: String,
+    /// The agent's short title, when it has chosen one. A client draws this in
+    /// place of the intent, and reads the intent when there is none.
+    #[serde(default)]
+    pub title: Option<String>,
     pub intent: String,
     pub environment: String,
     pub agent: Option<AgentKind>,

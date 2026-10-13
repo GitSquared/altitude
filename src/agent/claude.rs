@@ -28,6 +28,22 @@ const DEFAULT_SETTINGS: &str = r#"{
 }
 "#;
 
+/// The MCP tools Claude may call without asking, which are Altitude's channel.
+const MCP_TOOLS: &str = "mcp__altitude__*";
+
+/// Claude's view of Altitude's channel: the bridge this recipe writes as a
+/// managed file, named by `--mcp-config` on every turn. Which tools exist is
+/// decided at the binding point, `TaskService::agent_tools`.
+const DEFAULT_MCP: &str = r#"{
+  "mcpServers": {
+    "altitude": {
+      "command": "python3",
+      "args": ["/altitude/claude/altitude-bridge.py"]
+    }
+  }
+}
+"#;
+
 impl ClaudeCode {
     fn install_command() -> &'static str {
         "export HOME=/root && \\
@@ -131,7 +147,10 @@ impl AgentEngine for ClaudeCode {
             "exec claude -p --permission-mode auto \\
              --output-format stream-json --verbose --include-partial-messages \\
              --system-prompt-snapshot off \\
+             --mcp-config /altitude/claude/mcp.json \
+             --allowedTools {} \
              --append-system-prompt {} {session} {}",
+            shell_quote(MCP_TOOLS),
             shell_quote(AUTOPILOT_SYSTEM_PROMPT),
             shell_quote(&format!(
                 "{prompt}\n\nAltitude task context at the start of this turn: {context}"
@@ -143,7 +162,10 @@ impl AgentEngine for ClaudeCode {
         format!(
             "exec claude -p --permission-mode auto --output-format json \\
              --system-prompt-snapshot off \\
+             --mcp-config /altitude/claude/mcp.json \
+             --allowedTools {} \
              --append-system-prompt {} --json-schema {} --resume {} {}",
+            shell_quote(MCP_TOOLS),
             shell_quote(REPORT_SYSTEM_PROMPT),
             shell_quote(REPORT_SCHEMA),
             shell_quote(conversation_id),
@@ -179,11 +201,18 @@ impl AgentEngine for ClaudeCode {
                 PersistentDirectory::root(
                     GuestPath::Absolute("/altitude/claude"),
                     include_str!("assets/claude.md"),
-                    vec![DefaultFile {
-                        path: "settings.json",
-                        contents: DEFAULT_SETTINGS,
-                    }],
+                    vec![
+                        DefaultFile {
+                            path: "settings.json",
+                            contents: DEFAULT_SETTINGS,
+                        },
+                        DefaultFile {
+                            path: "mcp.json",
+                            contents: DEFAULT_MCP,
+                        },
+                    ],
                 )
+                .with_managed_file("altitude-bridge.py", include_str!("assets/bridge.py"))
                 .with_task_local_subdirectories(&[
                     "projects",
                     "file-history",

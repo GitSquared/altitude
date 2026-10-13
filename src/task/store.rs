@@ -81,6 +81,19 @@ impl TaskStore {
         .map_err(TaskError::Database)
     }
 
+    /// One task by id, whether or not it is still in play.
+    pub async fn get(&self, task_id: &str) -> Result<Option<Task>, TaskError> {
+        sqlx::query_as::<_, TaskRow>(concat!(
+            include_str!("read_task.sql"),
+            " WHERE tasks.id = ?"
+        ))
+        .bind(task_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map(|row| row.map(Task::from))
+        .map_err(TaskError::Database)
+    }
+
     /// Found a task, with the history it already had if it has one.
     ///
     /// A task born here is born with the intent that asked for it. A task that arrived

@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use sqlx::Type;
 use std::{error::Error as StdError, fmt, str::FromStr};
 mod claude;
+pub mod mcp;
 mod pi;
+pub mod tools;
 use claude::ClaudeCode;
 use pi::PiCode;
 
@@ -67,7 +69,7 @@ impl fmt::Display for AgentError {
 impl StdError for AgentError {}
 
 /// The autonomy Altitude expects from every harness while no operator is watching.
-const AUTOPILOT_SYSTEM_PROMPT: &str = "Altitude owns this task. It keeps the task's record, decides when your turns run, and carries signals between you and the operator, who is usually away from the terminal. You cannot close a task; only the operator can. Continue autonomously whenever the next action is reasonably implied by the original task. Match the precision of the operator's expressed intent. Investigate and take reasonable defaults instead of asking for confirmation. Altitude will ask for a structured task report after this work turn ends.";
+const AUTOPILOT_SYSTEM_PROMPT: &str = "Altitude owns this task. It keeps the task's record, decides when your turns run, and carries signals between you and the operator, who is usually away from the terminal. You cannot close a task; only the operator can. Continue autonomously whenever the next action is reasonably implied by the original task. Match the precision of the operator's expressed intent. Investigate and take reasonable defaults instead of asking for confirmation. Altitude will ask for a structured task report after this work turn ends. You are one harness in an isolated sandbox on one machine, working one task; Altitude gives you the task's context and its tools at the start of each turn, and that is the whole of what it knows about your situation. The operator's interface names this task by its title, so refresh that title through those tools as the work progresses: a very short summary of what the task has become, not a restatement of the original request. Altitude carries your words to the operator only through signals.";
 const REPORT_SYSTEM_PROMPT: &str = r#"Altitude is driving this task without an operator watching. Do not perform more work in this turn. Return the structured task report now.
 
 Keep routine reasoning, progress, recoverable failures, and decisions you can reasonably infer in the summary. Before raising an operator signal, weigh the cost of taking the operator's attention:

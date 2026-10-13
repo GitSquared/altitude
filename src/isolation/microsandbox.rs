@@ -24,6 +24,7 @@ use super::{
     BaseSandboxRecipe, BaseSandboxSnapshot, Command, CommandEvent, CommandSession,
     EnvironmentDescription, EnvironmentProgress, EnvironmentProgressSink, EnvironmentRecipe,
     IsolationEngine, IsolationError, IsolationStatus, OutputStream, SandboxOptions, SetupStep,
+    VsockRoute,
     environment::{self, REFRESH_AFTER, private_directory},
     trust_host_roots,
 };
@@ -144,6 +145,9 @@ impl MicrosandboxIsolation {
                     restore =
                         restore.volume(mount.guest_path, |volume| volume.bind(mount.host_path));
                 }
+                for route in options.vsock {
+                    restore = restore.vsock(route.host_socket, route.guest_port);
+                }
                 match restore.restore().await {
                     Ok(_) if options.environment.is_empty() && base.is_none() => Ok(()),
                     Ok(sandbox) => {
@@ -174,6 +178,9 @@ impl MicrosandboxIsolation {
                 for mount in options.mounts {
                     builder =
                         builder.volume(mount.guest_path, |volume| volume.bind(mount.host_path));
+                }
+                for route in options.vsock {
+                    builder = builder.vsock(route.host_socket, route.guest_port);
                 }
                 for (key, value) in options.environment {
                     builder = builder.env(key, value);
@@ -588,15 +595,19 @@ impl IsolationEngine for MicrosandboxIsolation {
         task_snapshot: Option<String>,
         environment: Environment,
         recipes: Vec<EnvironmentRecipe>,
+        vsock: Vec<VsockRoute>,
         progress: &dyn EnvironmentProgressSink,
     ) -> Result<(), IsolationError> {
         environment::provision(
             self,
             &self.config,
-            id,
-            task_snapshot,
-            environment,
-            recipes,
+            environment::ProvisionRequest {
+                id,
+                snapshot: task_snapshot,
+                environment,
+                recipes,
+                vsock,
+            },
             progress,
         )
         .await

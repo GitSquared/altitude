@@ -506,6 +506,7 @@ fn summarise(task: &Task) -> TaskSummary {
     TaskSummary {
         id: task.id.clone(),
         host: task.host.clone(),
+        title: task.facts.title.clone(),
         intent: task.facts.intent.clone(),
         environment: task.facts.environment_name.clone(),
         agent: task.agent_kind,
@@ -557,6 +558,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         config.task_snapshots_dir(),
         AgentEngines::new(),
         config.identity().map_err(io::Error::other)?,
+        config.agent_channel_dir(),
     );
     let (task_loop, mut updates) = TaskEventLoop::new(tasks);
     tokio::spawn(async move {

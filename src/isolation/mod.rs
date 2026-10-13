@@ -15,6 +15,7 @@ mod microsandbox;
 /// How long a built environment is kept before it is rebuilt, for the interface
 /// that has to tell an operator when their base was last refreshed.
 pub use environment::REFRESH_AFTER;
+pub(crate) use environment::private_directory;
 /// Shared with the VCS providers so capsule commands are quoted one way.
 pub(crate) use environment::shell_quote;
 pub use environment::{
@@ -181,6 +182,19 @@ pub struct SandboxOptions {
     pub network_enabled: bool,
     pub mounts: Vec<SandboxMount>,
     pub environment: Vec<(String, String)>,
+    /// Host sockets this sandbox can reach as host CID 2, for channels that are
+    /// not the network. See [`VsockRoute`].
+    pub vsock: Vec<VsockRoute>,
+}
+
+/// A host local socket published to one sandbox on a guest vsock port.
+///
+/// This is a channel rather than a service: only the sandbox it was created for
+/// can reach it, and it exists without the sandbox having a network at all.
+#[derive(Clone, Debug)]
+pub struct VsockRoute {
+    pub host_socket: PathBuf,
+    pub guest_port: u32,
 }
 
 /// Gives a sandbox the extra roots this machine trusts.
@@ -257,6 +271,7 @@ impl SandboxOptions {
             network_enabled: false,
             mounts: Vec::new(),
             environment: Vec::new(),
+            vsock: Vec::new(),
         }
     }
 }
@@ -312,6 +327,7 @@ pub trait IsolationEngine: Send + Sync {
         task_snapshot: Option<String>,
         environment: Environment,
         recipes: Vec<EnvironmentRecipe>,
+        vsock: Vec<VsockRoute>,
         progress: &dyn EnvironmentProgressSink,
     ) -> impl Future<Output = Result<(), IsolationError>> + Send;
 

@@ -1,10 +1,10 @@
 //! A task's life: founding it, provisioning it, and taking it apart.
 
 use crate::{
-    agent::AgentKind,
+    agent::{AgentKind, mcp},
     config::InstallationIdentity,
     isolation::Environment,
-    isolation::{CommandEvent, CommandSession, IsolationEngine, SandboxOptions},
+    isolation::{CommandEvent, CommandSession, IsolationEngine, SandboxOptions, VsockRoute},
     vcs::GitHub,
 };
 use futures_util::future::join_all;
@@ -138,6 +138,16 @@ where
             None
         };
         let progress = self.environment_progress.writer(&task.id);
+        // The agent's channel belongs to the sandbox: opened before it is made,
+        // because a vsock route is fixed at creation and does not survive a
+        // restored capsule's rebuild without being asked for again.
+        let vsock = match task.agent_kind {
+            Some(_) => vec![VsockRoute {
+                host_socket: self.bind_agent_channel(&task.id)?,
+                guest_port: mcp::AGENT_CHANNEL_PORT,
+            }],
+            None => Vec::new(),
+        };
         let create = match task.agent_kind {
             Some(kind) => {
                 self.isolation
@@ -149,6 +159,7 @@ where
                             self.agents.engine(kind).environment_recipe(),
                             GitHub::environment_recipe(),
                         ],
+                        vsock,
                         &progress,
                     )
                     .await
@@ -161,6 +172,7 @@ where
         };
         self.environment_progress.clear(&task.id);
         if let Err(error) = create {
+            self.release_agent_channel(&task.id);
             self.fail(&task, error.to_string()).await?;
             return Err(TaskServiceError::Isolation(error));
         }
@@ -211,6 +223,7 @@ where
             .map_err(TaskServiceError::Task)
     }
     pub(super) async fn release_resources(&self, task: &Task) -> Result<Task, TaskServiceError> {
+        self.release_agent_channel(&task.id);
         let mut task = task.clone();
         if task.facts.sandbox_available {
             let id = task
@@ -274,6 +287,7 @@ where
                         .await
                     {
                         Ok(path) => {
+                            service.release_agent_channel(&task.id);
                             task = service
                                 .record_snapshot(
                                     &task,
@@ -350,6 +364,7 @@ where
                             }
                         };
                         service.record_snapshot(&task, &[event]).await?;
+                        service.release_agent_channel(&task.id);
                         Ok(())
                     }
                     Err(error) => {
