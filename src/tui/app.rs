@@ -7,7 +7,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fs, io, mem,
+    env, fs, io, mem, process,
     time::{Duration, Instant},
 };
 
@@ -40,11 +40,12 @@ use crate::{
 
 use popups::confirm::PendingConfirm;
 use popups::new_task::{Host, NewTask};
+use popups::open_link::{self, Link, OpenLink};
 use popups::reply::{Prompt, PromptAction, Reply};
 use screens::settings::{
     CredentialKind, Depth, Focus, Form, Panel, RowKind, Section, Setting, Target,
 };
-use screens::shell::Shell;
+use screens::shell::{GuestRequest, Shell};
 
 /// What the keyboard is answering to, most immediate first.
 ///
@@ -73,6 +74,8 @@ pub(in crate::tui) enum Foreground {
     Signals,
     /// A terminal, taking every key there is.
     Shell(ShellId),
+    /// A sandbox asking to open a link, over the terminal that asked.
+    OpenLink(OpenLink),
     #[default]
     Tasks,
 }
@@ -470,6 +473,7 @@ impl App {
             }
             // Nothing to hand back to: the sandbox goes with the shell.
             Foreground::Shell(ShellId::Credentials(_)) => vec![Hint::new("ctrl-a", "close")],
+            Foreground::OpenLink(asking) => asking.hints(),
             Foreground::Tasks => {
                 // Only what there is something to do it to.
                 let mut hints = vec![Hint::new("c", "create"), Hint::new("s", "settings")];
@@ -501,10 +505,12 @@ impl App {
         }
     }
 
-    /// The terminal in front, if one is.
+    /// The terminal in front, if one is. A question a sandbox asked is asked over
+    /// the terminal it asked from, which goes on running behind it.
     pub(in crate::tui) fn open_shell(&self) -> Option<&ShellId> {
         match &self.foreground {
             Foreground::Shell(id) => Some(id),
+            Foreground::OpenLink(asking) => Some(asking.shell()),
             _ => None,
         }
     }
@@ -1959,24 +1965,58 @@ impl App {
             .is_some_and(Shell::has_active_notice)
     }
 
-    /// Feed one terminal's bytes to the shell that draws it, and copy what it asked
-    /// to copy.
+    /// Feed one terminal's bytes to the shell that draws it, and do what its program
+    /// asked for along the way.
     ///
     /// The same for a task's shell and a credential shell, because the terminal is
     /// the same: only where the bytes came from differs.
     fn process_shell_output(&mut self, id: &ShellId, bytes: Vec<u8>) {
-        let Some(shell) = self.shells.get_mut(id) else {
-            return;
-        };
-        let Some(text) = shell.process(bytes) else {
-            return;
-        };
-        match copy_to_clipboard(text) {
-            Ok(()) => {
-                shell.show_clipboard_confirmation();
-                tracing::info!("copied terminal text to clipboard");
+        let mut asked_to_open = None;
+        {
+            let Some(shell) = self.shells.get_mut(id) else {
+                return;
+            };
+            for request in shell.process(bytes) {
+                match request {
+                    GuestRequest::Copy(text) => match copy_to_clipboard(text) {
+                        Ok(()) => {
+                            shell.show_clipboard_confirmation();
+                            tracing::info!("copied terminal text to clipboard");
+                        }
+                        Err(error) => tracing::error!(%error, "could not copy terminal text"),
+                    },
+                    GuestRequest::Open(url) => asked_to_open = Some(url),
+                }
             }
-            Err(error) => tracing::error!(%error, "could not copy terminal text"),
+        }
+        let Some(url) = asked_to_open else {
+            return;
+        };
+        match Link::parse(&url) {
+            // A question rather than an act: a sandbox runs what it likes, and this
+            // machine opens what its operator says it opens.
+            Some(link) => self.foreground = Foreground::OpenLink(OpenLink::new(id.clone(), link)),
+            None => tracing::debug!(%url, "a sandbox asked to open something that is not a page"),
+        }
+    }
+
+    /// Take the answer to a sandbox's link.
+    pub(in crate::tui) fn open_link_key(&mut self, key: KeyEvent) {
+        let Foreground::OpenLink(mut asking) = mem::take(&mut self.foreground) else {
+            return;
+        };
+        let shell = asking.shell().clone();
+        match asking.handle_key(key) {
+            None => self.foreground = Foreground::OpenLink(asking),
+            Some(open_link::Decision::No) => self.foreground = Foreground::Shell(shell),
+            Some(open_link::Decision::Open) => {
+                let url = asking.url().to_owned();
+                self.foreground = Foreground::Shell(shell);
+                match open_in_browser(&url) {
+                    Ok(()) => tracing::info!(%url, "opened a sandbox's link"),
+                    Err(error) => self.notice = Some(format!("could not open {url}: {error}")),
+                }
+            }
         }
     }
 
@@ -1991,6 +2031,25 @@ impl App {
 fn copy_to_clipboard(text: String) -> Result<(), arboard::Error> {
     let mut clipboard = arboard::Clipboard::new()?;
     clipboard.set_text(text)
+}
+
+/// Open an address in this machine's browser.
+///
+/// One argument and never a shell word: the sandbox chooses the address, and a
+/// sandbox is not to be trusted with this machine's command line.
+fn open_in_browser(url: &str) -> Result<(), String> {
+    let opener = match env::consts::OS {
+        "macos" => "open",
+        _ => "xdg-open",
+    };
+    let status = process::Command::new(opener)
+        .arg(url)
+        .status()
+        .map_err(|error| error.to_string())?;
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| format!("{opener} exited with {status}"))
 }
 
 /// Open the settings panel, reading back the two things it cannot see for

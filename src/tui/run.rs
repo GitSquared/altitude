@@ -136,6 +136,11 @@ where
             if let Some(shell) = app.open_shell().and_then(|id| app.shells.get(id)) {
                 shell.draw(frame, content);
             }
+            // Over the terminal that asked, which goes on running behind it.
+            if let Foreground::OpenLink(asking) = &app.foreground {
+                widgets::chrome::dim(frame, content);
+                popups::open_link::draw(frame, content, asking);
+            }
             if matches!(app.foreground, Foreground::Panel) {
                 // Fullscreen: it is the screen, not something over it.
                 let view = app.settings_view();
@@ -309,6 +314,7 @@ where
         Foreground::Panel => app.panel_keys(key, task_service, credential_events).await,
         Foreground::Signals => app.signals_key(key, task_service).await,
         Foreground::Shell(_) => app.shell_key(key, event_loop, task_service).await,
+        Foreground::OpenLink(_) => app.open_link_key(key),
         Foreground::Tasks => {
             if app.list_key(key, task_service).await? {
                 return Ok(true);

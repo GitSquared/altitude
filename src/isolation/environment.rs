@@ -17,6 +17,8 @@ use super::{
 /// The current Alpine environment runs as root, so home-relative requirements
 /// resolve from here.
 const GUEST_HOME: &str = "/root";
+/// Where the opener every sandbox is given lives, and what `$BROWSER` points at.
+const OPENER: &str = "/usr/local/bin/xdg-open";
 pub const REFRESH_AFTER: Duration = Duration::from_secs(72 * 60 * 60);
 
 /// Knowledge supplied by an agent or VCS module. No host I/O or lifecycle hooks.
@@ -132,6 +134,9 @@ impl EnvironmentPlan {
                 environment: vec![
                     ("HOME".into(), GUEST_HOME.into()),
                     ("SHELL".into(), "/bin/bash".into()),
+                    // So that a tool which asks a browser to open something uses the
+                    // opener Altitude answers, not a browser that is not there.
+                    ("BROWSER".into(), OPENER.into()),
                 ],
             },
             defaults: Vec::new(),
@@ -261,6 +266,19 @@ impl EnvironmentPlan {
         }
         Ok(())
     }
+}
+
+/// The opener every sandbox is given: what a browser would do, handed to the
+/// terminal Altitude streams instead.
+///
+/// Written per sandbox rather than built into the environment, because it is
+/// Altitude's plumbing and travels with Altitude's code rather than with a
+/// snapshot. It goes in through a quoted heredoc, so the script is the file.
+fn opener_script() -> String {
+    format!(
+        "mkdir -p /usr/local/bin\ncat > {OPENER} <<'ALTITUDE_OPENER'\n{}ALTITUDE_OPENER\nchmod 0755 {OPENER}\n",
+        include_str!("assets/xdg-open.sh")
+    )
 }
 
 pub(super) fn relative_path(path: &str, allow_empty: bool) -> Result<(), IsolationError> {
@@ -444,11 +462,9 @@ async fn create(
     plan.options.snapshot_path = Some(path);
     plan.options.environment_base = base;
     engine.create(id.clone(), plan.options).await?;
-    if plan.local_mounts.is_empty() {
-        return Ok(());
-    }
-    let root = kind.state_root();
     let mut command = String::from("set -eu\n");
+    command.push_str(&opener_script());
+    let root = kind.state_root();
     for (source, target) in plan.local_mounts {
         let source = shell_quote(&Path::new(root).join(source).to_string_lossy());
         let target = shell_quote(&target);

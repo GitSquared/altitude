@@ -1,6 +1,7 @@
 use crate::tui::widgets::palette;
 
 use std::{
+    str,
     sync::mpsc::{self, Receiver, Sender},
     time::{Duration, Instant},
 };
@@ -17,9 +18,18 @@ use terminput::Encoding;
 use terminput_crossterm::to_terminput;
 use tui_term::{vt100, widget::PseudoTerminal};
 
+/// What the program in a sandbox asked this machine to do, because a terminal
+/// cannot do it from in there.
+pub enum GuestRequest {
+    /// Put this on the clipboard.
+    Copy(String),
+    /// Open this in a browser, which is on this side of the terminal.
+    Open(String),
+}
+
 pub struct Shell {
-    parser: vt100::Parser<ClipboardCallbacks>,
-    clipboard: Receiver<String>,
+    parser: vt100::Parser<HostCallbacks>,
+    requests: Receiver<GuestRequest>,
     clipboard_notice_until: Option<Instant>,
     /// What this terminal is, on its frame: a task's run, or the shell opened to set
     /// up credentials.
@@ -28,28 +38,28 @@ pub struct Shell {
 
 impl Shell {
     pub fn new(rows: u16, cols: u16, history: Vec<Vec<u8>>, title: String) -> Self {
-        let (clipboard_sender, clipboard) = mpsc::channel();
-        let mut parser = vt100::Parser::new_with_callbacks(
-            rows,
-            cols,
-            1_000,
-            ClipboardCallbacks { clipboard_sender },
-        );
+        let (host, requests) = mpsc::channel();
+        let mut parser =
+            vt100::Parser::new_with_callbacks(rows, cols, 1_000, HostCallbacks { host });
         for bytes in history {
             parser.process(&bytes);
         }
-        while clipboard.try_recv().is_ok() {}
+        // What the history asked for is dropped: a link an agent printed while
+        // nobody was watching must not open a browser when someone attaches.
+        while requests.try_recv().is_ok() {}
         Self {
             parser,
-            clipboard,
+            requests,
             clipboard_notice_until: None,
             title,
         }
     }
 
-    pub fn process(&mut self, bytes: Vec<u8>) -> Option<String> {
+    /// Feed the terminal what its program printed, and answer with what it asked
+    /// for along the way.
+    pub fn process(&mut self, bytes: Vec<u8>) -> Vec<GuestRequest> {
         self.parser.process(&bytes);
-        self.clipboard.try_recv().ok()
+        self.requests.try_iter().collect()
     }
 
     pub fn show_clipboard_confirmation(&mut self) {
@@ -161,11 +171,13 @@ impl Shell {
     }
 }
 
-struct ClipboardCallbacks {
-    clipboard_sender: Sender<String>,
+/// The escape sequences a program in a sandbox uses to ask for something only this
+/// side of the terminal can do: a clipboard, and a browser.
+struct HostCallbacks {
+    host: Sender<GuestRequest>,
 }
 
-impl vt100::Callbacks for ClipboardCallbacks {
+impl vt100::Callbacks for HostCallbacks {
     fn copy_to_clipboard(&mut self, _: &mut vt100::Screen, _: &[u8], data: &[u8]) {
         let Ok(bytes) = STANDARD.decode(data) else {
             return;
@@ -173,7 +185,18 @@ impl vt100::Callbacks for ClipboardCallbacks {
         let Ok(text) = String::from_utf8(bytes) else {
             return;
         };
-        let _ = self.clipboard_sender.send(text);
+        let _ = self.host.send(GuestRequest::Copy(text));
+    }
+
+    /// Altitude's own sequence, written by the opener every sandbox is given. The
+    /// parser hands over anything that is not a sequence it knows, which is what
+    /// makes this one ours to define.
+    fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
+        if let [b"1337", b"open", url] = params
+            && let Ok(url) = str::from_utf8(url)
+        {
+            let _ = self.host.send(GuestRequest::Open(url.to_owned()));
+        }
     }
 }
 
