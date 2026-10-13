@@ -25,9 +25,11 @@ use crate::{
         Announcement, ConfigBundle, LinkClient, RemoteKey, RemoteKeyStatus, RemoteKeys,
         RemoteState, TaskRequest, TaskSummary, bring_home, meet,
     },
+    task,
     task::{
-        Task, TaskEventLoop, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
-        TaskExecutionUpdate, TaskOperatorSignal, TaskService, TaskServiceError,
+        CredentialShell, CredentialShellEvent, Task, TaskEventLoop, TaskExecutionMode,
+        TaskExecutionPauseReason, TaskExecutionStatus, TaskExecutionUpdate, TaskOperatorSignal,
+        TaskService, TaskServiceError,
     },
     tui::keys::{is_dismiss, is_remove},
     tui::popups,
@@ -69,8 +71,8 @@ pub(in crate::tui) enum Foreground {
     Panel,
     /// A task's signals, over the list it was opened from.
     Signals,
-    /// A task's terminal, taking every key there is.
-    Shell(String),
+    /// A terminal, taking every key there is.
+    Shell(ShellId),
     #[default]
     Tasks,
 }
@@ -121,6 +123,10 @@ impl RemoteStatus {
     }
 }
 
+/// What a task's terminal is called on its frame, as opposed to the shell opened to
+/// set up credentials, which names the profile it is for.
+const TASK_SHELL: &str = "shell";
+
 /// What came back from reaching an address. Sent from the dial, which runs on its
 /// own so a slow one cannot hold up the interface.
 pub(in crate::tui) enum RemoteAnswer {
@@ -138,6 +144,34 @@ pub(in crate::tui) enum RemoteAnswer {
 /// How long the list is shown before its addresses are dialled, so moving through
 /// the sections does not reach anything.
 const ASK_AFTER: Duration = Duration::from_millis(400);
+
+/// Which terminal is in front.
+///
+/// One shell with two owners: everything about drawing it, sizing it, pasting into
+/// it and copying out of it is the same either way, and only where its keys go
+/// differs.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(in crate::tui) enum ShellId {
+    /// A task's run, whose keys go to the task's event loop.
+    Task(String),
+    /// A shell opened to set up credentials, whose keys go to its own sandbox.
+    Credentials(String),
+}
+
+/// Where a credential shell is.
+#[derive(Default)]
+pub(in crate::tui) enum CredentialShellState {
+    /// No shell, and none being made.
+    #[default]
+    Idle,
+    /// The sandbox is being made, which is a wait rather than a frame.
+    Opening {
+        profile: &'static str,
+        display: String,
+    },
+    /// A terminal to draw, and the channel its keys go down.
+    Open(CredentialShell),
+}
 
 /// A task another machine owns, and which machine that is.
 ///
@@ -167,7 +201,12 @@ pub struct App {
     pub(in crate::tui) removing: HashSet<String>,
     pub(in crate::tui) selected: usize,
     pub(in crate::tui) first_visible_task: usize,
-    pub(in crate::tui) shells: HashMap<String, Shell>,
+    pub(in crate::tui) shells: HashMap<ShellId, Shell>,
+    /// The shell opened to set up credentials, if there is one.
+    ///
+    /// One at a time: a profile is a shared directory, and two shells writing it
+    /// is a way to confuse yourself.
+    pub(in crate::tui) credential_shell: CredentialShellState,
     /// The selected task's signals, and where you are among them. Read when the
     /// signals open; the pop-up is a view over what the task already recorded.
     pub(in crate::tui) operator_signals: Vec<TaskOperatorSignal>,
@@ -235,6 +274,7 @@ impl App {
             selected: 0,
             first_visible_task: 0,
             shells: HashMap::new(),
+            credential_shell: CredentialShellState::Idle,
             operator_signals: Vec::new(),
             selected_operator_signal: 0,
             selected_signal_action: 0,
@@ -297,11 +337,24 @@ impl App {
             .unwrap_or_else(|| vec![Environment::base()])
     }
 
-    pub(in crate::tui) fn default_environment(&self) -> &str {
+    /// The name of the environment a new task would get.
+    pub(in crate::tui) fn default_environment_name(&self) -> &str {
         self.settings_file
             .as_ref()
             .map(|file| file.settings().default_environment.as_str())
             .unwrap_or_default()
+    }
+
+    /// The environment a new task would get.
+    ///
+    /// A credential shell is opened in it, because the credentials being set up are
+    /// the ones tasks read.
+    pub(in crate::tui) fn default_environment_value(&self) -> Environment {
+        let default = self.default_environment_name();
+        self.environments()
+            .into_iter()
+            .find(|environment| environment.name.eq_ignore_ascii_case(default))
+            .unwrap_or_else(Environment::base)
     }
 
     pub(in crate::tui) fn reload_settings(&mut self) -> bool {
@@ -394,6 +447,8 @@ impl App {
                     hints.push(Hint::new("enter", "choose"));
                 } else if self.panel.section == Section::Interface {
                     hints.push(Hint::new("enter", "toggle"));
+                } else if self.panel.section == Section::Credentials {
+                    hints.push(Hint::new("enter", "shell"));
                 }
                 if self.panel.section.grows() {
                     hints.push(Hint::new("n", "new"));
@@ -410,7 +465,11 @@ impl App {
                 dismiss(),
             ],
             // A shell takes every key there is, so it has no `?` to offer.
-            Foreground::Shell(_) => vec![Hint::new("ctrl-a", "hand back to autopilot")],
+            Foreground::Shell(ShellId::Task(_)) => {
+                vec![Hint::new("ctrl-a", "hand back to autopilot")]
+            }
+            // Nothing to hand back to: the sandbox goes with the shell.
+            Foreground::Shell(ShellId::Credentials(_)) => vec![Hint::new("ctrl-a", "close")],
             Foreground::Tasks => {
                 // Only what there is something to do it to.
                 let mut hints = vec![Hint::new("c", "create"), Hint::new("s", "settings")];
@@ -442,15 +501,193 @@ impl App {
         }
     }
 
-    /// The task whose terminal is in front, if one is.
-    pub(in crate::tui) fn open_shell(&self) -> Option<&str> {
+    /// The terminal in front, if one is.
+    pub(in crate::tui) fn open_shell(&self) -> Option<&ShellId> {
         match &self.foreground {
             Foreground::Shell(id) => Some(id),
             _ => None,
         }
     }
 
-    pub(in crate::tui) async fn panel_key(&mut self, key: KeyEvent) {
+    /// Send bytes to whichever shell is in front, wherever its keys go.
+    pub(in crate::tui) fn send_shell_input<E>(
+        &self,
+        id: &ShellId,
+        bytes: Vec<u8>,
+        event_loop: &TaskEventLoop<E>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        match id {
+            ShellId::Task(task_id) => event_loop.send_terminal_input(task_id, bytes),
+            ShellId::Credentials(_) => {
+                if let CredentialShellState::Open(shell) = &self.credential_shell {
+                    shell.input(bytes);
+                }
+            }
+        }
+    }
+
+    /// Tell whichever shell is in front how big its terminal is.
+    pub(in crate::tui) fn resize_shell<E>(
+        &mut self,
+        rows: u16,
+        cols: u16,
+        event_loop: &TaskEventLoop<E>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let Some(id) = self.open_shell().cloned() else {
+            return;
+        };
+        if let Some(shell) = self.shells.get_mut(&id) {
+            shell.resize(rows, cols);
+        }
+        match &id {
+            ShellId::Task(task_id) => event_loop.resize_terminal(task_id, rows, cols),
+            ShellId::Credentials(_) => {
+                if let CredentialShellState::Open(shell) = &self.credential_shell {
+                    shell.resize(rows, cols);
+                }
+            }
+        }
+    }
+
+    /// Open a terminal in a throwaway sandbox, for one profile's login.
+    ///
+    /// Off the loop, because the sandbox may have to be built first and a build is
+    /// minutes rather than frames. Altitude is not in the way of the credential
+    /// either: the CLI writes it where the profile is mounted, and the interface
+    /// only ever reads names and places.
+    pub(in crate::tui) fn open_credential_shell<E>(
+        &mut self,
+        display: &str,
+        profile: &'static str,
+        task_service: &TaskService<E>,
+        events: &mpsc::UnboundedSender<CredentialShellEvent>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        if !matches!(self.credential_shell, CredentialShellState::Idle) {
+            self.notice = Some("a shell is already open".to_owned());
+            return;
+        }
+        self.credential_shell = CredentialShellState::Opening {
+            profile,
+            display: display.to_owned(),
+        };
+        self.notice = Some(format!("opening a shell for {display}…"));
+        let environment = self.default_environment_value();
+        let chosen = self.agent();
+        let service = task_service.clone();
+        let events = events.clone();
+        tokio::spawn(async move {
+            match service
+                .open_credential_shell(environment, profile, chosen, &events)
+                .await
+            {
+                Ok(shell) => {
+                    let _ = events.send(CredentialShellEvent::Opened(shell));
+                }
+                Err(error) => {
+                    let _ = events.send(CredentialShellEvent::Unavailable(error.to_string()));
+                }
+            }
+        });
+    }
+
+    /// Take what came back from a credential shell.
+    pub(in crate::tui) async fn credential_shell_event<E>(
+        &mut self,
+        event: CredentialShellEvent,
+        terminal: &DefaultTerminal,
+        task_service: &TaskService<E>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        match event {
+            CredentialShellEvent::Opened(shell) => {
+                let CredentialShellState::Opening { display, .. } =
+                    mem::replace(&mut self.credential_shell, CredentialShellState::Idle)
+                else {
+                    // Nothing is waiting for it any more, so it has no reason to run.
+                    if let Err(error) = task_service.close_credential_shell(shell.id()).await {
+                        tracing::warn!(%error, "could not remove an unwanted credential shell");
+                    }
+                    return;
+                };
+                let Some((rows, cols)) = self.shell_size(terminal) else {
+                    return;
+                };
+                let id = ShellId::Credentials(shell.id().to_owned());
+                self.shells.insert(
+                    id.clone(),
+                    Shell::new(rows, cols, Vec::new(), format!("credentials — {display}")),
+                );
+                self.credential_shell = CredentialShellState::Open(shell);
+                self.foreground = Foreground::Shell(id);
+                self.notice = None;
+            }
+            CredentialShellEvent::Output { id, bytes } => {
+                self.process_shell_output(&ShellId::Credentials(id), bytes)
+            }
+            CredentialShellEvent::Exited(code) => {
+                if code != 0 {
+                    self.notice = Some(format!("the shell exited with {code}"));
+                }
+                self.close_credential_shell(task_service).await;
+            }
+            CredentialShellEvent::Failed(error) => {
+                self.notice = Some(format!("the shell ended: {error}"));
+                self.close_credential_shell(task_service).await;
+            }
+            CredentialShellEvent::Unavailable(reason) => {
+                self.credential_shell = CredentialShellState::Idle;
+                self.notice = Some(format!("no shell: {reason}"));
+            }
+        }
+    }
+
+    /// Throw a credential shell away, and go back to where it was opened from.
+    ///
+    /// The shell is not a task: what it wrote is in the profile, which is a host
+    /// directory, and the sandbox only ever had to last as long as the terminal.
+    pub(in crate::tui) async fn close_credential_shell<E>(&mut self, task_service: &TaskService<E>)
+    where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let state = mem::take(&mut self.credential_shell);
+        let CredentialShellState::Open(shell) = state else {
+            // One that was still being made is removed by the name it will have, so
+            // a shell nobody is waiting for cannot outlive the interface.
+            if let CredentialShellState::Opening { profile, .. } = state {
+                let id = task::credential_shell_id(profile);
+                if let Err(error) = task_service.close_credential_shell(&id).await {
+                    tracing::debug!(%error, "no credential shell to remove");
+                }
+            }
+            self.credential_shell = CredentialShellState::Idle;
+            return;
+        };
+        let id = ShellId::Credentials(shell.id().to_owned());
+        self.shells.remove(&id);
+        if self.open_shell() == Some(&id) {
+            // Back to the credentials it was about, so the row can say what changed.
+            self.foreground = Foreground::Panel;
+        }
+        if let Err(error) = task_service.close_credential_shell(shell.id()).await {
+            tracing::warn!(%error, "could not remove a credential shell's sandbox");
+        }
+    }
+
+    pub(in crate::tui) async fn panel_key<E>(
+        &mut self,
+        key: KeyEvent,
+        task_service: &TaskService<E>,
+        events: &mpsc::UnboundedSender<CredentialShellEvent>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
         let rows = self.row_count();
         match key.code {
             _ if is_dismiss(key) || key.code == KeyCode::Char('s') => {
@@ -484,16 +721,30 @@ impl App {
                 });
             }
             _ if is_remove(key) && self.panel.section.grows() => self.ask_to_delete(),
-            KeyCode::Enter => self.activate_selected().await,
+            KeyCode::Enter => self.activate_selected(task_service, events).await,
             _ => {}
         }
     }
 
     /// What `enter` does where the focus is: the row's own action, which for a
-    /// remote is reaching it rather than editing the address it is reached at.
-    pub(in crate::tui) async fn activate_selected(&mut self) {
+    /// remote is reaching it rather than editing the address it is reached at, and
+    /// for a credential is a terminal rather than a page.
+    pub(in crate::tui) async fn activate_selected<E>(
+        &mut self,
+        task_service: &TaskService<E>,
+        events: &mpsc::UnboundedSender<CredentialShellEvent>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
         match self.selected_row().map(|row| row.kind) {
             Some(RowKind::Remote { address, .. }) => self.check_remote(&address).await,
+            Some(RowKind::Credential(credential)) => {
+                if let CredentialKind::Profile { profile, .. } = credential.kind {
+                    self.open_credential_shell(&credential.label, profile, task_service, events);
+                } else {
+                    self.edit_selected();
+                }
+            }
             _ => self.edit_selected(),
         }
     }
@@ -904,20 +1155,10 @@ impl App {
                 self.set_agent(kind);
                 return;
             }
-            // A credential is read here and set up where it belongs, so there is
-            // no page behind it.
-            RowKind::Credential(credential) => {
-                self.notice = Some(
-                    match credential.kind {
-                        CredentialKind::Installation { .. } => {
-                            "the key names this machine and is not edited here"
-                        }
-                        CredentialKind::Profile { .. } => {
-                            "a login is set up by signing in, not from here"
-                        }
-                    }
-                    .to_owned(),
-                );
+            // The installation's key is made, not signed in to, so there is no
+            // terminal to open for it.
+            RowKind::Credential(_) => {
+                self.notice = Some("the key names this machine and is not edited here".to_owned());
                 return;
             }
             RowKind::Environment { name, setup, .. } => Form::new(
@@ -1123,13 +1364,14 @@ impl App {
     }
 
     pub(in crate::tui) fn hide_shell(&mut self) {
-        tracing::info!(task_id = ?self.open_shell(), "detaching terminal");
+        tracing::info!(shell = ?self.open_shell(), "detaching terminal");
         self.foreground = Foreground::Tasks;
     }
 
-    pub(in crate::tui) fn remove_shell(&mut self, id: &str) {
-        self.shells.remove(id);
-        if self.open_shell() == Some(id) {
+    pub(in crate::tui) fn remove_shell(&mut self, task_id: &str) {
+        let id = ShellId::Task(task_id.to_owned());
+        self.shells.remove(&id);
+        if self.open_shell() == Some(&id) {
             self.foreground = Foreground::Tasks;
         }
     }
@@ -1233,24 +1475,41 @@ impl App {
         }
     }
 
-    /// Send a key to the terminal in front, or hand control back.
-    pub(in crate::tui) fn shell_key<E>(&mut self, key: KeyEvent, event_loop: &TaskEventLoop<E>)
-    where
+    /// Send a key to the terminal in front, or leave it.
+    ///
+    /// Leaving means different things: a task's shell goes back to autopilot, and a
+    /// credential shell is thrown away with its sandbox.
+    pub(in crate::tui) async fn shell_key<E>(
+        &mut self,
+        key: KeyEvent,
+        event_loop: &TaskEventLoop<E>,
+        task_service: &TaskService<E>,
+    ) where
         E: IsolationEngine + Clone + 'static,
     {
-        let Some(id) = self.open_shell().map(str::to_owned) else {
+        let Some(id) = self.open_shell().cloned() else {
             return;
         };
         if screens::shell::is_exit_key(key) {
-            if !event_loop.return_to_autopilot(&id) {
-                self.notice =
-                    Some("this task is no longer running; control stayed with autopilot".into());
+            match &id {
+                ShellId::Task(task_id) => {
+                    if !event_loop.return_to_autopilot(task_id) {
+                        self.notice = Some(
+                            "this task is no longer running; control stayed with autopilot".into(),
+                        );
+                    }
+                    self.hide_shell();
+                }
+                ShellId::Credentials(_) => self.close_credential_shell(task_service).await,
             }
-            self.hide_shell();
-        } else if let Some(shell) = self.shells.get_mut(&id)
-            && let Some(bytes) = shell.key_bytes(key)
-        {
-            event_loop.send_terminal_input(&id, bytes);
+            return;
+        }
+        let bytes = self
+            .shells
+            .get_mut(&id)
+            .and_then(|shell| shell.key_bytes(key));
+        if let Some(bytes) = bytes {
+            self.send_shell_input(&id, bytes, event_loop);
         }
     }
 
@@ -1295,11 +1554,18 @@ impl App {
     }
 
     /// The panel's keys, which are its form's when a form is open.
-    pub(in crate::tui) async fn panel_keys(&mut self, key: KeyEvent) {
+    pub(in crate::tui) async fn panel_keys<E>(
+        &mut self,
+        key: KeyEvent,
+        task_service: &TaskService<E>,
+        events: &mpsc::UnboundedSender<CredentialShellEvent>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
         if self.panel.form.is_some() {
             self.panel_form_key(key).await;
         } else {
-            self.panel_key(key).await;
+            self.panel_key(key, task_service, events).await;
         }
     }
 
@@ -1422,7 +1688,7 @@ impl App {
                 if self.reload_settings() {
                     self.foreground = Foreground::NewTask(NewTask::new(
                         self.environments(),
-                        self.default_environment(),
+                        self.default_environment_name(),
                         self.agent(),
                         self.task_hosts(),
                     ));
@@ -1534,15 +1800,17 @@ impl App {
             return;
         }
         // Already the operator's: put its terminal back in front.
-        if self.shells.contains_key(&task.id) {
+        let shell_id = ShellId::Task(task.id.clone());
+        if self.shells.contains_key(&shell_id) {
             let Some((rows, cols)) = self.shell_size(terminal) else {
                 return;
             };
             event_loop.resize_terminal(&task.id, rows, cols);
-            if let Some(shell) = self.shells.get_mut(&task.id) {
+            let id = shell_id;
+            if let Some(shell) = self.shells.get_mut(&id) {
                 shell.resize(rows, cols);
             }
-            self.foreground = Foreground::Shell(task.id);
+            self.foreground = Foreground::Shell(id);
             return;
         }
         if !event_loop.has_active_run(&task.id) {
@@ -1554,9 +1822,12 @@ impl App {
         };
         let history = event_loop.cached_terminal_output(&task.id);
         event_loop.resize_terminal(&task.id, rows, cols);
-        self.shells
-            .insert(task.id.clone(), Shell::new(rows, cols, history));
-        self.foreground = Foreground::Shell(task.id);
+        let id = ShellId::Task(task.id.clone());
+        self.shells.insert(
+            id.clone(),
+            Shell::new(rows, cols, history, TASK_SHELL.to_owned()),
+        );
+        self.foreground = Foreground::Shell(id);
     }
 
     /// The size a terminal for a task should be, saying so when it cannot be read
@@ -1656,19 +1927,7 @@ impl App {
                 bytes,
             } => {
                 let _ = stream;
-                if let Some(shell) = self.shells.get_mut(&task_id)
-                    && let Some(text) = shell.process(bytes)
-                {
-                    match copy_to_clipboard(text) {
-                        Ok(()) => {
-                            shell.show_clipboard_confirmation();
-                            tracing::info!(task_id = %task_id, "copied terminal text to clipboard");
-                        }
-                        Err(error) => {
-                            tracing::error!(task_id = %task_id, %error, "could not copy terminal text")
-                        }
-                    }
-                }
+                self.process_shell_output(&ShellId::Task(task_id), bytes);
             }
             TaskExecutionUpdate::OperatorReady(task) => {
                 let id = task.id.clone();
@@ -1676,9 +1935,12 @@ impl App {
                 let (rows, cols) = screens::shell::size(terminal.size()?.into());
                 let history = event_loop.cached_terminal_output(&id);
                 event_loop.resize_terminal(&id, rows, cols);
-                self.shells
-                    .insert(id.clone(), Shell::new(rows, cols, history));
-                self.foreground = Foreground::Shell(id);
+                let shell_id = ShellId::Task(id);
+                self.shells.insert(
+                    shell_id.clone(),
+                    Shell::new(rows, cols, history, TASK_SHELL.to_owned()),
+                );
+                self.foreground = Foreground::Shell(shell_id);
             }
             TaskExecutionUpdate::Report { task, summary } => {
                 // The agent's own words are already recorded in the task's
@@ -1695,6 +1957,27 @@ impl App {
         self.open_shell()
             .and_then(|id| self.shells.get(id))
             .is_some_and(Shell::has_active_notice)
+    }
+
+    /// Feed one terminal's bytes to the shell that draws it, and copy what it asked
+    /// to copy.
+    ///
+    /// The same for a task's shell and a credential shell, because the terminal is
+    /// the same: only where the bytes came from differs.
+    fn process_shell_output(&mut self, id: &ShellId, bytes: Vec<u8>) {
+        let Some(shell) = self.shells.get_mut(id) else {
+            return;
+        };
+        let Some(text) = shell.process(bytes) else {
+            return;
+        };
+        match copy_to_clipboard(text) {
+            Ok(()) => {
+                shell.show_clipboard_confirmation();
+                tracing::info!("copied terminal text to clipboard");
+            }
+            Err(error) => tracing::error!(%error, "could not copy terminal text"),
+        }
     }
 
     /// Whether any task can currently be waiting on an environment build.

@@ -602,6 +602,26 @@ impl IsolationEngine for MicrosandboxIsolation {
         .await
     }
 
+    async fn credential_shell(
+        &self,
+        id: String,
+        environment: Environment,
+        recipes: Vec<EnvironmentRecipe>,
+        profile: &'static str,
+        progress: &dyn EnvironmentProgressSink,
+    ) -> Result<String, IsolationError> {
+        environment::credential_shell(
+            self,
+            &self.config,
+            id,
+            environment,
+            recipes,
+            profile,
+            progress,
+        )
+        .await
+    }
+
     async fn prepare(&self, status: &watch::Sender<IsolationStatus>) -> Result<(), IsolationError> {
         private_directory(self.config.data_dir())?;
         private_directory(&self.data_home)?;

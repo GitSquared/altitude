@@ -138,6 +138,8 @@ pub struct BaseSandboxSnapshot {
 pub struct ProfileSummary {
     /// The recipe's stable profile identity, e.g. `agents/claude`.
     pub profile: &'static str,
+    /// What this profile is called where an operator reads it.
+    pub display: &'static str,
     /// Each mounted directory, as its path inside the profile and where a task
     /// finds it.
     pub mounts: Vec<ProfileMount>,
@@ -312,6 +314,20 @@ pub trait IsolationEngine: Send + Sync {
         recipes: Vec<EnvironmentRecipe>,
         progress: &dyn EnvironmentProgressSink,
     ) -> impl Future<Output = Result<(), IsolationError>> + Send;
+
+    /// Make a sandbox for setting up one profile's credentials, and answer with
+    /// the command that opens a shell in it.
+    ///
+    /// Not a task: nothing records it, nothing travels from it, and it is meant to
+    /// be thrown away when the shell ends.
+    fn credential_shell(
+        &self,
+        id: String,
+        environment: Environment,
+        recipes: Vec<EnvironmentRecipe>,
+        profile: &'static str,
+        progress: &dyn EnvironmentProgressSink,
+    ) -> impl Future<Output = Result<String, IsolationError>> + Send;
 
     fn prepare(
         &self,

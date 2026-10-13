@@ -31,6 +31,7 @@ use super::popups::confirm::handle_confirm_key;
 use super::screens;
 use super::screens::settings::Focus;
 use super::widgets;
+use crate::task::CredentialShellEvent;
 
 pub async fn run<E>(
     terminal: &mut DefaultTerminal,
@@ -98,6 +99,9 @@ where
     // this loop and reports back with the task it landed.
     let (landings, mut landed) = mpsc::unbounded_channel::<Result<String, String>>();
     let mut read_clock = time::interval(Duration::from_secs(3));
+    // A credential shell is opened, prints, and ends on its own time: the sandbox may
+    // have to be built first, which is minutes rather than frames.
+    let (credential_events, mut credential_shell_events) = mpsc::unbounded_channel();
     loop {
         if mouse_captured != app.open_shell().is_some() {
             mouse_captured = app.open_shell().is_some();
@@ -169,8 +173,14 @@ where
             }
         })?;
         tokio::select! {
-            _ = terminate.recv() => return Ok(()),
-            _ = interrupt.recv() => return Ok(()),
+            _ = terminate.recv() => {
+                app.close_credential_shell(&task_service).await;
+                return Ok(());
+            }
+            _ = interrupt.recv() => {
+                app.close_credential_shell(&task_service).await;
+                return Ok(());
+            }
             _ = refresh.tick(), if app.open_shell().is_none() => {
                 if let Ok(tasks) = event_loop.list().await {
                     app.tasks = tasks;
@@ -209,9 +219,11 @@ where
             }
             Some(update) = task_execution_updates.recv() =>
                 app.apply(update, terminal, &event_loop).await?,
+            Some(event) = credential_shell_events.recv() =>
+                app.credential_shell_event(event, terminal, &task_service).await,
             event = events.next() => {
                 let Some(event) = event else { return Ok(()) };
-                if handle_event(event?, terminal, &event_loop, &task_service, &mut app, &landings).await? { return Ok(()); }
+                if handle_event(event?, terminal, &event_loop, &task_service, &mut app, &landings, &credential_events).await? { return Ok(()); }
             }
         }
     }
@@ -224,18 +236,16 @@ async fn handle_event<E>(
     task_service: &TaskService<E>,
     app: &mut App,
     landings: &mpsc::UnboundedSender<Result<String, String>>,
+    credential_events: &mpsc::UnboundedSender<CredentialShellEvent>,
 ) -> io::Result<bool>
 where
     E: IsolationEngine + Clone + 'static,
 {
     if let Event::Resize(_, _) = event
-        && let Some(id) = app.open_shell().map(str::to_owned)
+        && app.open_shell().is_some()
     {
         let (rows, cols) = screens::shell::size(terminal.size()?.into());
-        event_loop.resize_terminal(&id, rows, cols);
-        if let Some(shell) = app.shells.get_mut(&id) {
-            shell.resize(rows, cols);
-        }
+        app.resize_shell(rows, cols, event_loop);
         return Ok(false);
     }
     if let Event::Paste(text) = event {
@@ -249,20 +259,26 @@ where
                 Focus::Setup => form.setup.paste(&text),
                 _ => {}
             }
-        } else if let Some(id) = app.open_shell().map(str::to_owned)
-            && let Some(shell) = app.shells.get(&id)
-            && let Some(bytes) = shell.paste_bytes(text)
+        } else if let Some(id) = app.open_shell().cloned()
+            && let Some(bytes) = app
+                .shells
+                .get(&id)
+                .and_then(|shell| shell.paste_bytes(text))
         {
-            event_loop.send_terminal_input(&id, bytes);
+            app.send_shell_input(&id, bytes, event_loop);
         }
         return Ok(false);
     }
     if let Event::Mouse(mouse) = event {
-        if let Some(id) = app.open_shell().map(str::to_owned)
-            && let Some(shell) = app.shells.get_mut(&id)
-            && let Some(bytes) = shell.mouse_bytes(mouse, terminal.size()?.into())
-        {
-            event_loop.send_terminal_input(&id, bytes);
+        if let Some(id) = app.open_shell().cloned() {
+            let size = terminal.size()?.into();
+            let bytes = app
+                .shells
+                .get_mut(&id)
+                .and_then(|shell| shell.mouse_bytes(mouse, size));
+            if let Some(bytes) = bytes {
+                app.send_shell_input(&id, bytes, event_loop);
+            }
         }
         return Ok(false);
     }
@@ -290,9 +306,9 @@ where
         }
         Foreground::Reply(_) => app.reply_key(key, event_loop),
         Foreground::NewTask(_) => app.new_task_key(key, event_loop).await,
-        Foreground::Panel => app.panel_keys(key).await,
+        Foreground::Panel => app.panel_keys(key, task_service, credential_events).await,
         Foreground::Signals => app.signals_key(key, task_service).await,
-        Foreground::Shell(_) => app.shell_key(key, event_loop),
+        Foreground::Shell(_) => app.shell_key(key, event_loop, task_service).await,
         Foreground::Tasks => {
             if app.list_key(key, task_service).await? {
                 return Ok(true);

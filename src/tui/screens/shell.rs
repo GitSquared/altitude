@@ -21,10 +21,13 @@ pub struct Shell {
     parser: vt100::Parser<ClipboardCallbacks>,
     clipboard: Receiver<String>,
     clipboard_notice_until: Option<Instant>,
+    /// What this terminal is, on its frame: a task's run, or the shell opened to set
+    /// up credentials.
+    title: String,
 }
 
 impl Shell {
-    pub fn new(rows: u16, cols: u16, history: Vec<Vec<u8>>) -> Self {
+    pub fn new(rows: u16, cols: u16, history: Vec<Vec<u8>>, title: String) -> Self {
         let (clipboard_sender, clipboard) = mpsc::channel();
         let mut parser = vt100::Parser::new_with_callbacks(
             rows,
@@ -40,6 +43,7 @@ impl Shell {
             parser,
             clipboard,
             clipboard_notice_until: None,
+            title,
         }
     }
 
@@ -146,7 +150,7 @@ impl Shell {
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(palette::accent())
-            .title(" shell ");
+            .title(format!(" {} ", self.title));
         let block = if self.has_active_notice() {
             block.title_bottom(Line::styled(" copied to clipboard ", palette::accent()))
         } else {

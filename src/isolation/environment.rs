@@ -23,6 +23,12 @@ pub const REFRESH_AFTER: Duration = Duration::from_secs(72 * 60 * 60);
 pub struct EnvironmentRecipe {
     /// Stable relative profile identity, e.g. `agents/claude` or `vcs/github`.
     pub profile: &'static str,
+    /// What this profile is called where an operator reads it, which is the name
+    /// the settings list shows and the shell that sets it up names.
+    pub display: &'static str,
+    /// The command a login for this profile runs through. Named in that shell,
+    /// because the operator is about to type it.
+    pub command: &'static str,
     /// What this recipe installs, in the operator's words; a waiting task shows it.
     pub label: &'static str,
     pub setup_command: &'static str,
@@ -90,7 +96,10 @@ struct EnvironmentPlan {
     options: SandboxOptions,
     defaults: Vec<(PathBuf, &'static str)>,
     readmes: Vec<(PathBuf, String)>,
-    task_local_mounts: Vec<(String, String)>,
+    /// Subdirectories that must not reach the shared profile, as the path they
+    /// have under whichever root the sandbox gives them, and where a task sees
+    /// them.
+    local_mounts: Vec<(String, String)>,
 }
 
 impl EnvironmentPlan {
@@ -127,7 +136,7 @@ impl EnvironmentPlan {
             },
             defaults: Vec::new(),
             readmes: Vec::new(),
-            task_local_mounts: Vec::new(),
+            local_mounts: Vec::new(),
         };
         let mut profiles = HashSet::new();
         for recipe in recipes {
@@ -173,12 +182,11 @@ impl EnvironmentPlan {
                 plan.readmes.push((host_path.join("README.md"), readme));
                 for path in directory.task_local_subdirectories {
                     relative_path(path, false)?;
-                    let source = Path::new("/altitude/task-state")
-                        .join(recipe.profile)
+                    let source = Path::new(recipe.profile)
                         .join(directory.relative_path)
                         .join(path);
                     let target = guest_path.join(path);
-                    plan.task_local_mounts.push((
+                    plan.local_mounts.push((
                         source.to_string_lossy().into_owned(),
                         target.to_string_lossy().into_owned(),
                     ));
@@ -307,6 +315,33 @@ pub async fn ensure_environment(
     engine.ensure_base(plan.recipe, progress).await
 }
 
+/// What a sandbox is for, which decides where its own state goes and whether it
+/// records the environment it was built on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SandboxKind {
+    /// A task's. Its own state goes on its capsule, and its capsule travels.
+    Task,
+    /// A credential shell's. Its own state goes nowhere, and it is thrown away
+    /// where it was made.
+    Shell,
+}
+
+impl SandboxKind {
+    /// Where the subdirectories that must not reach the shared profile live.
+    fn state_root(self) -> &'static str {
+        match self {
+            Self::Task => "/altitude/task-state",
+            Self::Shell => "/tmp/altitude-shell",
+        }
+    }
+
+    /// Whether the environment boundary is recorded, which only a capsule that
+    /// travels has to prove.
+    fn records_environment(self) -> bool {
+        self == Self::Task
+    }
+}
+
 pub(super) async fn provision(
     engine: &impl IsolationEngine,
     config: &Config,
@@ -317,14 +352,76 @@ pub(super) async fn provision(
     progress: &dyn EnvironmentProgressSink,
 ) -> Result<(), IsolationError> {
     // Validate every recipe before creating directories or building images.
-    let mut plan = EnvironmentPlan::compose(config, environment, recipes)?;
+    let plan = EnvironmentPlan::compose(config, environment, recipes)?;
+    create(
+        engine,
+        config,
+        id,
+        plan,
+        SandboxKind::Task,
+        snapshot,
+        progress,
+    )
+    .await
+}
+
+/// A sandbox for setting up one profile's credentials, and the command that opens
+/// a shell in it.
+///
+/// It mounts everything a task mounts, so what is signed in to here is what a task
+/// will use, and it is not a task: no capsule, no record, and it is thrown away
+/// when the shell ends. The subdirectories a task keeps on its own disk go to a
+/// scratch directory instead, because a login shell writes session files and they
+/// must not reach the profile every task shares.
+///
+/// The banner is printed by the sandbox rather than drawn by the interface, so it
+/// scrolls with the session it belongs to.
+pub(super) async fn credential_shell(
+    engine: &impl IsolationEngine,
+    config: &Config,
+    id: String,
+    environment: Environment,
+    recipes: Vec<EnvironmentRecipe>,
+    profile: &str,
+    progress: &dyn EnvironmentProgressSink,
+) -> Result<String, IsolationError> {
+    let (display, command) = recipes
+        .iter()
+        .find(|recipe| recipe.profile == profile)
+        .map(|recipe| (recipe.display, recipe.command))
+        .ok_or_else(|| IsolationError::new(format!("no recipe for the {profile} profile")))?;
+    let plan = EnvironmentPlan::compose(config, environment, recipes)?;
+    create(engine, config, id, plan, SandboxKind::Shell, None, progress).await?;
+    let banner = include_str!("assets/credential-shell.md")
+        .replace("{{display}}", display)
+        .replace("{{command}}", command);
+    let mut script = String::from("printf '%s\\n'");
+    for line in banner.lines() {
+        script.push(' ');
+        script.push_str(&shell_quote(line));
+    }
+    script.push_str("\nexec bash -l\n");
+    Ok(script)
+}
+
+/// Creates a sandbox shaped the way Altitude expects, and binds the subdirectories
+/// that must not reach the shared profile.
+async fn create(
+    engine: &impl IsolationEngine,
+    config: &Config,
+    id: String,
+    mut plan: EnvironmentPlan,
+    kind: SandboxKind,
+    snapshot: Option<String>,
+    progress: &dyn EnvironmentProgressSink,
+) -> Result<(), IsolationError> {
     plan.initialize(config)?;
     let (path, base) = match snapshot {
         Some(path) => {
             let base = super::capsule::EnvironmentBase::from_capsule(&path)
                 .await
                 .map_err(IsolationError::new)?;
-            (path, base)
+            (path, Some(base))
         }
         None => {
             let path = engine
@@ -333,31 +430,37 @@ pub(super) async fn provision(
                 .path
                 .to_string_lossy()
                 .into_owned();
-            let base = super::capsule::EnvironmentBase::from_environment(&path)
-                .await
-                .map_err(IsolationError::new)?;
+            let base = match kind.records_environment() {
+                true => Some(
+                    super::capsule::EnvironmentBase::from_environment(&path)
+                        .await
+                        .map_err(IsolationError::new)?,
+                ),
+                false => None,
+            };
             (path, base)
         }
     };
     plan.options.snapshot_path = Some(path);
-    plan.options.environment_base = Some(base);
+    plan.options.environment_base = base;
     engine.create(id.clone(), plan.options).await?;
-    if !plan.task_local_mounts.is_empty() {
-        let mut command = String::from("set -eu\n");
-        for (source, target) in plan.task_local_mounts {
-            let source = shell_quote(&source);
-            let target = shell_quote(&target);
-            command.push_str(&format!(
-                "mkdir -p {source} {target}\nmount --bind {source} {target}\n"
-            ));
+    if plan.local_mounts.is_empty() {
+        return Ok(());
+    }
+    let root = kind.state_root();
+    let mut command = String::from("set -eu\n");
+    for (source, target) in plan.local_mounts {
+        let source = shell_quote(&Path::new(root).join(source).to_string_lossy());
+        let target = shell_quote(&target);
+        command.push_str(&format!(
+            "mkdir -p {source} {target}\nmount --bind {source} {target}\n"
+        ));
+    }
+    if let Err(error) = run_setup(engine, id.clone(), command).await {
+        if let Err(cleanup_error) = engine.remove(id).await {
+            tracing::warn!(%cleanup_error, "could not remove sandbox after its directory setup failed");
         }
-        let result = run_setup(engine, id.clone(), command).await;
-        if let Err(error) = result {
-            if let Err(cleanup_error) = engine.remove(id).await {
-                tracing::warn!(%cleanup_error, "could not remove sandbox after task directory setup failure");
-            }
-            return Err(error);
-        }
+        return Err(error);
     }
     Ok(())
 }

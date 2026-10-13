@@ -242,6 +242,8 @@ impl AgentEngine for PiCode {
     fn environment_recipe(&self) -> EnvironmentRecipe {
         EnvironmentRecipe {
             profile: "agents/pi",
+            display: "Pi",
+            command: "pi",
             label: "installing Pi",
             setup_command: INSTALL_COMMAND,
             directories: vec![

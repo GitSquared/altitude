@@ -2,8 +2,8 @@ use crate::{
     agent::{AgentEngines, AgentError, AgentKind},
     config::InstallationIdentity,
     isolation::{
-        Environment, EnvironmentDescription, EnvironmentProgress, IsolationEngine, IsolationError,
-        ProfileMount, ProfileSummary, guest_path,
+        Environment, EnvironmentDescription, EnvironmentProgress, EnvironmentRecipe,
+        IsolationEngine, IsolationError, ProfileMount, ProfileSummary, guest_path,
     },
     vcs::GitHub,
 };
@@ -12,11 +12,13 @@ use uuid::Uuid;
 
 mod agents;
 mod capacity;
+mod credential;
 mod event_loop;
 mod lifecycle;
 mod signals;
 mod state;
 mod turns;
+pub use credential::{CredentialShell, CredentialShellEvent, credential_shell_id};
 pub use event_loop::{TaskEventLoop, TaskExecutionUpdate};
 mod progress;
 mod store;
@@ -198,15 +200,11 @@ where
     /// Built from the same recipes a task is provisioned with, so this cannot
     /// drift from what is actually mounted.
     pub fn profiles(&self) -> Vec<ProfileSummary> {
-        let recipes = [
-            self.agents.engine(AgentKind::Pi).environment_recipe(),
-            self.agents.engine(AgentKind::Claude).environment_recipe(),
-            GitHub::environment_recipe(),
-        ];
-        recipes
+        self.recipes()
             .into_iter()
             .map(|recipe| ProfileSummary {
                 profile: recipe.profile,
+                display: recipe.display,
                 mounts: recipe
                     .directories
                     .iter()
@@ -218,6 +216,16 @@ where
             })
             .collect()
     }
+
+    /// The recipes a task is provisioned with, in the order it mounts them.
+    fn recipes(&self) -> Vec<EnvironmentRecipe> {
+        vec![
+            self.agents.engine(AgentKind::Pi).environment_recipe(),
+            self.agents.engine(AgentKind::Claude).environment_recipe(),
+            GitHub::environment_recipe(),
+        ]
+    }
+
     /// What the workspace base says about itself, for an interface that
     /// describes environments rather than runs them.
     pub fn base_description(&self) -> Option<EnvironmentDescription> {

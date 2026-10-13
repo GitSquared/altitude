@@ -227,7 +227,7 @@ pub enum CredentialKind {
     },
     /// A profile a task mounts. Presence and place only: never the contents.
     Profile {
-        profile: String,
+        profile: &'static str,
         directory: String,
         present: bool,
         /// The account name, where one can be read without reading a credential.
@@ -824,7 +824,7 @@ fn credential_lines(
             }
             lines.push(Line::from(vec![
                 Span::styled("profile   ", palette::muted()),
-                profile.clone().into(),
+                (*profile).into(),
             ]));
             lines.push(Line::from(vec![
                 Span::styled("on disk   ", palette::muted()),
@@ -844,6 +844,12 @@ fn credential_lines(
                 "A login is kept here and mounted into every task, so it survives between them. \
                  Altitude shows where it lives and never its contents.",
                 palette::muted(),
+            ));
+            lines.push(Line::from(""));
+            lines.push(Line::styled(
+                "Press enter for a shell in a sandbox to sign in in. It is thrown away when you \
+                 leave it; the login is not.",
+                palette::good(),
             ));
         }
     }
@@ -953,7 +959,7 @@ impl App {
     /// Everything the panel draws, assembled from the settings file and from
     /// what was read back about each remote and about the base environment.
     pub(in crate::tui) fn settings_view(&self) -> View {
-        let default_environment = self.default_environment().to_owned();
+        let default_environment = self.default_environment_name().to_owned();
         let rows = match self.panel.section {
             Section::Interface => vec![Row {
                 label: Setting::KeyboardHints.label().to_owned(),
@@ -1069,9 +1075,9 @@ impl App {
         for profile in self.profiles.iter() {
             let directory = self.config.profile_dir(profile.profile);
             credentials.push(Credential {
-                label: profile_label(profile.profile).to_owned(),
+                label: profile.display.to_owned(),
                 kind: CredentialKind::Profile {
-                    profile: profile.profile.to_owned(),
+                    profile: profile.profile,
                     present: directory.is_dir(),
                     account: account_name(&directory),
                     directory: directory.display().to_string(),
@@ -1106,16 +1112,6 @@ impl App {
             .rows
             .into_iter()
             .nth(self.panel.selected)
-    }
-}
-
-/// A profile's name, for a list that has no room for its path.
-fn profile_label(profile: &str) -> &str {
-    match profile.rsplit('/').next().unwrap_or(profile) {
-        "claude" => "Claude Code",
-        "pi" => "Pi",
-        "github" => "GitHub",
-        other => other,
     }
 }
 

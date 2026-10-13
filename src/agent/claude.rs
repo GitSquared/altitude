@@ -171,6 +171,8 @@ impl AgentEngine for ClaudeCode {
     fn environment_recipe(&self) -> EnvironmentRecipe {
         EnvironmentRecipe {
             profile: "agents/claude",
+            display: "Claude Code",
+            command: "claude",
             label: "installing Claude Code",
             setup_command: Self::install_command(),
             directories: vec![
