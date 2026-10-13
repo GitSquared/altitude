@@ -216,6 +216,15 @@ impl Config {
         self.cache_dir.join("logs")
     }
 
+    /// Where this machine keeps what it has already pulled, so the next task over
+    /// the same repository does not pull it again.
+    ///
+    /// A cache by every rule that matters: disposable, and worth nothing that
+    /// cannot be fetched again.
+    pub fn git_cache_dir(&self) -> PathBuf {
+        self.cache_dir.join("git")
+    }
+
     pub fn microsandbox_socket_dir(&self) -> PathBuf {
         self.cache_dir.join("msb")
     }

@@ -11,6 +11,7 @@ use tokio::sync::{mpsc, watch};
 
 pub(crate) mod capsule;
 mod environment;
+mod git_cache;
 mod microsandbox;
 /// How long a built environment is kept before it is rebuilt, for the interface
 /// that has to tell an operator when their base was last refreshed.
@@ -211,6 +212,35 @@ pub struct SandboxOptions {
 pub struct VsockRoute {
     pub host_socket: PathBuf,
     pub guest_port: u32,
+}
+
+/// Gives a sandbox this machine's shared git object cache.
+///
+/// A capsule is disposable, so the repository cloned into it is too, and a
+/// machine given task after task over the same few repositories would pull each
+/// one from the network every time. The cache is where this machine keeps what
+/// it has already pulled, and a capsule's git clones through it.
+///
+/// Mounted rather than built into a snapshot, because it belongs to this machine
+/// and a snapshot can be moved to another one.
+///
+/// A failure here is not a failure to create a sandbox: a sandbox without a
+/// cache is the sandbox there was before, and the git it runs clones as it always
+/// did.
+pub(crate) fn mount_git_cache(options: &mut SandboxOptions, cache_dir: &Path) {
+    match git_cache::ready(cache_dir) {
+        Ok(host_path) => {
+            options.mounts.push(SandboxMount {
+                host_path,
+                guest_path: git_cache::GUEST_PATH.to_owned(),
+            });
+            options.environment.push((
+                git_cache::ENVIRONMENT.to_owned(),
+                git_cache::GUEST_PATH.to_owned(),
+            ));
+        }
+        Err(error) => tracing::warn!(%error, "no git cache for this sandbox"),
+    }
 }
 
 /// Gives a sandbox the extra roots this machine trusts.

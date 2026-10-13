@@ -26,7 +26,7 @@ use super::{
     EnvironmentProgressSink, EnvironmentRecipe, IsolationEngine, IsolationError, IsolationStatus,
     OutputStream, SandboxOptions, SetupStep, VsockRoute,
     environment::{self, REFRESH_AFTER, private_directory},
-    trust_host_roots,
+    mount_git_cache, trust_host_roots,
 };
 
 const BASE_IMAGE: &str = "alpine";
@@ -124,6 +124,7 @@ impl MicrosandboxIsolation {
         mut options: SandboxOptions,
         pull_policy: PullPolicy,
     ) -> Result<(), IsolationError> {
+        mount_git_cache(&mut options, &self.config.git_cache_dir());
         let base = options
             .environment_base
             .as_ref()

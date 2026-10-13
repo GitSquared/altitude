@@ -7,6 +7,18 @@ use crate::{
     },
 };
 
+/// What this profile installs: git and the tools that give it a GitHub
+/// identity, and then the git a task finds in its `PATH` — Altitude's own, which
+/// clones through this machine's shared object cache instead of pulling a
+/// repository the machine already has. See `assets/git-shim.sh`.
+const SETUP_COMMAND: &str = concat!(
+    "apk add --no-cache git openssh-client-default github-cli gnupg\n",
+    "cat > /usr/local/bin/git <<'ALTITUDE_GIT_SHIM'\n",
+    include_str!("assets/git-shim.sh"),
+    "ALTITUDE_GIT_SHIM\n",
+    "chmod 0755 /usr/local/bin/git\n",
+);
+
 pub struct GitHub;
 
 impl GitHub {
@@ -19,7 +31,7 @@ impl GitHub {
             // the token's scopes.
             status_command: "gh auth status",
             label: "installing GitHub tools",
-            setup_command: "apk add --no-cache git openssh-client-default github-cli gnupg",
+            setup_command: SETUP_COMMAND,
             directories: vec![
                 PersistentDirectory::at(
                     "git",
