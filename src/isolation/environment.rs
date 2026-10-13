@@ -10,8 +10,9 @@ use std::{
 use crate::config::Config;
 
 use super::{
-    BaseSandboxRecipe, BaseSandboxSnapshot, CommandEvent, EnvironmentProgressSink, IsolationEngine,
-    IsolationError, SandboxMount, SandboxOptions, SetupStep, VsockRoute,
+    BaseSandboxRecipe, BaseSandboxSnapshot, CommandEvent, CredentialReport,
+    EnvironmentProgressSink, IsolationEngine, IsolationError, SandboxMount, SandboxOptions,
+    SetupStep, VsockRoute,
 };
 
 /// The current Alpine environment runs as root, so home-relative requirements
@@ -22,6 +23,7 @@ const OPENER: &str = "/usr/local/bin/xdg-open";
 pub const REFRESH_AFTER: Duration = Duration::from_secs(72 * 60 * 60);
 
 /// Knowledge supplied by an agent or VCS module. No host I/O or lifecycle hooks.
+#[derive(Clone)]
 pub struct EnvironmentRecipe {
     /// Stable relative profile identity, e.g. `agents/claude` or `vcs/github`.
     pub profile: &'static str,
@@ -31,6 +33,10 @@ pub struct EnvironmentRecipe {
     /// The command a login for this profile runs through. Named in that shell,
     /// because the operator is about to type it.
     pub command: &'static str,
+    /// A command that exits 0 when this profile is signed in, and prints what it
+    /// found. Run in a sandbox with the profile mounted, so it sees the login a task
+    /// would see and never its contents: what it prints is what an operator reads.
+    pub status_command: &'static str,
     /// What this recipe installs, in the operator's words; a waiting task shows it.
     pub label: &'static str,
     pub setup_command: &'static str,
@@ -38,11 +44,13 @@ pub struct EnvironmentRecipe {
     pub environment: Vec<(&'static str, &'static str)>,
 }
 
+#[derive(Clone)]
 pub enum GuestPath {
     Absolute(&'static str),
     HomeRelative(&'static str),
 }
 
+#[derive(Clone)]
 pub struct PersistentDirectory {
     /// Relative path inside the profile.
     pub relative_path: &'static str,
@@ -98,6 +106,7 @@ impl PersistentDirectory {
     }
 }
 
+#[derive(Clone)]
 pub struct DefaultFile {
     pub path: &'static str,
     pub contents: &'static str,
@@ -414,6 +423,55 @@ pub(super) async fn provision(
     .await
 }
 
+/// The build a set of recipes describes.
+///
+/// What an environment *is*: its setup steps are its identity, so this is what says
+/// whether one is already built here, and it is also what a sandbox is made from.
+pub(super) fn composed_recipe(
+    config: &Config,
+    environment: Environment,
+    recipes: Vec<EnvironmentRecipe>,
+) -> Result<BaseSandboxRecipe, IsolationError> {
+    EnvironmentPlan::compose(config, environment, recipes).map(|plan| plan.recipe)
+}
+
+/// What a profile's own check says about it, run in a sandbox that is thrown away
+/// after it.
+///
+/// The sandbox is the one a credential shell for that profile would get, so a report
+/// is what opening one would find. Nothing of the check is kept: it prints what it
+/// found, and the operator reads that.
+pub(super) async fn credential_report(
+    engine: &impl IsolationEngine,
+    config: &Config,
+    id: String,
+    environment: Environment,
+    recipes: Vec<EnvironmentRecipe>,
+    command: String,
+    progress: &dyn EnvironmentProgressSink,
+) -> Result<CredentialReport, IsolationError> {
+    let plan = EnvironmentPlan::compose(config, environment, recipes)?;
+    create(
+        engine,
+        config,
+        id.clone(),
+        plan,
+        SandboxKind::Shell,
+        None,
+        progress,
+    )
+    .await?;
+    let result = run_to_end(engine, id.clone(), command).await;
+    if let Err(error) = engine.remove(id.clone()).await {
+        tracing::warn!(sandbox_id = %id, %error, "could not remove a sandbox after a check");
+    }
+    let (status, output) = result?;
+    Ok(CredentialReport {
+        output,
+        signed_in: status == 0,
+    })
+}
+
 /// A sandbox for setting up one profile's credentials, and the command that opens
 /// a shell in it.
 ///
@@ -514,6 +572,27 @@ async fn create(
 
 pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Runs a command to completion, answering with its exit status and everything it
+/// printed. A check is a command that answers a question, so its output is the point.
+async fn run_to_end(
+    engine: &impl IsolationEngine,
+    id: String,
+    command: String,
+) -> Result<(i32, String), IsolationError> {
+    let mut session = engine.run_command(id, command).await?;
+    let mut output = String::new();
+    while let Some(event) = session.events.recv().await {
+        match event {
+            CommandEvent::Output { bytes, .. } => output.push_str(&String::from_utf8_lossy(&bytes)),
+            CommandEvent::Exited(status) => return Ok((status, output)),
+            CommandEvent::Failed(error) => return Err(IsolationError::new(error)),
+        }
+    }
+    Err(IsolationError::new(
+        "a command closed without an exit status",
+    ))
 }
 
 async fn run_setup(

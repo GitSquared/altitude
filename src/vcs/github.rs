@@ -15,6 +15,9 @@ impl GitHub {
             profile: "vcs/github",
             display: "GitHub",
             command: "gh",
+            // The one profile whose CLI can be asked, and answers with the account and
+            // the token's scopes.
+            status_command: "gh auth status",
             label: "installing GitHub tools",
             setup_command: "apk add --no-cache git openssh-client-default github-cli gnupg",
             directories: vec![

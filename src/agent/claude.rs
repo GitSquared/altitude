@@ -195,6 +195,10 @@ impl AgentEngine for ClaudeCode {
             profile: "agents/claude",
             display: "Claude Code",
             command: "claude",
+            // Claude Code writes this file when it is signed in, and its own CLI has
+            // no way to be asked. Existence and size only: the contents are the
+            // credential, and Altitude does not read it.
+            status_command: "test -s /altitude/claude/.credentials.json && echo a login is here",
             label: "installing Claude Code",
             setup_command: Self::install_command(),
             directories: vec![

@@ -36,6 +36,7 @@ use crate::{
     tui::screens,
     tui::widgets::chrome::Hint,
     tui::widgets::palette,
+    tui::widgets::utils::Dot,
 };
 
 use popups::confirm::PendingConfirm;
@@ -116,6 +117,16 @@ impl RemoteStatus {
         matches!(self, Self::Asking | Self::Syncing)
     }
 
+    /// The mark in front of the address, on the same terms as a profile's.
+    pub(in crate::tui) fn dot(&self) -> Dot {
+        let (glyph, style) = (self.glyph(), self.style());
+        if self.is_in_progress() {
+            Dot::travelling(glyph, style)
+        } else {
+            Dot::still(glyph, style)
+        }
+    }
+
     pub(in crate::tui) fn style(&self) -> Style {
         match self {
             Self::Unknown => palette::muted(),
@@ -129,6 +140,55 @@ impl RemoteStatus {
 /// What a task's terminal is called on its frame, as opposed to the shell opened to
 /// set up credentials, which names the profile it is for.
 const TASK_SHELL: &str = "shell";
+
+/// What a profile's own check last said about its login.
+///
+/// Asked rather than known, and asked the way a remote's address is reached: one at a
+/// time, off the loop, with a mark in front of the row that says which it is doing.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub(in crate::tui) enum CredentialStatus {
+    /// Not asked yet.
+    #[default]
+    Unknown,
+    /// Asked, and nothing has come back.
+    Checking,
+    /// Answered, with what the profile's own command printed.
+    Checked { signed_in: bool, output: String },
+    /// Not asked, because the environment it would be asked in is not built here.
+    NotBuilt,
+    /// Could not be asked.
+    Silent(String),
+}
+
+impl CredentialStatus {
+    /// The mark in front of the row: filled when there is a login, hollow when there
+    /// is not, and travelling while the answer is still out.
+    pub(in crate::tui) fn dot(&self) -> Dot {
+        let (glyph, style) = match self {
+            Self::Unknown => ('○', palette::muted()),
+            Self::Checking => ('◌', palette::attention()),
+            Self::Checked {
+                signed_in: true, ..
+            } => ('●', palette::good()),
+            Self::Checked {
+                signed_in: false, ..
+            } => ('○', palette::muted()),
+            // A mark of its own for each way of not knowing: nothing was asked here,
+            // or the asking went wrong.
+            Self::NotBuilt => ('·', palette::attention()),
+            Self::Silent(_) => ('×', palette::bad()),
+        };
+        if *self == Self::Checking {
+            Dot::travelling(glyph, style)
+        } else {
+            Dot::still(glyph, style)
+        }
+    }
+
+    fn is_in_progress(&self) -> bool {
+        *self == Self::Checking
+    }
+}
 
 /// What came back from reaching an address. Sent from the dial, which runs on its
 /// own so a slow one cannot hold up the interface.
@@ -228,6 +288,11 @@ pub struct App {
     pub(in crate::tui) foreground: Foreground,
     /// What each address last answered, for the list to show.
     pub(in crate::tui) remote_status: HashMap<String, RemoteStatus>,
+    /// What each profile's own check last said about its login.
+    pub(in crate::tui) credential_status: HashMap<&'static str, CredentialStatus>,
+    /// When the credentials list started showing, which the wait before asking is
+    /// measured from. Absent while it is not showing.
+    credentials_visible_since: Option<Instant>,
     /// When the remotes list started showing, which the wait before dialling is
     /// measured from. Absent while it is not showing.
     remotes_visible_since: Option<Instant>,
@@ -288,6 +353,8 @@ impl App {
             panel: Panel::new(),
             foreground: Foreground::default(),
             remote_status: HashMap::new(),
+            credential_status: HashMap::new(),
+            credentials_visible_since: None,
             remotes_visible_since: None,
             remote_synced: HashMap::new(),
             remote_tasks: Vec::new(),
@@ -993,6 +1060,87 @@ impl App {
             (false, Some(_)) => self.remotes_visible_since = None,
             _ => {}
         }
+    }
+
+    /// Note whether the credentials list is showing, and start its clock when it
+    /// appears.
+    ///
+    /// A fresh look every time it is opened, so a login made in a shell a moment ago
+    /// is not still being reported as it was.
+    pub(in crate::tui) fn sync_credentials(&mut self) {
+        let showing = matches!(self.foreground, Foreground::Panel)
+            && self.panel.section == Section::Credentials;
+        match (showing, self.credentials_visible_since) {
+            (true, None) => {
+                self.credentials_visible_since = Some(Instant::now());
+                self.credential_status.clear();
+            }
+            (false, Some(_)) => self.credentials_visible_since = None,
+            _ => {}
+        }
+    }
+
+    /// Whether any profile is being asked about right now, which is what keeps the
+    /// dot moving while it waits.
+    pub(in crate::tui) fn is_asking_credentials(&self) -> bool {
+        self.credential_status
+            .values()
+            .any(CredentialStatus::is_in_progress)
+    }
+
+    /// Whether it is time to ask about another profile: the list is showing, it has
+    /// been showing long enough to mean it, and nothing is in flight.
+    pub(in crate::tui) fn wants_credential_check(&self) -> bool {
+        let Some(since) = self.credentials_visible_since else {
+            return false;
+        };
+        since.elapsed() >= ASK_AFTER
+            && !self.is_asking_credentials()
+            && self.next_unasked_profile().is_some()
+    }
+
+    /// The first profile whose login has not been asked about.
+    fn next_unasked_profile(&self) -> Option<&'static str> {
+        self.profiles
+            .iter()
+            .map(|profile| profile.profile)
+            .find(|profile| !self.credential_status.contains_key(profile))
+    }
+
+    /// Ask a profile's own command about its login, and let it report back when it
+    /// answers. Off the loop: the answer comes from a sandbox.
+    pub(in crate::tui) fn ask_next_credential<E>(
+        &mut self,
+        task_service: &TaskService<E>,
+        reports: &mpsc::UnboundedSender<(&'static str, CredentialStatus)>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let Some(profile) = self.next_unasked_profile() else {
+            return;
+        };
+        self.credential_status
+            .insert(profile, CredentialStatus::Checking);
+        let environment = self.default_environment_value();
+        let chosen = self.agent();
+        let service = task_service.clone();
+        let reports = reports.clone();
+        tokio::spawn(async move {
+            let status = match service
+                .credential_report(environment, profile, chosen)
+                .await
+            {
+                Ok(Some(report)) => CredentialStatus::Checked {
+                    signed_in: report.signed_in,
+                    output: report.output,
+                },
+                // Not built here, which is an answer rather than a failure: the
+                // environment a shell for this profile would need does not exist yet.
+                Ok(None) => CredentialStatus::NotBuilt,
+                Err(error) => CredentialStatus::Silent(error.to_string()),
+            };
+            let _ = reports.send((profile, status));
+        });
     }
 
     /// Whether any address is being asked about right now, which is what keeps the

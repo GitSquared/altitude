@@ -146,6 +146,22 @@ pub struct ProfileSummary {
     pub mounts: Vec<ProfileMount>,
 }
 
+/// What a sandbox made for credentials is called: the shell an operator signs in in,
+/// and the one a profile's login is checked in.
+///
+/// Named by prefix rather than by profile so that one a client left behind can be told
+/// from every other sandbox without knowing which profiles exist.
+pub const CREDENTIAL_PREFIX: &str = "credentials-";
+
+/// What a profile's own check said about it.
+#[derive(Clone, Debug)]
+pub struct CredentialReport {
+    /// What the command printed, which is what an operator reads.
+    pub output: String,
+    /// Whether it exited 0, which is how a profile says it is signed in.
+    pub signed_in: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct ProfileMount {
     pub path: &'static str,
@@ -388,6 +404,33 @@ pub trait IsolationEngine: Send + Sync {
         id: String,
         command: String,
     ) -> impl Future<Output = Result<CommandSession, IsolationError>> + Send;
+
+    /// Whether an environment is already built here, and current.
+    ///
+    /// Asked instead of building one: a check that a profile can be read has to be
+    /// able to answer "not built here" rather than start a build, because looking at
+    /// a page is not the place for minutes of work.
+    fn environment_built(&self, environment: Environment, recipes: Vec<EnvironmentRecipe>) -> bool;
+
+    /// Run a profile's own check command in a sandbox that is thrown away after it.
+    ///
+    /// The same sandbox a credential shell for that profile would get, so a report is
+    /// what opening one would find.
+    fn credential_report(
+        &self,
+        id: String,
+        environment: Environment,
+        recipes: Vec<EnvironmentRecipe>,
+        command: String,
+        progress: &dyn EnvironmentProgressSink,
+    ) -> impl Future<Output = Result<CredentialReport, IsolationError>> + Send;
+
+    /// Throw away credential shells a client left behind.
+    ///
+    /// One lives as long as the terminal in front of it, so one still here is one
+    /// nobody is looking at: a client that stopped in the middle of opening one
+    /// cannot have left anything else, and nothing else holds these.
+    fn remove_leftover_credential_shells(&self) -> impl Future<Output = ()> + Send;
 
     fn remove(&self, id: String) -> impl Future<Output = Result<(), IsolationError>> + Send;
 

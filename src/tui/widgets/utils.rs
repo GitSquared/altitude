@@ -1,5 +1,6 @@
 use ratatui::{
     layout::{Constraint, Flex, Layout, Rect},
+    style::Style,
     text::Span,
 };
 
@@ -15,6 +16,48 @@ pub fn centered_width(area: Rect, width: u16, height_percent: u16) -> Rect {
     Layout::vertical([Constraint::Percentage(height_percent)])
         .flex(Flex::Center)
         .areas::<1>(area)[0]
+}
+
+/// A mark in front of a list row: what the last answer about that row said.
+///
+/// Every list that asks something on its own clock marks its rows with one, so the
+/// same thing in front of a row means the same thing wherever it is: filled when the
+/// answer came back, hollow while it has not, and travelling while it is still
+/// coming.
+pub struct Dot {
+    glyph: char,
+    style: Style,
+    travelling: bool,
+}
+
+impl Dot {
+    /// A mark for an answer that has arrived, or will not.
+    pub fn still(glyph: char, style: Style) -> Self {
+        Self {
+            glyph,
+            style,
+            travelling: false,
+        }
+    }
+
+    /// A mark for a question that is still out.
+    pub fn travelling(glyph: char, style: Style) -> Self {
+        Self {
+            glyph,
+            style,
+            travelling: true,
+        }
+    }
+
+    /// The mark, and the space after it, ready to be the first span of a row.
+    pub fn spans(&self, tick: usize) -> Vec<Span<'static>> {
+        let text = format!("{} ", self.glyph);
+        if self.travelling {
+            shimmer(&text, tick)
+        } else {
+            vec![Span::styled(text, self.style)]
+        }
+    }
 }
 
 /// A highlight that travels across `text`, so a wait reads as work in progress.
@@ -34,6 +77,41 @@ pub fn shimmer(text: &str, tick: usize) -> Vec<Span<'static>> {
             Span::styled(character.to_string(), style)
         })
         .collect()
+}
+
+/// What a terminal would have drawn, as text.
+///
+/// A command's output is written for a terminal: colours, cursor questions, window
+/// titles. Read as text, those are noise — and a question is noise a program asked
+/// something that was not there to answer.
+pub fn plain(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut characters = text.chars();
+    while let Some(character) = characters.next() {
+        match character {
+            '\u{1b}' => match characters.next() {
+                // A control sequence ends at the first letter.
+                Some('[') => {
+                    characters.by_ref().any(|c| c.is_ascii_alphabetic());
+                }
+                // An operating system command ends at a bell or a string terminator.
+                Some(']') => {
+                    let mut previous = ' ';
+                    for c in characters.by_ref() {
+                        if c == '\u{7}' || (previous == '\u{1b}' && c == '\\') {
+                            break;
+                        }
+                        previous = c;
+                    }
+                }
+                Some(_) | None => {}
+            },
+            '\n' | '\t' => plain.push(character),
+            c if !c.is_control() => plain.push(c),
+            _ => {}
+        }
+    }
+    plain
 }
 
 /// Shortens `text` to `width` characters, marking the cut with an ellipsis.

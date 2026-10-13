@@ -10,7 +10,7 @@ use std::{
 
 use microsandbox::{
     LocalBackend, Sandbox,
-    sandbox::{PullPolicy, exec::ExecEvent},
+    sandbox::{MAX_SANDBOX_LIST_LIMIT, PullPolicy, exec::ExecEvent},
     set_default_backend,
     setup::{InstallOptions, ensure_runtime},
     snapshot::Snapshot,
@@ -21,10 +21,10 @@ use crate::config::Config;
 use crate::isolation::Environment;
 
 use super::{
-    BaseSandboxRecipe, BaseSandboxSnapshot, Command, CommandEvent, CommandSession,
-    EnvironmentDescription, EnvironmentProgress, EnvironmentProgressSink, EnvironmentRecipe,
-    IsolationEngine, IsolationError, IsolationStatus, OutputStream, SandboxOptions, SetupStep,
-    VsockRoute,
+    BaseSandboxRecipe, BaseSandboxSnapshot, CREDENTIAL_PREFIX, Command, CommandEvent,
+    CommandSession, CredentialReport, EnvironmentDescription, EnvironmentProgress,
+    EnvironmentProgressSink, EnvironmentRecipe, IsolationEngine, IsolationError, IsolationStatus,
+    OutputStream, SandboxOptions, SetupStep, VsockRoute,
     environment::{self, REFRESH_AFTER, private_directory},
     trust_host_roots,
 };
@@ -243,7 +243,7 @@ impl MicrosandboxIsolation {
         if Sandbox::get(id).await.is_err() {
             return;
         }
-        tracing::info!(sandbox_id = %id, "removing a sandbox left by an unfinished build");
+        tracing::info!(sandbox_id = %id, "removing a sandbox left behind");
         if let Err(error) = self.remove(id.to_owned()).await {
             tracing::warn!(sandbox_id = %id, %error, "could not remove a leftover sandbox");
         }
@@ -633,6 +633,73 @@ impl IsolationEngine for MicrosandboxIsolation {
         .await
     }
 
+    fn environment_built(&self, environment: Environment, recipes: Vec<EnvironmentRecipe>) -> bool {
+        let Ok(recipe) = environment::composed_recipe(&self.config, environment, recipes) else {
+            return false;
+        };
+        let store = BaseSandboxSnapshotStore::new(&recipe);
+        let current = store.current().ok().flatten();
+        // The same question `ensure_snapshot` asks, minus the build it would do about
+        // it: a child is rebuilt when its workspace base is newer than it.
+        let workspace_newer =
+            BaseSandboxSnapshotStore::at(self.config.workspace_snapshots_dir(), REFRESH_AFTER)
+                .current()
+                .ok()
+                .flatten()
+                .zip(current.as_ref())
+                .is_some_and(|(workspace, current)| {
+                    workspace.created_at_ms > current.created_at_ms
+                });
+        !workspace_newer && !store.needs_refresh(current.as_ref(), &recipe.setup_command())
+    }
+
+    async fn credential_report(
+        &self,
+        id: String,
+        environment: Environment,
+        recipes: Vec<EnvironmentRecipe>,
+        command: String,
+        progress: &dyn EnvironmentProgressSink,
+    ) -> Result<CredentialReport, IsolationError> {
+        environment::credential_report(
+            self,
+            &self.config,
+            id,
+            environment,
+            recipes,
+            command,
+            progress,
+        )
+        .await
+    }
+
+    async fn remove_leftover_credential_shells(&self) {
+        let mut cursor: Option<String> = None;
+        loop {
+            let listed = Sandbox::list_with(|list| match &cursor {
+                Some(cursor) => list.cursor(cursor.clone()).limit(MAX_SANDBOX_LIST_LIMIT),
+                None => list.limit(MAX_SANDBOX_LIST_LIMIT),
+            })
+            .await;
+            let page = match listed {
+                Ok(page) => page,
+                Err(error) => {
+                    tracing::debug!(%error, "could not list the sandboxes");
+                    return;
+                }
+            };
+            for sandbox in page.sandboxes {
+                if sandbox.name().starts_with(CREDENTIAL_PREFIX) {
+                    self.remove_leftover(sandbox.name()).await;
+                }
+            }
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => return,
+            }
+        }
+    }
+
     async fn prepare(&self, status: &watch::Sender<IsolationStatus>) -> Result<(), IsolationError> {
         private_directory(self.config.data_dir())?;
         private_directory(&self.data_home)?;
@@ -652,6 +719,10 @@ impl IsolationEngine for MicrosandboxIsolation {
         set_default_backend(backend);
 
         tracing::info!("Microsandbox runtime ready");
+        // A credential shell lives as long as the terminal in front of it, so one that
+        // is still here belongs to a client that is gone: a client that stopped in the
+        // middle of opening one cannot have left anything else.
+        self.remove_leftover_credential_shells().await;
 
         status.send_replace(IsolationStatus::PreparingBaseImage);
         let sandbox = Sandbox::builder(PREPARATION_SANDBOX)

@@ -14,15 +14,11 @@
 
 use crate::tui::{
     App,
-    app::RemoteStatus,
-    widgets::{chrome, palette},
+    app::{CredentialStatus, RemoteStatus},
+    widgets::{chrome, palette, utils::Dot},
 };
 
-use std::{
-    fs,
-    path::Path,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use ratatui::{
     Frame,
@@ -35,8 +31,10 @@ use crate::{
     agent::AgentKind,
     isolation::{EnvironmentDescription, ProfileMount, REFRESH_AFTER},
     remote::RemoteKey,
-    tui::widgets::text::{Field, FieldStyle, TextBox},
-    tui::widgets::utils::shimmer,
+    tui::widgets::{
+        text::{Field, FieldStyle, TextBox},
+        utils::plain,
+    },
 };
 
 /// The gap between columns, so two focus bars can never touch.
@@ -191,6 +189,16 @@ pub enum RowKind {
 }
 
 impl Row {
+    /// The mark in front of this row, where what it says is asked rather than known:
+    /// a remote's address, or a profile's login.
+    fn dot(&self) -> Option<Dot> {
+        match &self.kind {
+            RowKind::Remote { status, .. } => Some(status.dot()),
+            RowKind::Credential(credential) => credential.dot(),
+            _ => None,
+        }
+    }
+
     /// Whether this row opens into anything.
     ///
     /// The built-in base does not: there is no form behind it and nothing to
@@ -218,6 +226,17 @@ pub struct Credential {
     pub kind: CredentialKind,
 }
 
+impl Credential {
+    /// What a profile's own check last said, as a mark in front of its row. The
+    /// installation's key is not signed in to, so it has nothing to say.
+    fn dot(&self) -> Option<Dot> {
+        match &self.kind {
+            CredentialKind::Profile { status, .. } => Some(status.dot()),
+            CredentialKind::Installation { .. } => None,
+        }
+    }
+}
+
 pub enum CredentialKind {
     /// This installation: the key that names it and where its state lives.
     Installation {
@@ -229,9 +248,8 @@ pub enum CredentialKind {
     Profile {
         profile: &'static str,
         directory: String,
-        present: bool,
-        /// The account name, where one can be read without reading a credential.
-        account: Option<String>,
+        /// What that profile's own check said about it, if it has been asked.
+        status: CredentialStatus,
         mounts: Vec<ProfileMount>,
     },
 }
@@ -459,17 +477,6 @@ fn item(
     Line::from(spans)
 }
 
-/// A remote's dot, which travels while it waits, so a slow address looks like
-/// something happening rather than something stuck.
-fn dot(status: &RemoteStatus, tick: usize) -> Vec<Span<'static>> {
-    let dot = format!("{} ", status.glyph());
-    if status.is_in_progress() {
-        shimmer(&dot, tick)
-    } else {
-        vec![Span::styled(dot, status.style())]
-    }
-}
-
 fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick: usize) {
     let block = Block::bordered()
         .title(" Settings ")
@@ -526,10 +533,7 @@ fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick:
             .iter()
             .enumerate()
             .map(|(index, row)| {
-                let mark = match &row.kind {
-                    RowKind::Remote { status, .. } => dot(status, tick),
-                    _ => Vec::new(),
-                };
+                let mark = row.dot().map_or_else(Vec::new, |dot| dot.spans(tick));
                 let line = item(
                     mark,
                     &row.label,
@@ -803,25 +807,10 @@ fn credential_lines(
         CredentialKind::Profile {
             profile,
             directory,
-            present,
-            account,
+            status,
             mounts,
         } => {
-            lines.push(Line::styled(
-                if *present { "set up" } else { "not set up yet" },
-                if *present {
-                    palette::good()
-                } else {
-                    palette::muted()
-                },
-            ));
-            lines.push(Line::from(""));
-            if let Some(account) = account {
-                lines.push(Line::from(vec![
-                    Span::styled("account   ", palette::muted()),
-                    account.clone().into(),
-                ]));
-            }
+            lines.extend(status_lines(status));
             lines.push(Line::from(vec![
                 Span::styled("profile   ", palette::muted()),
                 (*profile).into(),
@@ -833,11 +822,14 @@ fn credential_lines(
             if !mounts.is_empty() {
                 lines.push(Line::from(""));
                 lines.push(Line::styled("A task sees", palette::muted()));
-                lines.extend(
-                    mounts
-                        .iter()
-                        .map(|mount| Line::from(format!("{}  →  {}", mount.guest, mount.path))),
-                );
+                // A directory at the profile's root is mounted as the profile itself,
+                // so there is nothing to say after the arrow.
+                lines.extend(mounts.iter().map(|mount| {
+                    Line::from(match mount.path.is_empty() {
+                        true => mount.guest.clone(),
+                        false => format!("{}  →  {}", mount.guest, mount.path),
+                    })
+                }));
             }
             lines.push(Line::from(""));
             lines.push(Line::styled(
@@ -854,6 +846,56 @@ fn credential_lines(
         }
     }
     lines
+}
+
+/// What a profile's own check said about it, as its page reads it.
+///
+/// The command's own words are kept: a check is a command the profile's CLI knows how
+/// to answer, and paraphrasing it would be Altitude guessing at what it means.
+fn status_lines(status: &CredentialStatus) -> Vec<Line<'static>> {
+    match status {
+        CredentialStatus::Unknown => vec![Line::styled("not checked yet", palette::muted())],
+        CredentialStatus::Checking => {
+            vec![Line::styled(
+                "asking its own command…",
+                palette::attention(),
+            )]
+        }
+        CredentialStatus::Checked { signed_in, output } => {
+            let mut lines = vec![Line::styled(
+                if *signed_in {
+                    "signed in"
+                } else {
+                    "not signed in"
+                },
+                if *signed_in {
+                    palette::good()
+                } else {
+                    palette::muted()
+                },
+            )];
+            let output = plain(output);
+            if !output.trim().is_empty() {
+                lines.push(Line::from(""));
+                lines.extend(output.lines().map(|line| Line::from(line.to_owned())));
+            }
+            lines
+        }
+        CredentialStatus::NotBuilt => vec![
+            Line::styled("not asked here", palette::attention()),
+            Line::from(""),
+            Line::styled(
+                "The environment this login needs is not built on this machine yet. \
+                 Press enter to build it and sign in.",
+                palette::muted(),
+            ),
+        ],
+        CredentialStatus::Silent(reason) => vec![
+            Line::styled("could not be asked", palette::bad()),
+            Line::from(""),
+            Line::styled(reason.clone(), palette::muted()),
+        ],
+    }
 }
 
 /// How long ago something was seen, coarsely: the exact minute is not the point.
@@ -1078,9 +1120,12 @@ impl App {
                 label: profile.display.to_owned(),
                 kind: CredentialKind::Profile {
                     profile: profile.profile,
-                    present: directory.is_dir(),
-                    account: account_name(&directory),
                     directory: directory.display().to_string(),
+                    status: self
+                        .credential_status
+                        .get(profile.profile)
+                        .cloned()
+                        .unwrap_or_default(),
                     mounts: profile.mounts.clone(),
                 },
             });
@@ -1113,18 +1158,4 @@ impl App {
             .into_iter()
             .nth(self.panel.selected)
     }
-}
-
-/// The account a profile is signed in as, where a name can be read without
-/// reading a credential.
-///
-/// The GitHub CLI keeps the account name beside the token in its hosts file, and
-/// only the name is read.
-fn account_name(directory: &Path) -> Option<String> {
-    let hosts = fs::read_to_string(directory.join("gh/hosts.yml")).ok()?;
-    hosts.lines().find_map(|line| {
-        let value = line.trim().strip_prefix("user:")?;
-        let value = value.trim().trim_matches('"');
-        (!value.is_empty()).then(|| value.to_owned())
-    })
 }

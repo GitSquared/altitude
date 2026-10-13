@@ -102,6 +102,9 @@ where
     // A credential shell is opened, prints, and ends on its own time: the sandbox may
     // have to be built first, which is minutes rather than frames.
     let (credential_events, mut credential_shell_events) = mpsc::unbounded_channel();
+    // A profile's login is asked about off the loop too: the answer comes from a
+    // sandbox, and one at a time, so the panel is never waiting on three.
+    let (credential_reports, mut reported) = mpsc::unbounded_channel();
     loop {
         if mouse_captured != app.open_shell().is_some() {
             mouse_captured = app.open_shell().is_some();
@@ -198,8 +201,15 @@ where
                 if app.wants_remote_check() {
                     app.ask_next_remote(&remote_answers).await;
                 }
+                app.sync_credentials();
+                if app.wants_credential_check() {
+                    app.ask_next_credential(&task_service, &credential_reports);
+                }
             }
             Some(answer) = answered.recv() => app.remote_answered(answer).await,
+            Some((profile, status)) = reported.recv() => {
+                app.credential_status.insert(profile, status);
+            }
             _ = read_clock.tick(), if matches!(app.foreground, Foreground::Tasks) => {
                 app.read_remote_tasks(&remote_task_reads);
             }
@@ -218,7 +228,8 @@ where
                 }
             }
             _ = shell_notice.tick(), if app.shell_has_active_notice() => {}
-            _ = shimmer.tick(), if app.is_preparing() || app.is_asking_remotes() => {
+            _ = shimmer.tick(),
+                if app.is_preparing() || app.is_asking_remotes() || app.is_asking_credentials() => {
                 app.shimmer = app.shimmer.wrapping_add(1);
                 app.environment_builds = task_service.environment_builds();
             }

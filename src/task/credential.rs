@@ -9,20 +9,30 @@
 use tokio::sync::mpsc;
 
 use crate::isolation::{
-    Command, CommandEvent, Environment, IsolationEngine, IsolationError, Unwatched,
+    CREDENTIAL_PREFIX, Command, CommandEvent, CredentialReport, Environment, IsolationEngine,
+    IsolationError, Unwatched,
 };
 
 use crate::{agent::AgentKind, vcs::GitHub};
 
 use super::{TaskService, TaskServiceError};
 
-/// The name a profile's credential sandbox has.
+/// The name a profile's credential shell has.
 ///
 /// Named rather than anonymous because it can be asked for before there is a session
 /// to hold: a shell whose opening nobody is waiting for any more still has to be
 /// reachable to be thrown away.
 pub fn credential_shell_id(profile: &str) -> String {
-    format!("credentials-{}", profile.replace('/', "-"))
+    format!("{CREDENTIAL_PREFIX}shell-{}", profile.replace('/', "-"))
+}
+
+/// The name the sandbox a profile's login is checked in has.
+///
+/// A check and a shell can be asked for at the same time — the list asks about every
+/// profile as it is shown, and the operator can open one while an answer is still
+/// coming — so they cannot share a name.
+fn credential_check_id(profile: &str) -> String {
+    format!("{CREDENTIAL_PREFIX}check-{}", profile.replace('/', "-"))
 }
 
 /// What came back from a credential shell.
@@ -147,6 +157,51 @@ where
             .find(|kind| self.agents.engine(*kind).environment_recipe().profile == profile)
             .or(chosen)
             .unwrap_or_default()
+    }
+
+    /// What a profile's own check says about it, or nothing when it cannot be asked
+    /// here.
+    ///
+    /// The check runs in the environment a credential shell for that profile would
+    /// use, so a report is what pressing enter would find. An environment that is not
+    /// built here is answered with nothing rather than built: a page is not the place
+    /// for minutes of work, and opening the shell is what builds it.
+    pub async fn credential_report(
+        &self,
+        environment: Environment,
+        profile: &'static str,
+        chosen: Option<AgentKind>,
+    ) -> Result<Option<CredentialReport>, TaskServiceError> {
+        let recipes = vec![
+            self.agents
+                .engine(self.credential_agent(profile, chosen))
+                .environment_recipe(),
+            GitHub::environment_recipe(),
+        ];
+        let Some(command) = recipes
+            .iter()
+            .find(|recipe| recipe.profile == profile)
+            .map(|recipe| recipe.status_command.to_owned())
+        else {
+            return Ok(None);
+        };
+        if !self
+            .isolation
+            .environment_built(environment.clone(), recipes.clone())
+        {
+            return Ok(None);
+        }
+        self.isolation
+            .credential_report(
+                credential_check_id(profile),
+                environment,
+                recipes,
+                command,
+                &Unwatched,
+            )
+            .await
+            .map(Some)
+            .map_err(TaskServiceError::Isolation)
     }
 
     /// Take a credential shell's sandbox away.
