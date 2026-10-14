@@ -7,13 +7,15 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    env, fs, io, mem, process,
+    env, fs, io, mem,
+    path::PathBuf,
+    process,
     time::{Duration, Instant},
 };
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{DefaultTerminal, style::Style};
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, task::JoinHandle};
 
 use crate::{
     agent::AgentKind,
@@ -31,6 +33,7 @@ use crate::{
         TaskExecutionPauseReason, TaskExecutionStatus, TaskExecutionUpdate, TaskOperatorSignal,
         TaskService, TaskServiceError,
     },
+    tracker::{IssueReference, IssueSnapshot, IssueSummary},
     tui::keys::{is_dismiss, is_remove},
     tui::popups,
     tui::screens,
@@ -40,7 +43,7 @@ use crate::{
 };
 
 use popups::confirm::PendingConfirm;
-use popups::new_task::{Host, NewTask};
+use popups::new_task::{Answer, Host, NewTask, SearchToken};
 use popups::open_link::{self, Link, OpenLink};
 use popups::reply::{Prompt, PromptAction, Reply};
 use screens::settings::{
@@ -68,7 +71,7 @@ pub(in crate::tui) enum Foreground {
     /// A reply being written to a signal.
     Reply(Reply),
     /// The creation question, holding the prompt until it is answered.
-    NewTask(NewTask),
+    NewTask(Box<NewTask>),
     /// The settings panel: environments, remotes, the interface, the identity.
     Panel,
     /// A task's signals, over the list it was opened from.
@@ -190,6 +193,23 @@ impl CredentialStatus {
     }
 }
 
+/// What is known about the Linear tracker's live session.
+///
+/// The provider's own `is_connected` is the only truth here: a sign-in profile
+/// kept on disk is not a connection, so it is never shown as one. Signing in
+/// opens a browser and waits on an OAuth callback, which is minutes rather than
+/// frames, so it runs off the loop and reports back as one of these.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(in crate::tui) enum TrackerState {
+    /// No live session: nothing is signed in, or a session ended.
+    #[default]
+    NotConnected,
+    /// A sign-in is out, waiting on the browser and the callback.
+    Connecting,
+    /// The provider reports a live session.
+    Connected,
+}
+
 /// What came back from reaching an address. Sent from the dial, which runs on its
 /// own so a slow one cannot hold up the interface.
 pub(in crate::tui) enum RemoteAnswer {
@@ -203,6 +223,39 @@ pub(in crate::tui) enum RemoteAnswer {
         reason: String,
     },
 }
+
+/// What came back from a Linear search. The token says which popup and which
+/// query it answers, so a late one is dropped rather than shown under a query it
+/// was not about.
+pub(in crate::tui) struct IssueSearchReply {
+    pub token: SearchToken,
+    pub result: Result<Vec<IssueSummary>, String>,
+}
+
+/// What came back from reading one issue's snapshot. The token says which
+/// submission it belongs to, so a snapshot that lands after the question was
+/// dismissed cannot still found a task.
+pub(in crate::tui) struct IssueReadReply {
+    pub token: u64,
+    pub result: Result<IssueSnapshot, String>,
+}
+
+/// What came back from finishing a Linear sign-in.
+///
+/// The bool is the provider's own answer to `is_connected` after connecting,
+/// because a profile on disk is not a connection and only a live session makes
+/// the row say Connected.
+pub(in crate::tui) struct TrackerConnectReply {
+    pub attempt: u64,
+    pub result: Result<bool, String>,
+}
+
+/// The notice the sign-in sets, kept as one value so a reply can clear its own
+/// without erasing whatever else has happened since.
+const SIGN_IN_NOTICE: &str = "Finish Linear sign-in in your browser";
+
+/// What it says when the build carries no tracker provider at all.
+pub(in crate::tui) const NO_LINEAR: &str = "Linear support is not available in this build.";
 
 /// How long the list is shown before its addresses are dialled, so moving through
 /// the sections does not reach anything.
@@ -314,6 +367,24 @@ pub struct App {
     pub(in crate::tui) base_description: Option<EnvironmentDescription>,
     /// The profiles a task mounts, read when the panel opens.
     pub(in crate::tui) profiles: Vec<ProfileSummary>,
+    /// What the Linear tracker's session is doing, read when the panel opens
+    /// and updated when a sign-in lands.
+    pub(in crate::tui) tracker_state: TrackerState,
+    /// The sign-in in flight, so a second enter can give up on it and leaving
+    /// the interface can take it down with it. The provider owns the browser and
+    /// the OAuth callback; dropping this future is what cancels them.
+    tracker_connect: Option<JoinHandle<()>>,
+    tracker_connect_attempt: u64,
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        // The provider's future cleans up its broker when it is dropped, so the
+        // sign-in must not outlive the interface that asked for it.
+        if let Some(handle) = self.tracker_connect.take() {
+            handle.abort();
+        }
+    }
 }
 
 impl App {
@@ -363,6 +434,9 @@ impl App {
             remembered_keys: Vec::new(),
             base_description: None,
             profiles: Vec::new(),
+            tracker_state: TrackerState::NotConnected,
+            tracker_connect: None,
+            tracker_connect_attempt: 0,
             environment_builds: HashMap::new(),
             shimmer: 0,
             capacity: None,
@@ -519,11 +593,21 @@ impl App {
                     hints.push(Hint::new("enter", "toggle"));
                 } else if self.panel.section == Section::Credentials {
                     hints.push(Hint::new("enter", "shell"));
+                } else if self.panel.section == Section::Trackers {
+                    hints.push(Hint::new(
+                        "enter",
+                        if self.is_connecting_tracker() {
+                            "cancel sign-in"
+                        } else {
+                            "sign in"
+                        },
+                    ));
                 }
                 if self.panel.section.grows() {
                     hints.push(Hint::new("n", "new"));
                     hints.push(Hint::new("d", "delete"));
                 }
+                hints.push(Hint::new("pgup/pgdn", "details"));
                 hints.push(dismiss());
                 hints
             }
@@ -551,6 +635,12 @@ impl App {
                         Hint::new("h/j/k/l", "select"),
                         Hint::new("d", "remove"),
                     ]);
+                }
+                if self
+                    .selected_task()
+                    .is_some_and(|task| task.facts.tracker_issue.is_some())
+                {
+                    hints.push(Hint::new("b", "open issue"));
                 }
                 hints.push(Hint::new("?", "keys"));
                 hints.push(Hint::new("q", "quit"));
@@ -758,11 +848,19 @@ impl App {
         key: KeyEvent,
         task_service: &TaskService<E>,
         events: &mpsc::UnboundedSender<CredentialShellEvent>,
+        tracker_connects: &mpsc::UnboundedSender<TrackerConnectReply>,
     ) where
         E: IsolationEngine + Clone + 'static,
     {
         let rows = self.row_count();
         match key.code {
+            KeyCode::PageDown => {
+                self.panel.detail_scroll = self.panel.detail_scroll.saturating_add(5)
+            }
+            KeyCode::PageUp => {
+                self.panel.detail_scroll = self.panel.detail_scroll.saturating_sub(5)
+            }
+            KeyCode::Home => self.panel.detail_scroll = 0,
             _ if is_dismiss(key) || key.code == KeyCode::Char('s') => {
                 self.foreground = Foreground::Tasks;
             }
@@ -794,23 +892,31 @@ impl App {
                 });
             }
             _ if is_remove(key) && self.panel.section.grows() => self.ask_to_delete(),
-            KeyCode::Enter => self.activate_selected(task_service, events).await,
+            KeyCode::Enter => {
+                self.activate_selected(task_service, events, tracker_connects)
+                    .await
+            }
             _ => {}
         }
     }
 
     /// What `enter` does where the focus is: the row's own action, which for a
-    /// remote is reaching it rather than editing the address it is reached at, and
-    /// for a credential is a terminal rather than a page.
+    /// remote is reaching it rather than editing the address it is reached at, for
+    /// a credential is a terminal, and for a tracker is a browser sign-in, all
+    /// rather than a page.
     pub(in crate::tui) async fn activate_selected<E>(
         &mut self,
         task_service: &TaskService<E>,
         events: &mpsc::UnboundedSender<CredentialShellEvent>,
+        tracker_connects: &mpsc::UnboundedSender<TrackerConnectReply>,
     ) where
         E: IsolationEngine + Clone + 'static,
     {
         match self.selected_row().map(|row| row.kind) {
             Some(RowKind::Remote { address, .. }) => self.check_remote(&address).await,
+            // A tracker is signed in to, which is a browser and a callback rather
+            // than a page here.
+            Some(RowKind::Tracker { .. }) => self.connect_tracker(task_service, tracker_connects),
             Some(RowKind::Credential(credential)) => {
                 if let CredentialKind::Profile { profile, .. } = credential.kind {
                     self.open_credential_shell(&credential.label, profile, task_service, events);
@@ -1315,6 +1421,12 @@ impl App {
                 self.notice = Some("the key names this machine and is not edited here".to_owned());
                 return;
             }
+            // A tracker is signed in to with enter, which starts a browser
+            // sign-in rather than a form here.
+            RowKind::Tracker { .. } => {
+                self.notice = Some("press enter to sign in to Linear".to_owned());
+                return;
+            }
             RowKind::Environment { name, setup, .. } => Form::new(
                 Target::Environment {
                     original: name.clone(),
@@ -1338,7 +1450,11 @@ impl App {
         };
         // The question is built first: it borrows the name the target then moves.
         let (question, target) = match row.kind {
-            RowKind::Base | RowKind::Switch { .. } | RowKind::Agent(_) | RowKind::Credential(_) => {
+            RowKind::Base
+            | RowKind::Switch { .. }
+            | RowKind::Agent(_)
+            | RowKind::Credential(_)
+            | RowKind::Tracker { .. } => {
                 return;
             }
             RowKind::Environment { name, .. } => (
@@ -1672,6 +1788,8 @@ impl App {
         &mut self,
         key: KeyEvent,
         event_loop: &TaskEventLoop<E>,
+        task_service: &TaskService<E>,
+        issue_reads: &mpsc::UnboundedSender<IssueReadReply>,
     ) where
         E: IsolationEngine + Clone + 'static,
     {
@@ -1680,13 +1798,16 @@ impl App {
         };
         match question.handle_key(key) {
             None => self.foreground = Foreground::NewTask(question),
-            Some(popups::new_task::Answer::Cancel) => {}
-            Some(popups::new_task::Answer::Create {
+            // The question is dropped, and with it any read that had not yet
+            // founded a task.
+            Some(Answer::Cancel) => {}
+            Some(Answer::Create {
                 task,
                 environment,
                 agent,
                 host,
                 remember,
+                reopen,
             }) => {
                 // The first answer becomes the default, because there was nothing
                 // to default to and guessing is not Altitude's to do.
@@ -1703,7 +1824,244 @@ impl App {
                     // Founded here, so whose work it is needs no saying.
                     None => event_loop.create(task, environment, agent, None),
                 }
+                if reopen {
+                    question.reset_for_next();
+                    self.foreground = Foreground::NewTask(question);
+                }
             }
+            // The prompt stays in front, reading the issue: the operator sees the
+            // wait, and can still dismiss it.
+            Some(Answer::ReadIssue { token }) => {
+                self.foreground = Foreground::NewTask(question);
+                self.start_issue_read(token, task_service, issue_reads);
+            }
+        }
+    }
+
+    /// Where Linear keeps its sign-in profile. Shown in settings; the interface
+    /// never reads its contents, and it is never mounted into a task.
+    pub(in crate::tui) fn tracker_profile_dir(&self) -> PathBuf {
+        self.config.data_dir().join("trackers").join("linear")
+    }
+
+    /// The search the issue page owes, if its query has rested long enough.
+    pub(in crate::tui) fn due_issue_search(&mut self) -> Option<(SearchToken, String)> {
+        let Foreground::NewTask(question) = &mut self.foreground else {
+            return None;
+        };
+        question.due_search(Instant::now())
+    }
+
+    /// Tell the issue page why it cannot search, with the message the caller
+    /// chose: no session is the ordinary case, no provider is the build's.
+    pub(in crate::tui) fn issue_search_unavailable(
+        &mut self,
+        token: SearchToken,
+        message: &'static str,
+    ) {
+        if let Foreground::NewTask(question) = &mut self.foreground {
+            question.search_unavailable(token, message.to_owned());
+        }
+    }
+
+    /// Take a search answer, if the page is still asking that question.
+    pub(in crate::tui) fn issue_search_resolved(&mut self, reply: IssueSearchReply) {
+        if let Foreground::NewTask(question) = &mut self.foreground {
+            question.apply_search(reply.token, reply.result);
+        }
+    }
+
+    /// Read the chosen issue off the loop, so the interface keeps drawing while
+    /// Linear is asked.
+    fn start_issue_read<E>(
+        &mut self,
+        token: u64,
+        task_service: &TaskService<E>,
+        issue_reads: &mpsc::UnboundedSender<IssueReadReply>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let Some(reference) = self.issue_submission_reference(token) else {
+            return;
+        };
+        let Some(tracker) = task_service.tracker() else {
+            if let Foreground::NewTask(question) = &mut self.foreground {
+                question.read_unavailable(token, NO_LINEAR.to_owned());
+            }
+            return;
+        };
+        let replies = issue_reads.clone();
+        tokio::spawn(async move {
+            let result = tracker
+                .read(&reference)
+                .await
+                .map_err(|error| error.to_string());
+            let _ = replies.send(IssueReadReply { token, result });
+        });
+    }
+
+    fn issue_submission_reference(&self, token: u64) -> Option<IssueReference> {
+        match &self.foreground {
+            Foreground::NewTask(question) => question.submission_reference(token),
+            _ => None,
+        }
+    }
+
+    /// Take a snapshot that has arrived, if the submission that asked for it is
+    /// still the one in front of the operator. This is the gate between the read
+    /// and founding a task: a reply whose token no longer matches creates nothing.
+    pub(in crate::tui) async fn issue_read_resolved<E>(
+        &mut self,
+        reply: IssueReadReply,
+        event_loop: &TaskEventLoop<E>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        match reply.result {
+            Ok(snapshot) => {
+                let submission = {
+                    let Foreground::NewTask(question) = &mut self.foreground else {
+                        return;
+                    };
+                    question.take_submission(reply.token)
+                };
+                let Some(submission) = submission else {
+                    return;
+                };
+                if let Some(agent) = submission.remember {
+                    self.set_agent(agent);
+                }
+                // A bound issue is local-only for now. This is refused before the
+                // read, so reaching it means something moved; the binding is still
+                // not sent as a plain prompt to a remote.
+                if submission.host.is_some() {
+                    self.notice = Some("Start linked issues on this machine for now".to_owned());
+                    self.foreground = Foreground::Tasks;
+                    return;
+                }
+                event_loop.create_from_issue(snapshot, submission.environment, submission.agent);
+                if submission.reopen {
+                    if let Foreground::NewTask(question) = &mut self.foreground {
+                        question.reset_for_next();
+                    }
+                } else {
+                    self.foreground = Foreground::Tasks;
+                }
+            }
+            Err(error) => {
+                if let Foreground::NewTask(question) = &mut self.foreground {
+                    question.read_failed(reply.token, error);
+                }
+            }
+        }
+    }
+
+    /// Start signing in to Linear, or give up on a sign-in already under way.
+    ///
+    /// The browser and the OAuth callback are the provider's; this asks for a
+    /// connection and keeps the one handle, so the attempt can be cancelled here
+    /// or taken down with the interface.
+    pub(in crate::tui) fn connect_tracker<E>(
+        &mut self,
+        task_service: &TaskService<E>,
+        replies: &mpsc::UnboundedSender<TrackerConnectReply>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        if let Some(handle) = self.tracker_connect.take() {
+            handle.abort();
+            self.tracker_connect_attempt = self.tracker_connect_attempt.wrapping_add(1);
+            self.tracker_state = TrackerState::NotConnected;
+            self.clear_sign_in_notice();
+            self.notice = Some("Linear sign-in cancelled".to_owned());
+            return;
+        }
+        let Some(tracker) = task_service.tracker() else {
+            self.notice = Some("Linear is not available in this build".to_owned());
+            return;
+        };
+        if tracker.is_connected() {
+            self.tracker_state = TrackerState::Connected;
+            self.notice = Some("Linear is already connected".to_owned());
+            return;
+        }
+        self.tracker_state = TrackerState::Connecting;
+        self.tracker_connect_attempt = self.tracker_connect_attempt.wrapping_add(1);
+        let attempt = self.tracker_connect_attempt;
+        self.notice = Some(SIGN_IN_NOTICE.to_owned());
+        let replies = replies.clone();
+        self.tracker_connect = Some(tokio::spawn(async move {
+            let result = match tracker.connect().await {
+                Ok(()) => Ok(tracker.is_connected()),
+                Err(error) => Err(error.to_string()),
+            };
+            let _ = replies.send(TrackerConnectReply { attempt, result });
+        }));
+    }
+
+    /// Take what a sign-in ended in, and update the row without a restart.
+    ///
+    /// Only this attempt's own notice is cleared: an unrelated error that arrived
+    /// while the browser was open is not this reply's to erase.
+    pub(in crate::tui) fn tracker_connect_resolved(&mut self, reply: TrackerConnectReply) {
+        // A reply that lands after this attempt was given up on is not the
+        // attempt the operator is watching, so it changes nothing.
+        if self.tracker_state != TrackerState::Connecting
+            || reply.attempt != self.tracker_connect_attempt
+        {
+            return;
+        }
+        self.tracker_connect = None;
+        // The result replaces the sign-in notice it set, and nothing else: an
+        // unrelated error that arrived while the browser was open stays put.
+        let sign_in = self.clear_sign_in_notice();
+        match reply.result {
+            Ok(true) => {
+                self.tracker_state = TrackerState::Connected;
+                if sign_in {
+                    self.notice = Some("Linear is connected".to_owned());
+                }
+            }
+            // The provider answered but reports no live session, which is not a
+            // connection whatever else it may have kept.
+            Ok(false) => {
+                self.tracker_state = TrackerState::NotConnected;
+                if sign_in {
+                    self.notice = Some("Linear did not report a session".to_owned());
+                }
+            }
+            Err(error) => {
+                self.tracker_state = TrackerState::NotConnected;
+                if sign_in {
+                    self.notice = Some(format!("Linear sign-in did not finish: {error}"));
+                }
+            }
+        }
+    }
+
+    /// Whether a sign-in is out, which is what keeps its dot moving.
+    pub(in crate::tui) fn is_connecting_tracker(&self) -> bool {
+        self.tracker_state == TrackerState::Connecting
+    }
+
+    /// Drop the sign-in notice, and only it, saying whether it was the one that
+    /// was showing: anything else in the band belongs to another action and is
+    /// not this reply's to clear.
+    fn clear_sign_in_notice(&mut self) -> bool {
+        if self.notice.as_deref() == Some(SIGN_IN_NOTICE) {
+            self.notice = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Whether the issue page is waiting on a search or a read, which is what
+    /// keeps its shimmer moving.
+    pub(in crate::tui) fn is_awaiting_tracker(&self) -> bool {
+        match &self.foreground {
+            Foreground::NewTask(question) => question.is_awaiting(),
+            _ => false,
         }
     }
 
@@ -1713,13 +2071,15 @@ impl App {
         key: KeyEvent,
         task_service: &TaskService<E>,
         events: &mpsc::UnboundedSender<CredentialShellEvent>,
+        tracker_connects: &mpsc::UnboundedSender<TrackerConnectReply>,
     ) where
         E: IsolationEngine + Clone + 'static,
     {
         if self.panel.form.is_some() {
             self.panel_form_key(key).await;
         } else {
-            self.panel_key(key, task_service, events).await;
+            self.panel_key(key, task_service, events, tracker_connects)
+                .await;
         }
     }
 
@@ -1844,12 +2204,12 @@ impl App {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
             KeyCode::Char('c') => {
                 if self.reload_settings() {
-                    self.foreground = Foreground::NewTask(NewTask::new(
+                    self.foreground = Foreground::NewTask(Box::new(NewTask::new(
                         self.environments(),
                         self.default_environment_name(),
                         self.agent(),
                         self.task_hosts(),
-                    ));
+                    )));
                 }
             }
             KeyCode::Char('s') => {
@@ -1892,6 +2252,22 @@ impl App {
                     );
                     self.foreground =
                         Foreground::Confirm(PendingConfirm::taking_over(task.id, question));
+                }
+            }
+            // The issue a task is bound to is a page, so it opens the same way a
+            // sandbox's link does: through this machine's browser, by the
+            // operator's own act.
+            KeyCode::Char('b') => {
+                if let Some(issue) = self
+                    .selected_task()
+                    .and_then(|task| task.facts.tracker_issue)
+                {
+                    match open_in_browser(&issue.url) {
+                        Ok(()) => tracing::info!(%issue.url, "opened a task's issue"),
+                        Err(error) => {
+                            self.notice = Some(format!("could not open {}: {error}", issue.url))
+                        }
+                    }
                 }
             }
             _ => {}
@@ -2058,7 +2434,15 @@ impl App {
         E: IsolationEngine + Clone + 'static,
     {
         match update {
-            TaskExecutionUpdate::Created(Ok(task)) => self.replace_task(task),
+            TaskExecutionUpdate::Created(Ok(task)) => {
+                // A task that was just asked for is the one in view, whether it
+                // was founded or an existing binding was reused for it.
+                let id = task.id.clone();
+                self.replace_task(task);
+                if let Some(index) = self.tasks.iter().position(|task| task.id == id) {
+                    self.selected = index;
+                }
+            }
             TaskExecutionUpdate::Created(Err(error)) => self.notice = Some(error.to_string()),
             TaskExecutionUpdate::Started(Ok(task)) => self.replace_task(task),
             TaskExecutionUpdate::Started(Err(error)) => self.notice = Some(error.to_string()),
@@ -2217,6 +2601,10 @@ where
     }
     app.base_description = task_service.base_description();
     app.profiles = task_service.profiles();
+    app.tracker_state = match task_service.tracker() {
+        Some(tracker) if tracker.is_connected() => TrackerState::Connected,
+        _ => TrackerState::NotConnected,
+    };
     match app.remote_keys.list().await {
         Ok(keys) => app.remembered_keys = keys,
         Err(error) => app.notice = Some(format!("could not read remembered remotes: {error}")),

@@ -10,6 +10,7 @@ use crate::isolation::Environment;
 use crate::{
     agent::AgentKind,
     db::Database,
+    tracker::IssueReference,
     vcs::{CodeContribution, ContributionObservation},
 };
 
@@ -105,6 +106,20 @@ impl TaskStore {
         history: Option<&[(i64, TaskHistoryEvent)]>,
         arrival: &[TaskHistoryEvent],
     ) -> Result<Task, TaskError> {
+        let mut transaction = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(TaskError::Database)?;
+        // Binding is idempotent: if an active task already holds this issue, that
+        // task is the answer, and founding a second one would double the work.
+        // Read under the same write lock that would have created the second task.
+        if let Some(reference) = tracker_binding(arrival)
+            && let Some(existing) = Self::active_bound_task(&mut transaction, reference).await?
+        {
+            transaction.commit().await.map_err(TaskError::Database)?;
+            return Ok(existing);
+        }
         let TaskDraft {
             intent,
             environment,
@@ -115,11 +130,6 @@ impl TaskStore {
             agent_conversation_id,
         } = draft;
         let task_id = Uuid::new_v4().to_string();
-        let mut transaction = self
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(TaskError::Database)?;
         sqlx::query(
             r#"
             INSERT INTO tasks (id, agent_kind, host, created_at_ms)
@@ -161,6 +171,60 @@ impl TaskStore {
         let task = Self::read_task(&mut transaction, &task_id).await?;
         transaction.commit().await.map_err(TaskError::Database)?;
         Ok(task)
+    }
+
+    /// The active task bound to an issue, if one exists.
+    ///
+    /// A task counts as finished once the operator accepted it, which is the
+    /// judgment that precedes cleanup, or once cleanup recorded it completed. A
+    /// removed task is not in play. Both finished and removed work may be founded
+    /// again later, which is why neither is returned here.
+    async fn active_bound_task(
+        transaction: &mut Transaction<'_, Sqlite>,
+        reference: &IssueReference,
+    ) -> Result<Option<Task>, TaskError> {
+        let provider = match serde_json::to_value(reference.provider) {
+            Ok(serde_json::Value::String(provider)) => provider,
+            Ok(_) => unreachable!("a tracker kind serializes to a string"),
+            Err(error) => return Err(TaskError::HistoryData(error)),
+        };
+        sqlx::query_as::<_, TaskRow>(concat!(
+            include_str!("read_task.sql"),
+            r#" WHERE tasks.removed_at_ms IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM task_event_logs AS finished
+                      WHERE finished.task_id = tasks.id
+                        AND finished.event_type IN ('operator_signal_confirmed', 'task_completed')
+                  )
+                  AND EXISTS (
+                      SELECT 1 FROM task_event_logs AS bound
+                      WHERE bound.task_id = tasks.id
+                        AND bound.event_type = 'tracker_issue_bound'
+                        AND bound.payload ->> '$.data.issue.issue.reference.provider' = ?1
+                        AND bound.payload ->> '$.data.issue.issue.reference.workspace_id' = ?2
+                        AND bound.payload ->> '$.data.issue.issue.reference.id' = ?3
+                  )
+                ORDER BY tasks.created_at_ms DESC
+                LIMIT 1"#
+        ))
+        .bind(provider)
+        .bind(&reference.workspace_id)
+        .bind(&reference.id)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(TaskError::Database)
+        .map(|row| row.map(Task::from))
+    }
+
+    /// Whether a task is still in play, by id.
+    pub async fn is_active(&self, task_id: &str) -> Result<bool, TaskError> {
+        let active: Option<bool> =
+            sqlx::query_scalar("SELECT removed_at_ms IS NULL FROM tasks WHERE id = ?")
+                .bind(task_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(TaskError::Database)?;
+        Ok(active.unwrap_or(false))
     }
 
     /// Append related facts atomically and read their latest values before releasing the writer.
@@ -624,6 +688,14 @@ impl SignalResolution<'_> {
     fn is_answer(&self) -> bool {
         matches!(self, Self::Confirm | Self::Answer(_))
     }
+}
+
+/// The issue a create call binds to, when it binds one.
+fn tracker_binding(events: &[TaskHistoryEvent]) -> Option<&IssueReference> {
+    events.iter().find_map(|event| match event {
+        TaskHistoryEvent::TrackerIssueBound { issue } => Some(&issue.issue.reference),
+        _ => None,
+    })
 }
 
 fn now_ms() -> i64 {

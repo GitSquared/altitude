@@ -17,6 +17,7 @@ use crate::{
         Task, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
         TaskOperatorAttentionLevel, TaskOperatorSignalKind,
     },
+    tracker::IssueReference,
     tui::widgets::utils::{shimmer, truncate},
 };
 
@@ -114,6 +115,8 @@ struct Card<'a> {
     environment: &'a str,
     agent: Option<AgentKind>,
     host: &'a str,
+    /// The tracker issue this task is bound to, when it is bound to one.
+    issue: Option<&'a IssueReference>,
     /// How it is going, already in the words the card has room for.
     status: Line<'static>,
     /// What else it has to say, in the order it should be read.
@@ -139,6 +142,7 @@ fn cards(app: &App) -> Vec<Card<'_>> {
             environment: &task.facts.environment_name,
             agent: task.agent_kind,
             host: &task.host,
+            issue: task.facts.tracker_issue.as_ref(),
             status: card_status(
                 task,
                 at_capacity,
@@ -155,6 +159,7 @@ fn cards(app: &App) -> Vec<Card<'_>> {
             environment: &summary.environment,
             agent: summary.agent,
             host: &summary.host,
+            issue: None,
             status: held_status(summary),
             extras: summary
                 .extras
@@ -216,6 +221,12 @@ fn draw_card(frame: &mut Frame, area: Rect, card: &Card<'_>, focused: bool) {
         None => "no agent".to_owned(),
     };
     let mut lines = vec![card.status.clone()];
+    if let Some(issue) = card.issue {
+        lines.push(Line::styled(
+            format!("{} · Linear", issue.identifier),
+            palette::accent(),
+        ));
+    }
     lines.push(Line::styled(card.environment.to_owned(), palette::muted()));
     lines.push(Line::styled(
         format!("{agent} on {}", card.host),

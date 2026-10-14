@@ -399,6 +399,7 @@ fn is_machine_local_event(event: &TaskHistoryEvent) -> bool {
     matches!(
         event,
         TaskHistoryEvent::TaskSnapshotSaved { .. }
+            | TaskHistoryEvent::TrackerSynced { .. }
             | TaskHistoryEvent::ExecutionRecovered { .. }
             | TaskHistoryEvent::ExecutionPaused { .. }
             | TaskHistoryEvent::TransferStaged { .. }

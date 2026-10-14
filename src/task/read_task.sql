@@ -80,6 +80,10 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      FROM task_event_logs
      WHERE task_id = tasks.id AND event_type = 'operator_signal_answered'
      ORDER BY sequence DESC LIMIT 1) AS latest_operator_answer,
+    (SELECT payload -> '$.data.issue.issue.reference'
+     FROM task_event_logs
+     WHERE task_id = tasks.id AND event_type = 'tracker_issue_bound'
+     ORDER BY sequence DESC LIMIT 1) AS tracker_issue,
     (SELECT kind
      FROM task_operator_signals
      WHERE task_id = tasks.id

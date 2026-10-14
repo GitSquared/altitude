@@ -14,11 +14,14 @@
 
 use crate::tui::{
     App,
-    app::{CredentialStatus, RemoteStatus},
+    app::{CredentialStatus, RemoteStatus, TrackerState},
     widgets::{chrome, palette, utils::Dot},
 };
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use ratatui::{
     Frame,
@@ -48,15 +51,17 @@ pub enum Section {
     Interface,
     Agents,
     Credentials,
+    Trackers,
     Environments,
     Remotes,
 }
 
 impl Section {
-    pub const ALL: [Section; 5] = [
+    pub const ALL: [Section; 6] = [
         Self::Interface,
         Self::Agents,
         Self::Credentials,
+        Self::Trackers,
         Self::Environments,
         Self::Remotes,
     ];
@@ -66,6 +71,7 @@ impl Section {
             Self::Interface => "Interface",
             Self::Agents => "Agents",
             Self::Credentials => "Credentials",
+            Self::Trackers => "Trackers",
             Self::Environments => "Environments",
             Self::Remotes => "Remotes",
         }
@@ -182,6 +188,11 @@ pub enum RowKind {
         /// Whether the configuration it holds is the one this client has.
         needs_config: bool,
     },
+    /// A tracker Altitude can bind an issue to. Today that is Linear, and the
+    /// row says whether its live session is connected.
+    Tracker {
+        state: TrackerState,
+    },
     Switch {
         setting: Setting,
         on: bool,
@@ -195,6 +206,11 @@ impl Row {
         match &self.kind {
             RowKind::Remote { status, .. } => Some(status.dot()),
             RowKind::Credential(credential) => credential.dot(),
+            RowKind::Tracker { state } => Some(match state {
+                TrackerState::Connected => Dot::still('●', palette::good()),
+                TrackerState::Connecting => Dot::travelling('◌', palette::attention()),
+                TrackerState::NotConnected => Dot::still('○', palette::muted()),
+            }),
             _ => None,
         }
     }
@@ -218,6 +234,8 @@ pub struct View {
     pub rows: Vec<Row>,
     /// What the base environment is made of, once it has been built here.
     pub base: Option<EnvironmentDescription>,
+    /// Where Linear keeps its sign-in profile, for the Trackers page.
+    pub tracker_profile_dir: PathBuf,
 }
 
 /// One credential, as the list shows it.
@@ -262,6 +280,7 @@ pub struct Panel {
     pub selected: usize,
     pub depth: Depth,
     pub form: Option<Form>,
+    pub detail_scroll: u16,
 }
 
 impl Panel {
@@ -271,6 +290,7 @@ impl Panel {
             selected: 0,
             depth: Depth::List,
             form: None,
+            detail_scroll: 0,
         }
     }
 }
@@ -284,6 +304,7 @@ impl Default for Panel {
 impl Panel {
     /// Move within the focused list, which at the rail means the section.
     pub fn move_selection(&mut self, forward: bool, rows: usize) {
+        self.detail_scroll = 0;
         match self.depth {
             Depth::Rail => {
                 let at = Section::ALL
@@ -560,6 +581,15 @@ fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick:
                 .selected_row(view)
                 .is_some_and(|row| !row.is_actionable()));
     let pane = detail(panel, view, detail_focused);
+    let last_row = pane
+        .line_count(detail_area.width)
+        .saturating_sub(usize::from(detail_area.height));
+    let pane = pane.scroll((
+        panel
+            .detail_scroll
+            .min(last_row.min(u16::MAX as usize) as u16),
+        0,
+    ));
     frame.render_widget(
         if detail_focused {
             pane
@@ -568,6 +598,41 @@ fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick:
         },
         detail_area,
     );
+}
+
+/// How a remote is made, and what one is for.
+///
+/// Shown in the remotes detail and, when that list is empty, in place of the
+/// detail the missing row would otherwise give.
+fn remote_education_lines() -> Vec<Line<'static>> {
+    vec![
+        Line::styled(
+            "A remote keeps tasks running after you close this client.",
+            palette::muted(),
+        ),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("On another machine, run ", palette::muted()),
+            Span::styled("altitude serve", palette::accent()),
+            Span::styled(" (uses Microsandbox). Default port: ", palette::muted()),
+            Span::styled("25848", palette::accent()),
+            Span::styled(" (TCP and UDP).", palette::muted()),
+        ]),
+        Line::from(""),
+        Line::styled(
+            "Use a trusted network: reachable clients are admitted. Add its host:port here.",
+            palette::muted(),
+        ),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Press ", palette::muted()),
+            Span::styled("p", palette::accent()),
+            Span::styled(
+                " to send your environments and login profiles to the selected remote.",
+                palette::muted(),
+            ),
+        ]),
+    ]
 }
 
 /// The third column. `focused` is decided by the caller, because whether this
@@ -583,6 +648,10 @@ fn detail(panel: &Panel, view: &View, focused: bool) -> Paragraph<'static> {
         }
     };
     let Some(row) = panel.selected_row(view) else {
+        // The only list that can be empty teaches rather than stays blank.
+        if panel.section == Section::Remotes {
+            return Paragraph::new(remote_education_lines()).wrap(Wrap { trim: true });
+        }
         return Paragraph::new(Span::styled("", palette::muted()));
     };
     let label = row.label.clone();
@@ -623,6 +692,7 @@ fn detail(panel: &Panel, view: &View, focused: bool) -> Paragraph<'static> {
             ),
         ],
         RowKind::Credential(credential) => credential_lines(credential, heading),
+        RowKind::Tracker { state } => tracker_lines(*state, &view.tracker_profile_dir, heading),
         RowKind::Switch { setting, on } => vec![
             heading(label.clone()),
             Line::from(""),
@@ -699,6 +769,8 @@ fn detail(panel: &Panel, view: &View, focused: bool) -> Paragraph<'static> {
                     ));
                 }
             }
+            lines.push(Line::from(""));
+            lines.extend(remote_education_lines());
             lines
         }
     };
@@ -769,6 +841,51 @@ fn base_lines(
                  it, and this page then says what it was built from.",
             ));
         }
+    }
+    lines
+}
+
+/// How to connect Linear, and what Altitude does with the connection.
+///
+/// The page names the profile directory and never its contents. Signing in runs
+/// through Linear's official MCP server, which Altitude starts for itself; the
+/// operator finishes it in a browser, and the page says so rather than implying
+/// a key is copied anywhere.
+fn tracker_lines(
+    state: TrackerState,
+    profile_dir: &Path,
+    heading: impl Fn(String) -> Line<'static>,
+) -> Vec<Line<'static>> {
+    let (status, style) = match state {
+        TrackerState::Connected => ("connected", palette::good()),
+        TrackerState::Connecting => ("finishing sign-in in your browser", palette::attention()),
+        TrackerState::NotConnected => ("not connected", palette::attention()),
+    };
+    let mut lines = vec![
+        heading("Linear".to_owned()),
+        Line::from(""),
+        Line::styled(status, style),
+        Line::from(""),
+        Line::from(
+            "Press enter to connect in your browser. Uses Linear's official MCP server; \
+             requires Node.js (npx).",
+        ),
+        Line::from(""),
+        Line::styled("profile", palette::muted()),
+        Line::styled(profile_dir.display().to_string(), palette::primary()),
+        Line::from(""),
+        Line::from("Login stays outside task capsules. Altitude controls tracker writes."),
+    ];
+    match state {
+        TrackerState::Connected => {}
+        TrackerState::Connecting => {
+            lines.push(Line::from(""));
+            lines.push(Line::styled(
+                "Press enter again to give up on this sign-in.",
+                palette::muted(),
+            ));
+        }
+        TrackerState::NotConnected => {}
     }
     lines
 }
@@ -1028,6 +1145,17 @@ impl App {
                     kind: RowKind::Credential(credential),
                 })
                 .collect(),
+            Section::Trackers => vec![Row {
+                label: "Linear".to_owned(),
+                note: Some(match self.tracker_state {
+                    TrackerState::Connected => "(connected)",
+                    TrackerState::Connecting => "(connecting)",
+                    TrackerState::NotConnected => "(not connected)",
+                }),
+                kind: RowKind::Tracker {
+                    state: self.tracker_state,
+                },
+            }],
             Section::Environments => self
                 .environments()
                 .into_iter()
@@ -1090,6 +1218,7 @@ impl App {
         View {
             rows,
             base: self.base_description.clone(),
+            tracker_profile_dir: self.tracker_profile_dir(),
         }
     }
 
@@ -1147,6 +1276,7 @@ impl App {
             Section::Interface => 1,
             Section::Agents => 2,
             Section::Credentials => self.profiles.len() + 1,
+            Section::Trackers => 1,
             Section::Environments => self.environments().len(),
             Section::Remotes => self.configured_remotes().len(),
         }

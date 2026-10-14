@@ -1,6 +1,9 @@
-use std::{error::Error, io};
+use std::{error::Error, io, sync::Arc, time::Duration};
 
-use tokio::signal::unix::{SignalKind, signal};
+use tokio::{
+    signal::unix::{SignalKind, signal},
+    time::{MissedTickBehavior, interval},
+};
 
 use clap::Parser;
 
@@ -22,6 +25,7 @@ mod isolation;
 mod logging;
 mod remote;
 mod task;
+mod tracker;
 mod tui;
 mod vcs;
 
@@ -69,6 +73,14 @@ async fn client() -> Result<(), Box<dyn Error>> {
         else {
             return Ok(());
         };
+        let tracker =
+            match tracker::Linear::from_directory(&config.data_dir().join("trackers/linear")) {
+                Ok(connection) => Some(Arc::new(connection) as Arc<dyn tracker::TrackerProvider>),
+                Err(error) => {
+                    tracing::warn!(%error, "Linear setup needs attention");
+                    None
+                }
+            };
         let tasks = TaskService::new(
             TaskStore::new(&database),
             isolation,
@@ -76,7 +88,8 @@ async fn client() -> Result<(), Box<dyn Error>> {
             AgentEngines::new(),
             identity,
             config.agent_channel_dir(),
-        );
+        )
+        .with_tracker(tracker);
         let Some(recovered) = tui::boot_task_resume(
             &mut terminal,
             &mut terminate,
@@ -107,6 +120,17 @@ async fn client() -> Result<(), Box<dyn Error>> {
         )
         .await
         .map_err(io::Error::other)?;
+        let syncing = tasks.clone();
+        let tracker_sync = tokio::spawn(async move {
+            let mut tick = interval(Duration::from_secs(10));
+            tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                if let Err(error) = syncing.sync_tracker().await {
+                    tracing::warn!(%error, "tracker updates remain queued");
+                }
+            }
+        });
         let result = tui::run(
             &mut terminal,
             &mut terminate,
@@ -123,6 +147,7 @@ async fn client() -> Result<(), Box<dyn Error>> {
             task_execution_updates,
         )
         .await;
+        tracker_sync.abort();
         link.shutdown().await;
         result
     }

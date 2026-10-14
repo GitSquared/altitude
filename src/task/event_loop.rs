@@ -16,6 +16,7 @@ use crate::{
         Task, TaskAgentRequestedAction, TaskAgentRun, TaskExecutionMode, TaskExecutionStatus,
         TaskHistoryEvent, TaskService, TaskServiceError,
     },
+    tracker::IssueSnapshot,
 };
 
 pub enum TaskExecutionUpdate {
@@ -411,6 +412,41 @@ where
                 .send(TaskExecutionUpdate::Created(Ok(task.clone())));
             // A new task is not started here: it waits for a slot like everything
             // else, so a burst of them queues instead of all running at once.
+            event_loop.admit();
+        });
+    }
+
+    /// Found a task from an issue the host already fetched, then admit it like
+    /// any other new task.
+    ///
+    /// If an active task already holds the issue, creation returns that task, and
+    /// admitting it changes nothing: only a pending task starts, so a paused one
+    /// is left where the operator put it.
+    pub fn create_from_issue(
+        &self,
+        issue: IssueSnapshot,
+        environment: Environment,
+        agent: AgentKind,
+    ) {
+        tracing::info!(issue = %issue.issue.reference.identifier, "creating task from issue");
+        let event_loop = self.clone();
+        tokio::spawn(async move {
+            let task = match event_loop
+                .service
+                .create_from_issue(issue, environment, agent)
+                .await
+            {
+                Ok(task) => task,
+                Err(error) => {
+                    let _ = event_loop
+                        .events
+                        .send(TaskExecutionUpdate::Created(Err(error)));
+                    return;
+                }
+            };
+            let _ = event_loop
+                .events
+                .send(TaskExecutionUpdate::Created(Ok(task)));
             event_loop.admit();
         });
     }

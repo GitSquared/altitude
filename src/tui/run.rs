@@ -24,7 +24,9 @@ use crate::{
 };
 
 use super::App;
-use super::app::{Foreground, HeldTask};
+use super::app::{
+    Foreground, HeldTask, IssueReadReply, IssueSearchReply, NO_LINEAR, TrackerConnectReply,
+};
 use super::keys::is_help;
 use super::popups;
 use super::popups::confirm::handle_confirm_key;
@@ -32,6 +34,13 @@ use super::screens;
 use super::screens::settings::Focus;
 use super::widgets;
 use crate::task::CredentialShellEvent;
+
+struct EventReplies<'a> {
+    landings: &'a mpsc::UnboundedSender<Result<String, String>>,
+    credentials: &'a mpsc::UnboundedSender<CredentialShellEvent>,
+    issues: &'a mpsc::UnboundedSender<IssueReadReply>,
+    tracker_connects: &'a mpsc::UnboundedSender<TrackerConnectReply>,
+}
 
 pub async fn run<E>(
     terminal: &mut DefaultTerminal,
@@ -105,6 +114,19 @@ where
     // A profile's login is asked about off the loop too: the answer comes from a
     // sandbox, and one at a time, so the panel is never waiting on three.
     let (credential_reports, mut reported) = mpsc::unbounded_channel();
+    // Searching Linear and reading one issue are network calls, so they happen on
+    // their own clock and away from this loop. Each reply carries the popup and
+    // query it answers, so a late one is dropped rather than shown under the
+    // wrong question.
+    let (issue_search_replies, mut issue_search_replied) =
+        mpsc::unbounded_channel::<IssueSearchReply>();
+    let (issue_read_replies, mut issue_read_replied) = mpsc::unbounded_channel::<IssueReadReply>();
+    // Signing in to Linear opens a browser and waits on an OAuth callback, which
+    // is minutes rather than frames, so it happens off this loop and reports back
+    // like a task's run does.
+    let (tracker_connects, mut tracker_connect_replied) =
+        mpsc::unbounded_channel::<TrackerConnectReply>();
+    let mut issue_search_clock = time::interval(Duration::from_millis(80));
     loop {
         if mouse_captured != app.open_shell().is_some() {
             mouse_captured = app.open_shell().is_some();
@@ -168,7 +190,7 @@ where
             }
             if let Foreground::NewTask(new_task) = &app.foreground {
                 widgets::chrome::dim(frame, content);
-                popups::new_task::draw(frame, content, new_task);
+                popups::new_task::draw(frame, content, new_task, app.shimmer);
             }
             if matches!(app.foreground, Foreground::Keys(_)) {
                 widgets::chrome::dim(frame, content);
@@ -229,7 +251,12 @@ where
             }
             _ = shell_notice.tick(), if app.shell_has_active_notice() => {}
             _ = shimmer.tick(),
-                if app.is_preparing() || app.is_asking_remotes() || app.is_asking_credentials() => {
+                if app.is_preparing()
+                    || app.is_asking_remotes()
+                    || app.is_asking_credentials()
+                    || app.is_awaiting_tracker()
+                    || app.is_connecting_tracker() =>
+            {
                 app.shimmer = app.shimmer.wrapping_add(1);
                 app.environment_builds = task_service.environment_builds();
             }
@@ -237,9 +264,50 @@ where
                 app.apply(update, terminal, &event_loop).await?,
             Some(event) = credential_shell_events.recv() =>
                 app.credential_shell_event(event, terminal, &task_service).await,
+            _ = issue_search_clock.tick() => {
+                if let Some((token, query)) = app.due_issue_search() {
+                    match task_service.tracker() {
+                        Some(tracker) => {
+                            let replies = issue_search_replies.clone();
+                            tokio::spawn(async move {
+                                let result = tracker
+                                    .search(&query)
+                                    .await
+                                    .map_err(|error| error.to_string());
+                                let _ = replies.send(IssueSearchReply { token, result });
+                            });
+                        }
+                        // No provider at all is a property of the build.
+                        None => app.issue_search_unavailable(token, NO_LINEAR),
+                    }
+                }
+            }
+            Some(reply) = issue_search_replied.recv() => app.issue_search_resolved(reply),
+            Some(reply) = issue_read_replied.recv() => {
+                app.issue_read_resolved(reply, &event_loop).await
+            }
+            Some(reply) = tracker_connect_replied.recv() => {
+                app.tracker_connect_resolved(reply)
+            }
             event = events.next() => {
                 let Some(event) = event else { return Ok(()) };
-                if handle_event(event?, terminal, &event_loop, &task_service, &mut app, &landings, &credential_events).await? { return Ok(()); }
+                let quit = handle_event(
+                    event?,
+                    terminal,
+                    &event_loop,
+                    &task_service,
+                    &mut app,
+                    &EventReplies {
+                        landings: &landings,
+                        credentials: &credential_events,
+                        issues: &issue_read_replies,
+                        tracker_connects: &tracker_connects,
+                    },
+                )
+                .await?;
+                if quit {
+                    return Ok(());
+                }
             }
         }
     }
@@ -251,12 +319,17 @@ async fn handle_event<E>(
     event_loop: &TaskEventLoop<E>,
     task_service: &TaskService<E>,
     app: &mut App,
-    landings: &mpsc::UnboundedSender<Result<String, String>>,
-    credential_events: &mpsc::UnboundedSender<CredentialShellEvent>,
+    replies: &EventReplies<'_>,
 ) -> io::Result<bool>
 where
     E: IsolationEngine + Clone + 'static,
 {
+    let EventReplies {
+        landings,
+        credentials: credential_events,
+        issues: issue_reads,
+        tracker_connects,
+    } = replies;
     if let Event::Resize(_, _) = event
         && app.open_shell().is_some()
     {
@@ -321,8 +394,14 @@ where
             handle_confirm_key(app, terminal, event_loop, key, landings).await
         }
         Foreground::Reply(_) => app.reply_key(key, event_loop),
-        Foreground::NewTask(_) => app.new_task_key(key, event_loop).await,
-        Foreground::Panel => app.panel_keys(key, task_service, credential_events).await,
+        Foreground::NewTask(_) => {
+            app.new_task_key(key, event_loop, task_service, issue_reads)
+                .await
+        }
+        Foreground::Panel => {
+            app.panel_keys(key, task_service, credential_events, tracker_connects)
+                .await
+        }
         Foreground::Signals => app.signals_key(key, task_service).await,
         Foreground::Shell(_) => app.shell_key(key, event_loop, task_service).await,
         Foreground::OpenLink(_) => app.open_link_key(key),

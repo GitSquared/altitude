@@ -6,6 +6,7 @@ use crate::{
         IsolationEngine, IsolationError, ProfileMount, ProfileSummary, guest_path,
         private_directory,
     },
+    tracker::TrackerProvider,
     vcs::GitHub,
 };
 use std::{
@@ -33,6 +34,7 @@ pub use event_loop::{TaskEventLoop, TaskExecutionUpdate};
 mod progress;
 mod store;
 mod tools;
+mod tracker;
 pub use state::*;
 pub use store::{TaskDraft, TaskStore};
 
@@ -65,6 +67,11 @@ pub struct TaskService<E> {
     /// Where each running task's agent channel listens.
     agent_channel_dir: PathBuf,
     agent_channels: Arc<Mutex<HashMap<String, AgentChannel>>>,
+    /// The host-only tracker client, absent until one is configured.
+    ///
+    /// Held behind an `Arc` because it is shared with the tasks it reports on;
+    /// an agent reaches it only through the read-only tool this service binds.
+    tracker: Option<Arc<dyn TrackerProvider>>,
 }
 
 /// One task's agent channel: the listener serving its tools, and the socket it is
@@ -205,7 +212,20 @@ where
             environment_progress: EnvironmentProgressRegistry::default(),
             agent_channel_dir,
             agent_channels: Arc::new(Mutex::new(HashMap::new())),
+            tracker: None,
         }
+    }
+
+    /// Bind the host's tracker client to this service.
+    ///
+    /// Absent by default, so existing callers keep working without a tracker.
+    pub fn with_tracker(mut self, tracker: Option<Arc<dyn TrackerProvider>>) -> Self {
+        self.tracker = tracker;
+        self
+    }
+
+    pub fn tracker(&self) -> Option<Arc<dyn TrackerProvider>> {
+        self.tracker.clone()
     }
 
     /// The one place Altitude's subsystems are bound into an agent's tool set.
@@ -215,7 +235,11 @@ where
     /// server serves whatever this returns and names no tool itself.
     fn agent_tools(&self, task_id: &str) -> AgentToolRegistry {
         let mut tools = AgentToolRegistry::new();
-        tools.register(TaskAgentTools::new(self.store.clone(), task_id.to_owned()));
+        tools.register(TaskAgentTools::new(
+            self.store.clone(),
+            task_id.to_owned(),
+            self.tracker.clone(),
+        ));
         tools
     }
 

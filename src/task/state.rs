@@ -4,6 +4,7 @@ use std::fmt;
 
 use crate::agent::AgentKind;
 use crate::isolation::Environment;
+use crate::tracker::{IssueReference, IssueSnapshot};
 use crate::vcs::{CodeContribution, ContributionObservation};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -148,6 +149,12 @@ pub struct TaskFacts {
     pub latest_turn_summary: Option<String>,
     #[sqlx(json(nullable))]
     pub latest_operator_answer: Option<TaskOperatorAnswer>,
+    /// The tracker issue this task is bound to, when the operator bound one.
+    ///
+    /// Derived from the binding event rather than stored twice, so a task that
+    /// arrived by transfer carries where it belongs with the rest of its history.
+    #[sqlx(json(nullable))]
+    pub tracker_issue: Option<IssueReference>,
     /// The blocking signal the operator is being waited on for, when one is open.
     pub awaiting_signal_kind: Option<TaskOperatorSignalKind>,
     pub unread_operator_signal_count: u32,
@@ -308,6 +315,21 @@ pub enum TaskHistoryEvent {
     },
     TaskCompleted {
         execution_status: TaskExecutionStatus,
+    },
+    /// The operator bound this task to a tracker issue when it was founded.
+    ///
+    /// The snapshot is kept here, once: it is what the task's prompt was built
+    /// from, and what the tracker's later state is compared against.
+    TrackerIssueBound {
+        issue: IssueSnapshot,
+    },
+    /// How far this task's tracker binding has been reported, by history position.
+    ///
+    /// `event_count` is the number of history events, checkpoints included, that
+    /// existed when the checkpoint was written. A later pass resumes there, so
+    /// idle scans never generate a checkpoint of their own.
+    TrackerSynced {
+        event_count: usize,
     },
 }
 
