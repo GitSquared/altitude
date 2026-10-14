@@ -2,7 +2,7 @@ use std::{
     fs,
     io::ErrorKind,
     os::unix::fs::symlink,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -290,7 +290,11 @@ impl MicrosandboxIsolation {
             .iter()
             .filter(|step| !step.command.trim().is_empty())
             .collect();
-        let sandbox_id = format!("altitude-{}-setup", recipe.name);
+        let sandbox_id = format!(
+            "altitude-{}-{}-setup",
+            build_namespace(&recipe.snapshots_dir),
+            recipe.name
+        );
         let created_at_ms = now_ms();
         tracing::info!(environment = %recipe.name, steps = steps.len(), "building environment base sandbox snapshot");
         self.remove_leftover(&sandbox_id).await;
@@ -571,6 +575,12 @@ impl BaseSandboxSnapshotStore {
     }
 }
 
+/// A short, stable tag for whichever directory a build writes into, so two
+/// operators' same-named environments cannot collide on one setup sandbox.
+fn build_namespace(snapshots_dir: &Path) -> String {
+    blake3::hash(snapshots_dir.to_string_lossy().as_bytes()).to_hex()[..12].to_owned()
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -581,6 +591,26 @@ fn now_ms() -> i64 {
 }
 
 impl IsolationEngine for MicrosandboxIsolation {
+    fn for_operator(&self, owner: &str) -> Result<Self, IsolationError> {
+        if !self.config.serves_operators() {
+            return Ok(self.clone());
+        }
+        let config = self
+            .config
+            .for_operator(owner)
+            .map_err(|error| IsolationError::new(error.to_string()))?;
+        Ok(Self {
+            config,
+            // The runtime and its preparation lock belong to the machine, not to
+            // one operator: a scoped view shares them rather than making a
+            // second runtime the socket cannot carry.
+            data_home: self.data_home.clone(),
+            cache_home: self.cache_home.clone(),
+            socket_safe_home: self.socket_safe_home.clone(),
+            base_preparation_lock: Arc::clone(&self.base_preparation_lock),
+        })
+    }
+
     async fn ensure_environment(
         &self,
         environment: Environment,

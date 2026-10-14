@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
+    sync::atomic::{AtomicBool, Ordering},
     sync::{Arc, Mutex},
 };
 
@@ -61,6 +62,7 @@ impl CachedTerminalOutput {
 #[derive(Clone)]
 pub struct TaskEventLoop<E> {
     service: TaskService<E>,
+    admission_enabled: Arc<AtomicBool>,
     events: mpsc::UnboundedSender<TaskExecutionUpdate>,
     runs: Arc<Mutex<HashMap<String, ActiveRun>>>,
     control_requests: Arc<Mutex<HashMap<String, RequestedControl>>>,
@@ -98,9 +100,23 @@ where
     E: IsolationEngine + Clone + 'static,
 {
     pub fn new(service: TaskService<E>) -> (Self, mpsc::UnboundedReceiver<TaskExecutionUpdate>) {
+        Self::with_admission(service, true)
+    }
+
+    pub fn waiting_for_runtime(
+        service: TaskService<E>,
+    ) -> (Self, mpsc::UnboundedReceiver<TaskExecutionUpdate>) {
+        Self::with_admission(service, false)
+    }
+
+    fn with_admission(
+        service: TaskService<E>,
+        enabled: bool,
+    ) -> (Self, mpsc::UnboundedReceiver<TaskExecutionUpdate>) {
         let (events, receiver) = mpsc::unbounded_channel();
         let event_loop = Self {
             service,
+            admission_enabled: Arc::new(AtomicBool::new(enabled)),
             events,
             runs: Arc::new(Mutex::new(HashMap::new())),
             control_requests: Arc::new(Mutex::new(HashMap::new())),
@@ -158,12 +174,23 @@ where
     /// Cheap to call and safe to call repeatedly: a task already being started is
     /// skipped, so this is idempotent and can be triggered by anything that might
     /// have freed a slot.
+    pub fn enable_admission(&self) {
+        self.admission_enabled.store(true, Ordering::Release);
+        self.admit();
+    }
+
     pub fn admit(&self) {
+        if !self.admission_enabled.load(Ordering::Acquire) {
+            return;
+        }
         let event_loop = self.clone();
         tokio::spawn(async move { event_loop.admit_waiting().await });
     }
 
     async fn admit_waiting(&self) {
+        if !self.admission_enabled.load(Ordering::Acquire) {
+            return;
+        }
         let tasks = match self.service.list().await {
             Ok(tasks) => tasks,
             Err(error) => {
@@ -197,7 +224,17 @@ where
             .collect();
         // The list arrives newest first; the queue is served oldest first.
         waiting.reverse();
-        for task in waiting.into_iter().take(room) {
+        let mut fresh = 0;
+        for task in waiting {
+            if !task.facts.sandbox_available {
+                if fresh >= room {
+                    continue;
+                }
+                fresh += 1;
+            }
+            if !self.admission_enabled.load(Ordering::Acquire) {
+                break;
+            }
             if !self
                 .starting
                 .lock()
@@ -219,6 +256,94 @@ where
                 event_loop.admit();
             });
         }
+    }
+
+    pub(crate) fn service(&self) -> &TaskService<E> {
+        &self.service
+    }
+
+    pub async fn update_intent(
+        &self,
+        task_id: &str,
+        instruction: String,
+    ) -> Result<(), TaskServiceError> {
+        let task = self
+            .list()
+            .await?
+            .into_iter()
+            .find(|task| task.id == task_id)
+            .ok_or(TaskServiceError::Task(super::TaskError::OperationRejected(
+                "this task is no longer active",
+            )))?;
+        if task.facts.accepted {
+            return Err(TaskServiceError::Task(super::TaskError::OperationRejected(
+                "this task has already been accepted",
+            )));
+        }
+        self.suspend(task).await?;
+        let task = self
+            .list()
+            .await?
+            .into_iter()
+            .find(|task| task.id == task_id)
+            .ok_or(TaskServiceError::Task(super::TaskError::OperationRejected(
+                "this task is no longer active",
+            )))?;
+        self.service
+            .record(
+                task_id,
+                &[TaskHistoryEvent::IntentExpressed {
+                    intent: format!(
+                        "{}\n\nThe operator added these instructions:\n{}",
+                        task.facts.intent, instruction
+                    ),
+                    environment: task.environment(),
+                    identity_id: task
+                        .facts
+                        .operator_id
+                        .clone()
+                        .ok_or(TaskServiceError::Task(super::TaskError::OperationRejected(
+                            "this task has no operator",
+                        )))?,
+                    identity_label: task.facts.operator_label.clone().unwrap_or_default(),
+                    agent_conversation_id: task.facts.agent_conversation_id.clone(),
+                    execution_status: TaskExecutionStatus::Pending,
+                    execution_mode: TaskExecutionMode::Autopilot,
+                    operator_attention_level: task.facts.operator_attention_level,
+                    sandbox_available: task.facts.sandbox_available,
+                    snapshot_available: task.facts.snapshot_available,
+                }],
+            )
+            .await?;
+        self.admit();
+        Ok(())
+    }
+
+    pub async fn reply(&self, signal_id: &str, answer: String) -> Result<(), TaskServiceError> {
+        let run = self
+            .service
+            .answer_operator_signal(signal_id, answer)
+            .await?;
+        self.watch_agent_run(Ok(run));
+        Ok(())
+    }
+
+    pub async fn create_issue_for_operator(
+        &self,
+        issue: IssueSnapshot,
+        environment: Environment,
+        agent: AgentKind,
+        operator: InstallationIdentity,
+    ) -> Result<Task, TaskServiceError> {
+        let task = self
+            .service
+            .create_from_issue_as_operator(issue, environment, agent, Some(operator))
+            .await?;
+        let _ = self
+            .events
+            .send(TaskExecutionUpdate::Created(Ok(task.clone())));
+        self.admit();
+        Ok(task)
     }
 
     pub async fn list(&self) -> Result<Vec<Task>, TaskServiceError> {
@@ -462,25 +587,40 @@ where
         });
     }
 
-    pub fn remove(&self, task: Task) {
-        let service = self.service.clone();
-        let events = self.events.clone();
+    fn detach_task(&self, task_id: &str) {
         self.terminal_output
             .lock()
             .expect("terminal output lock poisoned")
-            .remove(&task.id);
+            .remove(task_id);
         self.runs
             .lock()
             .expect("task run lock poisoned")
-            .remove(&task.id);
+            .remove(task_id);
         self.control_requests
             .lock()
             .expect("task control request lock poisoned")
-            .remove(&task.id);
+            .remove(task_id);
+    }
+
+    pub fn remove(&self, task: Task) {
+        let event_loop = self.clone();
         tokio::spawn(async move {
             let id = task.id.clone();
-            let _ = events.send(TaskExecutionUpdate::Removed(id, service.remove(task).await));
+            let result = event_loop.remove_and_wait(task).await;
+            if let Err(error) = result {
+                let _ = event_loop
+                    .events
+                    .send(TaskExecutionUpdate::Removed(id, Err(error)));
+            }
         });
+    }
+
+    pub async fn remove_and_wait(&self, task: Task) -> Result<(), TaskServiceError> {
+        self.detach_task(&task.id);
+        let id = task.id.clone();
+        self.service.remove(task).await?;
+        let _ = self.events.send(TaskExecutionUpdate::Removed(id, Ok(())));
+        Ok(())
     }
 
     /// Stop one task's run.
@@ -600,6 +740,18 @@ where
         self.service.prepare_environment(environment, agent).await
     }
 
+    /// Build what a task's environment needs for one operator.
+    pub async fn prepare_environment_as_operator(
+        &self,
+        owner: &str,
+        environment: &Environment,
+        agent: AgentKind,
+    ) -> Result<PathBuf, TaskServiceError> {
+        self.service
+            .prepare_environment_as_operator(owner, environment, agent)
+            .await
+    }
+
     /// History and the transfer hold are one transaction, so an arriving task
     /// cannot enter the execution queue before the source relinquishes ownership.
     pub async fn land(&self, arrival: super::TaskArrival) -> Result<Task, TaskServiceError> {
@@ -663,6 +815,46 @@ where
         Err(TaskServiceError::Task(super::TaskError::MissingSandbox))
     }
 
+    pub async fn finish_remote_transfer(
+        &self,
+        task_id: &str,
+        transfer_id: &str,
+    ) -> Result<(), TaskServiceError> {
+        let blocked = self
+            .service
+            .operator_signals(task_id)
+            .await?
+            .iter()
+            .any(|signal| {
+                matches!(
+                    signal.kind,
+                    super::TaskOperatorSignalKind::Decision
+                        | super::TaskOperatorSignalKind::InReview
+                        | super::TaskOperatorSignalKind::Failure
+                )
+            });
+        self.service
+            .record(
+                task_id,
+                &[TaskHistoryEvent::TransferLanded {
+                    transfer_id: transfer_id.into(),
+                    execution_status: if blocked {
+                        TaskExecutionStatus::Paused
+                    } else {
+                        TaskExecutionStatus::Pending
+                    },
+                    execution_pause_reason: if blocked {
+                        super::TaskExecutionPauseReason::AwaitingOperator
+                    } else {
+                        super::TaskExecutionPauseReason::Transfer
+                    },
+                }],
+            )
+            .await?;
+        self.admit();
+        Ok(())
+    }
+
     pub async fn finish_transfer(
         &self,
         task_id: &str,
@@ -690,6 +882,7 @@ where
     }
 
     pub async fn suspend_all(&self) -> Result<(), TaskServiceError> {
+        self.admission_enabled.store(false, Ordering::Release);
         let tasks = self.list().await?;
         // The flag lives on the run it describes, so a task suspended now and
         // resumed later does not carry a stale reason for its next ending.

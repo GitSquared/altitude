@@ -1,5 +1,6 @@
 -- Read facts as recorded. Absence leaves the previous value; JSON null is an explicit value.
 SELECT tasks.id, tasks.agent_kind, tasks.host,
+    EXISTS (SELECT 1 FROM task_event_logs WHERE task_id = tasks.id AND event_type IN ('operator_signal_confirmed', 'task_completed')) AS accepted,
     (SELECT MAX(sequence) FROM task_event_logs WHERE task_id = tasks.id) AS last_event_sequence,
     (SELECT payload ->> '$.data.intent'
      FROM task_event_logs
@@ -11,6 +12,16 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      WHERE task_id = tasks.id
        AND json_type(payload, '$.data.title') IS NOT NULL
      ORDER BY sequence DESC LIMIT 1) AS title,
+    (SELECT payload ->> '$.data.identity_id'
+     FROM task_event_logs
+     WHERE task_id = tasks.id
+       AND event_type = 'intent_expressed'
+     ORDER BY sequence ASC LIMIT 1) AS operator_id,
+    (SELECT payload ->> '$.data.identity_label'
+     FROM task_event_logs
+     WHERE task_id = tasks.id
+       AND event_type = 'intent_expressed'
+     ORDER BY sequence ASC LIMIT 1) AS operator_label,
     (SELECT payload ->> '$.data.environment.name'
      FROM task_event_logs
      WHERE task_id = tasks.id
@@ -26,11 +37,13 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      WHERE task_id = tasks.id
        AND json_type(payload, '$.data.agent_conversation_id') IS NOT NULL
      ORDER BY sequence DESC LIMIT 1) AS agent_conversation_id,
-    (SELECT payload ->> '$.data.execution_status'
-     FROM task_event_logs
-     WHERE task_id = tasks.id
-       AND json_type(payload, '$.data.execution_status') IS NOT NULL
-     ORDER BY sequence DESC LIMIT 1) AS execution_status,
+    CASE WHEN EXISTS (SELECT 1 FROM task_event_logs WHERE task_id = tasks.id AND event_type IN ('operator_signal_confirmed', 'task_completed'))
+         THEN 'completed'
+         ELSE (SELECT payload ->> '$.data.execution_status'
+               FROM task_event_logs
+               WHERE task_id = tasks.id AND json_type(payload, '$.data.execution_status') IS NOT NULL
+               ORDER BY sequence DESC LIMIT 1)
+    END AS execution_status,
     (SELECT payload ->> '$.data.execution_pause_reason'
      FROM task_event_logs
      WHERE task_id = tasks.id

@@ -82,6 +82,19 @@ impl TaskStore {
         .map_err(TaskError::Database)
     }
 
+    pub async fn task_for_signal(&self, signal_id: &str) -> Result<Option<Task>, TaskError> {
+        let task_id: Option<String> =
+            sqlx::query_scalar("SELECT task_id FROM task_operator_signals WHERE id = ?")
+                .bind(signal_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(TaskError::Database)?;
+        match task_id {
+            Some(task_id) => self.get(&task_id).await,
+            None => Ok(None),
+        }
+    }
+
     /// One task by id, whether or not it is still in play.
     pub async fn get(&self, task_id: &str) -> Result<Option<Task>, TaskError> {
         sqlx::query_as::<_, TaskRow>(concat!(
@@ -569,6 +582,8 @@ impl TaskStore {
             SELECT task_id, json_quote(kind)
             FROM task_operator_signals
             WHERE id = ?1 AND resolved = 0
+              AND EXISTS (SELECT 1 FROM tasks WHERE tasks.id = task_operator_signals.task_id AND removed_at_ms IS NULL)
+              AND NOT EXISTS (SELECT 1 FROM task_event_logs WHERE task_id = task_operator_signals.task_id AND event_type IN ('operator_signal_confirmed', 'task_completed'))
         "#,
         )
         .bind(signal_id)
@@ -577,7 +592,10 @@ impl TaskStore {
         .map_err(TaskError::Database)?;
         // Acknowledging an update asks nothing of the task; confirming or replying
         // needs it stopped, so the operator is answering something that is waiting.
-        if resolution.is_answer() {
+        if matches!(
+            resolution,
+            SignalResolution::Answer(_) | SignalResolution::Confirm
+        ) {
             let task = Self::read_task(&mut transaction, &task_id).await?;
             let failed = kind.0 == TaskOperatorSignalKind::Failure
                 && task.facts.execution_status == TaskExecutionStatus::Failed;

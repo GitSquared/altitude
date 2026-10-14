@@ -1,0 +1,1704 @@
+//! The remote's Linear coordinator: signed webhooks in, task host out.
+//!
+//! A serve role has no person at the keyboard. Work arrives as a Linear
+//! AgentSessionEvent or an Issue status change, is durably recorded before the
+//! webhook is acknowledged, and is then routed to the task host that owns the
+//! capsule. This module owns only the mapping between an external issue/session
+//! and a local task, a peer, and a tracker user; the task's own state is always
+//! read back from the host, never cached here.
+//!
+//! The coordinator calls the host through [`Host`], a small callback surface the
+//! serve role implements over its task event loop. Keeping the two apart is what
+//! lets the execution core stay the source of operational truth.
+
+use std::{
+    cmp::Reverse,
+    collections::HashSet,
+    fs,
+    future::Future,
+    io::ErrorKind,
+    path::{Path, PathBuf},
+    pin::Pin,
+    sync::{Arc, Mutex, MutexGuard},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+use axum::{
+    Router,
+    body::Bytes,
+    extract::{DefaultBodyLimit, State},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    routing::post,
+};
+use iroh::EndpointId;
+use serde::{Deserialize, Serialize};
+use tokio::{
+    sync::Notify,
+    time::{MissedTickBehavior, interval},
+};
+
+use crate::{
+    task::{
+        TaskExecutionPauseReason, TaskHistoryEvent, TaskOperatorSignal, TaskOperatorSignalKind,
+    },
+    tracker::{
+        IssueReference, IssueSnapshot, TrackerKind, TrackerStatus,
+        automation::{
+            AgentActivityContent, AgentSessionEvent, LinearAutomation, WebhookError,
+            parse_agent_session_event, verify_signature,
+        },
+    },
+};
+
+use super::identity::write_private;
+
+/// One webhook request, and the one resource this coordinator handles.
+const WEBHOOK_ROUTE: &str = "/linear/webhook";
+const MAX_WEBHOOK_BYTES: usize = 1024 * 1024;
+const SIGNATURE_HEADER: &str = "linear-signature";
+
+/// How often the coordinator reports task life. A webhook wakes it sooner.
+const TICK: Duration = Duration::from_secs(10);
+/// A failed delivery is retried at a fixed pace: the work is already durable on
+/// disk, so a tracker outage should not produce a request storm.
+const RETRY: Duration = Duration::from_secs(10);
+/// Completed deliveries and terminated sessions are kept long enough that a
+/// redelivery or a replay is still recognised.
+const DONE_RETENTION: Duration = Duration::from_secs(600);
+const TERMINATED_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_DONE: usize = 512;
+const MAX_TERMINATED: usize = 1024;
+/// A pairing nonce is short-lived, so a code posted in a public thread stops
+/// being useful quickly.
+const PAIR_CHALLENGE_LIFETIME: Duration = Duration::from_secs(600);
+const MAX_CHALLENGES: usize = 32;
+/// A Linear webhook is only trusted while it is this fresh.
+const WEBHOOK_MAX_AGE: Duration = Duration::from_secs(300);
+
+/// Everything the coordinator needs that the serve role already owns.
+///
+/// The token, workspace, and app user live inside [`LinearAutomation`], which
+/// is why they are not repeated here: a webhook is validated against the same
+/// handle the API calls go through, so the two cannot disagree.
+pub struct RemoteTrackerConfig {
+    pub automation: Arc<LinearAutomation>,
+    pub webhook_secret: Vec<u8>,
+    pub oauth_client_id: String,
+    pub storage_path: PathBuf,
+}
+
+/// The task operations the coordinator asks of the machine that owns the capsule.
+///
+/// Every method returns a boxed future so the trait stays object-safe without
+/// `async fn`, matching the tracker provider's own shape. The host derives each
+/// answer from the task's own history; nothing here is a cache.
+pub type HostFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
+
+pub trait Host: Send + Sync + 'static {
+    /// Found a task for `issue` on the machine reached through `peer`.
+    ///
+    /// The host chooses the environment and agent: a remote runs what it was
+    /// pushed, and the client does not get to name it. The label is the signed
+    /// human name the work belongs to, so a task card reads a person rather than
+    /// the peer's key.
+    fn start_issue(
+        &self,
+        peer: EndpointId,
+        issue: IssueSnapshot,
+        label: String,
+    ) -> HostFuture<'_, String>;
+    /// Cancel a task and dispose of its capsule. Never an acceptance.
+    fn stop(&self, task_id: String) -> HostFuture<'_, ()>;
+    /// The task's currently unresolved operator signals.
+    fn signals(&self, task_id: String) -> HostFuture<'_, Vec<TaskOperatorSignal>>;
+    /// The task's history, oldest first.
+    fn events(&self, task_id: String) -> HostFuture<'_, Vec<(i64, TaskHistoryEvent)>>;
+    /// Answer a blocking signal, which resumes the work.
+    fn instruct(&self, task_id: String, instruction: String) -> HostFuture<'_, ()>;
+    fn reply(&self, signal_id: String, answer: String) -> HostFuture<'_, ()>;
+    /// Accept a wrap-up request, the only way a task ends.
+    fn accept(&self, signal_id: String) -> HostFuture<'_, ()>;
+    /// Whether the task is still in play, so a removed task stops being reported.
+    fn is_active(&self, task_id: String) -> HostFuture<'_, bool>;
+}
+
+/// One workspace user bound to one remote peer, proved by a pairing nonce.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Pairing {
+    pub tracker_user_id: String,
+    pub peer: String,
+    pub bound_at_ms: i64,
+}
+
+pub struct RemoteTracker {
+    config: RemoteTrackerConfig,
+    ledger: Mutex<Ledger>,
+    /// Woken when a webhook is recorded, so the operator does not wait a tick.
+    notify: Notify,
+}
+
+impl RemoteTracker {
+    /// Open the coordinator over an already-verified API handle.
+    ///
+    /// A missing ledger starts empty; one that cannot be read is an error, so a
+    /// corrupt file is never silently replaced by an empty one.
+    pub fn new(config: RemoteTrackerConfig) -> Result<Arc<Self>, String> {
+        let ledger = Ledger::load(&config.storage_path)?;
+        Ok(Arc::new(Self {
+            config,
+            ledger: Mutex::new(ledger),
+            notify: Notify::new(),
+        }))
+    }
+
+    /// The HTTP surface a serve role mounts beside its other routes.
+    ///
+    /// The body limit is applied here rather than trusted from the caller, so a
+    /// router built without care cannot hand the handler an unbounded body.
+    pub fn webhook_router(self: &Arc<Self>) -> Router {
+        Router::new()
+            .route(WEBHOOK_ROUTE, post(webhook))
+            .layer(DefaultBodyLimit::max(MAX_WEBHOOK_BYTES))
+            .with_state(Arc::clone(self))
+    }
+
+    /// Issue a pairing nonce for an authenticated peer claiming a tracker user.
+    ///
+    /// The peer is already authenticated by the link handshake; the claimed user
+    /// is only a claim until a signed webhook proves the human controls it. Only
+    /// the coordinator's link path may call this, which is why it takes the
+    /// endpoint id rather than a string a caller could invent.
+    pub fn begin_pair(
+        &self,
+        peer: EndpointId,
+        claimed_tracker_user_id: String,
+    ) -> Result<String, String> {
+        let claimed = claimed_tracker_user_id.trim().to_owned();
+        if claimed.is_empty() {
+            return Err("a pairing request must name a tracker user".to_owned());
+        }
+        let now = now_ms();
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        self.mutate(|ledger| {
+            ledger.prune(now);
+            ledger.challenges.push(PairChallenge {
+                nonce: nonce.clone(),
+                peer: peer.to_string(),
+                tracker_user_id: claimed.clone(),
+                issued_at_ms: now,
+            });
+            while ledger.challenges.len() > MAX_CHALLENGES {
+                ledger.challenges.remove(0);
+            }
+        })?;
+        Ok(nonce)
+    }
+
+    /// Sponsor a session on an issue for a task a paired client started here.
+    ///
+    /// The peer must already be paired: a route needs a tracker user who can
+    /// answer it, and a peer with no proved user has none. The session is made
+    /// through the public Agent API so an issue this app was never delegated can
+    /// still be reported on, and the human assignee is left alone. A route that
+    /// already holds the task or the issue is left as it is, so a retry cannot
+    /// sponsor a second session once one has been recorded.
+    pub async fn pilot_task(
+        &self,
+        peer: EndpointId,
+        task_id: String,
+        issue: IssueReference,
+    ) -> Result<(), String> {
+        let Some(tracker_user_id) = self.user_for_peer(&peer.to_string()) else {
+            return Err(
+                "pair this remote with your Linear account before delegating issue work".into(),
+            );
+        };
+        if self.route_for_task(&task_id).is_some() || self.route_for_issue(&issue.id).is_some() {
+            return Ok(());
+        }
+        let session_id = self
+            .config
+            .automation
+            .create_session_on_issue(&issue.id)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.upsert_route(Route {
+            issue_id: issue.id,
+            session_id,
+            peer: peer.to_string(),
+            tracker_user_id,
+            task_id,
+            cursor: 0,
+            origin: RouteOrigin::Piloted,
+        })
+    }
+
+    /// Drain queued webhooks and report task life, forever.
+    ///
+    /// A webhook wakes the loop at once; a tracker or API outage is logged and
+    /// retried on the next pass, and never stops the loop, because the work it is
+    /// reporting on keeps running.
+    pub async fn run(self: Arc<Self>, host: Arc<dyn Host>) {
+        let mut tick = interval(TICK);
+        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {}
+                _ = self.notify.notified() => {}
+            }
+            self.process_deliveries(host.as_ref()).await;
+            self.poll_routes(host.as_ref()).await;
+        }
+    }
+
+    fn lock(&self) -> Result<MutexGuard<'_, Ledger>, String> {
+        self.ledger
+            .lock()
+            .map_err(|_| "the tracker ledger lock was poisoned".to_owned())
+    }
+
+    /// Change the ledger and write it before the change is visible in memory.
+    ///
+    /// A failed write leaves the previous ledger in place, so a caller that gets
+    /// an error knows nothing was recorded and can retry.
+    fn mutate<T>(&self, change: impl FnOnce(&mut Ledger) -> T) -> Result<T, String> {
+        let mut ledger = self.lock()?;
+        let mut next = (*ledger).clone();
+        let outcome = change(&mut next);
+        self.persist(&next)?;
+        *ledger = next;
+        Ok(outcome)
+    }
+
+    fn persist(&self, ledger: &Ledger) -> Result<(), String> {
+        persist(&self.config.storage_path, ledger)
+    }
+
+    /// Accept a signed delivery before the webhook is acknowledged.
+    ///
+    /// Returns whether the delivery is new; a redelivery is acknowledged without
+    /// being queued twice.
+    fn enqueue(&self, key: String, event: StoredEvent) -> Result<bool, String> {
+        let now = now_ms();
+        let is_new = self.mutate(|ledger| {
+            ledger.prune(now);
+            if ledger.deliveries.iter().any(|delivery| delivery.key == key) {
+                return false;
+            }
+            ledger.deliveries.push(Delivery {
+                key: key.clone(),
+                received_at_ms: now,
+                next_attempt_at_ms: now,
+                done: false,
+                event,
+            });
+            true
+        })?;
+        if is_new {
+            self.notify.notify_one();
+        }
+        Ok(is_new)
+    }
+
+    fn pending(&self) -> Vec<Delivery> {
+        self.lock()
+            .map(|ledger| {
+                ledger
+                    .deliveries
+                    .iter()
+                    .filter(|delivery| !delivery.done)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn complete_delivery(&self, key: &str) -> Result<(), String> {
+        self.mutate(|ledger| {
+            if let Some(delivery) = ledger.deliveries.iter_mut().find(|d| d.key == key) {
+                delivery.done = true;
+            }
+            ledger.prune(now_ms());
+        })
+    }
+
+    fn defer_delivery(&self, key: &str) -> Result<(), String> {
+        let retry_at = now_ms() + RETRY.as_millis() as i64;
+        self.mutate(|ledger| {
+            if let Some(delivery) = ledger.deliveries.iter_mut().find(|d| d.key == key) {
+                delivery.next_attempt_at_ms = retry_at;
+            }
+        })
+    }
+
+    /// Handle every pending delivery that is due, in arrival order.
+    ///
+    /// Each delivery stands on its own: one that fails is deferred and the rest
+    /// still run, so a single bad issue cannot block another operator's stop or
+    /// cancellation.
+    async fn process_deliveries(&self, host: &dyn Host) {
+        for delivery in self.pending() {
+            if delivery.next_attempt_at_ms > now_ms() {
+                continue;
+            }
+            match self.handle_delivery(&delivery.event, host).await {
+                Ok(()) => {
+                    if let Err(error) = self.complete_delivery(&delivery.key) {
+                        tracing::error!(delivery = %delivery.key, %error, "could not record a completed Linear delivery; it stays queued");
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(delivery = %delivery.key, %error, "a Linear delivery will be retried");
+                    if let Err(persist_error) = self.defer_delivery(&delivery.key) {
+                        tracing::error!(delivery = %delivery.key, %persist_error, "could not record a deferred Linear delivery");
+                    }
+                }
+            }
+        }
+    }
+
+    async fn handle_delivery(&self, event: &StoredEvent, host: &dyn Host) -> Result<(), String> {
+        match event {
+            StoredEvent::Session(session) => {
+                if session.is_stop() {
+                    return self.handle_stop(session, host).await;
+                }
+                // Binding is a side effect rather than a short-circuit: the same
+                // event then routes normally, so a start that fails after binding
+                // is retried instead of being lost with the consumed nonce.
+                self.consume_pairing(session)?;
+                match session.action.as_str() {
+                    "created" => self.handle_created(session, host).await,
+                    "prompted" => self.handle_prompted(session, host).await,
+                    _ => Ok(()),
+                }
+            }
+            StoredEvent::IssueStateChanged(change) => {
+                self.handle_issue_state(
+                    &change.issue_id,
+                    &change.state_id,
+                    &change.actor_id,
+                    change.occurred_at_ms,
+                    host,
+                )
+                .await
+            }
+        }
+    }
+
+    /// A stop is a cancellation, never an acceptance or a status restore.
+    ///
+    /// Only the delegation operator may stop the work; a teammate's stop is not
+    /// the operator's judgment and is ignored. The route is dropped only after
+    /// the stop and its notice have both succeeded, so nothing writes to it again.
+    async fn handle_stop(&self, event: &SessionEvent, host: &dyn Host) -> Result<(), String> {
+        let Some(route) = self.route_for_session(&event.session_id) else {
+            if event
+                .creator_id
+                .as_deref()
+                .is_some_and(|author| event.is_from(author))
+            {
+                self.mutate(|ledger| {
+                    ledger.terminated_sessions.push(TerminatedSession {
+                        session_id: event.session_id.clone(),
+                        terminated_at_ms: now_ms(),
+                    })
+                })?;
+            }
+            return Ok(());
+        };
+        if !event.is_from(&route.tracker_user_id) {
+            return Ok(());
+        }
+        host.stop(route.task_id.clone()).await?;
+        self.config
+            .automation
+            .create_activity(
+                &route.session_id,
+                &activity_id(&route.task_id, "stopped"),
+                AgentActivityContent::Response {
+                    body: "Stopped by the operator. The task's capsule was disposed.".to_owned(),
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        self.retire_route(&route)
+    }
+
+    /// A new Agent Session is a delegation, or a redelegation of active work.
+    async fn handle_created(&self, event: &SessionEvent, host: &dyn Host) -> Result<(), String> {
+        let Some(issue_id) = event.issue_id.as_deref() else {
+            return Ok(());
+        };
+        if self.is_terminated(&event.session_id)
+            || self.route_for_session(&event.session_id).is_some()
+        {
+            return Ok(());
+        }
+        // The session's creator is the delegation author. An automation- or
+        // agent-started session has no responsible human, so there is nobody to
+        // route through and no assignee fallback is invented. An app-created id
+        // cannot be guessed back to a person, and an issue already being worked
+        // on is not news, so only an unknown issue is worth educating.
+        let Some(author) = event
+            .creator_id
+            .as_deref()
+            .filter(|id| *id != self.config.automation.app_user_id())
+        else {
+            if self.route_for_issue(issue_id).is_none() {
+                self.post_pairing_guidance(&event.session_id).await?;
+            }
+            return Ok(());
+        };
+        let label = event.creator_name.as_deref().unwrap_or(author);
+        self.delegate(issue_id, &event.session_id, author, label, host)
+            .await
+    }
+
+    /// Start (or restart) the task for an issue under `author`'s paired remote.
+    ///
+    /// Shared by a `created` delegation and by the pairing reply that makes a
+    /// previously unknown operator known, so both paths behave identically and
+    /// a failed start can be retried.
+    async fn delegate(
+        &self,
+        issue_id: &str,
+        session_id: &str,
+        author: &str,
+        label: &str,
+        host: &dyn Host,
+    ) -> Result<(), String> {
+        if self.is_terminated(session_id) {
+            return Ok(());
+        }
+        // The same session delivered again is the work already running here; it
+        // must not be stopped and restarted.
+        if self.route_for_session(session_id).is_some() {
+            return Ok(());
+        }
+
+        // A different session on an issue that already has work is a
+        // redelegation: stop the old task before the new one starts, so two
+        // capsules never own the same issue.
+        let redelegation = if let Some(existing) = self.route_for_issue(issue_id) {
+            host.stop(existing.task_id.clone()).await?;
+            self.config.automation.create_activity(&existing.session_id, &activity_id(&existing.task_id, "redelegated"), AgentActivityContent::Response {
+                body: "This delegation was replaced. Altitude stopped the previous task and disposed of its capsule.".into(),
+            }).await.map_err(|error| error.to_string())?;
+            self.retire_route(&existing)?;
+            true
+        } else {
+            false
+        };
+
+        let Some(peer) = self.peer_for_user(author) else {
+            self.post_pairing_guidance(session_id).await?;
+            return Ok(());
+        };
+        let peer: EndpointId = peer
+            .parse()
+            .map_err(|_| "the paired remote's key could not be read".to_owned())?;
+
+        // Say the work is starting before the issue is fetched and a capsule is
+        // provisioned. The id is stable, so a redelivery is one thought.
+        self.config
+            .automation
+            .create_activity(
+                session_id,
+                &activity_id(session_id, "starting"),
+                AgentActivityContent::Thought {
+                    body: format!("Starting work on this issue for {label}."),
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let snapshot = self
+            .config
+            .automation
+            .read(&self.issue_reference(issue_id))
+            .await
+            .map_err(|error| error.to_string())?;
+        let task_id = match host.start_issue(peer, snapshot, label.to_owned()).await {
+            Ok(task_id) => task_id,
+            Err(reason) => {
+                // A remote that cannot start the work needs its operator to push
+                // a setup. Retrying forever would wedge every later delivery.
+                self.post_start_guidance(session_id, &reason).await?;
+                return Ok(());
+            }
+        };
+        self.upsert_route(Route {
+            issue_id: issue_id.to_owned(),
+            session_id: session_id.to_owned(),
+            peer: peer.to_string(),
+            tracker_user_id: author.to_owned(),
+            task_id: task_id.clone(),
+            cursor: 0,
+            origin: RouteOrigin::Delegated,
+        })?;
+        if redelegation {
+            self.config
+                .automation
+                .create_activity(
+                    session_id,
+                    &activity_id(&task_id, "redelegated"),
+                    AgentActivityContent::Thought {
+                        body: format!(
+                            "Redelegated: this work now runs for operator {author} on remote {peer}."
+                        ),
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// A prompt is an operator's answer to whatever the task is waiting on.
+    async fn handle_prompted(&self, event: &SessionEvent, host: &dyn Host) -> Result<(), String> {
+        let Some(answer) = event.prompt_body.as_deref() else {
+            return Ok(());
+        };
+        let Some(route) = self.route_for_session(&event.session_id) else {
+            // No route yet: an operator's prompt on an issue session is a
+            // delegation, which is how "reply here with the pair code" starts
+            // the work. It is also the retry path after a failed start.
+            if let Some(author) = event.prompt_author_id.as_deref()
+                && let Some(issue_id) = event.issue_id.as_deref()
+                && event.creator_id.as_deref() == Some(author)
+                && self.peer_for_user(author).is_some()
+            {
+                let label = event.creator_name.as_deref().unwrap_or(author);
+                return self
+                    .delegate(issue_id, &event.session_id, author, label, host)
+                    .await;
+            }
+            return Ok(());
+        };
+        // Only the current delegation operator's reply counts; a teammate's
+        // comment is context, not a decision.
+        if !event.is_from(&route.tracker_user_id) {
+            return Ok(());
+        }
+        // A pairing code is proof of identity, not an answer to a signal.
+        if answer.trim().starts_with("altitude pair ") {
+            return Ok(());
+        }
+        let signals = host.signals(route.task_id.clone()).await?;
+        // A prompt answers only what was already waiting when it was written. A
+        // prompt that predates a signal is stale, and letting it resolve the
+        // newer question would answer something the operator never saw.
+        let waiting: Vec<&TaskOperatorSignal> = signals
+            .iter()
+            .filter(|signal| signal.raised_at_ms <= event.occurred_at_ms)
+            .collect();
+        let blocking = waiting.iter().copied().find(|signal| {
+            matches!(
+                signal.kind,
+                TaskOperatorSignalKind::Decision | TaskOperatorSignalKind::Failure
+            )
+        });
+        let review = waiting
+            .iter()
+            .copied()
+            .find(|signal| signal.kind == TaskOperatorSignalKind::InReview);
+        let Some(signal) = blocking.or(review) else {
+            return host
+                .instruct(route.task_id.clone(), answer.to_owned())
+                .await;
+        };
+        if signal.kind == TaskOperatorSignalKind::InReview && is_acceptance(answer) {
+            host.accept(signal.id.clone()).await?;
+            let events = host.events(route.task_id.clone()).await?;
+            return self.finish_accepted(&route, &events).await;
+        }
+        host.reply(signal.id.clone(), answer.to_owned()).await
+    }
+
+    /// A user changed an issue's workflow state.
+    ///
+    /// Only the delegation operator's own change is the operator's judgment, and
+    /// only a state the native API confirms is completed counts. A teammate's
+    /// status change is ignored, as is a poll that merely observes Done.
+    async fn handle_issue_state(
+        &self,
+        issue_id: &str,
+        state_id: &str,
+        actor_id: &str,
+        occurred_at_ms: i64,
+        host: &dyn Host,
+    ) -> Result<(), String> {
+        let Some(route) = self.route_for_issue(issue_id) else {
+            return Ok(());
+        };
+        if route.tracker_user_id.as_str() != actor_id {
+            return Ok(());
+        }
+        let delegation = self
+            .config
+            .automation
+            .issue_delegation(issue_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        if delegation.state.id != state_id || delegation.state.state_type != "completed" {
+            return Ok(());
+        }
+        let history = host.events(route.task_id.clone()).await?;
+        let was_waiting = history
+            .iter()
+            .rev()
+            .filter(|(time, _)| *time <= occurred_at_ms)
+            .find_map(|(_, event)| match event {
+                TaskHistoryEvent::AgentRunStarted { .. }
+                | TaskHistoryEvent::ExecutionQueued { .. } => Some(false),
+                TaskHistoryEvent::ExecutionPaused {
+                    execution_pause_reason,
+                    ..
+                }
+                | TaskHistoryEvent::TransferLanded {
+                    execution_pause_reason,
+                    ..
+                } => Some(*execution_pause_reason == TaskExecutionPauseReason::AwaitingOperator),
+                _ => None,
+            })
+            .unwrap_or(false);
+        if !was_waiting {
+            return Ok(());
+        }
+        let signals = host.signals(route.task_id.clone()).await?;
+        let Some(review) = signals
+            .iter()
+            .find(|signal| signal.kind == TaskOperatorSignalKind::InReview)
+        else {
+            return Ok(());
+        };
+        // The review must already have been waiting when the operator marked the
+        // issue done; a later one belongs to a later cycle.
+        if review.raised_at_ms > occurred_at_ms {
+            return Ok(());
+        }
+        host.accept(review.id.clone()).await?;
+        let events = host.events(route.task_id.clone()).await?;
+        self.finish_accepted(&route, &events).await
+    }
+
+    /// Report task life outward, and stop work the issue no longer delegates.
+    ///
+    /// A completed issue is not accepted here: a poll cannot prove who changed
+    /// the state. It is only ignored, so it never blocks the other routes.
+    async fn poll_routes(&self, host: &dyn Host) {
+        for route in self.routes() {
+            // A task the operator removed is no longer work: stop writing about
+            // it rather than reporting a history that will never advance. A task
+            // that left because it moved elsewhere still gets one goodbye, and
+            // neither ending stops the work or marks the issue Done.
+            match host.is_active(route.task_id.clone()).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    let moved = host
+                        .events(route.task_id.clone())
+                        .await
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|(_, event)| {
+                            matches!(event, TaskHistoryEvent::TransferCommitted { .. })
+                        });
+                    let outcome = if moved {
+                        self.finish_transferred(&route).await
+                    } else {
+                        self.retire_route(&route)
+                    };
+                    if let Err(error) = outcome {
+                        tracing::warn!(task = %route.task_id, %error, "could not drop a removed task's route");
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(task = %route.task_id, %error, "could not tell whether a task is still here");
+                    continue;
+                }
+            }
+            // A piloted route was not delegated to the app, so it does not end
+            // when the issue stops being delegated; it still accepts a native
+            // stop and the operator's own control.
+            if route.origin == RouteOrigin::Delegated {
+                let delegation = match self
+                    .config
+                    .automation
+                    .issue_delegation(&route.issue_id)
+                    .await
+                {
+                    Ok(delegation) => delegation,
+                    Err(error) => {
+                        tracing::warn!(issue = %route.issue_id, %error, "could not read the issue's delegation");
+                        continue;
+                    }
+                };
+                if delegation.delegate_id.as_deref() != Some(self.config.automation.app_user_id()) {
+                    self.unhook(host, &route).await;
+                    continue;
+                }
+            }
+            if let Err(error) = self.sync_route(host, &route).await {
+                tracing::warn!(task = %route.task_id, %error, "task updates remain queued");
+            }
+        }
+    }
+
+    /// The issue is no longer delegated to this app. Stop once, say so once,
+    /// then drop the route so nothing writes to it again.
+    ///
+    /// A failed stop leaves the route in place so the next pass retries it; the
+    /// notice is only posted after the work is actually stopped.
+    async fn unhook(&self, host: &dyn Host, route: &Route) {
+        if host.stop(route.task_id.clone()).await.is_err() {
+            return;
+        }
+        if let Err(error) = self
+            .config
+            .automation
+            .create_activity(
+                &route.session_id,
+                &activity_id(&route.task_id, "unhooked"),
+                AgentActivityContent::Response {
+                    body: "This issue is no longer delegated to Altitude; the task was stopped."
+                        .to_owned(),
+                },
+            )
+            .await
+        {
+            tracing::warn!(task = %route.task_id, %error, "could not say why a task was unhooked");
+            return;
+        }
+        if let Err(error) = self.retire_route(route) {
+            tracing::warn!(task = %route.task_id, %error, "could not drop an unhooked route");
+        }
+    }
+
+    /// Report new task history outward, advancing the cursor only after each
+    /// event's action succeeded.
+    ///
+    /// The operator's acceptance is read from the task's own history, whether it
+    /// came from a tracker reply or the local interface, and produces the one
+    /// Done transition, final response, and unhook. An agent run ending is not an
+    /// ending and never implies Done.
+    async fn sync_route(&self, host: &dyn Host, route: &Route) -> Result<(), String> {
+        let events = host.events(route.task_id.clone()).await?;
+        if route.cursor > events.len() {
+            self.set_cursor(&route.issue_id, 0)?;
+            return Ok(());
+        }
+        // Signals still open are the only ones worth publishing; one already
+        // answered or confirmed must not be raised again on the next pass.
+        let unresolved: HashSet<String> = host
+            .signals(route.task_id.clone())
+            .await?
+            .into_iter()
+            .map(|signal| signal.id)
+            .collect();
+        // A route that only began after a transfer must not replay the source's
+        // whole life as new activity. Folding leaves the projected state below.
+        let folded = route.cursor == 0 && was_transferred(&events);
+        let start = if folded { events.len() } else { route.cursor };
+        for (index, (_, event)) in events.iter().enumerate().skip(start) {
+            match event {
+                TaskHistoryEvent::AgentRunStarted { agent_run_id, .. } => {
+                    if events[..index].iter().any(|(_, event)| {
+                        matches!(event, TaskHistoryEvent::OperatorSignalAnswered { .. })
+                    }) {
+                        self.config
+                            .automation
+                            .create_activity(
+                                &route.session_id,
+                                &activity_id(&route.task_id, agent_run_id),
+                                AgentActivityContent::Thought {
+                                    body:
+                                        "Your answer was received. Altitude is continuing the work."
+                                            .into(),
+                                },
+                            )
+                            .await
+                            .map_err(|error| error.to_string())?;
+                    }
+                    self.config
+                        .automation
+                        .status(
+                            &self.issue_reference(&route.issue_id),
+                            TrackerStatus::InProgress,
+                        )
+                        .await
+                        .map_err(|error| error.to_string())?;
+                }
+                TaskHistoryEvent::OperatorSignalRaised { signal } => {
+                    if unresolved.contains(&signal.id) {
+                        let contributions = contribution_urls(&events[..=index]);
+                        self.publish_signal(route, signal, &contributions).await?;
+                    }
+                }
+                TaskHistoryEvent::OperatorSignalConfirmed { .. }
+                | TaskHistoryEvent::TaskCompleted { .. } => {
+                    return self.finish_accepted(route, &events[..=index]).await;
+                }
+                _ => {}
+            }
+            self.set_cursor(&route.issue_id, index + 1)?;
+        }
+        if folded {
+            // The destination still owes the operator whatever is waiting, even
+            // though the rest of the history was already reported at the source.
+            let contributions = contribution_urls(&events);
+            for signal in host.signals(route.task_id.clone()).await? {
+                if !unresolved.contains(&signal.id) {
+                    continue;
+                }
+                self.publish_signal(route, &signal, &contributions).await?;
+            }
+            self.set_cursor(&route.issue_id, events.len())?;
+        }
+        Ok(())
+    }
+
+    /// The task moved to another machine: say so and drop the route without
+    /// stopping the work or marking the issue Done.
+    async fn finish_transferred(&self, route: &Route) -> Result<(), String> {
+        self.config
+            .automation
+            .create_activity(
+                &route.session_id,
+                &activity_id(&route.task_id, "transferred"),
+                AgentActivityContent::Response {
+                    body: "This work moved to another machine and continues there.".to_owned(),
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        self.retire_route(route)
+    }
+
+    async fn publish_signal(
+        &self,
+        route: &Route,
+        signal: &TaskOperatorSignal,
+        contributions: &[String],
+    ) -> Result<(), String> {
+        let id = activity_id(&route.task_id, &signal.id);
+        let reference = self.issue_reference(&route.issue_id);
+        match signal.kind {
+            TaskOperatorSignalKind::Update => {
+                let body = format!(
+                    "**Altitude update: {}**\n\n{}",
+                    signal.title.trim(),
+                    signal.body.trim()
+                );
+                self.config
+                    .automation
+                    .create_activity(
+                        &route.session_id,
+                        &id,
+                        AgentActivityContent::Thought { body },
+                    )
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+            TaskOperatorSignalKind::Decision => {
+                let body = format!(
+                    "**Altitude needs a decision: {}**\n\n{}\n\nReply here to answer.",
+                    signal.title.trim(),
+                    signal.body.trim()
+                );
+                self.config
+                    .automation
+                    .create_activity(
+                        &route.session_id,
+                        &id,
+                        AgentActivityContent::Elicitation { body },
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                self.config
+                    .automation
+                    .status(&reference, TrackerStatus::InReview)
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+            TaskOperatorSignalKind::InReview => {
+                // An elicitation keeps the session awaiting the operator; a
+                // response here would mark it complete before anyone accepted.
+                let mut body = format!(
+                    "**Altitude finished the work: {}**\n\n{}\n\nReply to accept and complete, or reply with further instructions.",
+                    signal.title.trim(),
+                    signal.body.trim()
+                );
+                append_contributions(&mut body, contributions);
+                self.config
+                    .automation
+                    .create_activity(
+                        &route.session_id,
+                        &id,
+                        AgentActivityContent::Elicitation { body },
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                self.config
+                    .automation
+                    .status(&reference, TrackerStatus::InReview)
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+            TaskOperatorSignalKind::Failure => {
+                let body = format!(
+                    "**Altitude stopped: {}**\n\n{}",
+                    signal.title.trim(),
+                    signal.body.trim()
+                );
+                self.config
+                    .automation
+                    .create_activity(&route.session_id, &id, AgentActivityContent::Error { body })
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+        }
+    }
+
+    /// The operator accepted: report Done, say so once, and drop the route.
+    async fn finish_accepted(
+        &self,
+        route: &Route,
+        events: &[(i64, TaskHistoryEvent)],
+    ) -> Result<(), String> {
+        self.config
+            .automation
+            .status(&self.issue_reference(&route.issue_id), TrackerStatus::Done)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.config
+            .automation
+            .create_activity(
+                &route.session_id,
+                &activity_id(&route.task_id, "accepted"),
+                AgentActivityContent::Response {
+                    body: accepted_body(&contribution_urls(events)),
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        self.retire_route(route)
+    }
+
+    /// An unknown delegation is educated once, not run. The nonce is the proof
+    /// that the human controls both the tracker account and the remote.
+    async fn post_pairing_guidance(&self, session_id: &str) -> Result<(), String> {
+        let body = "Altitude does not yet know which remote should run this work. On the machine \
+                    that will run it, connect the Altitude remote, push your profile, and request \
+                    a pair code. Then reply here with the code: `altitude pair <code>`."
+            .to_owned();
+        self.config
+            .automation
+            .create_activity(
+                session_id,
+                &activity_id(session_id, "pair-guidance"),
+                AgentActivityContent::Elicitation { body },
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// A paired remote could not start the work; say what to fix instead of
+    /// retrying forever.
+    async fn post_start_guidance(&self, session_id: &str, reason: &str) -> Result<(), String> {
+        let body = format!(
+            "Altitude could not start this work on the paired remote.\n\n{reason}\n\n\
+             Connect that remote in Altitude, push your setup, then reply here to try again."
+        );
+        self.config
+            .automation
+            .create_activity(
+                session_id,
+                &activity_id(session_id, "start-guidance"),
+                AgentActivityContent::Elicitation { body },
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// Consume a challenge when a signed prompt proves the claimed user controls
+    /// both the tracker account and the authenticated peer.
+    fn consume_pairing(&self, event: &SessionEvent) -> Result<(), String> {
+        let Some(author) = event.prompt_author_id.as_deref() else {
+            return Ok(());
+        };
+        let Some(body) = event.prompt_body.as_deref() else {
+            return Ok(());
+        };
+        let body = body.trim();
+        let now = now_ms();
+        self.mutate(|ledger| {
+            ledger.prune_challenges(now);
+            let Some(index) = ledger.challenges.iter().position(|challenge| {
+                challenge.tracker_user_id == author
+                    && body == format!("altitude pair {}", challenge.nonce)
+            }) else {
+                return;
+            };
+            let challenge = ledger.challenges.remove(index);
+            // One proved tracker user per peer, and one peer per user: a second
+            // proof replaces both sides rather than leaving an alias that could
+            // route the same work to two machines.
+            ledger.pairings.retain(|pairing| {
+                pairing.tracker_user_id != author && pairing.peer != challenge.peer
+            });
+            ledger.pairings.push(Pairing {
+                tracker_user_id: author.to_owned(),
+                peer: challenge.peer,
+                bound_at_ms: now,
+            });
+        })
+    }
+
+    fn peer_for_user(&self, tracker_user_id: &str) -> Option<String> {
+        let ledger = self.lock().ok()?;
+        ledger
+            .pairings
+            .iter()
+            .find(|pairing| pairing.tracker_user_id == tracker_user_id)
+            .map(|pairing| pairing.peer.clone())
+    }
+
+    /// Whether this peer has proved exactly one tracker user, which is what a
+    /// route needs to be answerable.
+    pub fn is_peer_paired(&self, peer: EndpointId) -> bool {
+        self.user_for_peer(&peer.to_string()).is_some()
+    }
+
+    /// The tracker user a peer proved, when it has proved exactly one.
+    fn user_for_peer(&self, peer: &str) -> Option<String> {
+        let ledger = self.lock().ok()?;
+        let mut users = ledger
+            .pairings
+            .iter()
+            .filter(|pairing| pairing.peer == peer)
+            .map(|pairing| pairing.tracker_user_id.clone());
+        let first = users.next()?;
+        users.next().is_none().then_some(first)
+    }
+
+    fn route_for_task(&self, task_id: &str) -> Option<Route> {
+        let ledger = self.lock().ok()?;
+        ledger
+            .routes
+            .iter()
+            .find(|route| route.task_id == task_id)
+            .cloned()
+    }
+
+    fn route_for_session(&self, session_id: &str) -> Option<Route> {
+        let ledger = self.lock().ok()?;
+        ledger
+            .routes
+            .iter()
+            .find(|route| route.session_id == session_id)
+            .cloned()
+    }
+
+    fn route_for_issue(&self, issue_id: &str) -> Option<Route> {
+        let ledger = self.lock().ok()?;
+        ledger
+            .routes
+            .iter()
+            .find(|route| route.issue_id == issue_id)
+            .cloned()
+    }
+
+    fn routes(&self) -> Vec<Route> {
+        self.lock()
+            .map(|ledger| ledger.routes.clone())
+            .unwrap_or_default()
+    }
+
+    fn upsert_route(&self, route: Route) -> Result<(), String> {
+        self.mutate(|ledger| {
+            ledger
+                .routes
+                .retain(|existing| existing.issue_id != route.issue_id);
+            ledger.routes.push(route);
+        })
+    }
+
+    /// Remove a route and remember the session so a replay cannot restart it.
+    fn retire_route(&self, route: &Route) -> Result<(), String> {
+        let now = now_ms();
+        self.mutate(|ledger| {
+            ledger
+                .routes
+                .retain(|existing| existing.issue_id != route.issue_id);
+            ledger
+                .terminated_sessions
+                .retain(|session| session.session_id != route.session_id);
+            ledger.terminated_sessions.push(TerminatedSession {
+                session_id: route.session_id.clone(),
+                terminated_at_ms: now,
+            });
+            ledger.prune_terminated(now);
+        })
+    }
+
+    fn is_terminated(&self, session_id: &str) -> bool {
+        self.lock()
+            .map(|ledger| {
+                ledger
+                    .terminated_sessions
+                    .iter()
+                    .any(|session| session.session_id == session_id)
+            })
+            .unwrap_or(false)
+    }
+
+    fn set_cursor(&self, issue_id: &str, cursor: usize) -> Result<(), String> {
+        self.mutate(|ledger| {
+            if let Some(route) = ledger.routes.iter_mut().find(|r| r.issue_id == issue_id) {
+                route.cursor = cursor;
+            }
+        })
+    }
+
+    /// A reference used only to address an issue by id.
+    ///
+    /// The API reads and writes by id and checks the workspace from the issue it
+    /// returns, so the empty identifier and url are never read.
+    fn issue_reference(&self, issue_id: &str) -> IssueReference {
+        IssueReference {
+            provider: TrackerKind::Linear,
+            workspace_id: self.config.automation.workspace_id().to_owned(),
+            id: issue_id.to_owned(),
+            identifier: String::new(),
+            url: String::new(),
+        }
+    }
+}
+
+// ------------------------------------------------------------------ the wire
+
+async fn webhook(
+    State(tracker): State<Arc<RemoteTracker>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let signature = headers
+        .get(SIGNATURE_HEADER)
+        .and_then(|value| value.to_str().ok());
+    if !verify_signature(&tracker.config.webhook_secret, signature, &body) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let event = match classify_webhook(&tracker, &body) {
+        WebhookOutcome::Store(event) => event,
+        // A well-formed webhook for another resource is not this coordinator's
+        // work. Acknowledging it stops Linear retrying it forever.
+        WebhookOutcome::Ignore => return StatusCode::OK.into_response(),
+        WebhookOutcome::Reject => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    // Identity comes from the signed body, not the unsigned delivery header:
+    // a header a sender can choose is transport, not what the event is.
+    let key = event.dedupe_key();
+    match tracker.enqueue(key, event) {
+        Ok(_) => StatusCode::OK.into_response(),
+        Err(error) => {
+            tracing::error!(%error, "could not durably record a Linear delivery");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+enum WebhookOutcome {
+    Store(StoredEvent),
+    Ignore,
+    Reject,
+}
+
+fn classify_webhook(tracker: &RemoteTracker, body: &[u8]) -> WebhookOutcome {
+    let Some(event_type) = webhook_event_type(body) else {
+        return WebhookOutcome::Reject;
+    };
+    match event_type.as_str() {
+        "AgentSessionEvent" => match parse_agent_session_event(body) {
+            Ok(event)
+                if event
+                    .validate(
+                        tracker.config.automation.workspace_id(),
+                        tracker.config.automation.app_user_id(),
+                    )
+                    .is_ok()
+                    && event.oauth_client_id == tracker.config.oauth_client_id =>
+            {
+                WebhookOutcome::Store(StoredEvent::Session(Box::new(SessionEvent::from(&event))))
+            }
+            Ok(_) => WebhookOutcome::Reject,
+            Err(WebhookError::UnsupportedEvent(_)) => WebhookOutcome::Ignore,
+            Err(_) => WebhookOutcome::Reject,
+        },
+        "Issue" => match parse_issue_event(body) {
+            Ok(event)
+                if event.organization_id == tracker.config.automation.workspace_id()
+                    && event.is_fresh() =>
+            {
+                match event.into_stored() {
+                    Some(stored) => WebhookOutcome::Store(stored),
+                    None => WebhookOutcome::Ignore,
+                }
+            }
+            Ok(_) => WebhookOutcome::Reject,
+            Err(_) => WebhookOutcome::Reject,
+        },
+        _ => WebhookOutcome::Ignore,
+    }
+}
+
+fn webhook_event_type(body: &[u8]) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Envelope {
+        #[serde(rename = "type")]
+        event_type: String,
+    }
+    serde_json::from_slice::<Envelope>(body)
+        .ok()
+        .map(|envelope| envelope.event_type)
+}
+
+/// An `Issue` webhook, as far as the coordinator trusts it.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IssueEvent {
+    organization_id: String,
+    webhook_timestamp: f64,
+    created_at: String,
+    actor: IssueActor,
+    data: IssueData,
+    #[serde(default)]
+    updated_from: Option<IssueUpdatedFrom>,
+}
+
+#[derive(Deserialize)]
+struct IssueActor {
+    id: String,
+    #[serde(rename = "type")]
+    actor_type: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IssueData {
+    id: String,
+    #[serde(default)]
+    state_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IssueUpdatedFrom {
+    #[serde(default)]
+    state_id: Option<String>,
+}
+
+fn parse_issue_event(body: &[u8]) -> Result<IssueEvent, serde_json::Error> {
+    serde_json::from_slice(body)
+}
+
+impl IssueEvent {
+    fn is_fresh(&self) -> bool {
+        let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+            return false;
+        };
+        (now.as_millis() as f64 - self.webhook_timestamp).abs()
+            <= WEBHOOK_MAX_AGE.as_millis() as f64
+    }
+
+    /// Only a state change made by a human becomes work; anything else is not
+    /// this coordinator's business.
+    fn into_stored(self) -> Option<StoredEvent> {
+        if self.actor.actor_type != "user" {
+            return None;
+        }
+        let state_id = self.data.state_id?;
+        let previous_state_id = self.updated_from?.state_id?;
+        if previous_state_id == state_id {
+            return None;
+        }
+        let occurred_at_ms = chrono::DateTime::parse_from_rfc3339(&self.created_at)
+            .ok()?
+            .timestamp_millis();
+        Some(StoredEvent::IssueStateChanged(IssueStateChanged {
+            issue_id: self.data.id,
+            state_id,
+            actor_id: self.actor.id,
+            occurred_at_ms,
+        }))
+    }
+}
+
+// ------------------------------------------------------------------- storage
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct Ledger {
+    #[serde(default)]
+    deliveries: Vec<Delivery>,
+    #[serde(default)]
+    routes: Vec<Route>,
+    #[serde(default)]
+    challenges: Vec<PairChallenge>,
+    #[serde(default)]
+    pairings: Vec<Pairing>,
+    #[serde(default)]
+    terminated_sessions: Vec<TerminatedSession>,
+}
+
+impl Ledger {
+    fn load(path: &Path) -> Result<Self, String> {
+        match fs::read_to_string(path) {
+            Ok(text) => serde_json::from_str(&text).map_err(|error| {
+                format!(
+                    "could not read the tracker ledger at {}: {error}",
+                    path.display()
+                )
+            }),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => Err(format!(
+                "could not read the tracker ledger at {}: {error}",
+                path.display()
+            )),
+        }
+    }
+
+    fn prune(&mut self, now: i64) {
+        self.prune_done(now);
+        self.prune_challenges(now);
+        self.prune_terminated(now);
+    }
+
+    /// Keep pending deliveries in arrival order and retain only recent finished
+    /// ones, so a redelivery is still deduped without the file growing forever.
+    fn prune_done(&mut self, now: i64) {
+        let cutoff = now - DONE_RETENTION.as_millis() as i64;
+        let mut pending = Vec::new();
+        let mut done = Vec::new();
+        for delivery in self.deliveries.drain(..) {
+            if delivery.done {
+                if delivery.received_at_ms >= cutoff {
+                    done.push(delivery);
+                }
+            } else {
+                pending.push(delivery);
+            }
+        }
+        done.sort_by_key(|delivery| Reverse(delivery.received_at_ms));
+        done.truncate(MAX_DONE);
+        pending.extend(done);
+        self.deliveries = pending;
+    }
+
+    fn prune_challenges(&mut self, now: i64) {
+        let lifetime = PAIR_CHALLENGE_LIFETIME.as_millis() as i64;
+        self.challenges
+            .retain(|challenge| now - challenge.issued_at_ms < lifetime);
+    }
+
+    fn prune_terminated(&mut self, now: i64) {
+        let cutoff = now - TERMINATED_RETENTION.as_millis() as i64;
+        self.terminated_sessions
+            .retain(|session| session.terminated_at_ms >= cutoff);
+        if self.terminated_sessions.len() > MAX_TERMINATED {
+            let excess = self.terminated_sessions.len() - MAX_TERMINATED;
+            self.terminated_sessions.drain(..excess);
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Delivery {
+    key: String,
+    received_at_ms: i64,
+    next_attempt_at_ms: i64,
+    done: bool,
+    event: StoredEvent,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Route {
+    issue_id: String,
+    session_id: String,
+    peer: String,
+    tracker_user_id: String,
+    task_id: String,
+    #[serde(default)]
+    cursor: usize,
+    #[serde(default)]
+    origin: RouteOrigin,
+}
+
+/// How a route came to exist, which decides whether it depends on the issue
+/// still being delegated to this app.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RouteOrigin {
+    /// Linear delegated the issue to the app, so removing that delegation ends
+    /// the route.
+    #[default]
+    Delegated,
+    /// A paired client started the task and this remote only reports it, so the
+    /// issue need not stay delegated and a native stop is still accepted.
+    Piloted,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct PairChallenge {
+    nonce: String,
+    peer: String,
+    tracker_user_id: String,
+    issued_at_ms: i64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct TerminatedSession {
+    session_id: String,
+    terminated_at_ms: i64,
+}
+
+/// What a signed webhook left behind after the request is over.
+///
+/// The raw body is not kept: the webhook user carries an email, and a delivery
+/// ledger is not the place for it. Only ids and the operator's own words remain.
+#[derive(Clone, Serialize, Deserialize)]
+enum StoredEvent {
+    Session(Box<SessionEvent>),
+    IssueStateChanged(IssueStateChanged),
+}
+
+impl StoredEvent {
+    /// The signed content that makes a redelivery the same work.
+    fn dedupe_key(&self) -> String {
+        match self {
+            StoredEvent::Session(session) => session.dedupe_key(),
+            StoredEvent::IssueStateChanged(change) => format!(
+                "issue:{}:{}:{}:{}",
+                change.issue_id, change.state_id, change.actor_id, change.occurred_at_ms
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct SessionEvent {
+    action: String,
+    session_id: String,
+    #[serde(default)]
+    issue_id: Option<String>,
+    #[serde(default)]
+    creator_id: Option<String>,
+    #[serde(default)]
+    creator_name: Option<String>,
+    #[serde(default)]
+    prompt_author_id: Option<String>,
+    #[serde(default)]
+    prompt_body: Option<String>,
+    #[serde(default)]
+    signal: Option<String>,
+    /// The signed activity id, which is a prompt's own identity: a redelivery is
+    /// the same activity whatever the unsigned delivery header says.
+    #[serde(default)]
+    activity_id: Option<String>,
+    /// When the signed webhook happened, for ordering a prompt against the
+    /// signal it means to answer.
+    #[serde(default)]
+    occurred_at_ms: i64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct IssueStateChanged {
+    issue_id: String,
+    state_id: String,
+    actor_id: String,
+    occurred_at_ms: i64,
+}
+
+impl SessionEvent {
+    /// A stop is the operator's own word or Linear's stop signal, never the
+    /// session's status.
+    fn is_stop(&self) -> bool {
+        if self.signal.as_deref() == Some("stop") {
+            return true;
+        }
+        let action = self.action.to_ascii_lowercase();
+        if [
+            "cancel",
+            "canceled",
+            "cancelled",
+            "stop",
+            "stopped",
+            "abort",
+            "aborted",
+        ]
+        .contains(&action.as_str())
+        {
+            return true;
+        }
+        if let Some(body) = self.prompt_body.as_deref() {
+            let body = body.trim().to_ascii_lowercase();
+            if ["stop", "cancel", "cancelled", "canceled"].contains(&body.as_str()) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn is_from(&self, tracker_user_id: &str) -> bool {
+        self.prompt_author_id.as_deref() == Some(tracker_user_id)
+    }
+
+    /// What makes this the same signed event as one already recorded.
+    ///
+    /// A creation is the session's action; a prompt is the activity itself, so
+    /// two prompts with the same words are still two answers; a stop names the
+    /// activity that carried it.
+    fn dedupe_key(&self) -> String {
+        if self.is_stop() {
+            return format!(
+                "session:{}:stop:{}",
+                self.session_id,
+                self.activity_id.as_deref().unwrap_or_default()
+            );
+        }
+        match self.action.as_str() {
+            "created" => format!("session:{}:created", self.session_id),
+            "prompted" => match &self.activity_id {
+                Some(activity_id) => format!("activity:{activity_id}"),
+                None => format!(
+                    "prompt:{}:{}",
+                    self.session_id,
+                    self.prompt_body.as_deref().unwrap_or_default()
+                ),
+            },
+            other => format!("session:{}:{other}", self.session_id),
+        }
+    }
+}
+
+impl From<&AgentSessionEvent> for SessionEvent {
+    fn from(event: &AgentSessionEvent) -> Self {
+        let activity = event.agent_activity.as_ref();
+        Self {
+            action: event.action.clone(),
+            session_id: event.agent_session.id.clone(),
+            issue_id: event.agent_session.issue_id.clone(),
+            creator_id: event.delegation_author_id().map(str::to_owned),
+            creator_name: event
+                .agent_session
+                .creator
+                .as_ref()
+                .map(|creator| creator.name.clone()),
+            prompt_author_id: event.prompt_author_id().map(str::to_owned),
+            prompt_body: activity.and_then(|activity| activity.content.body.clone()),
+            signal: activity.and_then(|activity| activity.signal.clone()),
+            activity_id: activity.map(|activity| activity.id.clone()),
+            occurred_at_ms: event.webhook_timestamp as i64,
+        }
+    }
+}
+
+// --------------------------------------------------------------------- utility
+
+fn persist(path: &Path, ledger: &Ledger) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(ledger)
+        .map_err(|error| format!("could not encode the tracker ledger: {error}"))?;
+    write_private(path, &text)
+        .map_err(|error| format!("could not write the tracker ledger: {error}"))
+}
+
+/// A UUID that is stable for one task's one signal, so a lost response can be
+/// retried without creating a second activity.
+fn activity_id(namespace: &str, discriminator: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(namespace.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(discriminator.as_bytes());
+    let hash = hasher.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    // Linear requires a v4 UUID; set the version and variant bits.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes).to_string()
+}
+
+/// Whether an operator's reply is a clear acceptance of a wrap-up request.
+///
+/// A reply that is not an acceptance is sent back to the task as further
+/// instructions, which is the safe default.
+fn is_acceptance(body: &str) -> bool {
+    let normalized = body.trim().to_ascii_lowercase();
+    [
+        "accept",
+        "accepted",
+        "approve",
+        "approved",
+        "lgtm",
+        "done",
+        "complete",
+        "completed",
+        "ship it",
+        "looks good",
+    ]
+    .contains(&normalized.as_str())
+}
+
+/// Whether this history crossed machines, which is what makes replaying it
+/// would-be duplicate reporting rather than news.
+///
+/// The arrival itself records a staged transfer, so the destination sees one
+/// even though the source's own transfer events were left behind.
+fn was_transferred(events: &[(i64, TaskHistoryEvent)]) -> bool {
+    events.iter().any(|(_, event)| {
+        matches!(
+            event,
+            TaskHistoryEvent::TransferStaged { .. }
+                | TaskHistoryEvent::TransferLanded { .. }
+                | TaskHistoryEvent::TransferCommitted { .. }
+        )
+    })
+}
+
+fn contribution_urls(events: &[(i64, TaskHistoryEvent)]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|(_, event)| match event {
+            TaskHistoryEvent::CodeContributionLinked { contribution } => {
+                Some(contribution.url.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn append_contributions(body: &mut String, contributions: &[String]) {
+    if contributions.is_empty() {
+        return;
+    }
+    body.push_str("\n\nWork submitted:\n");
+    for url in contributions {
+        body.push_str("- ");
+        body.push_str(url);
+        body.push('\n');
+    }
+}
+
+fn accepted_body(contributions: &[String]) -> String {
+    let mut body = "Accepted. The work is complete.".to_owned();
+    append_contributions(&mut body, contributions);
+    body
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_millis() as i64)
+        .unwrap_or_default()
+}

@@ -377,6 +377,19 @@ pub trait IsolationEngine: Send + Sync {
         progress: &dyn EnvironmentProgressSink,
     ) -> impl Future<Output = Result<(), IsolationError>> + Send;
 
+    /// A view of this engine that builds and mounts for one operator.
+    ///
+    /// The default is this engine unchanged: an engine that does not separate
+    /// operators keeps one set of directories for everyone. An engine that
+    /// serves several peers overrides this.
+    fn for_operator(&self, owner: &str) -> Result<Self, IsolationError>
+    where
+        Self: Sized + Clone,
+    {
+        let _ = owner;
+        Ok(self.clone())
+    }
+
     /// Make a sandbox for setting up one profile's credentials, and answer with
     /// the command that opens a shell in it.
     ///

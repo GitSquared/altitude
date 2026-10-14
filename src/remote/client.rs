@@ -4,8 +4,11 @@ use std::{fmt, fs, io::Write, path::Path};
 
 use iroh::{Endpoint, EndpointAddr, EndpointId, endpoint::Connection};
 
+use crate::task::TaskOperatorSignal;
+
 use super::{
     LinkResult,
+    bundle::ProfileStamp,
     protocol::{
         BlobHash, CHUNK_BYTES, Handover, LINK_ALPN, LinkRequest, LinkResponse, TaskRequest,
         TaskSummary, TransferArchive, builder, read_body, read_frame, write_frame,
@@ -164,6 +167,21 @@ impl LinkClient {
         }
     }
 
+    /// Asks which profiles a remote already holds for this client.
+    ///
+    /// Answered from the authenticated peer, so it is this client's stamps and
+    /// not whatever the remote holds for everyone else.
+    pub async fn held_profiles(
+        &self,
+        peer: impl Into<EndpointAddr>,
+    ) -> LinkResult<Vec<ProfileStamp>> {
+        match self.say(peer, &LinkRequest::HeldProfiles).await? {
+            LinkResponse::HeldProfiles { profiles } => Ok(profiles),
+            LinkResponse::Rejected { reason } => Err(reason.into()),
+            other => Err(format!("unexpected answer: {other:?}").into()),
+        }
+    }
+
     pub async fn prepare_take(&self, peer: &EndpointAddr, task_id: &str) -> LinkResult<Handover> {
         match self
             .say(
@@ -239,6 +257,87 @@ impl LinkClient {
         }
     }
 
+    /// Offer a stopped task to a remote, and learn whether it needs the base
+    /// environment the capsule was taken against.
+    pub async fn prepare_import(
+        &self,
+        peer: &EndpointAddr,
+        handover: &Handover,
+    ) -> LinkResult<bool> {
+        match self
+            .say(
+                peer.clone(),
+                &LinkRequest::PrepareImport {
+                    handover: Box::new(handover.clone()),
+                },
+            )
+            .await?
+        {
+            LinkResponse::ImportPrepared { needs_environment } => Ok(needs_environment),
+            LinkResponse::Rejected { reason } => Err(reason.into()),
+            other => Err(format!("unexpected answer: {other:?}").into()),
+        }
+    }
+
+    /// Send one bounded piece of an archive to the remote staging it.
+    pub async fn put_import_part(
+        &self,
+        peer: &EndpointAddr,
+        transfer_id: &str,
+        part: super::TransferPart,
+        offset: u64,
+        bytes: &[u8],
+    ) -> LinkResult<()> {
+        let request = LinkRequest::PutImportPart {
+            transfer_id: transfer_id.to_owned(),
+            part,
+            offset,
+            hash: BlobHash::of(bytes),
+            len: bytes.len() as u64,
+        };
+        match self.say_with_body(peer.clone(), &request, bytes).await? {
+            LinkResponse::Accepted => Ok(()),
+            LinkResponse::Rejected { reason } => Err(reason.into()),
+            other => Err(format!("unexpected answer: {other:?}").into()),
+        }
+    }
+
+    /// Ask the remote to land and boot the task it has staged, returning the id
+    /// it gave it there.
+    pub async fn stage_import(&self, peer: &EndpointAddr, transfer_id: &str) -> LinkResult<String> {
+        match self
+            .say(
+                peer.clone(),
+                &LinkRequest::StageImport {
+                    transfer_id: transfer_id.to_owned(),
+                },
+            )
+            .await?
+        {
+            LinkResponse::Imported { task_id } => Ok(task_id),
+            LinkResponse::Rejected { reason } => Err(reason.into()),
+            other => Err(format!("unexpected answer: {other:?}").into()),
+        }
+    }
+
+    /// Tell the remote the source has relinquished ownership, so the landed task
+    /// may begin. Idempotent: a lost answer is retried by a restarted source.
+    pub async fn commit_import(&self, peer: &EndpointAddr, transfer_id: &str) -> LinkResult<()> {
+        match self
+            .say(
+                peer.clone(),
+                &LinkRequest::CommitImport {
+                    transfer_id: transfer_id.to_owned(),
+                },
+            )
+            .await?
+        {
+            LinkResponse::Accepted => Ok(()),
+            LinkResponse::Rejected { reason } => Err(reason.into()),
+            other => Err(format!("unexpected answer: {other:?}").into()),
+        }
+    }
+
     /// Asks a remote to run a task of its own, and returns when it has taken it.
     ///
     /// Nothing is copied: the task is founded there and belongs to that machine from
@@ -248,8 +347,119 @@ impl LinkClient {
         peer: impl Into<EndpointAddr>,
         request: TaskRequest,
     ) -> LinkResult<()> {
-        match self.say(peer, &LinkRequest::RunTask { request }).await? {
+        let bytes = serde_json::to_vec(&request)?;
+        let request = LinkRequest::RunTask {
+            hash: BlobHash::of(&bytes),
+            len: bytes.len() as u64,
+        };
+        match self.say_with_body(peer, &request, &bytes).await? {
             LinkResponse::Accepted => Ok(()),
+            LinkResponse::Rejected { reason } => Err(reason.into()),
+            other => Err(format!("unexpected answer: {other:?}").into()),
+        }
+    }
+
+    pub async fn operator_signals(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        task_id: &str,
+    ) -> LinkResult<Vec<TaskOperatorSignal>> {
+        match self
+            .say(
+                peer,
+                &LinkRequest::ListSignals {
+                    task_id: task_id.into(),
+                },
+            )
+            .await?
+        {
+            LinkResponse::Signals { signals } => Ok(signals),
+            LinkResponse::Rejected { reason } => Err(reason.into()),
+            other => Err(format!("unexpected answer: {other:?}").into()),
+        }
+    }
+
+    async fn signal(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        command: super::protocol::SignalCommand,
+    ) -> LinkResult<()> {
+        match self.say(peer, &LinkRequest::Signal { command }).await? {
+            LinkResponse::Accepted => Ok(()),
+            LinkResponse::Rejected { reason } => Err(reason.into()),
+            other => Err(format!("unexpected answer: {other:?}").into()),
+        }
+    }
+
+    pub async fn read_operator_signals(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        task_id: &str,
+    ) -> LinkResult<()> {
+        self.signal(
+            peer,
+            super::protocol::SignalCommand::Read {
+                task_id: task_id.into(),
+            },
+        )
+        .await
+    }
+    pub async fn acknowledge_operator_signal(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        signal_id: &str,
+    ) -> LinkResult<()> {
+        self.signal(
+            peer,
+            super::protocol::SignalCommand::Acknowledge {
+                signal_id: signal_id.into(),
+            },
+        )
+        .await
+    }
+    pub async fn answer_operator_signal(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        signal_id: &str,
+        answer: &str,
+    ) -> LinkResult<()> {
+        self.signal(
+            peer,
+            super::protocol::SignalCommand::Answer {
+                signal_id: signal_id.into(),
+                answer: answer.into(),
+            },
+        )
+        .await
+    }
+    pub async fn confirm_operator_signal(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        signal_id: &str,
+    ) -> LinkResult<()> {
+        self.signal(
+            peer,
+            super::protocol::SignalCommand::Accept {
+                signal_id: signal_id.into(),
+            },
+        )
+        .await
+    }
+    pub async fn pair_tracker(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        tracker_user_id: &str,
+    ) -> LinkResult<String> {
+        match self
+            .say(
+                peer,
+                &LinkRequest::PairTracker {
+                    tracker_user_id: tracker_user_id.into(),
+                },
+            )
+            .await?
+        {
+            LinkResponse::PairingCode { code } => Ok(code),
             LinkResponse::Rejected { reason } => Err(reason.into()),
             other => Err(format!("unexpected answer: {other:?}").into()),
         }

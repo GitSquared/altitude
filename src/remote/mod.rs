@@ -10,9 +10,11 @@ mod bundle;
 mod clients;
 mod identity;
 mod keys;
+pub mod send;
 pub mod serve;
 mod server;
 mod takeover;
+mod tracker;
 
 mod client;
 mod known;
@@ -29,8 +31,8 @@ pub use {
     keys::{RemoteKey, RemoteKeys},
     known::{RemoteKeyStatus, meet},
     protocol::{
-        EnvironmentArchive, Handover, HandoverDraft, HandoverRecord, RecordedEvent, TaskRequest,
-        TaskSummary, TransferArchive, TransferPart,
+        EnvironmentArchive, Handover, HandoverDraft, HandoverRecord, RecordedEvent, TaskOrigin,
+        TaskRequest, TaskSummary, TransferArchive, TransferPart,
     },
     server::LinkServer,
     takeover::bring_home,

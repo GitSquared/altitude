@@ -6,7 +6,9 @@
 //! protocol, so a new tracker is another module beside [`Linear`], not another
 //! branch in this one.
 
+pub(crate) mod automation;
 mod linear;
+pub(crate) mod oauth;
 
 pub use linear::Linear;
 
@@ -32,6 +34,12 @@ pub enum TrackerStatus {
     InProgress,
     InReview,
     Done,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TrackerIdentity {
+    pub id: String,
+    pub label: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -131,25 +139,24 @@ impl fmt::Display for TrackerError {
 
 impl Error for TrackerError {}
 
-/// The tracker operations Altitude needs around one bound issue.
-///
-/// `comment` is deliberately not a general text-writing tool: it exists so the
-/// coordinator can post structured lifecycle output, and it is never offered to
-/// a delegated agent.
-pub trait TrackerProvider: Send + Sync {
+/// Tracker credentials remain on the host; agents receive only bound issue reads.
+pub trait IssueReader: Send + Sync {
+    fn read<'a>(&'a self, reference: &'a IssueReference) -> TrackerFuture<'a, IssueSnapshot>;
+}
+
+pub trait TrackerProvider: IssueReader {
     /// Establish a live, initialized connection, opening the operator's sign-in
     /// flow when none is stored. Called explicitly from Settings.
     fn connect<'a>(&'a self) -> TrackerFuture<'a, ()>;
 
     fn is_connected(&self) -> bool;
 
+    fn identity(&self) -> TrackerFuture<'_, TrackerIdentity>;
+
     fn search<'a>(&'a self, query: &'a str) -> TrackerFuture<'a, Vec<IssueSummary>>;
-    fn read<'a>(&'a self, reference: &'a IssueReference) -> TrackerFuture<'a, IssueSnapshot>;
     fn status<'a>(
         &'a self,
         reference: &'a IssueReference,
         status: TrackerStatus,
     ) -> TrackerFuture<'a, ()>;
-    fn comment<'a>(&'a self, reference: &'a IssueReference, body: &'a str)
-    -> TrackerFuture<'a, ()>;
 }

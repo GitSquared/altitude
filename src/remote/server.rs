@@ -22,6 +22,10 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler, Router},
 };
 
+use crate::config::Settings;
+
+use crate::task::TaskOperatorSignal;
+
 use super::{
     LinkResult,
     announce::{Announcement, Broadcast, RemoteState},
@@ -30,9 +34,14 @@ use super::{
     identity::InstallationKey,
     protocol::{
         BlobHash, Handover, LINK_ALPN, LinkRequest, LinkResponse, MAX_BLOB_BYTES, RemoteTicket,
-        TaskRequest, TaskSummary, builder, read_body, read_frame, write_frame,
+        TRANSFER_PIECE_BYTES, TaskRequest, TaskSummary, builder, read_body, read_frame,
+        write_frame,
     },
 };
+
+/// The profiles a pushed configuration may carry. A pushed file is a login, and
+/// only one Altitude knows how to mount is one.
+const ALLOWED_PROFILES: [&str; 3] = ["agents/pi", "agents/claude", "vcs/github"];
 
 // ------------------------------------------------------------- the server side
 
@@ -78,13 +87,10 @@ impl BlobStore {
 struct LinkHandler {
     id: EndpointId,
     blobs: Arc<BlobStore>,
-    /// Where a configuration pushed by a client is written.
-    config_path: PathBuf,
+    /// Where pushed configurations and logins are written, one directory per
+    /// operator.
     data_dir: PathBuf,
     config_lock: Arc<AsyncMutex<()>>,
-    /// What this machine holds, and where that record lives.
-    held: Arc<Mutex<HeldConfig>>,
-    held_path: PathBuf,
     /// The tasks this machine owns, which is the only place they exist.
     tasks: Arc<dyn TaskHost>,
 }
@@ -118,12 +124,16 @@ impl LinkHandler {
     /// A profile's files are credentials, so they are written for this user alone and
     /// moved into place rather than written in place: nothing should read half a
     /// login.
-    fn write_config(&self, bytes: &[u8]) -> io::Result<()> {
+    fn write_config(&self, peer: EndpointId, bytes: &[u8]) -> io::Result<()> {
         let bundle: ConfigBundle = serde_json::from_slice(bytes)
+            .map_err(|error| io::Error::other(format!("not a configuration: {error}")))?;
+        // Parsed before anything is written: a configuration that cannot be read
+        // must not leave half a login on disk for a later run to trust.
+        let _settings: Settings = toml::from_str(&bundle.settings)
             .map_err(|error| io::Error::other(format!("not a configuration: {error}")))?;
         let mut decoded = Vec::new();
         for profile in &bundle.profiles {
-            if !["agents/pi", "agents/claude", "vcs/github"].contains(&profile.profile.as_str()) {
+            if !ALLOWED_PROFILES.contains(&profile.profile.as_str()) {
                 return Err(io::Error::other("unknown credential profile"));
             }
             for file in &profile.files {
@@ -142,8 +152,9 @@ impl LinkHandler {
                 ));
             }
         }
-        fs::create_dir_all(&self.data_dir)?;
-        let root = Dir::open_ambient_dir(&self.data_dir, cap_std::ambient_authority())?;
+        let operator_dir = self.operator_dir(peer);
+        fs::create_dir_all(&operator_dir)?;
+        let root = Dir::open_ambient_dir(&operator_dir, cap_std::ambient_authority())?;
         for (path, contents) in decoded {
             let parent = path
                 .parent()
@@ -163,11 +174,12 @@ impl LinkHandler {
             file.sync_all()?;
             directory.rename(&incoming, &directory, filename)?;
         }
-        write_atomically(&self.config_path, bundle.settings.as_bytes())?;
-        let mut held = self
-            .held
-            .lock()
-            .map_err(|_| io::Error::other("the record of what is held was poisoned"))?;
+        write_atomically(
+            &operator_dir.join("config.toml"),
+            bundle.settings.as_bytes(),
+        )?;
+        let held_path = operator_dir.join("profiles.json");
+        let mut held = HeldConfig::load(&held_path);
         for profile in &bundle.profiles {
             held.profiles
                 .retain(|stamp| stamp.profile != profile.profile);
@@ -176,7 +188,17 @@ impl LinkHandler {
                 edited_at_ms: profile.edited_at_ms,
             });
         }
-        held.save(&self.held_path)
+        held.save(&held_path)
+    }
+
+    /// Where one peer's pushed configuration and logins live.
+    fn operator_dir(&self, peer: EndpointId) -> PathBuf {
+        self.data_dir.join("operators").join(peer.to_string())
+    }
+
+    /// The profiles this peer has already been sent.
+    fn held_profiles(&self, peer: EndpointId) -> Vec<ProfileStamp> {
+        HeldConfig::load(&self.operator_dir(peer).join("profiles.json")).profiles
     }
 }
 
@@ -186,13 +208,11 @@ pub struct ServerParts {
     pub clients: ClientRecord,
     pub listen: SocketAddr,
     pub label: String,
-    /// Where a configuration pushed by a client is written.
-    pub config_path: PathBuf,
+    /// Where pushed configurations and logins are written, one directory per
+    /// operator.
     pub data_dir: PathBuf,
     /// What this machine can do with a task right now.
     pub state: watch::Receiver<RemoteState>,
-    /// What this machine holds, for the parts a client asks about before sending.
-    pub held: Arc<Mutex<HeldConfig>>,
     /// The tasks this machine owns, which is the only place they exist.
     pub tasks: Arc<dyn TaskHost>,
 }
@@ -203,9 +223,24 @@ pub struct ServerParts {
 /// machine's business, which is why this is a trait rather than the link reaching
 /// into a task service it should know nothing about.
 pub trait TaskHost: Send + Sync + 'static {
-    fn configure(&self) -> BoxFuture<Result<(), String>>;
-    fn run(&self, request: TaskRequest) -> BoxFuture<Result<(), String>>;
-    fn list(&self) -> BoxFuture<Result<Vec<TaskSummary>, String>>;
+    fn signals(
+        &self,
+        peer: EndpointId,
+        task_id: String,
+    ) -> BoxFuture<Result<Vec<TaskOperatorSignal>, String>>;
+    fn signal(
+        &self,
+        peer: EndpointId,
+        command: super::protocol::SignalCommand,
+    ) -> BoxFuture<Result<(), String>>;
+    fn pair_tracker(
+        &self,
+        peer: EndpointId,
+        tracker_user_id: String,
+    ) -> BoxFuture<Result<String, String>>;
+    fn configure(&self, peer: EndpointId) -> BoxFuture<Result<(), String>>;
+    fn run(&self, peer: EndpointId, request: TaskRequest) -> BoxFuture<Result<(), String>>;
+    fn list(&self, peer: EndpointId) -> BoxFuture<Result<Vec<TaskSummary>, String>>;
     /// Stop a task and bundle it for another machine to continue.
     fn hand_over(&self, peer: EndpointId, task_id: String) -> BoxFuture<Result<Handover, String>>;
     fn transfer_piece(
@@ -218,6 +253,30 @@ pub trait TaskHost: Send + Sync + 'static {
     ) -> BoxFuture<Result<Vec<u8>, String>>;
     /// Commit source removal after the prepared recipient verifies its arrival.
     fn handed_over(&self, peer: EndpointId, transfer_id: String) -> BoxFuture<Result<(), String>>;
+    /// Accept a pushed task and say whether the base environment must follow.
+    fn prepare_import(
+        &self,
+        peer: EndpointId,
+        handover: Handover,
+    ) -> BoxFuture<Result<bool, String>>;
+    /// Write one bounded piece of an archive the recipient is staging.
+    fn put_import_part(
+        &self,
+        peer: EndpointId,
+        transfer_id: String,
+        part: super::TransferPart,
+        offset: u64,
+        bytes: Vec<u8>,
+    ) -> BoxFuture<Result<(), String>>;
+    /// Land and boot the staged task, answering what it is called here.
+    fn stage_import(
+        &self,
+        peer: EndpointId,
+        transfer_id: String,
+    ) -> BoxFuture<Result<String, String>>;
+    /// The source relinquished ownership; begin the landed task.
+    fn commit_import(&self, peer: EndpointId, transfer_id: String)
+    -> BoxFuture<Result<(), String>>;
 }
 
 /// A future a trait object can hold, which an `async fn` in a trait cannot be.
@@ -266,9 +325,42 @@ async fn answer(
             };
             write_frame(&mut send, &response).await?;
         }
-        LinkRequest::RunTask { request } => {
-            let response = match handler.tasks.run(request).await {
+        LinkRequest::RunTask { hash, len } => {
+            let bytes = read_body(&mut recv, len, MAX_BLOB_BYTES).await?;
+            if BlobHash::of(&bytes) != hash {
+                write_frame(
+                    &mut send,
+                    &LinkResponse::Rejected {
+                        reason: "task request digest did not match".into(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+            let request = serde_json::from_slice(&bytes)?;
+            let response = match handler.tasks.run(peer, request).await {
                 Ok(()) => LinkResponse::Accepted,
+                Err(reason) => LinkResponse::Rejected { reason },
+            };
+            write_frame(&mut send, &response).await?;
+        }
+        LinkRequest::ListSignals { task_id } => {
+            let response = match handler.tasks.signals(peer, task_id).await {
+                Ok(signals) => LinkResponse::Signals { signals },
+                Err(reason) => LinkResponse::Rejected { reason },
+            };
+            write_frame(&mut send, &response).await?;
+        }
+        LinkRequest::Signal { command } => {
+            let response = match handler.tasks.signal(peer, command).await {
+                Ok(()) => LinkResponse::Accepted,
+                Err(reason) => LinkResponse::Rejected { reason },
+            };
+            write_frame(&mut send, &response).await?;
+        }
+        LinkRequest::PairTracker { tracker_user_id } => {
+            let response = match handler.tasks.pair_tracker(peer, tracker_user_id).await {
+                Ok(code) => LinkResponse::PairingCode { code },
                 Err(reason) => LinkResponse::Rejected { reason },
             };
             write_frame(&mut send, &response).await?;
@@ -308,10 +400,67 @@ async fn answer(
             };
             write_frame(&mut send, &response).await?;
         }
+        LinkRequest::PrepareImport { handover } => {
+            let response = match handler.tasks.prepare_import(peer, *handover).await {
+                Ok(needs_environment) => LinkResponse::ImportPrepared { needs_environment },
+                Err(reason) => LinkResponse::Rejected { reason },
+            };
+            write_frame(&mut send, &response).await?;
+        }
+        LinkRequest::PutImportPart {
+            transfer_id,
+            part,
+            offset,
+            hash,
+            len,
+        } => {
+            let response = if len == 0 || len > TRANSFER_PIECE_BYTES {
+                LinkResponse::Rejected {
+                    reason: "invalid transfer piece length".into(),
+                }
+            } else {
+                let bytes = read_body(&mut recv, len, TRANSFER_PIECE_BYTES).await?;
+                if BlobHash::of(&bytes) != hash {
+                    LinkResponse::Rejected {
+                        reason: "transfer piece digest did not match".into(),
+                    }
+                } else {
+                    match handler
+                        .tasks
+                        .put_import_part(peer, transfer_id, part, offset, bytes)
+                        .await
+                    {
+                        Ok(()) => LinkResponse::Accepted,
+                        Err(reason) => LinkResponse::Rejected { reason },
+                    }
+                }
+            };
+            write_frame(&mut send, &response).await?;
+        }
+        LinkRequest::StageImport { transfer_id } => {
+            let response = match handler.tasks.stage_import(peer, transfer_id).await {
+                Ok(task_id) => LinkResponse::Imported { task_id },
+                Err(reason) => LinkResponse::Rejected { reason },
+            };
+            write_frame(&mut send, &response).await?;
+        }
+        LinkRequest::CommitImport { transfer_id } => {
+            let response = match handler.tasks.commit_import(peer, transfer_id).await {
+                Ok(()) => LinkResponse::Accepted,
+                Err(reason) => LinkResponse::Rejected { reason },
+            };
+            write_frame(&mut send, &response).await?;
+        }
         LinkRequest::ListTasks => {
-            let response = match handler.tasks.list().await {
+            let response = match handler.tasks.list(peer).await {
                 Ok(summaries) => LinkResponse::Tasks { summaries },
                 Err(reason) => LinkResponse::Rejected { reason },
+            };
+            write_frame(&mut send, &response).await?;
+        }
+        LinkRequest::HeldProfiles => {
+            let response = LinkResponse::HeldProfiles {
+                profiles: handler.held_profiles(peer),
             };
             write_frame(&mut send, &response).await?;
         }
@@ -324,8 +473,8 @@ async fn answer(
                 }
             } else {
                 let _writing = handler.config_lock.lock().await;
-                match handler.write_config(&bytes) {
-                    Ok(()) => match handler.tasks.configure().await {
+                match handler.write_config(peer, &bytes) {
+                    Ok(()) => match handler.tasks.configure(peer).await {
                         Ok(()) => LinkResponse::Configured,
                         Err(reason) => LinkResponse::Rejected { reason },
                     },
@@ -374,21 +523,16 @@ impl LinkServer {
             clients,
             listen,
             label,
-            config_path,
             data_dir,
             state,
-            held,
             tasks,
         } = parts;
         let blobs = Arc::new(BlobStore::default());
         let handler = LinkHandler {
             id: identity.id(),
             blobs: Arc::clone(&blobs),
-            held_path: data_dir.join("profiles.json"),
-            config_path,
             data_dir,
             config_lock: Arc::new(AsyncMutex::new(())),
-            held: Arc::clone(&held),
             tasks,
         };
         let log = ClientLog {
@@ -414,10 +558,8 @@ impl LinkServer {
                 label,
                 version: env!("CARGO_PKG_VERSION").to_owned(),
                 state: RemoteState::Preparing,
-                profiles: Vec::new(),
             },
             state,
-            held,
         )
         .await?;
         Ok(Self {

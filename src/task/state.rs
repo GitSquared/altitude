@@ -131,9 +131,16 @@ pub struct Task {
 /// Latest recorded values. Consumers decide which facts are relevant to their operation.
 #[derive(Clone, Debug, sqlx::FromRow)]
 pub struct TaskFacts {
+    pub accepted: bool,
     pub intent: String,
     /// The short name the agent chose for the task, when it has chosen one.
     pub title: Option<String>,
+    /// The key of the operator whose work this is, from the earliest recorded
+    /// intent. It scopes their settings, logins and environments on a machine
+    /// that serves several peers.
+    pub operator_id: Option<String>,
+    /// How that operator reads to a human. Presentation only.
+    pub operator_label: Option<String>,
     pub environment_name: String,
     pub environment_setup_command: String,
     pub agent_conversation_id: Option<String>,
@@ -452,6 +459,12 @@ pub fn normalize_title(title: &str) -> Option<String> {
 }
 
 impl Task {
+    /// The key that scopes this task's operator's settings, logins and
+    /// environments.
+    pub fn operator_id(&self) -> Option<&str> {
+        self.facts.operator_id.as_deref()
+    }
+
     /// What a list calls this task: the agent's title, or what was asked for
     /// before the agent has chosen one.
     pub fn title(&self) -> &str {

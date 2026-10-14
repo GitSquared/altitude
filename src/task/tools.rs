@@ -10,21 +10,17 @@ use std::sync::Arc;
 
 use super::{TaskHistoryEvent, TaskStore, normalize_title};
 use crate::agent::tools::{AgentTool, AgentToolError, AgentToolFuture, AgentToolProvider};
-use crate::tracker::TrackerProvider;
+use crate::tracker::IssueReader;
 
 /// The `tasks` agent tools, bound to one task's record.
 pub struct TaskAgentTools {
     store: TaskStore,
     task_id: String,
-    tracker: Option<Arc<dyn TrackerProvider>>,
+    tracker: Option<Arc<dyn IssueReader>>,
 }
 
 impl TaskAgentTools {
-    pub fn new(
-        store: TaskStore,
-        task_id: String,
-        tracker: Option<Arc<dyn TrackerProvider>>,
-    ) -> Self {
+    pub fn new(store: TaskStore, task_id: String, tracker: Option<Arc<dyn IssueReader>>) -> Self {
         Self {
             store,
             task_id,

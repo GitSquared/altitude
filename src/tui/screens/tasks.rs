@@ -108,7 +108,6 @@ fn draw_tasks(
     }
 }
 
-/// One task, as a card: what it is, and how it is going.
 /// What a card draws, whether the task is this machine's or one it is reading.
 struct Card<'a> {
     title: &'a str,
@@ -154,18 +153,27 @@ fn cards(app: &App) -> Vec<Card<'_>> {
         .collect();
     cards.extend(app.remote_tasks.iter().map(|held| {
         let summary = &held.summary;
+        let mut extras: Vec<Line<'static>> = summary
+            .extras
+            .iter()
+            .map(|extra| Line::styled(extra.clone(), palette::attention()))
+            .collect();
+        // Whose work this is, when it is not the machine holding the capsule, on
+        // the same terms as a local card.
+        if let Some(operator) = summary.operator_label.as_deref()
+            && !operator.is_empty()
+            && operator != summary.host.as_str()
+        {
+            extras.push(Line::styled(format!("for {operator}"), palette::muted()));
+        }
         Card {
             title: summary.title.as_deref().unwrap_or(&summary.intent),
             environment: &summary.environment,
             agent: summary.agent,
             host: &summary.host,
-            issue: None,
+            issue: summary.tracker_issue.as_ref(),
             status: held_status(summary),
-            extras: summary
-                .extras
-                .iter()
-                .map(|extra| Line::styled(extra.clone(), palette::attention()))
-                .collect(),
+            extras,
         }
     }));
     cards
@@ -320,6 +328,14 @@ fn card_extras(task: &Task) -> Vec<Line<'static>> {
         && let Some(error) = &task.facts.last_error
     {
         extras.push(Line::styled(error.clone(), palette::bad()));
+    }
+    // Whose work this is, when it is not the machine holding the capsule. A task
+    // delegated here from another operator names them.
+    if let Some(operator) = task.facts.operator_label.as_deref()
+        && !operator.is_empty()
+        && operator != task.host.as_str()
+    {
+        extras.push(Line::styled(format!("for {operator}"), palette::muted()));
     }
     extras
 }

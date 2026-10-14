@@ -247,6 +247,11 @@ where
         command: String,
         mode: TaskExecutionMode,
     ) -> Result<(Task, TaskAgentRun, CommandSession), TaskServiceError> {
+        if task.facts.accepted {
+            return Err(TaskServiceError::Task(super::TaskError::OperationRejected(
+                "this task has already been accepted",
+            )));
+        }
         let sandbox_id = task
             .facts
             .sandbox_id

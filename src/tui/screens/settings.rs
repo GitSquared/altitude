@@ -15,6 +15,7 @@
 use crate::tui::{
     App,
     app::{CredentialStatus, RemoteStatus, TrackerState},
+    popups::new_task::AGENTS,
     widgets::{chrome, palette, utils::Dot},
 };
 
@@ -215,12 +216,12 @@ impl Row {
         }
     }
 
-    /// Whether this row opens into anything.
+    /// Whether this row opens a form.
     ///
     /// The built-in base does not: there is no form behind it and nothing to
     /// configure, so selecting it is already as far as it goes, and its
     /// description is shown without a second step.
-    pub fn is_actionable(&self) -> bool {
+    pub fn opens_form(&self) -> bool {
         matches!(
             self.kind,
             RowKind::Environment { .. } | RowKind::Remote { .. }
@@ -579,7 +580,7 @@ fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick:
         || (panel.depth == Depth::List
             && panel
                 .selected_row(view)
-                .is_some_and(|row| !row.is_actionable()));
+                .is_some_and(|row| !row.opens_form()));
     let pane = detail(panel, view, detail_focused);
     let last_row = pane
         .line_count(detail_area.width)
@@ -631,6 +632,54 @@ fn remote_education_lines() -> Vec<Line<'static>> {
                 " to send your environments and login profiles to the selected remote.",
                 palette::muted(),
             ),
+        ]),
+        Line::from(""),
+        Line::styled(
+            "Linear on this remote — infrastructure owner",
+            palette::primary().bold(),
+        ),
+        Line::from(vec![
+            Span::styled("serve.toml: ", palette::muted()),
+            Span::styled("[linear]", palette::accent()),
+            Span::styled(" client_id and public_url.", palette::muted()),
+        ]),
+        Line::from(vec![
+            Span::styled("Host env: ", palette::muted()),
+            Span::styled("ALTITUDE_LINEAR_CLIENT_SECRET", palette::accent()),
+            Span::styled(" and ", palette::muted()),
+            Span::styled("ALTITUDE_LINEAR_WEBHOOK_SECRET", palette::accent()),
+            Span::styled(".", palette::muted()),
+        ]),
+        Line::from(vec![
+            Span::styled("Install the shared bot: ", palette::muted()),
+            Span::styled("altitude serve --connect-linear", palette::accent()),
+            Span::styled(".", palette::muted()),
+        ]),
+        Line::from(vec![
+            Span::styled("Reverse proxy public HTTPS ", palette::muted()),
+            Span::styled("/linear/webhook", palette::accent()),
+            Span::styled(" and ", palette::muted()),
+            Span::styled("/linear/oauth/callback", palette::accent()),
+            Span::styled(" to ", palette::muted()),
+            Span::styled("127.0.0.1:25849", palette::accent()),
+            Span::styled(".", palette::muted()),
+        ]),
+        Line::from(vec![
+            Span::styled("Subscribe the app to ", palette::muted()),
+            Span::styled("AgentSession", palette::accent()),
+            Span::styled(" and ", palette::muted()),
+            Span::styled("Issue", palette::accent()),
+            Span::styled(" events.", palette::muted()),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Then connect Linear in ", palette::muted()),
+            Span::styled("Settings ▸ Trackers", palette::accent()),
+            Span::styled(", press ", palette::muted()),
+            Span::styled("p", palette::accent()),
+            Span::styled(" to push your setup, and ", palette::muted()),
+            Span::styled("b", palette::accent()),
+            Span::styled(" to pair this machine with the remote.", palette::muted()),
         ]),
     ]
 }
@@ -875,6 +924,11 @@ fn tracker_lines(
         Line::styled(profile_dir.display().to_string(), palette::primary()),
         Line::from(""),
         Line::from("Login stays outside task capsules. Altitude controls tracker writes."),
+        Line::from(""),
+        Line::styled(
+            "Delegating Linear work to a remote uses that remote's shared app; see Remotes.",
+            palette::muted(),
+        ),
     ];
     match state {
         TrackerState::Connected => {}
@@ -1128,7 +1182,7 @@ impl App {
                     on: self.keyboard_hints(),
                 },
             }],
-            Section::Agents => [AgentKind::Pi, AgentKind::Claude]
+            Section::Agents => AGENTS
                 .into_iter()
                 .map(|kind| Row {
                     label: kind.to_string(),

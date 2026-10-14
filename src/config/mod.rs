@@ -13,8 +13,8 @@ use crate::remote::InstallationKey;
 
 mod serve;
 mod settings;
-pub use serve::{DEFAULT_PORT, ServeSettings};
-pub use settings::{SettingsError, SettingsFile};
+pub use serve::{DEFAULT_PORT, LinearSettings, ServeSettings};
+pub use settings::{Settings, SettingsError, SettingsFile};
 
 /// How this installation names itself.
 ///
@@ -49,6 +49,14 @@ pub struct Config {
     config_dir: PathBuf,
     data_dir: PathBuf,
     cache_dir: PathBuf,
+    scope: ConfigScope,
+}
+
+#[derive(Clone)]
+enum ConfigScope {
+    Personal,
+    Remote,
+    Operator(PathBuf),
 }
 
 impl Config {
@@ -60,16 +68,18 @@ impl Config {
             .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
             .ok_or_else(|| io::Error::other("could not determine altitude's config directory"))?;
 
+        let config_dir = env::var_os("ALTITUDE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| config_home.join("altitude"));
         Ok(Self {
-            config_dir: env::var_os("ALTITUDE_CONFIG_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| config_home.join("altitude")),
+            config_dir,
             data_dir: env::var_os("ALTITUDE_DATA_DIR")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| directories.data_dir().to_owned()),
             cache_dir: env::var_os("ALTITUDE_CACHE_DIR")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| directories.cache_dir().to_owned()),
+            scope: ConfigScope::Personal,
         })
     }
 
@@ -87,7 +97,43 @@ impl Config {
             config_dir: self.config_dir.clone(),
             data_dir: self.data_dir.join("serve"),
             cache_dir: self.cache_dir.join("serve"),
+            scope: ConfigScope::Remote,
         }
+    }
+
+    /// A view scoped to one operator.
+    ///
+    /// A machine that runs work for several peers must not let one peer's
+    /// logins or environment builds stand in for another's, so everything that
+    /// is theirs moves under their own directory. Everything shared — the
+    /// database, the runtime, the git cache, the workspace base — stays where it
+    /// was.
+    pub fn for_operator(&self, owner: &str) -> io::Result<Self> {
+        if !is_safe_operator_key(owner) {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("{owner:?} is not a usable operator key"),
+            ));
+        }
+        let operator_dir = self.data_dir.join("operators").join(owner);
+        Ok(Self {
+            config_dir: self.config_dir.clone(),
+            data_dir: self.data_dir.clone(),
+            cache_dir: self.cache_dir.clone(),
+            scope: ConfigScope::Operator(operator_dir),
+        })
+    }
+
+    /// The directory an operator's own state lives under, or the machine's own.
+    fn scoped_data_dir(&self) -> &Path {
+        match &self.scope {
+            ConfigScope::Operator(directory) => directory,
+            ConfigScope::Personal | ConfigScope::Remote => &self.data_dir,
+        }
+    }
+
+    pub(crate) fn serves_operators(&self) -> bool {
+        !matches!(self.scope, ConfigScope::Personal)
     }
 
     /// Where the serve role reads its settings.
@@ -193,7 +239,11 @@ impl Config {
     }
 
     pub fn settings_path(&self) -> PathBuf {
-        self.config_dir.join("config.toml")
+        match &self.scope {
+            ConfigScope::Personal => self.config_dir.join("config.toml"),
+            ConfigScope::Remote => self.config_dir.join("serve/config.toml"),
+            ConfigScope::Operator(directory) => directory.join("config.toml"),
+        }
     }
 
     pub fn load_or_create_settings(&self) -> Result<SettingsFile, SettingsError> {
@@ -243,7 +293,7 @@ impl Config {
     }
 
     pub fn profile_dir(&self, profile: &str) -> PathBuf {
-        self.data_dir.join(profile).join("profile")
+        self.scoped_data_dir().join(profile).join("profile")
     }
 
     /// Where the workspace base is kept: the snapshot every environment is
@@ -257,12 +307,19 @@ impl Config {
 
     /// Where one environment's snapshot is kept.
     pub fn environment_snapshots_dir(&self, name: &str) -> PathBuf {
-        self.data_dir
+        self.scoped_data_dir()
             .join("environments")
             .join("coding")
             .join(name)
             .join("snapshots")
     }
+}
+
+fn is_safe_operator_key(owner: &str) -> bool {
+    // Canonical transport keys prevent both path traversal and case-folding aliases.
+    owner
+        .parse::<iroh::EndpointId>()
+        .is_ok_and(|id| id.to_string() == owner)
 }
 
 /// The name a human reads for this installation: who is at which machine.

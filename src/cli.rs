@@ -28,6 +28,10 @@ pub enum Command {
 
 #[derive(Debug, Args)]
 pub struct ServeArgs {
+    /// Install the shared Linear app, then exit. Reads the Linear settings in serve.toml.
+    #[arg(long)]
+    pub connect_linear: bool,
+
     /// Address and port to listen on, as `address:port`. Overrides the settings
     /// file. The port is UDP, because the link speaks QUIC.
     #[arg(long, value_name = "ADDR:PORT")]

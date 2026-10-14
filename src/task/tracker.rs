@@ -9,14 +9,12 @@
 
 use crate::{
     agent::AgentKind,
+    config::InstallationIdentity,
     isolation::{Environment, IsolationEngine},
     tracker::{IssueSnapshot, TrackerError, TrackerProvider, TrackerStatus},
 };
 
-use super::{
-    Task, TaskExecutionPauseReason, TaskHistoryEvent, TaskOperatorSignal, TaskOperatorSignalKind,
-    TaskService, TaskServiceError,
-};
+use super::{Task, TaskExecutionPauseReason, TaskHistoryEvent, TaskService, TaskServiceError};
 
 impl<E> TaskService<E>
 where
@@ -28,13 +26,32 @@ where
         environment: Environment,
         agent: AgentKind,
     ) -> Result<Task, TaskServiceError> {
+        self.create_from_issue_as_operator(issue, environment, agent, None)
+            .await
+    }
+
+    pub async fn create_from_issue_as_operator(
+        &self,
+        issue: IssueSnapshot,
+        environment: Environment,
+        agent: AgentKind,
+        requester: Option<InstallationIdentity>,
+    ) -> Result<Task, TaskServiceError> {
         let intent = issue.intent();
-        self.adopt(
-            self.draft(intent, environment, agent, None, None),
-            None,
-            &[TaskHistoryEvent::TrackerIssueBound { issue }],
-        )
-        .await
+        let operator = requester.unwrap_or_else(|| self.identity.clone());
+        let task = self
+            .adopt(
+                self.draft(intent, environment, agent, None, Some(operator.clone())),
+                None,
+                &[TaskHistoryEvent::TrackerIssueBound { issue }],
+            )
+            .await?;
+        if task.operator_id() != Some(operator.id.as_str()) {
+            return Err(TaskServiceError::Task(super::TaskError::OperationRejected(
+                "this issue is already being worked on for another operator",
+            )));
+        }
+        Ok(task)
     }
 
     /// Report every bound task's life to its tracker, as far as it has not been
@@ -90,11 +107,7 @@ where
         let target = latest_status(&events);
         let reported = latest_status(&events[..start]);
         let status_changed = target.is_some() && target != reported;
-        let comments: Vec<String> = events[start..]
-            .iter()
-            .filter_map(|(_, event)| comment(task, event))
-            .collect();
-        if !status_changed && comments.is_empty() {
+        if !status_changed {
             return Ok(());
         }
         // A task removed while this pass was reading is no longer work, so it is
@@ -109,17 +122,6 @@ where
         }
         if let Some(status) = target.filter(|_| status_changed) {
             provider.status(reference, status).await?;
-        }
-        for body in &comments {
-            if !self
-                .store
-                .is_active(&task.id)
-                .await
-                .map_err(|error| TrackerError::new(error.to_string()))?
-            {
-                return Ok(());
-            }
-            provider.comment(reference, body).await?;
         }
         self.store
             .append_events(
@@ -180,52 +182,4 @@ fn latest_status(events: &[(i64, TaskHistoryEvent)]) -> Option<TrackerStatus> {
         }
     }
     status
-}
-
-/// The comment a history event deserves, if any.
-///
-/// Only updates the agent raised for the operator and the wrap-up request are
-/// mirrored. A decision is a question the local operator answers in the
-/// interface, and a failure's text is not tracker content.
-fn comment(task: &Task, event: &TaskHistoryEvent) -> Option<String> {
-    let TaskHistoryEvent::OperatorSignalRaised { signal } = event else {
-        return None;
-    };
-    match signal.kind {
-        TaskOperatorSignalKind::Update => Some(update_comment(signal)),
-        TaskOperatorSignalKind::InReview => Some(review_comment(task, signal)),
-        TaskOperatorSignalKind::Decision | TaskOperatorSignalKind::Failure => None,
-    }
-}
-
-fn update_comment(signal: &TaskOperatorSignal) -> String {
-    format!(
-        "**Altitude update: {}**\n\n{}\n\n_Altitude_",
-        signal.title.trim(),
-        signal.body.trim()
-    )
-}
-
-/// The wrap-up request, with the work it reports on.
-///
-/// A review is where the contributions matter, so their URLs go here rather than
-/// on every update.
-fn review_comment(task: &Task, signal: &TaskOperatorSignal) -> String {
-    let mut body = format!(
-        "**Altitude finished the work: {}**\n\n{}",
-        signal.title.trim(),
-        signal.body.trim()
-    );
-    if !task.code_contributions.is_empty() {
-        body.push_str("\n\nWork submitted:\n");
-        for (index, contribution) in task.code_contributions.iter().enumerate() {
-            if index > 0 {
-                body.push('\n');
-            }
-            body.push_str("- ");
-            body.push_str(&contribution.url);
-        }
-    }
-    body.push_str("\n\n_Altitude_");
-    body
 }

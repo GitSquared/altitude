@@ -53,8 +53,9 @@ use crate::{
     tracker::{IssueReference, IssueSummary},
 };
 
-/// The agents on offer, in the order they are shown.
-const AGENTS: [AgentKind; 2] = [AgentKind::Pi, AgentKind::Claude];
+/// The agents on offer, in the order they are shown. One catalog, so the
+/// creation question and the settings list cannot disagree about them.
+pub(in crate::tui) const AGENTS: [AgentKind; 2] = [AgentKind::Pi, AgentKind::Claude];
 
 /// The page's width, as a share of the terminal. Wider than a question about one
 /// value, because the answer to this one is a paragraph.
@@ -113,7 +114,7 @@ pub struct SearchToken {
 
 /// Where the issue page is.
 enum IssuePhase {
-    /// Nothing has been typed yet.
+    /// The query is empty.
     Idle,
     /// A query is waiting out its debounce or out on the wire.
     Searching,
@@ -168,6 +169,9 @@ pub struct NewTask {
     search_in_flight: bool,
     /// The read that is standing between the operator and a created task.
     submission: Option<Submission>,
+    /// A submission asked for while the search was still out, waiting for the
+    /// first result. `true` is create-and-another.
+    queued_submit: Option<bool>,
     /// A snapshot read that failed, kept so the operator can try again.
     read_error: Option<String>,
 }
@@ -227,8 +231,30 @@ impl NewTask {
             query_due: None,
             search_in_flight: false,
             submission: None,
+            queued_submit: None,
             read_error: None,
         }
+    }
+
+    /// Put the machines back in step with what the remotes have answered, keeping
+    /// the one the operator chose where it is still offered.
+    pub(in crate::tui) fn refresh_hosts(&mut self, hosts: Vec<Host>) {
+        let chosen = self
+            .hosts
+            .get(self.host)
+            .and_then(|host| host.address.clone());
+        self.hosts = hosts;
+        // A machine that stopped being ready is not kept chosen: the question
+        // would otherwise be answered into a delegation that cannot run.
+        let kept = chosen.and_then(|address| {
+            self.hosts
+                .iter()
+                .position(|host| host.address.as_deref() == Some(address.as_str()))
+        });
+        self.host = match kept {
+            Some(index) if self.hosts[index].ready => index,
+            _ => 0,
+        };
     }
 
     /// Whether the intent is taking characters, in which case `?` and `q` are
@@ -262,7 +288,14 @@ impl NewTask {
         ));
         // The portable chord, because a terminal does not always deliver the
         // command key macOS would use.
-        hints.push(chrome::Hint::new("ctrl-shift-enter", "create + keep"));
+        hints.push(chrome::Hint::new(
+            "ctrl-shift-enter",
+            if self.issue {
+                "link + keep"
+            } else {
+                "create + keep"
+            },
+        ));
         hints.push(chrome::Hint::new("esc", "cancel"));
         hints
     }
@@ -280,16 +313,12 @@ impl NewTask {
 
     /// Whether the question can be answered, and what is missing when it cannot.
     pub fn refusal(&self) -> Option<&'static str> {
-        // A read already under way is not a second answer.
-        if self.submission.is_some() {
+        // A read under way, or a submission waiting for the first result, is not
+        // a second answer.
+        if self.submission.is_some() || self.queued_submit.is_some() {
             return None;
         }
         if self.issue {
-            // A binding that would be sent as a plain prompt to a remote is
-            // refused rather than silently changed.
-            if self.host_is_remote() {
-                return Some("Start linked issues on this machine for now");
-            }
             return match self.phase {
                 IssuePhase::Ready if !self.results.is_empty() => None,
                 IssuePhase::Ready => Some("no issue to link"),
@@ -310,6 +339,7 @@ impl NewTask {
         // A read that has not created anything yet is cancelled with it.
         if key.code == KeyCode::Esc || (key.code == KeyCode::Char('q') && !self.is_typing()) {
             self.submission = None;
+            self.queued_submit = None;
             return Some(Answer::Cancel);
         }
         // The mode toggle works whether or not the prompt has the caret, because
@@ -442,6 +472,7 @@ impl NewTask {
         self.selected_result = 0;
         self.read_error = None;
         self.submission = None;
+        self.queued_submit = None;
         self.generation = self.generation.wrapping_add(1);
         self.query_due = None;
         self.search_in_flight = false;
@@ -459,6 +490,7 @@ impl NewTask {
         self.selected_result = 0;
         self.read_error = None;
         self.submission = None;
+        self.queued_submit = None;
         let has_query = !self.task.value().trim().is_empty();
         self.phase = if has_query {
             IssuePhase::Searching
@@ -498,14 +530,16 @@ impl NewTask {
         self.issue && token.popup == self.popup_id && token.generation == self.generation
     }
 
-    /// Take a search answer, or drop it if the query has moved on.
+    /// Take a search answer, or drop it if the query has moved on. When a
+    /// submission was queued while the search was out, its read starts here and
+    /// the token comes back so the loop starts it exactly once.
     pub(in crate::tui) fn apply_search(
         &mut self,
         token: SearchToken,
         result: Result<Vec<IssueSummary>, String>,
-    ) {
+    ) -> Option<u64> {
         if !self.is_current(token) {
-            return;
+            return None;
         }
         self.search_in_flight = false;
         match result {
@@ -513,9 +547,30 @@ impl NewTask {
                 self.results = results;
                 self.selected_result = 0;
                 self.phase = IssuePhase::Ready;
+                self.take_queued_submit()
             }
-            Err(error) => self.phase = IssuePhase::Failed(error),
+            Err(error) => {
+                self.phase = IssuePhase::Failed(error);
+                self.queued_submit = None;
+                None
+            }
         }
+    }
+
+    /// Whether the query is still resting before a search, or out on the wire,
+    /// so an answer has to wait for its first result.
+    fn is_search_pending(&self) -> bool {
+        matches!(self.phase, IssuePhase::Searching) || self.query_due.is_some()
+    }
+
+    /// Answer a submission queued while the search was out, now that there is a
+    /// first result. Nothing is read when the search found nothing.
+    fn take_queued_submit(&mut self) -> Option<u64> {
+        let reopen = self.queued_submit.take()?;
+        if self.results.is_empty() {
+            return None;
+        }
+        self.begin_submission(reopen)
     }
 
     /// Say that there is no credential to search with, which is a state of its
@@ -525,6 +580,7 @@ impl NewTask {
             return;
         }
         self.search_in_flight = false;
+        self.queued_submit = None;
         self.phase = IssuePhase::Failed(message);
     }
 
@@ -546,18 +602,13 @@ impl NewTask {
         }
     }
 
-    /// A snapshot read that failed leaves the results in place to try again.
+    /// A snapshot read that produced none, whether it failed or could not start,
+    /// leaving the results in place to try again.
     pub(in crate::tui) fn read_failed(&mut self, token: u64, error: String) {
         if self.submission.as_ref().is_some_and(|s| s.token == token) {
             self.submission = None;
             self.read_error = Some(error);
         }
-    }
-
-    /// A read that could not even be started, for the same reason a search
-    /// could not.
-    pub(in crate::tui) fn read_unavailable(&mut self, token: u64, message: String) {
-        self.read_failed(token, message);
     }
 
     /// Ask again with the same choices once this task is made.
@@ -568,6 +619,7 @@ impl NewTask {
         self.selected_result = 0;
         self.read_error = None;
         self.submission = None;
+        self.queued_submit = None;
         self.query_due = None;
         self.search_in_flight = false;
         self.phase = IssuePhase::Idle;
@@ -640,6 +692,18 @@ impl NewTask {
     }
 
     fn answer(&mut self, reopen: bool) -> Option<Answer> {
+        if self.issue {
+            // A search that is still resting or out is not a lost answer: the
+            // submission waits for the first result, keeping the choices made
+            // for the environment, the agent and the machine.
+            if self.queued_submit.is_some() {
+                return None;
+            }
+            if self.is_search_pending() {
+                self.queued_submit = Some(reopen);
+                return None;
+            }
+        }
         // A task with nothing to do is not a task, so the question is asked
         // again, and this time the page says what is missing.
         if self.refusal().is_some() {
@@ -708,14 +772,6 @@ impl NewTask {
         self.hosts.get(self.host).is_some_and(|host| host.ready)
     }
 
-    /// Whether the chosen machine is another one, which a bound issue cannot run
-    /// on yet.
-    fn host_is_remote(&self) -> bool {
-        self.hosts
-            .get(self.host)
-            .is_some_and(|host| host.address.is_some())
-    }
-
     fn environment_name(&self) -> &str {
         self.environments
             .get(self.environment)
@@ -781,12 +837,10 @@ fn draw_issue(frame: &mut Frame, area: Rect, new_task: &NewTask, tick: usize) {
         .as_deref()
         .map(|error| Line::styled(error.to_owned(), palette::bad()))
         .or_else(|| {
-            new_task.host_is_remote().then(|| {
-                Line::styled(
-                    "Start linked issues on this machine for now",
-                    palette::attention(),
-                )
-            })
+            new_task
+                .queued_submit
+                .is_some()
+                .then(|| Line::styled("linking the first result…", palette::attention()))
         });
     let [note_area, body] = Layout::vertical([
         Constraint::Length(u16::from(note.is_some())),

@@ -26,8 +26,8 @@ use serde_json::{Map, Value, json};
 use tokio::{process::Command, sync::Mutex, time::timeout};
 
 use super::{
-    IssueComment, IssueReference, IssueSnapshot, IssueSummary, TrackerError, TrackerFuture,
-    TrackerKind, TrackerProvider, TrackerStatus,
+    IssueComment, IssueReader, IssueReference, IssueSnapshot, IssueSummary, TrackerError,
+    TrackerFuture, TrackerIdentity, TrackerKind, TrackerProvider, TrackerStatus,
 };
 
 const LINEAR_MCP_URL: &str = "https://mcp.linear.app/mcp";
@@ -39,15 +39,13 @@ const GET_ISSUE: &str = "get_issue";
 const LIST_COMMENTS: &str = "list_comments";
 const LIST_ISSUE_STATUSES: &str = "list_issue_statuses";
 const SAVE_ISSUE: &str = "save_issue";
-const SAVE_COMMENT: &str = "save_comment";
 
-const REQUIRED_TOOLS: [&str; 6] = [
+const REQUIRED_TOOLS: [&str; 5] = [
     LIST_ISSUES,
     GET_ISSUE,
     LIST_COMMENTS,
     LIST_ISSUE_STATUSES,
     SAVE_ISSUE,
-    SAVE_COMMENT,
 ];
 
 const SEARCH_LIMIT: u64 = 25;
@@ -318,43 +316,22 @@ impl Linear {
         arguments.insert("id".to_owned(), json!(reference.id));
         arguments.insert("state".to_owned(), json!(state_id));
         let result = session.call(SAVE_ISSUE, arguments).await?;
-        if result.get("success").and_then(Value::as_bool) == Some(false) {
-            return Err(TrackerError::new("Linear did not apply the status change"));
+        let updated = result.get("issue").unwrap_or(&result);
+        if result.get("success").and_then(Value::as_bool) == Some(false)
+            || (result.get("success").and_then(Value::as_bool) != Some(true)
+                && updated.get("id").and_then(Value::as_str) != Some(reference.id.as_str()))
+        {
+            return Err(TrackerError::new(
+                "Linear did not confirm the status change",
+            ));
         }
         Ok(())
     }
+}
 
-    async fn comment_impl(
-        &self,
-        reference: &IssueReference,
-        body: &str,
-    ) -> Result<(), TrackerError> {
-        if body.trim().is_empty() {
-            return Err(TrackerError::new(
-                "refusing to post an empty Linear comment",
-            ));
-        }
-        let session = self.session_or_reconnect().await?;
-        let issue = fetch_issue(&session, &reference.id).await?;
-        self.ensure_workspace(reference, &issue_url(&issue)?)?;
-
-        // The MCP comment tool offers no client-chosen id, so a retry after a
-        // lost response cannot be made idempotent by request. The existing
-        // discussion is checked for this exact body first, which is the one
-        // safe approximation available; it can still duplicate if the operator
-        // posted identical text.
-        let existing = read_comments(&session, &reference.id).await?;
-        if existing.iter().any(|comment| comment.body == body) {
-            return Ok(());
-        }
-        let mut arguments = Map::new();
-        arguments.insert("issueId".to_owned(), json!(reference.id));
-        arguments.insert("body".to_owned(), json!(body));
-        let result = session.call(SAVE_COMMENT, arguments).await?;
-        if result.get("success").and_then(Value::as_bool) == Some(false) {
-            return Err(TrackerError::new("Linear did not post the comment"));
-        }
-        Ok(())
+impl IssueReader for Linear {
+    fn read<'a>(&'a self, reference: &'a IssueReference) -> TrackerFuture<'a, IssueSnapshot> {
+        Box::pin(self.read_impl(reference))
     }
 }
 
@@ -367,12 +344,32 @@ impl TrackerProvider for Linear {
         self.session().is_some()
     }
 
-    fn search<'a>(&'a self, query: &'a str) -> TrackerFuture<'a, Vec<IssueSummary>> {
-        Box::pin(self.search_impl(query))
+    fn identity(&self) -> TrackerFuture<'_, TrackerIdentity> {
+        Box::pin(async move {
+            let session = self.session_or_reconnect().await?;
+            let parameter = if session.accepts("get_user", "query") {
+                "query"
+            } else {
+                "id"
+            };
+            let mut arguments = Map::new();
+            arguments.insert(parameter.into(), json!("me"));
+            let data = session.call("get_user", arguments).await?;
+            let user = data.get("user").unwrap_or(&data);
+            Ok(TrackerIdentity {
+                id: string_field(user, "id")?,
+                label: user
+                    .get("displayName")
+                    .or_else(|| user.get("name"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| TrackerError::new("Linear returned no name for your account"))?
+                    .to_owned(),
+            })
+        })
     }
 
-    fn read<'a>(&'a self, reference: &'a IssueReference) -> TrackerFuture<'a, IssueSnapshot> {
-        Box::pin(self.read_impl(reference))
+    fn search<'a>(&'a self, query: &'a str) -> TrackerFuture<'a, Vec<IssueSummary>> {
+        Box::pin(self.search_impl(query))
     }
 
     fn status<'a>(
@@ -381,14 +378,6 @@ impl TrackerProvider for Linear {
         status: TrackerStatus,
     ) -> TrackerFuture<'a, ()> {
         Box::pin(self.status_impl(reference, status))
-    }
-
-    fn comment<'a>(
-        &'a self,
-        reference: &'a IssueReference,
-        body: &'a str,
-    ) -> TrackerFuture<'a, ()> {
-        Box::pin(self.comment_impl(reference, body))
     }
 }
 

@@ -6,7 +6,7 @@ use crate::{
         IsolationEngine, IsolationError, ProfileMount, ProfileSummary, guest_path,
         private_directory,
     },
-    tracker::TrackerProvider,
+    tracker::{IssueReader, TrackerProvider},
     vcs::GitHub,
 };
 use std::{
@@ -57,21 +57,14 @@ pub struct TaskService<E> {
     isolation: E,
     snapshots_dir: PathBuf,
     agents: AgentEngines,
-    /// The identity this installation delegates under, recorded on every task it founds.
-    ///
-    /// Nothing reads it back yet: the task's history is where it belongs, and its
-    /// consumers are the ones that will need to tell several operators' work
-    /// apart.
+    /// The operator used when this installation founds a task for itself.
     identity: InstallationIdentity,
     environment_progress: EnvironmentProgressRegistry,
     /// Where each running task's agent channel listens.
     agent_channel_dir: PathBuf,
     agent_channels: Arc<Mutex<HashMap<String, AgentChannel>>>,
-    /// The host-only tracker client, absent until one is configured.
-    ///
-    /// Held behind an `Arc` because it is shared with the tasks it reports on;
-    /// an agent reaches it only through the read-only tool this service binds.
     tracker: Option<Arc<dyn TrackerProvider>>,
+    issue_reader: Option<Arc<dyn IssueReader>>,
 }
 
 /// One task's agent channel: the listener serving its tools, and the socket it is
@@ -213,14 +206,20 @@ where
             agent_channel_dir,
             agent_channels: Arc::new(Mutex::new(HashMap::new())),
             tracker: None,
+            issue_reader: None,
         }
     }
 
-    /// Bind the host's tracker client to this service.
-    ///
-    /// Absent by default, so existing callers keep working without a tracker.
     pub fn with_tracker(mut self, tracker: Option<Arc<dyn TrackerProvider>>) -> Self {
+        self.issue_reader = tracker
+            .clone()
+            .map(|tracker| tracker as Arc<dyn IssueReader>);
         self.tracker = tracker;
+        self
+    }
+
+    pub fn with_issue_reader(mut self, reader: Option<Arc<dyn IssueReader>>) -> Self {
+        self.issue_reader = reader;
         self
     }
 
@@ -238,7 +237,7 @@ where
         tools.register(TaskAgentTools::new(
             self.store.clone(),
             task_id.to_owned(),
-            self.tracker.clone(),
+            self.issue_reader.clone(),
         ));
         tools
     }

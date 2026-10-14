@@ -17,13 +17,15 @@ use iroh::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::task::{TaskExecutionMode, TaskExecutionStatus, TaskHistoryEvent};
+use crate::task::{TaskExecutionMode, TaskExecutionStatus, TaskHistoryEvent, TaskOperatorSignal};
+use crate::tracker::{IssueReference, IssueSnapshot};
 use crate::{agent::AgentKind, isolation::Environment};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::{
     LinkError, LinkResult,
     announce::{self, Announcement},
+    bundle::ProfileStamp,
 };
 
 /// The one ALPN this protocol speaks. Two endpoints that do not agree on this
@@ -85,14 +87,34 @@ pub enum LinkRequest {
     /// A task belongs to the machine that runs it, so this is not a copy of anything:
     /// the remote founds the task, keeps it, and is the only machine that can say
     /// what it is doing. The client is told the id so it can ask again later.
-    RunTask { request: TaskRequest },
+    RunTask {
+        hash: BlobHash,
+        len: u64,
+    },
     /// Ask what tasks the remote owns.
     ListTasks,
+    ListSignals {
+        task_id: String,
+    },
+    Signal {
+        command: SignalCommand,
+    },
+    PairTracker {
+        tracker_user_id: String,
+    },
+    /// Ask what profiles the remote already holds for the asking peer.
+    ///
+    /// Authenticated: the answer is the asking peer's own held stamps, not
+    /// whatever the remote holds for everyone, which is why it is a request
+    /// rather than something an anonymous announcement carries.
+    HeldProfiles,
     /// Ask the remote to hand a task over.
     ///
     /// Preparation stops the task but keeps ownership at the source until the
     /// recipient has durably staged its history and booted the capsule.
-    TakeTask { task_id: String },
+    TakeTask {
+        task_id: String,
+    },
     FetchTransferPart {
         transfer_id: String,
         part: TransferPart,
@@ -101,13 +123,46 @@ pub enum LinkRequest {
     },
     /// The prepared recipient has staged and verified the task. Committing the
     /// source removal is idempotent so a lost acknowledgement cannot lose ownership.
-    HandedOver { transfer_id: String },
+    HandedOver {
+        transfer_id: String,
+    },
+    /// Offer a stopped task to a machine that will continue it.
+    ///
+    /// This is the push side of a transfer: the source dials the recipient, so
+    /// nothing has to reach back into the source's network. The answer says
+    /// whether the environment archive still has to travel.
+    PrepareImport {
+        handover: Box<Handover>,
+    },
+    /// Announce one bounded piece of an archive: `len` raw bytes follow, whose
+    /// digest must be `hash`, and they belong at `offset`.
+    PutImportPart {
+        transfer_id: String,
+        part: TransferPart,
+        offset: u64,
+        hash: BlobHash,
+        len: u64,
+    },
+    /// The recipient has every piece and may land and boot the task.
+    StageImport {
+        transfer_id: String,
+    },
+    /// The source has relinquished ownership. Begin the landed task.
+    CommitImport {
+        transfer_id: String,
+    },
     /// Announce an upload: `len` raw bytes follow, whose digest must be `hash`.
-    PutBlob { hash: BlobHash, len: u64 },
+    PutBlob {
+        hash: BlobHash,
+        len: u64,
+    },
     /// Announce a configuration: `len` raw bytes follow, whose digest must be
     /// `hash`. It is what this client runs tasks with, so a remote that holds it
     /// can build the same environments.
-    PutConfig { hash: BlobHash, len: u64 },
+    PutConfig {
+        hash: BlobHash,
+        len: u64,
+    },
 }
 
 /// The remote's answer to a [`LinkRequest`].
@@ -131,9 +186,28 @@ pub enum LinkResponse {
     Tasks {
         summaries: Vec<TaskSummary>,
     },
+    Signals {
+        signals: Vec<TaskOperatorSignal>,
+    },
+    PairingCode {
+        code: String,
+    },
+    /// What the remote holds for the asking peer's profiles.
+    HeldProfiles {
+        profiles: Vec<ProfileStamp>,
+    },
     /// The task is stopped, and this is what has to travel for it to continue.
     Handover {
         handover: Box<Handover>,
+    },
+    /// The recipient accepted the transfer and this is whether it needs the
+    /// environment archive.
+    ImportPrepared {
+        needs_environment: bool,
+    },
+    /// The recipient landed and booted the task, and this is what it is called here.
+    Imported {
+        task_id: String,
     },
     TransferPiece {
         len: u64,
@@ -147,14 +221,29 @@ pub enum LinkResponse {
 /// What a client asks a remote to run.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskRequest {
-    pub intent: String,
+    pub origin: TaskOrigin,
     /// Which environment, by name. The remote holds the recipe, because that is what
     /// it was sent; it has no need of the client's copy of it.
     pub environment: String,
     pub agent: AgentKind,
-    /// Whose work this is, so the remote's record says what the client's would have.
-    pub identity_id: String,
+    /// How the requesting operator reads to a human, so the remote's record says
+    /// what the client's would have. Presentation only: whose work this is comes
+    /// from the authenticated peer, not from here.
     pub identity_label: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum TaskOrigin {
+    Intent(String),
+    Issue(Box<IssueSnapshot>),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum SignalCommand {
+    Read { task_id: String },
+    Acknowledge { signal_id: String },
+    Answer { signal_id: String, answer: String },
+    Accept { signal_id: String },
 }
 
 /// A task as a card shows it.
@@ -176,12 +265,22 @@ pub struct TaskSummary {
     pub agent: Option<AgentKind>,
     pub status: TaskExecutionStatus,
     pub mode: TaskExecutionMode,
+    /// The tracker issue this task is bound to, when it is bound to one, so a
+    /// client can act on the binding without reading the whole task.
+    #[serde(default)]
+    pub tracker_issue: Option<IssueReference>,
+    /// How the operator whose work this is reads to a human.
+    #[serde(default)]
+    pub operator_label: Option<String>,
+    /// What the agent last reported, in the words a card has room for.
+    #[serde(default)]
+    pub latest_turn_summary: Option<String>,
     /// Something the operator has to look at, in the words the card has room for.
     pub extras: Vec<String>,
 }
 
 /// Everything a machine needs to continue a task it did not start.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Handover {
     pub task_id: String,
     pub transfer_id: String,
@@ -197,7 +296,7 @@ pub enum TransferPart {
     Capsule,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnvironmentArchive {
     pub snapshot_id: String,
     pub descriptor_digest: String,
@@ -229,7 +328,7 @@ pub struct HandoverDraft {
     pub agent_conversation_id: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferArchive {
     pub len: u64,
     /// Hex blake3 of the archive, checked where it lands.

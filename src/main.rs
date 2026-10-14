@@ -120,6 +120,20 @@ async fn client() -> Result<(), Box<dyn Error>> {
         )
         .await
         .map_err(io::Error::other)?;
+        // Finish any outgoing transfer whose final acknowledgement was lost to a
+        // crash. The source already committed, so this retries only the import
+        // commit; a task still stopped at the source is left where the operator can
+        // see it.
+        let resuming = event_loop.clone();
+        let resume_config = config.clone();
+        let resume_link = link.clone();
+        tokio::spawn(async move {
+            if let Err(error) =
+                remote::send::resume_outgoing(&resume_config, &resume_link, &resuming).await
+            {
+                tracing::warn!(%error, "an outgoing transfer is still waiting");
+            }
+        });
         let syncing = tasks.clone();
         let tracker_sync = tokio::spawn(async move {
             let mut tick = interval(Duration::from_secs(10));

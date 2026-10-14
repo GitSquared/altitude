@@ -6,7 +6,7 @@
 //! mean each role carrying fields it cannot interpret.
 
 use std::{
-    fs,
+    env, fs,
     io::{self, Write},
     os::unix::fs::OpenOptionsExt,
     path::Path,
@@ -33,12 +33,14 @@ pub fn default_listen() -> String {
 pub struct ServeSettings {
     /// `address:port`, UDP.
     pub listen: String,
+    pub linear: Option<LinearSettings>,
 }
 
 impl Default for ServeSettings {
     fn default() -> Self {
         Self {
             listen: default_listen(),
+            linear: None,
         }
     }
 }
@@ -77,4 +79,64 @@ fn write_new(path: &Path, contents: &str) -> Result<(), SettingsError> {
         .map_err(SettingsError::Io)?;
     file.sync_all().map_err(SettingsError::Io)?;
     Ok(())
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct LinearSettings {
+    pub client_id: String,
+    pub public_url: String,
+    #[serde(default = "default_linear_listen")]
+    pub listen: String,
+    #[serde(default = "default_client_secret_env")]
+    pub client_secret_env: String,
+    #[serde(default = "default_webhook_secret_env")]
+    pub webhook_secret_env: String,
+}
+
+fn default_linear_listen() -> String {
+    "127.0.0.1:25849".into()
+}
+
+fn default_client_secret_env() -> String {
+    "ALTITUDE_LINEAR_CLIENT_SECRET".into()
+}
+
+fn default_webhook_secret_env() -> String {
+    "ALTITUDE_LINEAR_WEBHOOK_SECRET".into()
+}
+
+impl LinearSettings {
+    pub fn endpoint(&self, path: &str) -> Result<url::Url, String> {
+        let mut url = url::Url::parse(&self.public_url)
+            .map_err(|_| "Linear public_url must be an HTTPS URL")?;
+        if url.scheme() != "https"
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(
+                "Linear public_url must be an HTTPS URL without credentials, query, or fragment"
+                    .into(),
+            );
+        }
+        url.set_path(path);
+        Ok(url)
+    }
+
+    pub fn client_secret(&self) -> Result<String, String> {
+        secret_from_environment(&self.client_secret_env)
+    }
+
+    pub fn webhook_secret(&self) -> Result<String, String> {
+        secret_from_environment(&self.webhook_secret_env)
+    }
+}
+
+fn secret_from_environment(name: &str) -> Result<String, String> {
+    env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("set {name} on the remote host before starting Altitude"))
 }

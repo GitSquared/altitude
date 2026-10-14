@@ -71,6 +71,21 @@ where
         .await
     }
 
+    /// A copy of this service whose isolation builds for one operator.
+    ///
+    /// Nothing else changes: the store, the machine's identity and the progress
+    /// registry belong to the machine, and only the directories a build writes
+    /// into depend on who the work belongs to.
+    pub(super) fn as_operator(&self, owner: &str) -> Result<Self, TaskServiceError> {
+        Ok(Self {
+            isolation: self
+                .isolation
+                .for_operator(owner)
+                .map_err(TaskServiceError::Isolation)?,
+            ..self.clone()
+        })
+    }
+
     /// Build what a task's environment needs, and say where its snapshot is.
     ///
     /// Local tools and profile mounts must be ready before a task arrives. Physical
@@ -92,6 +107,18 @@ where
             .await
             .map(|snapshot| snapshot.path)
             .map_err(TaskServiceError::Isolation)
+    }
+
+    /// Build what a task's environment needs for one operator.
+    pub async fn prepare_environment_as_operator(
+        &self,
+        owner: &str,
+        environment: &Environment,
+        agent: AgentKind,
+    ) -> Result<PathBuf, TaskServiceError> {
+        self.as_operator(owner)?
+            .prepare_environment(environment, agent)
+            .await
     }
 
     pub(super) async fn record(
@@ -131,6 +158,24 @@ where
             .await
     }
     pub(super) async fn provision(&self, task: Task) -> Result<Task, TaskServiceError> {
+        if task.facts.accepted {
+            return Err(TaskServiceError::Task(TaskError::OperationRejected(
+                "this task has already been accepted",
+            )));
+        }
+        if task.facts.sandbox_available {
+            return Ok(task);
+        }
+        let owner =
+            task.operator_id()
+                .map(|owner| owner.to_owned())
+                .ok_or(TaskServiceError::Task(TaskError::OperationRejected(
+                    "the task records no operator to build for",
+                )))?;
+        let isolation = self
+            .isolation
+            .for_operator(&owner)
+            .map_err(TaskServiceError::Isolation)?;
         let sandbox_id = format!("altitude-{}", Uuid::new_v4());
         let snapshot_path = if task.facts.snapshot_available {
             task.facts.snapshot_path.clone()
@@ -150,7 +195,7 @@ where
         };
         let create = match task.agent_kind {
             Some(kind) => {
-                self.isolation
+                isolation
                     .provision(
                         sandbox_id.clone(),
                         snapshot_path.clone(),
@@ -165,7 +210,7 @@ where
                     .await
             }
             None => {
-                self.isolation
+                isolation
                     .create(sandbox_id.clone(), SandboxOptions::isolated(snapshot_path))
                     .await
             }
@@ -186,7 +231,21 @@ where
             )
             .await
         {
-            Ok(task) => Ok(task),
+            Ok(task) => {
+                if self
+                    .store
+                    .is_active(&task.id)
+                    .await
+                    .map_err(TaskServiceError::Task)?
+                {
+                    Ok(task)
+                } else {
+                    self.release_resources(&task).await?;
+                    Err(TaskServiceError::Task(TaskError::OperationRejected(
+                        "the task was cancelled during preparation",
+                    )))
+                }
+            }
             Err(error) => {
                 if let Err(cleanup_error) = self.isolation.remove(sandbox_id).await {
                     tracing::warn!(%cleanup_error, "could not remove unrecorded task sandbox");
@@ -216,11 +275,19 @@ where
         self.record(&task.id, &events).await
     }
     pub async fn remove(&self, task: Task) -> Result<(), TaskServiceError> {
-        self.release_resources(&task).await?;
+        // Record cancellation before cleanup so a concurrent provision cannot resume the work.
         self.store
             .remove(&task.id)
             .await
-            .map_err(TaskServiceError::Task)
+            .map_err(TaskServiceError::Task)?;
+        let task = self
+            .store
+            .get(&task.id)
+            .await
+            .map_err(TaskServiceError::Task)?
+            .unwrap_or(task);
+        self.release_resources(&task).await?;
+        Ok(())
     }
     pub(super) async fn release_resources(&self, task: &Task) -> Result<Task, TaskServiceError> {
         self.release_agent_channel(&task.id);
@@ -232,7 +299,9 @@ where
                 .clone()
                 .ok_or(TaskServiceError::Task(TaskError::MissingSandbox))?;
             if let Err(error) = self.isolation.remove(id).await {
-                self.fail(&task, error.to_string()).await?;
+                if !task.facts.accepted {
+                    self.fail(&task, error.to_string()).await?;
+                }
                 return Err(TaskServiceError::Isolation(error));
             }
             task = self
@@ -251,7 +320,9 @@ where
                 .as_ref()
                 .expect("available snapshot has a recorded path");
             if let Err(error) = self.isolation.remove_snapshot(PathBuf::from(path)).await {
-                self.fail(&task, error.to_string()).await?;
+                if !task.facts.accepted {
+                    self.fail(&task, error.to_string()).await?;
+                }
                 return Err(TaskServiceError::Isolation(error));
             }
             task = self

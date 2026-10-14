@@ -11,6 +11,13 @@ impl<E> TaskService<E>
 where
     E: IsolationEngine + Clone,
 {
+    pub async fn task_for_signal(&self, signal_id: &str) -> Result<Option<Task>, TaskServiceError> {
+        self.store
+            .task_for_signal(signal_id)
+            .await
+            .map_err(TaskServiceError::Task)
+    }
+
     pub async fn operator_signals(
         &self,
         task_id: &str,
@@ -61,11 +68,25 @@ where
     /// operator decided does not depend on cleanup succeeding. Nothing here ends a
     /// run: the run that asked for review already ended, waiting for this answer.
     pub async fn confirm_operator_signal(&self, signal_id: &str) -> Result<Task, TaskServiceError> {
-        let task = self
-            .store
-            .confirm_operator_signal(signal_id)
-            .await
-            .map_err(TaskServiceError::Task)?;
+        let task = match self.store.confirm_operator_signal(signal_id).await {
+            Ok(task) => task,
+            Err(error) => {
+                let existing = self
+                    .store
+                    .task_for_signal(signal_id)
+                    .await
+                    .map_err(TaskServiceError::Task)?;
+                let Some(task) = existing else {
+                    return Err(TaskServiceError::Task(error));
+                };
+                let already_confirmed = self.store.events(&task.id).await.map_err(TaskServiceError::Task)?.iter()
+                    .any(|(_, event)| matches!(event, TaskHistoryEvent::OperatorSignalConfirmed { signal_id: confirmed } if confirmed == signal_id));
+                if !already_confirmed {
+                    return Err(TaskServiceError::Task(error));
+                }
+                task
+            }
+        };
         let task = self.release_resources(&task).await?;
         self.record(
             &task.id,

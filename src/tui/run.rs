@@ -25,7 +25,8 @@ use crate::{
 
 use super::App;
 use super::app::{
-    Foreground, HeldTask, IssueReadReply, IssueSearchReply, NO_LINEAR, TrackerConnectReply,
+    ConfigPushReply, Foreground, HeldTask, IssueReadReply, IssueSearchReply, NO_LINEAR,
+    RemoteSignalsReply, SendTaskReply, TaskDelegationReply, TrackerConnectReply,
 };
 use super::keys::is_help;
 use super::popups;
@@ -40,6 +41,10 @@ struct EventReplies<'a> {
     credentials: &'a mpsc::UnboundedSender<CredentialShellEvent>,
     issues: &'a mpsc::UnboundedSender<IssueReadReply>,
     tracker_connects: &'a mpsc::UnboundedSender<TrackerConnectReply>,
+    remote_signals: &'a mpsc::Sender<RemoteSignalsReply>,
+    delegations: &'a mpsc::Sender<TaskDelegationReply>,
+    sends: &'a mpsc::Sender<SendTaskReply>,
+    config_pushes: &'a mpsc::Sender<ConfigPushReply>,
 }
 
 pub async fn run<E>(
@@ -126,6 +131,19 @@ where
     // like a task's run does.
     let (tracker_connects, mut tracker_connect_replied) =
         mpsc::unbounded_channel::<TrackerConnectReply>();
+    // Acting on a remote task's signals is a dial, so it happens away from this
+    // loop. Bounded, and each reply carries the pop-up it belongs to, so one that
+    // arrives after the operator has left cannot replace what is on screen.
+    let (remote_signals, mut remote_signals_replied) = mpsc::channel::<RemoteSignalsReply>(8);
+    // Sending a task to a remote is a dial too. Bounded, and each reply names the
+    // machine, so the notice says which one answered.
+    let (delegations, mut delegated) = mpsc::channel::<TaskDelegationReply>(8);
+    // Sending an existing task is a dial, a transfer and a boot. Bounded, and the
+    // reply names the machine so the notice can.
+    let (sends, mut sent) = mpsc::channel::<SendTaskReply>(8);
+    // Sending a configuration is a dial. Bounded, and the reply carries the stamp
+    // the bundle was built from.
+    let (config_pushes, mut config_pushed) = mpsc::channel::<ConfigPushReply>(8);
     let mut issue_search_clock = time::interval(Duration::from_millis(80));
     loop {
         if mouse_captured != app.open_shell().is_some() {
@@ -172,13 +190,12 @@ where
                 screens::settings::draw(frame, content, &app.panel, &view, app.shimmer);
             } else if matches!(app.foreground, Foreground::Signals) {
                 widgets::chrome::dim(frame, content);
+                let summary = app.signals_summary();
                 popups::signals::draw(
                     frame,
                     content,
                     &app.operator_signals,
-                    app.selected_task()
-                        .and_then(|task| task.facts.latest_turn_summary)
-                        .as_deref(),
+                    summary.as_deref(),
                     app.selected_operator_signal,
                     app.selected_signal_action,
                     &mut app.operator_signal_scroll,
@@ -187,6 +204,10 @@ where
             if let Foreground::Confirm(confirm) = &app.foreground {
                 widgets::chrome::dim(frame, content);
                 confirm.draw(frame, content);
+            }
+            if let Foreground::SendTask(sending) = &app.foreground {
+                widgets::chrome::dim(frame, content);
+                popups::send_task::draw(frame, content, sending);
             }
             if let Foreground::NewTask(new_task) = &app.foreground {
                 widgets::chrome::dim(frame, content);
@@ -235,7 +256,7 @@ where
             _ = read_clock.tick(), if matches!(app.foreground, Foreground::Tasks) => {
                 app.read_remote_tasks(&remote_task_reads);
             }
-            Some(tasks) = remote_tasks_read.recv() => app.remote_tasks = tasks,
+            Some(tasks) = remote_tasks_read.recv() => app.remote_tasks_read(tasks),
             Some(outcome) = landed.recv() => {
                 match outcome {
                     Ok(id) => {
@@ -282,12 +303,27 @@ where
                     }
                 }
             }
-            Some(reply) = issue_search_replied.recv() => app.issue_search_resolved(reply),
+            Some(reply) = issue_search_replied.recv() => {
+                app.issue_search_resolved(reply, &task_service, &issue_read_replies)
+            }
             Some(reply) = issue_read_replied.recv() => {
-                app.issue_read_resolved(reply, &event_loop).await
+                app.issue_read_resolved(reply, &event_loop, &delegations).await
+            }
+            Some(reply) = delegated.recv() => {
+                app.task_delegation_resolved(reply, &remote_task_reads)
+            }
+            Some(reply) = sent.recv() => {
+                app.send_task_resolved(reply, &remote_task_reads)
+            }
+            Some(reply) = config_pushed.recv() => {
+                app.config_push_resolved(reply)
             }
             Some(reply) = tracker_connect_replied.recv() => {
                 app.tracker_connect_resolved(reply)
+            }
+            Some(reply) = app.pairings_replied.recv() => { app.pairing_resolved(reply); }
+            Some(reply) = remote_signals_replied.recv() => {
+                app.remote_signals_resolved(reply, &remote_task_reads)
             }
             event = events.next() => {
                 let Some(event) = event else { return Ok(()) };
@@ -302,6 +338,10 @@ where
                         credentials: &credential_events,
                         issues: &issue_read_replies,
                         tracker_connects: &tracker_connects,
+                        remote_signals: &remote_signals,
+                        delegations: &delegations,
+                        sends: &sends,
+                        config_pushes: &config_pushes,
                     },
                 )
                 .await?;
@@ -329,6 +369,10 @@ where
         credentials: credential_events,
         issues: issue_reads,
         tracker_connects,
+        remote_signals,
+        delegations,
+        sends,
+        config_pushes,
     } = replies;
     if let Event::Resize(_, _) = event
         && app.open_shell().is_some()
@@ -393,20 +437,30 @@ where
         Foreground::Confirm(_) => {
             handle_confirm_key(app, terminal, event_loop, key, landings).await
         }
-        Foreground::Reply(_) => app.reply_key(key, event_loop),
+        Foreground::Reply(_) => app.reply_key(key, event_loop, remote_signals),
+        Foreground::SendTask(_) => {
+            app.send_task_key(key, event_loop, task_service, sends)
+                .await
+        }
         Foreground::NewTask(_) => {
-            app.new_task_key(key, event_loop, task_service, issue_reads)
+            app.new_task_key(key, event_loop, task_service, issue_reads, delegations)
                 .await
         }
         Foreground::Panel => {
-            app.panel_keys(key, task_service, credential_events, tracker_connects)
-                .await
+            app.panel_keys(
+                key,
+                task_service,
+                credential_events,
+                tracker_connects,
+                config_pushes,
+            )
+            .await
         }
-        Foreground::Signals => app.signals_key(key, task_service).await,
+        Foreground::Signals => app.signals_key(key, task_service, remote_signals).await,
         Foreground::Shell(_) => app.shell_key(key, event_loop, task_service).await,
         Foreground::OpenLink(_) => app.open_link_key(key),
         Foreground::Tasks => {
-            if app.list_key(key, task_service).await? {
+            if app.list_key(key, task_service, remote_signals).await? {
                 return Ok(true);
             }
         }
