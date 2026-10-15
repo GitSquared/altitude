@@ -192,7 +192,7 @@ fn held_status(held: &TaskSummary) -> Line<'static> {
         })
         .style(palette::good()),
         TaskExecutionStatus::Paused => Line::styled("paused", palette::attention()),
-        TaskExecutionStatus::Completed => Line::styled("in review", palette::good()),
+        TaskExecutionStatus::Completed => Line::styled("completed", palette::muted()),
         TaskExecutionStatus::Failed => Line::styled("blocked · failed", palette::bad()),
     }
 }
