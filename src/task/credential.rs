@@ -7,6 +7,8 @@
 //! the profile is mounted.
 
 use std::{
+    fs, io,
+    path::PathBuf,
     sync::Arc,
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -367,5 +369,66 @@ where
     pub async fn close_credential_shell(&self, id: &str) -> Result<(), IsolationError> {
         self.release_agent_channel(id);
         self.isolation.remove(id.to_owned()).await
+    }
+
+    /// Forget a mounted profile's saved login, leaving everything else in it.
+    ///
+    /// Only the files a profile's CLI writes a sign-in to are removed: its
+    /// settings, models, managed MCP files, and the environment it was built in
+    /// stay. The Linear tracker is not a mounted profile; its sign-in is
+    /// forgotten through the tracker provider's `clear_credentials`.
+    pub async fn forget_credentials(&self, profile: &str) -> Result<(), TaskServiceError> {
+        let files = credential_files(profile).ok_or_else(|| {
+            TaskServiceError::Credentials(format!(
+                "no saved login is known for the {profile} profile"
+            ))
+        })?;
+        let directory = self.profile_directory(profile);
+        for file in files {
+            let path = directory.join(*file);
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                // Already signed out is the state the operator asked for.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(TaskServiceError::Credentials(format!(
+                        "could not remove the saved login at {}: {error}",
+                        path.display()
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Where a mounted profile keeps its files on this host.
+    ///
+    /// The same `data_dir/<profile>/profile` a recipe mounts, derived from the
+    /// snapshots directory rather than kept as a second copy of the data
+    /// directory that could disagree with it.
+    fn profile_directory(&self, profile: &str) -> PathBuf {
+        self.snapshots_dir
+            .parent()
+            .expect("the snapshots directory is inside the data directory")
+            .join(profile)
+            .join("profile")
+    }
+}
+
+/// The login files a profile's CLI writes, relative to its host directory.
+///
+/// Only a sign-in: settings, models, managed MCP files, and environment setup
+/// are not credentials and stay. A profile absent here has no login Altitude
+/// knows how to remove.
+fn credential_files(profile: &str) -> Option<&'static [&'static str]> {
+    match profile {
+        // Pi keeps one credential per provider here, and nothing else.
+        "agents/pi" => Some(&["auth.json"]),
+        // Claude Code's own login file; its settings and MCP files stay.
+        "agents/claude" => Some(&[".credentials.json"]),
+        // The GitHub CLI's host sign-in. The git identity, SSH keys, and signing
+        // keys are separate material and are deliberately not touched.
+        "vcs/github" => Some(&["gh/hosts.yml"]),
+        _ => None,
     }
 }

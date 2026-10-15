@@ -30,9 +30,7 @@ pub struct EnvironmentRecipe {
     /// What this profile is called where an operator reads it, which is the name
     /// the settings list shows and the shell that sets it up names.
     pub display: &'static str,
-    /// The command a login for this profile runs through. Named in that shell,
-    /// because the operator is about to type it.
-    pub command: &'static str,
+    pub sign_in: &'static str,
     /// A command that exits 0 when this profile is signed in, and prints what it
     /// found. Run in a sandbox with the profile mounted, so it sees the login a task
     /// would see and never its contents: what it prints is what an operator reads.
@@ -492,16 +490,16 @@ pub(super) async fn credential_shell(
     profile: &str,
     progress: &dyn EnvironmentProgressSink,
 ) -> Result<String, IsolationError> {
-    let (display, command) = recipes
+    let (display, sign_in) = recipes
         .iter()
         .find(|recipe| recipe.profile == profile)
-        .map(|recipe| (recipe.display, recipe.command))
+        .map(|recipe| (recipe.display, recipe.sign_in))
         .ok_or_else(|| IsolationError::new(format!("no recipe for the {profile} profile")))?;
     let plan = EnvironmentPlan::compose(config, environment, recipes)?;
     create(engine, config, id, plan, SandboxKind::Shell, None, progress).await?;
     let banner = include_str!("assets/credential-shell.md")
         .replace("{{display}}", display)
-        .replace("{{command}}", command);
+        .replace("{{sign_in}}", sign_in);
     let mut script = String::from("printf '%s\\n'");
     for line in banner.lines() {
         script.push(' ');

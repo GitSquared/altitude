@@ -1,6 +1,6 @@
+{{display}} sign-in
 
-This is a temporary bash shell where you can set up credentials for
-{{display}}. The `{{command}}` command is here.
+{{sign_in}}
+Your saved sign-in will be used by Altitude tasks.
 
-When you're done, exit: the credentials will be saved for tasks to use.
-
+Press Ctrl-A to close this setup shell.

@@ -149,6 +149,10 @@ pub trait TrackerProvider: IssueReader {
     /// flow when none is stored. Called explicitly from Settings.
     fn connect<'a>(&'a self) -> TrackerFuture<'a, ()>;
 
+    /// Forget the saved sign-in, stopping any live session first so a late
+    /// callback cannot write a fresh one back.
+    fn clear_credentials<'a>(&'a self) -> TrackerFuture<'a, ()>;
+
     fn is_connected(&self) -> bool;
 
     fn identity(&self) -> TrackerFuture<'_, TrackerIdentity>;

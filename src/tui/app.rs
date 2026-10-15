@@ -16,7 +16,7 @@ use std::{
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use iroh::EndpointAddr;
-use ratatui::{DefaultTerminal, layout::Rect};
+use ratatui::{DefaultTerminal, layout::Rect, text::Line};
 use tokio::{process::Command as HostCommand, sync::mpsc, task::JoinHandle};
 
 use crate::{
@@ -42,11 +42,12 @@ use crate::{
     tui::widgets::chrome::Hint,
 };
 
-use popups::confirm::PendingConfirm;
+use popups::confirm::{CredentialTarget, PendingConfirm};
 use popups::new_task::{Answer, Host, NewTask, SearchToken};
 use popups::open_link::{self, Link, OpenLink};
 use popups::reply::{Prompt, PromptAction, Reply};
 use popups::send_task::{Decision as SendDecision, SendTask};
+use popups::setup::{Setup, SetupKind};
 use screens::settings::{
     CredentialKind, Depth, Focus, Form, GitIdentity, Panel, RowKind, Section, Setting, Target,
 };
@@ -77,6 +78,7 @@ pub(in crate::tui) enum Foreground {
     NewTask(Box<NewTask>),
     /// The settings panel: environments, remotes, the interface, the identity.
     Panel,
+    Setup(Setup),
     /// A task's signals, over the list it was opened from.
     Signals,
     /// A terminal, taking every key there is.
@@ -138,6 +140,12 @@ impl CredentialStatus {
     fn is_in_progress(&self) -> bool {
         *self == Self::Checking
     }
+}
+
+pub(in crate::tui) struct CredentialCheckReply {
+    pub profile: &'static str,
+    pub status: CredentialStatus,
+    pub generation: u64,
 }
 
 /// What is known about the Linear tracker's live session.
@@ -319,6 +327,7 @@ pub struct App {
     pub(in crate::tui) environment_builds: HashMap<String, EnvironmentProgress>,
     /// Advances the highlight on that waiting text.
     pub(in crate::tui) shimmer: usize,
+    pub(in crate::tui) help_scroll: u16,
     /// What the host will run at once, so a wait can say whether there is room.
     /// Absent until the first refresh, and never stale by more than one interval.
     pub(in crate::tui) capacity: Option<usize>,
@@ -365,6 +374,7 @@ pub struct App {
     /// When the credentials list started showing, which the wait before asking is
     /// measured from. Absent while it is not showing.
     credentials_visible_since: Option<Instant>,
+    credential_check_generation: u64,
     /// When the remotes list started showing, which the wait before dialling is
     /// measured from. Absent while it is not showing.
     remotes_visible_since: Option<Instant>,
@@ -455,6 +465,7 @@ impl App {
             remote_status: HashMap::new(),
             credential_status: HashMap::new(),
             credentials_visible_since: None,
+            credential_check_generation: 0,
             remotes_visible_since: None,
             remote_synced: HashMap::new(),
             remote_tasks: Vec::new(),
@@ -469,6 +480,7 @@ impl App {
             tracker_connect_attempt: 0,
             environment_builds: HashMap::new(),
             shimmer: 0,
+            help_scroll: 0,
             capacity: None,
         }
     }
@@ -578,17 +590,28 @@ impl App {
             .is_none_or(|file| file.settings().interface().keyboard_hints)
     }
 
-    /// The keys that would do something where the focus is.
-    ///
-    /// The frame shows these, and the help popup lists them, so a key that
-    /// works is never a key you have to guess at. They follow what is in front
-    /// rather than the fields behind it, so the line cannot offer a key that
-    /// something above it would take first.
+    /// The few actions worth keeping visible below the current screen.
     pub(in crate::tui) fn hints(&self) -> Vec<Hint> {
-        self.hints_for(&self.foreground)
+        let mut hints = self.hints_for(&self.foreground);
+        hints.retain(|hint| {
+            !matches!(hint.keys, "tab" | "j/k" | "h/j/k/l" | "pgup/pgdn")
+                && !matches!((hint.keys, hint.what), ("esc", "close") | ("q", "quit"))
+        });
+        for hint in &mut hints {
+            if hint.keys == "enter / tab" {
+                hint.keys = "enter";
+            }
+        }
+        if !self.is_typing()
+            && self.open_shell().is_none()
+            && !hints.iter().any(|hint| hint.keys == "?")
+        {
+            hints.push(Hint::new("?", "all shortcuts"));
+        }
+        hints
     }
 
-    /// The keys of a given state, which help needs for the state it covers.
+    /// Candidate footer actions before common navigation is removed.
     pub(in crate::tui) fn hints_for(&self, front: &Foreground) -> Vec<Hint> {
         let dismiss = || Hint::new("esc", "close");
         match front {
@@ -623,10 +646,17 @@ impl App {
                 }
                 let mut hints = vec![Hint::new("tab", "change column"), Hint::new("j/k", "move")];
                 if self.panel.section == Section::Remotes {
-                    hints.push(Hint::new("enter", "check"));
-                    hints.push(Hint::new("p", "send config"));
-                    hints.push(Hint::new("b", "pair Linear"));
-                    hints.push(Hint::new("e", "edit"));
+                    if matches!(
+                        self.selected_row().map(|row| row.kind),
+                        Some(RowKind::Remote { .. })
+                    ) {
+                        hints.push(Hint::new("enter", "connect"));
+                        hints.push(Hint::new("p", "send config"));
+                        hints.push(Hint::new("b", "pair Linear"));
+                        hints.push(Hint::new("e", "edit"));
+                    } else {
+                        hints.push(Hint::new("enter", "remote setup"));
+                    }
                 } else if self.panel.section.grows() {
                     hints.push(Hint::new("enter", "edit"));
                 } else if self.panel.section == Section::Agents {
@@ -651,14 +681,25 @@ impl App {
                         },
                     ));
                 }
+                if self.selected_has_credentials() {
+                    hints.push(Hint::new("delete", "sign out"));
+                }
                 if self.panel.section.grows() {
                     hints.push(Hint::new("n", "new"));
-                    hints.push(Hint::new("d", "delete"));
+                    if self.panel.section != Section::Remotes
+                        || matches!(
+                            self.selected_row().map(|row| row.kind),
+                            Some(RowKind::Remote { .. })
+                        )
+                    {
+                        hints.push(Hint::new("d", "delete"));
+                    }
                 }
                 hints.push(Hint::new("pgup/pgdn", "details"));
                 hints.push(dismiss());
                 hints
             }
+            Foreground::Setup(_) => vec![Hint::new("esc / q", "close")],
             Foreground::Signals => vec![
                 Hint::new("tab", "action"),
                 Hint::new("enter", "validate"),
@@ -980,6 +1021,9 @@ impl App {
             }
             KeyCode::Down | KeyCode::Char('j') => self.panel.move_selection(true, rows),
             KeyCode::Up | KeyCode::Char('k') => self.panel.move_selection(false, rows),
+            KeyCode::Delete | KeyCode::Backspace if self.selected_has_credentials() => {
+                self.ask_to_forget_credentials()
+            }
             KeyCode::Char('d') if self.panel.section == Section::Agents => self.edit_selected(),
             KeyCode::Char('e') if self.panel.section.grows() => self.edit_selected(),
             KeyCode::Char('p') if self.panel.section == Section::Remotes => {
@@ -1078,7 +1122,32 @@ impl App {
             Some(RowKind::Remote { address, .. }) => self.check_remote(&address).await,
             // A tracker is signed in to, which is a browser and a callback rather
             // than a page here.
-            Some(RowKind::Tracker { .. }) => self.connect_tracker(task_service, tracker_connects),
+            Some(RowKind::Tracker { .. }) => {
+                let lines = if self.tracker_state == TrackerState::Connected {
+                    vec![
+                        Line::from("Linear is signed in."),
+                        Line::from(""),
+                        Line::from(
+                            "To use another account, close this window and press Delete on the Linear row to remove this sign-in.",
+                        ),
+                    ]
+                } else {
+                    vec![
+                        Line::from("Finish signing in in your browser."),
+                        Line::from(""),
+                        Line::from(
+                            "Altitude uses Linear's official MCP server through mcp-remote. Node.js (npx) is required.",
+                        ),
+                        Line::from(""),
+                        Line::from("Esc or q cancels this sign-in."),
+                    ]
+                };
+                self.foreground = Foreground::Setup(Setup::new(SetupKind::Linear, lines));
+                if self.tracker_state != TrackerState::Connected {
+                    self.connect_tracker(task_service, tracker_connects);
+                }
+                self.notice = None;
+            }
             Some(RowKind::Agent { credential, .. }) => {
                 if let CredentialKind::Profile { profile, .. } = credential.kind {
                     self.open_credential_shell(&credential.label, profile, task_service, events);
@@ -1090,6 +1159,11 @@ impl App {
             Some(RowKind::Credential(credential)) => {
                 if let CredentialKind::Profile { profile, .. } = credential.kind {
                     self.open_credential_shell(&credential.label, profile, task_service, events);
+                } else {
+                    self.foreground = Foreground::Setup(Setup::new(
+                        SetupKind::Remote,
+                        screens::settings::remote_setup_lines(),
+                    ));
                 }
             }
             _ => self.edit_selected(),
@@ -1554,6 +1628,7 @@ impl App {
         match (showing, self.credentials_visible_since) {
             (true, None) => {
                 self.credentials_visible_since = Some(Instant::now());
+                self.credential_check_generation = self.credential_check_generation.wrapping_add(1);
                 self.credential_status.clear();
             }
             (false, Some(_)) => self.credentials_visible_since = None,
@@ -1598,7 +1673,7 @@ impl App {
     pub(in crate::tui) fn ask_next_credential<E>(
         &mut self,
         task_service: &TaskService<E>,
-        reports: &mpsc::UnboundedSender<(&'static str, CredentialStatus)>,
+        reports: &mpsc::UnboundedSender<CredentialCheckReply>,
     ) where
         E: IsolationEngine + Clone + 'static,
     {
@@ -1611,6 +1686,7 @@ impl App {
         let chosen = self.agent();
         let service = task_service.clone();
         let reports = reports.clone();
+        let generation = self.credential_check_generation;
         tokio::spawn(async move {
             let status = match service
                 .credential_report(environment, profile, chosen)
@@ -1632,8 +1708,18 @@ impl App {
                     }
                 }
             };
-            let _ = reports.send((profile, status));
+            let _ = reports.send(CredentialCheckReply {
+                profile,
+                status,
+                generation,
+            });
         });
+    }
+
+    pub(in crate::tui) fn credential_checked(&mut self, reply: CredentialCheckReply) {
+        if reply.generation == self.credential_check_generation {
+            self.credential_status.insert(reply.profile, reply.status);
+        }
     }
 
     /// Whether any address is being asked about right now, which is what keeps the
@@ -1836,6 +1922,76 @@ impl App {
                 "",
             ),
         });
+    }
+
+    fn selected_has_credentials(&self) -> bool {
+        self.panel.depth != Depth::Rail
+            && matches!(
+                self.selected_row().map(|row| row.kind),
+                Some(RowKind::Agent { .. } | RowKind::Tracker { .. })
+                    | Some(RowKind::Credential(screens::settings::Credential {
+                        kind: CredentialKind::Profile { .. },
+                        ..
+                    }))
+            )
+    }
+
+    fn ask_to_forget_credentials(&mut self) {
+        let (target, question) = match self.selected_row().map(|row| row.kind) {
+            Some(RowKind::Agent { credential, .. }) | Some(RowKind::Credential(credential)) => {
+                let CredentialKind::Profile { profile, .. } = credential.kind else { return; };
+                let scope = if profile == "agents/pi" { "all Pi provider sign-ins" } else if profile == "vcs/github" { "the GitHub CLI sign-in" } else { "the Claude Code sign-in" };
+                (CredentialTarget::Profile(profile), format!("Delete {scope} saved on this machine? Tool settings and copies already sent to remotes are kept."))
+            }
+            Some(RowKind::Tracker { .. }) => (CredentialTarget::Linear, "Delete this machine's personal Linear sign-in? The remote's shared Linear app is kept.".to_owned()),
+            _ => return,
+        };
+        self.foreground =
+            Foreground::Confirm(PendingConfirm::forgetting_credentials(target, question));
+    }
+
+    pub(in crate::tui) async fn forget_credentials<E>(
+        &mut self,
+        target: CredentialTarget,
+        service: &TaskService<E>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let result = match target {
+            CredentialTarget::Profile(profile) => service
+                .forget_credentials(profile)
+                .await
+                .map_err(|error| error.to_string()),
+            CredentialTarget::Linear => {
+                if let Some(handle) = self.tracker_connect.take() {
+                    handle.abort();
+                }
+                self.tracker_connect_attempt = self.tracker_connect_attempt.wrapping_add(1);
+                match service.tracker() {
+                    Some(tracker) => tracker
+                        .clear_credentials()
+                        .await
+                        .map_err(|error| error.to_string()),
+                    None => Err("Linear is unavailable".to_owned()),
+                }
+            }
+        };
+        self.foreground = Foreground::Panel;
+        match result {
+            Ok(()) => {
+                self.credential_check_generation = self.credential_check_generation.wrapping_add(1);
+                self.credential_status.clear();
+                self.credentials_visible_since = None;
+                self.tracker_state = match service.tracker() {
+                    Some(tracker) if tracker.is_connected() => TrackerState::Connected,
+                    _ => TrackerState::NotConnected,
+                };
+                self.notice = Some("Saved sign-in deleted".to_owned());
+            }
+            Err(error) => {
+                self.notice = Some(format!("Could not delete the saved sign-in: {error}"))
+            }
+        }
     }
 
     pub(in crate::tui) fn ask_to_delete(&mut self) {
@@ -2108,6 +2264,39 @@ impl App {
 
 impl App {
     /// Close the keys, returning to what they covered.
+    pub(in crate::tui) fn setup_key(&mut self, key: KeyEvent) {
+        if is_dismiss(key) {
+            if matches!(&self.foreground, Foreground::Setup(setup) if matches!(setup.kind, SetupKind::Linear))
+                && let Some(handle) = self.tracker_connect.take()
+            {
+                handle.abort();
+                self.tracker_connect_attempt = self.tracker_connect_attempt.wrapping_add(1);
+                self.tracker_state = TrackerState::NotConnected;
+            }
+            self.foreground = Foreground::Panel;
+            self.notice = None;
+        } else if let Foreground::Setup(setup) = &mut self.foreground {
+            setup.scroll(key);
+        }
+    }
+
+    pub(in crate::tui) fn help_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q' | '?') => self.dismiss_keys(),
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.help_scroll = self.help_scroll.saturating_add(1)
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.help_scroll = self.help_scroll.saturating_sub(1)
+            }
+            KeyCode::PageDown => self.help_scroll = self.help_scroll.saturating_add(12),
+            KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(12),
+            KeyCode::Home => self.help_scroll = 0,
+            KeyCode::End => self.help_scroll = u16::MAX,
+            _ => {}
+        }
+    }
+
     pub(in crate::tui) fn dismiss_keys(&mut self) {
         if let Foreground::Keys(behind) = mem::take(&mut self.foreground) {
             self.foreground = *behind;
@@ -2456,9 +2645,13 @@ impl App {
             return;
         }
         self.tracker_connect = None;
+        let setup_open = matches!(&self.foreground, Foreground::Setup(setup) if matches!(setup.kind, SetupKind::Linear));
+        if setup_open {
+            self.foreground = Foreground::Panel;
+        }
         // The result replaces the sign-in notice it set, and nothing else: an
         // unrelated error that arrived while the browser was open stays put.
-        let sign_in = self.clear_sign_in_notice();
+        let sign_in = self.clear_sign_in_notice() || setup_open;
         match reply.result {
             Ok(true) => {
                 self.tracker_state = TrackerState::Connected;
@@ -2556,7 +2749,7 @@ impl App {
             KeyCode::Tab => self.focus_next_signal_action(),
             KeyCode::BackTab => self.focus_previous_signal_action(),
             KeyCode::Down | KeyCode::Char('j') => self.select_next_operator_signal(),
-            KeyCode::Up | KeyCode::Char('h') => self.select_previous_operator_signal(),
+            KeyCode::Up | KeyCode::Char('k' | 'h') => self.select_previous_operator_signal(),
             KeyCode::Enter => {
                 let actions = self.selected_signal_actions();
                 let Some(action) = actions

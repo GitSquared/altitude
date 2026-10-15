@@ -119,7 +119,22 @@ pub(in crate::tui) struct PendingConfirm {
     action: ConfirmAction,
 }
 
+pub(in crate::tui) enum CredentialTarget {
+    Profile(&'static str),
+    Linear,
+}
+
 impl PendingConfirm {
+    pub(in crate::tui) fn forgetting_credentials(
+        target: CredentialTarget,
+        question: String,
+    ) -> Self {
+        Self {
+            dialog: Confirm::new(question, "delete"),
+            action: ConfirmAction::ForgetCredentials(target),
+        }
+    }
+
     /// Confirming deletes a row the settings screen lists.
     pub(in crate::tui) fn deleting(target: Target, question: String) -> Self {
         Self {
@@ -144,6 +159,13 @@ impl PendingConfirm {
         }
     }
 
+    pub(in crate::tui) fn is_settings(&self) -> bool {
+        matches!(
+            self.action,
+            ConfirmAction::DeleteSetting(_) | ConfirmAction::ForgetCredentials(_)
+        )
+    }
+
     pub(in crate::tui) fn draw(&self, frame: &mut Frame, area: Rect) {
         draw(frame, area, &self.dialog);
     }
@@ -159,6 +181,7 @@ enum ConfirmAction {
     RemoveTask { id: String },
     TakeOver { id: String },
     DeleteSetting(Target),
+    ForgetCredentials(CredentialTarget),
 }
 
 /// Take an answer to the confirmation, and act on it.
@@ -176,7 +199,11 @@ pub(in crate::tui) async fn handle_confirm_key<E>(
     };
     match pending.dialog.handle_key(key) {
         None => app.foreground = Foreground::Confirm(pending),
-        Some(Decision::Cancel) => {}
+        Some(Decision::Cancel) => {
+            if pending.is_settings() {
+                app.foreground = Foreground::Panel;
+            }
+        }
         Some(Decision::Confirm) => match pending.action {
             ConfirmAction::RemoveTask { id } => {
                 if let Some(task) = app.tasks.iter().find(|task| task.id == id).cloned() {
@@ -187,7 +214,13 @@ pub(in crate::tui) async fn handle_confirm_key<E>(
                 }
             }
             ConfirmAction::TakeOver { id } => app.take_over(&id, terminal, event_loop, landings),
-            ConfirmAction::DeleteSetting(target) => app.delete(target).await,
+            ConfirmAction::DeleteSetting(target) => {
+                app.foreground = Foreground::Panel;
+                app.delete(target).await;
+            }
+            ConfirmAction::ForgetCredentials(target) => {
+                app.forget_credentials(target, event_loop.service()).await
+            }
         },
     }
 }

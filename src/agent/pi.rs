@@ -259,7 +259,7 @@ impl AgentEngine for PiCode {
         EnvironmentRecipe {
             profile: "agents/pi",
             display: "Pi",
-            command: "pi",
+            sign_in: "Run pi, then use /login to connect your provider.",
             // Pi keeps one credential per provider in auth.json, and writes an empty
             // object when there are none, so the question is whether it has any.
             status_command: "jq -e 'length > 0' /altitude/pi/auth.json >/dev/null \

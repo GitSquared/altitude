@@ -26,7 +26,7 @@ impl GitHub {
         EnvironmentRecipe {
             profile: "vcs/github",
             display: "GitHub",
-            command: "gh",
+            sign_in: "Run gh auth login and follow its sign-in instructions.",
             // The one profile whose CLI can be asked, and answers with the account and
             // the token's scopes.
             status_command: "gh auth status",

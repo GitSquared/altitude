@@ -194,7 +194,7 @@ impl AgentEngine for ClaudeCode {
         EnvironmentRecipe {
             profile: "agents/claude",
             display: "Claude Code",
-            command: "claude",
+            sign_in: "Run claude and follow its sign-in instructions.",
             // Claude Code writes this file when it is signed in, and its own CLI has
             // no way to be asked. Existence and size only: the contents are the
             // credential, and Altitude does not read it.

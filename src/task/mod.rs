@@ -141,6 +141,7 @@ pub enum TaskServiceError {
     Isolation(IsolationError),
     InvalidReport(String),
     AgentChannel(io::Error),
+    Credentials(String),
 }
 impl fmt::Display for TaskServiceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -150,6 +151,7 @@ impl fmt::Display for TaskServiceError {
             Self::Isolation(error) => error.fmt(formatter),
             Self::InvalidReport(error) => write!(formatter, "invalid agent turn report: {error}"),
             Self::AgentChannel(error) => write!(formatter, "agent channel error: {error}"),
+            Self::Credentials(error) => write!(formatter, "{error}"),
         }
     }
 }

@@ -16,7 +16,7 @@ use ratatui::{
     widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap},
 };
 
-use crate::tui::widgets::palette;
+use crate::tui::{keys::HelpSection, widgets::palette};
 
 /// The name every screen wears.
 const TITLE: &str = "⛰  altitude";
@@ -80,7 +80,9 @@ pub fn draw(
     }
     if !guidance.is_empty() {
         frame.render_widget(
-            Paragraph::new(guidance).style(palette::muted()),
+            Paragraph::new(guidance)
+                .style(palette::muted())
+                .right_aligned(),
             guidance_area,
         );
     }
@@ -163,26 +165,35 @@ pub fn dim(frame: &mut Frame, area: Rect) {
 ///
 /// Shown whether or not the guidance is, because a key you cannot find is a key
 /// you do not have.
-pub fn draw_help(frame: &mut Frame, area: Rect, hints: &[Hint]) {
-    let height = (hints.len() as u16 + 4).min(area.height);
-    let popup = centered(area, 56, height);
+pub fn draw_help(frame: &mut Frame, area: Rect, sections: &[HelpSection], scroll: &mut u16) {
+    let popup = centered(area, 94, area.height);
     frame.render_widget(Clear, popup);
     let block = Block::bordered()
-        .title(" Keys ")
+        .title(" Keyboard shortcuts ")
+        .title_bottom(" ↑/↓ · j/k · PgUp/PgDn scroll · Esc/q close ")
         .border_type(BorderType::Rounded)
         .padding(Padding::horizontal(1));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
-    let lines: Vec<Line> = hints
-        .iter()
-        .map(|hint| {
-            Line::from(vec![
-                Span::styled(format!("{:>10}   ", hint.keys), palette::accent()),
-                Span::raw(hint.what),
-            ])
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    let mut lines = Vec::new();
+    for section in sections {
+        if !lines.is_empty() {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::styled(section.title, palette::heading()));
+        for (keys, description) in section.bindings {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{keys}  "), palette::accent()),
+                Span::raw(*description),
+            ]));
+        }
+    }
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let maximum = paragraph
+        .line_count(inner.width)
+        .saturating_sub(usize::from(inner.height));
+    *scroll = (*scroll).min(maximum.min(usize::from(u16::MAX)) as u16);
+    frame.render_widget(paragraph.scroll((*scroll, 0)), inner);
 }
 
 /// A button: the one holding the focus is inverted, and the primary one is

@@ -184,7 +184,10 @@ where
                 widgets::chrome::dim(frame, content);
                 popups::open_link::draw(frame, content, asking);
             }
-            if matches!(app.foreground, Foreground::Panel) {
+            if matches!(app.foreground, Foreground::Panel)
+                || matches!(&app.foreground, Foreground::Confirm(confirm) if confirm.is_settings())
+                || matches!(app.foreground, Foreground::Setup(_))
+            {
                 // Fullscreen: it is the screen, not something over it.
                 let view = app.settings_view();
                 screens::settings::draw(frame, content, &app.panel, &view, app.shimmer);
@@ -208,6 +211,10 @@ where
                     &mut app.operator_signal_scroll,
                 );
             }
+            if let Foreground::Setup(setup) = &mut app.foreground {
+                widgets::chrome::dim(frame, content);
+                setup.draw(frame, content);
+            }
             if let Foreground::Confirm(confirm) = &app.foreground {
                 widgets::chrome::dim(frame, content);
                 confirm.draw(frame, content);
@@ -222,7 +229,12 @@ where
             }
             if matches!(app.foreground, Foreground::Keys(_)) {
                 widgets::chrome::dim(frame, content);
-                widgets::chrome::draw_help(frame, content, &hints);
+                widgets::chrome::draw_help(
+                    frame,
+                    content,
+                    &super::keys::help_sections(),
+                    &mut app.help_scroll,
+                );
             }
             // Input belongs above the settings overlay that opened it.
             if let Foreground::Reply(reply) = &app.foreground {
@@ -259,9 +271,7 @@ where
                 }
             }
             Some(answer) = answered.recv() => app.remote_answered(answer).await,
-            Some((profile, status)) = reported.recv() => {
-                app.credential_status.insert(profile, status);
-            }
+            Some(reply) = reported.recv() => app.credential_checked(reply),
             _ = read_clock.tick(), if matches!(app.foreground, Foreground::Tasks) => {
                 app.read_remote_tasks(&remote_task_reads);
             }
@@ -433,12 +443,13 @@ where
     if !key.is_press() {
         return Ok(false);
     }
-    // Anything at all closes help: a help screen is not somewhere to be.
+    // Help owns its scrolling keys; actions behind it stay untouched.
     if matches!(app.foreground, Foreground::Keys(_)) {
-        app.dismiss_keys();
+        app.help_key(key);
         return Ok(false);
     }
     if is_help(key) && !app.is_typing() {
+        app.help_scroll = 0;
         app.foreground = Foreground::Keys(Box::new(mem::take(&mut app.foreground)));
         return Ok(false);
     }
@@ -468,6 +479,7 @@ where
             )
             .await
         }
+        Foreground::Setup(_) => app.setup_key(key),
         Foreground::Signals => app.signals_key(key, task_service, remote_signals).await,
         Foreground::Shell(_) => app.shell_key(key, event_loop, task_service).await,
         Foreground::OpenLink(_) => app.open_link_key(key),

@@ -8,7 +8,7 @@
 use std::{
     cmp::Ordering,
     collections::HashMap,
-    fmt, fs,
+    fmt, fs, io,
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -23,7 +23,11 @@ use rmcp::{
     transport::TokioChildProcess,
 };
 use serde_json::{Map, Value, json};
-use tokio::{process::Command, sync::Mutex, time::timeout};
+use tokio::{
+    process::Command,
+    sync::{Mutex, watch},
+    time::{sleep, timeout},
+};
 
 use super::{
     IssueComment, IssueReader, IssueReference, IssueSnapshot, IssueSummary, TrackerError,
@@ -139,6 +143,9 @@ impl Session {
 pub struct Linear {
     profile: PathBuf,
     session: Mutex<Option<Arc<Session>>>,
+    /// Bumped when the saved sign-in is forgotten, so a sign-in already under
+    /// way stops instead of writing a fresh one after the files are gone.
+    generation: watch::Sender<u64>,
 }
 
 impl fmt::Debug for Linear {
@@ -167,6 +174,7 @@ impl Linear {
         Ok(Self {
             profile: directory.to_owned(),
             session: Mutex::new(None),
+            generation: watch::channel(0).0,
         })
     }
 
@@ -208,6 +216,10 @@ impl Linear {
     }
 
     async fn connect_impl(&self) -> Result<(), TrackerError> {
+        // Read the epoch before waiting for the lock: a sign-in that started
+        // before the credentials were forgotten must not write a fresh login
+        // after them.
+        let epoch = *self.generation.borrow();
         let mut slot = self.session.lock().await;
         if slot
             .as_ref()
@@ -218,13 +230,73 @@ impl Linear {
         // A session whose service loop has ended is no longer a connection, so
         // it is dropped before a fresh one is started.
         *slot = None;
+        let mut generation = self.generation.subscribe();
+        if *generation.borrow() != epoch {
+            return Err(TrackerError::new("the Linear sign-in was cancelled"));
+        }
         // The lock is held across startup so concurrent callers share one
         // bridge rather than racing to spawn two.
-        let session = timeout(CONNECT_TIMEOUT, Session::start(&self.profile))
-            .await
-            .map_err(|_| TrackerError::new("the Linear sign-in did not finish in time"))??;
+        let session = tokio::select! {
+            result = timeout(CONNECT_TIMEOUT, Session::start(&self.profile)) => {
+                result
+                    .map_err(|_| TrackerError::new("the Linear sign-in did not finish in time"))??
+            }
+            _ = generation.changed() => {
+                return Err(TrackerError::new("the Linear sign-in was cancelled"));
+            }
+        };
         *slot = Some(Arc::new(session));
         Ok(())
+    }
+
+    /// Forget the saved Linear sign-in.
+    ///
+    /// The bridge owns the browser flow and the token, so a sign-in already
+    /// under way is stopped and the live session ended before its cache is
+    /// removed; otherwise a late callback could write a fresh login back.
+    async fn clear_credentials_impl(&self) -> Result<(), TrackerError> {
+        self.generation
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+        let mut slot = self.session.lock().await;
+        if let Some(mut session) = slot.take() {
+            session.client.cancellation_token().cancel();
+            let owned = timeout(CLEANUP_TIMEOUT, async {
+                loop {
+                    match Arc::try_unwrap(session) {
+                        Ok(session) => break session,
+                        Err(shared) => session = shared,
+                    }
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .map_err(|_| {
+                TrackerError::new("Linear is still closing; try deleting its sign-in again")
+            })?;
+            let mut client = owned.client;
+            match client.close_with_timeout(CLEANUP_TIMEOUT).await {
+                Ok(Some(_)) => {}
+                _ => {
+                    return Err(TrackerError::new(
+                        "Linear did not finish closing; the saved sign-in was kept",
+                    ));
+                }
+            }
+        }
+        // A reconnect requested during cleanup must not open a browser after it.
+        self.generation
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+        // The profile is Altitude's own bridge cache and holds nothing but the
+        // sign-in, so it goes whole and is recreated empty for the next one.
+        if let Err(error) = fs::remove_dir_all(&self.profile)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            return Err(TrackerError::new(
+                "could not remove the saved Linear sign-in",
+            ));
+        }
+        private_directory(&self.profile)
+            .map_err(|_| TrackerError::new("could not reset the Linear profile"))
     }
 
     /// Refuse to act when the bound reference and the fetched issue are in
@@ -338,6 +410,10 @@ impl IssueReader for Linear {
 impl TrackerProvider for Linear {
     fn connect<'a>(&'a self) -> TrackerFuture<'a, ()> {
         Box::pin(self.connect_impl())
+    }
+
+    fn clear_credentials<'a>(&'a self) -> TrackerFuture<'a, ()> {
+        Box::pin(self.clear_credentials_impl())
     }
 
     fn is_connected(&self) -> bool {
