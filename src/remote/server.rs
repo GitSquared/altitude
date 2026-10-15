@@ -28,7 +28,7 @@ use crate::task::TaskOperatorSignal;
 
 use super::{
     LinkResult,
-    announce::{Announcement, Broadcast, RemoteState},
+    announce::{Announcement, Broadcast, RemoteState, TrackerConnection},
     bundle::{ConfigBundle, HeldConfig, ProfileStamp},
     clients::{ClientLog, ClientRecord},
     identity::InstallationKey,
@@ -213,9 +213,7 @@ pub struct ServerParts {
     pub data_dir: PathBuf,
     /// What this machine can do with a task right now.
     pub state: watch::Receiver<RemoteState>,
-    /// Whether this machine runs a shared Linear app, decided at startup because
-    /// setting one up takes a restart.
-    pub linear_ready: bool,
+    pub trackers: Vec<TrackerConnection>,
     /// The tasks this machine owns, which is the only place they exist.
     pub tasks: Arc<dyn TaskHost>,
 }
@@ -528,7 +526,7 @@ impl LinkServer {
             label,
             data_dir,
             state,
-            linear_ready,
+            trackers,
             tasks,
         } = parts;
         let blobs = Arc::new(BlobStore::default());
@@ -562,7 +560,7 @@ impl LinkServer {
                 label,
                 version: env!("CARGO_PKG_VERSION").to_owned(),
                 state: RemoteState::Preparing,
-                linear_ready,
+                trackers,
             },
             state,
         )

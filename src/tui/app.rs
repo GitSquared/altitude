@@ -27,7 +27,8 @@ use crate::{
     },
     remote::{
         Announcement, ConfigBundle, LinkClient, RemoteKey, RemoteKeyStatus, RemoteKeys,
-        RemoteState, TaskOrigin, TaskRequest, TaskSummary, bring_home, meet, send::send_to_remote,
+        RemoteState, TaskOrigin, TaskRequest, TaskSummary, TrackerConnection, bring_home, meet,
+        send::send_to_remote,
     },
     task,
     task::{
@@ -115,18 +116,6 @@ impl RemoteStatus {
     pub(in crate::tui) fn is_in_progress(&self) -> bool {
         matches!(self, Self::Asking | Self::Syncing)
     }
-}
-
-/// What a remote's own announcement said about its shared Linear app.
-///
-/// Read from the remote rather than guessed from anything local, so a machine
-/// that has not answered is unknown rather than shown as unconfigured.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(in crate::tui) enum RemoteTracker {
-    /// It answered and runs a shared Linear app.
-    Ready,
-    /// It answered and does not run one.
-    NotConnected,
 }
 
 /// What a task's terminal is called on its frame, as opposed to the shell opened to
@@ -381,9 +370,9 @@ pub struct App {
     pub(in crate::tui) foreground: Foreground,
     /// What each address last answered, for the list to show.
     pub(in crate::tui) remote_status: HashMap<String, RemoteStatus>,
-    /// What each address's last announcement said about its shared Linear app.
+    /// What each address's last announcement said about the trackers it runs.
     /// Runtime only: it is a fact about the remote, not something to persist.
-    pub(in crate::tui) remote_trackers: HashMap<String, RemoteTracker>,
+    pub(in crate::tui) remote_trackers: HashMap<String, Vec<TrackerConnection>>,
     /// What each profile's own check last said about its login.
     pub(in crate::tui) credential_status: HashMap<&'static str, CredentialStatus>,
     /// When the credentials list started showing, which the wait before asking is
@@ -668,8 +657,8 @@ impl App {
                     ) {
                         hints.push(Hint::new("enter", "connect"));
                         hints.push(Hint::new("p", "send config"));
-                        hints.push(Hint::new("t", "Linear setup"));
-                        hints.push(Hint::new("b", "pair identity"));
+                        hints.push(Hint::new("t", "task trackers"));
+                        hints.push(Hint::new("b", "pair Linear"));
                         hints.push(Hint::new("e", "edit"));
                     } else {
                         hints.push(Hint::new("enter", "remote setup"));
@@ -716,7 +705,14 @@ impl App {
                 hints.push(dismiss());
                 hints
             }
-            Foreground::Setup(_) => vec![Hint::new("esc / q", "close")],
+            Foreground::Setup(setup) => match &setup.kind {
+                SetupKind::RemoteTrackers => vec![
+                    Hint::new("enter", "setup guide"),
+                    Hint::new("esc / q", "close"),
+                ],
+                SetupKind::RemoteTrackerGuide(_) => vec![Hint::new("esc / q", "back")],
+                _ => vec![Hint::new("esc / q", "close")],
+            },
             Foreground::Signals => vec![
                 Hint::new("tab", "action"),
                 Hint::new("enter", "validate"),
@@ -1058,14 +1054,12 @@ impl App {
                 }
             }
             KeyCode::Char('t') if self.panel.section == Section::Remotes => {
-                if matches!(
-                    self.selected_row().map(|row| row.kind),
-                    Some(RowKind::Remote { .. })
-                ) {
-                    self.foreground = Foreground::Setup(Setup::new(
-                        SetupKind::RemoteTracker,
-                        screens::settings::remote_tracker_setup_lines(),
-                    ));
+                if let Some(RowKind::Remote {
+                    address, trackers, ..
+                }) = self.selected_row().map(|row| row.kind)
+                {
+                    self.foreground =
+                        Foreground::Setup(Setup::tracker_list(address, trackers.as_deref()));
                 }
             }
             KeyCode::Char('n') if self.panel.section.grows() => {
@@ -1819,7 +1813,7 @@ impl App {
                 let status = match key_status {
                     RemoteKeyStatus::New | RemoteKeyStatus::Known => {
                         self.remember(&address, &announcement).await;
-                        self.note_remote_tracker(&address, &announcement);
+                        self.note_remote_trackers(&address, &announcement);
                         // It answered, but a machine still building what it needs
                         // cannot be given work, and that is worth knowing before you
                         // delegate to it.
@@ -1832,7 +1826,7 @@ impl App {
                     // forgetting the address first, which is a second act. Nothing
                     // the unaccepted answer said is shown either.
                     RemoteKeyStatus::Changed => {
-                        self.remote_trackers.remove(&address);
+                        self.clear_remote_trackers(&address);
                         RemoteStatus::Changed
                     }
                 };
@@ -1840,7 +1834,7 @@ impl App {
                 self.reload_remembered_keys().await;
             }
             RemoteAnswer::Silent { address, reason } => {
-                self.remote_trackers.remove(&address);
+                self.clear_remote_trackers(&address);
                 self.remote_status
                     .insert(address, RemoteStatus::Silent(reason));
             }
@@ -1866,7 +1860,7 @@ impl App {
                 match sighting.key_status {
                     RemoteKeyStatus::New => {
                         self.remember(address, said).await;
-                        self.note_remote_tracker(address, said);
+                        self.note_remote_trackers(address, said);
                         Some(format!(
                             "{} answered, and its key is remembered",
                             said.label
@@ -1874,14 +1868,14 @@ impl App {
                     }
                     RemoteKeyStatus::Known => {
                         self.remember(address, said).await;
-                        self.note_remote_tracker(address, said);
+                        self.note_remote_trackers(address, said);
                         Some(format!(
                             "{} answered with the same key as before",
                             said.label
                         ))
                     }
                     RemoteKeyStatus::Changed => {
-                        self.remote_trackers.remove(address);
+                        self.clear_remote_trackers(address);
                         Some(format!(
                             "{address} answered with a different key. d forgets the one you have, \
                              then enter accepts this one."
@@ -1890,23 +1884,29 @@ impl App {
                 }
             }
             Err(error) => {
-                self.remote_trackers.remove(address);
+                self.clear_remote_trackers(address);
                 Some(format!("{address} did not answer: {error}"))
             }
         };
         self.reload_remembered_keys().await;
     }
 
-    /// Note what an announcement said about a remote's shared Linear app. Called
+    /// Note what an announcement said about the trackers a remote runs. Called
     /// only for an answer whose key is accepted, so a changed key never lends its
     /// announcement any authority.
-    fn note_remote_tracker(&mut self, address: &str, announcement: &Announcement) {
-        let tracker = if announcement.linear_ready {
-            RemoteTracker::Ready
-        } else {
-            RemoteTracker::NotConnected
-        };
-        self.remote_trackers.insert(address.to_owned(), tracker);
+    fn note_remote_trackers(&mut self, address: &str, announcement: &Announcement) {
+        self.remote_trackers
+            .insert(address.to_owned(), announcement.trackers.clone());
+        if let Foreground::Setup(setup) = &mut self.foreground {
+            setup.refresh_trackers(address, Some(&announcement.trackers));
+        }
+    }
+
+    fn clear_remote_trackers(&mut self, address: &str) {
+        self.remote_trackers.remove(address);
+        if let Foreground::Setup(setup) = &mut self.foreground {
+            setup.refresh_trackers(address, None);
+        }
     }
 
     /// Write down what a remote said about itself.
@@ -2328,10 +2328,27 @@ impl App {
                 self.tracker_connect_attempt = self.tracker_connect_attempt.wrapping_add(1);
                 self.tracker_state = TrackerState::NotConnected;
             }
-            self.foreground = Foreground::Panel;
-            self.notice = None;
+            // A provider's guide steps back to the list it came from; everything
+            // else closes to the panel.
+            let stays = match &mut self.foreground {
+                Foreground::Setup(setup) => setup.back(),
+                _ => false,
+            };
+            if !stays {
+                self.foreground = Foreground::Panel;
+                self.notice = None;
+            }
         } else if let Foreground::Setup(setup) = &mut self.foreground {
-            setup.scroll(key);
+            match key.code {
+                KeyCode::Down | KeyCode::Char('j') if setup.is_picker() => {
+                    setup.move_selection(true)
+                }
+                KeyCode::Up | KeyCode::Char('k') if setup.is_picker() => {
+                    setup.move_selection(false)
+                }
+                KeyCode::Enter if setup.is_picker() => setup.open_selected(),
+                _ => setup.scroll(key),
+            }
         }
     }
 

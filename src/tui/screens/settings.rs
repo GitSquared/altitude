@@ -14,7 +14,7 @@
 
 use crate::tui::{
     App,
-    app::{CredentialStatus, RemoteStatus, RemoteTracker, TrackerState},
+    app::{CredentialStatus, RemoteStatus, TrackerState},
     popups::new_task::AGENTS,
     widgets::{chrome, palette, utils::Dot},
 };
@@ -35,7 +35,8 @@ use ratatui::{
 use crate::{
     agent::AgentKind,
     isolation::{EnvironmentDescription, ProfileSummary, REFRESH_AFTER},
-    remote::RemoteKey,
+    remote::{RemoteKey, TrackerConnection},
+    tracker::TrackerKind,
     tui::widgets::{
         text::{Field, FieldStyle, TextBox},
         utils::plain,
@@ -179,9 +180,9 @@ pub enum RowKind {
         status: RemoteStatus,
         /// Whether the configuration it holds is the one this client has.
         needs_config: bool,
-        /// What its last announcement said about its shared Linear app, when it
-        /// has answered. Absent while it has not.
-        tracker: Option<RemoteTracker>,
+        /// What its last announcement said its shared trackers are, when it has
+        /// answered. Absent while it has not, which is unknown rather than empty.
+        trackers: Option<Vec<TrackerConnection>>,
     },
     /// A tracker Altitude can bind an issue to. Today that is Linear, and the
     /// row says whether its live session is connected.
@@ -822,30 +823,16 @@ fn detail(panel: &Panel, view: &View, focused: bool, tick: usize) -> Paragraph<'
             remembered,
             status,
             needs_config,
-            tracker,
+            trackers,
         } => {
             let mut lines =
                 remote_connector(label, address, remembered.as_ref(), status, *needs_config)
                     .lines(heading, tick);
             lines.push(Line::from(""));
             lines.push(section_heading("Task tracker"));
-            match tracker {
-                Some(tracker) => {
-                    lines.push(tracker_status(*tracker, tick));
-                    if *tracker == RemoteTracker::Ready {
-                        lines.push(Line::styled(
-                            "Press b to pair your Linear identity.",
-                            palette::accent(),
-                        ));
-                    }
-                }
-                None => lines.push(Line::styled(
-                    "Connect to check its setup.",
-                    palette::muted(),
-                )),
-            }
+            lines.push(tracker_summary(trackers.as_deref(), tick));
             lines.push(Line::styled(
-                "Press t for shared Linear setup.",
+                "Press t to choose a task tracker.",
                 palette::accent(),
             ));
             lines
@@ -897,15 +884,21 @@ pub(in crate::tui) fn remote_setup_lines() -> Vec<Line<'static>> {
         ),
         Line::from(""),
         Line::styled(
-            "To use a shared Linear app on the remote, select it here and press t.",
+            "To set up a task tracker on the remote, select it here and press t.",
             palette::accent(),
         ),
     ]
 }
 
-/// Instructions for the shared Linear app a remote runs, opened from that
-/// remote's details.
-pub(in crate::tui) fn remote_tracker_setup_lines() -> Vec<Line<'static>> {
+/// The guide for one task tracker a remote runs, opened from the provider list.
+pub(in crate::tui) fn remote_tracker_setup_lines(kind: TrackerKind) -> Vec<Line<'static>> {
+    match kind {
+        TrackerKind::Linear => linear_remote_tracker_lines(),
+    }
+}
+
+/// Instructions for the shared Linear app a remote runs.
+fn linear_remote_tracker_lines() -> Vec<Line<'static>> {
     vec![
         section_heading("Shared Linear app"),
         Line::from(
@@ -1248,21 +1241,38 @@ fn remote_connector(
     }
 }
 
-/// The remote's shared tracker, under its primary details: a second status line
-/// in the same shape as the first, not a page of its own.
-fn tracker_status(tracker: RemoteTracker, tick: usize) -> Line<'static> {
-    let (ready, status) = match tracker {
-        RemoteTracker::Ready => (true, "Linear configured"),
-        RemoteTracker::NotConnected => (false, "not connected"),
+/// The mark for what a remote's announcement said about one tracker: connected,
+/// not connected, or unknown because the remote has not answered at all.
+pub(in crate::tui) fn tracker_dot(is_ready: Option<bool>) -> Dot {
+    match is_ready {
+        Some(true) => Dot::still('●', palette::primary()),
+        Some(false) => Dot::still('○', palette::muted()),
+        None => Dot::still('○', palette::muted()),
+    }
+}
+
+/// The remote's shared trackers, under its primary details: a status line in the
+/// same shape as the first, not a page of its own.
+fn tracker_summary(trackers: Option<&[TrackerConnection]>, tick: usize) -> Line<'static> {
+    let Some(connections) = trackers else {
+        let mut spans = tracker_dot(None).spans(tick);
+        spans.push(Span::styled("unknown", palette::muted().bold()));
+        return Line::from(spans);
     };
-    let mut spans = mark(ready, false).spans(tick);
+    let initialized = connections
+        .iter()
+        .filter(|connection| connection.is_ready)
+        .map(|connection| connection.provider.label())
+        .collect::<Vec<_>>();
+    if initialized.is_empty() {
+        let mut spans = tracker_dot(Some(false)).spans(tick);
+        spans.push(Span::styled("not connected", palette::muted().bold()));
+        return Line::from(spans);
+    }
+    let mut spans = tracker_dot(Some(true)).spans(tick);
     spans.push(Span::styled(
-        status,
-        if ready {
-            palette::primary().bold()
-        } else {
-            palette::muted().bold()
-        },
+        initialized.join(", "),
+        palette::primary().bold(),
     ));
     Line::from(spans)
 }
@@ -1556,7 +1566,7 @@ impl App {
                         .get(&address)
                         .cloned()
                         .unwrap_or(RemoteStatus::Unknown);
-                    let tracker = self.remote_trackers.get(&address).copied();
+                    let trackers = self.remote_trackers.get(&address).cloned();
                     Row {
                         // A name is what the remote called itself, so an address
                         // that has never answered shows itself instead.
@@ -1570,7 +1580,7 @@ impl App {
                             address,
                             remembered,
                             status,
-                            tracker,
+                            trackers,
                         },
                     }
                 }));

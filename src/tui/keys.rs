@@ -97,7 +97,7 @@ pub fn help_sections() -> Vec<HelpSection> {
                     "Remove an environment or remote, after confirmation",
                 ),
                 ("p (Remotes)", "Send your setup to the selected remote"),
-                ("t (Remotes)", "Set up the remote's shared Linear app"),
+                ("t (Remotes)", "Choose the remote's task tracker"),
                 ("b (Remotes)", "Pair your Linear identity with that remote"),
                 (
                     "PgUp / PgDn · Home",
@@ -154,14 +154,19 @@ pub fn help_sections() -> Vec<HelpSection> {
         HelpSection {
             title: "Setup helpers",
             bindings: &[
-                ("j/k · ↓/↑", "Scroll the setup instructions"),
+                (
+                    "j/k · ↓/↑",
+                    "Scroll the instructions, or choose a task tracker",
+                ),
+                ("Enter (task trackers)", "Open the selected tracker's guide"),
                 (
                     "PgUp / PgDn · Home / End",
                     "Scroll by a page, or to either end",
                 ),
                 (
                     "Esc / q",
-                    "Close the helper; cancel a pending browser sign-in",
+                    "Close the helper, or step back from a guide; cancel a pending \
+                     browser sign-in",
                 ),
             ],
         },

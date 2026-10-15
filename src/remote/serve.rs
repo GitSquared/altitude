@@ -45,13 +45,13 @@ use crate::{
     logging,
     remote::protocol::{TaskRequest, TaskSummary},
     remote::{
-        ClientRecord, InstallationKey, LinkServer,
+        ClientRecord, InstallationKey, LinkServer, TrackerConnection,
         announce::RemoteState,
         server::{BoxFuture, ServerParts, TaskHost},
     },
     task::{Task, TaskEventLoop, TaskService, TaskStore},
     task::{TaskHistoryEvent, TaskOperatorSignal},
-    tracker::{IssueReader, IssueSnapshot, automation::LinearAutomation, oauth},
+    tracker::{IssueReader, IssueSnapshot, TrackerKind, automation::LinearAutomation, oauth},
 };
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -798,9 +798,10 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
             }
         }
     }
-    // Announced to clients: a configured [linear] block is not enough, the app
-    // must have initialized, which is what the runtime above means.
-    let linear_ready = linear_runtime.is_some();
+    let trackers = vec![TrackerConnection {
+        provider: TrackerKind::Linear,
+        is_ready: linear_runtime.is_some(),
+    }];
 
     let identity = InstallationKey::load_or_create(config.data_dir().join("identity.key"))
         .map_err(io::Error::other)?;
@@ -867,7 +868,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         label,
         data_dir: config.data_dir().to_owned(),
         state: observed,
-        linear_ready,
+        trackers,
         tasks: host.clone(),
     })
     .await

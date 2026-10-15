@@ -26,6 +26,16 @@ pub enum TrackerKind {
     Linear,
 }
 
+impl TrackerKind {
+    pub const ALL: [Self; 1] = [Self::Linear];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Linear => "Linear",
+        }
+    }
+}
+
 /// The lifecycle transitions Altitude reports, named for their meaning rather
 /// than any tracker's workflow states.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]

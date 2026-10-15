@@ -24,6 +24,7 @@ use tokio::{
 };
 
 use super::LinkResult;
+use crate::tracker::TrackerKind;
 
 /// How long either side waits for the other before giving up.
 const EXCHANGE_LIMIT: Duration = Duration::from_secs(5);
@@ -48,9 +49,15 @@ pub struct Announcement {
     pub version: String,
     /// What it can do with a task right now.
     pub state: RemoteState,
-    /// Whether this machine runs a shared Linear app, as of startup. Setup takes
-    /// a restart, so this cannot change while serving.
-    pub linear_ready: bool,
+    pub trackers: Vec<TrackerConnection>,
+}
+
+/// Setup is checked when the remote starts; this does not establish public
+/// webhook reachability or continuing service health.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct TrackerConnection {
+    pub provider: TrackerKind,
+    pub is_ready: bool,
 }
 
 /// What a remote can do with a task right now.
