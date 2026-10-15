@@ -1,6 +1,6 @@
-//! The settings panel: what the interface shows, which agent drives a task, the
-//! credentials on this machine, the environments a task runs in, and the remotes
-//! it can be delegated to.
+//! The settings panel: what the interface shows, which agent drives a task and
+//! how it signs in, the git identity tasks commit with, the environments a task
+//! runs in, and the remotes it can be delegated to.
 //!
 //! Fullscreen, and three columns. The rail picks a list, the list picks a row,
 //! and the third column says what is known about it. Only the column holding the
@@ -33,7 +33,7 @@ use ratatui::{
 
 use crate::{
     agent::AgentKind,
-    isolation::{EnvironmentDescription, ProfileMount, REFRESH_AFTER},
+    isolation::{EnvironmentDescription, ProfileSummary, REFRESH_AFTER},
     remote::RemoteKey,
     tui::widgets::{
         text::{Field, FieldStyle, TextBox},
@@ -51,7 +51,7 @@ const GAP: u16 = 3;
 pub enum Section {
     Interface,
     Agents,
-    Credentials,
+    VersionControl,
     Trackers,
     Environments,
     Remotes,
@@ -61,7 +61,7 @@ impl Section {
     pub const ALL: [Section; 6] = [
         Self::Interface,
         Self::Agents,
-        Self::Credentials,
+        Self::VersionControl,
         Self::Trackers,
         Self::Environments,
         Self::Remotes,
@@ -71,7 +71,7 @@ impl Section {
         match self {
             Self::Interface => "Interface",
             Self::Agents => "Agents",
-            Self::Credentials => "Credentials",
+            Self::VersionControl => "Version Control",
             Self::Trackers => "Trackers",
             Self::Environments => "Environments",
             Self::Remotes => "Remotes",
@@ -175,8 +175,14 @@ pub enum RowKind {
         setup: String,
         is_default: bool,
     },
-    /// A coding agent, which may be the one new tasks use.
-    Agent(AgentKind),
+    /// A coding agent, which may be the one new tasks use, and the login a task
+    /// drives it with.
+    Agent {
+        kind: AgentKind,
+        credential: Credential,
+    },
+    /// The identity git commits under, read from the version-control profile.
+    GitIdentity(GitIdentity),
     /// Something a task logs in with: this installation's key, or a login a task
     /// is given.
     Credential(Credential),
@@ -201,17 +207,15 @@ pub enum RowKind {
 }
 
 impl Row {
-    /// The mark in front of this row, where what it says is asked rather than known:
-    /// a remote's address, or a profile's login.
+    /// The mark in front of this row, where what it says is asked rather than
+    /// known: a remote's address, a profile's login, or a git identity.
     fn dot(&self) -> Option<Dot> {
         match &self.kind {
-            RowKind::Remote { status, .. } => Some(status.dot()),
+            RowKind::Remote { status, .. } => Some(remote_mark(status)),
+            RowKind::Agent { credential, .. } => credential.dot(),
             RowKind::Credential(credential) => credential.dot(),
-            RowKind::Tracker { state } => Some(match state {
-                TrackerState::Connected => Dot::still('●', palette::good()),
-                TrackerState::Connecting => Dot::travelling('◌', palette::attention()),
-                TrackerState::NotConnected => Dot::still('○', palette::muted()),
-            }),
+            RowKind::GitIdentity(identity) => Some(mark(identity.is_set(), false)),
+            RowKind::Tracker { state } => Some(tracker_mark(*state)),
             _ => None,
         }
     }
@@ -220,7 +224,8 @@ impl Row {
     ///
     /// The built-in base does not: there is no form behind it and nothing to
     /// configure, so selecting it is already as far as it goes, and its
-    /// description is shown without a second step.
+    /// description is shown without a second step. A credential and a git
+    /// identity are acted on with enter rather than edited here.
     pub fn opens_form(&self) -> bool {
         matches!(
             self.kind,
@@ -250,7 +255,7 @@ impl Credential {
     /// installation's key is not signed in to, so it has nothing to say.
     fn dot(&self) -> Option<Dot> {
         match &self.kind {
-            CredentialKind::Profile { status, .. } => Some(status.dot()),
+            CredentialKind::Profile { status, .. } => Some(credential_mark(status)),
             CredentialKind::Installation { .. } => None,
         }
     }
@@ -269,8 +274,77 @@ pub enum CredentialKind {
         directory: String,
         /// What that profile's own check said about it, if it has been asked.
         status: CredentialStatus,
-        mounts: Vec<ProfileMount>,
     },
+}
+
+/// The identity and signing a task's git commits use.
+///
+/// Read from the version-control profile's git config, which every task using
+/// that profile shares. An absent field is one git has no value for, which is
+/// what a commit under a missing name or an unsigned commit looks like.
+#[derive(Clone, Debug, Default)]
+pub struct GitIdentity {
+    pub name: Option<String>,
+    pub email: Option<String>,
+    pub signing_key: Option<String>,
+    pub signs_commits: bool,
+}
+
+impl GitIdentity {
+    fn is_set(&self) -> bool {
+        self.name.is_some() && self.email.is_some()
+    }
+}
+
+/// The status vocabulary of this panel: one glyph for an answer that came back,
+/// one for an answer that did not, and one that travels while the answer is
+/// still out.
+///
+/// The colour is the terminal's own rather than green or red, so no status here
+/// claims a verdict the row has not earned: a filled mark is white, and an empty
+/// one is dim.
+fn mark(filled: bool, asking: bool) -> Dot {
+    let (glyph, style) = match (asking, filled) {
+        (true, _) => ('◌', palette::muted()),
+        (false, true) => ('●', palette::primary()),
+        (false, false) => ('○', palette::muted()),
+    };
+    if asking {
+        Dot::travelling(glyph, style)
+    } else {
+        Dot::still(glyph, style)
+    }
+}
+
+fn remote_mark(status: &RemoteStatus) -> Dot {
+    match status {
+        RemoteStatus::Asking | RemoteStatus::Syncing => mark(false, true),
+        RemoteStatus::Reached | RemoteStatus::Changed => mark(true, false),
+        RemoteStatus::Unknown | RemoteStatus::Silent(_) => mark(false, false),
+    }
+}
+
+fn credential_mark(status: &CredentialStatus) -> Dot {
+    match status {
+        CredentialStatus::Checking => mark(false, true),
+        CredentialStatus::Checked {
+            signed_in: true, ..
+        } => mark(true, false),
+        // Everything that is not a confirmed sign-in reads as not signed in, so
+        // a failed check and a check that has not run look the same here.
+        CredentialStatus::Unknown
+        | CredentialStatus::Checked {
+            signed_in: false, ..
+        } => mark(false, false),
+    }
+}
+
+fn tracker_mark(state: TrackerState) -> Dot {
+    match state {
+        TrackerState::Connecting => mark(false, true),
+        TrackerState::Connected => mark(true, false),
+        TrackerState::NotConnected => mark(false, false),
+    }
 }
 
 // ------------------------------------------------------------------ the state
@@ -289,7 +363,9 @@ impl Panel {
         Self {
             section: Section::ALL[0],
             selected: 0,
-            depth: Depth::List,
+            // The rail, so the panel opens on its shape rather than on the
+            // details of whatever row happens to be first.
+            depth: Depth::Rail,
             form: None,
             detail_scroll: 0,
         }
@@ -573,6 +649,10 @@ fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick:
         frame.render_widget(List::new(list_items), list_area);
     }
 
+    if rail_focused {
+        return;
+    }
+
     // The column ahead of the focus is drawn dimmed rather than withheld, so the
     // shape of the next step is visible before it is taken. A row with no deeper
     // level has no next step, so its column is already the one you are in.
@@ -601,85 +681,108 @@ fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick:
     );
 }
 
-/// How a remote is made, and what one is for.
-///
-/// Shown in the remotes detail and, when that list is empty, in place of the
-/// detail the missing row would otherwise give.
-fn remote_education_lines() -> Vec<Line<'static>> {
+// ------------------------------------------------------------------ the copy
+
+/// A small heading inside a page, so a page that has to say several things can
+/// be read in the order it means them.
+fn section_heading(text: &str) -> Line<'static> {
+    Line::styled(text.to_owned(), palette::primary().bold())
+}
+
+fn field(label: &str, value: String) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{label:<10}"), palette::muted()),
+        Span::styled(value, palette::primary()),
+    ])
+}
+
+fn bullet(text: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("• ", palette::muted()),
+        Span::raw(text.to_owned()),
+    ])
+}
+
+/// What a remote is, how to stand one up, and how its shared Linear app is
+/// installed. Shown in a remote's detail and, when the list is empty, in place
+/// of the detail the missing row would otherwise give.
+fn remote_guide_lines() -> Vec<Line<'static>> {
     vec![
-        Line::styled(
-            "A remote keeps tasks running after you close this client.",
-            palette::muted(),
+        section_heading("What this is"),
+        Line::from(
+            "Another machine that keeps running your tasks after you close Altitude. Send a \
+             task there when you want it to carry on while you are away.",
         ),
         Line::from(""),
+        section_heading("Set it up"),
         Line::from(vec![
-            Span::styled("On another machine, run ", palette::muted()),
+            Span::raw("1. On the remote, install Altitude and run "),
             Span::styled("altitude serve", palette::accent()),
-            Span::styled(" (uses Microsandbox). Default port: ", palette::muted()),
+            Span::raw("."),
+        ]),
+        Line::from(vec![
+            Span::raw("2. It listens on port "),
             Span::styled("25848", palette::accent()),
-            Span::styled(" (TCP and UDP).", palette::muted()),
+            Span::raw(" (TCP and UDP)."),
+        ]),
+        Line::from(vec![
+            Span::raw("3. Add its host:port here with "),
+            Span::styled("n", palette::accent()),
+            Span::raw("."),
+        ]),
+        Line::from(vec![
+            Span::raw("4. Press "),
+            Span::styled("p", palette::accent()),
+            Span::raw(" to send this machine's environments and logins to it."),
         ]),
         Line::from(""),
         Line::styled(
-            "Use a trusted network: reachable clients are admitted. Add its host:port here.",
+            "Use a trusted network: anyone who can reach the port is admitted.",
             palette::muted(),
         ),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("Press ", palette::muted()),
-            Span::styled("p", palette::accent()),
-            Span::styled(
-                " to send your environments and login profiles to the selected remote.",
-                palette::muted(),
-            ),
-        ]),
-        Line::from(""),
-        Line::styled(
-            "Linear on this remote — infrastructure owner",
-            palette::primary().bold(),
+        section_heading("Let it take Linear work"),
+        Line::from(
+            "A remote signs in as a shared Linear app, not as you. The remote's owner installs \
+             that app once, and every task delegated there acts as it.",
         ),
         Line::from(vec![
-            Span::styled("serve.toml: ", palette::muted()),
+            Span::raw("In serve.toml, set "),
             Span::styled("[linear]", palette::accent()),
-            Span::styled(" client_id and public_url.", palette::muted()),
+            Span::raw(" client_id and public_url."),
         ]),
         Line::from(vec![
-            Span::styled("Host env: ", palette::muted()),
+            Span::raw("In the remote's environment, set "),
             Span::styled("ALTITUDE_LINEAR_CLIENT_SECRET", palette::accent()),
-            Span::styled(" and ", palette::muted()),
+            Span::raw(" and "),
             Span::styled("ALTITUDE_LINEAR_WEBHOOK_SECRET", palette::accent()),
-            Span::styled(".", palette::muted()),
+            Span::raw("."),
         ]),
         Line::from(vec![
-            Span::styled("Install the shared bot: ", palette::muted()),
+            Span::raw("Install the app with "),
             Span::styled("altitude serve --connect-linear", palette::accent()),
-            Span::styled(".", palette::muted()),
+            Span::raw("."),
         ]),
         Line::from(vec![
-            Span::styled("Reverse proxy public HTTPS ", palette::muted()),
+            Span::raw("Proxy public HTTPS "),
             Span::styled("/linear/webhook", palette::accent()),
-            Span::styled(" and ", palette::muted()),
+            Span::raw(" and "),
             Span::styled("/linear/oauth/callback", palette::accent()),
-            Span::styled(" to ", palette::muted()),
+            Span::raw(" to "),
             Span::styled("127.0.0.1:25849", palette::accent()),
-            Span::styled(".", palette::muted()),
+            Span::raw("."),
         ]),
         Line::from(vec![
-            Span::styled("Subscribe the app to ", palette::muted()),
+            Span::raw("Subscribe the app to "),
             Span::styled("AgentSession", palette::accent()),
-            Span::styled(" and ", palette::muted()),
+            Span::raw(" and "),
             Span::styled("Issue", palette::accent()),
-            Span::styled(" events.", palette::muted()),
+            Span::raw(" events."),
         ]),
-        Line::from(""),
         Line::from(vec![
-            Span::styled("Then connect Linear in ", palette::muted()),
-            Span::styled("Settings ▸ Trackers", palette::accent()),
-            Span::styled(", press ", palette::muted()),
-            Span::styled("p", palette::accent()),
-            Span::styled(" to push your setup, and ", palette::muted()),
+            Span::raw("Then press "),
             Span::styled("b", palette::accent()),
-            Span::styled(" to pair this machine with the remote.", palette::muted()),
+            Span::raw(" here to pair this machine with the remote."),
         ]),
     ]
 }
@@ -699,7 +802,7 @@ fn detail(panel: &Panel, view: &View, focused: bool) -> Paragraph<'static> {
     let Some(row) = panel.selected_row(view) else {
         // The only list that can be empty teaches rather than stays blank.
         if panel.section == Section::Remotes {
-            return Paragraph::new(remote_education_lines()).wrap(Wrap { trim: true });
+            return Paragraph::new(remote_guide_lines()).wrap(Wrap { trim: true });
         }
         return Paragraph::new(Span::styled("", palette::muted()));
     };
@@ -714,7 +817,7 @@ fn detail(panel: &Panel, view: &View, focused: bool) -> Paragraph<'static> {
                 lines.push(Line::from(""));
                 lines.push(Line::styled(
                     "New tasks use this environment by default.",
-                    palette::good(),
+                    palette::primary(),
                 ));
             }
             lines.push(Line::from(""));
@@ -729,17 +832,17 @@ fn detail(panel: &Panel, view: &View, focused: bool) -> Paragraph<'static> {
             }
             lines
         }
-        RowKind::Agent(kind) => vec![
-            heading(label.clone()),
-            Line::from(""),
-            Line::styled(
-                match kind {
-                    AgentKind::Pi => "Pi by Earendil",
-                    AgentKind::Claude => "Claude by Anthropic",
-                },
-                palette::primary(),
-            ),
-        ],
+        RowKind::Agent { kind, credential } => {
+            let mut lines = vec![
+                heading(label.clone()),
+                Line::from(""),
+                Line::styled(agent_author(*kind), palette::primary()),
+                Line::from(""),
+            ];
+            lines.extend(credential_body(credential));
+            lines
+        }
+        RowKind::GitIdentity(identity) => git_identity_lines(identity, heading),
         RowKind::Credential(credential) => credential_lines(credential, heading),
         RowKind::Tracker { state } => tracker_lines(*state, &view.tracker_profile_dir, heading),
         RowKind::Switch { setting, on } => vec![
@@ -748,7 +851,7 @@ fn detail(panel: &Panel, view: &View, focused: bool) -> Paragraph<'static> {
             Line::styled(
                 if *on { "on" } else { "off" },
                 if *on {
-                    palette::good()
+                    palette::primary()
                 } else {
                     palette::muted()
                 },
@@ -765,61 +868,49 @@ fn detail(panel: &Panel, view: &View, focused: bool) -> Paragraph<'static> {
             let mut lines = vec![
                 heading(label),
                 Line::from(""),
-                Line::from(vec![
-                    Span::styled("address   ", palette::muted()),
-                    address.clone().into(),
-                ]),
+                field("address", address.clone()),
             ];
             match status {
                 RemoteStatus::Silent(reason) => lines.push(Line::styled(
-                    format!("did not answer: {reason}"),
-                    palette::bad(),
+                    format!("did not answer — {reason}"),
+                    palette::muted(),
                 )),
-                RemoteStatus::Asking => lines.push(Line::styled("asking…", palette::attention())),
+                RemoteStatus::Asking => lines.push(Line::styled("asking…", palette::muted())),
                 RemoteStatus::Syncing => lines.push(Line::styled(
                     "syncing — it is building what it needs to run a task",
-                    palette::attention(),
+                    palette::muted(),
                 )),
                 RemoteStatus::Changed => lines.push(Line::styled(
-                    "it answered with a different key than the one you have. \
-                         d forgets the old one, then enter accepts this one.",
-                    palette::bad(),
+                    "it answered with a different key than the one you have. Press d to forget \
+                     the old one, then enter to accept this one.",
+                    palette::muted(),
                 )),
                 RemoteStatus::Unknown | RemoteStatus::Reached => {}
             }
             if *needs_config && *status == RemoteStatus::Reached {
                 lines.push(Line::styled(
-                    "it does not hold this configuration yet — p sends it",
-                    palette::attention(),
+                    "it does not hold this configuration yet — press p to send it",
+                    palette::muted(),
                 ));
             }
             lines.push(Line::from(""));
             match remembered {
                 Some(key) => {
-                    lines.push(Line::from(vec![
-                        Span::styled("key       ", palette::muted()),
-                        key.key.clone().into(),
-                    ]));
-                    lines.push(Line::from(vec![
-                        Span::styled("version   ", palette::muted()),
-                        key.version.clone().into(),
-                    ]));
-                    lines.push(Line::from(vec![
-                        Span::styled("met       ", palette::muted()),
-                        met_ago(key.seen_at_ms).into(),
-                    ]));
+                    lines.push(field("key", key.key.clone()));
+                    lines.push(field("version", key.version.clone()));
+                    lines.push(field("met", met_ago(key.seen_at_ms)));
                 }
                 None => {
                     lines.push(Line::styled("never met", palette::muted()));
                     lines.push(Line::styled(
                         "No key is remembered for this address yet. Press enter to reach it, \
-                             which records the key it answers with.",
+                         which records the key it answers with.",
                         palette::muted(),
                     ));
                 }
             }
             lines.push(Line::from(""));
-            lines.extend(remote_education_lines());
+            lines.extend(remote_guide_lines());
             lines
         }
     };
@@ -894,6 +985,176 @@ fn base_lines(
     lines
 }
 
+/// What a credential is and what to do about it.
+fn credential_lines(
+    credential: &Credential,
+    heading: impl Fn(String) -> Line<'static>,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![heading(credential.label.clone()), Line::from("")];
+    lines.extend(credential_body(credential));
+    lines
+}
+
+fn credential_body(credential: &Credential) -> Vec<Line<'static>> {
+    match &credential.kind {
+        CredentialKind::Installation {
+            label,
+            key,
+            data_dir,
+        } => vec![
+            Line::styled("This installation", palette::primary()),
+            Line::from(""),
+            field("label", label.clone()),
+            field("key", key.clone()),
+            field("state", data_dir.clone()),
+            Line::from(""),
+            Line::from(
+                "The key that identifies this Altitude installation to a remote. Pairing connects \
+                 this identity to your Linear account on that remote.",
+            ),
+            Line::from(""),
+            Line::styled(
+                "Made on first run. There is nothing to edit here.",
+                palette::muted(),
+            ),
+        ],
+        CredentialKind::Profile {
+            profile,
+            directory,
+            status,
+            ..
+        } => {
+            let mut lines = vec![
+                Line::styled(profile_purpose(profile), palette::primary()),
+                Line::from(""),
+            ];
+            lines.extend(status_lines(status));
+            lines.push(Line::from(""));
+            lines.push(Line::styled(profile_action(profile), palette::accent()));
+            lines.push(Line::from(""));
+            lines.push(Line::from("Sign in once; your tasks and remotes use this account. Close the setup shell with ctrl-a."));
+            lines.push(Line::from(""));
+            lines.push(field("saved at", directory.clone()));
+            lines.push(Line::from(""));
+            lines.push(Line::styled(
+                "Altitude does not display your tokens or passwords.",
+                palette::muted(),
+            ));
+            lines
+        }
+    }
+}
+
+/// What a profile is for, in one line, so a page opens by saying what the
+/// operator is looking at.
+fn profile_purpose(profile: &str) -> &'static str {
+    match profile {
+        "vcs/github" => "The GitHub CLI login your tasks clone, push, and read pull requests with.",
+        "agents/pi" => "Pi uses your provider account to run tasks.",
+        "agents/claude" => "Claude Code uses your account to run tasks.",
+        _ => "A login a task is given.",
+    }
+}
+
+/// The next step for a profile's login, named so the page is actionable rather
+/// than only descriptive.
+fn profile_action(profile: &str) -> &'static str {
+    match profile {
+        "vcs/github" => "Press enter for a shell, then run gh auth login.",
+        "agents/pi" => "Press enter, run pi, then use /login to connect your provider.",
+        "agents/claude" => "Press enter, run claude, and follow its sign-in instructions.",
+        _ => "Press enter to open its setup shell.",
+    }
+}
+
+/// What a profile's own check said about it, as its page reads it.
+///
+/// The command's own words are kept: a check is a command the profile's CLI knows how
+/// to answer, and paraphrasing it would be Altitude guessing at what it means. A
+/// check that failed or never ran is shown as not signed in, because that is the
+/// only thing the operator can act on.
+fn status_lines(status: &CredentialStatus) -> Vec<Line<'static>> {
+    match status {
+        CredentialStatus::Checking => vec![Line::styled("checking…", palette::muted())],
+        CredentialStatus::Checked { signed_in, output } => {
+            let mut lines = vec![Line::styled(
+                if *signed_in {
+                    "signed in"
+                } else {
+                    "not signed in"
+                },
+                if *signed_in {
+                    palette::primary()
+                } else {
+                    palette::muted()
+                },
+            )];
+            let output = plain(output);
+            if *signed_in && !output.trim().is_empty() {
+                lines.push(Line::from(""));
+                lines.extend(output.lines().map(|line| Line::from(line.to_owned())));
+            }
+            lines
+        }
+        CredentialStatus::Unknown => vec![Line::styled("not signed in", palette::muted())],
+    }
+}
+
+/// The git identity and signing a task commits with, and the next step to set
+/// them.
+fn git_identity_lines(
+    identity: &GitIdentity,
+    heading: impl Fn(String) -> Line<'static>,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![heading("Git identity".to_owned()), Line::from("")];
+    lines.push(match (identity.is_set(), identity.signs_commits) {
+        (true, true) => Line::styled("set · commits are signed", palette::primary()),
+        (true, false) => Line::styled("set · commits are not signed", palette::primary()),
+        (false, _) => Line::styled("not set", palette::muted()),
+    });
+    lines.push(Line::from(""));
+    lines.push(field(
+        "name",
+        identity.name.clone().unwrap_or_else(|| "—".to_owned()),
+    ));
+    lines.push(field(
+        "email",
+        identity.email.clone().unwrap_or_else(|| "—".to_owned()),
+    ));
+    lines.push(field(
+        "signing",
+        match (&identity.signing_key, identity.signs_commits) {
+            (Some(key), true) => key.clone(),
+            (Some(key), false) => format!("{key} (not used yet)"),
+            (None, _) => "—".to_owned(),
+        },
+    ));
+    lines.push(Line::from(""));
+    lines.push(section_heading("What this is"));
+    lines.push(Line::from(
+        "The name, email, and signing key your tasks commit with. They come from the \
+         version-control profile's git config, so every task that uses it commits the same \
+         way.",
+    ));
+    lines.push(Line::from(""));
+    lines.push(section_heading("What to do"));
+    lines.push(Line::from(vec![
+        Span::raw("Press enter for a shell, then set them with "),
+        Span::styled("git config --global user.name", palette::accent()),
+        Span::raw(" and "),
+        Span::styled("git config --global user.email", palette::accent()),
+        Span::raw("."),
+    ]));
+    lines.push(Line::from(vec![
+        Span::raw("To sign commits, also set "),
+        Span::styled("user.signingkey", palette::accent()),
+        Span::raw(" and "),
+        Span::styled("commit.gpgsign true", palette::accent()),
+        Span::raw(", with the matching signing key available in this setup shell."),
+    ]));
+    lines
+}
+
 /// How to connect Linear, and what Altitude does with the connection.
 ///
 /// The page names the profile directory and never its contents. Signing in runs
@@ -906,167 +1167,52 @@ fn tracker_lines(
     heading: impl Fn(String) -> Line<'static>,
 ) -> Vec<Line<'static>> {
     let (status, style) = match state {
-        TrackerState::Connected => ("connected", palette::good()),
-        TrackerState::Connecting => ("finishing sign-in in your browser", palette::attention()),
-        TrackerState::NotConnected => ("not connected", palette::attention()),
+        TrackerState::Connected => ("connected", palette::primary()),
+        TrackerState::Connecting => ("finishing sign-in in your browser", palette::muted()),
+        TrackerState::NotConnected => ("not connected", palette::muted()),
     };
     let mut lines = vec![
         heading("Linear".to_owned()),
         Line::from(""),
         Line::styled(status, style),
         Line::from(""),
+        section_heading("What this is"),
         Line::from(
-            "Press enter to connect in your browser. Uses Linear's official MCP server; \
-             requires Node.js (npx).",
+            "Your own Linear workspace. Altitude reads the issues you point it at and reports \
+             progress as you, through your browser sign-in.",
         ),
         Line::from(""),
-        Line::styled("profile", palette::muted()),
-        Line::styled(profile_dir.display().to_string(), palette::primary()),
-        Line::from(""),
-        Line::from("Login stays outside task capsules. Altitude controls tracker writes."),
-        Line::from(""),
-        Line::styled(
-            "Delegating Linear work to a remote uses that remote's shared app; see Remotes.",
-            palette::muted(),
-        ),
+        section_heading("What to do"),
     ];
     match state {
-        TrackerState::Connected => {}
+        TrackerState::Connected => {
+            lines.push(Line::styled(
+                "You are connected. Press enter again to sign in as someone else.",
+                palette::muted(),
+            ));
+        }
         TrackerState::Connecting => {
-            lines.push(Line::from(""));
             lines.push(Line::styled(
-                "Press enter again to give up on this sign-in.",
+                "Finish in your browser. Press enter again to give up on this sign-in.",
                 palette::muted(),
             ));
         }
-        TrackerState::NotConnected => {}
+        TrackerState::NotConnected => {
+            lines.push(Line::styled(
+                "Press enter to sign in with your browser. Needs Node.js (npx): Altitude runs \
+                 Linear's official MCP server for the connection.",
+                palette::muted(),
+            ));
+        }
     }
+    lines.push(Line::from(""));
+    lines.push(field("profile", profile_dir.display().to_string()));
+    lines.push(Line::from(""));
+    lines.push(bullet("The login stays outside task sandboxes."));
+    lines.push(bullet(
+        "To let a remote machine take Linear work, it needs its own shared app. See Remotes.",
+    ));
     lines
-}
-
-/// What is known about one credential.
-fn credential_lines(
-    credential: &Credential,
-    heading: impl Fn(String) -> Line<'static>,
-) -> Vec<Line<'static>> {
-    let mut lines = vec![heading(credential.label.clone()), Line::from("")];
-    match &credential.kind {
-        CredentialKind::Installation {
-            label,
-            key,
-            data_dir,
-        } => {
-            lines.push(Line::from(vec![
-                Span::styled("label     ", palette::muted()),
-                label.clone().into(),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled("key       ", palette::muted()),
-                key.clone().into(),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled("state     ", palette::muted()),
-                data_dir.clone().into(),
-            ]));
-            lines.push(Line::from(""));
-            lines.push(Line::styled(
-                "The key names this machine and cannot be edited here. It is what a tracker's \
-                 actor is mapped to, and what a remote checks.",
-                palette::muted(),
-            ));
-        }
-        CredentialKind::Profile {
-            profile,
-            directory,
-            status,
-            mounts,
-        } => {
-            lines.extend(status_lines(status));
-            lines.push(Line::from(vec![
-                Span::styled("profile   ", palette::muted()),
-                (*profile).into(),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled("on disk   ", palette::muted()),
-                directory.clone().into(),
-            ]));
-            if !mounts.is_empty() {
-                lines.push(Line::from(""));
-                lines.push(Line::styled("A task sees", palette::muted()));
-                // A directory at the profile's root is mounted as the profile itself,
-                // so there is nothing to say after the arrow.
-                lines.extend(mounts.iter().map(|mount| {
-                    Line::from(match mount.path.is_empty() {
-                        true => mount.guest.clone(),
-                        false => format!("{}  →  {}", mount.guest, mount.path),
-                    })
-                }));
-            }
-            lines.push(Line::from(""));
-            lines.push(Line::styled(
-                "A login is kept here and mounted into every task, so it survives between them. \
-                 Altitude shows where it lives and never its contents.",
-                palette::muted(),
-            ));
-            lines.push(Line::from(""));
-            lines.push(Line::styled(
-                "Press enter for a shell in a sandbox to sign in in. It is thrown away when you \
-                 leave it; the login is not.",
-                palette::good(),
-            ));
-        }
-    }
-    lines
-}
-
-/// What a profile's own check said about it, as its page reads it.
-///
-/// The command's own words are kept: a check is a command the profile's CLI knows how
-/// to answer, and paraphrasing it would be Altitude guessing at what it means.
-fn status_lines(status: &CredentialStatus) -> Vec<Line<'static>> {
-    match status {
-        CredentialStatus::Unknown => vec![Line::styled("not checked yet", palette::muted())],
-        CredentialStatus::Checking => {
-            vec![Line::styled(
-                "asking its own command…",
-                palette::attention(),
-            )]
-        }
-        CredentialStatus::Checked { signed_in, output } => {
-            let mut lines = vec![Line::styled(
-                if *signed_in {
-                    "signed in"
-                } else {
-                    "not signed in"
-                },
-                if *signed_in {
-                    palette::good()
-                } else {
-                    palette::muted()
-                },
-            )];
-            let output = plain(output);
-            if !output.trim().is_empty() {
-                lines.push(Line::from(""));
-                lines.extend(output.lines().map(|line| Line::from(line.to_owned())));
-            }
-            lines
-        }
-        CredentialStatus::NotBuilt => vec![
-            Line::styled("not asked here", palette::attention()),
-            Line::from(""),
-            Line::styled(
-                "The environment this login needs is not built on this machine yet. \
-                 Press enter to build it and sign in.",
-                palette::muted(),
-            ),
-        ],
-        CredentialStatus::Silent(reason) => vec![
-            Line::styled("could not be asked", palette::bad()),
-            Line::from(""),
-            Line::styled(reason.clone(), palette::muted()),
-        ],
-    }
 }
 
 /// How long ago something was seen, coarsely: the exact minute is not the point.
@@ -1090,6 +1236,21 @@ fn counted(count: i64, unit: &str) -> String {
         format!("1 {unit}")
     } else {
         format!("{count} {unit}s")
+    }
+}
+
+/// Which profile a coding agent's login lives in.
+fn agent_profile(kind: AgentKind) -> &'static str {
+    match kind {
+        AgentKind::Pi => "agents/pi",
+        AgentKind::Claude => "agents/claude",
+    }
+}
+
+fn agent_author(kind: AgentKind) -> &'static str {
+    match kind {
+        AgentKind::Pi => "Pi by Earendil",
+        AgentKind::Claude => "Claude by Anthropic",
     }
 }
 
@@ -1182,23 +1343,46 @@ impl App {
                     on: self.keyboard_hints(),
                 },
             }],
-            Section::Agents => AGENTS
-                .into_iter()
-                .map(|kind| Row {
-                    label: kind.to_string(),
-                    note: (self.agent() == Some(kind)).then_some("(default)"),
-                    kind: RowKind::Agent(kind),
-                })
-                .collect(),
-            Section::Credentials => self
-                .credentials()
-                .into_iter()
-                .map(|credential| Row {
-                    label: credential.label.clone(),
+            Section::Agents => {
+                let mut rows = AGENTS
+                    .into_iter()
+                    .map(|kind| Row {
+                        label: kind.to_string(),
+                        note: (self.agent() == Some(kind)).then_some("(default)"),
+                        kind: RowKind::Agent {
+                            kind,
+                            credential: self.agent_credential(kind),
+                        },
+                    })
+                    .collect::<Vec<_>>();
+                // The installation is the identity every agent runs under, so it
+                // is listed with them rather than in a section of its own.
+                rows.push(Row {
+                    label: "This installation".to_owned(),
                     note: None,
-                    kind: RowKind::Credential(credential),
-                })
-                .collect(),
+                    kind: RowKind::Credential(self.installation_credential()),
+                });
+                rows
+            }
+            Section::VersionControl => {
+                let identity = self.git_identity();
+                let mut rows = vec![Row {
+                    label: "Git identity".to_owned(),
+                    note: identity.is_set().then_some("(set)"),
+                    kind: RowKind::GitIdentity(identity),
+                }];
+                rows.extend(
+                    self.profiles
+                        .iter()
+                        .filter(|profile| profile.profile.starts_with("vcs/"))
+                        .map(|profile| Row {
+                            label: profile.display.to_owned(),
+                            note: None,
+                            kind: RowKind::Credential(self.profile_credential(profile)),
+                        }),
+                );
+                rows
+            }
             Section::Trackers => vec![Row {
                 label: "Linear".to_owned(),
                 note: Some(match self.tracker_state {
@@ -1276,15 +1460,11 @@ impl App {
         }
     }
 
-    /// The credentials this machine holds: the installation, then each login a
-    /// task is given.
-    ///
-    /// Names and places only. A credential is never read, and never shown.
-    fn credentials(&self) -> Vec<Credential> {
-        let mut credentials = Vec::new();
+    /// This installation's key and where its state lives.
+    fn installation_credential(&self) -> Credential {
         let identity = self.config.identity();
-        credentials.push(Credential {
-            label: "Altitude".to_owned(),
+        Credential {
+            label: "This installation".to_owned(),
             kind: CredentialKind::Installation {
                 label: identity
                     .as_ref()
@@ -1296,24 +1476,48 @@ impl App {
                     .unwrap_or_else(|error| format!("unreadable: {error}")),
                 data_dir: self.config.data_dir().display().to_string(),
             },
-        });
-        for profile in self.profiles.iter() {
-            let directory = self.config.profile_dir(profile.profile);
-            credentials.push(Credential {
-                label: profile.display.to_owned(),
-                kind: CredentialKind::Profile {
-                    profile: profile.profile,
-                    directory: directory.display().to_string(),
-                    status: self
-                        .credential_status
-                        .get(profile.profile)
-                        .cloned()
-                        .unwrap_or_default(),
-                    mounts: profile.mounts.clone(),
-                },
-            });
         }
-        credentials
+    }
+
+    /// One profile's login, with the place it lives and what its own check last
+    /// said. Names and places only: a credential is never read, and never shown.
+    fn profile_credential(&self, profile: &ProfileSummary) -> Credential {
+        Credential {
+            label: profile.display.to_owned(),
+            kind: CredentialKind::Profile {
+                profile: profile.profile,
+                directory: self
+                    .config
+                    .profile_dir(profile.profile)
+                    .display()
+                    .to_string(),
+                status: self
+                    .credential_status
+                    .get(profile.profile)
+                    .cloned()
+                    .unwrap_or_default(),
+            },
+        }
+    }
+
+    /// The login of the profile a coding agent runs under.
+    fn agent_credential(&self, kind: AgentKind) -> Credential {
+        let profile = agent_profile(kind);
+        match self
+            .profiles
+            .iter()
+            .find(|summary| summary.profile == profile)
+        {
+            Some(summary) => self.profile_credential(summary),
+            None => Credential {
+                label: kind.to_string(),
+                kind: CredentialKind::Profile {
+                    profile,
+                    directory: String::new(),
+                    status: CredentialStatus::default(),
+                },
+            },
+        }
     }
 
     /// The addresses the settings file configures.
@@ -1328,8 +1532,14 @@ impl App {
     pub(in crate::tui) fn row_count(&self) -> usize {
         match self.panel.section {
             Section::Interface => 1,
-            Section::Agents => 2,
-            Section::Credentials => self.profiles.len() + 1,
+            Section::Agents => AGENTS.len() + 1,
+            Section::VersionControl => {
+                1 + self
+                    .profiles
+                    .iter()
+                    .filter(|profile| profile.profile.starts_with("vcs/"))
+                    .count()
+            }
             Section::Trackers => 1,
             Section::Environments => self.environments().len(),
             Section::Remotes => self.configured_remotes().len(),

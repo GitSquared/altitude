@@ -6,24 +6,29 @@
 //! hands over a shell in the sandbox a task would get, and the CLI writes where
 //! the profile is mounted.
 
-use tokio::sync::mpsc;
-
-use crate::isolation::{
-    CREDENTIAL_PREFIX, Command, CommandEvent, CredentialReport, Environment, IsolationEngine,
-    IsolationError, Unwatched,
+use std::{
+    sync::Arc,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
-use crate::{agent::AgentKind, vcs::GitHub};
+use tokio::{net::UnixListener, sync::mpsc};
 
-use super::{TaskService, TaskServiceError};
+use crate::isolation::{
+    CREDENTIAL_PREFIX, Command, CommandEvent, CredentialReport, Environment, EnvironmentProgress,
+    EnvironmentProgressSink, IsolationEngine, IsolationError, Unwatched, private_directory,
+};
 
-/// The name a profile's credential shell has.
-///
-/// Named rather than anonymous because it can be asked for before there is a session
-/// to hold: a shell whose opening nobody is waiting for any more still has to be
-/// reachable to be thrown away.
-pub fn credential_shell_id(profile: &str) -> String {
-    format!("{CREDENTIAL_PREFIX}shell-{}", profile.replace('/', "-"))
+use crate::{
+    agent::{AgentKind, mcp, tools::AgentToolRegistry},
+    vcs::GitHub,
+};
+
+use super::{AgentChannel, TaskService, TaskServiceError};
+
+pub fn credential_shell_id() -> String {
+    // Keep the local socket path below macOS's Unix socket limit.
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    format!("{CREDENTIAL_PREFIX}shell-{}", &nonce[..16])
 }
 
 /// The name the sandbox a profile's login is checked in has.
@@ -37,25 +42,74 @@ fn credential_check_id(profile: &str) -> String {
 
 /// What came back from a credential shell.
 pub enum CredentialShellEvent {
+    Preparing {
+        id: String,
+        label: String,
+    },
     /// A terminal is running in a sandbox, and here it is.
     Opened(CredentialShell),
     /// No shell: the sandbox could not be made.
-    Unavailable(String),
+    Unavailable {
+        id: String,
+        reason: String,
+    },
     /// What the shell printed, and which sandbox printed it, because that is where
     /// the terminal drawing it is kept.
-    Output { id: String, bytes: Vec<u8> },
+    Output {
+        id: String,
+        bytes: Vec<u8>,
+    },
     /// The shell ended, with the status it ended with. Its sandbox is still there
     /// until it is closed.
-    Exited(i32),
+    Exited {
+        id: String,
+        code: i32,
+    },
     /// The shell broke.
-    Failed(String),
+    Failed {
+        id: String,
+        error: String,
+    },
 }
 
 impl CredentialShellEvent {
     /// Whether this is the last thing the shell will say. The first two answer the
     /// question of opening one, and a shell that never opened says nothing else.
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Opened(shell) => shell.id(),
+            Self::Preparing { id, .. }
+            | Self::Unavailable { id, .. }
+            | Self::Output { id, .. }
+            | Self::Exited { id, .. }
+            | Self::Failed { id, .. } => id,
+        }
+    }
+
     pub fn is_last(&self) -> bool {
-        matches!(self, Self::Exited(_) | Self::Failed(_))
+        matches!(self, Self::Exited { .. } | Self::Failed { .. })
+    }
+}
+
+/// Says that a credential shell being prepared is no longer wanted.
+///
+/// Opening one can wait on an environment build, and the operator can leave the page
+/// long before it opens. Without this, the build would finish into a sandbox nobody
+/// can reach and leave it behind.
+#[derive(Clone, Default)]
+pub struct CredentialShellCancel(Arc<AtomicBool>);
+
+impl CredentialShellCancel {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
     }
 }
 
@@ -79,6 +133,25 @@ impl CredentialShell {
     }
 }
 
+struct CredentialProgress<'a> {
+    id: &'a str,
+    events: &'a mpsc::UnboundedSender<CredentialShellEvent>,
+}
+
+impl EnvironmentProgressSink for CredentialProgress<'_> {
+    fn report(&self, progress: EnvironmentProgress) {
+        let _ = self.events.send(CredentialShellEvent::Preparing {
+            id: self.id.to_owned(),
+            label: format!(
+                "{} ({}/{})",
+                progress.label,
+                progress.completed + 1,
+                progress.total
+            ),
+        });
+    }
+}
+
 impl<E> TaskService<E>
 where
     E: IsolationEngine + Clone + 'static,
@@ -92,16 +165,22 @@ where
     /// throw away the one tasks are using.
     ///
     /// What the shell prints comes back on `events`: a shell outlives no frame, and
-    /// the interface draws it while it runs.
+    /// the interface draws it while it runs. `cancel` says the shell is no longer
+    /// wanted while it is being prepared, in which case nothing is left behind.
     pub async fn open_credential_shell(
         &self,
+        id: String,
         environment: Environment,
         profile: &'static str,
         chosen: Option<AgentKind>,
+        cancel: CredentialShellCancel,
         events: &mpsc::UnboundedSender<CredentialShellEvent>,
-    ) -> Result<CredentialShell, TaskServiceError> {
-        let id = credential_shell_id(profile);
+    ) -> Result<(), TaskServiceError> {
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
         let agent = self.credential_agent(profile, chosen);
+        self.bind_credential_channel(&id)?;
         let command = self
             .isolation
             .credential_shell(
@@ -112,15 +191,39 @@ where
                     GitHub::environment_recipe(),
                 ],
                 profile,
-                &Unwatched,
+                &CredentialProgress { id: &id, events },
             )
-            .await
-            .map_err(TaskServiceError::Isolation)?;
-        let mut session = self
-            .isolation
-            .run_command(id.clone(), command)
-            .await
-            .map_err(TaskServiceError::Isolation)?;
+            .await;
+        let command = match command {
+            Ok(command) => command,
+            Err(error) => {
+                self.discard_credential_shell(&id).await;
+                return Err(TaskServiceError::Isolation(error));
+            }
+        };
+        if cancel.is_cancelled() {
+            self.discard_credential_shell(&id).await;
+            return Ok(());
+        }
+        let mut session = match self.isolation.run_command(id.clone(), command).await {
+            Ok(session) => session,
+            Err(error) => {
+                self.discard_credential_shell(&id).await;
+                return Err(TaskServiceError::Isolation(error));
+            }
+        };
+        if cancel.is_cancelled() {
+            self.discard_credential_shell(&id).await;
+            return Ok(());
+        }
+        let opened = CredentialShell {
+            id: id.clone(),
+            commands: session.commands.clone(),
+        };
+        if events.send(CredentialShellEvent::Opened(opened)).is_err() {
+            self.discard_credential_shell(&id).await;
+            return Ok(());
+        }
         let events = events.clone();
         let said_by = id.clone();
         tokio::spawn(async move {
@@ -130,8 +233,14 @@ where
                         id: said_by.clone(),
                         bytes,
                     },
-                    CommandEvent::Exited(code) => CredentialShellEvent::Exited(code),
-                    CommandEvent::Failed(error) => CredentialShellEvent::Failed(error),
+                    CommandEvent::Exited(code) => CredentialShellEvent::Exited {
+                        id: said_by.clone(),
+                        code,
+                    },
+                    CommandEvent::Failed(error) => CredentialShellEvent::Failed {
+                        id: said_by.clone(),
+                        error,
+                    },
                 };
                 let last = event.is_last();
                 if events.send(event).is_err() || last {
@@ -139,10 +248,56 @@ where
                 }
             }
         });
-        Ok(CredentialShell {
-            id,
-            commands: session.commands,
-        })
+        Ok(())
+    }
+
+    /// Bind the MCP channel a credential shell's harness dials.
+    ///
+    /// The profile a shell mounts names Altitude's bridge, and without a channel the
+    /// bridge fails and the harness reports a server that would not start. The endpoint
+    /// serves no tools, because a shell sets up a login and has no task for tools to act
+    /// on.
+    ///
+    fn bind_credential_channel(&self, id: &str) -> Result<(), TaskServiceError> {
+        self.release_agent_channel(id);
+        private_directory(&self.agent_channel_dir)
+            .map_err(|error| TaskServiceError::Isolation(IsolationError::new(error.to_string())))?;
+        let path = self.agent_channel_dir.join(format!("{id}.sock"));
+        let listener = UnixListener::bind(&path)
+            .map_err(|error| TaskServiceError::Isolation(IsolationError::new(error.to_string())))?;
+        let handle = tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        tokio::spawn(async move {
+                            let (reader, writer) = stream.into_split();
+                            if let Err(error) =
+                                mcp::serve_agent(AgentToolRegistry::new(), reader, writer).await
+                            {
+                                tracing::debug!(%error, "a credential shell's MCP session ended");
+                            }
+                        });
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "a credential shell's MCP channel stopped listening");
+                        break;
+                    }
+                }
+            }
+        });
+        self.agent_channels
+            .lock()
+            .expect("agent channel lock poisoned")
+            .insert(id.to_owned(), AgentChannel { handle, path });
+        Ok(())
+    }
+
+    /// Throw away a shell nobody is waiting for, and the channel that would serve it.
+    async fn discard_credential_shell(&self, id: &str) {
+        self.release_agent_channel(id);
+        if let Err(error) = self.isolation.remove(id.to_owned()).await {
+            tracing::debug!(%error, "no credential shell sandbox to remove");
+        }
     }
 
     /// The agent whose environment a credential shell for this profile runs in.
@@ -210,6 +365,7 @@ where
     /// profile, which is a host directory, and the sandbox itself is only ever meant
     /// to last as long as the terminal in front of the operator.
     pub async fn close_credential_shell(&self, id: &str) -> Result<(), IsolationError> {
+        self.release_agent_channel(id);
         self.isolation.remove(id.to_owned()).await
     }
 }

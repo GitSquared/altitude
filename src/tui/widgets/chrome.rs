@@ -60,13 +60,8 @@ pub fn draw(
     let notice_rows = notice
         .map(|text| wrapped_rows(text, usize::from(inner.width)))
         .unwrap_or(0);
-    let [header, content, notice_area, guidance_area] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(0),
-        Constraint::Length(notice_rows),
-        Constraint::Length(guidance.len() as u16),
-    ])
-    .areas(inner);
+    let [header, content, notice_area, guidance_area] =
+        frame_areas(inner, notice_rows, guidance.len() as u16);
 
     let [title, version] =
         Layout::horizontal([Constraint::Min(0), Constraint::Min(0)]).areas(header);
@@ -90,6 +85,37 @@ pub fn draw(
         );
     }
     content
+}
+
+pub fn content_area(
+    area: Rect,
+    hints: &[Hint],
+    guidance_enabled: bool,
+    notice: Option<&str>,
+) -> Rect {
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y,
+        width: area.width.saturating_sub(2),
+        height: area.height,
+    };
+    let guidance_rows = if guidance_enabled {
+        guidance_lines(hints, usize::from(inner.width)).len() as u16
+    } else {
+        0
+    };
+    let notice_rows = notice.map_or(0, |text| wrapped_rows(text, usize::from(inner.width)));
+    frame_areas(inner, notice_rows, guidance_rows)[1]
+}
+
+fn frame_areas(inner: Rect, notice_rows: u16, guidance_rows: u16) -> [Rect; 4] {
+    Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(notice_rows),
+        Constraint::Length(guidance_rows),
+    ])
+    .areas(inner)
 }
 
 /// The guidance, wrapped to the width.

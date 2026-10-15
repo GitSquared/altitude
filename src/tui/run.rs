@@ -188,6 +188,13 @@ where
                 // Fullscreen: it is the screen, not something over it.
                 let view = app.settings_view();
                 screens::settings::draw(frame, content, &app.panel, &view, app.shimmer);
+                if let super::app::CredentialShellState::Opening {
+                    display, progress, ..
+                } = &app.credential_shell
+                {
+                    widgets::chrome::dim(frame, content);
+                    screens::shell::draw_preparing(frame, content, display, progress, app.shimmer);
+                }
             } else if matches!(app.foreground, Foreground::Signals) {
                 widgets::chrome::dim(frame, content);
                 let summary = app.signals_summary();
@@ -278,7 +285,8 @@ where
                     || app.is_asking_remotes()
                     || app.is_asking_credentials()
                     || app.is_awaiting_tracker()
-                    || app.is_connecting_tracker() =>
+                    || app.is_connecting_tracker()
+                    || matches!(app.credential_shell, super::app::CredentialShellState::Opening { .. }) =>
             {
                 app.shimmer = app.shimmer.wrapping_add(1);
                 app.environment_builds = task_service.environment_builds();
@@ -379,7 +387,9 @@ where
     if let Event::Resize(_, _) = event
         && app.open_shell().is_some()
     {
-        let (rows, cols) = screens::shell::size(terminal.size()?.into());
+        let Some((rows, cols)) = app.shell_size(terminal) else {
+            return Ok(false);
+        };
         app.resize_shell(rows, cols, event_loop);
         return Ok(false);
     }
@@ -406,7 +416,7 @@ where
     }
     if let Event::Mouse(mouse) = event {
         if let Some(id) = app.open_shell().cloned() {
-            let size = terminal.size()?.into();
+            let size = app.shell_area(terminal.size()?.into());
             let bytes = app
                 .shells
                 .get_mut(&id)

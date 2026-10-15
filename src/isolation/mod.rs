@@ -142,9 +142,6 @@ pub struct ProfileSummary {
     pub profile: &'static str,
     /// What this profile is called where an operator reads it.
     pub display: &'static str,
-    /// Each mounted directory, as its path inside the profile and where a task
-    /// finds it.
-    pub mounts: Vec<ProfileMount>,
 }
 
 /// What a sandbox made for credentials is called: the shell an operator signs in in,
@@ -161,20 +158,6 @@ pub struct CredentialReport {
     pub output: String,
     /// Whether it exited 0, which is how a profile says it is signed in.
     pub signed_in: bool,
-}
-
-#[derive(Clone, Debug)]
-pub struct ProfileMount {
-    pub path: &'static str,
-    pub guest: String,
-}
-
-/// Where a task finds a mounted directory.
-pub fn guest_path(guest: &GuestPath) -> String {
-    match guest {
-        GuestPath::Absolute(path) => (*path).to_owned(),
-        GuestPath::HomeRelative(path) => format!("~/{path}"),
-    }
 }
 
 /// What a built environment says about itself.

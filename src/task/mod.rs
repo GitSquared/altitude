@@ -3,8 +3,7 @@ use crate::{
     config::InstallationIdentity,
     isolation::{
         Environment, EnvironmentDescription, EnvironmentProgress, EnvironmentRecipe,
-        IsolationEngine, IsolationError, ProfileMount, ProfileSummary, guest_path,
-        private_directory,
+        IsolationEngine, IsolationError, ProfileSummary, private_directory,
     },
     tracker::{IssueReader, TrackerProvider},
     vcs::GitHub,
@@ -29,7 +28,9 @@ mod lifecycle;
 mod signals;
 mod state;
 mod turns;
-pub use credential::{CredentialShell, CredentialShellEvent, credential_shell_id};
+pub use credential::{
+    CredentialShell, CredentialShellCancel, CredentialShellEvent, credential_shell_id,
+};
 pub use event_loop::{TaskEventLoop, TaskExecutionUpdate};
 mod progress;
 mod store;
@@ -323,14 +324,6 @@ where
             .map(|recipe| ProfileSummary {
                 profile: recipe.profile,
                 display: recipe.display,
-                mounts: recipe
-                    .directories
-                    .iter()
-                    .map(|directory| ProfileMount {
-                        path: directory.relative_path,
-                        guest: guest_path(&directory.guest_path),
-                    })
-                    .collect(),
             })
             .collect()
     }

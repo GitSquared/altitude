@@ -17,6 +17,7 @@ use microsandbox::{
 };
 use tokio::sync::{Mutex, mpsc, watch};
 
+use crate::agent::mcp::AGENT_CHANNEL_PORT;
 use crate::config::Config;
 use crate::isolation::Environment;
 
@@ -116,6 +117,18 @@ impl MicrosandboxIsolation {
             socket_safe_home: config.microsandbox_socket_dir(),
             base_preparation_lock: Arc::new(Mutex::new(())),
         }
+    }
+
+    /// Connects the harness bridge to the credential shell's empty MCP endpoint.
+    fn credential_shell_channel(&self, id: &str) -> Option<VsockRoute> {
+        if !id.starts_with(&format!("{CREDENTIAL_PREFIX}shell-")) {
+            return None;
+        }
+        let host_socket = self.config.agent_channel_dir().join(format!("{id}.sock"));
+        host_socket.exists().then_some(VsockRoute {
+            host_socket,
+            guest_port: AGENT_CHANNEL_PORT,
+        })
     }
 
     async fn create_sandbox(
@@ -721,6 +734,12 @@ impl IsolationEngine for MicrosandboxIsolation {
             };
             for sandbox in page.sandboxes {
                 if sandbox.name().starts_with(CREDENTIAL_PREFIX) {
+                    // The channel's socket is bound by the task layer, which is not up yet.
+                    let _ = fs::remove_file(
+                        self.config
+                            .agent_channel_dir()
+                            .join(format!("{}.sock", sandbox.name())),
+                    );
                     self.remove_leftover(sandbox.name()).await;
                 }
             }
@@ -779,7 +798,10 @@ impl IsolationEngine for MicrosandboxIsolation {
         Ok(())
     }
 
-    async fn create(&self, id: String, options: SandboxOptions) -> Result<(), IsolationError> {
+    async fn create(&self, id: String, mut options: SandboxOptions) -> Result<(), IsolationError> {
+        if let Some(route) = self.credential_shell_channel(&id) {
+            options.vsock.push(route);
+        }
         self.create_sandbox(id, options, PullPolicy::Never).await
     }
 

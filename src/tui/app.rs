@@ -16,8 +16,8 @@ use std::{
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use iroh::EndpointAddr;
-use ratatui::{DefaultTerminal, style::Style};
-use tokio::{sync::mpsc, task::JoinHandle};
+use ratatui::{DefaultTerminal, layout::Rect};
+use tokio::{process::Command as HostCommand, sync::mpsc, task::JoinHandle};
 
 use crate::{
     agent::AgentKind,
@@ -31,17 +31,15 @@ use crate::{
     },
     task,
     task::{
-        CredentialShell, CredentialShellEvent, Task, TaskEventLoop, TaskExecutionMode,
-        TaskExecutionPauseReason, TaskExecutionStatus, TaskExecutionUpdate, TaskOperatorSignal,
-        TaskService, TaskServiceError,
+        CredentialShell, CredentialShellCancel, CredentialShellEvent, Task, TaskEventLoop,
+        TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus, TaskExecutionUpdate,
+        TaskOperatorSignal, TaskService, TaskServiceError,
     },
     tracker::{IssueReference, IssueSnapshot, IssueSummary},
     tui::keys::{is_dismiss, is_remove},
     tui::popups,
     tui::screens,
     tui::widgets::chrome::Hint,
-    tui::widgets::palette,
-    tui::widgets::utils::Dot,
 };
 
 use popups::confirm::PendingConfirm;
@@ -50,7 +48,7 @@ use popups::open_link::{self, Link, OpenLink};
 use popups::reply::{Prompt, PromptAction, Reply};
 use popups::send_task::{Decision as SendDecision, SendTask};
 use screens::settings::{
-    CredentialKind, Depth, Focus, Form, Panel, RowKind, Section, Setting, Target,
+    CredentialKind, Depth, Focus, Form, GitIdentity, Panel, RowKind, Section, Setting, Target,
 };
 use screens::shell::{GuestRequest, Shell};
 
@@ -110,38 +108,10 @@ pub(in crate::tui) enum RemoteStatus {
 }
 
 impl RemoteStatus {
-    /// The dot in front of the name. Filled when something answered.
-    pub(in crate::tui) fn glyph(&self) -> char {
-        match self {
-            Self::Asking | Self::Syncing => '◌',
-            Self::Reached | Self::Changed => '●',
-            Self::Unknown | Self::Silent(_) => '○',
-        }
-    }
-
     /// Whether something is happening, in which case the dot travels like every
     /// other wait in the interface.
     pub(in crate::tui) fn is_in_progress(&self) -> bool {
         matches!(self, Self::Asking | Self::Syncing)
-    }
-
-    /// The mark in front of the address, on the same terms as a profile's.
-    pub(in crate::tui) fn dot(&self) -> Dot {
-        let (glyph, style) = (self.glyph(), self.style());
-        if self.is_in_progress() {
-            Dot::travelling(glyph, style)
-        } else {
-            Dot::still(glyph, style)
-        }
-    }
-
-    pub(in crate::tui) fn style(&self) -> Style {
-        match self {
-            Self::Unknown => palette::muted(),
-            Self::Asking | Self::Syncing => palette::attention(),
-            Self::Reached => palette::good(),
-            Self::Changed | Self::Silent(_) => palette::bad(),
-        }
     }
 }
 
@@ -162,37 +132,9 @@ pub(in crate::tui) enum CredentialStatus {
     Checking,
     /// Answered, with what the profile's own command printed.
     Checked { signed_in: bool, output: String },
-    /// Not asked, because the environment it would be asked in is not built here.
-    NotBuilt,
-    /// Could not be asked.
-    Silent(String),
 }
 
 impl CredentialStatus {
-    /// The mark in front of the row: filled when there is a login, hollow when there
-    /// is not, and travelling while the answer is still out.
-    pub(in crate::tui) fn dot(&self) -> Dot {
-        let (glyph, style) = match self {
-            Self::Unknown => ('○', palette::muted()),
-            Self::Checking => ('◌', palette::attention()),
-            Self::Checked {
-                signed_in: true, ..
-            } => ('●', palette::good()),
-            Self::Checked {
-                signed_in: false, ..
-            } => ('○', palette::muted()),
-            // A mark of its own for each way of not knowing: nothing was asked here,
-            // or the asking went wrong.
-            Self::NotBuilt => ('·', palette::attention()),
-            Self::Silent(_) => ('×', palette::bad()),
-        };
-        if *self == Self::Checking {
-            Dot::travelling(glyph, style)
-        } else {
-            Dot::still(glyph, style)
-        }
-    }
-
     fn is_in_progress(&self) -> bool {
         *self == Self::Checking
     }
@@ -289,8 +231,10 @@ pub(in crate::tui) enum CredentialShellState {
     Idle,
     /// The sandbox is being made, which is a wait rather than a frame.
     Opening {
-        profile: &'static str,
+        id: String,
         display: String,
+        progress: String,
+        cancel: CredentialShellCancel,
     },
     /// A terminal to draw, and the channel its keys go down.
     Open(CredentialShell),
@@ -388,6 +332,7 @@ pub struct App {
     /// One at a time: a profile is a shared directory, and two shells writing it
     /// is a way to confuse yourself.
     pub(in crate::tui) credential_shell: CredentialShellState,
+    git_identity: GitIdentity,
     /// The selected task's signals, and where you are among them. Read when the
     /// signals open; the pop-up is a view over what the task already recorded.
     pub(in crate::tui) operator_signals: Vec<TaskOperatorSignal>,
@@ -492,6 +437,7 @@ impl App {
             first_visible_task: 0,
             shells: HashMap::new(),
             credential_shell: CredentialShellState::Idle,
+            git_identity: GitIdentity::default(),
             operator_signals: Vec::new(),
             selected_operator_signal: 0,
             selected_signal_action: 0,
@@ -658,6 +604,16 @@ impl App {
             Foreground::SendTask(sending) => sending.hints(),
             Foreground::NewTask(new_task) => new_task.hints(),
             Foreground::Panel => {
+                if matches!(self.credential_shell, CredentialShellState::Opening { .. }) {
+                    return vec![Hint::new("esc / q", "cancel")];
+                }
+                if self.panel.depth == Depth::Rail {
+                    return vec![
+                        Hint::new("j/k", "section"),
+                        Hint::new("enter / tab", "open"),
+                        dismiss(),
+                    ];
+                }
                 if self.panel.form.is_some() {
                     return vec![
                         Hint::new("tab", "next"),
@@ -674,11 +630,17 @@ impl App {
                 } else if self.panel.section.grows() {
                     hints.push(Hint::new("enter", "edit"));
                 } else if self.panel.section == Section::Agents {
-                    hints.push(Hint::new("enter", "choose"));
+                    if matches!(
+                        self.selected_row().map(|row| row.kind),
+                        Some(RowKind::Agent { .. })
+                    ) {
+                        hints.push(Hint::new("enter", "sign in"));
+                        hints.push(Hint::new("d", "use by default"));
+                    }
                 } else if self.panel.section == Section::Interface {
                     hints.push(Hint::new("enter", "toggle"));
-                } else if self.panel.section == Section::Credentials {
-                    hints.push(Hint::new("enter", "shell"));
+                } else if self.panel.section == Section::VersionControl {
+                    hints.push(Hint::new("enter", "open setup shell"));
                 } else if self.panel.section == Section::Trackers {
                     hints.push(Hint::new(
                         "enter",
@@ -838,25 +800,30 @@ impl App {
             self.notice = Some("a shell is already open".to_owned());
             return;
         }
+        let cancel = CredentialShellCancel::new();
+        let id = task::credential_shell_id();
         self.credential_shell = CredentialShellState::Opening {
-            profile,
+            id: id.clone(),
             display: display.to_owned(),
+            progress: "Preparing your sign-in environment…".to_owned(),
+            cancel: cancel.clone(),
         };
-        self.notice = Some(format!("opening a shell for {display}…"));
+        self.notice = None;
         let environment = self.default_environment_value();
         let chosen = self.agent();
         let service = task_service.clone();
         let events = events.clone();
         tokio::spawn(async move {
             match service
-                .open_credential_shell(environment, profile, chosen, &events)
+                .open_credential_shell(id.clone(), environment, profile, chosen, cancel, &events)
                 .await
             {
-                Ok(shell) => {
-                    let _ = events.send(CredentialShellEvent::Opened(shell));
-                }
+                Ok(()) => {}
                 Err(error) => {
-                    let _ = events.send(CredentialShellEvent::Unavailable(error.to_string()));
+                    let _ = events.send(CredentialShellEvent::Unavailable {
+                        id,
+                        reason: error.to_string(),
+                    });
                 }
             }
         });
@@ -871,7 +838,26 @@ impl App {
     ) where
         E: IsolationEngine + Clone + 'static,
     {
+        let expected = match &self.credential_shell {
+            CredentialShellState::Opening { id, .. } => Some(id.as_str()),
+            CredentialShellState::Open(shell) => Some(shell.id()),
+            CredentialShellState::Idle => None,
+        };
+        if expected != Some(event.id()) {
+            if let CredentialShellEvent::Opened(shell) = event {
+                let service = task_service.clone();
+                tokio::spawn(async move {
+                    let _ = service.close_credential_shell(shell.id()).await;
+                });
+            }
+            return;
+        }
         match event {
+            CredentialShellEvent::Preparing { label, .. } => {
+                if let CredentialShellState::Opening { progress, .. } = &mut self.credential_shell {
+                    *progress = label;
+                }
+            }
             CredentialShellEvent::Opened(shell) => {
                 let CredentialShellState::Opening { display, .. } =
                     mem::replace(&mut self.credential_shell, CredentialShellState::Idle)
@@ -882,14 +868,22 @@ impl App {
                     }
                     return;
                 };
+                let id = ShellId::Credentials(shell.id().to_owned());
+                self.foreground = Foreground::Shell(id.clone());
+                self.notice = None;
                 let Some((rows, cols)) = self.shell_size(terminal) else {
+                    let service = task_service.clone();
+                    tokio::spawn(async move {
+                        let _ = service.close_credential_shell(shell.id()).await;
+                    });
+                    self.foreground = Foreground::Panel;
                     return;
                 };
-                let id = ShellId::Credentials(shell.id().to_owned());
                 self.shells.insert(
                     id.clone(),
                     Shell::new(rows, cols, Vec::new(), format!("credentials — {display}")),
                 );
+                shell.resize(rows, cols);
                 self.credential_shell = CredentialShellState::Open(shell);
                 self.foreground = Foreground::Shell(id);
                 self.notice = None;
@@ -897,17 +891,17 @@ impl App {
             CredentialShellEvent::Output { id, bytes } => {
                 self.process_shell_output(&ShellId::Credentials(id), bytes)
             }
-            CredentialShellEvent::Exited(code) => {
+            CredentialShellEvent::Exited { code, .. } => {
                 if code != 0 {
                     self.notice = Some(format!("the shell exited with {code}"));
                 }
                 self.close_credential_shell(task_service).await;
             }
-            CredentialShellEvent::Failed(error) => {
+            CredentialShellEvent::Failed { error, .. } => {
                 self.notice = Some(format!("the shell ended: {error}"));
                 self.close_credential_shell(task_service).await;
             }
-            CredentialShellEvent::Unavailable(reason) => {
+            CredentialShellEvent::Unavailable { reason, .. } => {
                 self.credential_shell = CredentialShellState::Idle;
                 self.notice = Some(format!("no shell: {reason}"));
             }
@@ -924,13 +918,8 @@ impl App {
     {
         let state = mem::take(&mut self.credential_shell);
         let CredentialShellState::Open(shell) = state else {
-            // One that was still being made is removed by the name it will have, so
-            // a shell nobody is waiting for cannot outlive the interface.
-            if let CredentialShellState::Opening { profile, .. } = state {
-                let id = task::credential_shell_id(profile);
-                if let Err(error) = task_service.close_credential_shell(&id).await {
-                    tracing::debug!(%error, "no credential shell to remove");
-                }
+            if let CredentialShellState::Opening { cancel, .. } = state {
+                cancel.cancel();
             }
             self.credential_shell = CredentialShellState::Idle;
             return;
@@ -941,9 +930,14 @@ impl App {
             // Back to the credentials it was about, so the row can say what changed.
             self.foreground = Foreground::Panel;
         }
-        if let Err(error) = task_service.close_credential_shell(shell.id()).await {
-            tracing::warn!(%error, "could not remove a credential shell's sandbox");
-        }
+        let service = task_service.clone();
+        tokio::spawn(async move {
+            if let Err(error) = service.close_credential_shell(shell.id()).await {
+                tracing::warn!(%error, "could not remove a credential shell's sandbox");
+            }
+        });
+        self.credentials_visible_since = None;
+        self.refresh_git_identity().await;
     }
 
     pub(in crate::tui) async fn panel_key<E>(
@@ -956,6 +950,11 @@ impl App {
     ) where
         E: IsolationEngine + Clone + 'static,
     {
+        if self.panel.depth == Depth::Rail && key.code == KeyCode::Enter {
+            self.panel.depth = Depth::List;
+            return;
+        }
+        let previous_section = self.panel.section;
         let rows = self.row_count();
         match key.code {
             KeyCode::PageDown => {
@@ -981,6 +980,7 @@ impl App {
             }
             KeyCode::Down | KeyCode::Char('j') => self.panel.move_selection(true, rows),
             KeyCode::Up | KeyCode::Char('k') => self.panel.move_selection(false, rows),
+            KeyCode::Char('d') if self.panel.section == Section::Agents => self.edit_selected(),
             KeyCode::Char('e') if self.panel.section.grows() => self.edit_selected(),
             KeyCode::Char('p') if self.panel.section == Section::Remotes => {
                 if let Some(RowKind::Remote { address, .. }) =
@@ -1008,6 +1008,13 @@ impl App {
                     .await
             }
             _ => {}
+        }
+        if self.panel.section != previous_section {
+            if self.panel.section == Section::VersionControl {
+                self.refresh_git_identity().await;
+            }
+            self.credentials_visible_since = None;
+            self.remotes_visible_since = None;
         }
     }
 
@@ -1072,11 +1079,17 @@ impl App {
             // A tracker is signed in to, which is a browser and a callback rather
             // than a page here.
             Some(RowKind::Tracker { .. }) => self.connect_tracker(task_service, tracker_connects),
+            Some(RowKind::Agent { credential, .. }) => {
+                if let CredentialKind::Profile { profile, .. } = credential.kind {
+                    self.open_credential_shell(&credential.label, profile, task_service, events);
+                }
+            }
+            Some(RowKind::GitIdentity(_)) => {
+                self.open_credential_shell("Git identity", "vcs/github", task_service, events);
+            }
             Some(RowKind::Credential(credential)) => {
                 if let CredentialKind::Profile { profile, .. } = credential.kind {
                     self.open_credential_shell(&credential.label, profile, task_service, events);
-                } else {
-                    self.edit_selected();
                 }
             }
             _ => self.edit_selected(),
@@ -1534,7 +1547,10 @@ impl App {
     /// is not still being reported as it was.
     pub(in crate::tui) fn sync_credentials(&mut self) {
         let showing = matches!(self.foreground, Foreground::Panel)
-            && self.panel.section == Section::Credentials;
+            && matches!(
+                self.panel.section,
+                Section::Agents | Section::VersionControl
+            );
         match (showing, self.credentials_visible_since) {
             (true, None) => {
                 self.credentials_visible_since = Some(Instant::now());
@@ -1569,6 +1585,11 @@ impl App {
         self.profiles
             .iter()
             .map(|profile| profile.profile)
+            .filter(|profile| match self.panel.section {
+                Section::Agents => profile.starts_with("agents/"),
+                Section::VersionControl => profile.starts_with("vcs/"),
+                _ => false,
+            })
             .find(|profile| !self.credential_status.contains_key(profile))
     }
 
@@ -1599,10 +1620,17 @@ impl App {
                     signed_in: report.signed_in,
                     output: report.output,
                 },
-                // Not built here, which is an answer rather than a failure: the
-                // environment a shell for this profile would need does not exist yet.
-                Ok(None) => CredentialStatus::NotBuilt,
-                Err(error) => CredentialStatus::Silent(error.to_string()),
+                Ok(None) => CredentialStatus::Checked {
+                    signed_in: false,
+                    output: String::new(),
+                },
+                Err(error) => {
+                    tracing::debug!(%error, profile, "credential check unavailable");
+                    CredentialStatus::Checked {
+                        signed_in: false,
+                        output: String::new(),
+                    }
+                }
             };
             let _ = reports.send((profile, status));
         });
@@ -1773,12 +1801,16 @@ impl App {
                 self.toggle(setting, !on);
                 return;
             }
-            RowKind::Agent(kind) => {
+            RowKind::Agent { kind, .. } => {
                 self.set_agent(kind);
                 return;
             }
             // The installation's key is made, not signed in to, so there is no
             // terminal to open for it.
+            RowKind::GitIdentity(_) => {
+                self.notice = Some("press enter to configure Git identity and signing".to_owned());
+                return;
+            }
             RowKind::Credential(_) => {
                 self.notice = Some("the key names this machine and is not edited here".to_owned());
                 return;
@@ -1814,7 +1846,8 @@ impl App {
         let (question, target) = match row.kind {
             RowKind::Base
             | RowKind::Switch { .. }
-            | RowKind::Agent(_)
+            | RowKind::Agent { .. }
+            | RowKind::GitIdentity(_)
             | RowKind::Credential(_)
             | RowKind::Tracker { .. } => {
                 return;
@@ -2487,6 +2520,12 @@ impl App {
     ) where
         E: IsolationEngine + Clone + 'static,
     {
+        if matches!(self.credential_shell, CredentialShellState::Opening { .. }) {
+            if is_dismiss(key) {
+                self.close_credential_shell(task_service).await;
+            }
+            return;
+        }
         if self.panel.form.is_some() {
             self.panel_form_key(key, config_pushes).await;
         } else {
@@ -2805,6 +2844,12 @@ impl App {
         }
         // Already the operator's: put its terminal back in front.
         let shell_id = ShellId::Task(task.id.clone());
+        if !self.shells.contains_key(&shell_id) && !event_loop.has_active_run(&task.id) {
+            self.notice = Some("this task has no run to attach to".into());
+            return;
+        }
+        self.foreground = Foreground::Shell(shell_id.clone());
+        self.notice = None;
         if self.shells.contains_key(&shell_id) {
             let Some((rows, cols)) = self.shell_size(terminal) else {
                 return;
@@ -2815,10 +2860,6 @@ impl App {
                 shell.resize(rows, cols);
             }
             self.foreground = Foreground::Shell(id);
-            return;
-        }
-        if !event_loop.has_active_run(&task.id) {
-            self.notice = Some("this task has no run to attach to".into());
             return;
         }
         let Some((rows, cols)) = self.shell_size(terminal) else {
@@ -2836,14 +2877,58 @@ impl App {
 
     /// The size a terminal for a task should be, saying so when it cannot be read
     /// rather than taking the whole interface down with it.
-    fn shell_size(&mut self, terminal: &DefaultTerminal) -> Option<(u16, u16)> {
+    pub(in crate::tui) fn shell_size(&mut self, terminal: &DefaultTerminal) -> Option<(u16, u16)> {
         match terminal.size() {
-            Ok(size) => Some(screens::shell::size(size.into())),
+            Ok(size) => Some(screens::shell::size(self.shell_area(size.into()))),
             Err(error) => {
                 self.notice = Some(error.to_string());
                 None
             }
         }
+    }
+
+    pub(in crate::tui) fn git_identity(&self) -> GitIdentity {
+        self.git_identity.clone()
+    }
+
+    async fn refresh_git_identity(&mut self) {
+        let path = self.config.profile_dir("vcs/github").join("git/config");
+        let output = HostCommand::new("git")
+            .args(["config", "--no-includes", "--file"])
+            .arg(path)
+            .args([
+                "--get-regexp",
+                "^(user\\.(name|email|signingkey)|commit\\.gpgsign)$",
+            ])
+            .output()
+            .await;
+        let mut identity = GitIdentity::default();
+        if let Ok(output) = output {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let Some((key, value)) = line.split_once(' ') else {
+                    continue;
+                };
+                match key {
+                    "user.name" => identity.name = Some(value.to_owned()),
+                    "user.email" => identity.email = Some(value.to_owned()),
+                    "user.signingkey" => identity.signing_key = Some(value.to_owned()),
+                    "commit.gpgsign" => {
+                        identity.signs_commits = matches!(value, "true" | "yes" | "on" | "1")
+                    }
+                    _ => {}
+                }
+            }
+        }
+        self.git_identity = identity;
+    }
+
+    pub(in crate::tui) fn shell_area(&self, area: Rect) -> Rect {
+        super::widgets::chrome::content_area(
+            area,
+            &self.hints(),
+            self.keyboard_hints(),
+            self.notice.as_deref(),
+        )
     }
 
     /// Asks one machine what it is holding, which is where those tasks live.
@@ -3189,10 +3274,12 @@ impl App {
             TaskExecutionUpdate::OperatorReady(task) => {
                 let id = task.id.clone();
                 self.replace_task(task);
-                let (rows, cols) = screens::shell::size(terminal.size()?.into());
+                let shell_id = ShellId::Task(id.clone());
+                self.foreground = Foreground::Shell(shell_id.clone());
+                self.notice = None;
+                let (rows, cols) = screens::shell::size(self.shell_area(terminal.size()?.into()));
                 let history = event_loop.cached_terminal_output(&id);
                 event_loop.resize_terminal(&id, rows, cols);
-                let shell_id = ShellId::Task(id);
                 self.shells.insert(
                     shell_id.clone(),
                     Shell::new(rows, cols, history, TASK_SHELL.to_owned()),
@@ -3348,8 +3435,7 @@ where
     E: IsolationEngine + Clone + 'static,
 {
     app.foreground = Foreground::Panel;
-    app.panel.depth = Depth::List;
-    app.panel.form = None;
+    app.panel = Panel::new();
     if !app.reload_settings() {
         return;
     }
