@@ -72,7 +72,7 @@ impl Section {
             Self::Interface => "Interface",
             Self::Agents => "Agents",
             Self::VersionControl => "Version Control",
-            Self::Trackers => "Trackers",
+            Self::Trackers => "Task tracker",
             Self::Environments => "Environments",
             Self::Remotes => "Remotes",
         }
