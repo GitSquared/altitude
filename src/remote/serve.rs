@@ -674,14 +674,10 @@ async fn bundle_capsule(
     let base: EnvironmentBase = serde_json::from_str(encoded).map_err(|e| e.to_string())?;
     let staging = tempfile::tempdir_in(directory).map_err(|e| e.to_string())?;
     let (environment, capsule) = base.stage(&snapshot, staging.path()).await?;
+    // Both receivers prepare the image locally before importing. Bundling its
+    // cache would also carry a VMDK descriptor with the sender's absolute paths.
     environment
-        .save_to(
-            &directory.join("environment.tar.zst"),
-            SaveOpts {
-                with_image: true,
-                ..SaveOpts::default()
-            },
-        )
+        .save_to(&directory.join("environment.tar.zst"), SaveOpts::default())
         .await
         .map_err(|e| e.to_string())?;
     capsule

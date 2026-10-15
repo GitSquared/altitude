@@ -539,7 +539,7 @@ impl App {
     /// The grid does not wrap, because a card's neighbours are where it is and
     /// wrapping from the last column to the first is a jump, not a step.
     pub(in crate::tui) fn select_adjacent(&mut self, step: isize, columns: usize) {
-        let count = self.tasks.len();
+        let count = self.tasks.len() + self.remote_tasks.len();
         if count == 0 {
             return;
         }
@@ -1510,10 +1510,9 @@ impl App {
     /// Note whether the remotes list is showing, and start its clock when it
     /// appears.
     pub(in crate::tui) fn sync_remotes(&mut self) {
-        // The creation question and the send chooser offer the machines, so they
-        // need to know which of them can be given work, the same way the list does.
         let showing = (matches!(self.foreground, Foreground::Panel)
             && self.panel.section == Section::Remotes)
+            || matches!(self.foreground, Foreground::Tasks)
             || matches!(self.foreground, Foreground::NewTask(_))
             || matches!(self.foreground, Foreground::SendTask(_));
         match (showing, self.remotes_visible_since) {
@@ -1984,7 +1983,9 @@ impl App {
         self.removing.remove(id);
         if let Some(index) = self.tasks.iter().position(|task| task.id == id) {
             self.tasks.remove(index);
-            self.selected = self.selected.min(self.tasks.len().saturating_sub(1));
+            self.selected = self
+                .selected
+                .min((self.tasks.len() + self.remote_tasks.len()).saturating_sub(1));
         }
     }
 

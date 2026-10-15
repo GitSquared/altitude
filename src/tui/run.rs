@@ -235,7 +235,9 @@ where
             _ = refresh.tick(), if app.open_shell().is_none() => {
                 if let Ok(tasks) = event_loop.list().await {
                     app.tasks = tasks;
-                    app.selected = app.selected.min(app.tasks.len().saturating_sub(1));
+                    app.selected = app.selected.min(
+                        (app.tasks.len() + app.remote_tasks.len()).saturating_sub(1),
+                    );
                 }
                 app.capacity = Some(event_loop.capacity_limit());
             }
