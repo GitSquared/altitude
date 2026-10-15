@@ -33,7 +33,7 @@ pub struct ServeArgs {
     pub connect_linear: bool,
 
     /// Address and port to listen on, as `address:port`. Overrides the settings
-    /// file. The port is UDP, because the link speaks QUIC.
+    /// file. The port uses TCP for discovery and UDP for the task connection.
     #[arg(long, value_name = "ADDR:PORT")]
     pub listen: Option<String>,
 

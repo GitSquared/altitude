@@ -14,7 +14,7 @@
 
 use crate::tui::{
     App,
-    app::{CredentialStatus, RemoteStatus, TrackerState},
+    app::{CredentialStatus, RemoteStatus, RemoteTracker, TrackerState},
     popups::new_task::AGENTS,
     widgets::{chrome, palette, utils::Dot},
 };
@@ -179,6 +179,9 @@ pub enum RowKind {
         status: RemoteStatus,
         /// Whether the configuration it holds is the one this client has.
         needs_config: bool,
+        /// What its last announcement said about its shared Linear app, when it
+        /// has answered. Absent while it has not.
+        tracker: Option<RemoteTracker>,
     },
     /// A tracker Altitude can bind an issue to. Today that is Linear, and the
     /// row says whether its live session is connected.
@@ -819,70 +822,160 @@ fn detail(panel: &Panel, view: &View, focused: bool, tick: usize) -> Paragraph<'
             remembered,
             status,
             needs_config,
-        } => remote_connector(label, address, remembered.as_ref(), status, *needs_config)
-            .lines(heading, tick),
+            tracker,
+        } => {
+            let mut lines =
+                remote_connector(label, address, remembered.as_ref(), status, *needs_config)
+                    .lines(heading, tick);
+            lines.push(Line::from(""));
+            lines.push(section_heading("Task tracker"));
+            match tracker {
+                Some(tracker) => {
+                    lines.push(tracker_status(*tracker, tick));
+                    if *tracker == RemoteTracker::Ready {
+                        lines.push(Line::styled(
+                            "Press b to pair your Linear identity.",
+                            palette::accent(),
+                        ));
+                    }
+                }
+                None => lines.push(Line::styled(
+                    "Connect to check its setup.",
+                    palette::muted(),
+                )),
+            }
+            lines.push(Line::styled(
+                "Press t for shared Linear setup.",
+                palette::accent(),
+            ));
+            lines
+        }
     };
     Paragraph::new(lines).wrap(Wrap { trim: true })
 }
 
 /// Instructions shown after opening the remote setup helper.
+///
+/// Only getting a remote running: the shared task tracker is set up afterwards,
+/// on the remote it belongs to, and lives in its own helper.
 pub(in crate::tui) fn remote_setup_lines() -> Vec<Line<'static>> {
     vec![
         section_heading("Set up a remote"),
-        Line::from(vec![
-            Span::raw("On that machine, install Altitude and run "),
-            Span::styled("altitude serve", palette::accent()),
-            Span::raw(". It listens on port "),
-            Span::styled("25848", palette::accent()),
-            Span::raw(" (TCP and UDP)."),
-        ]),
-        Line::from(vec![
-            Span::raw("Add its host:port here with "),
-            Span::styled("n", palette::accent()),
-            Span::raw(", then press "),
-            Span::styled("p", palette::accent()),
-            Span::raw(" to send this machine's environments and logins."),
-        ]),
+        Line::from(
+            "A remote is a headless machine that keeps running your tasks after you close \
+             Altitude. It can be yours alone or shared with a team: a team remote is one \
+             machine several people pair with.",
+        ),
+        Line::from(""),
+        step(
+            "1.",
+            "Install the Altitude binary on that machine. Build or download the binary for its \
+             operating system and CPU.",
+        ),
+        step(
+            "2.",
+            "Run altitude serve there. It listens on port 25848 over both TCP and UDP.",
+        ),
+        step(
+            "3.",
+            "Press n here and add its hostname or IP address. Leave the port off to use 25848, \
+             or write host:port if you changed it.",
+        ),
+        step(
+            "4.",
+            "Press p to send this machine's environments and logins.",
+        ),
+        step(
+            "5.",
+            "Create a task and choose the remote, or send an existing task with r.",
+        ),
+        Line::from(""),
         Line::styled(
-            "Use a trusted network: anyone who can reach the port is admitted.",
+            "The host must be reachable on both TCP and UDP, and the network must be trusted: \
+             anyone who can reach the port is admitted.",
             palette::muted(),
         ),
         Line::from(""),
+        Line::styled(
+            "To use a shared Linear app on the remote, select it here and press t.",
+            palette::accent(),
+        ),
+    ]
+}
+
+/// Instructions for the shared Linear app a remote runs, opened from that
+/// remote's details.
+pub(in crate::tui) fn remote_tracker_setup_lines() -> Vec<Line<'static>> {
+    vec![
         section_heading("Shared Linear app"),
         Line::from(
             "A remote signs in as a shared Linear app, not as you. Its owner installs the app \
-             once, and every task delegated there acts as it.",
+             once, and every task delegated there acts as it. This is separate from your \
+             personal Linear sign-in under Settings → Task tracker.",
         ),
+        Line::from(""),
         Line::from(vec![
-            Span::raw("In serve.toml set "),
-            Span::styled("[linear]", palette::accent()),
-            Span::raw(" client_id and public_url, and in its environment set "),
-            Span::styled("ALTITUDE_LINEAR_CLIENT_SECRET", palette::accent()),
-            Span::raw(" and "),
-            Span::styled("ALTITUDE_LINEAR_WEBHOOK_SECRET", palette::accent()),
-            Span::raw("."),
+            Span::raw("On the remote, edit "),
+            Span::styled("~/.config/altitude/serve.toml", palette::accent()),
+            Span::raw(
+                ". The server prints its settings path when it starts; XDG_CONFIG_HOME, \
+                 ALTITUDE_CONFIG_DIR or --config can change it.",
+            ),
         ]),
-        Line::from(vec![
-            Span::raw("Install it with "),
-            Span::styled("altitude serve --connect-linear", palette::accent()),
-            Span::raw(", proxy HTTPS "),
-            Span::styled("/linear/webhook", palette::accent()),
-            Span::raw(" and "),
-            Span::styled("/linear/oauth/callback", palette::accent()),
-            Span::raw(" to "),
-            Span::styled("127.0.0.1:25849", palette::accent()),
-            Span::raw(", and subscribe to "),
-            Span::styled("AgentSession", palette::accent()),
-            Span::raw(" and "),
-            Span::styled("Issue", palette::accent()),
-            Span::raw(" events."),
-        ]),
-        Line::from(vec![
-            Span::raw("Then press "),
-            Span::styled("b", palette::accent()),
-            Span::raw(" here to pair with the remote."),
-        ]),
+        Line::from(""),
+        step(
+            "1.",
+            "As a workspace administrator, create an OAuth application in Linear's API settings. \
+             Name it Altitude and enable Agent Session and Issue webhook events.",
+        ),
+        step("2.", "Add this section to the remote's serve.toml:"),
+        Line::from(""),
+        sample("[linear]"),
+        sample("client_id = \"<the application's client ID>\""),
+        sample("public_url = \"https://altitude.example.com\""),
+        Line::from(""),
+        step(
+            "3.",
+            "Route that public HTTPS address to 127.0.0.1:25849 on the remote. Register \
+             https://altitude.example.com/linear/oauth/callback as the app's redirect URL and \
+             https://altitude.example.com/linear/webhook as its webhook URL. Replace the example \
+             domain with yours.",
+        ),
+        step(
+            "4.",
+            "Set ALTITUDE_LINEAR_CLIENT_SECRET and ALTITUDE_LINEAR_WEBHOOK_SECRET in the \
+             remote's environment, using the app's client secret and webhook signing secret. \
+             Keep these available to the service when it starts.",
+        ),
+        step(
+            "5.",
+            "Stop altitude serve, then run altitude serve --connect-linear with the same \
+             settings. Open the printed URL in your browser to install the app. Once it exits, \
+             start altitude serve again.",
+        ),
+        step(
+            "6.",
+            "Sign in under Settings → Task tracker, then select this remote and press b to \
+             pair your Linear identity. You can now delegate an issue to Altitude in Linear.",
+        ),
+        Line::from(""),
+        Line::styled(
+            "The remote shows configured once its app is installed and altitude serve is \
+             running with it; this panel does not check Linear from here.",
+            palette::muted(),
+        ),
     ]
+}
+
+fn step(number: &'static str, text: &'static str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{number} "), palette::accent()),
+        Span::raw(text),
+    ])
+}
+
+fn sample(text: &'static str) -> Line<'static> {
+    Line::styled(text, palette::accent())
 }
 
 /// The built-in environment, described rather than configured.
@@ -1153,6 +1246,25 @@ fn remote_connector(
                   carries on while you are away. Yours alone, or shared with a team.",
         fields,
     }
+}
+
+/// The remote's shared tracker, under its primary details: a second status line
+/// in the same shape as the first, not a page of its own.
+fn tracker_status(tracker: RemoteTracker, tick: usize) -> Line<'static> {
+    let (ready, status) = match tracker {
+        RemoteTracker::Ready => (true, "Linear configured"),
+        RemoteTracker::NotConnected => (false, "not connected"),
+    };
+    let mut spans = mark(ready, false).spans(tick);
+    spans.push(Span::styled(
+        status,
+        if ready {
+            palette::primary().bold()
+        } else {
+            palette::muted().bold()
+        },
+    ));
+    Line::from(spans)
 }
 
 /// What a profile is for, in one line, so a page opens by saying what the
@@ -1444,6 +1556,7 @@ impl App {
                         .get(&address)
                         .cloned()
                         .unwrap_or(RemoteStatus::Unknown);
+                    let tracker = self.remote_trackers.get(&address).copied();
                     Row {
                         // A name is what the remote called itself, so an address
                         // that has never answered shows itself instead.
@@ -1457,6 +1570,7 @@ impl App {
                             address,
                             remembered,
                             status,
+                            tracker,
                         },
                     }
                 }));

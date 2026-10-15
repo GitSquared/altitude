@@ -117,6 +117,18 @@ impl RemoteStatus {
     }
 }
 
+/// What a remote's own announcement said about its shared Linear app.
+///
+/// Read from the remote rather than guessed from anything local, so a machine
+/// that has not answered is unknown rather than shown as unconfigured.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::tui) enum RemoteTracker {
+    /// It answered and runs a shared Linear app.
+    Ready,
+    /// It answered and does not run one.
+    NotConnected,
+}
+
 /// What a task's terminal is called on its frame, as opposed to the shell opened to
 /// set up credentials, which names the profile it is for.
 const TASK_SHELL: &str = "shell";
@@ -369,6 +381,9 @@ pub struct App {
     pub(in crate::tui) foreground: Foreground,
     /// What each address last answered, for the list to show.
     pub(in crate::tui) remote_status: HashMap<String, RemoteStatus>,
+    /// What each address's last announcement said about its shared Linear app.
+    /// Runtime only: it is a fact about the remote, not something to persist.
+    pub(in crate::tui) remote_trackers: HashMap<String, RemoteTracker>,
     /// What each profile's own check last said about its login.
     pub(in crate::tui) credential_status: HashMap<&'static str, CredentialStatus>,
     /// When the credentials list started showing, which the wait before asking is
@@ -463,6 +478,7 @@ impl App {
             panel: Panel::new(),
             foreground: Foreground::default(),
             remote_status: HashMap::new(),
+            remote_trackers: HashMap::new(),
             credential_status: HashMap::new(),
             credentials_visible_since: None,
             credential_check_generation: 0,
@@ -652,7 +668,8 @@ impl App {
                     ) {
                         hints.push(Hint::new("enter", "connect"));
                         hints.push(Hint::new("p", "send config"));
-                        hints.push(Hint::new("b", "pair Linear"));
+                        hints.push(Hint::new("t", "Linear setup"));
+                        hints.push(Hint::new("b", "pair identity"));
                         hints.push(Hint::new("e", "edit"));
                     } else {
                         hints.push(Hint::new("enter", "remote setup"));
@@ -1038,6 +1055,17 @@ impl App {
                     self.selected_row().map(|row| row.kind)
                 {
                     self.begin_tracker_pairing(address, task_service);
+                }
+            }
+            KeyCode::Char('t') if self.panel.section == Section::Remotes => {
+                if matches!(
+                    self.selected_row().map(|row| row.kind),
+                    Some(RowKind::Remote { .. })
+                ) {
+                    self.foreground = Foreground::Setup(Setup::new(
+                        SetupKind::RemoteTracker,
+                        screens::settings::remote_tracker_setup_lines(),
+                    ));
                 }
             }
             KeyCode::Char('n') if self.panel.section.grows() => {
@@ -1608,6 +1636,7 @@ impl App {
             (true, None) => {
                 self.remotes_visible_since = Some(Instant::now());
                 self.remote_status.clear();
+                self.remote_trackers.clear();
             }
             (false, Some(_)) => self.remotes_visible_since = None,
             _ => {}
@@ -1790,6 +1819,7 @@ impl App {
                 let status = match key_status {
                     RemoteKeyStatus::New | RemoteKeyStatus::Known => {
                         self.remember(&address, &announcement).await;
+                        self.note_remote_tracker(&address, &announcement);
                         // It answered, but a machine still building what it needs
                         // cannot be given work, and that is worth knowing before you
                         // delegate to it.
@@ -1799,13 +1829,18 @@ impl App {
                         }
                     }
                     // Reported, and not written: accepting a changed key means
-                    // forgetting the address first, which is a second act.
-                    RemoteKeyStatus::Changed => RemoteStatus::Changed,
+                    // forgetting the address first, which is a second act. Nothing
+                    // the unaccepted answer said is shown either.
+                    RemoteKeyStatus::Changed => {
+                        self.remote_trackers.remove(&address);
+                        RemoteStatus::Changed
+                    }
                 };
                 self.remote_status.insert(address, status);
                 self.reload_remembered_keys().await;
             }
             RemoteAnswer::Silent { address, reason } => {
+                self.remote_trackers.remove(&address);
                 self.remote_status
                     .insert(address, RemoteStatus::Silent(reason));
             }
@@ -1831,6 +1866,7 @@ impl App {
                 match sighting.key_status {
                     RemoteKeyStatus::New => {
                         self.remember(address, said).await;
+                        self.note_remote_tracker(address, said);
                         Some(format!(
                             "{} answered, and its key is remembered",
                             said.label
@@ -1838,20 +1874,39 @@ impl App {
                     }
                     RemoteKeyStatus::Known => {
                         self.remember(address, said).await;
+                        self.note_remote_tracker(address, said);
                         Some(format!(
                             "{} answered with the same key as before",
                             said.label
                         ))
                     }
-                    RemoteKeyStatus::Changed => Some(format!(
-                        "{address} answered with a different key. d forgets the one you have, \
-                         then enter accepts this one."
-                    )),
+                    RemoteKeyStatus::Changed => {
+                        self.remote_trackers.remove(address);
+                        Some(format!(
+                            "{address} answered with a different key. d forgets the one you have, \
+                             then enter accepts this one."
+                        ))
+                    }
                 }
             }
-            Err(error) => Some(format!("{address} did not answer: {error}")),
+            Err(error) => {
+                self.remote_trackers.remove(address);
+                Some(format!("{address} did not answer: {error}"))
+            }
         };
         self.reload_remembered_keys().await;
+    }
+
+    /// Note what an announcement said about a remote's shared Linear app. Called
+    /// only for an answer whose key is accepted, so a changed key never lends its
+    /// announcement any authority.
+    fn note_remote_tracker(&mut self, address: &str, announcement: &Announcement) {
+        let tracker = if announcement.linear_ready {
+            RemoteTracker::Ready
+        } else {
+            RemoteTracker::NotConnected
+        };
+        self.remote_trackers.insert(address.to_owned(), tracker);
     }
 
     /// Write down what a remote said about itself.

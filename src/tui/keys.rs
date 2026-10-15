@@ -97,6 +97,7 @@ pub fn help_sections() -> Vec<HelpSection> {
                     "Remove an environment or remote, after confirmation",
                 ),
                 ("p (Remotes)", "Send your setup to the selected remote"),
+                ("t (Remotes)", "Set up the remote's shared Linear app"),
                 ("b (Remotes)", "Pair your Linear identity with that remote"),
                 (
                     "PgUp / PgDn · Home",

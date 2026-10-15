@@ -10,6 +10,7 @@ use crate::tui::widgets::chrome;
 
 pub enum SetupKind {
     Remote,
+    RemoteTracker,
     Linear,
 }
 
@@ -45,6 +46,7 @@ impl Setup {
         let block = Block::bordered()
             .title(match self.kind {
                 SetupKind::Remote => " Set up a remote ",
+                SetupKind::RemoteTracker => " Set up the remote's shared Linear app ",
                 SetupKind::Linear => " Sign in to Linear ",
             })
             .title_bottom(" ↑/↓ · j/k · PgUp/PgDn scroll · Esc/q close ")

@@ -48,6 +48,9 @@ pub struct Announcement {
     pub version: String,
     /// What it can do with a task right now.
     pub state: RemoteState,
+    /// Whether this machine runs a shared Linear app, as of startup. Setup takes
+    /// a restart, so this cannot change while serving.
+    pub linear_ready: bool,
 }
 
 /// What a remote can do with a task right now.
