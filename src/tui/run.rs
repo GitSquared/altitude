@@ -18,10 +18,10 @@ use crossterm::{
     execute,
 };
 use futures_util::StreamExt;
-use ratatui::{DefaultTerminal, buffer::Buffer, layout::Rect, style::Color};
+use ratatui::{DefaultTerminal, buffer::Buffer, layout::Rect};
 use tachyonfx::{
-    Effect, EffectManager, Interpolation, Motion, fx,
-    pattern::{InvertedPattern, RadialPattern},
+    Effect, EffectManager, Interpolation, fx,
+    pattern::{InvertedPattern, RadialPattern, SweepPattern},
 };
 use tokio::{signal::unix::Signal, sync::mpsc, task::spawn_blocking, time};
 
@@ -77,28 +77,22 @@ impl Leaving {
 
 /// How the panel arrives. It is the screen itself, so it is drawn in from the
 /// rail rather than blooming from the middle.
+///
+/// A dissolve clears the cells it has not reached, so the area it has still to
+/// cover shows the terminal behind it. A sweep would paint those cells, which is
+/// a colour this interface cannot know.
 fn panel_entry(area: Rect) -> Effect {
-    fx::sweep_in(
-        Motion::LeftToRight,
-        12,
-        0,
-        Color::Black,
-        (90, Interpolation::QuadOut),
-    )
-    .with_area(area)
+    fx::dissolve((90, Interpolation::QuadOut))
+        .with_pattern(InvertedPattern::new(SweepPattern::left_to_right(12)))
+        .with_area(area)
 }
 
 /// How a modal leaves. A pop-up reverses the dissolve it would have arrived
 /// with; the panel sweeps back out the way it came.
 fn exit(panel: bool, area: Rect) -> Effect {
     if panel {
-        fx::sweep_out(
-            Motion::LeftToRight,
-            12,
-            0,
-            Color::Black,
-            (160, Interpolation::QuadOut),
-        )
+        fx::coalesce((160, Interpolation::QuadOut))
+            .with_pattern(InvertedPattern::new(SweepPattern::left_to_right(12)))
     } else {
         fx::coalesce((140, Interpolation::QuadOut))
             .with_pattern(InvertedPattern::new(RadialPattern::center()))
