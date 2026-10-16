@@ -25,7 +25,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use super::{
     LinkError, LinkResult,
     announce::{self, Announcement},
-    bundle::ProfileStamp,
+    bundle::ProfileDigest,
 };
 
 /// The one ALPN this protocol speaks. Two endpoints that do not agree on this
@@ -194,7 +194,7 @@ pub enum LinkResponse {
     },
     /// What the remote holds for the asking peer's profiles.
     HeldProfiles {
-        profiles: Vec<ProfileStamp>,
+        profiles: Vec<ProfileDigest>,
     },
     /// The task is stopped, and this is what has to travel for it to continue.
     Handover {

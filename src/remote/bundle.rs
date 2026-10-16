@@ -1,15 +1,6 @@
-//! What a client asks a remote to hold.
-//!
-//! A remote is a replica of a setup, so this is the setup: how to build a task, and
-//! what to run it as. It travels as one document rather than a copy of the
-//! configuration directory, because the parts that matter are not the parts a file
-//! copy would carry — a client's own remotes are not a remote's business, and a
-//! profile's files are credentials rather than preferences.
-//!
-//! Each profile carries a digest of its contents, so a client can send the ones the
-//! remote does not have instead of all of them. Profiles are the expensive half:
-//! sending a configuration string again costs nothing, and sending a directory of
-//! logins again does.
+//! Client settings and private profile snapshots exchanged with a remote.
+//! Digests identify snapshots already received, including empty profiles that
+//! remove credentials the client no longer holds.
 
 use std::{fs, io, path::Path};
 
@@ -43,7 +34,7 @@ pub struct ProfileFile {
 
 /// What a remote says it holds for a profile, so a client can send only what is new.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProfileStamp {
+pub struct ProfileDigest {
     pub profile: String,
     pub digest: String,
 }
@@ -52,7 +43,7 @@ pub struct ProfileStamp {
 /// not to send again.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct HeldConfig {
-    pub profiles: Vec<ProfileStamp>,
+    pub profiles: Vec<ProfileDigest>,
 }
 
 impl HeldConfig {
@@ -78,12 +69,19 @@ impl HeldConfig {
 
 impl ConfigBundle {
     pub fn digest(&self) -> io::Result<String> {
-        Ok(blake3::hash(&serde_json::to_vec(self)?)
-            .to_hex()
-            .to_string())
+        let profiles = self
+            .profiles
+            .iter()
+            .map(|profile| (&profile.profile, &profile.digest))
+            .collect::<Vec<_>>();
+        Ok(
+            blake3::hash(&serde_json::to_vec(&(&self.settings, profiles))?)
+                .to_hex()
+                .to_string(),
+        )
     }
 
-    pub fn missing_profiles(&mut self, held: &[ProfileStamp]) {
+    pub fn retain_changed_profiles(&mut self, held: &[ProfileDigest]) {
         self.profiles.retain(|profile| {
             !held
                 .iter()
@@ -99,23 +97,15 @@ impl ConfigBundle {
         settings: String,
         data_dir: &Path,
         profiles: &[&str],
-        held: &[ProfileStamp],
+        held: &[ProfileDigest],
     ) -> Result<Self, io::Error> {
-        let mut sending = Vec::new();
-        for profile in profiles {
-            let bundle = ProfileBundle::of(data_dir, profile)?;
-            let is_different = held
-                .iter()
-                .find(|stamp| stamp.profile == *profile)
-                .is_none_or(|stamp| stamp.digest != bundle.digest);
-            if is_different {
-                sending.push(bundle);
-            }
-        }
-        Ok(Self {
-            settings,
-            profiles: sending,
-        })
+        let profiles = profiles
+            .iter()
+            .map(|profile| ProfileBundle::of(data_dir, profile))
+            .collect::<io::Result<Vec<_>>>()?;
+        let mut bundle = Self { settings, profiles };
+        bundle.retain_changed_profiles(held);
+        Ok(bundle)
     }
 }
 

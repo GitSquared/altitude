@@ -20,7 +20,7 @@ use tokio::{signal::unix::Signal, sync::mpsc, task::spawn_blocking, time};
 
 use crate::{
     isolation::IsolationEngine,
-    remote::{ConfigBundle, browse},
+    remote::ConfigBundle,
     task::{TaskEventLoop, TaskExecutionUpdate, TaskService},
 };
 
@@ -103,7 +103,7 @@ where
     let mut connection_clock = time::interval(Duration::from_secs(15));
     let mut reading_configuration = false;
     let (configuration_reads, mut configuration_read) = mpsc::unbounded_channel();
-    let mut browser = match browse() {
+    let mut browser = match app.link.browse_remotes().await {
         Ok(browser) => Some(browser),
         Err(error) => {
             tracing::warn!(%error, "network discovery unavailable");
@@ -224,7 +224,11 @@ where
             }
             if let Foreground::Setup(setup) = &mut app.foreground {
                 widgets::chrome::dim(frame, content);
-                setup.draw(frame, content);
+                let report = setup
+                    .remote_address()
+                    .and_then(|address| app.remote_trackers.get(address))
+                    .map(Vec::as_slice);
+                setup.draw(frame, content, report);
             }
             if let Foreground::Confirm(confirm) = &app.foreground {
                 widgets::chrome::dim(frame, content);
@@ -271,7 +275,7 @@ where
                 }
                 app.capacity = Some(event_loop.capacity_limit());
             }
-            event = async { browser.as_ref().expect("discovery enabled").recv().await }, if browser.is_some() => {
+            event = async { browser.as_mut().expect("discovery enabled").recv().await }, if browser.is_some() => {
                 match event {
                     Some(event) => app.discovery_observed(event),
                     None => browser = None,

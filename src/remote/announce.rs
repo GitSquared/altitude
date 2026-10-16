@@ -24,7 +24,7 @@ use tokio::{
     time::{sleep, timeout},
 };
 
-use super::{LinkResult, discovery};
+use super::LinkResult;
 use crate::tracker::TrackerKind;
 
 /// How long either side waits for the other before giving up.
@@ -76,9 +76,6 @@ pub enum RemoteState {
 /// The listeners that answer announcements.
 pub(super) struct Broadcast {
     tasks: Vec<JoinHandle<()>>,
-    /// Kept until the server stops, because a service that vanished while the
-    /// remote is still answering would be worse than one never found.
-    advertisement: Option<discovery::Advertisement>,
 }
 
 impl Broadcast {
@@ -101,23 +98,6 @@ impl Broadcast {
         for address in bound {
             listeners.push(bind_listener(*address)?);
         }
-        // Discovery is a convenience. A network that refuses mDNS does not stop
-        // the remote from being reachable by the address an operator types.
-        let advertisement = match discovery::advertise(
-            &announcement.label,
-            &announcement.id,
-            &announcement.version,
-            bound,
-        ) {
-            Ok(advertisement) => Some(advertisement),
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "mDNS discovery is unavailable; add this remote by its address instead"
-                );
-                None
-            }
-        };
         let mut tasks = Vec::new();
         for listener in listeners {
             tasks.push(tokio::spawn(answer_everyone(
@@ -126,10 +106,7 @@ impl Broadcast {
                 state.clone(),
             )));
         }
-        Ok(Self {
-            tasks,
-            advertisement,
-        })
+        Ok(Self { tasks })
     }
 
     /// Stops answering. Dropping a server should not leave a port open.
@@ -137,7 +114,6 @@ impl Broadcast {
         for task in self.tasks {
             task.abort();
         }
-        drop(self.advertisement);
     }
 }
 

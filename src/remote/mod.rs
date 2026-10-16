@@ -28,7 +28,7 @@ pub use {
     bundle::ConfigBundle,
     client::LinkClient,
     clients::ClientRecord,
-    discovery::{DiscoveredRemote, DiscoveryEvent, browse},
+    discovery::{DiscoveredRemote, DiscoveryEvent},
     identity::InstallationKey,
     keys::{RemoteKey, RemoteKeys},
     known::{RemoteKeyStatus, meet},

@@ -15,7 +15,7 @@ use std::{
 };
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use iroh::EndpointAddr;
+use iroh::{EndpointAddr, EndpointId};
 use ratatui::{DefaultTerminal, layout::Rect, text::Line};
 use tokio::{process::Command as HostCommand, sync::mpsc, task::JoinHandle};
 
@@ -390,7 +390,7 @@ pub struct App {
     configuration_digest: Option<String>,
     remote_config_inflight: HashSet<String>,
     remote_checks_due: HashSet<String>,
-    pub(in crate::tui) discovered_remotes: HashMap<String, DiscoveredRemote>,
+    pub(in crate::tui) discovered_remotes: HashMap<EndpointId, DiscoveredRemote>,
 
     /// What each address last answered with. Written by the dial once there is
     /// one; read when the panel opens.
@@ -1060,12 +1060,10 @@ impl App {
                 }
             }
             KeyCode::Char('t') if self.panel.section == Section::Remotes => {
-                if let Some(RowKind::Remote {
-                    address, trackers, ..
-                }) = self.selected_row().map(|row| row.kind)
+                if let Some(RowKind::Remote { address, .. }) =
+                    self.selected_row().map(|row| row.kind)
                 {
-                    self.foreground =
-                        Foreground::Setup(Setup::tracker_list(address, trackers.as_deref()));
+                    self.foreground = Foreground::Setup(Setup::tracker_list(address));
                 }
             }
             KeyCode::Char('n') if self.panel.section.grows() => {
@@ -1567,7 +1565,7 @@ impl App {
     pub(in crate::tui) fn discovery_observed(&mut self, event: DiscoveryEvent) {
         let selected = if self.panel.section == Section::Remotes {
             match self.selected_row().map(|row| row.kind) {
-                Some(RowKind::Discovered(remote)) => Some(remote.service),
+                Some(RowKind::Discovered(remote)) => Some(remote.id),
                 _ => None,
             }
         } else {
@@ -1575,17 +1573,19 @@ impl App {
         };
         match event {
             DiscoveryEvent::Found(remote) => {
-                self.discovered_remotes
-                    .insert(remote.service.clone(), remote);
+                self.discovered_remotes.insert(remote.id, remote);
             }
-            DiscoveryEvent::Removed(service) => {
-                self.discovered_remotes.remove(&service);
+            DiscoveryEvent::Removed(id) => {
+                self.discovered_remotes.remove(&id);
             }
         }
-        if let Some(service) = selected {
-            self.panel.selected = self.settings_view().rows.iter().position(|row| {
-                matches!(&row.kind, RowKind::Discovered(remote) if remote.service == service)
-            }).unwrap_or(0);
+        if let Some(id) = selected {
+            self.panel.selected = self
+                .settings_view()
+                .rows
+                .iter()
+                .position(|row| matches!(&row.kind, RowKind::Discovered(remote) if remote.id == id))
+                .unwrap_or(0);
         }
     }
 
@@ -1941,16 +1941,10 @@ impl App {
     fn note_remote_trackers(&mut self, address: &str, announcement: &Announcement) {
         self.remote_trackers
             .insert(address.to_owned(), announcement.trackers.clone());
-        if let Foreground::Setup(setup) = &mut self.foreground {
-            setup.refresh_trackers(address, Some(&announcement.trackers));
-        }
     }
 
     fn clear_remote_trackers(&mut self, address: &str) {
         self.remote_trackers.remove(address);
-        if let Foreground::Setup(setup) = &mut self.foreground {
-            setup.refresh_trackers(address, None);
-        }
     }
 
     /// Write down what a remote said about itself.
@@ -3724,7 +3718,7 @@ async fn deliver_config(
         .held_profiles(peer.clone())
         .await
         .map_err(|error| error.to_string())?;
-    bundle.missing_profiles(&held);
+    bundle.retain_changed_profiles(&held);
     let bytes = serde_json::to_vec(&bundle).map_err(|error| error.to_string())?;
     client
         .put_config(peer, &bytes)

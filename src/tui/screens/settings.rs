@@ -1731,10 +1731,9 @@ impl App {
                 !configured
                     .iter()
                     .any(|address| address.eq_ignore_ascii_case(&remote.address))
-                    && !self
-                        .remembered_keys
-                        .iter()
-                        .any(|key| key.key == remote.id && configured.contains(&key.address))
+                    && !self.remembered_keys.iter().any(|key| {
+                        key.key == remote.id.to_string() && configured.contains(&key.address)
+                    })
             })
             .cloned()
             .collect::<Vec<_>>();

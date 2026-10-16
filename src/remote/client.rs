@@ -8,7 +8,8 @@ use crate::task::TaskOperatorSignal;
 
 use super::{
     LinkResult,
-    bundle::ProfileStamp,
+    bundle::ProfileDigest,
+    discovery::{self, Browser},
     protocol::{
         BlobHash, CHUNK_BYTES, Handover, LINK_ALPN, LinkRequest, LinkResponse, TaskRequest,
         TaskSummary, TransferArchive, builder, read_body, read_frame, write_frame,
@@ -90,6 +91,14 @@ impl LinkClient {
             .bind()
             .await?;
         Ok(Self { endpoint })
+    }
+
+    /// Browses the local network for remotes announcing themselves.
+    ///
+    /// The endpoint keeps the lookup alive; dropping the returned browser only
+    /// stops listening.
+    pub async fn browse_remotes(&self) -> LinkResult<Browser> {
+        discovery::browse(&self.endpoint).await
     }
 
     pub async fn shutdown(&self) {
@@ -174,7 +183,7 @@ impl LinkClient {
     pub async fn held_profiles(
         &self,
         peer: impl Into<EndpointAddr>,
-    ) -> LinkResult<Vec<ProfileStamp>> {
+    ) -> LinkResult<Vec<ProfileDigest>> {
         match self.say(peer, &LinkRequest::HeldProfiles).await? {
             LinkResponse::HeldProfiles { profiles } => Ok(profiles),
             LinkResponse::Rejected { reason } => Err(reason.into()),

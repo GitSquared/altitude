@@ -29,8 +29,9 @@ use crate::task::TaskOperatorSignal;
 use super::{
     LinkResult,
     announce::{Announcement, Broadcast, RemoteState, TrackerConnection},
-    bundle::{ConfigBundle, HeldConfig, ProfileStamp},
+    bundle::{ConfigBundle, HeldConfig, ProfileDigest},
     clients::{ClientLog, ClientRecord},
+    discovery,
     identity::InstallationKey,
     protocol::{
         BlobHash, Handover, LINK_ALPN, LinkRequest, LinkResponse, MAX_BLOB_BYTES, RemoteTicket,
@@ -199,7 +200,7 @@ impl LinkHandler {
         for profile in &bundle.profiles {
             held.profiles
                 .retain(|stamp| stamp.profile != profile.profile);
-            held.profiles.push(ProfileStamp {
+            held.profiles.push(ProfileDigest {
                 profile: profile.profile.clone(),
                 digest: profile.digest.clone(),
             });
@@ -213,7 +214,7 @@ impl LinkHandler {
     }
 
     /// The profiles this peer has already been sent.
-    fn held_profiles(&self, peer: EndpointId) -> Vec<ProfileStamp> {
+    fn held_profiles(&self, peer: EndpointId) -> Vec<ProfileDigest> {
         HeldConfig::load(&self.operator_dir(peer).join("profiles.json")).profiles
     }
 }
@@ -592,7 +593,7 @@ impl LinkServer {
             Announcement {
                 protocol: String::from_utf8_lossy(LINK_ALPN).into_owned(),
                 id: identity.id().to_string(),
-                label,
+                label: label.clone(),
                 version: env!("CARGO_PKG_VERSION").to_owned(),
                 state: RemoteState::Preparing,
                 trackers,
@@ -600,6 +601,14 @@ impl LinkServer {
             state,
         )
         .await?;
+        // Discovery is a convenience; a network that refuses mDNS does not stop
+        // the remote from being reachable by the address an operator types.
+        if let Err(error) = discovery::advertise(router.endpoint(), &label) {
+            tracing::warn!(
+                %error,
+                "mDNS discovery is unavailable; add this remote by its address instead"
+            );
+        }
         Ok(Self {
             router,
             identity,

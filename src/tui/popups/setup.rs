@@ -66,7 +66,6 @@ pub struct Setup {
 
 struct Picker {
     address: String,
-    candidates: Vec<TrackerOption>,
     selected: usize,
 }
 
@@ -80,26 +79,20 @@ impl Setup {
         }
     }
 
-    /// The provider list for one remote, from what its last announcement said.
-    pub fn tracker_list(address: String, report: Option<&[TrackerConnection]>) -> Self {
+    pub fn tracker_list(address: String) -> Self {
         Self {
             kind: SetupKind::RemoteTrackers,
             lines: Vec::new(),
             scroll: 0,
             picker: Some(Picker {
                 address,
-                candidates: candidates(report),
                 selected: 0,
             }),
         }
     }
 
-    pub fn refresh_trackers(&mut self, address: &str, report: Option<&[TrackerConnection]>) {
-        if let Some(picker) = &mut self.picker
-            && picker.address == address
-        {
-            picker.candidates = candidates(report);
-        }
+    pub fn remote_address(&self) -> Option<&str> {
+        self.picker.as_ref().map(|picker| picker.address.as_str())
     }
 
     pub fn is_picker(&self) -> bool {
@@ -110,7 +103,7 @@ impl Setup {
         let Some(picker) = &mut self.picker else {
             return;
         };
-        let count = picker.candidates.len();
+        let count = TrackerKind::ALL.len();
         if count == 0 {
             return;
         }
@@ -128,7 +121,7 @@ impl Setup {
         let Some(picker) = &self.picker else {
             return;
         };
-        let provider = picker.candidates[picker.selected].provider;
+        let provider = TrackerKind::ALL[picker.selected];
         self.kind = SetupKind::RemoteTrackerGuide(provider);
         self.lines = remote_tracker_setup_lines(provider);
         self.scroll = 0;
@@ -158,19 +151,20 @@ impl Setup {
         }
     }
 
-    pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
+    pub fn draw(&mut self, frame: &mut Frame, area: Rect, report: Option<&[TrackerConnection]>) {
         if self.is_picker() {
-            self.draw_picker(frame, area);
+            self.draw_picker(frame, area, report);
         } else {
             self.draw_guide(frame, area);
         }
     }
 
-    fn draw_picker(&self, frame: &mut Frame, area: Rect) {
+    fn draw_picker(&self, frame: &mut Frame, area: Rect, report: Option<&[TrackerConnection]>) {
         let Some(picker) = &self.picker else {
             return;
         };
-        let height = picker.candidates.len() as u16 + 2;
+        let options = candidates(report);
+        let height = options.len() as u16 + 2;
         let popup = chrome::centered(area, 75, height);
         let block = Block::bordered()
             .title(" Choose a task tracker ")
@@ -185,8 +179,7 @@ impl Setup {
         frame.render_widget(Clear, popup);
         frame.render_widget(block, popup);
         let width = usize::from(inner.width);
-        let items = picker
-            .candidates
+        let items = options
             .iter()
             .enumerate()
             .map(|(index, candidate)| {
