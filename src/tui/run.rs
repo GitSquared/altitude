@@ -75,24 +75,24 @@ impl Leaving {
     }
 }
 
-/// How the panel arrives. It is the screen itself, so it is drawn in from the
-/// rail rather than blooming from the middle.
+/// How the panel arrives: drawn down from the top, the way the rail above it is
+/// read.
 ///
 /// A dissolve clears the cells it has not reached, so the area it has still to
 /// cover shows the terminal behind it. A sweep would paint those cells, which is
 /// a colour this interface cannot know.
 fn panel_entry(area: Rect) -> Effect {
     fx::dissolve((90, Interpolation::QuadOut))
-        .with_pattern(InvertedPattern::new(SweepPattern::left_to_right(12)))
+        .with_pattern(InvertedPattern::new(SweepPattern::up_to_down(12)))
         .with_area(area)
 }
 
 /// How a modal leaves. A pop-up reverses the dissolve it would have arrived
-/// with; the panel sweeps back out the way it came.
+/// with; the panel slides back up the way it came down.
 fn exit(panel: bool, area: Rect) -> Effect {
     if panel {
         fx::coalesce((160, Interpolation::QuadOut))
-            .with_pattern(InvertedPattern::new(SweepPattern::left_to_right(12)))
+            .with_pattern(InvertedPattern::new(SweepPattern::down_to_up(12)))
     } else {
         fx::coalesce((140, Interpolation::QuadOut))
             .with_pattern(InvertedPattern::new(RadialPattern::center()))
