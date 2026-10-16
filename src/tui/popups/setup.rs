@@ -3,7 +3,7 @@ use ratatui::{
     Frame,
     layout::Rect,
     text::{Line, Span},
-    widgets::{Block, BorderType, Clear, List, ListItem, Padding, Paragraph, Wrap},
+    widgets::{Clear, List, ListItem, Paragraph, Wrap},
 };
 
 use crate::{
@@ -151,30 +151,41 @@ impl Setup {
         }
     }
 
-    pub fn draw(&mut self, frame: &mut Frame, area: Rect, report: Option<&[TrackerConnection]>) {
-        if self.is_picker() {
-            self.draw_picker(frame, area, report);
+    /// Move the guide by one wheel notch.
+    pub(in crate::tui) fn wheel(&mut self, up: bool, rows: u16) {
+        self.scroll = if up {
+            self.scroll.saturating_sub(rows)
         } else {
-            self.draw_guide(frame, area);
+            self.scroll.saturating_add(rows)
+        };
+    }
+
+    pub fn draw(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        report: Option<&[TrackerConnection]>,
+    ) -> Rect {
+        if self.is_picker() {
+            self.draw_picker(frame, area, report)
+        } else {
+            self.draw_guide(frame, area)
         }
     }
 
-    fn draw_picker(&self, frame: &mut Frame, area: Rect, report: Option<&[TrackerConnection]>) {
+    fn draw_picker(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        report: Option<&[TrackerConnection]>,
+    ) -> Rect {
         let Some(picker) = &self.picker else {
-            return;
+            return Rect::default();
         };
         let options = candidates(report);
         let height = options.len() as u16 + 2;
         let popup = chrome::centered(area, 75, height);
-        let block = Block::bordered()
-            .title(" Choose a task tracker ")
-            .title_bottom(
-                Line::from(" ↑/↓ · j/k choose · Enter open · Esc/q close ")
-                    .right_aligned()
-                    .style(palette::muted()),
-            )
-            .border_type(BorderType::Rounded)
-            .padding(Padding::horizontal(1));
+        let block = chrome::modal("Choose a task tracker");
         let inner = block.inner(popup);
         frame.render_widget(Clear, popup);
         frame.render_widget(block, popup);
@@ -187,19 +198,12 @@ impl Setup {
             })
             .collect::<Vec<_>>();
         frame.render_widget(List::new(items), inner);
+        popup
     }
 
-    fn draw_guide(&mut self, frame: &mut Frame, area: Rect) {
+    fn draw_guide(&mut self, frame: &mut Frame, area: Rect) -> Rect {
         let popup = chrome::centered(area, 85, area.height.saturating_sub(2));
-        let block = Block::bordered()
-            .title(self.title())
-            .title_bottom(
-                Line::from(self.footer())
-                    .right_aligned()
-                    .style(palette::muted()),
-            )
-            .border_type(BorderType::Rounded)
-            .padding(Padding::horizontal(1));
+        let block = chrome::modal(self.title());
         let inner = block.inner(popup);
         frame.render_widget(Clear, popup);
         frame.render_widget(block, popup);
@@ -209,24 +213,17 @@ impl Setup {
             .saturating_sub(usize::from(inner.height));
         self.scroll = self.scroll.min(maximum.min(usize::from(u16::MAX)) as u16);
         frame.render_widget(paragraph.scroll((self.scroll, 0)), inner);
+        popup
     }
 
-    fn title(&self) -> Line<'static> {
+    fn title(&self) -> String {
         match &self.kind {
-            SetupKind::Remote => Line::styled(" Altitude remote guide ", palette::heading()),
-            SetupKind::RemoteTrackers => Line::from(" Choose a task tracker "),
+            SetupKind::Remote => "Altitude remote guide".to_owned(),
+            SetupKind::RemoteTrackers => "Choose a task tracker".to_owned(),
             SetupKind::RemoteTrackerGuide(kind) => {
-                Line::from(format!(" Set up {} on the remote ", kind.label()))
+                format!("Set up {} on the remote", kind.label())
             }
-            SetupKind::Linear => Line::from(" Sign in to Linear "),
-        }
-    }
-
-    fn footer(&self) -> &'static str {
-        match &self.kind {
-            SetupKind::RemoteTrackers => " ↑/↓ · j/k choose · Enter open · Esc/q close ",
-            SetupKind::RemoteTrackerGuide(_) => " ↑/↓ · j/k · PgUp/PgDn scroll · Esc/q back ",
-            _ => " ↑/↓ · j/k · PgUp/PgDn scroll · Esc/q close ",
+            SetupKind::Linear => "Sign in to Linear".to_owned(),
         }
     }
 }

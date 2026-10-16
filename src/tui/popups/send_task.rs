@@ -10,7 +10,7 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     text::Line,
-    widgets::{Block, BorderType, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap},
+    widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
 use crate::{
@@ -150,17 +150,14 @@ impl SendTask {
     }
 }
 
-pub(in crate::tui) fn draw(frame: &mut Frame, area: Rect, sending: &SendTask) {
+pub(in crate::tui) fn draw(frame: &mut Frame, area: Rect, sending: &SendTask) -> Rect {
     let popup = chrome::centered(area, 60, 15);
     frame.render_widget(Clear, popup);
-    let block = Block::bordered()
-        .title(" Send to a remote ")
-        .border_type(BorderType::Rounded)
-        .padding(Padding::horizontal(2));
+    let block = chrome::modal("Send to a remote");
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     if inner.height < 6 {
-        return;
+        return popup;
     }
     let [summary_area, list_area, note_area] = Layout::vertical([
         Constraint::Length(2),
@@ -197,7 +194,7 @@ pub(in crate::tui) fn draw(frame: &mut Frame, area: Rect, sending: &SendTask) {
             .wrap(Wrap { trim: true }),
             list_area,
         );
-        return;
+        return popup;
     }
     let width = usize::from(list_area.width);
     let items = sending
@@ -229,4 +226,5 @@ pub(in crate::tui) fn draw(frame: &mut Frame, area: Rect, sending: &SendTask) {
             .wrap(Wrap { trim: true }),
         note_area,
     );
+    popup
 }

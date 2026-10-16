@@ -13,7 +13,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     DefaultTerminal, Frame,
     layout::{Constraint, Layout, Rect},
-    widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap},
+    widgets::{Clear, Paragraph, Wrap},
 };
 
 use crate::{
@@ -81,13 +81,10 @@ impl Confirm {
     }
 }
 
-pub fn draw(frame: &mut Frame, area: Rect, confirm: &Confirm) {
+pub fn draw(frame: &mut Frame, area: Rect, confirm: &Confirm) -> Rect {
     let popup = chrome::centered(area, 60, 7);
     frame.render_widget(Clear, popup);
-    let block = Block::bordered()
-        .title(" Are you sure? ")
-        .border_type(BorderType::Rounded)
-        .padding(Padding::horizontal(2));
+    let block = chrome::modal("Are you sure?");
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     let [question, buttons] =
@@ -111,6 +108,7 @@ pub fn draw(frame: &mut Frame, area: Rect, confirm: &Confirm) {
         confirm.button == 1,
         true,
     );
+    popup
 }
 
 /// A question waiting on an answer, and what the answer would do.
@@ -166,8 +164,8 @@ impl PendingConfirm {
         )
     }
 
-    pub(in crate::tui) fn draw(&self, frame: &mut Frame, area: Rect) {
-        draw(frame, area, &self.dialog);
+    pub(in crate::tui) fn draw(&self, frame: &mut Frame, area: Rect) -> Rect {
+        draw(frame, area, &self.dialog)
     }
 
     pub(in crate::tui) fn hints(&self) -> Vec<chrome::Hint> {

@@ -15,7 +15,7 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     text::Line,
-    widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap},
+    widgets::{Clear, Paragraph, Wrap},
 };
 
 use crate::tui::{
@@ -123,13 +123,10 @@ pub enum Decision {
     Open,
 }
 
-pub fn draw(frame: &mut Frame, area: Rect, asking: &OpenLink) {
+pub fn draw(frame: &mut Frame, area: Rect, asking: &OpenLink) -> Rect {
     let popup = chrome::centered(area, 60, 9);
     frame.render_widget(Clear, popup);
-    let block = Block::bordered()
-        .title(" Sandbox asks ")
-        .border_type(BorderType::Rounded)
-        .padding(Padding::horizontal(2));
+    let block = chrome::modal("Sandbox asks");
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     let [question, buttons] =
@@ -153,4 +150,5 @@ pub fn draw(frame: &mut Frame, area: Rect, asking: &OpenLink) {
     .areas(buttons);
     chrome::button(frame, cancel, "cancel", asking.button == 0, false);
     chrome::button(frame, open, "open", asking.button == 1, true);
+    popup
 }

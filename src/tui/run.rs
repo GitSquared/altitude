@@ -18,9 +18,9 @@ use crossterm::{
     execute,
 };
 use futures_util::StreamExt;
-use ratatui::DefaultTerminal;
+use ratatui::{DefaultTerminal, buffer::Buffer, layout::Rect, style::Color};
 use tachyonfx::{
-    EffectManager, Interpolation, fx,
+    Effect, EffectManager, Interpolation, Motion, fx,
     pattern::{InvertedPattern, RadialPattern},
 };
 use tokio::{signal::unix::Signal, sync::mpsc, task::spawn_blocking, time};
@@ -44,6 +44,67 @@ use super::screens::settings::Focus;
 use super::widgets;
 use super::widgets::utils::shimmer_clock;
 use crate::task::CredentialShellEvent;
+
+/// A modal's last frame, kept so it can be drawn once more while it leaves.
+///
+/// By the time a modal is dismissed, the screen behind it already has the
+/// foreground, so the only way to animate the modal out is to hold the cells it
+/// left behind and draw them back over the screen for as long as it takes.
+struct Leaving {
+    area: Rect,
+    cells: Buffer,
+}
+
+impl Leaving {
+    fn take(buffer: &Buffer, area: Rect) -> Self {
+        let mut cells = Buffer::empty(area);
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                cells[(x, y)] = buffer[(x, y)].clone();
+            }
+        }
+        Self { area, cells }
+    }
+
+    fn draw(&self, buffer: &mut Buffer) {
+        for y in self.area.y..self.area.bottom() {
+            for x in self.area.x..self.area.right() {
+                buffer[(x, y)] = self.cells[(x, y)].clone();
+            }
+        }
+    }
+}
+
+/// How the panel arrives. It is the screen itself, so it is drawn in from the
+/// rail rather than blooming from the middle.
+fn panel_entry(area: Rect) -> Effect {
+    fx::sweep_in(
+        Motion::LeftToRight,
+        12,
+        0,
+        Color::Black,
+        (90, Interpolation::QuadOut),
+    )
+    .with_area(area)
+}
+
+/// How a modal leaves. A pop-up reverses the dissolve it would have arrived
+/// with; the panel sweeps back out the way it came.
+fn exit(panel: bool, area: Rect) -> Effect {
+    if panel {
+        fx::sweep_out(
+            Motion::LeftToRight,
+            12,
+            0,
+            Color::Black,
+            (160, Interpolation::QuadOut),
+        )
+    } else {
+        fx::coalesce((140, Interpolation::QuadOut))
+            .with_pattern(InvertedPattern::new(RadialPattern::center()))
+    }
+    .with_area(area)
+}
 
 struct EventReplies<'a> {
     landings: &'a mpsc::UnboundedSender<Result<String, String>>,
@@ -172,9 +233,21 @@ where
     let mut effects: EffectManager<()> = EffectManager::default();
     let mut previous_foreground = mem::discriminant(&app.foreground);
     let mut last_frame = Instant::now();
+    // A modal that has just been dismissed, held as its last frame so it can be
+    // drawn once more while it leaves, and the last frame of whatever modal is in
+    // front, ready for when it does.
+    let mut leaving: Option<Leaving> = None;
+    let mut modal_cells: Option<Leaving> = None;
+    let mut was_modal = app.has_modal();
+    let mut was_panel = matches!(app.foreground, Foreground::Panel);
+    // While an effect is running, the loop is woken often enough for the
+    // animation to move smoothly rather than at the shimmer's slower pace.
+    let mut motion = time::interval(Duration::from_millis(33));
+    motion.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     loop {
-        if mouse_captured != app.open_shell().is_some() {
-            mouse_captured = app.open_shell().is_some();
+        let wants_mouse = app.wants_mouse();
+        if mouse_captured != wants_mouse {
+            mouse_captured = wants_mouse;
             if mouse_captured {
                 execute!(io::stdout(), EnableMouseCapture)?;
             } else {
@@ -203,6 +276,23 @@ where
         previous_foreground = foreground;
         let elapsed = last_frame.elapsed().min(Duration::from_millis(80));
         last_frame = Instant::now();
+        // A modal that has just gone keeps its last frame for a moment, so it can
+        // be animated out after the screen behind it has taken the foreground.
+        let is_modal = app.has_modal();
+        let is_panel = matches!(app.foreground, Foreground::Panel);
+        if !app.animations() {
+            leaving = None;
+        } else if was_modal && !is_modal {
+            if let Some(cells) = modal_cells.take() {
+                effects = EffectManager::default();
+                effects.add_effect(exit(was_panel, cells.area));
+                leaving = Some(cells);
+            }
+        } else if is_modal && !was_modal {
+            leaving = None;
+        }
+        was_modal = is_modal;
+        was_panel = is_panel;
         terminal.draw(|frame| {
             let hints = app.hints();
             let content =
@@ -211,10 +301,13 @@ where
             if let Some(shell) = app.open_shell().and_then(|id| app.shells.get(id)) {
                 shell.draw(frame, content);
             }
+            // What the modal in front occupied, so the transition animates what
+            // was actually drawn rather than a size written down a second time.
+            let mut modal: Option<Rect> = None;
             // Over the terminal that asked, which goes on running behind it.
             if let Foreground::OpenLink(asking) = &app.foreground {
                 widgets::chrome::dim(frame, content);
-                popups::open_link::draw(frame, content, asking);
+                modal = Some(popups::open_link::draw(frame, content, asking));
             }
             if matches!(app.foreground, Foreground::Panel)
                 || matches!(&app.foreground, Foreground::Confirm(confirm) if confirm.is_settings())
@@ -222,24 +315,30 @@ where
             {
                 // Fullscreen: it is the screen, not something over it.
                 let view = app.settings_view();
-                screens::settings::draw(frame, content, &app.panel, &view, app.animation_tick());
+                modal = Some(screens::settings::draw(
+                    frame,
+                    content,
+                    &app.panel,
+                    &view,
+                    app.animation_tick(),
+                ));
                 if let super::app::CredentialShellState::Opening {
                     display, progress, ..
                 } = &app.credential_shell
                 {
                     widgets::chrome::dim(frame, content);
-                    screens::shell::draw_preparing(
+                    modal = Some(screens::shell::draw_preparing(
                         frame,
                         content,
                         display,
                         progress,
                         app.animation_tick(),
-                    );
+                    ));
                 }
             } else if matches!(app.foreground, Foreground::Signals) {
                 widgets::chrome::dim(frame, content);
                 let summary = app.signals_summary();
-                popups::signals::draw(
+                modal = Some(popups::signals::draw(
                     frame,
                     content,
                     &app.operator_signals,
@@ -247,7 +346,7 @@ where
                     app.selected_operator_signal,
                     app.selected_signal_action,
                     &mut app.operator_signal_scroll,
-                );
+                ));
             }
             if let Foreground::Setup(setup) = &mut app.foreground {
                 widgets::chrome::dim(frame, content);
@@ -255,48 +354,54 @@ where
                     .remote_address()
                     .and_then(|address| app.remote_trackers.get(address))
                     .map(Vec::as_slice);
-                setup.draw(frame, content, report);
+                modal = Some(setup.draw(frame, content, report));
             }
             if let Foreground::Confirm(confirm) = &app.foreground {
                 widgets::chrome::dim(frame, content);
-                confirm.draw(frame, content);
+                modal = Some(confirm.draw(frame, content));
             }
             if let Foreground::SendTask(sending) = &app.foreground {
                 widgets::chrome::dim(frame, content);
-                popups::send_task::draw(frame, content, sending);
+                modal = Some(popups::send_task::draw(frame, content, sending));
             }
             if let Foreground::NewTask(new_task) = &app.foreground {
                 widgets::chrome::dim(frame, content);
-                popups::new_task::draw(frame, content, new_task, app.animation_tick());
+                modal = Some(popups::new_task::draw(
+                    frame,
+                    content,
+                    new_task,
+                    app.animation_tick(),
+                ));
             }
             if matches!(app.foreground, Foreground::Keys(_)) {
                 widgets::chrome::dim(frame, content);
-                widgets::chrome::draw_help(
+                modal = Some(widgets::chrome::draw_help(
                     frame,
                     content,
                     &super::keys::help_sections(),
                     &mut app.help_scroll,
-                );
+                ));
             }
             // Input belongs above the settings overlay that opened it.
             if let Foreground::Reply(reply) = &app.foreground {
                 widgets::chrome::dim(frame, content);
-                reply.prompt.draw(frame, content);
+                modal = Some(reply.prompt.draw(frame, content));
             }
-            if entering && app.animations() {
+            // Keep the modal's last frame, ready to draw once more when it
+            // leaves. Modals arrive at once; only the panel is drawn in.
+            if app.animations()
+                && let Some(area) = modal
+            {
+                modal_cells = Some(Leaving::take(frame.buffer_mut(), area));
+            }
+            if entering && app.animations() && is_panel {
                 effects = EffectManager::default();
-                let popup = match app.foreground {
-                    Foreground::Confirm(_) => Some(widgets::chrome::centered(content, 60, 7)),
-                    Foreground::NewTask(_) => Some(widgets::chrome::centered(content, 64, 22)),
-                    _ => None,
-                };
-                if let Some(popup) = popup {
-                    effects.add_effect(
-                        fx::dissolve((200, Interpolation::QuadOut))
-                            .with_pattern(InvertedPattern::new(RadialPattern::center()))
-                            .with_area(popup),
-                    );
+                if let Some(area) = modal {
+                    effects.add_effect(panel_entry(area));
                 }
+            }
+            if let Some(cells) = &leaving {
+                cells.draw(frame.buffer_mut());
             }
             // Off, the manager is emptied rather than left holding effects that
             // would resume mid-flight if it were turned back on.
@@ -306,6 +411,10 @@ where
                 effects = EffectManager::default();
             }
         })?;
+        // A modal has finished leaving once nothing is drawing it out.
+        if leaving.is_some() && !effects.is_running() {
+            leaving = None;
+        }
         tokio::select! {
             _ = terminate.recv() => {
                 app.close_credential_shell(&task_service).await;
@@ -381,6 +490,7 @@ where
             _ = shimmer.tick(), if app.animations() && app.open_shell().is_none() => {
                 app.shimmer = app.shimmer.wrapping_add(1);
             }
+            _ = motion.tick(), if effects.is_running() => {}
             _ = progress_clock.tick(), if app.open_shell().is_none() && app.is_awaiting_progress() => {
                 app.environment_builds = task_service.environment_builds();
             }
@@ -515,6 +625,8 @@ where
             if let Some(bytes) = bytes {
                 app.send_shell_input(&id, bytes, event_loop);
             }
+        } else {
+            app.scroll_mouse(mouse);
         }
         return Ok(false);
     }

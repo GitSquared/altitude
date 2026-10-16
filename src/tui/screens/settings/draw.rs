@@ -23,12 +23,19 @@ use super::{
 /// The gap between columns, so two focus bars can never touch.
 const GAP: u16 = 3;
 
-pub fn draw(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick: Option<usize>) {
+pub fn draw(
+    frame: &mut Frame,
+    area: Rect,
+    panel: &Panel,
+    view: &View,
+    tick: Option<usize>,
+) -> Rect {
     draw_columns(frame, area, panel, view, tick);
     if let Some(form) = &panel.form {
         chrome::dim(frame, area);
         draw_form(frame, area, form);
     }
+    area
 }
 
 /// One item of a list, in the three places it can hold something: a mark at the

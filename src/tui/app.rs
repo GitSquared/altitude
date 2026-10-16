@@ -14,7 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use iroh::{EndpointAddr, EndpointId};
 use ratatui::{DefaultTerminal, layout::Rect, text::Line};
 use tokio::{process::Command as HostCommand, sync::mpsc, task::JoinHandle};
@@ -636,9 +636,12 @@ impl App {
     pub(in crate::tui) fn hints_for(&self, front: &Foreground) -> Vec<Hint> {
         let dismiss = || Hint::new("esc", "close");
         match front {
-            // Help lists the keys of what it covers, which is what the line
-            // under it goes on showing.
-            Foreground::Keys(behind) => self.hints_for(behind),
+            // Help owns the screen while it is open, so the line under it shows
+            // how to move through and leave the help itself.
+            Foreground::Keys(_) => vec![
+                Hint::new("↑/↓ · j/k · pgup/pgdn", "scroll"),
+                Hint::new("esc / q", "close"),
+            ],
             Foreground::Confirm(pending) => pending.hints(),
             Foreground::Reply(_) => vec![
                 Hint::new("enter", "send"),
@@ -687,11 +690,18 @@ impl App {
             }
             Foreground::Setup(setup) => match &setup.kind {
                 SetupKind::RemoteTrackers => vec![
+                    Hint::new("j/k", "choose"),
                     Hint::new("enter", "setup guide"),
                     Hint::new("esc / q", "close"),
                 ],
-                SetupKind::RemoteTrackerGuide(_) => vec![Hint::new("esc / q", "back")],
-                _ => vec![Hint::new("esc / q", "close")],
+                SetupKind::RemoteTrackerGuide(_) => vec![
+                    Hint::new("j/k · pgup/pgdn", "scroll"),
+                    Hint::new("esc / q", "back"),
+                ],
+                _ => vec![
+                    Hint::new("j/k · pgup/pgdn", "scroll"),
+                    Hint::new("esc / q", "close"),
+                ],
             },
             Foreground::Signals => vec![
                 Hint::new("tab", "action"),
@@ -768,6 +778,64 @@ impl App {
             Foreground::Shell(id) => Some(id),
             Foreground::OpenLink(asking) => Some(asking.shell()),
             _ => None,
+        }
+    }
+
+    /// Whether a modal is in front: a pop-up or the panel, rather than the work
+    /// itself or a terminal. What the transition animates.
+    pub(in crate::tui) fn has_modal(&self) -> bool {
+        matches!(
+            self.foreground,
+            Foreground::Keys(_)
+                | Foreground::Confirm(_)
+                | Foreground::Reply(_)
+                | Foreground::SendTask(_)
+                | Foreground::NewTask(_)
+                | Foreground::Panel
+                | Foreground::Setup(_)
+                | Foreground::Signals
+                | Foreground::OpenLink(_)
+        )
+    }
+
+    /// Whether the app wants the terminal's mouse reports.
+    ///
+    /// A shell needs them to hand to its program, and a modal that scrolls needs
+    /// the wheel. Everywhere else they are left to the terminal, so selecting
+    /// text still works.
+    pub(in crate::tui) fn wants_mouse(&self) -> bool {
+        self.open_shell().is_some()
+            || matches!(
+                self.foreground,
+                Foreground::Keys(_)
+                    | Foreground::Setup(_)
+                    | Foreground::Signals
+                    | Foreground::Panel
+            )
+    }
+
+    /// Move whatever is in front by one wheel notch, for the modals that scroll.
+    pub(in crate::tui) fn scroll_mouse(&mut self, mouse: MouseEvent) {
+        let up = match mouse.kind {
+            MouseEventKind::ScrollUp => true,
+            MouseEventKind::ScrollDown => false,
+            _ => return,
+        };
+        // A wheel notch is three rows.
+        const ROWS: u16 = 3;
+        let step = |scroll: u16| {
+            if up {
+                scroll.saturating_sub(ROWS)
+            } else {
+                scroll.saturating_add(ROWS)
+            }
+        };
+        match &mut self.foreground {
+            Foreground::Keys(_) => self.help_scroll = step(self.help_scroll),
+            Foreground::Setup(setup) => setup.wheel(up, ROWS),
+            Foreground::Signals => self.operator_signal_scroll = step(self.operator_signal_scroll),
+            Foreground::Panel => self.panel.detail_scroll = step(self.panel.detail_scroll),
+            _ => {}
         }
     }
 

@@ -177,7 +177,7 @@ pub fn draw_preparing(
     display: &str,
     progress: &str,
     tick: Option<usize>,
-) {
+) -> Rect {
     let popup = popup_area(area);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
@@ -193,6 +193,7 @@ pub fn draw_preparing(
         Paragraph::new(Line::from_iter(shimmer(progress, tick))).centered(),
         line,
     );
+    popup
 }
 
 /// The escape sequences a program in a sandbox uses to ask for something only this

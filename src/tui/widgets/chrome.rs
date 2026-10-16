@@ -16,7 +16,10 @@ use ratatui::{
     widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap},
 };
 
-use crate::tui::{keys::HelpSection, widgets::palette};
+use crate::tui::{
+    keys::HelpSection,
+    widgets::{palette, utils::centered_width},
+};
 
 /// The name every screen wears.
 const TITLE: &str = "⛰  altitude";
@@ -165,16 +168,28 @@ pub fn dim(frame: &mut Frame, area: Rect) {
 ///
 /// Shown whether or not the guidance is, because a key you cannot find is a key
 /// you do not have.
-pub fn draw_help(frame: &mut Frame, area: Rect, sections: &[HelpSection], scroll: &mut u16) {
-    let popup = centered(area, 94, area.height);
+pub fn draw_help(
+    frame: &mut Frame,
+    area: Rect,
+    sections: &[HelpSection],
+    scroll: &mut u16,
+) -> Rect {
+    // Narrower than the screen and a little short of it: the guide is a column to
+    // read, not a wall.
+    let popup = centered_width(area, 84, 88);
     frame.render_widget(Clear, popup);
-    let block = Block::bordered()
-        .title(" Keyboard shortcuts ")
-        .title_bottom(" ↑/↓ · j/k · PgUp/PgDn scroll · Esc/q close ")
-        .border_type(BorderType::Rounded)
-        .padding(Padding::horizontal(1));
+    let block = modal("Keyboard shortcuts");
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
+    // The keys are one left-aligned column and the words another, with a leader
+    // between them, so the eye can run down either one.
+    let key_width = sections
+        .iter()
+        .flat_map(|section| section.bindings.iter())
+        .map(|(keys, _)| keys.chars().count())
+        .max()
+        .unwrap_or(0);
+    let description_column = key_width + 4;
     let mut lines = Vec::new();
     for section in sections {
         if !lines.is_empty() {
@@ -182,8 +197,16 @@ pub fn draw_help(frame: &mut Frame, area: Rect, sections: &[HelpSection], scroll
         }
         lines.push(Line::styled(section.title, palette::heading()));
         for (keys, description) in section.bindings {
+            let leader = ".".repeat(
+                description_column
+                    .saturating_sub(keys.chars().count() + 2)
+                    .max(2),
+            );
             lines.push(Line::from(vec![
-                Span::styled(format!("{keys}  "), palette::accent()),
+                Span::styled((*keys).to_owned(), palette::accent()),
+                Span::raw(" "),
+                Span::styled(leader, palette::muted()),
+                Span::raw(" "),
                 Span::raw(*description),
             ]));
         }
@@ -194,6 +217,7 @@ pub fn draw_help(frame: &mut Frame, area: Rect, sections: &[HelpSection], scroll
         .saturating_sub(usize::from(inner.height));
     *scroll = (*scroll).min(maximum.min(usize::from(u16::MAX)) as u16);
     frame.render_widget(paragraph.scroll((*scroll, 0)), inner);
+    popup
 }
 
 /// A button: the one holding the focus is inverted, and the primary one is
@@ -219,6 +243,21 @@ pub fn button(frame: &mut Frame, area: Rect, label: &str, focused: bool, primary
 }
 
 /// A box a percentage of the width and a fixed height, centred.
+/// The frame a modal wears: a rounded border with what it is at the top.
+///
+/// The keys that work are not printed here. They belong to the frame at the
+/// bottom of the screen, which every screen shares, so a modal cannot invent its
+/// own keys or fall out of step with them.
+pub fn modal(title: impl Into<String>) -> Block<'static> {
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .padding(Padding::horizontal(1))
+        .title(Line::styled(
+            format!(" {} ", title.into()),
+            palette::heading(),
+        ))
+}
+
 pub fn centered(area: Rect, percent_x: u16, height: u16) -> Rect {
     let [vertical] = Layout::vertical([Constraint::Length(height.min(area.height))])
         .flex(Flex::Center)

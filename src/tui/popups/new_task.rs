@@ -39,7 +39,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::Style,
     text::{Line, Span},
-    widgets::{Block, BorderType, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap},
+    widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
 use crate::tui::widgets::{
@@ -783,21 +783,18 @@ impl NewTask {
     }
 }
 
-pub fn draw(frame: &mut Frame, area: Rect, new_task: &NewTask, tick: Option<usize>) {
+pub fn draw(frame: &mut Frame, area: Rect, new_task: &NewTask, tick: Option<usize>) -> Rect {
     let popup = chrome::centered(area, WIDTH_PERCENT, HEIGHT);
     frame.render_widget(Clear, popup);
-    let block = Block::bordered()
-        .title(if new_task.issue {
-            " New task — link an issue "
-        } else {
-            " New task "
-        })
-        .border_type(BorderType::Rounded)
-        .padding(Padding::horizontal(2));
+    let block = chrome::modal(if new_task.issue {
+        "New task — link an issue"
+    } else {
+        "New task"
+    });
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     if inner.height < 8 {
-        return;
+        return popup;
     }
     if new_task.issue {
         let [label, body, choices, actions] = Layout::vertical([
@@ -828,6 +825,7 @@ pub fn draw(frame: &mut Frame, area: Rect, new_task: &NewTask, tick: Option<usiz
         draw_choices(frame, choices, new_task, false);
         draw_actions(frame, actions, new_task);
     }
+    popup
 }
 
 /// The results, or the reason there are none yet.

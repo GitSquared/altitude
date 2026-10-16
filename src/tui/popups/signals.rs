@@ -3,12 +3,12 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::Style,
     text::{Line, Span},
-    widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
 use chrono::{Local, TimeZone};
 
-use crate::tui::widgets::palette;
+use crate::tui::widgets::{chrome, palette};
 use crate::{
     task::{TaskOperatorSignal, TaskOperatorSignalKind, TaskOperatorSignalPriority},
     tui::widgets::utils::centered_width,
@@ -59,10 +59,10 @@ pub fn draw(
     selected: usize,
     focused_action: usize,
     scroll: &mut u16,
-) {
+) -> Rect {
     let area = centered_width(area, 72, 65);
     frame.render_widget(Clear, area);
-    let block = Block::bordered().title(" Signals ");
+    let block = chrome::modal("Signals");
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let list_height = operator_signals
@@ -147,6 +147,7 @@ pub fn draw(
         actions(operator_signals.get(selected), focused_action),
         actions_area,
     );
+    area
 }
 
 /// The buttons for the selected signal, with the focused one picked out.
