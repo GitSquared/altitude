@@ -7,6 +7,8 @@
 //! the task. Provider credentials stay inside the provider; nothing here reads
 //! or records them.
 
+use std::sync::Arc;
+
 use crate::{
     agent::AgentKind,
     config::InstallationIdentity,
@@ -15,6 +17,24 @@ use crate::{
 };
 
 use super::{Task, TaskExecutionPauseReason, TaskHistoryEvent, TaskService, TaskServiceError};
+
+/// How a task's tracker is found.
+///
+/// A machine with one login answers the same provider for every task. A machine
+/// serving several peers has one login per peer, read from what each peer pushed,
+/// so the answer depends on who owns the task.
+pub trait TrackerHost: Send + Sync + 'static {
+    fn for_operator(&self, operator: &str) -> Option<Arc<dyn TrackerProvider>>;
+}
+
+/// One login for every task, which is what a machine with a single account has.
+pub(crate) struct OwnTracker(pub(crate) Arc<dyn TrackerProvider>);
+
+impl TrackerHost for OwnTracker {
+    fn for_operator(&self, _operator: &str) -> Option<Arc<dyn TrackerProvider>> {
+        Some(self.0.clone())
+    }
+}
 
 impl<E> TaskService<E>
 where
@@ -57,12 +77,14 @@ where
     /// Report every bound task's life to its tracker, as far as it has not been
     /// reported already.
     ///
-    /// Safe to call repeatedly: work is derived from history and checkpointed, so
-    /// a pass that finds nothing new writes nothing and a pass that fails leaves
-    /// its work for the next one. One task's provider failure does not stop the
-    /// others; the first failure is returned for the interface to show.
+    /// Each task is reported through the account of the peer that owns it, so a
+    /// machine serving several peers uses the login each of them synced. Safe to
+    /// call repeatedly: work is derived from history and checkpointed, so a pass
+    /// that finds nothing new writes nothing and a pass that fails leaves its work
+    /// for the next one. One task's provider failure does not stop the others; the
+    /// first failure is returned for the interface to show.
     pub async fn sync_tracker(&self) -> Result<(), TrackerError> {
-        let Some(provider) = self.tracker.clone() else {
+        let Some(host) = self.trackers.clone() else {
             return Ok(());
         };
         let tasks = self
@@ -74,6 +96,14 @@ where
             if task.facts.tracker_issue.is_none() {
                 continue;
             }
+            // A task is reported through the account of the peer that owns it,
+            // which is the login that peer pushed here.
+            let Some(provider) = task
+                .operator_id()
+                .and_then(|owner| host.for_operator(owner))
+            else {
+                continue;
+            };
             if let Err(error) = self.sync_task_tracker(provider.as_ref(), &task).await {
                 tracing::warn!(task_id = %task.id, %error, "could not sync a task to its tracker");
                 first_error.get_or_insert(error);

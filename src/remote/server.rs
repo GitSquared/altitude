@@ -40,9 +40,19 @@ use super::{
     },
 };
 
-/// The profiles a pushed configuration may carry. A pushed file is a login, and
-/// only one Altitude knows how to mount is one.
-const ALLOWED_PROFILES: [&str; 3] = ["agents/pi", "agents/claude", "vcs/github"];
+use crate::tracker::{ACCOUNT_FILE, TrackerAccount, TrackerKind};
+
+/// Whether a pushed configuration may carry this profile.
+///
+/// A pushed file is a login, and only one a task mounts here is one. A tracker
+/// profile is the exception: it travels so a remote can route tracker work, and
+/// is never mounted.
+fn is_allowed_profile(mounted: &[&str], profile: &str) -> bool {
+    mounted.contains(&profile)
+        || TrackerKind::ALL
+            .iter()
+            .any(|kind| kind.profile() == profile)
+}
 
 // ------------------------------------------------------------- the server side
 
@@ -96,6 +106,9 @@ struct LinkHandler {
     /// Where pushed configurations and logins are written, one directory per
     /// operator.
     data_dir: PathBuf,
+    /// The profiles a task mounts here, which is what a pushed configuration may
+    /// carry besides a tracker profile.
+    mounted_profiles: Arc<Vec<&'static str>>,
     config_lock: Arc<AsyncMutex<()>>,
     /// The tasks this machine owns, which is the only place they exist.
     tasks: Arc<dyn TaskHost>,
@@ -139,7 +152,7 @@ impl LinkHandler {
             .map_err(|error| io::Error::other(format!("not a configuration: {error}")))?;
         let mut decoded = Vec::new();
         for profile in &bundle.profiles {
-            if !ALLOWED_PROFILES.contains(&profile.profile.as_str()) {
+            if !is_allowed_profile(&self.mounted_profiles, &profile.profile) {
                 return Err(io::Error::other("unknown credential profile"));
             }
             for file in &profile.files {
@@ -205,7 +218,30 @@ impl LinkHandler {
                 digest: profile.digest.clone(),
             });
         }
-        held.save(&held_path)
+        held.save(&held_path)?;
+        // The account a peer is signed in as travels in its tracker profile, so it
+        // is read back from what was just written rather than trusted from the
+        // pushed bytes.
+        let mut pushed = Vec::new();
+        for provider in TrackerKind::ALL {
+            if !bundle
+                .profiles
+                .iter()
+                .any(|sent| sent.profile == provider.profile())
+            {
+                continue;
+            }
+            let path = operator_dir
+                .join(provider.profile())
+                .join("profile")
+                .join(ACCOUNT_FILE);
+            let account = fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<TrackerAccount>(&bytes).ok())
+                .filter(|account| account.provider == provider);
+            pushed.push((provider, account));
+        }
+        super::tracker::record_accounts(&operator_dir, &pushed)
     }
 
     /// Where one peer's pushed configuration and logins live.
@@ -246,6 +282,9 @@ pub struct ServerParts {
     /// Where pushed configurations and logins are written, one directory per
     /// operator.
     pub data_dir: PathBuf,
+    /// The profiles a task mounts here, so a pushed configuration can be checked
+    /// against what this machine actually knows how to mount.
+    pub mounted_profiles: Vec<&'static str>,
     /// What this machine can do with a task right now.
     pub state: watch::Receiver<RemoteState>,
     pub trackers: Vec<TrackerConnection>,
@@ -269,11 +308,6 @@ pub trait TaskHost: Send + Sync + 'static {
         peer: EndpointId,
         command: super::protocol::SignalCommand,
     ) -> BoxFuture<Result<(), String>>;
-    fn pair_tracker(
-        &self,
-        peer: EndpointId,
-        tracker_user_id: String,
-    ) -> BoxFuture<Result<String, String>>;
     fn configure(&self, peer: EndpointId) -> BoxFuture<Result<(), String>>;
     fn run(&self, peer: EndpointId, request: TaskRequest) -> BoxFuture<Result<(), String>>;
     fn list(&self, peer: EndpointId) -> BoxFuture<Result<Vec<TaskSummary>, String>>;
@@ -390,13 +424,6 @@ async fn answer(
         LinkRequest::Signal { command } => {
             let response = match handler.tasks.signal(peer, command).await {
                 Ok(()) => LinkResponse::Accepted,
-                Err(reason) => LinkResponse::Rejected { reason },
-            };
-            write_frame(&mut send, &response).await?;
-        }
-        LinkRequest::PairTracker { tracker_user_id } => {
-            let response = match handler.tasks.pair_tracker(peer, tracker_user_id).await {
-                Ok(code) => LinkResponse::PairingCode { code },
                 Err(reason) => LinkResponse::Rejected { reason },
             };
             write_frame(&mut send, &response).await?;
@@ -560,6 +587,7 @@ impl LinkServer {
             listen,
             label,
             data_dir,
+            mounted_profiles,
             state,
             trackers,
             tasks,
@@ -569,6 +597,7 @@ impl LinkServer {
             id: identity.id(),
             blobs: Arc::clone(&blobs),
             data_dir,
+            mounted_profiles: Arc::new(mounted_profiles),
             config_lock: Arc::new(AsyncMutex::new(())),
             tasks,
         };

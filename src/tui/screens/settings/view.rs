@@ -179,8 +179,8 @@ impl App {
     /// reorders the remotes the operator configured.
     fn remote_rows(&self) -> Vec<Row> {
         let installation = self.installation_credential();
-        // This installation comes first: it is the identity a remote is paired
-        // with.
+        // This installation comes first: it is the identity a remote knows this
+        // machine by.
         let mut rows = vec![Row {
             label: installation.label.clone(),
             note: None,

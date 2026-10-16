@@ -191,13 +191,8 @@ where
     let mut connection_clock = time::interval(Duration::from_secs(15));
     let mut reading_configuration = false;
     let (configuration_reads, mut configuration_read) = mpsc::unbounded_channel();
-    let mut browser = match app.link.browse_remotes().await {
-        Ok(browser) => Some(browser),
-        Err(error) => {
-            tracing::warn!(%error, "network discovery unavailable");
-            None
-        }
-    };
+    let mut scan = None;
+    let mut remotes_visible = false;
 
     let mut mouse_captured = false;
     // Whether the terminal is reporting the keys the creation question needs.
@@ -261,6 +256,24 @@ where
     let mut motion = time::interval(Duration::from_millis(8));
     motion.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     loop {
+        let showing_remotes = app.foreground.shows_settings()
+            && app.panel.section == screens::settings::Section::Remotes;
+        if showing_remotes != remotes_visible {
+            remotes_visible = showing_remotes;
+            scan = None;
+            if showing_remotes {
+                app.discovered_remotes.clear();
+                scan = match app.link.scan_remotes().await {
+                    Ok(scan) => Some(scan),
+                    Err(error) => {
+                        tracing::warn!(%error, "Network discovery unavailable");
+                        app.notice =
+                            Some("Network discovery unavailable · add a remote by hostname".into());
+                        None
+                    }
+                };
+            }
+        }
         let wants_mouse = app.wants_mouse();
         if mouse_captured != wants_mouse {
             mouse_captured = wants_mouse;
@@ -326,10 +339,7 @@ where
                 widgets::chrome::dim(frame, content);
                 modal = Some(popups::open_link::draw(frame, content, asking));
             }
-            if matches!(app.foreground, Foreground::Panel)
-                || matches!(&app.foreground, Foreground::Confirm(confirm) if confirm.is_settings())
-                || matches!(app.foreground, Foreground::Setup(_))
-            {
+            if app.foreground.shows_settings() {
                 // Fullscreen: it is the screen, not something over it.
                 let view = app.settings_view();
                 modal = Some(screens::settings::draw(
@@ -338,6 +348,7 @@ where
                     &app.panel,
                     &view,
                     app.animation_tick(),
+                    scan.is_some(),
                 ));
                 if let super::app::CredentialShellState::Opening {
                     display, progress, ..
@@ -451,10 +462,10 @@ where
                 app.capacity = Some(event_loop.capacity_limit());
                 redraw = true;
             }
-            event = async { browser.as_mut().expect("discovery enabled").recv().await }, if browser.is_some() => {
+            event = async { scan.as_mut().expect("discovery active").recv().await }, if scan.is_some() => {
                 match event {
                     Some(event) => app.discovery_observed(event),
-                    None => browser = None,
+                    None => scan = None,
                 }
                 redraw = true;
             }
@@ -588,10 +599,6 @@ where
             }
             Some(reply) = tracker_connect_replied.recv() => {
                 app.tracker_connect_resolved(reply);
-                redraw = true;
-            }
-            Some(reply) = app.pairings_replied.recv() => {
-                app.pairing_resolved(reply);
                 redraw = true;
             }
             Some(reply) = remote_signals_replied.recv() => {

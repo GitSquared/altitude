@@ -110,19 +110,6 @@ impl Row {
         }
     }
 
-    /// Whether this row opens a form.
-    ///
-    /// The built-in base does not: there is no form behind it and nothing to
-    /// configure, so selecting it is already as far as it goes, and its
-    /// description is shown without a second step. A credential and a git
-    /// identity are acted on with enter rather than edited here.
-    pub fn opens_form(&self) -> bool {
-        matches!(
-            self.kind,
-            RowKind::Environment { .. } | RowKind::Remote { .. }
-        )
-    }
-
     /// Whether this row is a coding agent.
     pub fn is_agent(&self) -> bool {
         matches!(self.kind, RowKind::Agent { .. })
@@ -197,7 +184,6 @@ impl Row {
             RowKind::Remote { .. } => vec![
                 chrome::Hint::new("enter", "connect"),
                 chrome::Hint::new("t", "task trackers"),
-                chrome::Hint::new("b", "pair Linear"),
                 chrome::Hint::new("e", "edit"),
             ],
             RowKind::Discovered(_) => vec![chrome::Hint::new("enter", "use remote")],
@@ -241,12 +227,13 @@ impl Credential {
         )
     }
 
-    /// What a profile's own check last said, as a mark in front of its row. The
-    /// installation's key is not signed in to, so it has nothing to say.
+    /// The mark in front of a credential's row. A profile's says what its own
+    /// check last said. This installation is signed in to nothing, so its mark
+    /// says which machine it is instead.
     pub(super) fn dot(&self) -> Option<Dot> {
         match &self.kind {
             CredentialKind::Profile { status, .. } => Some(credential_mark(status)),
-            CredentialKind::Installation { .. } => None,
+            CredentialKind::Installation { .. } => Some(Dot::still('⌂', palette::muted())),
         }
     }
 }

@@ -97,7 +97,6 @@ pub fn help_sections() -> Vec<HelpSection> {
                     "Remove an environment or remote, after confirmation",
                 ),
                 ("t (Remotes)", "Choose the remote's task tracker"),
-                ("b (Remotes)", "Pair your Linear identity with that remote"),
                 (
                     "PgUp / PgDn · Home",
                     "Scroll details, or return to their beginning",

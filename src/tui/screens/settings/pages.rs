@@ -218,15 +218,13 @@ fn linear_remote_tracker_lines() -> Vec<Line<'static>> {
              settings. Open the printed URL in your browser to install the app. Once it exits, \
              start altitude serve again.",
         ),
-        step(
-            "6.",
-            "Sign in under Settings → Task tracker, then select this remote and press b to \
-             pair your Linear identity. You can now delegate an issue to Altitude in Linear.",
-        ),
         Line::from(""),
         Line::styled(
-            "The remote shows configured once its app is installed and altitude serve is \
-             running with it; this panel does not check Linear from here.",
+            "Steps 1–5 belong to whoever owns this remote. On the machine that should run the \
+             work, connect Linear under Settings → Task tracker: that account syncs here, and \
+             decides which machine receives an issue delegated in Linear. The remote shows \
+             configured once its app is installed and altitude serve is running with it; this \
+             panel does not check Linear from here.",
             palette::muted(),
         ),
     ]
@@ -370,7 +368,7 @@ pub(super) fn credential_connector(credential: &Credential) -> Connector {
             identity: None,
             note: None,
             action: Some("Press enter to learn more about altitude remotes."),
-            purpose: "The key that names this installation to a remote, so a paired remote \
+            purpose: "The key that names this installation to a remote, so a remote \
                       knows whose work it holds.",
             fields: vec![
                 ("name", label.clone()),
@@ -434,7 +432,16 @@ pub(super) fn git_connector(identity: &GitIdentity) -> Connector {
 /// Linear, as the page reads it: a live session rather than a login kept on disk.
 pub(super) fn tracker_connector(state: TrackerState, profile_dir: &Path) -> Connector {
     let (reach, status, note, action) = match state {
-        TrackerState::Connected => (Reach::On, "signed in", None, None),
+        TrackerState::Connected => (
+            Reach::On,
+            "signed in",
+            Some(
+                "This account syncs to your remotes, and decides which machine receives \
+                 an issue delegated in Linear."
+                    .to_owned(),
+            ),
+            None,
+        ),
         TrackerState::Connecting => (Reach::Asking, "connecting…", None, None),
         TrackerState::NotConnected => (
             Reach::Off,

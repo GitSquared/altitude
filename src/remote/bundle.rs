@@ -7,6 +7,8 @@ use std::{fs, io, path::Path};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 
+use crate::tracker::TrackerKind;
+
 /// Everything a remote needs to be this client, as far as running a task goes.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConfigBundle {
@@ -91,16 +93,22 @@ impl ConfigBundle {
 
     /// Reads this installation's setup, sending the profiles a remote is missing.
     ///
+    /// `mounted` is the logins a task mounts. The tracker profiles travel with
+    /// them but are never mounted: what they carry is the account a remote routes
+    /// tracker work by, not something a capsule reads.
+    ///
     /// `held` is what the remote said it has. A profile is sent when it is not there
     /// at all, or when its contents differ.
     pub fn of(
         settings: String,
         data_dir: &Path,
-        profiles: &[&str],
+        mounted: &[&str],
         held: &[ProfileDigest],
     ) -> Result<Self, io::Error> {
-        let profiles = profiles
+        let profiles = mounted
             .iter()
+            .copied()
+            .chain(TrackerKind::ALL.iter().map(|kind| kind.profile()))
             .map(|profile| ProfileBundle::of(data_dir, profile))
             .collect::<io::Result<Vec<_>>>()?;
         let mut bundle = Self { settings, profiles };

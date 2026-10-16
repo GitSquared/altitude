@@ -89,14 +89,15 @@ async fn client() -> Result<(), Box<dyn Error>> {
         else {
             return Ok(());
         };
-        let tracker =
-            match tracker::Linear::from_directory(&config.data_dir().join("trackers/linear")) {
-                Ok(connection) => Some(Arc::new(connection) as Arc<dyn tracker::TrackerProvider>),
-                Err(error) => {
-                    tracing::warn!(%error, "Linear setup needs attention");
-                    None
-                }
-            };
+        let tracker = match tracker::Linear::from_directory(
+            &config.profile_dir(tracker::TrackerKind::Linear.profile()),
+        ) {
+            Ok(connection) => Some(Arc::new(connection) as Arc<dyn tracker::TrackerProvider>),
+            Err(error) => {
+                tracing::warn!(%error, "Linear setup needs attention");
+                None
+            }
+        };
         let tasks = TaskService::new(
             TaskStore::new(&database),
             isolation,

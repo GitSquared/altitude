@@ -2,11 +2,10 @@
 //! how it signs in, the git identity tasks commit with, the environments a task
 //! runs in, and the remotes it can be delegated to.
 //!
-//! Fullscreen, and three columns. The rail picks a list, the list picks a row,
-//! and the third column says what is known about it. Only the column holding the
-//! focus carries the inverted bar; the column ahead of it is drawn dimmed, as a
-//! preview of where the next step goes, so nothing moves on screen when the
-//! focus does.
+//! Fullscreen, and three columns. The rail picks a list and the list picks a
+//! row. The third column is not a place the focus goes: it only says what is
+//! known about the row the list has selected, and stays readable while the list
+//! is being used.
 //!
 //! The base environment is built in and therefore has no form: selecting it
 //! describes it instead, which is the only place an operator can see what a

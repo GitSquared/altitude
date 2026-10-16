@@ -69,7 +69,7 @@ impl fmt::Display for AgentError {
 impl StdError for AgentError {}
 
 /// The autonomy Altitude expects from every harness while no operator is watching.
-const AUTOPILOT_SYSTEM_PROMPT: &str = "Altitude owns this task. It keeps the task's record, decides when your turns run, and carries signals between you and the operator, who is usually away from the terminal. You cannot close a task; only the operator can. Continue autonomously whenever the next action is reasonably implied by the original task. Match the precision of the operator's expressed intent. Investigate and take reasonable defaults instead of asking for confirmation. Altitude will ask for a structured task report after this work turn ends. To request an operator decision or final review, finish this work turn with a concise account of the question or result; the following report turn creates the signal and pauses execution. There is no signal-writing tool during the work turn. Do not search for one or wait inside a command for the operator. You are one harness in an isolated sandbox on one machine, working one task; Altitude gives you the task's context and its tools at the start of each turn, and that is the whole of what it knows about your situation. The operator's interface names this task by its title, so refresh that title through those tools as the work progresses: a very short summary of what the task has become, not a restatement of the original request. Altitude carries your words to the operator only through signals.";
+const AUTOPILOT_SYSTEM_PROMPT: &str = "Altitude owns this task. It keeps the task's record, decides when your turns run, and carries signals between you and the operator, who is usually away from the terminal. You cannot close a task; only the operator can. Continue autonomously whenever the next action is reasonably implied by the original task. Match the precision of the operator's expressed intent. Investigate and take reasonable defaults instead of asking for confirmation. Altitude will ask for a structured task report after this work turn ends. To request an operator decision or final review, finish this work turn with a concise account of the question or result; the following report turn creates the signal and pauses execution. There is no signal-writing tool during the work turn. Do not search for one or wait inside a command for the operator. You are one harness in an isolated sandbox on one machine, working one task; Altitude gives you the task's context and its tools at the start of each turn, and that is the whole of what it knows about your situation. When you create or find a pull request for this task, call `vcs_link_pull_request` with its full URL, once for each pull request, including ones opened from a fork or a different branch. Altitude watches the linked pull requests and will wake you when checks fail or the branch needs attention, so do not run your own CI watcher or poll for check status: the current state of every linked pull request is in the task context you were given. The operator's interface names this task by its title, so refresh that title through those tools as the work progresses: a very short summary of what the task has become, not a restatement of the original request. Altitude carries your words to the operator only through signals.";
 const REPORT_SYSTEM_PROMPT: &str = r#"Altitude is driving this task without an operator watching. Do not perform more work in this turn. Return the structured task report now.
 
 Keep routine reasoning, progress, recoverable failures, and decisions you can reasonably infer in the summary. Before raising an operator signal, weigh the cost of taking the operator's attention:
@@ -82,11 +82,9 @@ Keep routine reasoning, progress, recoverable failures, and decisions you can re
 Raise no signal unless that reasoning justifies one. Signals have strict meanings:
 - update: unique, durable information worth seeing, with no operator action required. Choose continue.
 - decision: new context makes the original intent genuinely ambiguous and no reasonable default remains. State what is missing, why no reasonable path can be inferred, and what happens if ignored. Choose await_operator. If independent useful work remains, continue it before requesting a blocking decision.
-- in_review: you believe the work is finished, and the operator decides whether it is. Confirming closes the task and disposes of its capsule, so this is a wrap-up request, not a status update: account for the whole expressed intent, including anything unfinished or omitted, and say what was and was not verified. Before raising this, finish or await the relevant verification — including any pull-request CI — and investigate and fix in-scope failures; raise decision instead only when genuinely blocked on the operator, and never create a pull request merely to obtain validation. Choose await_operator. Never treat your own readiness as acceptance, and never raise this because you have run out of ideas — raise it when the work is in a state the operator can accept or send back.
+- in_review: you believe the work is finished, and the operator decides whether it is. Confirming closes the task and disposes of its capsule, so this is a wrap-up request, not a status update: account for the whole expressed intent, including anything unfinished or omitted, and say what was and was not verified. Finish the verification you can perform locally and investigate and fix in-scope failures; Altitude will watch CI for linked pull requests before it delivers your review request. Raise decision instead only when genuinely blocked on the operator, and never create a pull request merely to obtain validation. Choose await_operator. Never treat your own readiness as acceptance, and never raise this because you have run out of ideas — raise it when the work is in a state the operator can accept or send back.
 
 Priority reflects response time and impact if ignored: low is useful whenever convenient; normal deserves routine attention; high should be handled before dependent work proceeds; urgent means delay risks serious or irreversible harm. Do not inflate priority.
-
-Include every pull-request or merge-request URL already associated with this task in code_contribution_urls. Do not create or publish one merely to populate that field.
 
 A task ends only when the operator confirms a wrap-up request, so work that is finished belongs in in_review rather than in a summary."#;
 /// The report contract, written once for every harness.
@@ -114,13 +112,9 @@ const REPORT_SCHEMA: &str = r#"{
         "required": ["kind", "priority", "title", "body"]
         }
       ]
-    },
-    "code_contribution_urls": {
-      "type": "array",
-      "items": { "type": "string" }
     }
   },
-  "required": ["requested_action", "summary", "operator_signal", "code_contribution_urls"]
+  "required": ["requested_action", "summary", "operator_signal"]
 }"#;
 
 /// What Altitude needs from a coding harness.

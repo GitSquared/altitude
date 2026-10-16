@@ -2,6 +2,10 @@
 dev:
     watchexec --restart --stop-signal SIGTERM --stop-timeout 2s --wrap-process=none --watch src --watch migrations --watch Cargo.toml --watch Cargo.lock --shell=none -- sh -c 'cargo build && exec ./target/debug/altitude'
 
+# Build a release binary using the locked dependency versions.
+build:
+    cargo build --release --locked
+
 # Create an immutable, forward-only SQL migration.
 [positional-arguments]
 migration name:

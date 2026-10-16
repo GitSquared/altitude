@@ -83,29 +83,11 @@ impl Setting {
     }
 }
 
-/// How deep the focus is, and therefore how many columns are lit.
+/// Whether the focus is in the rail or the list.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Depth {
     Rail,
     List,
-    Detail,
-}
-
-impl Depth {
-    pub fn deeper(self) -> Self {
-        match self {
-            Self::Rail => Self::List,
-            Self::List | Self::Detail => Self::Detail,
-        }
-    }
-
-    pub fn shallower(self) -> Self {
-        match self {
-            Self::Rail => Self::Rail,
-            Self::Detail => Self::List,
-            Self::List => Self::Rail,
-        }
-    }
 }
 
 /// The panel's state: where the focus is, and whatever is drawn over it.
@@ -155,7 +137,7 @@ impl Panel {
                 self.section = Section::ALL[next];
                 self.selected = 0;
             }
-            Depth::List | Depth::Detail => {
+            Depth::List => {
                 if rows > 0 {
                     self.selected = if forward {
                         (self.selected + 1) % rows

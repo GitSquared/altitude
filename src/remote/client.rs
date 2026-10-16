@@ -9,7 +9,7 @@ use crate::task::TaskOperatorSignal;
 use super::{
     LinkResult,
     bundle::ProfileDigest,
-    discovery::{self, Browser},
+    discovery::{self, Scan},
     protocol::{
         BlobHash, CHUNK_BYTES, Handover, LINK_ALPN, LinkRequest, LinkResponse, TaskRequest,
         TaskSummary, TransferArchive, builder, read_body, read_frame, write_frame,
@@ -93,12 +93,10 @@ impl LinkClient {
         Ok(Self { endpoint })
     }
 
-    /// Browses the local network for remotes announcing themselves.
-    ///
-    /// The endpoint keeps the lookup alive; dropping the returned browser only
-    /// stops listening.
-    pub async fn browse_remotes(&self) -> LinkResult<Browser> {
-        discovery::browse(&self.endpoint).await
+    /// Combines available network sources into remote suggestions.
+    /// The scan ends after five seconds; dropping it cancels in-flight probes.
+    pub async fn scan_remotes(&self) -> LinkResult<Scan> {
+        discovery::scan(&self.endpoint).await
     }
 
     pub async fn shutdown(&self) {
@@ -454,26 +452,6 @@ impl LinkClient {
         )
         .await
     }
-    pub async fn pair_tracker(
-        &self,
-        peer: impl Into<EndpointAddr>,
-        tracker_user_id: &str,
-    ) -> LinkResult<String> {
-        match self
-            .say(
-                peer,
-                &LinkRequest::PairTracker {
-                    tracker_user_id: tracker_user_id.into(),
-                },
-            )
-            .await?
-        {
-            LinkResponse::PairingCode { code } => Ok(code),
-            LinkResponse::Rejected { reason } => Err(reason.into()),
-            other => Err(format!("unexpected answer: {other:?}").into()),
-        }
-    }
-
     /// Sends this machine's configuration for a remote to build from.
     pub async fn put_config(&self, peer: impl Into<EndpointAddr>, bytes: &[u8]) -> LinkResult<()> {
         let request = LinkRequest::PutConfig {

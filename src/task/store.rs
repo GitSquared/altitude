@@ -4,7 +4,8 @@ use uuid::Uuid;
 use super::{
     Task, TaskAgentRun, TaskAgentTurnReport, TaskError, TaskExecutionMode,
     TaskExecutionPauseReason, TaskExecutionStatus, TaskFacts, TaskHistoryEvent,
-    TaskOperatorAttentionLevel, TaskOperatorSignal, TaskOperatorSignalKind,
+    TaskOperatorAttentionLevel, TaskOperatorSignal, TaskOperatorSignalDraft,
+    TaskOperatorSignalKind,
 };
 use crate::isolation::Environment;
 use crate::{
@@ -60,6 +61,21 @@ pub struct TaskStore {
     pool: SqlitePool,
 }
 
+/// What the host does with the wrap-up request a report asks for.
+///
+/// The three cases are the only three: the request goes out in the agent's
+/// words, goes out with something the host knows about it appended, or waits
+/// for the linked contributions to answer.
+pub(crate) enum ReviewRequest<'a> {
+    /// Raise what the report asks for, as the agent wrote it.
+    Raise,
+    /// Raise it with a note the host adds, for something the agent could not
+    /// know about the request.
+    RaiseWithNote(&'a str),
+    /// Hold it until the linked contributions answer.
+    Hold(&'a TaskOperatorSignalDraft),
+}
+
 impl TaskStore {
     pub fn new(database: &Database) -> Self {
         Self {
@@ -75,6 +91,23 @@ impl TaskStore {
         sqlx::query_as::<_, TaskRow>(concat!(
             include_str!("read_task.sql"),
             " WHERE tasks.removed_at_ms IS NULL ORDER BY last_event_sequence DESC"
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| rows.into_iter().map(Task::from).collect())
+        .map_err(TaskError::Database)
+    }
+
+    /// The tasks whose wrap-up request the host is still holding, newest first.
+    ///
+    /// The review scheduler asks this every pass, so it reads only the tasks it
+    /// acts on rather than every task's facts.
+    pub async fn list_held_reviews(&self) -> Result<Vec<Task>, TaskError> {
+        sqlx::query_as::<_, TaskRow>(concat!(
+            include_str!("read_task.sql"),
+            " WHERE tasks.removed_at_ms IS NULL",
+            " AND tasks.id IN (SELECT task_id FROM task_deferred_reviews)",
+            " ORDER BY last_event_sequence DESC"
         ))
         .fetch_all(&self.pool)
         .await
@@ -368,7 +401,7 @@ impl TaskStore {
         agent_run: &TaskAgentRun,
         report: &TaskAgentTurnReport,
         attention: TaskOperatorAttentionLevel,
-        contributions: &[CodeContribution],
+        review: ReviewRequest<'_>,
     ) -> Result<Task, TaskError> {
         let mut events = vec![TaskHistoryEvent::AgentTurnReported {
             agent_run_id: agent_run.id.clone(),
@@ -376,70 +409,108 @@ impl TaskStore {
             operator_attention_level: attention,
             summary: report.summary.clone(),
         }];
-        let signals: Vec<_> = report
-            .operator_signal
-            .iter()
-            .map(|draft| TaskOperatorSignal {
-                id: Uuid::new_v4().to_string(),
-                task_id: task_id.to_owned(),
-                kind: draft.kind,
-                priority: draft.priority,
-                title: draft.title.clone(),
-                body: draft.body.clone(),
-                raised_at_ms: now_ms(),
-                read: false,
-            })
-            .collect();
-        events.extend(
-            signals
-                .iter()
-                .cloned()
-                .map(|signal| TaskHistoryEvent::OperatorSignalRaised { signal }),
-        );
+        let signal = |draft: &TaskOperatorSignalDraft, note: Option<&str>| TaskOperatorSignal {
+            id: Uuid::new_v4().to_string(),
+            task_id: task_id.to_owned(),
+            kind: draft.kind,
+            priority: draft.priority,
+            title: draft.title.clone(),
+            body: match note {
+                Some(note) => format!("{}\n\n{note}", draft.body),
+                None => draft.body.clone(),
+            },
+            raised_at_ms: now_ms(),
+            read: false,
+        };
+        match review {
+            // A held request is not raised now; the host raises it later, once
+            // the linked contributions can answer. Either way it is recorded
+            // here, so the agent's request is never lost to a restart.
+            ReviewRequest::Hold(draft) => events.push(TaskHistoryEvent::ReviewDeferred {
+                signal: signal(draft, None),
+                agent_run_id: agent_run.id.clone(),
+            }),
+            ReviewRequest::Raise => events.extend(report.operator_signal.iter().map(|draft| {
+                TaskHistoryEvent::OperatorSignalRaised {
+                    signal: signal(draft, None),
+                }
+            })),
+            ReviewRequest::RaiseWithNote(note) => {
+                events.extend(report.operator_signal.iter().map(|draft| {
+                    TaskHistoryEvent::OperatorSignalRaised {
+                        signal: signal(draft, Some(note)),
+                    }
+                }))
+            }
+        }
         let mut transaction = self
             .pool
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(TaskError::Database)?;
         Self::write_events(&mut transaction, task_id, &events).await?;
-        for contribution in contributions {
-            let event = TaskHistoryEvent::CodeContributionLinked {
-                contribution: contribution.clone(),
-            };
-            let payload = serde_json::to_string(&event).map_err(TaskError::HistoryData)?;
-            sqlx::query(
-                r#"
-                INSERT INTO task_event_logs (id, task_id, recorded_at_ms, payload)
-                VALUES (?1, ?2, ?3, ?4)
-                ON CONFLICT(id) DO NOTHING
-            "#,
-            )
-            .bind(format!("code-contribution:{task_id}:{}", contribution.id))
-            .bind(task_id)
-            .bind(now_ms())
-            .bind(payload)
-            .execute(&mut *transaction)
-            .await
-            .map_err(TaskError::Database)?;
-        }
         let task = Self::read_task(&mut transaction, task_id).await?;
         transaction.commit().await.map_err(TaskError::Database)?;
         Ok(task)
     }
 
-    /// Record transitions, including a return to a previously observed state.
-    /// Compare with the latest event under the write lock so unchanged polls
-    /// remain a no-op across restarts without suppressing A -> B -> A.
-    pub async fn record_code_contribution_observations(
+    /// Link one contribution to a task, once.
+    ///
+    /// The event id is derived from the task and the contribution's canonical
+    /// identity, so linking the same pull request twice records one link. The
+    /// return says whether this call is the one that recorded it.
+    pub async fn link_code_contribution(
         &self,
         task_id: &str,
-        observations: &[ContributionObservation],
-    ) -> Result<Task, TaskError> {
+        contribution: &CodeContribution,
+    ) -> Result<(Task, bool), TaskError> {
         let mut transaction = self
             .pool
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(TaskError::Database)?;
+        let event = TaskHistoryEvent::CodeContributionLinked {
+            contribution: contribution.clone(),
+        };
+        let payload = serde_json::to_string(&event).map_err(TaskError::HistoryData)?;
+        let inserted = sqlx::query(
+            r#"
+            INSERT INTO task_event_logs (id, task_id, recorded_at_ms, payload)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(id) DO NOTHING
+        "#,
+        )
+        .bind(format!("code-contribution:{task_id}:{}", contribution.id))
+        .bind(task_id)
+        .bind(now_ms())
+        .bind(payload)
+        .execute(&mut *transaction)
+        .await
+        .map_err(TaskError::Database)?
+        .rows_affected()
+            > 0;
+        let task = Self::read_task(&mut transaction, task_id).await?;
+        transaction.commit().await.map_err(TaskError::Database)?;
+        Ok((task, inserted))
+    }
+
+    /// Record transitions, including a return to a previously observed state.
+    /// Compare with the latest event under the write lock so unchanged polls
+    /// remain a no-op across restarts without suppressing A -> B -> A.
+    ///
+    /// The flag says whether anything was new, which is what tells the host the
+    /// contributions moved.
+    pub async fn record_code_contribution_observations(
+        &self,
+        task_id: &str,
+        observations: &[ContributionObservation],
+    ) -> Result<(Task, bool), TaskError> {
+        let mut transaction = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(TaskError::Database)?;
+        let mut moved = false;
         for observation in observations {
             let previous: Option<Json<ContributionObservation>> = sqlx::query_scalar(
                 r#"
@@ -462,6 +533,7 @@ impl TaskStore {
             {
                 continue;
             }
+            moved = true;
             Self::write_events(
                 &mut transaction,
                 task_id,
@@ -473,7 +545,7 @@ impl TaskStore {
         }
         let task = Self::read_task(&mut transaction, task_id).await?;
         transaction.commit().await.map_err(TaskError::Database)?;
-        Ok(task)
+        Ok((task, moved))
     }
 
     pub async fn operator_signals(

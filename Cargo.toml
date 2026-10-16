@@ -14,6 +14,7 @@ absolute_paths = "warn"
 [dependencies]
 axum = "0.8.9"
 arboard = { version = "3.6.1", default-features = false }
+async-trait = "0.1"
 base64 = "0.23.1"
 cap-std = "4.0.3"
 microsandbox-image = "0.7.3"
@@ -35,7 +36,7 @@ microsandbox = { version = "0.7.3", default-features = false, features = ["local
 microsandbox-filesystem = { version = "0.7.3", default-features = false, features = ["download-binaries"] }
 ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "form"] }
-rmcp = { version = "3.5.1", default-features = false, features = ["client", "transport-child-process"] }
+rmcp = { version = "3.5.1", default-features = false, features = ["client", "auth", "transport-streamable-http-client-reqwest"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"

@@ -195,8 +195,8 @@ impl LinearAutomation {
 
     /// Sponsor an agent session on an issue through the public Agent API.
     ///
-    /// This is how a task that began on a paired client is reported from the
-    /// remote that runs it: the issue need not be delegated to this app, and the
+    /// This is how a task that began on a client is reported from the remote
+    /// that runs it: the issue need not be delegated to this app, and the
     /// human assignee is left where the operator put them. Linear has no way to
     /// make this idempotent, so a response lost after the session was created
     /// leaves a second session behind; the caller records a route before it

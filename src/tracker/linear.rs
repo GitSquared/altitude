@@ -1,18 +1,17 @@
 //! The Linear tracker adapter.
 //!
-//! [`Linear`] speaks to Linear's official MCP server through the `mcp-remote`
-//! stdio bridge, driven by the official rmcp client. OAuth and token storage
-//! belong to the bridge and live in a host-only profile directory; this adapter
-//! never sees a credential and the profile is never mounted into a capsule.
+//! [`Linear`] speaks to Linear's official MCP server over streamable HTTP, driven
+//! by the official rmcp client. Signing in is Altitude's own OAuth flow, and the
+//! grant lives in the tracker's profile directory, which is never mounted into a
+//! capsule.
 
 use std::{
     cmp::Ordering,
     collections::HashMap,
     fmt, fs, io,
     path::{Path, PathBuf},
-    process::Stdio,
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use crate::isolation::private_directory;
@@ -20,23 +19,18 @@ use rmcp::{
     RoleClient, ServiceExt,
     model::{CallToolRequestParams, CallToolResult, ContentBlock, Tool},
     service::RunningService,
-    transport::TokioChildProcess,
 };
 use serde_json::{Map, Value, json};
 use tokio::{
-    process::Command,
     sync::{Mutex, watch},
     time::{sleep, timeout},
 };
 
 use super::{
-    IssueComment, IssueReader, IssueReference, IssueSnapshot, IssueSummary, TrackerError,
-    TrackerFuture, TrackerIdentity, TrackerKind, TrackerProvider, TrackerStatus,
+    ACCOUNT_FILE, IssueComment, IssueReader, IssueReference, IssueSnapshot, IssueSummary,
+    TrackerAccount, TrackerError, TrackerFuture, TrackerKind, TrackerProvider, TrackerStatus,
+    linear_auth,
 };
-
-const LINEAR_MCP_URL: &str = "https://mcp.linear.app/mcp";
-const BRIDGE_PACKAGE: &str = "mcp-remote@0.14.3";
-const BRIDGE_STORE: &str = "mcp-remote-v1";
 
 const LIST_ISSUES: &str = "list_issues";
 const GET_ISSUE: &str = "get_issue";
@@ -55,8 +49,8 @@ const REQUIRED_TOOLS: [&str; 5] = [
 const SEARCH_LIMIT: u64 = 25;
 const PAGE_LIMIT: u64 = 100;
 const MAX_COMMENT_PAGES: usize = 20;
-/// Bounds sign-in and startup, leaving room for the bridge's own 120s OAuth
-/// callback window.
+/// Bounds sign-in and startup, which is a browser round trip when nothing is
+/// saved.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(180);
 const TOOL_TIMEOUT: Duration = Duration::from_secs(30);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(3);
@@ -68,13 +62,8 @@ struct Session {
 
 impl Session {
     async fn start(profile: &Path) -> Result<Self, TrackerError> {
-        // stderr is discarded rather than inherited: the bridge's own logs can
-        // carry sign-in URLs and tokens, and none of that belongs in Altitude's
-        // output.
-        let (transport, _) = TokioChildProcess::builder(bridge_command(profile))
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|_| TrackerError::new("could not start the mcp-remote bridge"))?;
+        let client = linear_auth::authorized_client(profile).await?;
+        let transport = linear_auth::transport(client);
         let mut client = ().serve(transport).await.map_err(|_| {
             TrackerError::new("could not connect to Linear; try Connect in Settings → Trackers")
         })?;
@@ -161,9 +150,9 @@ impl fmt::Debug for Linear {
 impl Linear {
     /// A client for the host-only profile directory at `directory`.
     ///
-    /// No credential file is read or required: the bridge owns sign-in, and the
-    /// session stays disconnected until `connect` is called. The directory is
-    /// created if absent so the bridge has a fixed, private cwd.
+    /// Nothing is read from it until `connect` is called, and the sign-in it
+    /// holds is written there and nowhere else. The directory is created if
+    /// absent so the grant has a private place to land.
     pub fn from_directory(directory: &Path) -> Result<Self, TrackerError> {
         private_directory(directory).map_err(|error| {
             TrackerError::new(format!(
@@ -188,16 +177,19 @@ impl Linear {
     }
 
     fn has_saved_auth(&self) -> bool {
-        let store = self.profile.join(BRIDGE_STORE);
-        let Ok(entries) = fs::read_dir(&store) else {
-            return false;
-        };
-        entries.flatten().any(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .ends_with("_tokens.json")
-        })
+        linear_auth::has_grant(&self.profile)
+    }
+
+    /// Whether a sign-in is saved, so a machine serving a peer can tell an
+    /// account that peer synced from one it never signed in to.
+    pub fn is_signed_in(&self) -> bool {
+        self.has_saved_auth()
+    }
+
+    /// When the saved sign-in last changed, so a machine that opened a client
+    /// from it can tell that the login has since been replaced.
+    pub fn sign_in_changed_at(&self) -> Option<SystemTime> {
+        linear_auth::grant_changed_at(&self.profile)
     }
 
     /// A session for an operation, reconnecting only when a saved sign-in
@@ -235,7 +227,7 @@ impl Linear {
             return Err(TrackerError::new("the Linear sign-in was cancelled"));
         }
         // The lock is held across startup so concurrent callers share one
-        // bridge rather than racing to spawn two.
+        // session rather than racing to open two.
         let session = tokio::select! {
             result = timeout(CONNECT_TIMEOUT, Session::start(&self.profile)) => {
                 result
@@ -245,15 +237,31 @@ impl Linear {
                 return Err(TrackerError::new("the Linear sign-in was cancelled"));
             }
         };
-        *slot = Some(Arc::new(session));
+        let session = Arc::new(session);
+        *slot = Some(session.clone());
+        drop(slot);
+        // The account travels to a remote in this profile, so it is written as
+        // soon as there is a session that can be asked who this is.
+        if let Err(error) = self.record_account(&session).await {
+            tracing::warn!(%error, "could not record the Linear account");
+        }
         Ok(())
+    }
+
+    /// Ask Linear who this is and write the answer into the profile.
+    async fn record_account(&self, session: &Session) -> Result<(), TrackerError> {
+        let account = read_account(session).await?;
+        let bytes = serde_json::to_vec_pretty(&account)
+            .map_err(|_| TrackerError::new("could not encode the Linear account"))?;
+        fs::write(self.profile.join(ACCOUNT_FILE), bytes)
+            .map_err(|_| TrackerError::new("could not record the Linear account"))
     }
 
     /// Forget the saved Linear sign-in.
     ///
-    /// The bridge owns the browser flow and the token, so a sign-in already
-    /// under way is stopped and the live session ended before its cache is
-    /// removed; otherwise a late callback could write a fresh login back.
+    /// A sign-in already under way is stopped and the live session ended before
+    /// the grant is removed; otherwise a late callback could write a fresh login
+    /// back.
     async fn clear_credentials_impl(&self) -> Result<(), TrackerError> {
         self.generation
             .send_modify(|generation| *generation = generation.wrapping_add(1));
@@ -286,8 +294,8 @@ impl Linear {
         // A reconnect requested during cleanup must not open a browser after it.
         self.generation
             .send_modify(|generation| *generation = generation.wrapping_add(1));
-        // The profile is Altitude's own bridge cache and holds nothing but the
-        // sign-in, so it goes whole and is recreated empty for the next one.
+        // The profile holds nothing but the sign-in, so it goes whole and is
+        // recreated empty for the next one.
         if let Err(error) = fs::remove_dir_all(&self.profile)
             && error.kind() != io::ErrorKind::NotFound
         {
@@ -401,6 +409,29 @@ impl Linear {
     }
 }
 
+/// Ask Linear which account a live session is signed in as.
+async fn read_account(session: &Session) -> Result<TrackerAccount, TrackerError> {
+    let parameter = if session.accepts("get_user", "query") {
+        "query"
+    } else {
+        "id"
+    };
+    let mut arguments = Map::new();
+    arguments.insert(parameter.into(), json!("me"));
+    let data = session.call("get_user", arguments).await?;
+    let user = data.get("user").unwrap_or(&data);
+    Ok(TrackerAccount {
+        provider: TrackerKind::Linear,
+        user_id: string_field(user, "id")?,
+        display_name: user
+            .get("displayName")
+            .or_else(|| user.get("name"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| TrackerError::new("Linear returned no name for your account"))?
+            .to_owned(),
+    })
+}
+
 impl IssueReader for Linear {
     fn read<'a>(&'a self, reference: &'a IssueReference) -> TrackerFuture<'a, IssueSnapshot> {
         Box::pin(self.read_impl(reference))
@@ -420,30 +451,6 @@ impl TrackerProvider for Linear {
         self.session().is_some()
     }
 
-    fn identity(&self) -> TrackerFuture<'_, TrackerIdentity> {
-        Box::pin(async move {
-            let session = self.session_or_reconnect().await?;
-            let parameter = if session.accepts("get_user", "query") {
-                "query"
-            } else {
-                "id"
-            };
-            let mut arguments = Map::new();
-            arguments.insert(parameter.into(), json!("me"));
-            let data = session.call("get_user", arguments).await?;
-            let user = data.get("user").unwrap_or(&data);
-            Ok(TrackerIdentity {
-                id: string_field(user, "id")?,
-                label: user
-                    .get("displayName")
-                    .or_else(|| user.get("name"))
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| TrackerError::new("Linear returned no name for your account"))?
-                    .to_owned(),
-            })
-        })
-    }
-
     fn search<'a>(&'a self, query: &'a str) -> TrackerFuture<'a, Vec<IssueSummary>> {
         Box::pin(self.search_impl(query))
     }
@@ -455,22 +462,6 @@ impl TrackerProvider for Linear {
     ) -> TrackerFuture<'a, ()> {
         Box::pin(self.status_impl(reference, status))
     }
-}
-
-fn bridge_command(profile: &Path) -> Command {
-    let mut command = Command::new("npx");
-    command
-        .arg("--yes")
-        .arg(BRIDGE_PACKAGE)
-        .arg(LINEAR_MCP_URL)
-        .arg("--transport")
-        .arg("http-only")
-        .arg("--auth-timeout")
-        .arg("120")
-        .arg("--silent")
-        .env("MCP_REMOTE_CONFIG_DIR", profile)
-        .current_dir(profile);
-    command
 }
 
 fn tool_result(result: CallToolResult) -> Result<Value, TrackerError> {

@@ -13,8 +13,6 @@ pub struct TaskAgentTurnReport {
     pub summary: String,
     #[serde(default)]
     pub operator_signal: Option<TaskOperatorSignalDraft>,
-    #[serde(default)]
-    pub code_contribution_urls: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -84,6 +82,9 @@ pub enum TaskExecutionStatus {
 #[sqlx(rename_all = "snake_case")]
 pub enum TaskExecutionPauseReason {
     AwaitingOperator,
+    /// The agent asked for review and the host is watching the linked pull
+    /// requests. The capsule is in a snapshot, so the wait costs no capacity.
+    AwaitingReviewChecks,
     ApplicationShutdown,
     Transfer,
 }
@@ -113,6 +114,21 @@ pub struct TaskOperatorSignal {
     pub body: String,
     pub raised_at_ms: i64,
     pub read: bool,
+}
+
+/// A wrap-up request the host is holding until the linked contributions can
+/// answer.
+///
+/// The agent's run is over, but its request is not delivered yet: the linked
+/// pull requests decide whether the operator is asked to review or the agent is
+/// woken to fix something. Keeping it as recorded state is what makes the wait
+/// survive a restart without an agent turn.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeferredReview {
+    pub signal: TaskOperatorSignal,
+    /// The run that asked for review, recorded so its ending can be written with
+    /// the hold that began after it.
+    pub agent_run_id: String,
 }
 
 #[derive(Clone, Debug)]
@@ -165,6 +181,15 @@ pub struct TaskFacts {
     /// The blocking signal the operator is being waited on for, when one is open.
     pub awaiting_signal_kind: Option<TaskOperatorSignalKind>,
     pub unread_operator_signal_count: u32,
+    /// The wrap-up request the host is holding while it watches linked
+    /// contributions, when one is pending.
+    #[sqlx(json(nullable))]
+    pub deferred_review: Option<DeferredReview>,
+    /// Why the host last woke this task from watching its linked contributions.
+    ///
+    /// Present only until the next run starts, so the reason reaches the turn it
+    /// was recorded for and never reads as the reason for a later one.
+    pub review_wake_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -269,6 +294,22 @@ pub enum TaskHistoryEvent {
     /// whether anything about it deserves the operator's attention.
     CodeContributionObserved {
         observation: ContributionObservation,
+    },
+    /// A wrap-up request the host holds while it watches linked contributions.
+    ///
+    /// Recorded rather than waited on in memory, so the request is not lost to a
+    /// restart and the agent is not asked to poll for it.
+    ReviewDeferred {
+        signal: TaskOperatorSignal,
+        agent_run_id: String,
+    },
+    /// A held wrap-up request stopped waiting: the contributions need the agent,
+    /// or the operator took the task over before the host could decide.
+    ReviewDeferralCleared {
+        signal_id: String,
+        /// Why the wait ended, in the operator's words. The next autopilot turn
+        /// reads it as its prompt when the agent is the one being woken.
+        reason: String,
     },
     ExecutionPaused {
         execution_status: TaskExecutionStatus,

@@ -8,7 +8,7 @@ use ratatui::{
     widgets::{Block, BorderType, Clear, List, ListItem, Padding, Paragraph, Wrap},
 };
 
-use crate::tui::widgets::{chrome, palette};
+use crate::tui::widgets::{chrome, palette, utils::shimmer};
 
 use super::{
     form::draw_form,
@@ -29,8 +29,9 @@ pub fn draw(
     panel: &Panel,
     view: &View,
     tick: Option<usize>,
+    is_discovering: bool,
 ) -> Rect {
-    draw_columns(frame, area, panel, view, tick);
+    draw_columns(frame, area, panel, view, tick, is_discovering);
     if let Some(form) = &panel.form {
         chrome::dim(frame, area);
         draw_form(frame, area, form);
@@ -76,7 +77,14 @@ fn item(
     Line::from(spans)
 }
 
-fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick: Option<usize>) {
+fn draw_columns(
+    frame: &mut Frame,
+    area: Rect,
+    panel: &Panel,
+    view: &View,
+    tick: Option<usize>,
+    is_discovering: bool,
+) {
     let block = Block::bordered()
         .title(" Settings ")
         .border_type(BorderType::Rounded)
@@ -117,7 +125,7 @@ fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick:
 
     let list_focused = panel.depth == Depth::List;
     let width = usize::from(list_area.width);
-    let list_items = view
+    let mut list_items = view
         .rows
         .iter()
         .enumerate()
@@ -144,17 +152,17 @@ fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick:
             })
         })
         .collect::<Vec<_>>();
+    if panel.section == Section::Remotes && is_discovering {
+        list_items.push(ListItem::new(Line::default()));
+        list_items.push(ListItem::new(
+            Line::from(shimmer("scanning…", tick)).centered(),
+        ));
+    }
     frame.render_widget(List::new(list_items), list_area);
 
-    // The column ahead of the focus is drawn dimmed rather than withheld, so the
-    // shape of the next step is visible before it is taken. A row with no deeper
-    // level has no next step, so its column is already the one you are in.
-    let detail_focused = panel.depth == Depth::Detail
-        || (panel.depth == Depth::List
-            && panel
-                .selected_row(view)
-                .is_some_and(|row| !row.opens_form()));
-    let pane = detail(panel, view, detail_focused, tick);
+    // The third column follows the selection rather than the focus, so it is
+    // drawn at full strength whether or not the list is being used.
+    let pane = detail(panel, view, tick);
     let last_row = pane
         .line_count(detail_area.width)
         .saturating_sub(usize::from(detail_area.height));
@@ -164,28 +172,15 @@ fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick:
             .min(last_row.min(u16::MAX as usize) as u16),
         0,
     ));
-    frame.render_widget(
-        if detail_focused {
-            pane
-        } else {
-            pane.style(palette::muted())
-        },
-        detail_area,
-    );
+    frame.render_widget(pane, detail_area);
 }
 
 /// The third column. `focused` is decided by the caller, because whether this
 /// column holds the focus is not the same question as how deep the focus is: a
 /// row with nothing inside it is already here.
-fn detail(panel: &Panel, view: &View, focused: bool, tick: Option<usize>) -> Paragraph<'static> {
-    // The heading is the column's focus indicator: it has no rows to bar.
-    let heading = move |text: String| {
-        if focused {
-            Line::styled(text, palette::heading())
-        } else {
-            Line::styled(text, palette::muted().bold())
-        }
-    };
+/// The third column: what is known about the row the list has selected.
+fn detail(panel: &Panel, view: &View, tick: Option<usize>) -> Paragraph<'static> {
+    let heading = move |text: String| Line::styled(text, palette::heading());
     let Some(row) = panel.selected_row(view) else {
         return Paragraph::new(Span::styled("", palette::muted()));
     };

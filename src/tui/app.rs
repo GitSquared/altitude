@@ -36,7 +36,7 @@ use crate::{
         TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus, TaskExecutionUpdate,
         TaskOperatorSignal, TaskService, TaskServiceError,
     },
-    tracker::{IssueReference, IssueSnapshot, IssueSummary},
+    tracker::{IssueReference, IssueSnapshot, IssueSummary, TrackerKind},
     tui::keys::{is_dismiss, is_remove},
     tui::popups,
     tui::screens,
@@ -88,6 +88,17 @@ pub(in crate::tui) enum Foreground {
     OpenLink(OpenLink),
     #[default]
     Tasks,
+}
+
+impl Foreground {
+    pub(in crate::tui) fn shows_settings(&self) -> bool {
+        match self {
+            Self::Panel | Self::Setup(_) => true,
+            Self::Confirm(confirm) => confirm.is_settings(),
+            Self::Keys(behind) => behind.shows_settings(),
+            _ => false,
+        }
+    }
 }
 
 /// What the panel last heard from an address.
@@ -356,8 +367,6 @@ pub struct App {
     /// Which opening of the pop-up this is, so a reply from an earlier one is
     /// dropped rather than replacing what is on screen.
     remote_signals_attempt: u64,
-    pairing_replies: mpsc::Sender<Result<(String, String), String>>,
-    pub(in crate::tui) pairings_replied: mpsc::Receiver<Result<(String, String), String>>,
     /// Where `config.toml` lives, so the manage view can persist changes.
     pub(in crate::tui) config: Config,
     pub(in crate::tui) settings_file: Option<SettingsFile>,
@@ -439,7 +448,6 @@ impl App {
                 )),
             ),
         };
-        let (pairing_replies, pairings_replied) = mpsc::channel(8);
         Self {
             tasks,
             grid_columns: 1,
@@ -457,8 +465,6 @@ impl App {
             remote_signals: None,
             remote_signals_loading: false,
             remote_signals_attempt: 0,
-            pairing_replies,
-            pairings_replied,
             config,
             link: Arc::new(link),
             settings_file,
@@ -1068,17 +1074,14 @@ impl App {
             _ if is_dismiss(key) || key.code == KeyCode::Char('s') => {
                 self.foreground = Foreground::Tasks;
             }
-            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
-                // A row with nothing inside it has no deeper level to open.
-                if self.panel.depth != Depth::List
-                    || self.selected_row().is_some_and(|row| row.opens_form())
-                {
-                    self.panel.depth = self.panel.depth.deeper();
-                }
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.panel.depth = match self.panel.depth {
+                    Depth::Rail => Depth::List,
+                    Depth::List => Depth::Rail,
+                };
             }
-            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
-                self.panel.depth = self.panel.depth.shallower()
-            }
+            KeyCode::Right | KeyCode::Char('l') => self.panel.depth = Depth::List,
+            KeyCode::Left | KeyCode::Char('h') => self.panel.depth = Depth::Rail,
             KeyCode::Down | KeyCode::Char('j') => self.panel.move_selection(true, rows),
             KeyCode::Up | KeyCode::Char('k') => self.panel.move_selection(false, rows),
             KeyCode::Delete | KeyCode::Backspace if self.selected_has_credentials() => {
@@ -1088,17 +1091,6 @@ impl App {
                 self.edit_selected()
             }
             KeyCode::Char('e') if self.panel.section.grows() => self.edit_selected(),
-            KeyCode::Char('b')
-                if self
-                    .selected_row()
-                    .is_some_and(|row| row.is_configured_remote()) =>
-            {
-                if let Some(RowKind::Remote { address, .. }) =
-                    self.selected_row().map(|row| row.kind)
-                {
-                    self.begin_tracker_pairing(address, task_service);
-                }
-            }
             KeyCode::Char('t')
                 if self
                     .selected_row()
@@ -1134,50 +1126,6 @@ impl App {
                 self.refresh_remote_connections();
             }
         }
-    }
-
-    fn begin_tracker_pairing<E>(&mut self, address: String, tasks: &TaskService<E>)
-    where
-        E: IsolationEngine + Clone + 'static,
-    {
-        let Some(tracker) = tasks.tracker() else {
-            self.notice = Some(NO_LINEAR.into());
-            return;
-        };
-        let keys = self.remote_keys.clone();
-        let link = self.link.clone();
-        let replies = self.pairing_replies.clone();
-        self.notice = Some("asking for a Linear pairing code…".into());
-        tokio::spawn(async move {
-            let result = async {
-                let identity = tracker
-                    .identity()
-                    .await
-                    .map_err(|error| error.to_string())?;
-                let peer = Self::remote_peer(&address, &keys).await?;
-                let code = link
-                    .pair_tracker(peer, &identity.id)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                Ok((identity.label, format!("altitude pair {code}")))
-            }
-            .await;
-            let _ = replies.send(result).await;
-        });
-    }
-
-    pub(in crate::tui) fn pairing_resolved(&mut self, result: Result<(String, String), String>) {
-        self.notice = Some(match result {
-            Ok((label, command)) => match copy_to_clipboard(command.clone()) {
-                Ok(()) => format!(
-                    "Pairing command copied for {label}. Delegate an issue to Altitude and paste it in reply to its setup message (valid 10 minutes)."
-                ),
-                Err(_) => format!(
-                    "Reply to Altitude's setup message in Linear: {command} (valid 10 minutes)"
-                ),
-            },
-            Err(error) => format!("could not pair with the remote: {error}"),
-        });
     }
 
     /// What `enter` does where the focus is: the row's own action, which for a
@@ -1221,10 +1169,6 @@ impl App {
                 } else {
                     vec![
                         Line::from("Finish signing in in your browser."),
-                        Line::from(""),
-                        Line::from(
-                            "Altitude uses Linear's official MCP server through mcp-remote. Node.js (npx) is required.",
-                        ),
                         Line::from(""),
                         Line::from("Esc or q cancels this sign-in."),
                     ]
@@ -1950,21 +1894,12 @@ impl App {
             Ok(sighting) => {
                 let said = &sighting.announcement;
                 match sighting.key_status {
-                    RemoteKeyStatus::New => {
+                    // Reaching a remote already shows in its row and in the third
+                    // column, so an answer that changed nothing says nothing here.
+                    RemoteKeyStatus::New | RemoteKeyStatus::Known => {
                         self.remember(address, said).await;
                         self.note_remote_trackers(address, said);
-                        Some(format!(
-                            "{} answered, and its key is remembered",
-                            said.label
-                        ))
-                    }
-                    RemoteKeyStatus::Known => {
-                        self.remember(address, said).await;
-                        self.note_remote_trackers(address, said);
-                        Some(format!(
-                            "{} answered with the same key as before",
-                            said.label
-                        ))
+                        None
                     }
                     RemoteKeyStatus::Changed => {
                         self.clear_remote_trackers(address);
@@ -2614,7 +2549,7 @@ impl App {
     /// Where Linear keeps its sign-in profile. Shown in settings; the interface
     /// never reads its contents, and it is never mounted into a task.
     pub(in crate::tui) fn tracker_profile_dir(&self) -> PathBuf {
-        self.config.data_dir().join("trackers").join("linear")
+        self.config.profile_dir(TrackerKind::Linear.profile())
     }
 
     /// The search the issue page owes, if its query has rested long enough.

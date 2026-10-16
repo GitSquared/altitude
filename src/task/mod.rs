@@ -6,7 +6,7 @@ use crate::{
         IsolationEngine, IsolationError, ProfileSummary, private_directory,
     },
     tracker::{IssueReader, TrackerProvider},
-    vcs::GitHub,
+    vcs::{self, tools::VcsAgentTools},
 };
 use std::{
     collections::HashMap,
@@ -33,11 +33,13 @@ pub use credential::{
 };
 pub use event_loop::{TaskEventLoop, TaskExecutionUpdate};
 mod progress;
+mod review;
 mod store;
 mod tools;
 mod tracker;
 pub use state::*;
 pub use store::{TaskDraft, TaskStore};
+pub use tracker::TrackerHost;
 
 use progress::EnvironmentProgressRegistry;
 
@@ -64,7 +66,7 @@ pub struct TaskService<E> {
     /// Where each running task's agent channel listens.
     agent_channel_dir: PathBuf,
     agent_channels: Arc<Mutex<HashMap<String, AgentChannel>>>,
-    tracker: Option<Arc<dyn TrackerProvider>>,
+    trackers: Option<Arc<dyn TrackerHost>>,
     issue_reader: Option<Arc<dyn IssueReader>>,
 }
 
@@ -208,7 +210,7 @@ where
             environment_progress: EnvironmentProgressRegistry::default(),
             agent_channel_dir,
             agent_channels: Arc::new(Mutex::new(HashMap::new())),
-            tracker: None,
+            trackers: None,
             issue_reader: None,
         }
     }
@@ -217,7 +219,15 @@ where
         self.issue_reader = tracker
             .clone()
             .map(|tracker| tracker as Arc<dyn IssueReader>);
-        self.tracker = tracker;
+        self.trackers =
+            tracker.map(|tracker| Arc::new(tracker::OwnTracker(tracker)) as Arc<dyn TrackerHost>);
+        self
+    }
+
+    /// Use the tracker each task's own operator pushed, for a machine serving
+    /// other peers rather than reporting its own work.
+    pub fn with_trackers(mut self, trackers: Arc<dyn TrackerHost>) -> Self {
+        self.trackers = Some(trackers);
         self
     }
 
@@ -227,7 +237,9 @@ where
     }
 
     pub fn tracker(&self) -> Option<Arc<dyn TrackerProvider>> {
-        self.tracker.clone()
+        self.trackers
+            .as_ref()
+            .and_then(|host| host.for_operator(&self.identity.id))
     }
 
     /// The one place Altitude's subsystems are bound into an agent's tool set.
@@ -242,6 +254,7 @@ where
             task_id.to_owned(),
             self.issue_reader.clone(),
         ));
+        tools.register(VcsAgentTools::new(self.store.clone(), task_id.to_owned()));
         tools
     }
 
@@ -332,11 +345,12 @@ where
 
     /// The recipes a task is provisioned with, in the order it mounts them.
     fn recipes(&self) -> Vec<EnvironmentRecipe> {
-        vec![
+        let mut recipes = vec![
             self.agents.engine(AgentKind::Pi).environment_recipe(),
             self.agents.engine(AgentKind::Claude).environment_recipe(),
-            GitHub::environment_recipe(),
-        ]
+        ];
+        recipes.extend(vcs::environment_recipes());
+        recipes
     }
 
     /// What the workspace base says about itself, for an interface that

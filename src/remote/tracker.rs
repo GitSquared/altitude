@@ -16,7 +16,7 @@ use std::{
     collections::HashSet,
     fs,
     future::Future,
-    io::ErrorKind,
+    io::{self, ErrorKind},
     path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, Mutex, MutexGuard},
@@ -43,7 +43,7 @@ use crate::{
         TaskExecutionPauseReason, TaskHistoryEvent, TaskOperatorSignal, TaskOperatorSignalKind,
     },
     tracker::{
-        IssueReference, IssueSnapshot, TrackerKind, TrackerStatus,
+        IssueReference, IssueSnapshot, TrackerAccount, TrackerKind, TrackerStatus,
         automation::{
             AgentActivityContent, AgentSessionEvent, LinearAutomation, WebhookError,
             parse_agent_session_event, verify_signature,
@@ -69,10 +69,6 @@ const DONE_RETENTION: Duration = Duration::from_secs(600);
 const TERMINATED_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_DONE: usize = 512;
 const MAX_TERMINATED: usize = 1024;
-/// A pairing nonce is short-lived, so a code posted in a public thread stops
-/// being useful quickly.
-const PAIR_CHALLENGE_LIFETIME: Duration = Duration::from_secs(600);
-const MAX_CHALLENGES: usize = 32;
 /// A Linear webhook is only trusted while it is this fresh.
 const WEBHOOK_MAX_AGE: Duration = Duration::from_secs(300);
 
@@ -86,6 +82,9 @@ pub struct RemoteTrackerConfig {
     pub webhook_secret: Vec<u8>,
     pub oauth_client_id: String,
     pub storage_path: PathBuf,
+    /// Where each peer's pushed configuration lives, because that is where the
+    /// account a peer is signed in as is written down.
+    pub operators_dir: PathBuf,
 }
 
 /// The task operations the coordinator asks of the machine that owns the capsule.
@@ -123,14 +122,6 @@ pub trait Host: Send + Sync + 'static {
     fn is_active(&self, task_id: String) -> HostFuture<'_, bool>;
 }
 
-/// One workspace user bound to one remote peer, proved by a pairing nonce.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Pairing {
-    pub tracker_user_id: String,
-    pub peer: String,
-    pub bound_at_ms: i64,
-}
-
 pub struct RemoteTracker {
     config: RemoteTrackerConfig,
     ledger: Mutex<Ledger>,
@@ -163,46 +154,14 @@ impl RemoteTracker {
             .with_state(Arc::clone(self))
     }
 
-    /// Issue a pairing nonce for an authenticated peer claiming a tracker user.
+    /// Sponsor a session on an issue for a task a client started here.
     ///
-    /// The peer is already authenticated by the link handshake; the claimed user
-    /// is only a claim until a signed webhook proves the human controls it. Only
-    /// the coordinator's link path may call this, which is why it takes the
-    /// endpoint id rather than a string a caller could invent.
-    pub fn begin_pair(
-        &self,
-        peer: EndpointId,
-        claimed_tracker_user_id: String,
-    ) -> Result<String, String> {
-        let claimed = claimed_tracker_user_id.trim().to_owned();
-        if claimed.is_empty() {
-            return Err("a pairing request must name a tracker user".to_owned());
-        }
-        let now = now_ms();
-        let nonce = uuid::Uuid::new_v4().simple().to_string();
-        self.mutate(|ledger| {
-            ledger.prune(now);
-            ledger.challenges.push(PairChallenge {
-                nonce: nonce.clone(),
-                peer: peer.to_string(),
-                tracker_user_id: claimed.clone(),
-                issued_at_ms: now,
-            });
-            while ledger.challenges.len() > MAX_CHALLENGES {
-                ledger.challenges.remove(0);
-            }
-        })?;
-        Ok(nonce)
-    }
-
-    /// Sponsor a session on an issue for a task a paired client started here.
-    ///
-    /// The peer must already be paired: a route needs a tracker user who can
-    /// answer it, and a peer with no proved user has none. The session is made
-    /// through the public Agent API so an issue this app was never delegated can
-    /// still be reported on, and the human assignee is left alone. A route that
-    /// already holds the task or the issue is left as it is, so a retry cannot
-    /// sponsor a second session once one has been recorded.
+    /// The peer must have synced a tracker account: a route needs a tracker user
+    /// who can answer it, and a peer that has pushed none has nobody. The session
+    /// is made through the public Agent API so an issue this app was never
+    /// delegated can still be reported on, and the human assignee is left alone. A
+    /// route that already holds the task or the issue is left as it is, so a retry
+    /// cannot sponsor a second session once one has been recorded.
     pub async fn pilot_task(
         &self,
         peer: EndpointId,
@@ -210,9 +169,7 @@ impl RemoteTracker {
         issue: IssueReference,
     ) -> Result<(), String> {
         let Some(tracker_user_id) = self.user_for_peer(&peer.to_string()) else {
-            return Err(
-                "pair this remote with your Linear account before delegating issue work".into(),
-            );
+            return Err("sync a Linear account to this remote before delegating issue work".into());
         };
         if self.route_for_task(&task_id).is_some() || self.route_for_issue(&issue.id).is_some() {
             return Ok(());
@@ -364,10 +321,6 @@ impl RemoteTracker {
                 if session.is_stop() {
                     return self.handle_stop(session, host).await;
                 }
-                // Binding is a side effect rather than a short-circuit: the same
-                // event then routes normally, so a start that fails after binding
-                // is retried instead of being lost with the consumed nonce.
-                self.consume_pairing(session)?;
                 match session.action.as_str() {
                     "created" => self.handle_created(session, host).await,
                     "prompted" => self.handle_prompted(session, host).await,
@@ -447,7 +400,7 @@ impl RemoteTracker {
             .filter(|id| *id != self.config.automation.app_user_id())
         else {
             if self.route_for_issue(issue_id).is_none() {
-                self.post_pairing_guidance(&event.session_id).await?;
+                self.post_sync_guidance(&event.session_id).await?;
             }
             return Ok(());
         };
@@ -456,11 +409,11 @@ impl RemoteTracker {
             .await
     }
 
-    /// Start (or restart) the task for an issue under `author`'s paired remote.
+    /// Start (or restart) the task for an issue under `author`'s remote.
     ///
-    /// Shared by a `created` delegation and by the pairing reply that makes a
-    /// previously unknown operator known, so both paths behave identically and
-    /// a failed start can be retried.
+    /// Shared by a `created` delegation and by the retry an operator's prompt
+    /// makes, so both paths behave identically and a failed start can be tried
+    /// again.
     async fn delegate(
         &self,
         issue_id: &str,
@@ -493,12 +446,12 @@ impl RemoteTracker {
         };
 
         let Some(peer) = self.peer_for_user(author) else {
-            self.post_pairing_guidance(session_id).await?;
+            self.post_sync_guidance(session_id).await?;
             return Ok(());
         };
         let peer: EndpointId = peer
             .parse()
-            .map_err(|_| "the paired remote's key could not be read".to_owned())?;
+            .map_err(|_| "the remote's key could not be read".to_owned())?;
 
         // Say the work is starting before the issue is fetched and a capsule is
         // provisioned. The id is stable, so a redelivery is one thought.
@@ -563,8 +516,8 @@ impl RemoteTracker {
         };
         let Some(route) = self.route_for_session(&event.session_id) else {
             // No route yet: an operator's prompt on an issue session is a
-            // delegation, which is how "reply here with the pair code" starts
-            // the work. It is also the retry path after a failed start.
+            // delegation, which is how a session opened from the issue starts the
+            // work. It is also the retry path after a failed start.
             if let Some(author) = event.prompt_author_id.as_deref()
                 && let Some(issue_id) = event.issue_id.as_deref()
                 && event.creator_id.as_deref() == Some(author)
@@ -580,10 +533,6 @@ impl RemoteTracker {
         // Only the current delegation operator's reply counts; a teammate's
         // comment is context, not a decision.
         if !event.is_from(&route.tracker_user_id) {
-            return Ok(());
-        }
-        // A pairing code is proof of identity, not an answer to a signal.
-        if answer.trim().starts_with("altitude pair ") {
             return Ok(());
         }
         let signals = host.signals(route.task_id.clone()).await?;
@@ -833,7 +782,7 @@ impl RemoteTracker {
                 }
                 TaskHistoryEvent::OperatorSignalRaised { signal } => {
                     if unresolved.contains(&signal.id) {
-                        let contributions = contribution_urls(&events[..=index]);
+                        let contributions = contribution_details(&events[..=index]);
                         self.publish_signal(route, signal, &contributions).await?;
                     }
                 }
@@ -848,7 +797,7 @@ impl RemoteTracker {
         if folded {
             // The destination still owes the operator whatever is waiting, even
             // though the rest of the history was already reported at the source.
-            let contributions = contribution_urls(&events);
+            let contributions = contribution_details(&events);
             for signal in host.signals(route.task_id.clone()).await? {
                 if !unresolved.contains(&signal.id) {
                     continue;
@@ -987,30 +936,35 @@ impl RemoteTracker {
         self.retire_route(route)
     }
 
-    /// An unknown delegation is educated once, not run. The nonce is the proof
-    /// that the human controls both the tracker account and the remote.
-    async fn post_pairing_guidance(&self, session_id: &str) -> Result<(), String> {
-        let body = "Altitude does not yet know which remote should run this work. On the machine \
-                    that will run it, connect the Altitude remote, push your profile, and request \
-                    a pair code. Then reply here with the code: `altitude pair <code>`."
-            .to_owned();
+    /// An unknown delegation is educated once, not run.
+    async fn post_sync_guidance(&self, session_id: &str) -> Result<(), String> {
+        let tracker = TrackerKind::Linear.label();
+        let host = whoami::hostname().unwrap_or_else(|_| "this remote".to_owned());
+        let body = format!(
+            "Altitude runs this issue as coding work and reports progress back here. No machine \
+             is synced to it yet. Make sure:\n\n\
+             1. You have Altitude set up, or download it.\n\
+             2. You have {tracker} connected in Altitude.\n\
+             3. You have synced to the remote running at {host}.\n\n\
+             Altitude picks this up as soon as you have synced."
+        );
         self.config
             .automation
             .create_activity(
                 session_id,
-                &activity_id(session_id, "pair-guidance"),
+                &activity_id(session_id, "sync-guidance"),
                 AgentActivityContent::Elicitation { body },
             )
             .await
             .map_err(|error| error.to_string())
     }
 
-    /// A paired remote could not start the work; say what to fix instead of
-    /// retrying forever.
+    /// A remote could not start the work; say what to fix instead of retrying
+    /// forever.
     async fn post_start_guidance(&self, session_id: &str, reason: &str) -> Result<(), String> {
         let body = format!(
-            "Altitude could not start this work on the paired remote.\n\n{reason}\n\n\
-             Connect that remote in Altitude, push your setup, then reply here to try again."
+            "Altitude could not start this work on the machine that owns it.\n\n{reason}\n\n\
+             Connect that machine in Altitude, sync your setup, then reply here to try again."
         );
         self.config
             .automation
@@ -1023,65 +977,67 @@ impl RemoteTracker {
             .map_err(|error| error.to_string())
     }
 
-    /// Consume a challenge when a signed prompt proves the claimed user controls
-    /// both the tracker account and the authenticated peer.
-    fn consume_pairing(&self, event: &SessionEvent) -> Result<(), String> {
-        let Some(author) = event.prompt_author_id.as_deref() else {
-            return Ok(());
-        };
-        let Some(body) = event.prompt_body.as_deref() else {
-            return Ok(());
-        };
-        let body = body.trim();
-        let now = now_ms();
-        self.mutate(|ledger| {
-            ledger.prune_challenges(now);
-            let Some(index) = ledger.challenges.iter().position(|challenge| {
-                challenge.tracker_user_id == author
-                    && body == format!("altitude pair {}", challenge.nonce)
-            }) else {
-                return;
-            };
-            let challenge = ledger.challenges.remove(index);
-            // One proved tracker user per peer, and one peer per user: a second
-            // proof replaces both sides rather than leaving an alias that could
-            // route the same work to two machines.
-            ledger.pairings.retain(|pairing| {
-                pairing.tracker_user_id != author && pairing.peer != challenge.peer
-            });
-            ledger.pairings.push(Pairing {
-                tracker_user_id: author.to_owned(),
-                peer: challenge.peer,
-                bound_at_ms: now,
-            });
-        })
-    }
-
+    /// The tracker user a peer is signed in as, from what that peer pushed.
     fn peer_for_user(&self, tracker_user_id: &str) -> Option<String> {
-        let ledger = self.lock().ok()?;
-        ledger
-            .pairings
-            .iter()
-            .find(|pairing| pairing.tracker_user_id == tracker_user_id)
-            .map(|pairing| pairing.peer.clone())
+        let mut matches = self
+            .accounts()
+            .into_iter()
+            .filter(|(_, record)| record.account.user_id == tracker_user_id);
+        let (first_peer, first) = matches.next()?;
+        // The newest account wins, and a tie is broken by the peer's own key so
+        // the answer does not depend on directory order.
+        matches
+            .fold((first_peer, first), |best, candidate| {
+                if candidate.1.changed_at_ms > best.1.changed_at_ms
+                    || (candidate.1.changed_at_ms == best.1.changed_at_ms && candidate.0 < best.0)
+                {
+                    candidate
+                } else {
+                    best
+                }
+            })
+            .0
+            .into()
     }
 
-    /// Whether this peer has proved exactly one tracker user, which is what a
-    /// route needs to be answerable.
-    pub fn is_peer_paired(&self, peer: EndpointId) -> bool {
+    /// Whether this peer has synced a tracker account, which is what a route
+    /// needs to be answerable.
+    pub fn has_account(&self, peer: EndpointId) -> bool {
         self.user_for_peer(&peer.to_string()).is_some()
     }
 
-    /// The tracker user a peer proved, when it has proved exactly one.
+    /// The tracker user a peer is signed in as, from what it pushed.
     fn user_for_peer(&self, peer: &str) -> Option<String> {
-        let ledger = self.lock().ok()?;
-        let mut users = ledger
-            .pairings
-            .iter()
-            .filter(|pairing| pairing.peer == peer)
-            .map(|pairing| pairing.tracker_user_id.clone());
-        let first = users.next()?;
-        users.next().is_none().then_some(first)
+        self.accounts()
+            .into_iter()
+            .find(|(owner, _)| owner == peer)
+            .map(|(_, record)| record.account.user_id)
+    }
+
+    /// Every peer's synced tracker account, read from what each pushed.
+    ///
+    /// Read from disk rather than cached: the account is the peer's, and a peer
+    /// that has not synced yet is simply absent.
+    fn accounts(&self) -> Vec<(String, AccountRecord)> {
+        let Ok(entries) = fs::read_dir(&self.config.operators_dir) else {
+            return Vec::new();
+        };
+        let mut accounts = Vec::new();
+        for entry in entries.flatten() {
+            let peer = entry.file_name().to_string_lossy().into_owned();
+            let Ok(text) = fs::read_to_string(accounts_path(&entry.path())) else {
+                continue;
+            };
+            let Ok(records) = serde_json::from_str::<Vec<AccountRecord>>(&text) else {
+                continue;
+            };
+            for record in records {
+                if record.account.provider == TrackerKind::Linear {
+                    accounts.push((peer.clone(), record));
+                }
+            }
+        }
+        accounts
     }
 
     fn route_for_task(&self, task_id: &str) -> Option<Route> {
@@ -1338,16 +1294,80 @@ impl IssueEvent {
 
 // ------------------------------------------------------------------- storage
 
+/// The tracker account a peer pushed, and when it last changed.
+///
+/// The stamp follows the account, not the push: a login refreshes underneath the
+/// profile it travels in, and a refreshed login must not re-assert a binding the
+/// operator has since moved to another machine.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountRecord {
+    pub account: TrackerAccount,
+    pub changed_at_ms: i64,
+}
+
+/// Where a peer's tracker accounts are kept, beside the configuration it pushed.
+pub fn accounts_path(operator_dir: &Path) -> PathBuf {
+    operator_dir.join("accounts.json")
+}
+
+/// Note the tracker accounts a peer's profiles now name.
+///
+/// `pushed` carries one entry per tracker profile in the configuration that just
+/// arrived: the account it names, or nothing when the peer has signed out. A
+/// provider that was not in this push keeps the account it already had.
+pub fn record_accounts(
+    operator_dir: &Path,
+    pushed: &[(TrackerKind, Option<TrackerAccount>)],
+) -> io::Result<()> {
+    let path = accounts_path(operator_dir);
+    let held: Vec<AccountRecord> = fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    let now = now_ms();
+    let mut records: Vec<AccountRecord> = pushed
+        .iter()
+        .filter_map(|(_, account)| account.as_ref())
+        .map(|account| AccountRecord {
+            changed_at_ms: held
+                .iter()
+                .find(|record| record.account == *account)
+                .map_or(now, |record| record.changed_at_ms),
+            account: account.clone(),
+        })
+        .collect();
+    records.extend(
+        held.iter()
+            .filter(|record| {
+                !pushed
+                    .iter()
+                    .any(|(provider, _)| *provider == record.account.provider)
+            })
+            .cloned(),
+    );
+    // A pushed login refreshing underneath an unchanged account must not look
+    // like the account changed, so nothing is written when nothing moved.
+    if records == held {
+        return Ok(());
+    }
+    if records.is_empty() {
+        return match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        };
+    }
+    let text = serde_json::to_string_pretty(&records)
+        .map_err(|error| io::Error::other(format!("could not encode tracker accounts: {error}")))?;
+    write_private(&path, &text).map_err(io::Error::other)
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Ledger {
     #[serde(default)]
     deliveries: Vec<Delivery>,
     #[serde(default)]
     routes: Vec<Route>,
-    #[serde(default)]
-    challenges: Vec<PairChallenge>,
-    #[serde(default)]
-    pairings: Vec<Pairing>,
     #[serde(default)]
     terminated_sessions: Vec<TerminatedSession>,
 }
@@ -1371,7 +1391,6 @@ impl Ledger {
 
     fn prune(&mut self, now: i64) {
         self.prune_done(now);
-        self.prune_challenges(now);
         self.prune_terminated(now);
     }
 
@@ -1394,12 +1413,6 @@ impl Ledger {
         done.truncate(MAX_DONE);
         pending.extend(done);
         self.deliveries = pending;
-    }
-
-    fn prune_challenges(&mut self, now: i64) {
-        let lifetime = PAIR_CHALLENGE_LIFETIME.as_millis() as i64;
-        self.challenges
-            .retain(|challenge| now - challenge.issued_at_ms < lifetime);
     }
 
     fn prune_terminated(&mut self, now: i64) {
@@ -1444,17 +1457,9 @@ enum RouteOrigin {
     /// the route.
     #[default]
     Delegated,
-    /// A paired client started the task and this remote only reports it, so the
+    /// A client started the task and this remote only reports it, so the
     /// issue need not stay delegated and a native stop is still accepted.
     Piloted,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct PairChallenge {
-    nonce: String,
-    peer: String,
-    tracker_user_id: String,
-    issued_at_ms: i64,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1672,6 +1677,29 @@ fn contribution_urls(events: &[(i64, TaskHistoryEvent)]) -> Vec<String> {
         .filter_map(|(_, event)| match event {
             TaskHistoryEvent::CodeContributionLinked { contribution } => {
                 Some(contribution.url.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn contribution_details(events: &[(i64, TaskHistoryEvent)]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|(_, event)| match event {
+            TaskHistoryEvent::CodeContributionLinked { contribution } => {
+                let latest = events.iter().rev().find_map(|(_, event)| match event {
+                    TaskHistoryEvent::CodeContributionObserved { observation }
+                        if observation.contribution_id == contribution.id =>
+                    {
+                        Some(observation.summary.as_str())
+                    }
+                    _ => None,
+                });
+                Some(match latest {
+                    Some(summary) => format!("{} — {summary}", contribution.url),
+                    None => contribution.url.clone(),
+                })
             }
             _ => None,
         })

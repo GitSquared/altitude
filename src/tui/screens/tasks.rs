@@ -19,6 +19,7 @@ use crate::{
     },
     tracker::IssueReference,
     tui::widgets::utils::{shimmer, truncate},
+    vcs::{ContributionReadiness, now_ms},
 };
 
 /// The narrowest a card may be and still show an intent.
@@ -280,6 +281,7 @@ fn card_status(
         .style(palette::good()),
         TaskExecutionStatus::Paused => Line::from(match task.facts.execution_pause_reason {
             Some(TaskExecutionPauseReason::AwaitingOperator) => "paused · awaiting operator",
+            Some(TaskExecutionPauseReason::AwaitingReviewChecks) => "paused · watching PRs",
             Some(TaskExecutionPauseReason::ApplicationShutdown) => "paused · app stopped",
             Some(TaskExecutionPauseReason::Transfer) => "paused · transferring",
             None => "paused",
@@ -329,6 +331,31 @@ fn card_extras(task: &Task) -> Vec<Line<'static>> {
             format!("{count} contributions"),
             palette::accent(),
         )),
+    }
+    let shown = task.code_contributions.len().min(2);
+    for contribution in task.code_contributions.iter().take(shown) {
+        let label = format!("PR #{}", contribution.reference);
+        let observation = task
+            .code_contribution_observations
+            .iter()
+            .find(|observation| observation.contribution_id == contribution.id);
+        let status = observation.map_or("status not observed", |observation| {
+            observation.summary.as_str()
+        });
+        let style = match observation.map(|observation| observation.state.readiness(now_ms())) {
+            Some(ContributionReadiness::NeedsAction) => palette::bad(),
+            Some(ContributionReadiness::Pending) => palette::attention(),
+            _ => palette::muted(),
+        };
+        extras.push(Line::styled(format!("{label} · {status}"), style));
+    }
+    if task.code_contributions.len() > shown {
+        // The card lists a couple of pull requests; say so, so the two shown are
+        // not read as the whole set.
+        extras.push(Line::styled(
+            format!("+{} more", task.code_contributions.len() - shown),
+            palette::muted(),
+        ));
     }
     if task.facts.execution_status == TaskExecutionStatus::Failed
         && let Some(error) = &task.facts.last_error

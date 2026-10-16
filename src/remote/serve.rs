@@ -6,13 +6,14 @@
 //! file rather than the client's.
 
 use std::{
+    collections::HashMap,
     error::Error,
     fs, io,
     io::{Read, Seek, SeekFrom},
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
+    sync::{Arc, Mutex},
+    time::{Duration, SystemTime},
 };
 
 use crate::{
@@ -33,7 +34,7 @@ use tokio::{
     net::TcpListener,
     signal::unix::{SignalKind, signal},
     sync::watch,
-    time::interval,
+    time::{MissedTickBehavior, interval},
 };
 
 use crate::{
@@ -50,8 +51,11 @@ use crate::{
         server::{BoxFuture, ServerParts, TaskHost},
     },
     task::{Task, TaskEventLoop, TaskService, TaskStore},
-    task::{TaskHistoryEvent, TaskOperatorSignal},
-    tracker::{IssueReader, IssueSnapshot, TrackerKind, automation::LinearAutomation, oauth},
+    task::{TaskHistoryEvent, TaskOperatorSignal, TrackerHost},
+    tracker::{
+        IssueReader, IssueSnapshot, Linear, TrackerKind, TrackerProvider,
+        automation::LinearAutomation, oauth,
+    },
 };
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -174,18 +178,6 @@ impl TaskHost for OwnTasks {
         })
     }
 
-    fn pair_tracker(
-        &self,
-        peer: EndpointId,
-        tracker_user_id: String,
-    ) -> BoxFuture<Result<String, String>> {
-        let tracker = self.tracker.clone();
-        Box::pin(async move {
-            tracker.ok_or("Linear automation is not configured on this remote; ask its infrastructure owner to connect it")?
-            .begin_pair(peer, tracker_user_id)
-        })
-    }
-
     fn hand_over(&self, peer: EndpointId, task_id: String) -> BoxFuture<Result<Handover, String>> {
         let tasks = self.tasks.clone();
         let config = self.config.clone();
@@ -289,6 +281,7 @@ impl TaskHost for OwnTasks {
             // A task that arrives already bound to an issue is reported here now,
             // through a session on that issue, without replaying its history.
             if let Some(tracker) = tracker
+                && tracker.has_account(peer)
                 && let Some(task) = tasks
                     .list()
                     .await
@@ -429,22 +422,15 @@ impl TaskHost for OwnTasks {
                     tasks.admit();
                 }
                 super::protocol::TaskOrigin::Issue(issue) => {
-                    // A piloted session needs a proved tracker user on this
-                    // remote, so refuse before a capsule exists rather than
-                    // running work nobody can answer.
-                    if let Some(tracker) = &tracker
-                        && !tracker.is_peer_paired(peer)
-                    {
-                        return Err(
-                            "pair this remote with your Linear account before delegating issue work"
-                                .into(),
-                        );
-                    }
                     let task = tasks
                         .create_issue_for_operator(*issue, environment, request.agent, operator)
                         .await
                         .map_err(|error| error.to_string())?;
+                    // A session can only be piloted for a peer that has synced a
+                    // tracker account; without one the work still runs, it just
+                    // cannot be reported to the tracker from here.
                     if let Some(tracker) = &tracker
+                        && tracker.has_account(peer)
                         && let Some(reference) = task.facts.tracker_issue.clone()
                         && let Err(error) =
                             tracker.pilot_task(peer, task.id.clone(), reference).await
@@ -811,7 +797,10 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     if linear_runtime.is_some() {
         tracing::info!("Linear connected");
     } else if settings.linear.is_none() {
-        tracing::info!("No task tracker configured · connect from Altitude to get started");
+        tracing::info!(
+            "No Linear app configured · delegated issues still run, reported through each \
+             operator's own login"
+        );
     }
 
     let identity = InstallationKey::load_or_create(config.data_dir().join("identity.key"))
@@ -835,11 +824,18 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         config.identity().map_err(io::Error::other)?,
         config.agent_channel_dir(),
     );
-    let tasks = tasks.with_issue_reader(
+    // A remote with no Linear app of its own still reports task status, through
+    // the login the task's own peer synced here. When the app is configured,
+    // agent sessions own reporting and this would be a second voice.
+    let reports_through_pushed_logins = linear_runtime.is_none();
+    let mut tasks = tasks.with_issue_reader(
         linear_runtime
             .as_ref()
             .map(|runtime| runtime.automation.clone() as Arc<dyn IssueReader>),
     );
+    if reports_through_pushed_logins {
+        tasks = tasks.with_trackers(Arc::new(PushedTrackers::new(config.clone())));
+    }
     let (task_loop, mut updates) = TaskEventLoop::waiting_for_runtime(tasks);
     tokio::spawn(async move {
         while updates.recv().await.is_some() {
@@ -847,6 +843,27 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         }
     });
     let task_loop = Arc::new(task_loop);
+    // What this machine can mount is what a pushed configuration may carry,
+    // besides the tracker profiles that only travel.
+    let mounted_profiles: Vec<&'static str> = task_loop
+        .service()
+        .profiles()
+        .iter()
+        .map(|profile| profile.profile)
+        .collect();
+    if reports_through_pushed_logins {
+        let syncing = Arc::clone(&task_loop);
+        tokio::spawn(async move {
+            let mut tick = interval(Duration::from_secs(10));
+            tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                if let Err(error) = syncing.service().sync_tracker().await {
+                    tracing::warn!(%error, "tracker updates remain queued");
+                }
+            }
+        });
+    }
     let incoming = IncomingTransfers::new(config.clone(), task_loop.clone());
     let host = Arc::new(OwnTasks {
         config: Arc::new(config.clone()),
@@ -878,6 +895,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         listen,
         label,
         data_dir: config.data_dir().to_owned(),
+        mounted_profiles,
         state: observed,
         trackers,
         tasks: host.clone(),
@@ -973,6 +991,62 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// The tracker each peer synced, opened from that peer's own profile.
+///
+/// A remote has no login of its own, so it reports a task through the account of
+/// the peer that owns the task. Opening one is cheap and the session inside it is
+/// shared, so the tracker is kept once opened — until the peer signs in again,
+/// which replaces the login the open one was made from.
+struct PushedTrackers {
+    config: Config,
+    opened: Mutex<HashMap<String, Opened>>,
+}
+
+struct Opened {
+    tracker: Arc<Linear>,
+    signed_in_at: Option<SystemTime>,
+}
+
+impl PushedTrackers {
+    fn new(config: Config) -> Self {
+        Self {
+            config,
+            opened: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl TrackerHost for PushedTrackers {
+    fn for_operator(&self, operator: &str) -> Option<Arc<dyn TrackerProvider>> {
+        if let Some(opened) = self.opened.lock().ok()?.get(operator)
+            && opened.signed_in_at == opened.tracker.sign_in_changed_at()
+        {
+            return Some(opened.tracker.clone() as Arc<dyn TrackerProvider>);
+        }
+        let directory = self
+            .config
+            .for_operator(operator)
+            .ok()?
+            .profile_dir(TrackerKind::Linear.profile());
+        let tracker = Linear::from_directory(&directory).ok()?;
+        // A peer that pushed a tracker profile without signing in has nothing to
+        // report through, and is not an error worth warning about every pass.
+        if !tracker.is_signed_in() {
+            return None;
+        }
+        let signed_in_at = tracker.sign_in_changed_at();
+        let tracker = Arc::new(tracker);
+        self.opened.lock().ok()?.insert(
+            operator.to_owned(),
+            Opened {
+                tracker: Arc::clone(&tracker),
+                signed_in_at,
+            },
+        );
+        Some(tracker as Arc<dyn TrackerProvider>)
+    }
+}
+
 struct LinearRuntime {
     automation: Arc<LinearAutomation>,
     tracker: Arc<super::tracker::RemoteTracker>,
@@ -1002,6 +1076,7 @@ async fn connect_tracker(
         webhook_secret: settings.webhook_secret()?.into_bytes(),
         oauth_client_id: settings.client_id.clone(),
         storage_path: config.data_dir().join("trackers/linear/deliveries.json"),
+        operators_dir: config.data_dir().join("operators"),
     })?;
     let settings = settings.clone();
     let path = credentials_path.to_owned();
