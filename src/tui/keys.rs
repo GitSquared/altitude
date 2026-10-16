@@ -85,7 +85,7 @@ pub fn help_sections() -> Vec<HelpSection> {
                     "Enter",
                     "Open a section, sign in, or use the selected action",
                 ),
-                ("d (Agents)", "Use the selected agent by default"),
+                ("Space (Agents)", "Use the selected agent by default"),
                 (
                     "Delete / Backspace",
                     "Remove saved credentials, after confirmation",
@@ -96,7 +96,6 @@ pub fn help_sections() -> Vec<HelpSection> {
                     "d / Delete / Backspace",
                     "Remove an environment or remote, after confirmation",
                 ),
-                ("p (Remotes)", "Send your setup to the selected remote"),
                 ("t (Remotes)", "Choose the remote's task tracker"),
                 ("b (Remotes)", "Pair your Linear identity with that remote"),
                 (

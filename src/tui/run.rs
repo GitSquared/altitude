@@ -4,7 +4,7 @@
 //! events, routing them to whatever is in front, and drawing. What the
 //! application does with an event is its own business, in `app`.
 
-use std::{io, mem, time::Duration};
+use std::{fs, io, mem, time::Duration};
 
 use crossterm::{
     event::{
@@ -16,10 +16,11 @@ use crossterm::{
 };
 use futures_util::StreamExt;
 use ratatui::DefaultTerminal;
-use tokio::{signal::unix::Signal, sync::mpsc, time};
+use tokio::{signal::unix::Signal, sync::mpsc, task::spawn_blocking, time};
 
 use crate::{
     isolation::IsolationEngine,
+    remote::{ConfigBundle, browse},
     task::{TaskEventLoop, TaskExecutionUpdate, TaskService},
 };
 
@@ -44,7 +45,6 @@ struct EventReplies<'a> {
     remote_signals: &'a mpsc::Sender<RemoteSignalsReply>,
     delegations: &'a mpsc::Sender<TaskDelegationReply>,
     sends: &'a mpsc::Sender<SendTaskReply>,
-    config_pushes: &'a mpsc::Sender<ConfigPushReply>,
 }
 
 pub async fn run<E>(
@@ -99,6 +99,18 @@ where
     let mut refresh = time::interval(Duration::from_secs(2));
     let mut shell_notice = time::interval(Duration::from_millis(100));
     let mut shimmer = time::interval(Duration::from_millis(80));
+    let mut configuration_clock = time::interval(Duration::from_secs(3));
+    let mut connection_clock = time::interval(Duration::from_secs(15));
+    let mut reading_configuration = false;
+    let (configuration_reads, mut configuration_read) = mpsc::unbounded_channel();
+    let mut browser = match browse() {
+        Ok(browser) => Some(browser),
+        Err(error) => {
+            tracing::warn!(%error, "network discovery unavailable");
+            None
+        }
+    };
+
     let mut mouse_captured = false;
     // Whether the terminal is reporting the keys the creation question needs.
     let mut keys_enhanced = false;
@@ -141,8 +153,7 @@ where
     // Sending an existing task is a dial, a transfer and a boot. Bounded, and the
     // reply names the machine so the notice can.
     let (sends, mut sent) = mpsc::channel::<SendTaskReply>(8);
-    // Sending a configuration is a dial. Bounded, and the reply carries the stamp
-    // the bundle was built from.
+    // Acknowledgements identify the exact content sent while local edits continue.
     let (config_pushes, mut config_pushed) = mpsc::channel::<ConfigPushReply>(8);
     let mut issue_search_clock = time::interval(Duration::from_millis(80));
     loop {
@@ -260,8 +271,32 @@ where
                 }
                 app.capacity = Some(event_loop.capacity_limit());
             }
+            event = async { browser.as_ref().expect("discovery enabled").recv().await }, if browser.is_some() => {
+                match event {
+                    Some(event) => app.discovery_observed(event),
+                    None => browser = None,
+                }
+            }
+            _ = connection_clock.tick() => app.refresh_remote_connections(),
+            _ = configuration_clock.tick(), if !reading_configuration => {
+                reading_configuration = true;
+                let config = app.config.clone();
+                let profiles: Vec<_> = task_service.profiles().iter().map(|profile| profile.profile).collect();
+                let reports = configuration_reads.clone();
+                tokio::spawn(async move {
+                    let result = spawn_blocking(move || {
+                        let settings = fs::read_to_string(config.settings_path())?;
+                        ConfigBundle::of(settings, config.data_dir(), &profiles, &[])
+                    }).await.map_err(|error| error.to_string())
+                        .and_then(|result| result.map_err(|error| error.to_string()));
+                    let _ = reports.send(result);
+                });
+            }
+            Some(result) = configuration_read.recv() => {
+                reading_configuration = false;
+                app.configuration_read(result, &config_pushes);
+            }
             _ = ask.tick() => {
-                app.sync_remotes();
                 if app.wants_remote_check() {
                     app.ask_next_remote(&remote_answers).await;
                 }
@@ -361,7 +396,6 @@ where
                         remote_signals: &remote_signals,
                         delegations: &delegations,
                         sends: &sends,
-                        config_pushes: &config_pushes,
                     },
                 )
                 .await?;
@@ -392,7 +426,6 @@ where
         remote_signals,
         delegations,
         sends,
-        config_pushes,
     } = replies;
     if let Event::Resize(_, _) = event
         && app.open_shell().is_some()
@@ -470,14 +503,8 @@ where
                 .await
         }
         Foreground::Panel => {
-            app.panel_keys(
-                key,
-                task_service,
-                credential_events,
-                tracker_connects,
-                config_pushes,
-            )
-            .await
+            app.panel_keys(key, task_service, credential_events, tracker_connects)
+                .await
         }
         Foreground::Setup(_) => app.setup_key(key),
         Foreground::Signals => app.signals_key(key, task_service, remote_signals).await,

@@ -8,6 +8,7 @@
 mod announce;
 mod bundle;
 mod clients;
+mod discovery;
 mod identity;
 mod keys;
 pub mod send;
@@ -27,6 +28,7 @@ pub use {
     bundle::ConfigBundle,
     client::LinkClient,
     clients::ClientRecord,
+    discovery::{DiscoveredRemote, DiscoveryEvent, browse},
     identity::InstallationKey,
     keys::{RemoteKey, RemoteKeys},
     known::{RemoteKeyStatus, meet},

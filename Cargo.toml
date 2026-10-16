@@ -3,7 +3,7 @@ name = "altitude"
 version = "0.1.0"
 edition = "2024"
 authors = ["Gabriel Saillard <gabriel@saillard.dev>"]
-description = "A personal, headless intent control plane for delegated coding work."
+description = "altitude helps you get shit done with agents."
 license-file = "LICENSE"
 readme = "README.md"
 publish = false
@@ -26,6 +26,8 @@ clap = { version = "4", features = ["derive"] }
 directories = "6"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 iroh = "1.3"
+mdns-sd = "0.21"
+socket2 = "0.6"
 hmac = "0.13"
 hex = "0.4"
 microsandbox = { version = "0.7.3", default-features = false, features = ["local", "net"] }

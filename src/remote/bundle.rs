@@ -6,18 +6,18 @@
 //! copy would carry — a client's own remotes are not a remote's business, and a
 //! profile's files are credentials rather than preferences.
 //!
-//! Each profile carries when it was last changed, so a client can send the ones the
+//! Each profile carries a digest of its contents, so a client can send the ones the
 //! remote does not have instead of all of them. Profiles are the expensive half:
 //! sending a configuration string again costs nothing, and sending a directory of
 //! logins again does.
 
-use std::{fs, io, path::Path, time::UNIX_EPOCH};
+use std::{fs, io, path::Path};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 
 /// Everything a remote needs to be this client, as far as running a task goes.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConfigBundle {
     /// The configuration file as written, so the remote holds the same environments.
     pub settings: String,
@@ -25,18 +25,16 @@ pub struct ConfigBundle {
     pub profiles: Vec<ProfileBundle>,
 }
 
-/// One profile's files, and when the newest of them was changed.
-#[derive(Debug, Serialize, Deserialize)]
+/// A profile snapshot, including an empty snapshot when its files were removed.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProfileBundle {
     pub profile: String,
-    /// The newest change among these files. A remote that already has this one, or a
-    /// newer one, is not sent them again.
-    pub edited_at_ms: i64,
+    pub digest: String,
     pub files: Vec<ProfileFile>,
 }
 
 /// One file inside a profile, at its path relative to the profile's directory.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProfileFile {
     pub path: String,
     /// Base64, because these are credential files and the bundle is JSON.
@@ -47,7 +45,7 @@ pub struct ProfileFile {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfileStamp {
     pub profile: String,
-    pub edited_at_ms: i64,
+    pub digest: String,
 }
 
 /// What a remote holds, kept beside its configuration so a client can be told what
@@ -79,10 +77,24 @@ impl HeldConfig {
 }
 
 impl ConfigBundle {
+    pub fn digest(&self) -> io::Result<String> {
+        Ok(blake3::hash(&serde_json::to_vec(self)?)
+            .to_hex()
+            .to_string())
+    }
+
+    pub fn missing_profiles(&mut self, held: &[ProfileStamp]) {
+        self.profiles.retain(|profile| {
+            !held
+                .iter()
+                .any(|stamp| stamp.profile == profile.profile && stamp.digest == profile.digest)
+        });
+    }
+
     /// Reads this installation's setup, sending the profiles a remote is missing.
     ///
     /// `held` is what the remote said it has. A profile is sent when it is not there
-    /// at all, or when the copy here is newer than the one there.
+    /// at all, or when its contents differ.
     pub fn of(
         settings: String,
         data_dir: &Path,
@@ -92,11 +104,11 @@ impl ConfigBundle {
         let mut sending = Vec::new();
         for profile in profiles {
             let bundle = ProfileBundle::of(data_dir, profile)?;
-            let is_missing_or_older = held
+            let is_different = held
                 .iter()
                 .find(|stamp| stamp.profile == *profile)
-                .is_none_or(|stamp| stamp.edited_at_ms < bundle.edited_at_ms);
-            if is_missing_or_older && !bundle.files.is_empty() {
+                .is_none_or(|stamp| stamp.digest != bundle.digest);
+            if is_different {
                 sending.push(bundle);
             }
         }
@@ -115,42 +127,34 @@ impl ProfileBundle {
     pub fn of(data_dir: &Path, profile: &str) -> Result<Self, io::Error> {
         let root = data_dir.join(profile).join("profile");
         let mut files = Vec::new();
-        let mut edited_at_ms = 0;
         if root.is_dir() {
-            collect(&root, &root, &mut files, &mut edited_at_ms)?;
+            collect(&root, &root, &mut files)?;
         }
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        let digest = blake3::hash(&serde_json::to_vec(&files)?)
+            .to_hex()
+            .to_string();
         Ok(Self {
             profile: profile.to_owned(),
-            edited_at_ms,
+            digest,
             files,
         })
     }
 }
 
-/// Walks a profile, keeping every file and the newest time anything in it changed.
-fn collect(
-    root: &Path,
-    directory: &Path,
-    files: &mut Vec<ProfileFile>,
-    edited_at_ms: &mut i64,
-) -> Result<(), io::Error> {
+fn collect(root: &Path, directory: &Path, files: &mut Vec<ProfileFile>) -> Result<(), io::Error> {
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
         let path = entry.path();
         let meta = fs::symlink_metadata(&path)?;
         if meta.is_dir() {
-            collect(root, &path, files, edited_at_ms)?;
+            collect(root, &path, files)?;
             continue;
         }
         // A symlink inside a profile points at something on the machine that wrote
         // it, which means nothing here. Only the files themselves travel.
         if meta.file_type().is_symlink() {
             continue;
-        }
-        if let Ok(modified) = meta.modified()
-            && let Ok(since) = modified.duration_since(UNIX_EPOCH)
-        {
-            *edited_at_ms = (*edited_at_ms).max(since.as_millis() as i64);
         }
         let relative = path
             .strip_prefix(root)

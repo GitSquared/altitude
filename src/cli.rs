@@ -9,9 +9,29 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
-/// A personal, headless intent control plane for delegated coding work.
+/// The serve mode, written once so the root's long help and the subcommand agree.
+const SERVE_MODE: &str = "Run altitude serve on a headless server to let your team run agents beyond their own machines, and pilot them directly from your task tracker.";
+
+/// The root help opens with the same icon, name, and version as `--version`.
+const ROOT_HELP_TEMPLATE: &str = "\
+{name} {version}
+{about}
+
+{usage-heading} {usage}
+
+{all-args}{after-help}";
+
 #[derive(Debug, Parser)]
-#[command(name = "altitude", version, about, long_about = None)]
+#[command(
+    name = "altitude",
+    display_name = "⛰  altitude",
+    version = concat!("v", env!("CARGO_PKG_VERSION")),
+    about = env!("CARGO_PKG_DESCRIPTION"),
+    long_about = format!(
+        "{}\n\nStart altitude without any argument for the interactive TUI application to manage tasks and agents.\n\n{SERVE_MODE}", env!("CARGO_PKG_DESCRIPTION")
+    ),
+    help_template = ROOT_HELP_TEMPLATE
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -19,30 +39,32 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Run as a server: serve work to clients, with no terminal.
-    ///
-    /// Reads its own settings file, keeps its own identity, and logs to stdout
-    /// so a service manager can collect it.
+    /// Run as a headless remote hosting agents for clients
+    #[command(long_about = SERVE_MODE)]
     Serve(ServeArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct ServeArgs {
-    /// Install the shared Linear app, then exit. Reads the Linear settings in serve.toml.
-    #[arg(long)]
-    pub connect_linear: bool,
-
-    /// Address and port to listen on, as `address:port`. Overrides the settings
-    /// file. The port uses TCP for discovery and UDP for the task connection.
-    #[arg(long, value_name = "ADDR:PORT")]
-    pub listen: Option<String>,
-
-    /// Settings file to read instead of the default.
-    #[arg(long, value_name = "PATH")]
+    /// Settings file to read instead of the default `~/.config/altitude/serve.toml`.
+    ///
+    /// `$XDG_CONFIG_HOME/altitude/serve.toml` and `$ALTITUDE_CONFIG_DIR/serve.toml`
+    /// are where that default comes from, so setting either moves it.
+    #[arg(long, value_name = "PATH", display_order = 1)]
     pub config: Option<PathBuf>,
+
+    /// Address and port to listen on, as `address:port`. Defaults to
+    /// `0.0.0.0:25848`, with discovery over TCP and the task connection over UDP.
+    /// Overrides the settings file.
+    #[arg(long, value_name = "ADDR:PORT", display_order = 2)]
+    pub listen: Option<String>,
 
     /// Data directory to use instead of the default, where the serve role keeps its
     /// key and its record of clients.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", display_order = 3)]
     pub data_dir: Option<PathBuf>,
+
+    /// Install the shared Linear app, then exit. Reads the Linear settings in serve.toml.
+    #[arg(long, help_heading = "Task tracker integration")]
+    pub connect_linear: bool,
 }

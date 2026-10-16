@@ -174,7 +174,11 @@ impl Setup {
         let popup = chrome::centered(area, 75, height);
         let block = Block::bordered()
             .title(" Choose a task tracker ")
-            .title_bottom(" ↑/↓ · j/k choose · Enter open · Esc/q close ")
+            .title_bottom(
+                Line::from(" ↑/↓ · j/k choose · Enter open · Esc/q close ")
+                    .right_aligned()
+                    .style(palette::muted()),
+            )
             .border_type(BorderType::Rounded)
             .padding(Padding::horizontal(1));
         let inner = block.inner(popup);
@@ -196,7 +200,11 @@ impl Setup {
         let popup = chrome::centered(area, 85, area.height.saturating_sub(2));
         let block = Block::bordered()
             .title(self.title())
-            .title_bottom(self.footer())
+            .title_bottom(
+                Line::from(self.footer())
+                    .right_aligned()
+                    .style(palette::muted()),
+            )
             .border_type(BorderType::Rounded)
             .padding(Padding::horizontal(1));
         let inner = block.inner(popup);
@@ -210,14 +218,14 @@ impl Setup {
         frame.render_widget(paragraph.scroll((self.scroll, 0)), inner);
     }
 
-    fn title(&self) -> String {
+    fn title(&self) -> Line<'static> {
         match &self.kind {
-            SetupKind::Remote => " Set up a remote ".to_owned(),
-            SetupKind::RemoteTrackers => " Choose a task tracker ".to_owned(),
+            SetupKind::Remote => Line::styled(" Altitude remote guide ", palette::heading()),
+            SetupKind::RemoteTrackers => Line::from(" Choose a task tracker "),
             SetupKind::RemoteTrackerGuide(kind) => {
-                format!(" Set up {} on the remote ", kind.label())
+                Line::from(format!(" Set up {} on the remote ", kind.label()))
             }
-            SetupKind::Linear => " Sign in to Linear ".to_owned(),
+            SetupKind::Linear => Line::from(" Sign in to Linear "),
         }
     }
 

@@ -4,7 +4,6 @@ use std::{
     io::{self, ErrorKind, Write},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
-    time::UNIX_EPOCH,
 };
 
 use directories::ProjectDirs;
@@ -221,21 +220,6 @@ impl Config {
             Err(error) if error.kind() == ErrorKind::AlreadyExists => self.identity(),
             Err(error) => Err(error),
         }
-    }
-
-    /// When this installation's configuration was last edited, in milliseconds.
-    ///
-    /// This is what a remote is compared against to decide whether what it holds is
-    /// what this client has. The file's own time is the honest answer, because
-    /// editing the configuration means writing it.
-    pub fn stamp(&self) -> i64 {
-        self.settings_path()
-            .metadata()
-            .and_then(|meta| meta.modified())
-            .ok()
-            .and_then(|edited| edited.duration_since(UNIX_EPOCH).ok())
-            .map(|since| since.as_millis() as i64)
-            .unwrap_or(0)
     }
 
     pub fn settings_path(&self) -> PathBuf {

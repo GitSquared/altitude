@@ -7,7 +7,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    env, fs, io, mem,
+    env, io, mem,
     path::PathBuf,
     process,
     sync::Arc,
@@ -26,9 +26,9 @@ use crate::{
         Environment, EnvironmentDescription, EnvironmentProgress, IsolationEngine, ProfileSummary,
     },
     remote::{
-        Announcement, ConfigBundle, LinkClient, RemoteKey, RemoteKeyStatus, RemoteKeys,
-        RemoteState, TaskOrigin, TaskRequest, TaskSummary, TrackerConnection, bring_home, meet,
-        send::send_to_remote,
+        Announcement, ConfigBundle, DiscoveredRemote, DiscoveryEvent, LinkClient, RemoteKey,
+        RemoteKeyStatus, RemoteKeys, RemoteState, TaskOrigin, TaskRequest, TaskSummary,
+        TrackerConnection, bring_home, meet, send::send_to_remote,
     },
     task,
     task::{
@@ -309,11 +309,10 @@ pub(in crate::tui) struct SendTaskReply {
 
 /// What came back from sending this client's configuration to a remote.
 ///
-/// The stamp is the one the bundle was built from, so a settings edit made while
-/// the send was in flight is not mistaken for one the remote already holds.
+/// The digest names the bytes sent, so edits during a sync remain pending.
 pub(in crate::tui) struct ConfigPushReply {
     pub(in crate::tui) address: String,
-    pub(in crate::tui) stamp: i64,
+    pub(in crate::tui) digest: String,
     pub(in crate::tui) result: Result<(), String>,
 }
 
@@ -379,9 +378,6 @@ pub struct App {
     /// measured from. Absent while it is not showing.
     credentials_visible_since: Option<Instant>,
     credential_check_generation: u64,
-    /// When the remotes list started showing, which the wait before dialling is
-    /// measured from. Absent while it is not showing.
-    remotes_visible_since: Option<Instant>,
     /// What the remotes are holding, as of the last time each answered. Read from
     /// them rather than copied: a task belongs to the machine running it, so this is
     /// only ever as good as the last answer.
@@ -389,10 +385,12 @@ pub struct App {
     /// The remote card to select once the next read of a remote's tasks lands,
     /// so a task that has just been sent there is the one in view.
     pending_remote: Option<(String, String)>,
-    /// When this client last sent its configuration to each address. Held in
-    /// memory: a restart forgets, and sending a small file again is cheaper than a
-    /// record that can disagree with what the remote holds.
-    remote_synced: HashMap<String, i64>,
+    /// Acknowledged digests stay in memory; reconnecting rechecks the remote.
+    remote_synced: HashMap<String, String>,
+    configuration_digest: Option<String>,
+    remote_config_inflight: HashSet<String>,
+    remote_checks_due: HashSet<String>,
+    pub(in crate::tui) discovered_remotes: HashMap<String, DiscoveredRemote>,
 
     /// What each address last answered with. Written by the dial once there is
     /// one; read when the panel opens.
@@ -471,8 +469,11 @@ impl App {
             credential_status: HashMap::new(),
             credentials_visible_since: None,
             credential_check_generation: 0,
-            remotes_visible_since: None,
             remote_synced: HashMap::new(),
+            configuration_digest: None,
+            remote_config_inflight: HashSet::new(),
+            remote_checks_due: HashSet::new(),
+            discovered_remotes: HashMap::new(),
             remote_tasks: Vec::new(),
             pending_remote: None,
 
@@ -635,18 +636,18 @@ impl App {
                 if matches!(self.credential_shell, CredentialShellState::Opening { .. }) {
                     return vec![Hint::new("esc / q", "cancel")];
                 }
-                if self.panel.depth == Depth::Rail {
-                    return vec![
-                        Hint::new("j/k", "section"),
-                        Hint::new("enter / tab", "open"),
-                        dismiss(),
-                    ];
-                }
                 if self.panel.form.is_some() {
                     return vec![
                         Hint::new("tab", "next"),
                         Hint::new("enter", "next, or add a line"),
                         Hint::new("esc", "leave the box, then the page"),
+                    ];
+                }
+                if self.panel.depth == Depth::Rail {
+                    return vec![
+                        Hint::new("j/k", "section"),
+                        Hint::new("enter / tab", "open"),
+                        dismiss(),
                     ];
                 }
                 let mut hints = vec![Hint::new("tab", "change column"), Hint::new("j/k", "move")];
@@ -656,27 +657,40 @@ impl App {
                         Some(RowKind::Remote { .. })
                     ) {
                         hints.push(Hint::new("enter", "connect"));
-                        hints.push(Hint::new("p", "send config"));
                         hints.push(Hint::new("t", "task trackers"));
                         hints.push(Hint::new("b", "pair Linear"));
                         hints.push(Hint::new("e", "edit"));
                     } else {
-                        hints.push(Hint::new("enter", "remote setup"));
+                        hints.push(Hint::new(
+                            "enter",
+                            if matches!(
+                                self.selected_row().map(|row| row.kind),
+                                Some(RowKind::Discovered(_))
+                            ) {
+                                "use remote"
+                            } else {
+                                "remote guide"
+                            },
+                        ));
                     }
                 } else if self.panel.section.grows() {
                     hints.push(Hint::new("enter", "edit"));
                 } else if self.panel.section == Section::Agents {
-                    if matches!(
-                        self.selected_row().map(|row| row.kind),
-                        Some(RowKind::Agent { .. })
-                    ) {
-                        hints.push(Hint::new("enter", "sign in"));
-                        hints.push(Hint::new("d", "use by default"));
+                    if let Some(RowKind::Agent { credential, .. }) =
+                        self.selected_row().map(|row| row.kind)
+                    {
+                        if !credential.is_pending() {
+                            hints.push(Hint::new("enter", "sign in"));
+                        }
+                        hints.push(Hint::new("space", "set as default"));
                     }
                 } else if self.panel.section == Section::Interface {
                     hints.push(Hint::new("enter", "toggle"));
                 } else if self.panel.section == Section::VersionControl {
-                    hints.push(Hint::new("enter", "open setup shell"));
+                    if !matches!(self.selected_row().map(|row| row.kind), Some(RowKind::Credential(credential)) if credential.is_pending())
+                    {
+                        hints.push(Hint::new("enter", "open setup shell"));
+                    }
                 } else if self.panel.section == Section::Trackers {
                     hints.push(Hint::new(
                         "enter",
@@ -1000,7 +1014,6 @@ impl App {
         task_service: &TaskService<E>,
         events: &mpsc::UnboundedSender<CredentialShellEvent>,
         tracker_connects: &mpsc::UnboundedSender<TrackerConnectReply>,
-        config_pushes: &mpsc::Sender<ConfigPushReply>,
     ) where
         E: IsolationEngine + Clone + 'static,
     {
@@ -1037,15 +1050,8 @@ impl App {
             KeyCode::Delete | KeyCode::Backspace if self.selected_has_credentials() => {
                 self.ask_to_forget_credentials()
             }
-            KeyCode::Char('d') if self.panel.section == Section::Agents => self.edit_selected(),
+            KeyCode::Char(' ') if self.panel.section == Section::Agents => self.edit_selected(),
             KeyCode::Char('e') if self.panel.section.grows() => self.edit_selected(),
-            KeyCode::Char('p') if self.panel.section == Section::Remotes => {
-                if let Some(RowKind::Remote { address, .. }) =
-                    self.selected_row().map(|row| row.kind)
-                {
-                    self.push_config(&address, config_pushes);
-                }
-            }
             KeyCode::Char('b') if self.panel.section == Section::Remotes => {
                 if let Some(RowKind::Remote { address, .. }) =
                     self.selected_row().map(|row| row.kind)
@@ -1080,7 +1086,9 @@ impl App {
                 self.refresh_git_identity().await;
             }
             self.credentials_visible_since = None;
-            self.remotes_visible_since = None;
+            if self.panel.section == Section::Remotes {
+                self.refresh_remote_connections();
+            }
         }
     }
 
@@ -1142,6 +1150,19 @@ impl App {
     {
         match self.selected_row().map(|row| row.kind) {
             Some(RowKind::Remote { address, .. }) => self.check_remote(&address).await,
+            Some(RowKind::Discovered(remote)) => {
+                if let Some(file) = self.settings_file.as_mut() {
+                    let mut proposed = file.settings().clone();
+                    proposed.add_remote(&remote.address);
+                    match file.save(proposed) {
+                        Ok(()) => {
+                            self.remote_status.remove(&remote.address);
+                            self.check_remote(&remote.address).await;
+                        }
+                        Err(error) => self.notice = Some(error.to_string()),
+                    }
+                }
+            }
             // A tracker is signed in to, which is a browser and a callback rather
             // than a page here.
             Some(RowKind::Tracker { .. }) => {
@@ -1543,97 +1564,122 @@ impl App {
             && self.selected < self.tasks.len() + self.remote_tasks.len()
     }
 
-    /// Whether a remote holds the configuration this client has.
-    pub(in crate::tui) fn remote_needs_config(&self, address: &str) -> bool {
-        self.remote_synced
-            .get(address)
-            .is_none_or(|sent| *sent < self.config.stamp())
+    pub(in crate::tui) fn discovery_observed(&mut self, event: DiscoveryEvent) {
+        let selected = if self.panel.section == Section::Remotes {
+            match self.selected_row().map(|row| row.kind) {
+                Some(RowKind::Discovered(remote)) => Some(remote.service),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        match event {
+            DiscoveryEvent::Found(remote) => {
+                self.discovered_remotes
+                    .insert(remote.service.clone(), remote);
+            }
+            DiscoveryEvent::Removed(service) => {
+                self.discovered_remotes.remove(&service);
+            }
+        }
+        if let Some(service) = selected {
+            self.panel.selected = self.settings_view().rows.iter().position(|row| {
+                matches!(&row.kind, RowKind::Discovered(remote) if remote.service == service)
+            }).unwrap_or(0);
+        }
     }
 
-    /// Send this installation's configuration to a remote, so it can build the
-    /// environments this client runs tasks in.
-    ///
-    /// The dial is a network round trip and a bundle read, so it runs away from
-    /// the interface and reports back. What is written down when it answers is the
-    /// stamp the bundle was built from, not whatever the file says by then.
-    pub(in crate::tui) fn push_config(
+    pub(in crate::tui) fn remote_needs_config(&self, address: &str) -> bool {
+        self.configuration_digest
+            .as_ref()
+            .is_none_or(|digest| self.remote_synced.get(address) != Some(digest))
+    }
+
+    pub(in crate::tui) fn configuration_read(
         &mut self,
-        address: &str,
+        result: Result<ConfigBundle, String>,
         replies: &mpsc::Sender<ConfigPushReply>,
     ) {
-        self.notice = Some(format!("sending the configuration to {address}…"));
-        self.remote_status
-            .insert(address.to_owned(), RemoteStatus::Syncing);
-        let stamp = self.config.stamp();
-        let settings = match fs::read_to_string(self.config.settings_path()) {
-            Ok(settings) => settings,
+        let bundle = match result {
+            Ok(bundle) => bundle,
             Err(error) => {
-                self.notice = Some(format!("could not read the configuration: {error}"));
-                self.remote_status.remove(address);
+                tracing::warn!(%error, "could not read configuration for remote sync");
                 return;
             }
         };
-        let address = address.to_owned();
-        let data_dir = self.config.data_dir().to_path_buf();
-        // Sending a configuration string again costs nothing; sending a directory
-        // of logins again does, so the ones the remote already holds are left out.
-        let profiles: Vec<&'static str> = self.profiles.iter().map(|held| held.profile).collect();
-        let keys = self.remote_keys.clone();
-        let client = self.link.clone();
-        let replies = replies.clone();
-        tokio::spawn(async move {
-            let result =
-                deliver_config(&address, settings, data_dir, profiles, &keys, &client).await;
-            let _ = replies
-                .send(ConfigPushReply {
-                    address,
-                    stamp,
-                    result,
-                })
-                .await;
-        });
+        let digest = match bundle.digest() {
+            Ok(digest) => digest,
+            Err(error) => {
+                tracing::warn!(%error, "could not fingerprint remote configuration");
+                return;
+            }
+        };
+        self.configuration_digest = Some(digest.clone());
+        let bundle = Arc::new(bundle);
+        for address in self.configured_remotes() {
+            if self.remote_needs_config(&address)
+                && !self.remote_config_inflight.contains(&address)
+                && matches!(
+                    self.remote_status.get(&address),
+                    Some(RemoteStatus::Reached)
+                )
+            {
+                self.remote_config_inflight.insert(address.clone());
+                self.remote_status
+                    .insert(address.clone(), RemoteStatus::Syncing);
+                let bundle = bundle.clone();
+                let digest = digest.clone();
+                let keys = self.remote_keys.clone();
+                let client = self.link.clone();
+                let replies = replies.clone();
+                tokio::spawn(async move {
+                    let result = deliver_config(&address, (*bundle).clone(), &keys, &client).await;
+                    let _ = replies
+                        .send(ConfigPushReply {
+                            address,
+                            digest,
+                            result,
+                        })
+                        .await;
+                });
+            }
+        }
     }
 
-    /// Take what came back from pushing a configuration. Only a real
-    /// acknowledgement records the stamp; anything else leaves the settings alone
-    /// and says what happened.
     pub(in crate::tui) fn config_push_resolved(&mut self, reply: ConfigPushReply) {
+        if !self.remote_config_inflight.remove(&reply.address)
+            || matches!(
+                self.remote_status.get(&reply.address),
+                Some(RemoteStatus::Changed)
+            )
+            || !self.configured_remotes().contains(&reply.address)
+        {
+            return;
+        }
         match reply.result {
             Ok(()) => {
                 self.remote_synced
-                    .insert(reply.address.clone(), reply.stamp);
-                self.notice = Some(format!("{} holds this configuration now", reply.address));
+                    .insert(reply.address.clone(), reply.digest);
+                self.remote_status
+                    .insert(reply.address, RemoteStatus::Reached);
             }
             Err(error) => {
-                self.notice = Some(format!("{} did not take it: {error}", reply.address));
+                tracing::warn!(address=%reply.address, %error, "remote configuration sync failed");
+                self.remote_status
+                    .insert(reply.address, RemoteStatus::Silent(error));
             }
         }
-        // Asked again either way, so the dot says what is true now rather than what
-        // was hoped for.
-        self.remote_status.remove(&reply.address);
-        // A creation question may be open over this list; what it can offer has
-        // just changed.
         self.refresh_task_hosts();
     }
 
-    /// Note whether the remotes list is showing, and start its clock when it
-    /// appears.
-    pub(in crate::tui) fn sync_remotes(&mut self) {
-        let showing = (matches!(self.foreground, Foreground::Panel)
-            && self.panel.section == Section::Remotes)
-            || matches!(self.foreground, Foreground::Tasks)
-            || matches!(self.foreground, Foreground::NewTask(_))
-            || matches!(self.foreground, Foreground::SendTask(_));
-        match (showing, self.remotes_visible_since) {
-            // A fresh look every time the list is opened, so what it says is about
-            // now rather than about whenever it was last visited.
-            (true, None) => {
-                self.remotes_visible_since = Some(Instant::now());
-                self.remote_status.clear();
-                self.remote_trackers.clear();
+    pub(in crate::tui) fn refresh_remote_connections(&mut self) {
+        for address in self.configured_remotes() {
+            if !matches!(
+                self.remote_status.get(&address),
+                Some(RemoteStatus::Changed | RemoteStatus::Asking)
+            ) {
+                self.remote_checks_due.insert(address);
             }
-            (false, Some(_)) => self.remotes_visible_since = None,
-            _ => {}
         }
     }
 
@@ -1753,25 +1799,21 @@ impl App {
             .any(RemoteStatus::is_in_progress)
     }
 
-    /// Whether it is time to ask about another address: the list is showing, it
-    /// has been showing long enough to mean it, and nothing is in flight.
     pub(in crate::tui) fn wants_remote_check(&self) -> bool {
-        let Some(since) = self.remotes_visible_since else {
-            return false;
-        };
-        since.elapsed() >= ASK_AFTER
-            && !self
-                .remote_status
-                .values()
-                .any(|s| *s == RemoteStatus::Asking)
+        !self
+            .remote_status
+            .values()
+            .any(|status| *status == RemoteStatus::Asking)
             && self.next_unasked_remote().is_some()
     }
 
     /// The first address in the list that has not been asked about.
     fn next_unasked_remote(&self) -> Option<String> {
-        self.configured_remotes()
-            .into_iter()
-            .find(|address| !self.remote_status.contains_key(address))
+        self.configured_remotes().into_iter().find(|address| {
+            !self.remote_config_inflight.contains(address)
+                && (!self.remote_status.contains_key(address)
+                    || self.remote_checks_due.contains(address))
+        })
     }
 
     /// Dial the next address in the list, and let it report back when it answers.
@@ -1782,6 +1824,7 @@ impl App {
         let Some(address) = self.next_unasked_remote() else {
             return;
         };
+        self.remote_checks_due.remove(&address);
         self.remote_status
             .insert(address.clone(), RemoteStatus::Asking);
         let remembered = self.remote_keys.remembered(&address).await.ok().flatten();
@@ -1835,6 +1878,7 @@ impl App {
             }
             RemoteAnswer::Silent { address, reason } => {
                 self.clear_remote_trackers(&address);
+                self.remote_synced.remove(&address);
                 self.remote_status
                     .insert(address, RemoteStatus::Silent(reason));
             }
@@ -1969,6 +2013,7 @@ impl App {
                 &name,
                 &setup,
             ),
+            RowKind::Discovered(_) => return,
             RowKind::Remote { address, .. } => Form::new(
                 Target::Remote {
                     original: address.clone(),
@@ -2060,7 +2105,8 @@ impl App {
             | RowKind::Agent { .. }
             | RowKind::GitIdentity(_)
             | RowKind::Credential(_)
-            | RowKind::Tracker { .. } => {
+            | RowKind::Tracker { .. }
+            | RowKind::Discovered(_) => {
                 return;
             }
             RowKind::Environment { name, .. } => (
@@ -2091,11 +2137,7 @@ impl App {
         }
     }
 
-    pub(in crate::tui) async fn panel_form_key(
-        &mut self,
-        key: KeyEvent,
-        config_pushes: &mpsc::Sender<ConfigPushReply>,
-    ) {
+    pub(in crate::tui) async fn panel_form_key(&mut self, key: KeyEvent) {
         let Some(mut form) = self.panel.form.take() else {
             return;
         };
@@ -2131,10 +2173,7 @@ impl App {
             if !self.save_form(&form) {
                 self.panel.form = Some(form);
             } else if let Some(address) = added {
-                // A remote that has just been added is sent this configuration, so
-                // that it becomes a replica rather than a machine waiting to be told
-                // what to build.
-                self.push_config(&address, config_pushes);
+                self.remote_status.remove(&address);
             }
         } else if keep {
             self.panel.form = Some(form);
@@ -2201,6 +2240,11 @@ impl App {
             Target::Environment { original } => proposed.remove_environment(original),
             Target::Remote { original } => {
                 proposed.remove_remote(original);
+                self.remote_synced.remove(original);
+                self.remote_status.remove(original);
+                self.remote_config_inflight.remove(original);
+                self.remote_checks_due.remove(original);
+                self.remote_trackers.remove(original);
                 // A forgotten remote's key is forgotten with it: the next
                 // sighting is a first sighting again, which is what forgetting
                 // means.
@@ -2781,7 +2825,6 @@ impl App {
         task_service: &TaskService<E>,
         events: &mpsc::UnboundedSender<CredentialShellEvent>,
         tracker_connects: &mpsc::UnboundedSender<TrackerConnectReply>,
-        config_pushes: &mpsc::Sender<ConfigPushReply>,
     ) where
         E: IsolationEngine + Clone + 'static,
     {
@@ -2792,9 +2835,9 @@ impl App {
             return;
         }
         if self.panel.form.is_some() {
-            self.panel_form_key(key, config_pushes).await;
+            self.panel_form_key(key).await;
         } else {
-            self.panel_key(key, task_service, events, tracker_connects, config_pushes)
+            self.panel_key(key, task_service, events, tracker_connects)
                 .await;
         }
     }
@@ -3660,9 +3703,7 @@ fn open_in_browser(url: &str) -> Result<(), String> {
 /// preference.
 async fn deliver_config(
     address: &str,
-    settings: String,
-    data_dir: PathBuf,
-    profiles: Vec<&'static str>,
+    mut bundle: ConfigBundle,
     keys: &RemoteKeys,
     client: &LinkClient,
 ) -> Result<(), String> {
@@ -3683,8 +3724,7 @@ async fn deliver_config(
         .held_profiles(peer.clone())
         .await
         .map_err(|error| error.to_string())?;
-    let bundle = ConfigBundle::of(settings, &data_dir, &profiles, &held)
-        .map_err(|error| error.to_string())?;
+    bundle.missing_profiles(&held);
     let bytes = serde_json::to_vec(&bundle).map_err(|error| error.to_string())?;
     client
         .put_config(peer, &bytes)

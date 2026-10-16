@@ -1,7 +1,7 @@
 //! The server side: accept a connection, answer one request, hold the blobs.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt, fs,
     future::Future,
     io::{self, Write},
@@ -53,10 +53,15 @@ const ALLOWED_PROFILES: [&str; 3] = ["agents/pi", "agents/claude", "vcs/github"]
 /// port. IPv6 is probed first, because a host without it fails the bind rather
 /// than ignoring it.
 fn bind(builder: Builder, listen: SocketAddr) -> LinkResult<Builder> {
-    let builder = builder.bind_addr(listen)?;
+    let builder = builder
+        .clear_ip_transports()
+        .bind_addr(listen)
+        .map_err(|error| format!("UDP task bind at {listen}: {error}"))?;
     if listen.ip().is_unspecified() && listen.is_ipv4() && ipv6_available() {
         let anywhere = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), listen.port());
-        return Ok(builder.bind_addr(anywhere)?);
+        return Ok(builder
+            .bind_addr(anywhere)
+            .map_err(|error| format!("UDP task bind at {anywhere}: {error}"))?);
     }
     Ok(builder)
 }
@@ -174,6 +179,17 @@ impl LinkHandler {
             file.sync_all()?;
             directory.rename(&incoming, &directory, filename)?;
         }
+        for profile in &bundle.profiles {
+            let path = Path::new(&profile.profile).join("profile");
+            root.create_dir_all(&path)?;
+            let directory = root.open_dir(&path)?;
+            let wanted: HashSet<_> = profile
+                .files
+                .iter()
+                .map(|file| PathBuf::from(&file.path))
+                .collect();
+            remove_missing_profile_files(&directory, Path::new(""), &wanted)?;
+        }
         write_atomically(
             &operator_dir.join("config.toml"),
             bundle.settings.as_bytes(),
@@ -185,7 +201,7 @@ impl LinkHandler {
                 .retain(|stamp| stamp.profile != profile.profile);
             held.profiles.push(ProfileStamp {
                 profile: profile.profile.clone(),
-                edited_at_ms: profile.edited_at_ms,
+                digest: profile.digest.clone(),
             });
         }
         held.save(&held_path)
@@ -200,6 +216,24 @@ impl LinkHandler {
     fn held_profiles(&self, peer: EndpointId) -> Vec<ProfileStamp> {
         HeldConfig::load(&self.operator_dir(peer).join("profiles.json")).profiles
     }
+}
+
+fn remove_missing_profile_files(
+    directory: &Dir,
+    relative: &Path,
+    wanted: &HashSet<PathBuf>,
+) -> io::Result<()> {
+    for entry in directory.entries()? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let path = relative.join(&name);
+        if entry.file_type()?.is_dir() {
+            remove_missing_profile_files(&directory.open_dir(&name)?, &path, wanted)?;
+        } else if !wanted.contains(&path) {
+            directory.remove_file(&name)?;
+        }
+    }
+    Ok(())
 }
 
 /// What a server is started with: who it is, where it listens, and what it holds.
@@ -548,7 +582,8 @@ impl LinkServer {
             listen,
         )?
         .bind()
-        .await?;
+        .await
+        .map_err(|error| format!("UDP task bind at {listen}: {error}"))?;
         let router = Router::builder(endpoint).accept(LINK_ALPN, handler).spawn();
         // Announced on the same address, over TCP, so that a client which has
         // only been told where this server is can still find out who it is.

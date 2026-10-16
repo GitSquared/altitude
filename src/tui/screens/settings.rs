@@ -35,7 +35,7 @@ use ratatui::{
 use crate::{
     agent::AgentKind,
     isolation::{EnvironmentDescription, ProfileSummary, REFRESH_AFTER},
-    remote::{RemoteKey, TrackerConnection},
+    remote::{DiscoveredRemote, RemoteKey, TrackerConnection},
     tracker::TrackerKind,
     tui::widgets::{
         text::{Field, FieldStyle, TextBox},
@@ -73,7 +73,7 @@ impl Section {
         match self {
             Self::Interface => "Interface",
             Self::Agents => "Agents",
-            Self::VersionControl => "Version Control",
+            Self::VersionControl => "Version control",
             Self::Trackers => "Task tracker",
             Self::Environments => "Environments",
             Self::Remotes => "Remotes",
@@ -184,6 +184,8 @@ pub enum RowKind {
         /// answered. Absent while it has not, which is unknown rather than empty.
         trackers: Option<Vec<TrackerConnection>>,
     },
+    /// A remote announcing on the network that this client has not adopted.
+    Discovered(DiscoveredRemote),
     /// A tracker Altitude can bind an issue to. Today that is Linear, and the
     /// row says whether its live session is connected.
     Tracker {
@@ -200,6 +202,11 @@ impl Row {
     /// known: a remote's address, a profile's login, or a git identity.
     fn dot(&self) -> Option<Dot> {
         match &self.kind {
+            RowKind::Remote {
+                status: RemoteStatus::Reached,
+                needs_config: true,
+                ..
+            } => Some(mark(false, true)),
             RowKind::Remote { status, .. } => Some(remote_mark(status)),
             RowKind::Agent { credential, .. } => credential.dot(),
             RowKind::Credential(credential) => credential.dot(),
@@ -240,6 +247,16 @@ pub struct Credential {
 }
 
 impl Credential {
+    pub(in crate::tui) fn is_pending(&self) -> bool {
+        matches!(
+            &self.kind,
+            CredentialKind::Profile {
+                status: CredentialStatus::Unknown | CredentialStatus::Checking,
+                ..
+            }
+        )
+    }
+
     /// What a profile's own check last said, as a mark in front of its row. The
     /// installation's key is not signed in to, so it has nothing to say.
     fn dot(&self) -> Option<Dot> {
@@ -251,8 +268,10 @@ impl Credential {
 }
 
 pub enum CredentialKind {
-    /// This installation: the key that names it and where its state lives.
+    /// This installation: the machine it runs on, the key that names it, and
+    /// where its state lives.
     Installation {
+        hostname: String,
         label: String,
         key: String,
         data_dir: String,
@@ -524,6 +543,7 @@ impl Form {
 pub fn draw(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick: usize) {
     draw_columns(frame, area, panel, view, tick);
     if let Some(form) = &panel.form {
+        chrome::dim(frame, area);
         draw_form(frame, area, form);
     }
 }
@@ -618,10 +638,17 @@ fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick:
                 width,
                 list_focused && index == panel.selected,
             );
-            ListItem::new(if list_focused {
+            let line = if list_focused {
                 line
             } else {
                 line.style(palette::muted())
+            };
+            // A discovered remote waits at the end of the list until it is
+            // adopted, so it stays dim even while the list has the focus.
+            ListItem::new(if matches!(row.kind, RowKind::Discovered(_)) {
+                line.style(palette::muted())
+            } else {
+                line
             })
         })
         .collect::<Vec<_>>();
@@ -837,6 +864,16 @@ fn detail(panel: &Panel, view: &View, focused: bool, tick: usize) -> Paragraph<'
             ));
             lines
         }
+        RowKind::Discovered(discovered) => vec![
+            heading(label),
+            Line::from(""),
+            Line::from(format!(
+                "We detected this remote running altitude v{} on your network.",
+                discovered.version
+            )),
+            Line::from(""),
+            Line::styled("Press enter to start using it", palette::accent()),
+        ],
     };
     Paragraph::new(lines).wrap(Wrap { trim: true })
 }
@@ -847,45 +884,31 @@ fn detail(panel: &Panel, view: &View, focused: bool, tick: usize) -> Paragraph<'
 /// on the remote it belongs to, and lives in its own helper.
 pub(in crate::tui) fn remote_setup_lines() -> Vec<Line<'static>> {
     vec![
-        section_heading("Set up a remote"),
         Line::from(
-            "A remote is a headless machine that keeps running your tasks after you close \
-             Altitude. It can be yours alone or shared with a team: a team remote is one \
-             machine several people pair with.",
+            "Run altitude serve on a headless machine to use it as a remote and keep your \
+             agents working even when you’re offline.",
         ),
         Line::from(""),
-        step(
-            "1.",
-            "Install the Altitude binary on that machine. Build or download the binary for its \
-             operating system and CPU.",
+        Line::from(
+            "Remotes can be shared with your team if they are on the same network. Each team \
+             member gets their own space to run their own agents as they see fit.",
         ),
-        step(
-            "2.",
-            "Run altitude serve there. It listens on port 25848 over both TCP and UDP.",
-        ),
-        step(
-            "3.",
-            "Press n here and add its hostname or IP address. Leave the port off to use 25848, \
-             or write host:port if you changed it.",
-        ),
-        step(
-            "4.",
-            "Press p to send this machine's environments and logins.",
-        ),
-        step(
-            "5.",
-            "Create a task and choose the remote, or send an existing task with r.",
+        Line::from(""),
+        Line::from(
+            "With an altitude remote server, you can also connect your task tracker to pilot \
+             tasks and agents running on the remote directly from where you organize your work, \
+             without going through altitude’s terminal interface.",
         ),
         Line::from(""),
         Line::styled(
-            "The host must be reachable on both TCP and UDP, and the network must be trusted: \
-             anyone who can reach the port is admitted.",
+            "Set up a machine on your network to run altitude serve, then press n in altitude > \
+             Settings > Remotes to add its hostname.",
             palette::muted(),
         ),
         Line::from(""),
         Line::styled(
-            "To set up a task tracker on the remote, select it here and press t.",
-            palette::accent(),
+            "Hostname alone uses port 25848 (TCP and UDP). Anyone who can reach it is admitted; use a trusted network.",
+            palette::muted(),
         ),
     ]
 }
@@ -1069,7 +1092,14 @@ fn profile_connector(
         status_value: None,
         identity,
         note: None,
-        action: (reach != Reach::On).then_some("Press enter to sign in."),
+        action: matches!(
+            status,
+            CredentialStatus::Checked {
+                signed_in: false,
+                ..
+            }
+        )
+        .then_some("Press enter to sign in."),
         purpose,
         fields: vec![("saved at", tilde(directory))],
     }
@@ -1079,17 +1109,18 @@ fn profile_connector(
 fn credential_connector(credential: &Credential) -> Connector {
     match &credential.kind {
         CredentialKind::Installation {
+            hostname,
             label,
             key,
             data_dir,
         } => Connector {
-            title: "This installation".to_owned(),
+            title: format!("{hostname} (this machine)"),
             reach: Reach::On,
             status: "registered as key".to_owned(),
             status_value: Some(short_key(key)),
             identity: None,
             note: None,
-            action: Some("Press enter for remote setup."),
+            action: Some("Press enter to learn more about altitude remotes."),
             purpose: "The key that names this installation to a remote, so a paired remote \
                       knows whose work it holds.",
             fields: vec![
@@ -1186,16 +1217,17 @@ fn remote_connector(
     needs_config: bool,
 ) -> Connector {
     let (reach, word, note, action) = match status {
-        RemoteStatus::Reached => (
-            Reach::On,
-            "connected",
+        RemoteStatus::Reached if needs_config => (
+            Reach::Asking,
+            "synchronizing…",
+            Some("Sending this machine's environments and logins.".to_owned()),
             None,
-            needs_config.then_some("Press p to send this configuration."),
         ),
+        RemoteStatus::Reached => (Reach::On, "synced", None, None),
         RemoteStatus::Asking => (Reach::Asking, "connecting…", None, None),
         RemoteStatus::Syncing => (
             Reach::Asking,
-            "connecting…",
+            "synchronizing…",
             Some("It is building what it needs to run a task.".to_owned()),
             None,
         ),
@@ -1322,6 +1354,18 @@ fn github_account(output: &str) -> Option<String> {
     None
 }
 
+fn hostname() -> String {
+    let name: String = whoami::hostname()
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect();
+    if name.is_empty() {
+        "unknown".to_owned()
+    } else {
+        name
+    }
+}
+
 /// A path as the operator would type it: the home directory's prefix is replaced
 /// with `~`, component by component so `/home/gaby-other` is not mistaken for a
 /// path under `/home/gaby`.
@@ -1392,6 +1436,11 @@ fn agent_purpose(kind: AgentKind) -> &'static str {
 // ------------------------------------------------------------------ the pages
 
 fn draw_form(frame: &mut Frame, area: Rect, form: &Form) {
+    let area = if form.target.is_remote() {
+        chrome::centered(area, 45, 9)
+    } else {
+        chrome::centered(area, 65, 18)
+    };
     let block = Block::bordered()
         .title(format!(" {} ", form.target.title()))
         .border_type(BorderType::Rounded)
@@ -1546,46 +1595,7 @@ impl App {
                     }
                 })
                 .collect(),
-            Section::Remotes => {
-                // This installation comes first: it is the identity a remote is
-                // paired with, and the page it opens carries the setup guide
-                // while there are no remotes to show.
-                let mut rows = vec![Row {
-                    label: "This installation".to_owned(),
-                    note: None,
-                    kind: RowKind::Credential(self.installation_credential()),
-                }];
-                rows.extend(self.configured_remotes().into_iter().map(|address| {
-                    let remembered = self
-                        .remembered_keys
-                        .iter()
-                        .find(|key| key.address.eq_ignore_ascii_case(&address))
-                        .cloned();
-                    let status = self
-                        .remote_status
-                        .get(&address)
-                        .cloned()
-                        .unwrap_or(RemoteStatus::Unknown);
-                    let trackers = self.remote_trackers.get(&address).cloned();
-                    Row {
-                        // A name is what the remote called itself, so an address
-                        // that has never answered shows itself instead.
-                        label: match &remembered {
-                            Some(key) => key.label.clone(),
-                            None => address.clone(),
-                        },
-                        note: None,
-                        kind: RowKind::Remote {
-                            needs_config: self.remote_needs_config(&address),
-                            address,
-                            remembered,
-                            status,
-                            trackers,
-                        },
-                    }
-                }));
-                rows
-            }
+            Section::Remotes => self.remote_rows(),
         };
         View {
             rows,
@@ -1594,12 +1604,14 @@ impl App {
         }
     }
 
-    /// This installation's key and where its state lives.
+    /// This installation's hostname, key, and where its state lives.
     fn installation_credential(&self) -> Credential {
         let identity = self.config.identity();
+        let hostname = hostname();
         Credential {
-            label: "This installation".to_owned(),
+            label: hostname.clone(),
             kind: CredentialKind::Installation {
+                hostname,
                 label: identity
                     .as_ref()
                     .map(|identity| identity.label.clone())
@@ -1662,6 +1674,87 @@ impl App {
             .unwrap_or_default()
     }
 
+    /// The remotes list: detected remotes go last, so adopting one never
+    /// reorders the remotes the operator configured.
+    fn remote_rows(&self) -> Vec<Row> {
+        let installation = self.installation_credential();
+        // This installation comes first: it is the identity a remote is paired
+        // with.
+        let mut rows = vec![Row {
+            label: installation.label.clone(),
+            note: None,
+            kind: RowKind::Credential(installation),
+        }];
+        rows.extend(self.configured_remotes().into_iter().map(|address| {
+            let remembered = self
+                .remembered_keys
+                .iter()
+                .find(|key| key.address.eq_ignore_ascii_case(&address))
+                .cloned();
+            let status = self
+                .remote_status
+                .get(&address)
+                .cloned()
+                .unwrap_or(RemoteStatus::Unknown);
+            let trackers = self.remote_trackers.get(&address).cloned();
+            Row {
+                // A name is what the remote called itself, so an address
+                // that has never answered shows itself instead.
+                label: match &remembered {
+                    Some(key) => key.label.clone(),
+                    None => address.clone(),
+                },
+                note: None,
+                kind: RowKind::Remote {
+                    needs_config: self.remote_needs_config(&address),
+                    address,
+                    remembered,
+                    status,
+                    trackers,
+                },
+            }
+        }));
+        rows.extend(self.discovered_rows());
+        rows
+    }
+
+    /// Discovered remotes, ordered by the name they announce so the list does
+    /// not reshuffle as announcements arrive.
+    fn discovered_rows(&self) -> Vec<Row> {
+        let configured = self.configured_remotes();
+        let mut discovered = self
+            .discovered_remotes
+            .values()
+            .filter(|remote| {
+                !configured
+                    .iter()
+                    .any(|address| address.eq_ignore_ascii_case(&remote.address))
+                    && !self
+                        .remembered_keys
+                        .iter()
+                        .any(|key| key.key == remote.id && configured.contains(&key.address))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        discovered.sort_by(|left, right| {
+            left.label
+                .cmp(&right.label)
+                .then_with(|| left.address.cmp(&right.address))
+        });
+        discovered
+            .into_iter()
+            .map(|remote| Row {
+                label: if remote.label.trim().is_empty() {
+                    remote.address.clone()
+                } else {
+                    remote.label.clone()
+                },
+                note: None,
+                kind: RowKind::Discovered(remote),
+            })
+            .collect()
+    }
+
     /// How many rows the focused list holds, which is what moving needs.
     pub(in crate::tui) fn row_count(&self) -> usize {
         match self.panel.section {
@@ -1676,7 +1769,7 @@ impl App {
             }
             Section::Trackers => 1,
             Section::Environments => self.environments().len(),
-            Section::Remotes => 1 + self.configured_remotes().len(),
+            Section::Remotes => self.remote_rows().len(),
         }
     }
 

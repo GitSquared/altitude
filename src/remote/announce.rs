@@ -14,6 +14,7 @@
 use std::{net::SocketAddr, time::Duration};
 
 use serde::{Deserialize, Serialize};
+use socket2::{Domain, Protocol, Socket, Type};
 
 use tokio::sync::watch;
 use tokio::{
@@ -23,7 +24,7 @@ use tokio::{
     time::{sleep, timeout},
 };
 
-use super::LinkResult;
+use super::{LinkResult, discovery};
 use crate::tracker::TrackerKind;
 
 /// How long either side waits for the other before giving up.
@@ -75,6 +76,9 @@ pub enum RemoteState {
 /// The listeners that answer announcements.
 pub(super) struct Broadcast {
     tasks: Vec<JoinHandle<()>>,
+    /// Kept until the server stops, because a service that vanished while the
+    /// remote is still answering would be worse than one never found.
+    advertisement: Option<discovery::Advertisement>,
 }
 
 impl Broadcast {
@@ -91,16 +95,41 @@ impl Broadcast {
         announcement: Announcement,
         state: watch::Receiver<RemoteState>,
     ) -> LinkResult<Self> {
-        let mut tasks = Vec::new();
+        // Every listener is bound before any is served: a bind that fails half
+        // way through must not leave a task running on a port nobody owns.
+        let mut listeners = Vec::new();
         for address in bound {
-            let listener = TcpListener::bind(address).await?;
+            listeners.push(bind_listener(*address)?);
+        }
+        // Discovery is a convenience. A network that refuses mDNS does not stop
+        // the remote from being reachable by the address an operator types.
+        let advertisement = match discovery::advertise(
+            &announcement.label,
+            &announcement.id,
+            &announcement.version,
+            bound,
+        ) {
+            Ok(advertisement) => Some(advertisement),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "mDNS discovery is unavailable; add this remote by its address instead"
+                );
+                None
+            }
+        };
+        let mut tasks = Vec::new();
+        for listener in listeners {
             tasks.push(tokio::spawn(answer_everyone(
                 listener,
                 announcement.clone(),
                 state.clone(),
             )));
         }
-        Ok(Self { tasks })
+        Ok(Self {
+            tasks,
+            advertisement,
+        })
     }
 
     /// Stops answering. Dropping a server should not leave a port open.
@@ -108,7 +137,39 @@ impl Broadcast {
         for task in self.tasks {
             task.abort();
         }
+        drop(self.advertisement);
     }
+}
+
+/// Linux's IPv6 wildcard also claims IPv4 unless IPV6_V6ONLY is explicit.
+/// SO_REUSEADDR permits restarting after closed connections; SO_REUSEPORT stays
+/// disabled so a competing listener still fails.
+fn bind_listener(address: SocketAddr) -> Result<TcpListener, String> {
+    let socket = Socket::new(
+        Domain::for_address(address),
+        Type::STREAM,
+        Some(Protocol::TCP),
+    )
+    .map_err(|error| format!("TCP discovery at {address}: {error}"))?;
+    if address.is_ipv6() {
+        socket
+            .set_only_v6(true)
+            .map_err(|error| format!("TCP discovery at {address}: {error}"))?;
+    }
+    socket
+        .set_reuse_address(true)
+        .map_err(|error| format!("TCP discovery at {address}: {error}"))?;
+    socket
+        .set_nonblocking(true)
+        .map_err(|error| format!("TCP discovery at {address}: {error}"))?;
+    socket
+        .bind(&address.into())
+        .map_err(|error| format!("TCP discovery at {address}: {error}"))?;
+    socket
+        .listen(128)
+        .map_err(|error| format!("TCP discovery at {address}: {error}"))?;
+    TcpListener::from_std(socket.into())
+        .map_err(|error| format!("TCP discovery at {address}: {error}"))
 }
 
 async fn answer_everyone(
