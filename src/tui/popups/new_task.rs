@@ -783,7 +783,7 @@ impl NewTask {
     }
 }
 
-pub fn draw(frame: &mut Frame, area: Rect, new_task: &NewTask, tick: usize) {
+pub fn draw(frame: &mut Frame, area: Rect, new_task: &NewTask, tick: Option<usize>) {
     let popup = chrome::centered(area, WIDTH_PERCENT, HEIGHT);
     frame.render_widget(Clear, popup);
     let block = Block::bordered()
@@ -831,7 +831,7 @@ pub fn draw(frame: &mut Frame, area: Rect, new_task: &NewTask, tick: usize) {
 }
 
 /// The results, or the reason there are none yet.
-fn draw_issue(frame: &mut Frame, area: Rect, new_task: &NewTask, tick: usize) {
+fn draw_issue(frame: &mut Frame, area: Rect, new_task: &NewTask, tick: Option<usize>) {
     let note = new_task
         .read_error
         .as_deref()

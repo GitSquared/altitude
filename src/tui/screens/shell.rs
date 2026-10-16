@@ -171,7 +171,13 @@ impl Shell {
     }
 }
 
-pub fn draw_preparing(frame: &mut Frame, area: Rect, display: &str, progress: &str, tick: usize) {
+pub fn draw_preparing(
+    frame: &mut Frame,
+    area: Rect,
+    display: &str,
+    progress: &str,
+    tick: Option<usize>,
+) {
     let popup = popup_area(area);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)

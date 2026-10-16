@@ -1,0 +1,111 @@
+//! A quiet contour field for the space around Altitude's work.
+
+use ratatui::{
+    Frame,
+    layout::Rect,
+    style::{Color, Style},
+};
+
+pub fn draw(frame: &mut Frame, area: Rect, tick: usize) {
+    if area.width < 8 || area.height < 4 {
+        return;
+    }
+
+    // Braille gives each terminal cell a 2×4 pixel grid, as in milli.nvim's
+    // exported splashes. Sample the terrain once per pixel corner, then pack
+    // contour crossings into the eight dots of each cell.
+    let pixel_width = usize::from(area.width) * 2;
+    let pixel_height = usize::from(area.height) * 4;
+    let drift = tick as f32 * 0.006;
+    let stride = pixel_width + 1;
+    let mut heights = vec![0.0; stride * (pixel_height + 1)];
+    for row in 0..=pixel_height {
+        for column in 0..=pixel_width {
+            let x = column as f32 / pixel_width as f32 * 3.2;
+            let y = row as f32 / pixel_height as f32 * 2.0;
+            heights[row * stride + column] = elevation(x, y, drift);
+        }
+    }
+
+    const DOTS: [[u8; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
+    let buffer = frame.buffer_mut();
+    for row in 0..area.height {
+        for column in 0..area.width {
+            let mut dots = 0;
+            let mut highest_level = 0.0_f32;
+            for (dot_row, row_dots) in DOTS.iter().enumerate() {
+                for (dot_column, dot) in row_dots.iter().enumerate() {
+                    let pixel_x = usize::from(column) * 2 + dot_column;
+                    let pixel_y = usize::from(row) * 4 + dot_row;
+                    let index = pixel_y * stride + pixel_x;
+                    let corners = [
+                        heights[index],
+                        heights[index + 1],
+                        heights[index + stride],
+                        heights[index + stride + 1],
+                    ];
+                    let minimum = corners.into_iter().fold(f32::INFINITY, f32::min);
+                    let maximum = corners.into_iter().fold(f32::NEG_INFINITY, f32::max);
+                    let level = (minimum * 8.0).floor().max(0.0) + 1.0;
+                    if level <= maximum * 8.0 {
+                        dots |= *dot;
+                        highest_level = highest_level.max(level);
+                    }
+                }
+            }
+            if dots == 0 {
+                continue;
+            }
+            let shade = highest_level.min(8.0) as u8;
+            let color = Color::Rgb(18 + shade * 5, 60 + shade * 9, 72 + shade * 10);
+            let symbol = char::from_u32(0x2800 + u32::from(dots))
+                .expect("braille dots always form a Unicode scalar")
+                .to_string();
+            buffer[(area.x + column, area.y + row)]
+                .set_symbol(&symbol)
+                .set_style(Style::new().fg(color));
+        }
+    }
+}
+
+fn elevation(x: f32, y: f32, drift: f32) -> f32 {
+    let dx = (x - 1.6) * 0.74;
+    let dy = (y - 1.0) * 1.12;
+    let island = 0.9 - (dx * dx + dy * dy).sqrt();
+    let mut texture = 0.0;
+    let mut frequency = 1.0;
+    let mut amplitude = 0.22;
+    for _ in 0..4 {
+        texture += perlin(x * frequency + drift, y * frequency + drift * 0.4) * amplitude;
+        frequency *= 2.0;
+        amplitude *= 0.5;
+    }
+    island + texture
+}
+
+fn perlin(x: f32, y: f32) -> f32 {
+    let left = x.floor() as i32;
+    let top = y.floor() as i32;
+    let u = x - left as f32;
+    let v = y - top as f32;
+    let fade = |t: f32| t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+    let dot = |corner_x: i32, corner_y: i32, offset_x: f32, offset_y: f32| {
+        let hash = (corner_x.wrapping_mul(374_761_393) ^ corner_y.wrapping_mul(668_265_263))
+            .wrapping_mul(1_274_126_177);
+        match hash & 7 {
+            0 => offset_x + offset_y,
+            1 => offset_x - offset_y,
+            2 => -offset_x + offset_y,
+            3 => -offset_x - offset_y,
+            4 => offset_x,
+            5 => -offset_x,
+            6 => offset_y,
+            _ => -offset_y,
+        }
+    };
+    let upper =
+        dot(left, top, u, v) + fade(u) * (dot(left + 1, top, u - 1.0, v) - dot(left, top, u, v));
+    let lower = dot(left, top + 1, u, v - 1.0)
+        + fade(u) * (dot(left + 1, top + 1, u - 1.0, v - 1.0) - dot(left, top + 1, u, v - 1.0));
+    upper + fade(v) * (lower - upper)
+}

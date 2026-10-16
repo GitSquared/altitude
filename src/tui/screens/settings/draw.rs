@@ -23,7 +23,7 @@ use super::{
 /// The gap between columns, so two focus bars can never touch.
 const GAP: u16 = 3;
 
-pub fn draw(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick: usize) {
+pub fn draw(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick: Option<usize>) {
     draw_columns(frame, area, panel, view, tick);
     if let Some(form) = &panel.form {
         chrome::dim(frame, area);
@@ -69,7 +69,7 @@ fn item(
     Line::from(spans)
 }
 
-fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick: usize) {
+fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick: Option<usize>) {
     let block = Block::bordered()
         .title(" Settings ")
         .border_type(BorderType::Rounded)
@@ -170,7 +170,7 @@ fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick:
 /// The third column. `focused` is decided by the caller, because whether this
 /// column holds the focus is not the same question as how deep the focus is: a
 /// row with nothing inside it is already here.
-fn detail(panel: &Panel, view: &View, focused: bool, tick: usize) -> Paragraph<'static> {
+fn detail(panel: &Panel, view: &View, focused: bool, tick: Option<usize>) -> Paragraph<'static> {
     // The heading is the column's focus indicator: it has no rows to bar.
     let heading = move |text: String| {
         if focused {

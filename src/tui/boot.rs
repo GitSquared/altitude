@@ -1,4 +1,4 @@
-use std::{error::Error, future::Future, io, time::Duration};
+use std::{error::Error, future::Future, io};
 
 use crossterm::event::{EventStream, KeyCode, KeyModifiers};
 use futures_util::StreamExt;
@@ -8,10 +8,13 @@ use ratatui::{
     text::Line,
     widgets::Paragraph,
 };
-use tokio::{signal::unix::Signal, sync::watch, time};
+use tokio::{signal::unix::Signal, sync::watch};
 
-use crate::tui::widgets::palette;
-use crate::{isolation::IsolationStatus, tui::widgets::utils::shimmer};
+use crate::tui::{terrain, widgets::palette};
+use crate::{
+    isolation::IsolationStatus,
+    tui::widgets::utils::{shimmer, shimmer_clock},
+};
 
 const TITLE: &str = "⛰  altitude";
 
@@ -19,6 +22,7 @@ pub async fn database<T, E>(
     terminal: &mut DefaultTerminal,
     terminate: &mut Signal,
     interrupt: &mut Signal,
+    animations: bool,
     initialize: impl Future<Output = Result<T, E>>,
 ) -> io::Result<Option<T>>
 where
@@ -28,6 +32,7 @@ where
         terminal,
         terminate,
         interrupt,
+        animations,
         || "migrating database...",
         async { initialize.await.map_err(io::Error::other) },
     )
@@ -39,6 +44,7 @@ pub async fn isolation(
     terminate: &mut Signal,
     interrupt: &mut Signal,
     status: watch::Receiver<IsolationStatus>,
+    animations: bool,
 ) -> io::Result<Option<watch::Receiver<IsolationStatus>>> {
     // Two handles: one reports what is happening, the other waits for it to
     // change. The label is read every frame, so it follows the status.
@@ -48,6 +54,7 @@ pub async fn isolation(
         terminal,
         terminate,
         interrupt,
+        animations,
         || isolation_label(&shown.borrow()),
         async move {
             loop {
@@ -72,12 +79,14 @@ pub async fn task_resume<T>(
     terminal: &mut DefaultTerminal,
     terminate: &mut Signal,
     interrupt: &mut Signal,
+    animations: bool,
     resume: impl Future<Output = T>,
 ) -> io::Result<Option<T>> {
     wait_for(
         terminal,
         terminate,
         interrupt,
+        animations,
         || "resuming tasks...",
         async { Ok(resume.await) },
     )
@@ -90,21 +99,22 @@ async fn wait_for<T>(
     terminal: &mut DefaultTerminal,
     terminate: &mut Signal,
     interrupt: &mut Signal,
+    animations: bool,
     label: impl Fn() -> &'static str,
     operation: impl Future<Output = io::Result<T>>,
 ) -> io::Result<Option<T>> {
     let mut events = EventStream::new();
-    let mut animation = time::interval(Duration::from_millis(80));
+    let mut animation = shimmer_clock();
     let mut shimmer = 0;
     tokio::pin!(operation);
 
     loop {
-        terminal.draw(|frame| draw(frame, label(), shimmer))?;
+        terminal.draw(|frame| draw(frame, label(), animations.then_some(shimmer)))?;
         tokio::select! {
             _ = terminate.recv() => return Ok(None),
             _ = interrupt.recv() => return Ok(None),
             result = &mut operation => return result.map(Some),
-            _ = animation.tick() => shimmer = shimmer.wrapping_add(1),
+            _ = animation.tick(), if animations => shimmer = shimmer.wrapping_add(1),
             event = events.next() => {
                 let Some(event) = event else { return Ok(None) };
                 if let Some(key) = event?.as_key_press_event()
@@ -129,7 +139,10 @@ fn isolation_label(status: &IsolationStatus) -> &'static str {
     }
 }
 
-fn draw(frame: &mut Frame, label: &str, tick: usize) {
+fn draw(frame: &mut Frame, label: &str, tick: Option<usize>) {
+    if let Some(tick) = tick {
+        terrain::draw(frame, frame.area(), tick);
+    }
     let [_, title_area, _, status, _] = Layout::vertical([
         Constraint::Fill(1),
         Constraint::Length(1),

@@ -8,7 +8,7 @@ use ratatui::{
     Frame,
     layout::Rect,
     text::{Line, Span},
-    widgets::{Block, BorderType, Padding, Paragraph, Wrap},
+    widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap},
 };
 
 use crate::{
@@ -44,6 +44,9 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         .padding(Padding::uniform(1));
     let content = panel.inner(area);
     frame.render_widget(panel, area);
+    if app.animations() {
+        super::super::terrain::draw(frame, content, app.shimmer);
+    }
     let (columns, card_width, height) = grid(content);
     app.grid_columns = columns;
     draw_tasks(frame, content, app, columns, card_width, height);
@@ -145,7 +148,7 @@ fn cards(app: &App) -> Vec<Card<'_>> {
             status: card_status(
                 task,
                 at_capacity,
-                app.shimmer,
+                app.animation_tick(),
                 app.environment_builds.get(&task.id),
             ),
             extras: card_extras(task),
@@ -198,6 +201,7 @@ fn held_status(held: &TaskSummary) -> Line<'static> {
 }
 
 fn draw_card(frame: &mut Frame, area: Rect, card: &Card<'_>, focused: bool) {
+    frame.render_widget(Clear, area);
     let border = if focused {
         palette::accent()
     } else {
@@ -248,7 +252,7 @@ fn draw_card(frame: &mut Frame, area: Rect, card: &Card<'_>, focused: bool) {
 fn card_status(
     task: &Task,
     at_capacity: bool,
-    tick: usize,
+    tick: Option<usize>,
     build: Option<&EnvironmentProgress>,
 ) -> Line<'static> {
     if let Some(progress) = build {

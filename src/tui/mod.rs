@@ -11,6 +11,7 @@ mod keys;
 mod popups;
 mod run;
 mod screens;
+mod terrain;
 mod widgets;
 
 pub use app::App;

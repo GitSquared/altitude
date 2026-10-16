@@ -64,3 +64,4 @@ tui-term = { version = "0.3.4", default-features = false, features = ["vt100"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 whoami = "2.1.3"
+tachyonfx = "0.25.2"

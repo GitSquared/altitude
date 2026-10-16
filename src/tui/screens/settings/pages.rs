@@ -74,7 +74,7 @@ impl Connector {
     pub(super) fn lines(
         self,
         heading: impl Fn(String) -> Line<'static>,
-        tick: usize,
+        tick: Option<usize>,
     ) -> Vec<Line<'static>> {
         let status = self.status_line(tick);
         let mut lines = vec![heading(self.title), Line::from(""), status];
@@ -101,7 +101,7 @@ impl Connector {
 
     /// The status is the page's verdict, so it is bold and monochrome with the
     /// same dot the list uses; only the value beside it, if any, is accented.
-    fn status_line(&self, tick: usize) -> Line<'static> {
+    fn status_line(&self, tick: Option<usize>) -> Line<'static> {
         let mut spans = mark(self.reach == Reach::On, self.reach == Reach::Asking).spans(tick);
         spans.push(Span::styled(
             self.status.clone(),
@@ -536,7 +536,7 @@ pub(in crate::tui) fn tracker_dot(is_ready: Option<bool>) -> Dot {
 /// same shape as the first, not a page of its own.
 pub(super) fn tracker_summary(
     trackers: Option<&[TrackerConnection]>,
-    tick: usize,
+    tick: Option<usize>,
 ) -> Line<'static> {
     let Some(connections) = trackers else {
         let mut spans = tracker_dot(None).spans(tick);

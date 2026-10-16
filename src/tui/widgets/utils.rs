@@ -3,11 +3,18 @@ use ratatui::{
     style::Style,
     text::Span,
 };
+use tokio::time::{self, Duration, Interval, MissedTickBehavior};
 
 use crate::tui::widgets::palette;
 
 /// How many characters wide the travelling highlight is.
 const SHIMMER_WIDTH: usize = 3;
+
+pub fn shimmer_clock() -> Interval {
+    let mut clock = time::interval(Duration::from_millis(80));
+    clock.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    clock
+}
 
 pub fn centered_width(area: Rect, width: u16, height_percent: u16) -> Rect {
     let [area] = Layout::horizontal([Constraint::Length(width.min(area.width))])
@@ -50,9 +57,12 @@ impl Dot {
     }
 
     /// The mark, and the space after it, ready to be the first span of a row.
-    pub fn spans(&self, tick: usize) -> Vec<Span<'static>> {
+    ///
+    /// A travelling mark only travels while there is a frame counter to move it:
+    /// with animations off it sits still, in the style it would have travelled in.
+    pub fn spans(&self, tick: Option<usize>) -> Vec<Span<'static>> {
         let text = format!("{} ", self.glyph);
-        if self.travelling {
+        if self.travelling && tick.is_some() {
             shimmer(&text, tick)
         } else {
             vec![Span::styled(text, self.style)]
@@ -63,8 +73,12 @@ impl Dot {
 /// A highlight that travels across `text`, so a wait reads as work in progress.
 ///
 /// `tick` is any increasing counter; each call wraps it, so callers only need
-/// to keep counting.
-pub fn shimmer(text: &str, tick: usize) -> Vec<Span<'static>> {
+/// to keep counting. `None` is a wait with no animation to draw: the text is
+/// shown whole, in the colour the highlight would have reached.
+pub fn shimmer(text: &str, tick: Option<usize>) -> Vec<Span<'static>> {
+    let Some(tick) = tick else {
+        return vec![Span::styled(text.to_owned(), palette::waiting())];
+    };
     let position = tick % (text.chars().count() + SHIMMER_WIDTH);
     text.chars()
         .enumerate()

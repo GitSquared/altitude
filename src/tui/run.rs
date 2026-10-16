@@ -4,7 +4,10 @@
 //! events, routing them to whatever is in front, and drawing. What the
 //! application does with an event is its own business, in `app`.
 
-use std::{fs, io, mem, time::Duration};
+use std::{
+    fs, io, mem,
+    time::{Duration, Instant},
+};
 
 use crossterm::{
     event::{
@@ -16,6 +19,10 @@ use crossterm::{
 };
 use futures_util::StreamExt;
 use ratatui::DefaultTerminal;
+use tachyonfx::{
+    EffectManager, Interpolation, fx,
+    pattern::{InvertedPattern, RadialPattern},
+};
 use tokio::{signal::unix::Signal, sync::mpsc, task::spawn_blocking, time};
 
 use crate::{
@@ -35,6 +42,7 @@ use super::popups::confirm::handle_confirm_key;
 use super::screens;
 use super::screens::settings::Focus;
 use super::widgets;
+use super::widgets::utils::shimmer_clock;
 use crate::task::CredentialShellEvent;
 
 struct EventReplies<'a> {
@@ -98,7 +106,12 @@ where
     let mut events = EventStream::new();
     let mut refresh = time::interval(Duration::from_secs(2));
     let mut shell_notice = time::interval(Duration::from_millis(100));
-    let mut shimmer = time::interval(Duration::from_millis(80));
+    let mut shimmer = shimmer_clock();
+    // A wait still has progress to report with animations off, so the clock that
+    // reads it is not the one that moves the screen. Skip, so a long wait with
+    // nothing to report does not come back as a burst of catch-up ticks.
+    let mut progress_clock = time::interval(Duration::from_millis(100));
+    progress_clock.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     let mut configuration_clock = time::interval(Duration::from_secs(3));
     let mut connection_clock = time::interval(Duration::from_secs(15));
     let mut reading_configuration = false;
@@ -156,6 +169,9 @@ where
     // Acknowledgements identify the exact content sent while local edits continue.
     let (config_pushes, mut config_pushed) = mpsc::channel::<ConfigPushReply>(8);
     let mut issue_search_clock = time::interval(Duration::from_millis(80));
+    let mut effects: EffectManager<()> = EffectManager::default();
+    let mut previous_foreground = mem::discriminant(&app.foreground);
+    let mut last_frame = Instant::now();
     loop {
         if mouse_captured != app.open_shell().is_some() {
             mouse_captured = app.open_shell().is_some();
@@ -182,6 +198,11 @@ where
                 execute!(io::stdout(), PopKeyboardEnhancementFlags)?;
             }
         }
+        let foreground = mem::discriminant(&app.foreground);
+        let entering = foreground != previous_foreground;
+        previous_foreground = foreground;
+        let elapsed = last_frame.elapsed().min(Duration::from_millis(80));
+        last_frame = Instant::now();
         terminal.draw(|frame| {
             let hints = app.hints();
             let content =
@@ -201,13 +222,19 @@ where
             {
                 // Fullscreen: it is the screen, not something over it.
                 let view = app.settings_view();
-                screens::settings::draw(frame, content, &app.panel, &view, app.shimmer);
+                screens::settings::draw(frame, content, &app.panel, &view, app.animation_tick());
                 if let super::app::CredentialShellState::Opening {
                     display, progress, ..
                 } = &app.credential_shell
                 {
                     widgets::chrome::dim(frame, content);
-                    screens::shell::draw_preparing(frame, content, display, progress, app.shimmer);
+                    screens::shell::draw_preparing(
+                        frame,
+                        content,
+                        display,
+                        progress,
+                        app.animation_tick(),
+                    );
                 }
             } else if matches!(app.foreground, Foreground::Signals) {
                 widgets::chrome::dim(frame, content);
@@ -240,7 +267,7 @@ where
             }
             if let Foreground::NewTask(new_task) = &app.foreground {
                 widgets::chrome::dim(frame, content);
-                popups::new_task::draw(frame, content, new_task, app.shimmer);
+                popups::new_task::draw(frame, content, new_task, app.animation_tick());
             }
             if matches!(app.foreground, Foreground::Keys(_)) {
                 widgets::chrome::dim(frame, content);
@@ -255,6 +282,28 @@ where
             if let Foreground::Reply(reply) = &app.foreground {
                 widgets::chrome::dim(frame, content);
                 reply.prompt.draw(frame, content);
+            }
+            if entering && app.animations() {
+                effects = EffectManager::default();
+                let popup = match app.foreground {
+                    Foreground::Confirm(_) => Some(widgets::chrome::centered(content, 60, 7)),
+                    Foreground::NewTask(_) => Some(widgets::chrome::centered(content, 64, 22)),
+                    _ => None,
+                };
+                if let Some(popup) = popup {
+                    effects.add_effect(
+                        fx::dissolve((200, Interpolation::QuadOut))
+                            .with_pattern(InvertedPattern::new(RadialPattern::center()))
+                            .with_area(popup),
+                    );
+                }
+            }
+            // Off, the manager is emptied rather than left holding effects that
+            // would resume mid-flight if it were turned back on.
+            if app.animations() {
+                effects.process_effects(elapsed.into(), frame.buffer_mut(), content);
+            } else {
+                effects = EffectManager::default();
             }
         })?;
         tokio::select! {
@@ -329,15 +378,10 @@ where
                 }
             }
             _ = shell_notice.tick(), if app.shell_has_active_notice() => {}
-            _ = shimmer.tick(),
-                if app.is_preparing()
-                    || app.is_asking_remotes()
-                    || app.is_asking_credentials()
-                    || app.is_awaiting_tracker()
-                    || app.is_connecting_tracker()
-                    || matches!(app.credential_shell, super::app::CredentialShellState::Opening { .. }) =>
-            {
+            _ = shimmer.tick(), if app.animations() && app.open_shell().is_none() => {
                 app.shimmer = app.shimmer.wrapping_add(1);
+            }
+            _ = progress_clock.tick(), if app.open_shell().is_none() && app.is_awaiting_progress() => {
                 app.environment_builds = task_service.environment_builds();
             }
             Some(update) = task_execution_updates.recv() =>

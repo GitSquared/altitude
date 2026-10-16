@@ -50,6 +50,13 @@ async fn client() -> Result<(), Box<dyn Error>> {
     let mut interrupt = signal(SignalKind::interrupt())?;
     let config = Config::load()?;
     let settings = config.load_or_create_settings();
+    // Boot happens before the interface does, so the preference is read here
+    // rather than reached for from inside it. Unreadable settings animate, which
+    // is what the rest of the interface does when it has none.
+    let animations = settings
+        .as_ref()
+        .map(|file| file.settings().interface().animations)
+        .unwrap_or(true);
     let _log_guard = logging::init(&config)?;
     tracing::info!("starting altitude");
     let mut terminal = ratatui::init();
@@ -59,6 +66,7 @@ async fn client() -> Result<(), Box<dyn Error>> {
             &mut terminal,
             &mut terminate,
             &mut interrupt,
+            animations,
             Database::open(&config),
         )
         .await?
@@ -75,6 +83,7 @@ async fn client() -> Result<(), Box<dyn Error>> {
             &mut terminate,
             &mut interrupt,
             isolation_status,
+            animations,
         )
         .await?
         else {
@@ -101,6 +110,7 @@ async fn client() -> Result<(), Box<dyn Error>> {
             &mut terminal,
             &mut terminate,
             &mut interrupt,
+            animations,
             tasks.recover_all(),
         )
         .await?

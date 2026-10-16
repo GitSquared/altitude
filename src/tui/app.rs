@@ -604,6 +604,13 @@ impl App {
             .is_none_or(|file| file.settings().interface().animations)
     }
 
+    /// The frame counter that drives animated drawing, absent while animations
+    /// are off. What is animated reads this rather than the counter itself, so
+    /// there is one place that decides whether anything moves at all.
+    pub(in crate::tui) fn animation_tick(&self) -> Option<usize> {
+        self.animations().then_some(self.shimmer)
+    }
+
     /// The few actions worth keeping visible below the current screen.
     pub(in crate::tui) fn hints(&self) -> Vec<Hint> {
         let mut hints = self.hints_for(&self.foreground);
@@ -3641,6 +3648,20 @@ impl App {
         self.tasks
             .iter()
             .any(|task| task.facts.execution_status == TaskExecutionStatus::Pending)
+    }
+
+    /// Whether anything on screen is waiting on work whose progress is worth
+    /// reading again while it runs.
+    ///
+    /// The animation clock reads this too, but it is not the animation's own
+    /// question: with animations off there is still a wait to report on.
+    pub(in crate::tui) fn is_awaiting_progress(&self) -> bool {
+        self.is_preparing()
+            || self.is_asking_remotes()
+            || self.is_asking_credentials()
+            || self.is_awaiting_tracker()
+            || self.is_connecting_tracker()
+            || matches!(self.credential_shell, CredentialShellState::Opening { .. })
     }
 }
 

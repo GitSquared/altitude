@@ -234,7 +234,7 @@ impl Setup {
 fn candidate_line(candidate: &TrackerOption, width: usize, focused: bool) -> Line<'static> {
     let status = candidate.status();
     let label = candidate.provider.label();
-    let mut spans = tracker_dot(candidate.is_ready).spans(0);
+    let mut spans = tracker_dot(candidate.is_ready).spans(None);
     let used = spans.iter().map(Span::width).sum::<usize>() + label.len() + status.len();
     let padding = " ".repeat(width.saturating_sub(used).max(1));
     if focused {
