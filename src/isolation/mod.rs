@@ -151,6 +151,13 @@ pub struct ProfileSummary {
 /// from every other sandbox without knowing which profiles exist.
 pub const CREDENTIAL_PREFIX: &str = "credentials-";
 
+/// What a sandbox made to observe a provider is called.
+///
+/// One per credential owner, reused by every review that owner is holding, and
+/// thrown away when the host stops. The prefix is what tells a leftover from a
+/// sandbox that is in use.
+pub const WATCHER_PREFIX: &str = "watcher-";
+
 /// What a profile's own check said about it.
 #[derive(Clone, Debug)]
 pub struct CredentialReport {
@@ -185,6 +192,34 @@ pub struct SandboxOptions {
     /// Host sockets this sandbox can reach as host CID 2, for channels that are
     /// not the network. See [`VsockRoute`].
     pub vsock: Vec<VsockRoute>,
+    pub size: SandboxSize,
+}
+
+/// What a sandbox is created with.
+///
+/// Ceilings the sandbox enforces, not reservations: most work uses a fraction of
+/// them most of the time, which is why how many run at once is observed rather
+/// than derived from these. The values are arbitrary. There are two sizes
+/// because the work differs by an order of magnitude, and a host watching many
+/// reviews should not hold a capsule's memory for each one.
+#[derive(Clone, Copy, Debug)]
+pub struct SandboxSize {
+    pub cpus: u8,
+    pub memory_mib: u32,
+}
+
+impl SandboxSize {
+    /// An agent working a repository.
+    pub const CAPSULE: Self = Self {
+        cpus: 4,
+        memory_mib: 5 * 1_024,
+    };
+
+    /// One command, such as reading a provider's state.
+    pub const COMMAND: Self = Self {
+        cpus: 1,
+        memory_mib: 512,
+    };
 }
 
 /// A host local socket published to one sandbox on a guest vsock port.
@@ -301,6 +336,7 @@ impl SandboxOptions {
             mounts: Vec::new(),
             environment: Vec::new(),
             vsock: Vec::new(),
+            size: SandboxSize::CAPSULE,
         }
     }
 }
@@ -387,6 +423,22 @@ pub trait IsolationEngine: Send + Sync {
         progress: &dyn EnvironmentProgressSink,
     ) -> impl Future<Output = Result<String, IsolationError>> + Send;
 
+    /// Make a sandbox that runs a provider's read commands with an owner's
+    /// profile mounted, and keep it until the host removes it.
+    ///
+    /// The same shell shape a credential shell gets, minus the shell: it is not a
+    /// task, nothing travels from it, and its only job is to answer what a linked
+    /// contribution looks like now. It is scoped to one owner by the caller, so a
+    /// machine serving several peers never lets one peer's login answer for
+    /// another's.
+    fn watcher(
+        &self,
+        id: String,
+        environment: Environment,
+        recipes: Vec<EnvironmentRecipe>,
+        progress: &dyn EnvironmentProgressSink,
+    ) -> impl Future<Output = Result<(), IsolationError>> + Send;
+
     fn prepare(
         &self,
         status: &watch::Sender<IsolationStatus>,
@@ -451,12 +503,13 @@ pub trait IsolationEngine: Send + Sync {
         progress: &dyn EnvironmentProgressSink,
     ) -> impl Future<Output = Result<CredentialReport, IsolationError>> + Send;
 
-    /// Throw away credential shells a client left behind.
+    /// Throw away sandboxes a client left behind.
     ///
-    /// One lives as long as the terminal in front of it, so one still here is one
-    /// nobody is looking at: a client that stopped in the middle of opening one
-    /// cannot have left anything else, and nothing else holds these.
-    fn remove_leftover_credential_shells(&self) -> impl Future<Output = ()> + Send;
+    /// A credential shell lives as long as the terminal in front of it, and a
+    /// watcher sandbox lives as long as the host that made it, so one still here
+    /// when the host is starting up belongs to a process that is gone. Nothing
+    /// else holds these.
+    fn remove_leftover_sandboxes(&self) -> impl Future<Output = ()> + Send;
 
     fn remove(&self, id: String) -> impl Future<Output = Result<(), IsolationError>> + Send;
 

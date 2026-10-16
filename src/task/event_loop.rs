@@ -13,11 +13,19 @@ use crate::{
     isolation::Environment,
     isolation::{Command, CommandEvent, CommandSession, IsolationEngine, OutputStream},
     task::capacity::{HostCapacity, HostSampler, SAMPLE_INTERVAL},
+    task::review::{
+        Look, OBSERVATION_ATTEMPTS, REVIEW_POLL_INTERVAL, ReviewWaits, Watchers, unreadable,
+        wake_reason,
+    },
     task::{
-        Task, TaskAgentRequestedAction, TaskAgentRun, TaskExecutionMode, TaskExecutionStatus,
-        TaskHistoryEvent, TaskService, TaskServiceError,
+        DeferredReview, Task, TaskAgentRequestedAction, TaskAgentRun, TaskExecutionMode,
+        TaskExecutionStatus, TaskHistoryEvent, TaskOperatorSignal, TaskService, TaskServiceError,
     },
     tracker::IssueSnapshot,
+    vcs::{
+        CodeContribution, ContributionObservation, ContributionOutlook, ContributionReadiness,
+        now_ms,
+    },
 };
 
 pub enum TaskExecutionUpdate {
@@ -72,6 +80,10 @@ pub struct TaskEventLoop<E> {
     /// Tasks admitted but not yet running. A task stays `Pending` until its run
     /// reports, so without this it would be admitted again on the next pass.
     starting: Arc<Mutex<HashSet<String>>>,
+    /// The observation sandboxes, shared by every held review of one owner.
+    watchers: Arc<Watchers<E>>,
+    /// When each held review is next worth a look.
+    review_waits: Arc<ReviewWaits>,
 }
 
 /// A turn this host is currently driving.
@@ -114,6 +126,7 @@ where
         enabled: bool,
     ) -> (Self, mpsc::UnboundedReceiver<TaskExecutionUpdate>) {
         let (events, receiver) = mpsc::unbounded_channel();
+        let watchers = Arc::new(Watchers::new(service.clone()));
         let event_loop = Self {
             service,
             admission_enabled: Arc::new(AtomicBool::new(enabled)),
@@ -123,8 +136,11 @@ where
             terminal_output: Arc::new(Mutex::new(HashMap::new())),
             capacity: Arc::new(Mutex::new(HostCapacity::new())),
             starting: Arc::new(Mutex::new(HashSet::new())),
+            watchers,
+            review_waits: Arc::new(ReviewWaits::default()),
         };
         event_loop.watch_host_capacity();
+        event_loop.watch_held_reviews();
         (event_loop, receiver)
     }
 
@@ -147,7 +163,9 @@ where
                 let demand = match event_loop.service.list().await {
                     Ok(tasks) => tasks
                         .iter()
-                        .filter(|task| super::wants_a_slot(task))
+                        .filter(|task| {
+                            super::wants_a_slot(task) && task.facts.deferred_review.is_none()
+                        })
                         .count(),
                     Err(error) => {
                         tracing::warn!(%error, "could not read tasks to measure demand");
@@ -211,9 +229,12 @@ where
             .count();
         let taken = occupied + self.starting.lock().expect("starting lock poisoned").len();
         let room = limit.saturating_sub(taken);
+        // A task with a held review is the scheduler's: admission must not start
+        // an agent turn for it while the review is still waiting.
         let mut waiting: Vec<Task> = tasks
             .into_iter()
             .filter(|task| task.facts.execution_status == TaskExecutionStatus::Pending)
+            .filter(|task| task.facts.deferred_review.is_none())
             .filter(|task| {
                 !self
                     .starting
@@ -246,12 +267,12 @@ where
             let event_loop = self.clone();
             tokio::spawn(async move {
                 let result = event_loop.service.start(task.clone()).await;
+                event_loop.watch_agent_run(result);
                 event_loop
                     .starting
                     .lock()
                     .expect("starting lock poisoned")
                     .remove(&task.id);
-                event_loop.watch_agent_run(result);
                 // Provisioning may have freed or taken room for something else.
                 event_loop.admit();
             });
@@ -892,6 +913,9 @@ where
         for result in self.service.suspend_all(tasks).await {
             result?;
         }
+        // The scheduler owns no task, but it does own the sandboxes it observes
+        // through; they are this host's to dispose of like any capsule.
+        self.watchers.shutdown().await;
         Ok(())
     }
 
@@ -989,6 +1013,287 @@ where
         });
     }
 
+    /// Scan the reviews the host is holding, on an interval, and resolve them.
+    ///
+    /// One loop for the whole host: a held review costs no capsule and no
+    /// per-task watcher, because the wait is recorded state and this only looks
+    /// at it. A provider that cannot be read leaves the review held for the next
+    /// pass, so a transient failure is a delay rather than a wrong decision.
+    fn watch_held_reviews(&self) {
+        let event_loop = self.clone();
+        tokio::spawn(async move {
+            let mut tick = time::interval(REVIEW_POLL_INTERVAL);
+            tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                if event_loop.watchers.is_stopped() {
+                    return;
+                }
+                // The runtime may not be ready yet; a held review waits for it
+                // rather than being observed through a sandbox that cannot be
+                // made.
+                if !event_loop.admission_enabled.load(Ordering::Acquire) {
+                    continue;
+                }
+                event_loop.observe_held_reviews().await;
+            }
+        });
+    }
+
+    async fn observe_held_reviews(&self) {
+        let tasks = match self.service.store.list_held_reviews().await {
+            Ok(tasks) => tasks,
+            Err(error) => {
+                tracing::warn!(%error, "could not read held reviews");
+                return;
+            }
+        };
+        // A task that failed is not watched, so it keeps no sandbox and its wait
+        // is forgotten.
+        let watching: Vec<&Task> = tasks
+            .iter()
+            .filter(|task| task.facts.execution_status != TaskExecutionStatus::Failed)
+            .collect();
+        let owners: HashSet<String> = watching
+            .iter()
+            .filter_map(|task| task.operator_id().map(str::to_owned))
+            .collect();
+        self.watchers.retain(&owners).await;
+
+        let watched: HashSet<String> = watching.iter().map(|task| task.id.clone()).collect();
+        let due = self.review_waits.due(&watched).await;
+        let waiting: Vec<&Task> = watching
+            .into_iter()
+            .filter(|task| due.contains(&task.id))
+            .collect();
+        // One request per owner covers every review that owner is waiting on, so
+        // there is no per-review budget to keep: the pass is bounded by how many
+        // owners have something due, and each of those is asked once.
+        let mut owner_names: Vec<String> = waiting
+            .iter()
+            .filter_map(|task| task.operator_id().map(str::to_owned))
+            .collect();
+        owner_names.sort();
+        owner_names.dedup();
+        for owner in owner_names {
+            if self.watchers.is_stopped() {
+                return;
+            }
+            let theirs: Vec<&Task> = waiting
+                .iter()
+                .copied()
+                .filter(|task| task.operator_id() == Some(owner.as_str()))
+                .collect();
+            self.observe_owner(&owner, &theirs).await;
+        }
+    }
+
+    /// Every held review of one credential owner, looked at once.
+    ///
+    /// One sandbox reads for one owner, so one request asks it about every pull
+    /// request that owner is waiting on rather than one request for each.
+    async fn observe_owner(&self, owner: &str, tasks: &[&Task]) {
+        // A capsule that outlived its hold is given back before observing, so
+        // watching never competes with running work.
+        let mut watching = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            if !task.facts.sandbox_available {
+                watching.push((*task).clone());
+                continue;
+            }
+            match self.service.hold_review_checks(task, None).await {
+                Ok(task) => watching.push(task),
+                Err(error) => {
+                    tracing::warn!(task_id = %task.id, %error, "could not release a task capsule while watching its pull requests");
+                }
+            }
+        }
+        // A pull request linked to two reviews is one pull request, asked about
+        // once.
+        let mut contributions: Vec<CodeContribution> = Vec::new();
+        for task in &watching {
+            for contribution in &task.code_contributions {
+                if !contributions.iter().any(|seen| seen.id == contribution.id) {
+                    contributions.push(contribution.clone());
+                }
+            }
+        }
+        let observations = match self.watchers.look(owner, &contributions).await {
+            Look::Read(observations) => observations,
+            // Nothing to decide from: either the provider was not asked, or it was
+            // asked and could not be read. A provider that cannot be read must not
+            // be mistaken for a finished check, and the owner's backoff decides
+            // when either is tried again.
+            Look::Unreadable | Look::NotAsked => return,
+            // Only the operator can sign a provider in again, so the reviews this
+            // owner is holding become theirs.
+            Look::GivenUp => {
+                for task in &watching {
+                    if let Some(deferred) = task.facts.deferred_review.clone() {
+                        self.abandon_review(task, &deferred).await;
+                    }
+                }
+                return;
+            }
+        };
+        for task in &watching {
+            self.decide_held_review(task, &observations).await;
+        }
+    }
+
+    /// One held review, decided from what its owner's provider reported.
+    async fn decide_held_review(&self, task: &Task, observations: &[ContributionObservation]) {
+        let Some(deferred) = task.facts.deferred_review.clone() else {
+            return;
+        };
+        let mine: Vec<ContributionObservation> = observations
+            .iter()
+            .filter(|observation| {
+                task.code_contributions
+                    .iter()
+                    .any(|contribution| contribution.id == observation.contribution_id)
+            })
+            .cloned()
+            .collect();
+        let Some((task, moved)) = self.record_observations(task, &mine).await else {
+            return;
+        };
+        // The operator can take over or remove a task while a pass is in flight;
+        // acting on a hold that is gone would raise a signal nobody owns.
+        match self.service.store.is_active(&task.id).await {
+            Ok(true) => {}
+            Ok(false) | Err(_) => return,
+        }
+        if task
+            .facts
+            .deferred_review
+            .as_ref()
+            .map(|hold| &hold.signal.id)
+            != Some(&deferred.signal.id)
+        {
+            return;
+        }
+        self.review_waits.looked(&task.id, moved).await;
+        self.resolve_held_review(&task, &deferred, &mine).await;
+    }
+
+    async fn record_observations(
+        &self,
+        task: &Task,
+        observations: &[ContributionObservation],
+    ) -> Option<(Task, bool)> {
+        match self
+            .service
+            .store
+            .record_code_contribution_observations(&task.id, observations)
+            .await
+        {
+            Ok(recorded) => Some(recorded),
+            Err(error) => {
+                tracing::warn!(task_id = %task.id, %error, "could not record PR observations");
+                None
+            }
+        }
+    }
+
+    async fn resolve_held_review(
+        &self,
+        task: &Task,
+        deferred: &DeferredReview,
+        observations: &[ContributionObservation],
+    ) {
+        let outlook = ContributionOutlook::of(observations, now_ms());
+        match outlook.readiness {
+            ContributionReadiness::NeedsAction => {
+                if self
+                    .wake_review(task, deferred, wake_reason(&outlook.needing_action))
+                    .await
+                {
+                    // The task is queued; admission decides whether the host has
+                    // room, so a review that needs work does not jump the queue.
+                    self.admit();
+                }
+            }
+            ContributionReadiness::Ready => {
+                self.deliver_review(task, deferred.signal.clone()).await
+            }
+            // Checks are still running. The wait is already recorded, and the
+            // review's own cadence decides when it is worth looking again.
+            ContributionReadiness::Pending => {}
+        }
+    }
+
+    /// Hand a held review to the operator because its provider cannot be read.
+    ///
+    /// The alternative is a review nobody watches and nobody is told about: the
+    /// agent was never woken and the operator was never asked. Only the operator
+    /// can sign a provider in again, so the request becomes theirs.
+    async fn abandon_review(&self, task: &Task, deferred: &DeferredReview) {
+        tracing::warn!(
+            task_id = %task.id,
+            attempts = OBSERVATION_ATTEMPTS,
+            "giving up on linked contributions"
+        );
+        self.deliver_review(task, unreadable(&deferred.signal))
+            .await;
+    }
+
+    /// Raise the held review and keep the task paused for the operator.
+    ///
+    /// The signal and the pause are one record, so a retry cannot raise the
+    /// review without the task being stopped for it. The capsule is already in a
+    /// snapshot from the hold, so there is nothing to suspend here.
+    async fn deliver_review(&self, task: &Task, signal: TaskOperatorSignal) {
+        let events = [
+            TaskHistoryEvent::OperatorSignalRaised { signal },
+            TaskHistoryEvent::ExecutionPaused {
+                execution_status: TaskExecutionStatus::Paused,
+                sandbox_available: false,
+                snapshot_available: task.facts.snapshot_available,
+                execution_pause_reason: super::TaskExecutionPauseReason::AwaitingOperator,
+                snapshot_path: task.facts.snapshot_path.clone().unwrap_or_default(),
+            },
+        ];
+        let result = self.service.record(&task.id, &events).await;
+        match &result {
+            Ok(_) => tracing::info!(task_id = %task.id, "delivered a held review request"),
+            Err(error) => {
+                tracing::warn!(task_id = %task.id, %error, "could not deliver a held review request")
+            }
+        }
+        let _ = self
+            .events
+            .send(TaskExecutionUpdate::Finished(task.id.clone(), result));
+    }
+
+    /// Drop the held review and queue the task for the agent, answering whether
+    /// the wait is over.
+    ///
+    /// The clear and the queue are one record, so a retry cannot clear the hold
+    /// without leaving the task somewhere it will run. Starting is admission's
+    /// business, so the wake respects host capacity like every other turn.
+    async fn wake_review(&self, task: &Task, deferred: &DeferredReview, reason: String) -> bool {
+        let events = [
+            TaskHistoryEvent::ReviewDeferralCleared {
+                signal_id: deferred.signal.id.clone(),
+                reason,
+            },
+            TaskHistoryEvent::ExecutionQueued {
+                execution_status: TaskExecutionStatus::Pending,
+            },
+        ];
+        match self.service.record(&task.id, &events).await {
+            Ok(_) => {
+                tracing::info!(task_id = %task.id, "woke a task because a linked pull request needs attention");
+                true
+            }
+            Err(error) => {
+                tracing::warn!(task_id = %task.id, %error, "could not clear a held review request");
+                false
+            }
+        }
+    }
+
     /// Interpret a finished run inside tasks/, keeping the UI concerned only with updates and input.
     async fn handle_run_termination(
         &self,
@@ -1043,15 +1348,30 @@ where
                     })?
                     .report()
                     .map_err(TaskServiceError::InvalidReport)?;
-                let task = self.service.apply_report(&task, run, &report).await?;
+                let (task, action) = self.service.apply_report(&task, run, &report).await?;
                 let _ = self.events.send(TaskExecutionUpdate::Report {
                     task: task.clone(),
-                    summary: report.summary,
+                    summary: task
+                        .facts
+                        .latest_turn_summary
+                        .clone()
+                        .unwrap_or(report.summary),
                 });
-                match report.requested_action {
+                match action {
                     TaskAgentRequestedAction::Continue => {
                         self.service.continue_turn(run).await?;
                         self.watch_agent_run(self.service.continue_autopilot(task).await);
+                    }
+                    TaskAgentRequestedAction::AwaitOperator
+                        if task.facts.deferred_review.is_some() =>
+                    {
+                        // The request is held in history and the host watches the
+                        // linked pull requests. Give the capsule back now: watching
+                        // needs no agent, and the wait should cost no capacity.
+                        let result = self.service.hold_review_checks(&task, Some(run)).await;
+                        let _ = self
+                            .events
+                            .send(TaskExecutionUpdate::Finished(task.id, result));
                     }
                     TaskAgentRequestedAction::AwaitOperator => {
                         let result = self.service.await_operator(&task, run).await;

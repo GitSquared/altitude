@@ -5,7 +5,7 @@ use crate::{
     config::InstallationIdentity,
     isolation::Environment,
     isolation::{CommandEvent, CommandSession, IsolationEngine, SandboxOptions, VsockRoute},
-    vcs::GitHub,
+    vcs,
 };
 use futures_util::future::join_all;
 
@@ -98,10 +98,11 @@ where
         self.isolation
             .ensure_environment(
                 environment.clone(),
-                vec![
-                    self.agents.engine(agent).environment_recipe(),
-                    GitHub::environment_recipe(),
-                ],
+                [
+                    vec![self.agents.engine(agent).environment_recipe()],
+                    vcs::environment_recipes(),
+                ]
+                .concat(),
                 &Unwatched,
             )
             .await
@@ -141,13 +142,18 @@ where
             Some(kind) => {
                 let engine = self.agents.engine(kind);
                 let conversation_id = self.agent_conversation(&task, resume).await?;
+                // A task the host woke because a linked pull request needed
+                // attention carries why; anything else is an ordinary resume.
+                let prompt = task.facts.review_wake_reason.clone().unwrap_or_else(|| {
+                    if resume {
+                        "Resume the task and continue making progress.".to_owned()
+                    } else {
+                        task.facts.intent.clone()
+                    }
+                });
                 engine.autopilot_command(
                     &conversation_id,
-                    if resume {
-                        "Resume the task and continue making progress."
-                    } else {
-                        &task.facts.intent
-                    },
+                    &prompt,
                     &task.turn_context(TaskExecutionMode::Autopilot),
                     resume,
                 )
@@ -200,10 +206,11 @@ where
                         sandbox_id.clone(),
                         snapshot_path.clone(),
                         task.environment(),
-                        vec![
-                            self.agents.engine(kind).environment_recipe(),
-                            GitHub::environment_recipe(),
-                        ],
+                        [
+                            vec![self.agents.engine(kind).environment_recipe()],
+                            vcs::environment_recipes(),
+                        ]
+                        .concat(),
                         vsock,
                         &progress,
                     )
@@ -359,17 +366,37 @@ where
                     {
                         Ok(path) => {
                             service.release_agent_channel(&task.id);
-                            task = service
-                                .record_snapshot(
-                                    &task,
-                                    &[TaskHistoryEvent::ExecutionRecovered {
-                                        execution_status: TaskExecutionStatus::Pending,
-                                        sandbox_available: false,
-                                        snapshot_available: true,
-                                        snapshot_path: path.to_string_lossy().into_owned(),
-                                    }],
-                                )
-                                .await?;
+                            let snapshot_path = path.to_string_lossy().into_owned();
+                            // A pause recovery was interrupted mid-way through, so
+                            // finish it rather than turning it into a fresh turn.
+                            // A held review is one of those pauses.
+                            let event = if task.facts.deferred_review.is_some() {
+                                TaskHistoryEvent::ExecutionPaused {
+                                    execution_status: TaskExecutionStatus::Paused,
+                                    sandbox_available: false,
+                                    snapshot_available: true,
+                                    execution_pause_reason:
+                                        TaskExecutionPauseReason::AwaitingReviewChecks,
+                                    snapshot_path,
+                                }
+                            } else if task.facts.awaiting_signal_kind.is_some() {
+                                TaskHistoryEvent::ExecutionPaused {
+                                    execution_status: TaskExecutionStatus::Paused,
+                                    sandbox_available: false,
+                                    snapshot_available: true,
+                                    execution_pause_reason:
+                                        TaskExecutionPauseReason::AwaitingOperator,
+                                    snapshot_path,
+                                }
+                            } else {
+                                TaskHistoryEvent::ExecutionRecovered {
+                                    execution_status: TaskExecutionStatus::Pending,
+                                    sandbox_available: false,
+                                    snapshot_available: true,
+                                    snapshot_path,
+                                }
+                            };
+                            task = service.record_snapshot(&task, &[event]).await?;
                         }
                         Err(error) => {
                             service
@@ -381,6 +408,23 @@ where
                             return Err(TaskServiceError::Isolation(error));
                         }
                     }
+                } else if task.facts.deferred_review.is_some() && task.facts.snapshot_available {
+                    // A shutdown can catch a review between the hold being
+                    // recorded and its capsule being suspended, which leaves it
+                    // paused for the shutdown — a pause recovery resumes.
+                    task = service
+                        .record(
+                            &task.id,
+                            &[TaskHistoryEvent::ExecutionPaused {
+                                execution_status: TaskExecutionStatus::Paused,
+                                sandbox_available: false,
+                                snapshot_available: true,
+                                execution_pause_reason:
+                                    TaskExecutionPauseReason::AwaitingReviewChecks,
+                                snapshot_path: task.facts.snapshot_path.clone().unwrap_or_default(),
+                            }],
+                        )
+                        .await?;
                 }
                 Ok(task)
             }

@@ -6,7 +6,7 @@ use crate::{
         IsolationEngine, IsolationError, ProfileSummary, private_directory,
     },
     tracker::{IssueReader, TrackerProvider},
-    vcs::GitHub,
+    vcs::{self, tools::VcsAgentTools},
 };
 use std::{
     collections::HashMap,
@@ -33,6 +33,7 @@ pub use credential::{
 };
 pub use event_loop::{TaskEventLoop, TaskExecutionUpdate};
 mod progress;
+mod review;
 mod store;
 mod tools;
 mod tracker;
@@ -253,6 +254,7 @@ where
             task_id.to_owned(),
             self.issue_reader.clone(),
         ));
+        tools.register(VcsAgentTools::new(self.store.clone(), task_id.to_owned()));
         tools
     }
 
@@ -343,11 +345,12 @@ where
 
     /// The recipes a task is provisioned with, in the order it mounts them.
     fn recipes(&self) -> Vec<EnvironmentRecipe> {
-        vec![
+        let mut recipes = vec![
             self.agents.engine(AgentKind::Pi).environment_recipe(),
             self.agents.engine(AgentKind::Claude).environment_recipe(),
-            GitHub::environment_recipe(),
-        ]
+        ];
+        recipes.extend(vcs::environment_recipes());
+        recipes
     }
 
     /// What the workspace base says about itself, for an interface that

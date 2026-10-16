@@ -782,7 +782,7 @@ impl RemoteTracker {
                 }
                 TaskHistoryEvent::OperatorSignalRaised { signal } => {
                     if unresolved.contains(&signal.id) {
-                        let contributions = contribution_urls(&events[..=index]);
+                        let contributions = contribution_details(&events[..=index]);
                         self.publish_signal(route, signal, &contributions).await?;
                     }
                 }
@@ -797,7 +797,7 @@ impl RemoteTracker {
         if folded {
             // The destination still owes the operator whatever is waiting, even
             // though the rest of the history was already reported at the source.
-            let contributions = contribution_urls(&events);
+            let contributions = contribution_details(&events);
             for signal in host.signals(route.task_id.clone()).await? {
                 if !unresolved.contains(&signal.id) {
                     continue;
@@ -1677,6 +1677,29 @@ fn contribution_urls(events: &[(i64, TaskHistoryEvent)]) -> Vec<String> {
         .filter_map(|(_, event)| match event {
             TaskHistoryEvent::CodeContributionLinked { contribution } => {
                 Some(contribution.url.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn contribution_details(events: &[(i64, TaskHistoryEvent)]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|(_, event)| match event {
+            TaskHistoryEvent::CodeContributionLinked { contribution } => {
+                let latest = events.iter().rev().find_map(|(_, event)| match event {
+                    TaskHistoryEvent::CodeContributionObserved { observation }
+                        if observation.contribution_id == contribution.id =>
+                    {
+                        Some(observation.summary.as_str())
+                    }
+                    _ => None,
+                });
+                Some(match latest {
+                    Some(summary) => format!("{} — {summary}", contribution.url),
+                    None => contribution.url.clone(),
+                })
             }
             _ => None,
         })

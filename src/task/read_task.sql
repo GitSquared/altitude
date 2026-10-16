@@ -105,6 +105,20 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      ORDER BY raised_at_ms DESC LIMIT 1) AS awaiting_signal_kind,
     (SELECT count(*) FROM task_operator_signals
      WHERE task_id = tasks.id AND read = 0 AND resolved = 0) AS unread_operator_signal_count,
+    (SELECT json_object(
+         'signal', json(payload -> '$.data.signal'),
+         'agent_run_id', payload -> '$.data.agent_run_id')
+     FROM task_deferred_reviews
+     WHERE task_id = tasks.id
+     ORDER BY sequence DESC LIMIT 1) AS deferred_review,
+    (SELECT json_extract(cleared.payload, '$.data.reason')
+     FROM task_event_logs AS cleared
+     WHERE cleared.task_id = tasks.id
+       AND cleared.event_type = 'review_deferral_cleared'
+       AND cleared.sequence > COALESCE(
+         (SELECT MAX(sequence) FROM task_event_logs
+          WHERE task_id = tasks.id AND event_type = 'agent_run_started'), 0)
+     ORDER BY cleared.sequence DESC LIMIT 1) AS review_wake_reason,
     (SELECT json_group_array(json(contribution))
      FROM task_code_contributions WHERE task_id = tasks.id) AS contributions,
     (SELECT json_group_array(json(observation))
