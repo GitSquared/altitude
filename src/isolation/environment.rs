@@ -12,7 +12,7 @@ use crate::config::Config;
 use super::{
     BaseSandboxRecipe, BaseSandboxSnapshot, CommandEvent, CredentialReport,
     EnvironmentProgressSink, IsolationEngine, IsolationError, SandboxMount, SandboxOptions,
-    SetupStep, VsockRoute,
+    SandboxSize, SetupStep, VsockRoute,
 };
 
 /// The current Alpine environment runs as root, so home-relative requirements
@@ -156,6 +156,7 @@ impl EnvironmentPlan {
                     ("BROWSER".into(), OPENER.into()),
                 ],
                 vsock: Vec::new(),
+                size: SandboxSize::CAPSULE,
             },
             defaults: Vec::new(),
             managed_files: Vec::new(),
@@ -507,6 +508,28 @@ pub(super) async fn credential_shell(
     }
     script.push_str("\nexec bash -l\n");
     Ok(script)
+}
+
+/// A sandbox that answers a provider's read commands with an owner's profile
+/// mounted.
+///
+/// The shell shape is deliberate: it mounts the profile a task would mount and
+/// keeps its own state out of it, but it is not a task, so it has no capsule and
+/// nothing travels from it. The caller scopes the config to one owner first, so
+/// the profile it mounts is that owner's alone.
+pub(super) async fn watcher(
+    engine: &impl IsolationEngine,
+    config: &Config,
+    id: String,
+    environment: Environment,
+    recipes: Vec<EnvironmentRecipe>,
+    progress: &dyn EnvironmentProgressSink,
+) -> Result<(), IsolationError> {
+    let mut plan = EnvironmentPlan::compose(config, environment, recipes)?;
+    // This sandbox runs a provider's read command and nothing else, so it is
+    // sized for one command rather than for an agent.
+    plan.options.size = SandboxSize::COMMAND;
+    create(engine, config, id, plan, SandboxKind::Shell, None, progress).await
 }
 
 /// Creates a sandbox shaped the way Altitude expects, and binds the subdirectories

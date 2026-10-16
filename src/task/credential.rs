@@ -22,7 +22,7 @@ use crate::isolation::{
 
 use crate::{
     agent::{AgentKind, mcp, tools::AgentToolRegistry},
-    vcs::GitHub,
+    vcs,
 };
 
 use super::{AgentChannel, TaskService, TaskServiceError};
@@ -188,10 +188,11 @@ where
             .credential_shell(
                 id.clone(),
                 environment,
-                vec![
-                    self.agents.engine(agent).environment_recipe(),
-                    GitHub::environment_recipe(),
-                ],
+                [
+                    vec![self.agents.engine(agent).environment_recipe()],
+                    vcs::environment_recipes(),
+                ]
+                .concat(),
                 profile,
                 &CredentialProgress { id: &id, events },
             )
@@ -329,12 +330,12 @@ where
         profile: &'static str,
         chosen: Option<AgentKind>,
     ) -> Result<Option<CredentialReport>, TaskServiceError> {
-        let recipes = vec![
+        let mut recipes = vec![
             self.agents
                 .engine(self.credential_agent(profile, chosen))
                 .environment_recipe(),
-            GitHub::environment_recipe(),
         ];
+        recipes.extend(vcs::environment_recipes());
         let Some(command) = recipes
             .iter()
             .find(|recipe| recipe.profile == profile)

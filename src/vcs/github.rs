@@ -1,9 +1,11 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 
 use crate::{
     isolation::{EnvironmentRecipe, GuestPath, PersistentDirectory, shell_quote},
     vcs::{
-        CodeContribution, ContributionObservation, ContributionState, VcsProvider, VcsProviderKind,
+        CodeContribution, ContributionObservation, ContributionState, MergeStanding, VcsProvider,
+        VcsProviderKind,
     },
 };
 
@@ -21,8 +23,8 @@ const SETUP_COMMAND: &str = concat!(
 
 pub struct GitHub;
 
-impl GitHub {
-    pub fn environment_recipe() -> EnvironmentRecipe {
+impl VcsProvider for GitHub {
+    fn environment_recipe(&self) -> EnvironmentRecipe {
         EnvironmentRecipe {
             profile: "vcs/github",
             display: "GitHub",
@@ -58,9 +60,7 @@ impl GitHub {
             environment: vec![("GIT_CONFIG_GLOBAL", "/altitude/git/config")],
         }
     }
-}
 
-impl VcsProvider for GitHub {
     fn contribution_from_url(&self, value: &str) -> Option<CodeContribution> {
         let url = url::Url::parse(value).ok()?;
         let host = url.host_str()?;
@@ -95,47 +95,116 @@ impl VcsProvider for GitHub {
         })
     }
 
-    fn observation_command(&self, contribution: &CodeContribution) -> String {
+    fn observation_command(&self, contributions: &[CodeContribution]) -> String {
+        // One request for the set rather than one per contribution: `gh pr view`
+        // takes a single pull request, so a host watching many reviews would
+        // otherwise spend one process and one request on each of them. `resource`
+        // resolves a pull request from the URL that already identifies it here, so
+        // the query carries the same identity the task stores.
+        //
         // `gh` resolves the token from the capsule's persistent gh config, so
         // watching costs the operator no setup beyond authenticating the CLI.
-        format!(
-            "gh pr view {} --repo {} --json headRefOid,reviewDecision,statusCheckRollup",
-            shell_quote(&contribution.reference),
-            shell_quote(&contribution.repository),
-        )
+        let mut query = String::from("query {\n");
+        for (index, contribution) in contributions.iter().enumerate() {
+            query.push_str(&format!(
+                "  c{index}: resource(url: {}) {{\n{CONTRIBUTION_FIELDS}\n  }}\n",
+                graphql_string(&contribution.url)
+            ));
+        }
+        query.push('}');
+        format!("gh api graphql -f query={}", shell_quote(&query))
     }
 
-    fn contribution_observation(
+    fn contribution_observations(
         &self,
-        contribution: &CodeContribution,
+        contributions: &[CodeContribution],
         output: &str,
-    ) -> Option<ContributionObservation> {
-        let view: PullRequestView = serde_json::from_str(output).ok()?;
-        let mut checks_passing = 0;
-        let mut checks_failing = 0;
-        let mut checks_pending = 0;
-        for check in view.status_check_rollup.unwrap_or_default() {
-            match check.outcome() {
-                CheckOutcome::Passing => checks_passing += 1,
-                CheckOutcome::Failing => checks_failing += 1,
-                CheckOutcome::Pending => checks_pending += 1,
-            }
+    ) -> Option<Vec<ContributionObservation>> {
+        let response: ContributionQuery = serde_json::from_str(output).ok()?;
+        let resources = response.data?;
+        let mut observations = Vec::with_capacity(contributions.len());
+        for (index, contribution) in contributions.iter().enumerate() {
+            // A contribution the provider cannot resolve answers null, which is
+            // not a state to decide anything from.
+            let view = resources.get(&format!("c{index}"))?.as_ref()?;
+            observations.push(observation_of(contribution, view));
         }
-        let (review, review_label) = review_decision(view.review_decision.as_deref());
-        Some(ContributionObservation {
-            contribution_id: contribution.id.clone(),
-            summary: format!(
-                "{} · {review_label}",
-                check_summary(checks_failing, checks_pending, checks_passing)
-            ),
-            state: ContributionState {
-                head_sha: view.head_ref_oid,
-                checks_passing,
-                checks_failing,
-                checks_pending,
-                review: review.to_owned(),
-            },
-        })
+        Some(observations)
+    }
+}
+
+/// The fields every contribution is read from.
+///
+/// A pull request is asked about through `resource`, so the fragment carries what
+/// the host decides on and nothing else.
+const CONTRIBUTION_FIELDS: &str = r#"    ... on PullRequest {
+      headRefOid
+      createdAt
+      reviewDecision
+      mergeable
+      mergeStateStatus
+      isDraft
+      state
+      statusCheckRollup {
+        contexts(first: 100) {
+          nodes {
+            ... on CheckRun { conclusion }
+            ... on StatusContext { state }
+          }
+        }
+      }
+    }"#;
+
+/// One GraphQL string literal.
+///
+/// The URL comes from one an agent supplied, so it is quoted rather than trusted
+/// to hold nothing that would end the literal.
+fn graphql_string(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// The answer to one contribution query, keyed by the alias its contribution got.
+#[derive(Deserialize)]
+struct ContributionQuery {
+    data: Option<HashMap<String, Option<PullRequestView>>>,
+}
+
+/// What one pull request looks like, as the host reads it.
+fn observation_of(
+    contribution: &CodeContribution,
+    view: &PullRequestView,
+) -> ContributionObservation {
+    let mut checks_passing = 0;
+    let mut checks_failing = 0;
+    let mut checks_pending = 0;
+    for check in view.status_check_rollup.as_deref().unwrap_or_default() {
+        match check.outcome() {
+            CheckOutcome::Passing => checks_passing += 1,
+            CheckOutcome::Failing => checks_failing += 1,
+            CheckOutcome::Pending => checks_pending += 1,
+        }
+    }
+    let standing = merge_standing(view);
+    ContributionObservation {
+        contribution_id: contribution.id.clone(),
+        summary: format!(
+            "{} · {}",
+            check_summary(checks_failing, checks_pending, checks_passing),
+            standing.label(),
+        ),
+        state: ContributionState {
+            head_sha: view.head_ref_oid.clone(),
+            checks_passing,
+            checks_failing,
+            checks_pending,
+            standing,
+            checks_settle_by_ms: view
+                .created_at
+                .as_deref()
+                .and_then(created_at_ms)
+                .map(|created| created + CHECKS_APPEAR_WITHIN_MS)
+                .unwrap_or_default(),
+        },
     }
 }
 
@@ -144,15 +213,87 @@ impl VcsProvider for GitHub {
 struct PullRequestView {
     #[serde(rename = "headRefOid")]
     head_ref_oid: String,
+    /// When the pull request was opened, which is what its checks are timed from.
+    #[serde(rename = "createdAt", default)]
+    created_at: Option<String>,
     #[serde(rename = "reviewDecision", default)]
     review_decision: Option<String>,
     /// Absent or null when a pull request has no checks at all.
     #[serde(rename = "statusCheckRollup", default)]
     status_check_rollup: Option<Vec<CheckRollupEntry>>,
+    #[serde(default)]
+    mergeable: Option<String>,
+    #[serde(rename = "mergeStateStatus", default)]
+    merge_state_status: Option<String>,
+    #[serde(rename = "isDraft", default)]
+    is_draft: Option<bool>,
+    #[serde(default)]
+    state: Option<String>,
 }
 
-/// A rollup entry is either a `CheckRun` (status plus conclusion) or a legacy
-/// `StatusContext` (a single state); both normalize to the same three counts.
+/// How long GitHub may take to start a contribution's checks.
+///
+/// A workflow begins in the seconds after the pull request event, and until its
+/// check runs exist nothing in the pull request reports them. Waiting this long
+/// costs a review nothing in the ordinary case — an agent opens a pull request,
+/// keeps working, and asks for review minutes later — and in the unusual case it
+/// is the difference between seeing a failing check and never seeing it at all.
+const CHECKS_APPEAR_WITHIN_MS: i64 = 60_000;
+
+/// A provider timestamp as the host measures it.
+fn created_at_ms(created_at: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(created_at)
+        .ok()
+        .map(|created| created.timestamp_millis())
+}
+
+/// What GitHub says stands between a pull request and its merge.
+///
+/// GitHub reports this in two fields that each say part of it: `mergeStateStatus`
+/// names the state, and `reviewDecision` says whether a review is the reason. Only
+/// the pair together can say that a review is what is outstanding, which is the one
+/// standing the operator is the next step for.
+fn merge_standing(view: &PullRequestView) -> MergeStanding {
+    match view.state.as_deref() {
+        Some("MERGED") => return MergeStanding::Merged,
+        Some("CLOSED") => return MergeStanding::Closed,
+        _ => {}
+    }
+    if view.is_draft == Some(true) {
+        return MergeStanding::Draft;
+    }
+    let mergeable = view.mergeable.as_deref();
+    let review = view.review_decision.as_deref();
+    if mergeable == Some("CONFLICTING") || view.merge_state_status.as_deref() == Some("DIRTY") {
+        return MergeStanding::Conflicting;
+    }
+    if review == Some("CHANGES_REQUESTED") {
+        return MergeStanding::ChangesRequested;
+    }
+    match view.merge_state_status.as_deref() {
+        // BLOCKED is GitHub saying something is unsatisfied without saying what. A
+        // required review is the one block that is the operator's, and it can only
+        // be named when the branch is otherwise mergeable. A block this provider
+        // cannot attribute is the agent's rather than guessed away.
+        Some("BLOCKED") if review == Some("REVIEW_REQUIRED") && mergeable == Some("MERGEABLE") => {
+            MergeStanding::AwaitingReview
+        }
+        Some("BLOCKED") => MergeStanding::Blocked,
+        Some("BEHIND") => MergeStanding::Behind,
+        Some("UNSTABLE") => MergeStanding::Unstable,
+        // GitHub calls a merge unblocked CLEAN whether or not anyone reviewed it,
+        // so the verdict is what tells the two apart.
+        Some("CLEAN" | "HAS_HOOKS") if mergeable == Some("MERGEABLE") => match review {
+            Some("APPROVED") => MergeStanding::Approved,
+            _ => MergeStanding::Clear,
+        },
+        _ => MergeStanding::Unknown,
+    }
+}
+
+/// A rollup entry is either a `CheckRun`, which carries a conclusion once it has
+/// finished, or a legacy `StatusContext`, which carries a single state; both
+/// normalize to the same three counts.
 #[derive(Deserialize)]
 struct CheckRollupEntry {
     #[serde(default)]
@@ -186,16 +327,6 @@ impl CheckRollupEntry {
                 _ => CheckOutcome::Pending,
             },
         }
-    }
-}
-
-/// Normalize `reviewDecision` into a stored token and an operator-facing label.
-fn review_decision(value: Option<&str>) -> (&'static str, &'static str) {
-    match value {
-        Some("APPROVED") => ("approved", "review approved"),
-        Some("CHANGES_REQUESTED") => ("changes_requested", "review changes requested"),
-        Some("REVIEW_REQUIRED") => ("review_required", "review required"),
-        _ => ("none", "no review yet"),
     }
 }
 

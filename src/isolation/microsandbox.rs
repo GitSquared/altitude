@@ -25,21 +25,19 @@ use super::{
     BaseSandboxRecipe, BaseSandboxSnapshot, CREDENTIAL_PREFIX, Command, CommandEvent,
     CommandSession, CredentialReport, EnvironmentDescription, EnvironmentProgress,
     EnvironmentProgressSink, EnvironmentRecipe, IsolationEngine, IsolationError, IsolationStatus,
-    OutputStream, SandboxOptions, SetupStep, VsockRoute,
+    OutputStream, SandboxOptions, SetupStep, VsockRoute, WATCHER_PREFIX,
     environment::{self, REFRESH_AFTER, private_directory},
     mount_git_cache, trust_host_roots,
 };
 
 const BASE_IMAGE: &str = "alpine";
 
-/// What one capsule is created with.
+/// How large a capsule's writable layer may grow.
 ///
-/// Ceilings the sandbox enforces, not reservations: most tasks use a fraction of
-/// them most of the time, which is why how many run at once is observed rather
-/// than derived from these. Deliberately not configurable per environment — one
-/// allocation for every capsule, for now — and the values are still arbitrary.
-const CAPSULE_CPUS: u8 = 4;
-const CAPSULE_MEMORY_MIB: u32 = 5 * 1_024;
+/// A ceiling rather than a reservation, like the rest of a sandbox's size. It
+/// stays out of [`SandboxSize`] because it applies only when a sandbox is made
+/// from the image: one restored from a snapshot keeps what the snapshot was
+/// built with.
 const CAPSULE_DISK_MIB: u32 = 15 * 1_024;
 
 /// The packages every sandbox gets, before any environment adds its own.
@@ -145,13 +143,13 @@ impl MicrosandboxIsolation {
             .transpose()
             .map_err(|e| IsolationError::new(e.to_string()))?;
         let trusted = trust_host_roots(&mut options, self.config.data_dir());
-        tracing::info!(sandbox_id = %id, network_enabled = options.network_enabled, cpus = CAPSULE_CPUS, memory_mib = CAPSULE_MEMORY_MIB, "creating sandbox");
+        tracing::info!(sandbox_id = %id, network_enabled = options.network_enabled, cpus = options.size.cpus, memory_mib = options.size.memory_mib, "creating sandbox");
         let result = match options.snapshot_path {
             Some(snapshot_path) => {
                 let mut restore = Sandbox::restore(snapshot_path)
                     .name(&id)
-                    .cpus(CAPSULE_CPUS)
-                    .memory(CAPSULE_MEMORY_MIB);
+                    .cpus(options.size.cpus)
+                    .memory(options.size.memory_mib);
                 if !options.network_enabled {
                     restore = restore.disable_network();
                 }
@@ -181,8 +179,8 @@ impl MicrosandboxIsolation {
             }
             None => {
                 let mut builder = Sandbox::builder(&id)
-                    .cpus(CAPSULE_CPUS)
-                    .memory(CAPSULE_MEMORY_MIB)
+                    .cpus(options.size.cpus)
+                    .memory(options.size.memory_mib)
                     .image(BASE_IMAGE)
                     .root_disk(CAPSULE_DISK_MIB)
                     .pull_policy(pull_policy);
@@ -677,6 +675,16 @@ impl IsolationEngine for MicrosandboxIsolation {
         .await
     }
 
+    async fn watcher(
+        &self,
+        id: String,
+        environment: Environment,
+        recipes: Vec<EnvironmentRecipe>,
+        progress: &dyn EnvironmentProgressSink,
+    ) -> Result<(), IsolationError> {
+        environment::watcher(self, &self.config, id, environment, recipes, progress).await
+    }
+
     fn environment_built(&self, environment: Environment, recipes: Vec<EnvironmentRecipe>) -> bool {
         let Ok(recipe) = environment::composed_recipe(&self.config, environment, recipes) else {
             return false;
@@ -717,7 +725,7 @@ impl IsolationEngine for MicrosandboxIsolation {
         .await
     }
 
-    async fn remove_leftover_credential_shells(&self) {
+    async fn remove_leftover_sandboxes(&self) {
         let mut cursor: Option<String> = None;
         loop {
             let listed = Sandbox::list_with(|list| match &cursor {
@@ -733,14 +741,15 @@ impl IsolationEngine for MicrosandboxIsolation {
                 }
             };
             for sandbox in page.sandboxes {
-                if sandbox.name().starts_with(CREDENTIAL_PREFIX) {
+                let name = sandbox.name();
+                if name.starts_with(CREDENTIAL_PREFIX) {
                     // The channel's socket is bound by the task layer, which is not up yet.
                     let _ = fs::remove_file(
-                        self.config
-                            .agent_channel_dir()
-                            .join(format!("{}.sock", sandbox.name())),
+                        self.config.agent_channel_dir().join(format!("{name}.sock")),
                     );
-                    self.remove_leftover(sandbox.name()).await;
+                    self.remove_leftover(name).await;
+                } else if name.starts_with(WATCHER_PREFIX) {
+                    self.remove_leftover(name).await;
                 }
             }
             match page.next_cursor {
@@ -769,10 +778,10 @@ impl IsolationEngine for MicrosandboxIsolation {
         set_default_backend(backend);
 
         tracing::info!("Microsandbox runtime ready");
-        // A credential shell lives as long as the terminal in front of it, so one that
-        // is still here belongs to a client that is gone: a client that stopped in the
-        // middle of opening one cannot have left anything else.
-        self.remove_leftover_credential_shells().await;
+        // A credential shell lives as long as the terminal in front of it, and a
+        // watcher sandbox as long as the host that made it, so one that is still
+        // here belongs to a process that is gone.
+        self.remove_leftover_sandboxes().await;
 
         status.send_replace(IsolationStatus::PreparingBaseImage);
         let sandbox = Sandbox::builder(PREPARATION_SANDBOX)
