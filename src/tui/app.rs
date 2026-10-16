@@ -596,6 +596,14 @@ impl App {
             .is_none_or(|file| file.settings().interface().keyboard_hints)
     }
 
+    /// Whether the interface animates: the transitions between what is in
+    /// front, and the drifting backdrop behind it.
+    pub(in crate::tui) fn animations(&self) -> bool {
+        self.settings_file
+            .as_ref()
+            .is_none_or(|file| file.settings().interface().animations)
+    }
+
     /// The few actions worth keeping visible below the current screen.
     pub(in crate::tui) fn hints(&self) -> Vec<Hint> {
         let mut hints = self.hints_for(&self.foreground);
@@ -651,69 +659,20 @@ impl App {
                     ];
                 }
                 let mut hints = vec![Hint::new("tab", "change column"), Hint::new("j/k", "move")];
-                if self.panel.section == Section::Remotes {
-                    if matches!(
-                        self.selected_row().map(|row| row.kind),
-                        Some(RowKind::Remote { .. })
-                    ) {
-                        hints.push(Hint::new("enter", "connect"));
-                        hints.push(Hint::new("t", "task trackers"));
-                        hints.push(Hint::new("b", "pair Linear"));
-                        hints.push(Hint::new("e", "edit"));
-                    } else {
-                        hints.push(Hint::new(
-                            "enter",
-                            if matches!(
-                                self.selected_row().map(|row| row.kind),
-                                Some(RowKind::Discovered(_))
-                            ) {
-                                "use remote"
-                            } else {
-                                "remote guide"
-                            },
-                        ));
-                    }
-                } else if self.panel.section.grows() {
-                    hints.push(Hint::new("enter", "edit"));
-                } else if self.panel.section == Section::Agents {
-                    if let Some(RowKind::Agent { credential, .. }) =
-                        self.selected_row().map(|row| row.kind)
-                    {
-                        if !credential.is_pending() {
-                            hints.push(Hint::new("enter", "sign in"));
-                        }
-                        hints.push(Hint::new("space", "set as default"));
-                    }
-                } else if self.panel.section == Section::Interface {
-                    hints.push(Hint::new("enter", "toggle"));
-                } else if self.panel.section == Section::VersionControl {
-                    if !matches!(self.selected_row().map(|row| row.kind), Some(RowKind::Credential(credential)) if credential.is_pending())
-                    {
-                        hints.push(Hint::new("enter", "open setup shell"));
-                    }
-                } else if self.panel.section == Section::Trackers {
-                    hints.push(Hint::new(
-                        "enter",
-                        if self.is_connecting_tracker() {
-                            "cancel sign-in"
-                        } else {
-                            "sign in"
-                        },
-                    ));
+                // One row, asked once: what it offers, and whether it can be
+                // signed out of or removed.
+                let row = self.selected_row();
+                if let Some(row) = &row {
+                    hints.extend(row.hints(self.is_connecting_tracker()));
                 }
-                if self.selected_has_credentials() {
+                if row.as_ref().is_some_and(|row| row.forgets_credentials()) {
                     hints.push(Hint::new("delete", "sign out"));
                 }
                 if self.panel.section.grows() {
                     hints.push(Hint::new("n", "new"));
-                    if self.panel.section != Section::Remotes
-                        || matches!(
-                            self.selected_row().map(|row| row.kind),
-                            Some(RowKind::Remote { .. })
-                        )
-                    {
-                        hints.push(Hint::new("d", "delete"));
-                    }
+                }
+                if row.as_ref().is_some_and(|row| row.is_removable()) {
+                    hints.push(Hint::new("d", "delete"));
                 }
                 hints.push(Hint::new("pgup/pgdn", "details"));
                 hints.push(dismiss());
@@ -1050,16 +1009,26 @@ impl App {
             KeyCode::Delete | KeyCode::Backspace if self.selected_has_credentials() => {
                 self.ask_to_forget_credentials()
             }
-            KeyCode::Char(' ') if self.panel.section == Section::Agents => self.edit_selected(),
+            KeyCode::Char(' ') if self.selected_row().is_some_and(|row| row.is_agent()) => {
+                self.edit_selected()
+            }
             KeyCode::Char('e') if self.panel.section.grows() => self.edit_selected(),
-            KeyCode::Char('b') if self.panel.section == Section::Remotes => {
+            KeyCode::Char('b')
+                if self
+                    .selected_row()
+                    .is_some_and(|row| row.is_configured_remote()) =>
+            {
                 if let Some(RowKind::Remote { address, .. }) =
                     self.selected_row().map(|row| row.kind)
                 {
                     self.begin_tracker_pairing(address, task_service);
                 }
             }
-            KeyCode::Char('t') if self.panel.section == Section::Remotes => {
+            KeyCode::Char('t')
+                if self
+                    .selected_row()
+                    .is_some_and(|row| row.is_configured_remote()) =>
+            {
                 if let Some(RowKind::Remote { address, .. }) =
                     self.selected_row().map(|row| row.kind)
                 {
@@ -1072,7 +1041,9 @@ impl App {
                     _ => Form::new(Target::NewEnvironment, "", ""),
                 });
             }
-            _ if is_remove(key) && self.panel.section.grows() => self.ask_to_delete(),
+            _ if is_remove(key) && self.selected_row().is_some_and(|row| row.is_removable()) => {
+                self.ask_to_delete()
+            }
             KeyCode::Enter => {
                 self.activate_selected(task_service, events, tracker_connects)
                     .await
@@ -1726,14 +1697,11 @@ impl App {
 
     /// The first profile whose login has not been asked about.
     fn next_unasked_profile(&self) -> Option<&'static str> {
+        let prefix = self.panel.section.profile_prefix()?;
         self.profiles
             .iter()
             .map(|profile| profile.profile)
-            .filter(|profile| match self.panel.section {
-                Section::Agents => profile.starts_with("agents/"),
-                Section::VersionControl => profile.starts_with("vcs/"),
-                _ => false,
-            })
+            .filter(|profile| profile.starts_with(prefix))
             .find(|profile| !self.credential_status.contains_key(profile))
     }
 
@@ -2020,24 +1988,31 @@ impl App {
 
     fn selected_has_credentials(&self) -> bool {
         self.panel.depth != Depth::Rail
-            && matches!(
-                self.selected_row().map(|row| row.kind),
-                Some(RowKind::Agent { .. } | RowKind::Tracker { .. })
-                    | Some(RowKind::Credential(screens::settings::Credential {
-                        kind: CredentialKind::Profile { .. },
-                        ..
-                    }))
-            )
+            && self
+                .selected_row()
+                .is_some_and(|row| row.forgets_credentials())
     }
 
     fn ask_to_forget_credentials(&mut self) {
-        let (target, question) = match self.selected_row().map(|row| row.kind) {
-            Some(RowKind::Agent { credential, .. }) | Some(RowKind::Credential(credential)) => {
-                let CredentialKind::Profile { profile, .. } = credential.kind else { return; };
-                let scope = if profile == "agents/pi" { "all Pi provider sign-ins" } else if profile == "vcs/github" { "the GitHub CLI sign-in" } else { "the Claude Code sign-in" };
-                (CredentialTarget::Profile(profile), format!("Delete {scope} saved on this machine? Tool settings and copies already sent to remotes are kept."))
+        let Some(row) = self.selected_row() else {
+            return;
+        };
+        let (target, question) = match &row.kind {
+            RowKind::Agent { .. } | RowKind::Credential(_) => {
+                let Some(profile) = row.profile() else { return };
+                let scope = if profile == "agents/pi" {
+                    "all Pi provider sign-ins"
+                } else if profile == "vcs/github" {
+                    "the GitHub CLI sign-in"
+                } else {
+                    "the Claude Code sign-in"
+                };
+                (
+                    CredentialTarget::Profile(profile),
+                    format!("Delete {scope} saved on this machine? Tool settings and copies already sent to remotes are kept."),
+                )
             }
-            Some(RowKind::Tracker { .. }) => (CredentialTarget::Linear, "Delete this machine's personal Linear sign-in? The remote's shared Linear app is kept.".to_owned()),
+            RowKind::Tracker { .. } => (CredentialTarget::Linear, "Delete this machine's personal Linear sign-in? The remote's shared Linear app is kept.".to_owned()),
             _ => return,
         };
         self.foreground =
@@ -2124,6 +2099,7 @@ impl App {
         let mut proposed = file.settings().clone();
         match setting {
             Setting::KeyboardHints => proposed.set_keyboard_hints(on),
+            Setting::Animations => proposed.set_animations(on),
         }
         match file.save(proposed) {
             Ok(()) => self.notice = None,

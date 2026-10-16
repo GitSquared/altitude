@@ -59,12 +59,19 @@ pub struct Interface {
     /// The `?` popup lists them either way: a key you cannot find is a key you
     /// do not have, so help is never something to be switched on first.
     pub keyboard_hints: bool,
+    /// Whether the interface animates: the transitions between what is in
+    /// front, and the drifting backdrop behind it.
+    ///
+    /// Off, the loops that draw those are not run at all, rather than drawn
+    /// still, so a machine that is asked to do less actually does less.
+    pub animations: bool,
 }
 
 impl Default for Interface {
     fn default() -> Self {
         Self {
             keyboard_hints: true,
+            animations: true,
         }
     }
 }
@@ -186,6 +193,11 @@ impl Settings {
     /// Whether the keys that work are listed at the bottom of the screen.
     pub fn set_keyboard_hints(&mut self, on: bool) {
         self.interface.keyboard_hints = on;
+    }
+
+    /// Whether the interface animates.
+    pub fn set_animations(&mut self, on: bool) {
+        self.interface.animations = on;
     }
 
     /// Add a configured environment, replacing one of the same name.
