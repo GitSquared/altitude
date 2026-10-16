@@ -2,11 +2,10 @@
 //! how it signs in, the git identity tasks commit with, the environments a task
 //! runs in, and the remotes it can be delegated to.
 //!
-//! Fullscreen, and three columns. The rail picks a list, the list picks a row,
-//! and the third column says what is known about it. Only the column holding the
-//! focus carries the inverted bar; the column ahead of it is drawn dimmed, as a
-//! preview of where the next step goes, so nothing moves on screen when the
-//! focus does.
+//! Fullscreen, and three columns. The rail picks a list and the list picks a
+//! row. The third column is not a place the focus goes: it only says what is
+//! known about the row the list has selected, and stays readable while the list
+//! is being used.
 //!
 //! The base environment is built in and therefore has no form: selecting it
 //! describes it instead, which is the only place an operator can see what a
@@ -112,29 +111,11 @@ impl Setting {
     }
 }
 
-/// How deep the focus is, and therefore how many columns are lit.
+/// Whether the focus is in the rail or the list.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Depth {
     Rail,
     List,
-    Detail,
-}
-
-impl Depth {
-    pub fn deeper(self) -> Self {
-        match self {
-            Self::Rail => Self::List,
-            Self::List | Self::Detail => Self::Detail,
-        }
-    }
-
-    pub fn shallower(self) -> Self {
-        match self {
-            Self::Rail => Self::Rail,
-            Self::Detail => Self::List,
-            Self::List => Self::Rail,
-        }
-    }
 }
 
 /// One row of the focused list.
@@ -198,8 +179,9 @@ pub enum RowKind {
 }
 
 impl Row {
-    /// The mark in front of this row, where what it says is asked rather than
-    /// known: a remote's address, a profile's login, or a git identity.
+    /// The mark in front of this row: what it is, or what was last asked about
+    /// it. A remote's address, a profile's login, a git identity, or the house
+    /// that says this row is the machine you are on.
     fn dot(&self) -> Option<Dot> {
         match &self.kind {
             RowKind::Remote {
@@ -214,19 +196,6 @@ impl Row {
             RowKind::Tracker { state } => Some(tracker_mark(*state)),
             _ => None,
         }
-    }
-
-    /// Whether this row opens a form.
-    ///
-    /// The built-in base does not: there is no form behind it and nothing to
-    /// configure, so selecting it is already as far as it goes, and its
-    /// description is shown without a second step. A credential and a git
-    /// identity are acted on with enter rather than edited here.
-    pub fn opens_form(&self) -> bool {
-        matches!(
-            self.kind,
-            RowKind::Environment { .. } | RowKind::Remote { .. }
-        )
     }
 }
 
@@ -257,12 +226,13 @@ impl Credential {
         )
     }
 
-    /// What a profile's own check last said, as a mark in front of its row. The
-    /// installation's key is not signed in to, so it has nothing to say.
+    /// The mark in front of a credential's row. A profile's says what its own
+    /// check last said. This installation is signed in to nothing, so its mark
+    /// says which machine it is instead.
     fn dot(&self) -> Option<Dot> {
         match &self.kind {
             CredentialKind::Profile { status, .. } => Some(credential_mark(status)),
-            CredentialKind::Installation { .. } => None,
+            CredentialKind::Installation { .. } => Some(Dot::still('⌂', palette::muted())),
         }
     }
 }
@@ -406,7 +376,7 @@ impl Panel {
                 self.section = Section::ALL[next];
                 self.selected = 0;
             }
-            Depth::List | Depth::Detail => {
+            Depth::List => {
                 if rows > 0 {
                     self.selected = if forward {
                         (self.selected + 1) % rows
@@ -676,15 +646,9 @@ fn draw_columns(
     }
     frame.render_widget(List::new(list_items), list_area);
 
-    // The column ahead of the focus is drawn dimmed rather than withheld, so the
-    // shape of the next step is visible before it is taken. A row with no deeper
-    // level has no next step, so its column is already the one you are in.
-    let detail_focused = panel.depth == Depth::Detail
-        || (panel.depth == Depth::List
-            && panel
-                .selected_row(view)
-                .is_some_and(|row| !row.opens_form()));
-    let pane = detail(panel, view, detail_focused, tick);
+    // The third column follows the selection rather than the focus, so it is
+    // drawn at full strength whether or not the list is being used.
+    let pane = detail(panel, view, tick);
     let last_row = pane
         .line_count(detail_area.width)
         .saturating_sub(usize::from(detail_area.height));
@@ -694,14 +658,7 @@ fn draw_columns(
             .min(last_row.min(u16::MAX as usize) as u16),
         0,
     ));
-    frame.render_widget(
-        if detail_focused {
-            pane
-        } else {
-            pane.style(palette::muted())
-        },
-        detail_area,
-    );
+    frame.render_widget(pane, detail_area);
 }
 
 // ------------------------------------------------------------------ the copy
@@ -798,18 +755,9 @@ impl Connector {
     }
 }
 
-/// The third column. `focused` is decided by the caller, because whether this
-/// column holds the focus is not the same question as how deep the focus is: a
-/// row with nothing inside it is already here.
-fn detail(panel: &Panel, view: &View, focused: bool, tick: usize) -> Paragraph<'static> {
-    // The heading is the column's focus indicator: it has no rows to bar.
-    let heading = move |text: String| {
-        if focused {
-            Line::styled(text, palette::heading())
-        } else {
-            Line::styled(text, palette::muted().bold())
-        }
-    };
+/// The third column: what is known about the row the list has selected.
+fn detail(panel: &Panel, view: &View, tick: usize) -> Paragraph<'static> {
+    let heading = move |text: String| Line::styled(text, palette::heading());
     let Some(row) = panel.selected_row(view) else {
         return Paragraph::new(Span::styled("", palette::muted()));
     };
@@ -997,15 +945,13 @@ fn linear_remote_tracker_lines() -> Vec<Line<'static>> {
              settings. Open the printed URL in your browser to install the app. Once it exits, \
              start altitude serve again.",
         ),
-        step(
-            "6.",
-            "Sign in under Settings → Task tracker, then select this remote and press b to \
-             pair your Linear identity. You can now delegate an issue to Altitude in Linear.",
-        ),
         Line::from(""),
         Line::styled(
-            "The remote shows configured once its app is installed and altitude serve is \
-             running with it; this panel does not check Linear from here.",
+            "Steps 1–5 belong to whoever owns this remote. On the machine that should run the \
+             work, connect Linear under Settings → Task tracker: that account syncs here, and \
+             decides which machine receives an issue delegated in Linear. The remote shows \
+             configured once its app is installed and altitude serve is running with it; this \
+             panel does not check Linear from here.",
             palette::muted(),
         ),
     ]
@@ -1149,7 +1095,7 @@ fn credential_connector(credential: &Credential) -> Connector {
             identity: None,
             note: None,
             action: Some("Press enter to learn more about altitude remotes."),
-            purpose: "The key that names this installation to a remote, so a paired remote \
+            purpose: "The key that names this installation to a remote, so a remote \
                       knows whose work it holds.",
             fields: vec![
                 ("name", label.clone()),
@@ -1213,7 +1159,16 @@ fn git_connector(identity: &GitIdentity) -> Connector {
 /// Linear, as the page reads it: a live session rather than a login kept on disk.
 fn tracker_connector(state: TrackerState, profile_dir: &Path) -> Connector {
     let (reach, status, note, action) = match state {
-        TrackerState::Connected => (Reach::On, "signed in", None, None),
+        TrackerState::Connected => (
+            Reach::On,
+            "signed in",
+            Some(
+                "This account syncs to your remotes, and decides which machine receives \
+                 an issue delegated in Linear."
+                    .to_owned(),
+            ),
+            None,
+        ),
         TrackerState::Connecting => (Reach::Asking, "connecting…", None, None),
         TrackerState::NotConnected => (
             Reach::Off,
@@ -1706,8 +1661,8 @@ impl App {
     /// reorders the remotes the operator configured.
     fn remote_rows(&self) -> Vec<Row> {
         let installation = self.installation_credential();
-        // This installation comes first: it is the identity a remote is paired
-        // with.
+        // This installation comes first: it is the identity a remote knows this
+        // machine by.
         let mut rows = vec![Row {
             label: installation.label.clone(),
             note: None,

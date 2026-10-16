@@ -20,10 +20,11 @@ pub fn centered_width(area: Rect, width: u16, height_percent: u16) -> Rect {
 
 /// A mark in front of a list row: what the last answer about that row said.
 ///
-/// Every list that asks something on its own clock marks its rows with one, so the
+/// Lists that ask something on their own clock mark their rows with one, so the
 /// same thing in front of a row means the same thing wherever it is: filled when the
 /// answer came back, hollow while it has not, and travelling while it is still
-/// coming.
+/// coming. A mark that is not an answer, like the house on the machine you are
+/// on, stands for itself.
 pub struct Dot {
     glyph: char,
     style: Style,

@@ -99,9 +99,6 @@ pub enum LinkRequest {
     Signal {
         command: SignalCommand,
     },
-    PairTracker {
-        tracker_user_id: String,
-    },
     /// Ask what profiles the remote already holds for the asking peer.
     ///
     /// Authenticated: the answer is the asking peer's own held stamps, not
@@ -188,9 +185,6 @@ pub enum LinkResponse {
     },
     Signals {
         signals: Vec<TaskOperatorSignal>,
-    },
-    PairingCode {
-        code: String,
     },
     /// What the remote holds for the asking peer's profiles.
     HeldProfiles {

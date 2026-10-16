@@ -398,7 +398,6 @@ where
             Some(reply) = tracker_connect_replied.recv() => {
                 app.tracker_connect_resolved(reply)
             }
-            Some(reply) = app.pairings_replied.recv() => { app.pairing_resolved(reply); }
             Some(reply) = remote_signals_replied.recv() => {
                 app.remote_signals_resolved(reply, &remote_task_reads)
             }

@@ -452,26 +452,6 @@ impl LinkClient {
         )
         .await
     }
-    pub async fn pair_tracker(
-        &self,
-        peer: impl Into<EndpointAddr>,
-        tracker_user_id: &str,
-    ) -> LinkResult<String> {
-        match self
-            .say(
-                peer,
-                &LinkRequest::PairTracker {
-                    tracker_user_id: tracker_user_id.into(),
-                },
-            )
-            .await?
-        {
-            LinkResponse::PairingCode { code } => Ok(code),
-            LinkResponse::Rejected { reason } => Err(reason.into()),
-            other => Err(format!("unexpected answer: {other:?}").into()),
-        }
-    }
-
     /// Sends this machine's configuration for a remote to build from.
     pub async fn put_config(&self, peer: impl Into<EndpointAddr>, bytes: &[u8]) -> LinkResult<()> {
         let request = LinkRequest::PutConfig {

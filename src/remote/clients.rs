@@ -1,14 +1,13 @@
 //! Which clients a server has seen.
 //!
-//! The transport authenticates *which* key is on the other end. Whether that key
-//! is welcome is a separate question, and the answer today is "yes, and write it
-//! down": a server records the identity of everyone who connects and says so, so
-//! that a new one is visible rather than silent. Refusing is not built, because a
-//! half-answer to "who may connect" is worse than none — the shape of the answer
-//! depends on how identity is delegated, which is not settled.
+//! The transport authenticates which key is on the other end; Altitude does not
+//! decide which keys are welcome. Reaching the server is the environment's job —
+//! the same network, a tailnet, a firewall — and a tool that grew an account
+//! system of its own would answer a question the operator has already answered
+//! outside it.
 //!
-//! The record is a list of public keys, never a secret, so the file says who has
-//! been here rather than granting anything.
+//! So this records every key that connects, and the record is a list of public
+//! keys, never a secret: it says who has been here, and grants nothing.
 
 use std::{
     collections::BTreeSet,
