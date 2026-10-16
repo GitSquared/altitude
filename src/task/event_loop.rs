@@ -889,10 +889,20 @@ where
         for task in tasks.iter().filter(|task| super::should_suspend(task)) {
             self.mark_suspending(&task.id);
         }
+        // Every task is attempted even when one cannot be stopped: most of the
+        // work suspended is better than none, and the first failure is reported
+        // once the rest have had their turn.
+        let mut first_error = None;
         for result in self.service.suspend_all(tasks).await {
-            result?;
+            if let Err(error) = result {
+                tracing::error!(%error, "a task could not be suspended");
+                first_error.get_or_insert(error);
+            }
         }
-        Ok(())
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     fn watch_agent_run(

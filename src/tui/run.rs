@@ -148,14 +148,20 @@ where
     .await;
     // Given back whether or not it was asked for: a terminal that never took it
     // ignores the sequence, and one that did must not be left holding it.
-    let terminal_cleanup = execute!(
+    //
+    // This happens before the work is stopped. Suspending every task can take a
+    // moment, and a shell prompt is a better place to wait for it than a screen
+    // that has stopped drawing.
+    execute!(
         io::stdout(),
         DisableMouseCapture,
         DisableBracketedPaste,
         PopKeyboardEnhancementFlags
-    );
-    event_loop.suspend_all().await.map_err(io::Error::other)?;
-    terminal_cleanup?;
+    )?;
+    ratatui::restore();
+    if let Err(error) = event_loop.suspend_all().await {
+        tracing::error!(%error, "not every task could be suspended on the way out");
+    }
     result
 }
 
