@@ -90,6 +90,17 @@ pub(in crate::tui) enum Foreground {
     Tasks,
 }
 
+impl Foreground {
+    pub(in crate::tui) fn shows_settings(&self) -> bool {
+        match self {
+            Self::Panel | Self::Setup(_) => true,
+            Self::Confirm(confirm) => confirm.is_settings(),
+            Self::Keys(behind) => behind.shows_settings(),
+            _ => false,
+        }
+    }
+}
+
 /// What the panel last heard from an address.
 ///
 /// Asking is automatic, because a status you have to ask for is one you will not

@@ -39,7 +39,7 @@ use crate::{
     tracker::TrackerKind,
     tui::widgets::{
         text::{Field, FieldStyle, TextBox},
-        utils::plain,
+        utils::{plain, shimmer},
     },
 };
 
@@ -540,8 +540,15 @@ impl Form {
 
 // ----------------------------------------------------------------- the drawing
 
-pub fn draw(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick: usize) {
-    draw_columns(frame, area, panel, view, tick);
+pub fn draw(
+    frame: &mut Frame,
+    area: Rect,
+    panel: &Panel,
+    view: &View,
+    tick: usize,
+    is_discovering: bool,
+) {
+    draw_columns(frame, area, panel, view, tick, is_discovering);
     if let Some(form) = &panel.form {
         chrome::dim(frame, area);
         draw_form(frame, area, form);
@@ -586,7 +593,14 @@ fn item(
     Line::from(spans)
 }
 
-fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick: usize) {
+fn draw_columns(
+    frame: &mut Frame,
+    area: Rect,
+    panel: &Panel,
+    view: &View,
+    tick: usize,
+    is_discovering: bool,
+) {
     let block = Block::bordered()
         .title(" Settings ")
         .border_type(BorderType::Rounded)
@@ -627,7 +641,7 @@ fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick:
 
     let list_focused = panel.depth == Depth::List;
     let width = usize::from(list_area.width);
-    let list_items = view
+    let mut list_items = view
         .rows
         .iter()
         .enumerate()
@@ -654,6 +668,12 @@ fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick:
             })
         })
         .collect::<Vec<_>>();
+    if panel.section == Section::Remotes && is_discovering {
+        list_items.push(ListItem::new(Line::default()));
+        list_items.push(ListItem::new(
+            Line::from(shimmer("scanning…", tick)).centered(),
+        ));
+    }
     frame.render_widget(List::new(list_items), list_area);
 
     // The column ahead of the focus is drawn dimmed rather than withheld, so the

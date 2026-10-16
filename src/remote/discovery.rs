@@ -1,34 +1,28 @@
-//! Iroh-native LAN discovery for the server and TUI. Discovered metadata is only
-//! a hint; the operator must adopt a remote before configuration is sent.
+//! Combines network discovery sources into remote suggestions for the TUI.
+//! Discovering a remote never adopts it or sends configuration and credentials.
 
+mod local;
+mod tailscale;
+
+use iroh::{Endpoint, EndpointId};
 use std::{
-    net::{IpAddr, SocketAddr},
-    pin::Pin,
+    collections::{BTreeMap, HashMap},
+    net::SocketAddr,
+    time::Duration,
+};
+use tokio::{
+    sync::mpsc,
+    task::JoinSet,
+    time::{Instant, timeout_at},
 };
 
-use futures_util::{Stream, StreamExt};
-use iroh::{
-    Endpoint, EndpointId,
-    address_lookup::{EndpointInfo, UserData},
-};
-use iroh_mdns_address_lookup::{DiscoveryEvent as MdnsEvent, MdnsAddressLookup};
-use serde::{Deserialize, Serialize};
+use crate::{config::DEFAULT_PORT, remote::LinkResult};
 
-use super::LinkResult;
-use crate::config::DEFAULT_PORT;
-
-/// The namespace Altitude publishes and browses, so a shared network does not
-/// mix Altitude remotes with unrelated iroh peers.
-const SERVICE_NAME: &str = "altitude";
-
-/// A remote seen announcing on the network, before the operator adopts it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiscoveredRemote {
     pub id: EndpointId,
     pub label: String,
     pub version: String,
-    /// Where to reach it. An IPv4 default port is left off; everything else
-    /// keeps its `port` because the settings parser expects it.
     pub address: String,
 }
 
@@ -38,107 +32,104 @@ pub enum DiscoveryEvent {
     Removed(EndpointId),
 }
 
-/// A subscription to the endpoint's local discovery stream.
-pub struct Browser {
-    events: Pin<Box<dyn Stream<Item = MdnsEvent> + Send>>,
+/// A VPN address wins when both sources see a remote: it remains reachable
+/// when the client moves away from the remote's LAN.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Source {
+    Tailscale,
+    Local,
 }
 
-/// What a server publishes about itself in its user data.
-#[derive(Deserialize, Serialize)]
-struct Metadata {
-    label: String,
-    version: String,
+struct SourceEvent {
+    source: Source,
+    event: DiscoveryEvent,
 }
 
-/// Starts browsing for remotes on this endpoint.
-///
-/// The lookup advertises nothing, so a browsing client is not itself offered as
-/// a remote. It is subscribed before it is attached, so the first events are not
-/// missed while the endpoint takes ownership of it.
-pub(crate) async fn browse(endpoint: &Endpoint) -> LinkResult<Browser> {
-    let lookup = MdnsAddressLookup::builder()
-        .advertise(false)
-        .service_name(SERVICE_NAME)
-        .build(endpoint.id())?;
-    let events = lookup.subscribe().await;
-    endpoint.address_lookup()?.add(lookup);
-    Ok(Browser {
-        events: Box::pin(events),
+pub struct Scan {
+    events: mpsc::Receiver<SourceEvent>,
+    sightings: BTreeMap<Source, HashMap<EndpointId, DiscoveredRemote>>,
+    tasks: JoinSet<()>,
+    deadline: Instant,
+}
+
+pub(crate) async fn scan(endpoint: &Endpoint) -> LinkResult<Scan> {
+    let (send, events) = mpsc::channel(64);
+    let mut tasks = JoinSet::new();
+    match local::browse(endpoint).await {
+        Ok(mut browser) => {
+            let send = send.clone();
+            tasks.spawn(async move {
+                while let Some(event) = browser.recv().await {
+                    let event = SourceEvent {
+                        source: Source::Local,
+                        event,
+                    };
+                    if send.send(event).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        Err(error) => tracing::warn!(%error, "Local network discovery unavailable"),
+    }
+    if let Some(executable) = tailscale::executable() {
+        tasks.spawn(tailscale::scan(executable, endpoint.id(), send.clone()));
+    }
+    if tasks.is_empty() {
+        return Err("No network discovery source is available; add remotes by hostname".into());
+    }
+    Ok(Scan {
+        events,
+        sightings: BTreeMap::new(),
+        tasks,
+        deadline: Instant::now() + Duration::from_secs(5),
     })
 }
 
-/// Says where this server is, so an operator does not have to type its address.
-///
-/// Discovery is optional; manual addresses remain usable if it fails.
 pub(crate) fn advertise(endpoint: &Endpoint, label: &str) -> LinkResult<()> {
-    let metadata = Metadata {
-        label: clean(label, 64),
-        version: env!("CARGO_PKG_VERSION").to_owned(),
-    };
-    let user_data: UserData = serde_json::to_string(&metadata)?.parse()?;
-    endpoint.set_user_data_for_address_lookup(Some(user_data));
-    let lookup = MdnsAddressLookup::builder()
-        .service_name(SERVICE_NAME)
-        .build(endpoint.id())?;
-    endpoint.address_lookup()?.add(lookup);
-    Ok(())
+    local::advertise(endpoint, label)
 }
 
-impl Browser {
-    /// Waits for the next thing worth telling the operator.
-    ///
-    /// `None` means browsing has stopped, which happens when the endpoint closes
-    /// rather than when the network is merely quiet.
+impl Scan {
     pub async fn recv(&mut self) -> Option<DiscoveryEvent> {
         loop {
-            match self.events.next().await? {
-                MdnsEvent::Discovered { endpoint_info, .. } => {
-                    if let Some(remote) = describe(&endpoint_info) {
-                        return Some(DiscoveryEvent::Found(remote));
+            let SourceEvent { source, event } =
+                match timeout_at(self.deadline, self.events.recv()).await {
+                    Ok(Some(event)) => event,
+                    _ => {
+                        self.tasks.abort_all();
+                        return None;
+                    }
+                };
+            let id = match &event {
+                DiscoveryEvent::Found(remote) => remote.id,
+                DiscoveryEvent::Removed(id) => *id,
+            };
+            let previous = self.preferred_remote(id).cloned();
+            match event {
+                DiscoveryEvent::Found(remote) => {
+                    self.sightings.entry(source).or_default().insert(id, remote);
+                }
+                DiscoveryEvent::Removed(id) => {
+                    if let Some(remotes) = self.sightings.get_mut(&source) {
+                        remotes.remove(&id);
                     }
                 }
-                MdnsEvent::Expired { endpoint_id } => {
-                    return Some(DiscoveryEvent::Removed(endpoint_id));
+            }
+            match (previous, self.preferred_remote(id)) {
+                (None, Some(remote)) => return Some(DiscoveryEvent::Found(remote.clone())),
+                (Some(previous), Some(remote)) if previous != *remote => {
+                    return Some(DiscoveryEvent::Found(remote.clone()));
                 }
+                (Some(_), None) => return Some(DiscoveryEvent::Removed(id)),
                 _ => {}
             }
         }
     }
-}
 
-fn describe(info: &EndpointInfo) -> Option<DiscoveredRemote> {
-    let metadata: Metadata = serde_json::from_str(info.user_data()?.as_ref()).ok()?;
-    Some(DiscoveredRemote {
-        id: info.endpoint_id,
-        label: clean(&metadata.label, 64),
-        version: clean(&metadata.version, 32),
-        address: format_address(usable_address(info)?),
-    })
-}
-
-/// The first address on this network a client can actually dial.
-///
-/// IPv4 first because a client that speaks only IPv4 is still common, and a
-/// private IPv4 before a public one because a remote on the same LAN is the
-/// point. A loopback or unspecified address is never offered: a remote bound
-/// only to itself is not a remote anyone else can reach.
-fn usable_address(info: &EndpointInfo) -> Option<SocketAddr> {
-    let mut addresses: Vec<SocketAddr> = info
-        .ip_addrs()
-        .copied()
-        .filter(|address| !address.ip().is_loopback() && !address.ip().is_unspecified())
-        .collect();
-    addresses.sort();
-    addresses
-        .iter()
-        .find(|address| matches!(address.ip(), IpAddr::V4(ip) if ip.is_private()))
-        .or_else(|| addresses.iter().find(|address| address.ip().is_ipv4()))
-        .or_else(|| {
-            addresses.iter().find(
-                |address| matches!(address.ip(), IpAddr::V6(ip) if !ip.is_unicast_link_local()),
-            )
-        })
-        .copied()
+    fn preferred_remote(&self, id: EndpointId) -> Option<&DiscoveredRemote> {
+        self.sightings.values().find_map(|remotes| remotes.get(&id))
+    }
 }
 
 fn format_address(address: SocketAddr) -> String {

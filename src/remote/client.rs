@@ -9,7 +9,7 @@ use crate::task::TaskOperatorSignal;
 use super::{
     LinkResult,
     bundle::ProfileDigest,
-    discovery::{self, Browser},
+    discovery::{self, Scan},
     protocol::{
         BlobHash, CHUNK_BYTES, Handover, LINK_ALPN, LinkRequest, LinkResponse, TaskRequest,
         TaskSummary, TransferArchive, builder, read_body, read_frame, write_frame,
@@ -93,12 +93,10 @@ impl LinkClient {
         Ok(Self { endpoint })
     }
 
-    /// Browses the local network for remotes announcing themselves.
-    ///
-    /// The endpoint keeps the lookup alive; dropping the returned browser only
-    /// stops listening.
-    pub async fn browse_remotes(&self) -> LinkResult<Browser> {
-        discovery::browse(&self.endpoint).await
+    /// Combines available network sources into remote suggestions.
+    /// The scan ends after five seconds; dropping it cancels in-flight probes.
+    pub async fn scan_remotes(&self) -> LinkResult<Scan> {
+        discovery::scan(&self.endpoint).await
     }
 
     pub async fn shutdown(&self) {
