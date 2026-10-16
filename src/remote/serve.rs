@@ -778,10 +778,10 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
             .map_err(|error| io::Error::other(error).into());
     }
 
-    tracing::info!("Checking sandbox host requirements");
+    tracing::debug!("Checking sandbox host requirements");
     MicrosandboxIsolation::check_host()?;
-    tracing::info!("Sandbox host requirements passed");
-    tracing::info!(settings = %settings_path.display(), data = %config.data_dir().display(), "Remote configuration");
+    tracing::debug!("Sandbox host requirements passed");
+    tracing::debug!(settings = %settings_path.display(), data = %config.data_dir().display(), "Remote configuration");
 
     let listen: SocketAddr = args
         .listen
@@ -937,12 +937,10 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         readiness.send_replace(RemoteState::Ready);
         tracing::info!("Remote ready · open Altitude → Settings → Remotes");
         if !listen.ip().is_loopback() {
-            tracing::info!(
-                "Clients on the same local network can discover this remote automatically"
-            );
+            tracing::info!("Clients on the same network can discover this remote automatically");
         }
         if let Some(address) = &connect_address {
-            tracing::info!("To add it manually, enter {address}");
+            tracing::info!(address = %address, "To add it manually, enter this address");
         } else {
             tracing::info!("To add it manually, enter this machine’s hostname");
         }

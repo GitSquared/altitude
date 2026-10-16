@@ -164,7 +164,7 @@ impl MicrosandboxIsolation {
             .transpose()
             .map_err(|e| IsolationError::new(e.to_string()))?;
         let trusted = trust_host_roots(&mut options, self.config.data_dir());
-        tracing::info!(sandbox_id = %id, network_enabled = options.network_enabled, cpus = CAPSULE_CPUS, memory_mib = CAPSULE_MEMORY_MIB, "creating sandbox");
+        tracing::debug!(sandbox_id = %id, network_enabled = options.network_enabled, cpus = CAPSULE_CPUS, memory_mib = CAPSULE_MEMORY_MIB, "creating sandbox");
         let result = match options.snapshot_path {
             Some(snapshot_path) => {
                 let mut restore = Sandbox::restore(snapshot_path)
@@ -234,7 +234,7 @@ impl MicrosandboxIsolation {
             self.append_host_roots(&id).await;
         }
 
-        tracing::info!(sandbox_id = %id, "sandbox created");
+        tracing::debug!(sandbox_id = %id, "sandbox created");
 
         Ok(())
     }
@@ -252,7 +252,7 @@ impl MicrosandboxIsolation {
     async fn append_host_roots(&self, id: &str) {
         let command = "cat /etc/altitude/host-roots.pem >> /etc/ssl/certs/ca-certificates.crt";
         match self.run_to_end(id, command).await {
-            Ok((0, _)) => tracing::info!(sandbox_id = %id, "sandbox trusts this machine's roots"),
+            Ok((0, _)) => tracing::debug!(sandbox_id = %id, "sandbox trusts this machine's roots"),
             Ok((code, output)) => tracing::warn!(
                 sandbox_id = %id,
                 code,
@@ -276,7 +276,7 @@ impl MicrosandboxIsolation {
         if Sandbox::get(id).await.is_err() {
             return;
         }
-        tracing::info!(sandbox_id = %id, "removing a sandbox left behind");
+        tracing::debug!(sandbox_id = %id, "removing a sandbox left behind");
         if let Err(error) = self.remove(id.to_owned()).await {
             tracing::warn!(sandbox_id = %id, %error, "could not remove a leftover sandbox");
         }
@@ -328,7 +328,7 @@ impl MicrosandboxIsolation {
             recipe.name
         );
         let created_at_ms = now_ms();
-        tracing::info!(environment = %recipe.name, steps = steps.len(), "building environment base sandbox snapshot");
+        tracing::debug!(environment = %recipe.name, steps = steps.len(), "building environment base sandbox snapshot");
         self.remove_leftover(&sandbox_id).await;
         let mut options = SandboxOptions::isolated(
             parent.map(|snapshot| snapshot.path.to_string_lossy().into_owned()),
@@ -364,7 +364,7 @@ impl MicrosandboxIsolation {
             };
             store.publish(&snapshot)?;
             for stale_snapshot in store.stale_snapshots().await? {
-                tracing::info!(snapshot = %stale_snapshot.display(), "removing stale environment base sandbox snapshot");
+                tracing::debug!(snapshot = %stale_snapshot.display(), "removing stale environment base sandbox snapshot");
                 if let Err(error) = self.remove_snapshot(stale_snapshot).await {
                     tracing::warn!(%error, "could not remove stale environment base sandbox snapshot");
                 }
@@ -379,7 +379,7 @@ impl MicrosandboxIsolation {
             }
         }
         let snapshot = result?;
-        tracing::info!(environment = %recipe.name, snapshot = %snapshot.path.display(), "environment base sandbox ready");
+        tracing::debug!(environment = %recipe.name, snapshot = %snapshot.path.display(), "environment base sandbox ready");
         Ok(snapshot)
     }
 
@@ -809,7 +809,7 @@ impl IsolationEngine for MicrosandboxIsolation {
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
 
-        tracing::info!("base sandbox image ready");
+        tracing::debug!("base sandbox image ready");
 
         status.send_replace(IsolationStatus::PreparingWorkspacePackages);
         let _preparation = self.base_preparation_lock.lock().await;
@@ -861,7 +861,7 @@ impl IsolationEngine for MicrosandboxIsolation {
         id: String,
         command: String,
     ) -> Result<CommandSession, IsolationError> {
-        tracing::info!(sandbox_id = %id, "starting sandbox command");
+        tracing::debug!(sandbox_id = %id, "starting sandbox command");
         let sandbox = Sandbox::get(&id)
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?
@@ -935,7 +935,7 @@ impl IsolationEngine for MicrosandboxIsolation {
     }
 
     async fn remove(&self, id: String) -> Result<(), IsolationError> {
-        tracing::info!(sandbox_id = %id, "removing sandbox");
+        tracing::debug!(sandbox_id = %id, "removing sandbox");
         let sandbox = Sandbox::get(&id)
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
@@ -955,7 +955,7 @@ impl IsolationEngine for MicrosandboxIsolation {
         snapshot_name: String,
         snapshots_dir: PathBuf,
     ) -> Result<PathBuf, IsolationError> {
-        tracing::info!(sandbox_id = %id, "suspending sandbox");
+        tracing::debug!(sandbox_id = %id, "suspending sandbox");
         private_directory(&snapshots_dir)?;
         let sandbox = Sandbox::get(&id)
             .await
@@ -991,7 +991,7 @@ impl IsolationEngine for MicrosandboxIsolation {
             .path()
             .map_err(|error| IsolationError::new(error.to_string()))?
             .to_owned();
-        tracing::info!(sandbox_id = %id, snapshot = %path.display(), "sandbox suspended");
+        tracing::debug!(sandbox_id = %id, snapshot = %path.display(), "sandbox suspended");
         Ok(path)
     }
 
