@@ -18,7 +18,7 @@ use crossterm::{
     execute,
 };
 use futures_util::StreamExt;
-use ratatui::{DefaultTerminal, buffer::Buffer, layout::Rect};
+use ratatui::{DefaultTerminal, Frame, buffer::Buffer, layout::Rect};
 use tachyonfx::{
     Effect, EffectManager, Interpolation, fx,
     pattern::{InvertedPattern, RadialPattern, SweepPattern},
@@ -98,6 +98,20 @@ fn exit(panel: bool, area: Rect) -> Effect {
             .with_pattern(InvertedPattern::new(RadialPattern::center()))
     }
     .with_area(area)
+}
+
+/// Draw a frame, but only when something has asked for one. At rest the loop
+/// never reaches this, so an idle interface costs nothing.
+fn draw_when(
+    redraw: &mut bool,
+    terminal: &mut DefaultTerminal,
+    render: impl FnOnce(&mut Frame),
+) -> io::Result<()> {
+    if *redraw {
+        terminal.draw(render)?;
+        *redraw = false;
+    }
+    Ok(())
 }
 
 struct EventReplies<'a> {
@@ -234,9 +248,11 @@ where
     let mut modal_cells: Option<Leaving> = None;
     let mut was_modal = app.has_modal();
     let mut was_panel = matches!(app.foreground, Foreground::Panel);
-    // While an effect is running, the loop is woken often enough for the
-    // animation to move smoothly rather than at the shimmer's slower pace.
-    let mut motion = time::interval(Duration::from_millis(33));
+    // A frame is drawn only when something asks for one: at rest the loop sits in
+    // its select and the terminal is left alone. While an effect runs, the clock
+    // wakes it fast enough for the animation to move smoothly.
+    let mut redraw = true;
+    let mut motion = time::interval(Duration::from_millis(8));
     motion.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     loop {
         let wants_mouse = app.wants_mouse();
@@ -281,13 +297,14 @@ where
                 effects = EffectManager::default();
                 effects.add_effect(exit(was_panel, cells.area));
                 leaving = Some(cells);
+                redraw = true;
             }
         } else if is_modal && !was_modal {
             leaving = None;
         }
         was_modal = is_modal;
         was_panel = is_panel;
-        terminal.draw(|frame| {
+        draw_when(&mut redraw, terminal, |frame| {
             let hints = app.hints();
             let content =
                 widgets::chrome::draw(frame, &hints, app.keyboard_hints(), app.notice.as_deref());
@@ -426,14 +443,19 @@ where
                     );
                 }
                 app.capacity = Some(event_loop.capacity_limit());
+                redraw = true;
             }
             event = async { browser.as_mut().expect("discovery enabled").recv().await }, if browser.is_some() => {
                 match event {
                     Some(event) => app.discovery_observed(event),
                     None => browser = None,
                 }
+                redraw = true;
             }
-            _ = connection_clock.tick() => app.refresh_remote_connections(),
+            _ = connection_clock.tick(), if !app.configured_remotes().is_empty() => {
+                app.refresh_remote_connections();
+                redraw = true;
+            }
             _ = configuration_clock.tick(), if !reading_configuration => {
                 reading_configuration = true;
                 let config = app.config.clone();
@@ -451,22 +473,38 @@ where
             Some(result) = configuration_read.recv() => {
                 reading_configuration = false;
                 app.configuration_read(result, &config_pushes);
+                redraw = true;
             }
             _ = ask.tick() => {
+                // Every quarter second, so it only asks for a frame when one of the
+                // checks it runs actually changed something.
+                let mut changed = false;
                 if app.wants_remote_check() {
                     app.ask_next_remote(&remote_answers).await;
+                    changed = true;
                 }
-                app.sync_credentials();
+                changed |= app.sync_credentials();
                 if app.wants_credential_check() {
                     app.ask_next_credential(&task_service, &credential_reports);
+                    changed = true;
                 }
+                redraw |= changed;
             }
-            Some(answer) = answered.recv() => app.remote_answered(answer).await,
-            Some(reply) = reported.recv() => app.credential_checked(reply),
+            Some(answer) = answered.recv() => {
+                app.remote_answered(answer).await;
+                redraw = true;
+            }
+            Some(reply) = reported.recv() => {
+                app.credential_checked(reply);
+                redraw = true;
+            }
             _ = read_clock.tick(), if matches!(app.foreground, Foreground::Tasks) => {
                 app.read_remote_tasks(&remote_task_reads);
             }
-            Some(tasks) = remote_tasks_read.recv() => app.remote_tasks_read(tasks),
+            Some(tasks) = remote_tasks_read.recv() => {
+                app.remote_tasks_read(tasks);
+                redraw = true;
+            }
             Some(outcome) = landed.recv() => {
                 match outcome {
                     Ok(id) => {
@@ -479,20 +517,31 @@ where
                         app.notice = Some(format!("could not bring it home: {error}"));
                     }
                 }
+                redraw = true;
             }
             _ = shell_notice.tick(), if app.shell_has_active_notice() => {}
             _ = shimmer.tick(), if app.animations() && app.open_shell().is_none() => {
                 app.shimmer = app.shimmer.wrapping_add(1);
+                redraw = true;
             }
-            _ = motion.tick(), if effects.is_running() => {}
+            _ = motion.tick(), if effects.is_running() => {
+                redraw = true;
+            }
             _ = progress_clock.tick(), if app.open_shell().is_none() && app.is_awaiting_progress() => {
                 app.environment_builds = task_service.environment_builds();
+                redraw = true;
             }
-            Some(update) = task_execution_updates.recv() =>
-                app.apply(update, terminal, &event_loop).await?,
-            Some(event) = credential_shell_events.recv() =>
-                app.credential_shell_event(event, terminal, &task_service).await,
-            _ = issue_search_clock.tick() => {
+            Some(update) = task_execution_updates.recv() => {
+                app.apply(update, terminal, &event_loop).await?;
+                redraw = true;
+            }
+            Some(event) = credential_shell_events.recv() => {
+                app.credential_shell_event(event, terminal, &task_service).await;
+                redraw = true;
+            }
+            // The creation question debounces its search, so the clock only has to
+            // run while it is the thing in front.
+            _ = issue_search_clock.tick(), if matches!(app.foreground, Foreground::NewTask(_)) => {
                 if let Some((token, query)) = app.due_issue_search() {
                     match task_service.tracker() {
                         Some(tracker) => {
@@ -508,29 +557,40 @@ where
                         // No provider at all is a property of the build.
                         None => app.issue_search_unavailable(token, NO_LINEAR),
                     }
+                    redraw = true;
                 }
             }
             Some(reply) = issue_search_replied.recv() => {
-                app.issue_search_resolved(reply, &task_service, &issue_read_replies)
+                app.issue_search_resolved(reply, &task_service, &issue_read_replies);
+                redraw = true;
             }
             Some(reply) = issue_read_replied.recv() => {
-                app.issue_read_resolved(reply, &event_loop, &delegations).await
+                app.issue_read_resolved(reply, &event_loop, &delegations).await;
+                redraw = true;
             }
             Some(reply) = delegated.recv() => {
-                app.task_delegation_resolved(reply, &remote_task_reads)
+                app.task_delegation_resolved(reply, &remote_task_reads);
+                redraw = true;
             }
             Some(reply) = sent.recv() => {
-                app.send_task_resolved(reply, &remote_task_reads)
+                app.send_task_resolved(reply, &remote_task_reads);
+                redraw = true;
             }
             Some(reply) = config_pushed.recv() => {
-                app.config_push_resolved(reply)
+                app.config_push_resolved(reply);
+                redraw = true;
             }
             Some(reply) = tracker_connect_replied.recv() => {
-                app.tracker_connect_resolved(reply)
+                app.tracker_connect_resolved(reply);
+                redraw = true;
             }
-            Some(reply) = app.pairings_replied.recv() => { app.pairing_resolved(reply); }
+            Some(reply) = app.pairings_replied.recv() => {
+                app.pairing_resolved(reply);
+                redraw = true;
+            }
             Some(reply) = remote_signals_replied.recv() => {
-                app.remote_signals_resolved(reply, &remote_task_reads)
+                app.remote_signals_resolved(reply, &remote_task_reads);
+                redraw = true;
             }
             event = events.next() => {
                 let Some(event) = event else { return Ok(()) };
@@ -554,6 +614,7 @@ where
                 if quit {
                     return Ok(());
                 }
+                redraw = true;
             }
         }
     }

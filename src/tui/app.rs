@@ -1733,8 +1733,9 @@ impl App {
     /// appears.
     ///
     /// A fresh look every time it is opened, so a login made in a shell a moment ago
-    /// is not still being reported as it was.
-    pub(in crate::tui) fn sync_credentials(&mut self) {
+    /// is not still being reported as it was. Says whether anything changed, so a
+    /// poll that found nothing does not ask for a frame.
+    pub(in crate::tui) fn sync_credentials(&mut self) -> bool {
         let showing = matches!(self.foreground, Foreground::Panel)
             && matches!(
                 self.panel.section,
@@ -1745,9 +1746,13 @@ impl App {
                 self.credentials_visible_since = Some(Instant::now());
                 self.credential_check_generation = self.credential_check_generation.wrapping_add(1);
                 self.credential_status.clear();
+                true
             }
-            (false, Some(_)) => self.credentials_visible_since = None,
-            _ => {}
+            (false, Some(_)) => {
+                self.credentials_visible_since = None;
+                true
+            }
+            _ => false,
         }
     }
 
