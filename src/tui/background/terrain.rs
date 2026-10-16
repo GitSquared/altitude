@@ -16,7 +16,7 @@ pub fn draw(frame: &mut Frame, area: Rect, tick: usize) {
     // contour crossings into the eight dots of each cell.
     let pixel_width = usize::from(area.width) * 2;
     let pixel_height = usize::from(area.height) * 4;
-    let drift = tick as f32 * 0.006;
+    let drift = tick as f32 * 0.0042;
     let stride = pixel_width + 1;
     let mut heights = vec![0.0; stride * (pixel_height + 1)];
     for row in 0..=pixel_height {
@@ -57,7 +57,11 @@ pub fn draw(frame: &mut Frame, area: Rect, tick: usize) {
                 continue;
             }
             let shade = highest_level.min(8.0) as u8;
-            let color = Color::Rgb(18 + shade * 5, 60 + shade * 9, 72 + shade * 10);
+            // One hue only — grey — so the field reads as background rather than
+            // as another status colour, and dark enough that the interface on top
+            // stays the brightest thing on screen.
+            let value = 22 + shade * 6;
+            let color = Color::Rgb(value, value, value);
             let symbol = char::from_u32(0x2800 + u32::from(dots))
                 .expect("braille dots always form a Unicode scalar")
                 .to_string();
@@ -69,18 +73,23 @@ pub fn draw(frame: &mut Frame, area: Rect, tick: usize) {
 }
 
 fn elevation(x: f32, y: f32, drift: f32) -> f32 {
-    let dx = (x - 1.6) * 0.74;
-    let dy = (y - 1.0) * 1.12;
-    let island = 0.9 - (dx * dx + dy * dy).sqrt();
+    // One broad swell, reaching past every edge, so the contours are a landscape
+    // that fills the area rather than an island in the middle of it. The texture
+    // is what makes it terrain; the swell is what gives it a horizon.
+    let dx = (x - 1.6) * 0.38;
+    let dy = (y - 1.0) * 0.60;
+    let swell = 1.30 - (dx * dx + dy * dy).sqrt();
     let mut texture = 0.0;
     let mut frequency = 1.0;
-    let mut amplitude = 0.22;
-    for _ in 0..4 {
+    // Three octaves, not four: at this size the finest one only added jitter to
+    // the contour lines, which reads as jaggedness rather than as terrain.
+    let mut amplitude = 0.16;
+    for _ in 0..3 {
         texture += perlin(x * frequency + drift, y * frequency + drift * 0.4) * amplitude;
         frequency *= 2.0;
         amplitude *= 0.5;
     }
-    island + texture
+    swell + texture
 }
 
 fn perlin(x: f32, y: f32) -> f32 {

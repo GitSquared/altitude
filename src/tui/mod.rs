@@ -6,12 +6,12 @@
 //! reads events and draws frames is in `run`.
 
 mod app;
+mod background;
 mod boot;
 mod keys;
 mod popups;
 mod run;
 mod screens;
-mod terrain;
 mod widgets;
 
 pub use app::App;

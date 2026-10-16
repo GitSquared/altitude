@@ -44,8 +44,10 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         .padding(Padding::uniform(1));
     let content = panel.inner(area);
     frame.render_widget(panel, area);
+    // The backdrop goes inside the frame, not under its border, so the contour
+    // lines never crowd the edge they are read against.
     if app.animations() {
-        super::super::terrain::draw(frame, content, app.shimmer);
+        super::super::background::terrain::draw(frame, content, app.shimmer);
     }
     let (columns, card_width, height) = grid(content);
     app.grid_columns = columns;

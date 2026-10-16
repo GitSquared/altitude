@@ -40,8 +40,12 @@ pub fn primary() -> Style {
 }
 
 /// The interface talking about itself: hints, labels, metadata.
+///
+/// The foreground is named even though it is the terminal's own, so text drawn
+/// over a coloured backdrop takes the default colour back rather than inheriting
+/// whatever the backdrop left in the cell.
 pub fn muted() -> Style {
-    Style::new().add_modifier(Modifier::DIM)
+    Style::new().fg(Color::Reset).add_modifier(Modifier::DIM)
 }
 
 /// Work that is going well: running, accepted, in review.

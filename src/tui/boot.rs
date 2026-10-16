@@ -10,7 +10,7 @@ use ratatui::{
 };
 use tokio::{signal::unix::Signal, sync::watch};
 
-use crate::tui::{terrain, widgets::palette};
+use crate::tui::{background::terrain, widgets::palette};
 use crate::{
     isolation::IsolationStatus,
     tui::widgets::utils::{shimmer, shimmer_clock},
