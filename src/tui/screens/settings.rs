@@ -886,10 +886,13 @@ fn detail(panel: &Panel, view: &View, focused: bool, tick: usize) -> Paragraph<'
 /// on the remote it belongs to, and lives in its own helper.
 pub(in crate::tui) fn remote_setup_lines() -> Vec<Line<'static>> {
     vec![
-        Line::from(
-            "Run altitude serve on a headless machine to use it as a remote and keep your \
-             agents working even when you’re offline.",
-        ),
+        Line::from(vec![
+            Span::raw("Run "),
+            Span::styled("altitude serve", palette::accent()),
+            Span::raw(
+                " on a headless machine to use it as a remote and keep your agents working even when you’re offline.",
+            ),
+        ]),
         Line::from(""),
         Line::from(
             "Remotes can be shared with your team if they are on the same network. Each team \
@@ -902,11 +905,14 @@ pub(in crate::tui) fn remote_setup_lines() -> Vec<Line<'static>> {
              without going through altitude’s terminal interface.",
         ),
         Line::from(""),
-        Line::styled(
-            "Set up a machine on your network to run altitude serve, then press n in altitude > \
-             Settings > Remotes to add its hostname.",
-            palette::muted(),
-        ),
+        Line::from(vec![
+            Span::styled("Set up a machine on your network to run ", palette::muted()),
+            Span::styled("altitude serve", palette::accent()),
+            Span::styled(
+                ", then press n in altitude > Settings > Remotes to add its hostname.",
+                palette::muted(),
+            ),
+        ]),
         Line::from(""),
         Line::styled(
             "Hostname alone uses port 25848 (TCP and UDP). Anyone who can reach it is admitted; use a trusted network.",

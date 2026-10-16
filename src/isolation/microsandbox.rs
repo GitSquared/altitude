@@ -109,6 +109,25 @@ pub struct MicrosandboxIsolation {
 }
 
 impl MicrosandboxIsolation {
+    pub(crate) fn check_host() -> Result<(), IsolationError> {
+        #[cfg(target_os = "linux")]
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/kvm")
+            .map_err(|error| {
+                let guidance = match error.kind() {
+                    ErrorKind::PermissionDenied => "Grant the account running Altitude read/write access to /dev/kvm. On Ubuntu, run `sudo usermod -aG kvm $(id -un)`, then reconnect your SSH session (or log out and back in) and restart Altitude. For a service, grant access to its service account instead.",
+                    ErrorKind::NotFound => "Enable hardware virtualization in the host firmware and load the appropriate KVM kernel module. If this machine is itself a VM, its host must expose nested virtualization and /dev/kvm.",
+                    _ => "Check that hardware virtualization is available and /dev/kvm is accessible to the account running Altitude.",
+                };
+                IsolationError::new(format!(
+                    "Microsandbox requires Linux KVM, but cannot open /dev/kvm: {error}.\n{guidance}"
+                ))
+            })?;
+        Ok(())
+    }
+
     pub fn new(config: &Config) -> Self {
         Self {
             config: config.clone(),
@@ -751,10 +770,11 @@ impl IsolationEngine for MicrosandboxIsolation {
     }
 
     async fn prepare(&self, status: &watch::Sender<IsolationStatus>) -> Result<(), IsolationError> {
+        Self::check_host()?;
         private_directory(self.config.data_dir())?;
         private_directory(&self.data_home)?;
         private_directory(&self.cache_home)?;
-        tracing::info!("installing Microsandbox runtime");
+        tracing::debug!("installing Microsandbox runtime");
         status.send_replace(IsolationStatus::InstallingRuntime);
         let socket_safe_home = self.ensure_socket_safe_home()?;
         let backend = LocalBackend::builder()
@@ -768,7 +788,7 @@ impl IsolationEngine for MicrosandboxIsolation {
             .map_err(|error| IsolationError::new(error.to_string()))?;
         set_default_backend(backend);
 
-        tracing::info!("Microsandbox runtime ready");
+        tracing::debug!("Microsandbox runtime ready");
         // A credential shell lives as long as the terminal in front of it, so one that
         // is still here belongs to a client that is gone: a client that stopped in the
         // middle of opening one cannot have left anything else.

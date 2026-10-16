@@ -1,4 +1,4 @@
-use std::{error::Error, io, sync::Arc, time::Duration};
+use std::{error::Error, io, process::ExitCode, sync::Arc, time::Duration};
 
 use tokio::{
     signal::unix::{SignalKind, signal},
@@ -30,10 +30,17 @@ mod tui;
 mod vcs;
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn Error>> {
-    match Cli::parse().command {
+async fn main() -> ExitCode {
+    let result = match Cli::parse().command {
         Some(Command::Serve(args)) => remote::serve::run(args).await,
         None => client().await,
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            ExitCode::FAILURE
+        }
     }
 }
 

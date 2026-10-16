@@ -39,7 +39,7 @@ use tokio::{
 use crate::{
     agent::AgentEngines,
     cli::ServeArgs,
-    config::{Config, InstallationIdentity, LinearSettings, ServeSettings},
+    config::{Config, DEFAULT_PORT, InstallationIdentity, LinearSettings, ServeSettings},
     db::Database,
     isolation::{self, IsolationEngine, IsolationStatus, MicrosandboxIsolation},
     logging,
@@ -762,6 +762,7 @@ fn summarise(task: &Task) -> TaskSummary {
 
 pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     logging::init_service();
+    tracing::info!("⛰  altitude v{} · remote", env!("CARGO_PKG_VERSION"));
 
     let config = match args.data_dir {
         Some(dir) => Config::load()?.with_data_dir(dir).serve(),
@@ -776,6 +777,11 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
             .await
             .map_err(|error| io::Error::other(error).into());
     }
+
+    tracing::info!("Checking sandbox host requirements");
+    MicrosandboxIsolation::check_host()?;
+    tracing::info!("Sandbox host requirements passed");
+    tracing::info!(settings = %settings_path.display(), data = %config.data_dir().display(), "Remote configuration");
 
     let listen: SocketAddr = args
         .listen
@@ -802,6 +808,11 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         provider: TrackerKind::Linear,
         is_ready: linear_runtime.is_some(),
     }];
+    if linear_runtime.is_some() {
+        tracing::info!("Linear connected");
+    } else if settings.linear.is_none() {
+        tracing::info!("No task tracker configured · connect from Altitude to get started");
+    }
 
     let identity = InstallationKey::load_or_create(config.data_dir().join("identity.key"))
         .map_err(io::Error::other)?;
@@ -874,48 +885,93 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     .await
     .map_err(io::Error::other)?;
     let ticket = server.ticket().map_err(io::Error::other)?;
+    let connect_address = if listen.ip().is_unspecified() {
+        whoami::hostname()
+            .ok()
+            .filter(|host| !host.is_empty())
+            .map(|host| {
+                if listen.port() == DEFAULT_PORT {
+                    host
+                } else {
+                    format!("{host}:{}", listen.port())
+                }
+            })
+    } else {
+        Some(listen.to_string())
+    };
 
-    tracing::info!(
-        listening = %listen,
-        settings = %settings_path.display(),
-        data = %config.data_dir().display(),
-        "serving"
-    );
-    println!("listening on {listen} (udp)");
-    println!("settings     {}", settings_path.display());
-    println!("data         {}", config.data_dir().display());
-    println!("identity     {}", server.id());
-    println!("ticket       {ticket}");
+    tracing::info!(address = %listen, "Listening · TCP discovery and UDP task connections · preparing sandboxes");
+    tracing::debug!(identity = %server.id(), %ticket, "Remote connection details");
 
     // Readiness is behind the server, so the answer to "what can you do" is
     // available while the answer is still "not yet".
     let mut runtime = host.runtime.clone();
     let readiness = host.readiness.clone();
     let resumed = host.tasks.clone();
-    tokio::spawn(async move {
-        match wait_until_ready(&mut runtime).await {
-            Ok(()) => {
-                for result in resumed.service().recover_all().await {
-                    if let Err(error) = result {
-                        tracing::warn!(%error, "a task needs attention after restart");
-                    }
+    let preparation = async {
+        loop {
+            let status = runtime.borrow_and_update().clone();
+            match status {
+                IsolationStatus::Starting => tracing::info!("Starting sandbox runtime"),
+                IsolationStatus::InstallingRuntime => {
+                    tracing::info!("Installing sandbox runtime · first startup may take a moment")
                 }
-                resumed.enable_admission();
-                readiness.send_replace(RemoteState::Ready);
+                IsolationStatus::PreparingBaseImage => {
+                    tracing::info!("Preparing base sandbox image")
+                }
+                IsolationStatus::PreparingWorkspacePackages => {
+                    tracing::info!("Installing workspace tools")
+                }
+                IsolationStatus::Failed(error) => return Err(io::Error::other(error)),
+                IsolationStatus::Ready => break,
             }
-            Err(error) => tracing::error!(%error, "the isolation runtime never became ready"),
+            runtime.changed().await.map_err(io::Error::other)?;
         }
-    });
+        tracing::info!("Sandbox ready · recovering saved tasks");
+        for result in resumed.service().recover_all().await {
+            if let Err(error) = result {
+                tracing::warn!(%error, "a task needs attention after restart");
+            }
+        }
+        resumed.enable_admission();
+        readiness.send_replace(RemoteState::Ready);
+        tracing::info!("Remote ready · open Altitude → Settings → Remotes");
+        if !listen.ip().is_loopback() {
+            tracing::info!(
+                "Clients on the same local network can discover this remote automatically"
+            );
+        }
+        if let Some(address) = &connect_address {
+            tracing::info!("To add it manually, enter {address}");
+        } else {
+            tracing::info!("To add it manually, enter this machine’s hostname");
+        }
+        Ok::<(), io::Error>(())
+    };
+    tokio::pin!(preparation);
 
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
-    tokio::select! {
-        _ = terminate.recv() => tracing::info!("asked to stop"),
-        _ = interrupt.recv() => tracing::info!("asked to stop"),
-    }
+    let mut is_ready = false;
+    let result = loop {
+        tokio::select! {
+            result = &mut preparation, if !is_ready => match result {
+                Ok(()) => is_ready = true,
+                Err(error) => {
+                    tracing::error!(%error, logs = %config.isolation_data_dir().join("sandboxes/altitude-base-image-setup/logs").display(), "Remote startup failed · no tasks will be accepted");
+                    break Err(error);
+                }
+            },
+            _ = terminate.recv() => break Ok(()),
+            _ = interrupt.recv() => break Ok(()),
+        }
+    };
 
+    tracing::info!("Stopping remote · suspending active tasks");
     server.shutdown().await.map_err(io::Error::other)?;
     host.tasks.suspend_all().await?;
+    result?;
+    tracing::info!("Remote stopped");
     Ok(())
 }
 

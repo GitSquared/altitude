@@ -30,7 +30,8 @@ const ROOT_HELP_TEMPLATE: &str = "\
     long_about = format!(
         "{}\n\nStart altitude without any argument for the interactive TUI application to manage tasks and agents.\n\n{SERVE_MODE}", env!("CARGO_PKG_DESCRIPTION")
     ),
-    help_template = ROOT_HELP_TEMPLATE
+    help_template = ROOT_HELP_TEMPLATE,
+    max_term_width = 90
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -40,7 +41,10 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Run as a headless remote hosting agents for clients
-    #[command(long_about = SERVE_MODE)]
+    #[command(
+        long_about = SERVE_MODE,
+        after_help = "Set LOG_LEVEL=debug for detailed logs. Terminal colors are automatic; set NO_COLOR to disable them."
+    )]
     Serve(ServeArgs),
 }
 
