@@ -8,13 +8,16 @@
 
 use ratatui::style::{Color, Modifier, Style};
 
-/// The only style in the interface with a background, which is what makes it
-/// unambiguous: wherever a filled bar appears, that is where the keys go.
+/// The cyan bar marks where the keys go.
 pub fn focus() -> Style {
     Style::new()
         .fg(Color::Black)
         .bg(Color::Cyan)
         .add_modifier(Modifier::BOLD)
+}
+
+pub fn inactive_selection() -> Style {
+    Style::new().fg(Color::White).bg(Color::DarkGray)
 }
 
 /// The edge of whatever holds the caret, and marks that invite a second look.

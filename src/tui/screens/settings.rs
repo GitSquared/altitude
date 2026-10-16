@@ -616,6 +616,8 @@ fn draw_columns(frame: &mut Frame, area: Rect, panel: &Panel, view: &View, tick:
             );
             ListItem::new(if rail_focused {
                 row
+            } else if *section == panel.section {
+                row.style(palette::inactive_selection())
             } else {
                 row.style(palette::muted())
             })
