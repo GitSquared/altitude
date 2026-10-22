@@ -3,5 +3,6 @@
 pub mod chrome;
 pub mod loading;
 pub mod palette;
+pub mod select;
 pub mod text;
 pub mod utils;

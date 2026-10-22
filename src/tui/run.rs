@@ -295,10 +295,9 @@ where
                 execute!(io::stdout(), DisableMouseCapture)?;
             }
         }
-        // A second line of intent in the creation question needs shift-enter to
-        // arrive as a key of its own, which is the terminal's to say and only
-        // while it is asked. Held for that page alone, so nothing else has to
-        // read its keys differently.
+        // Answering the creation question is ctrl-enter, which a terminal only
+        // reports as a key of its own under this protocol. Held for that page
+        // alone, so nothing else has to read its keys differently.
         if keys_enhanced != matches!(app.foreground, Foreground::NewTask(_)) {
             keys_enhanced = !keys_enhanced;
             if keys_enhanced {

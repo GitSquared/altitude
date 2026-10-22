@@ -17,18 +17,22 @@
 //! that arrives after the query changed, or after this page closed, is dropped
 //! rather than shown under the wrong question.
 //!
-//! Enter answers the question, and shift-enter is there for a second line of
-//! intent. That needs the terminal to report shift-enter as a key of its own, so
-//! the protocol that says so is asked for while this page is open and given back
-//! with it; a terminal that does not answer leaves enter to do both. Ctrl-shift
-//! (or super-shift) enter is the same answer without closing the page: the task
-//! is made and the question is asked again with the same choices.
+//! The three decisions are pills rather than rows: what is chosen is the thing
+//! you press, and enter opens it into a list you can narrow by typing. They sit
+//! under the prompt, so the list opens up over what has been written rather than
+//! down over the actions.
+//!
+//! Enter is a line in the prompt, because an intent is prose. Answering is
+//! ctrl-enter, so the keys that start a task are never the keys that write one.
+//! It is also the one key here that a terminal has to be told to report as a key
+//! of its own, which is why the page asks for that protocol while it is open.
 //!
 //! The agent's first answer becomes its default. On a fresh installation there
 //! is nothing to default to, and guessing on someone's behalf is not Altitude's
 //! to do.
 
 use std::{
+    mem,
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
@@ -37,13 +41,13 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    style::Style,
     text::{Line, Span},
     widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
 use crate::tui::widgets::{
     chrome, palette,
+    select::{Offer, Select},
     text::TextBox,
     utils::{shimmer, truncate},
 };
@@ -59,12 +63,12 @@ pub(in crate::tui) const AGENTS: [AgentKind; 2] = [AgentKind::Pi, AgentKind::Cla
 
 /// The page's width, as a share of the terminal. Wider than a question about one
 /// value, because the answer to this one is a paragraph.
-const WIDTH_PERCENT: u16 = 64;
-/// Its height, which is the prompt's room plus what the choices and the actions
+const WIDTH_PERCENT: u16 = 70;
+/// Its height, which is the prompt's room plus what the pills and the actions
 /// need. The prompt takes what is left of it.
-const HEIGHT: u16 = 22;
-/// The width of the choices' labels, so their values line up.
-const LABEL_WIDTH: u16 = 14;
+const HEIGHT: u16 = 18;
+/// Between two pills, so they read as three things rather than one strip.
+const PILL_GAP: u16 = 2;
 /// How long a query rests before it is searched, so a word typed a letter at a
 /// time is one search rather than ten.
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
@@ -133,18 +137,15 @@ pub(in crate::tui) struct Submission {
     pub(in crate::tui) agent: AgentKind,
     pub(in crate::tui) host: Option<String>,
     pub(in crate::tui) remember: Option<AgentKind>,
-    pub(in crate::tui) reopen: bool,
 }
 
 /// The question, and the answers so far.
 pub struct NewTask {
     task: TextBox,
-    environments: Vec<Environment>,
-    environment: usize,
-    agent: usize,
-    /// This machine first, then the remotes.
-    hosts: Vec<Host>,
-    host: usize,
+    environment: Select<Environment>,
+    agent: Select<AgentKind>,
+    /// This machine first, then the remotes, by where each is reached.
+    host: Select<Option<String>>,
     /// Whether the agent had never been chosen, in which case this answer is the
     /// one to keep.
     agent_unchosen: bool,
@@ -170,8 +171,8 @@ pub struct NewTask {
     /// The read that is standing between the operator and a created task.
     submission: Option<Submission>,
     /// A submission asked for while the search was still out, waiting for the
-    /// first result. `true` is create-and-another.
-    queued_submit: Option<bool>,
+    /// first result.
+    queued_submit: bool,
     /// A snapshot read that failed, kept so the operator can try again.
     read_error: Option<String>,
 }
@@ -187,8 +188,6 @@ pub enum Answer {
         host: Option<String>,
         /// The agent to remember, when this was the first answer.
         remember: Option<AgentKind>,
-        /// Whether to ask again with the same choices once the task is made.
-        reopen: bool,
     },
     /// Read this issue's snapshot before founding the task. The token says which
     /// submission the snapshot belongs to.
@@ -205,20 +204,37 @@ impl NewTask {
         default_agent: Option<AgentKind>,
         hosts: Vec<Host>,
     ) -> Self {
-        let environment = environments
+        let chosen = environments
             .iter()
             .position(|candidate| candidate.name.eq_ignore_ascii_case(default_environment))
             .unwrap_or(0);
-        let agent = default_agent
-            .and_then(|chosen| AGENTS.iter().position(|candidate| *candidate == chosen))
-            .unwrap_or(0);
+        let environment = Select::new(
+            "Environment",
+            environments
+                .into_iter()
+                .map(|environment| {
+                    let label = environment.name.clone();
+                    Offer::new(environment, label)
+                })
+                .collect(),
+            chosen,
+        );
+        let agent = Select::new(
+            "Agent",
+            AGENTS
+                .iter()
+                .copied()
+                .map(|agent| Offer::new(agent, agent.to_string()))
+                .collect(),
+            default_agent
+                .and_then(|chosen| AGENTS.iter().position(|candidate| *candidate == chosen))
+                .unwrap_or(0),
+        );
         Self {
             task: TextBox::new(""),
-            environments,
             environment,
             agent,
-            hosts,
-            host: 0,
+            host: Select::new("Runs on", host_offers(hosts), 0),
             agent_unchosen: default_agent.is_none(),
             refused: false,
             focus: Focus::Task,
@@ -231,7 +247,7 @@ impl NewTask {
             query_due: None,
             search_in_flight: false,
             submission: None,
-            queued_submit: None,
+            queued_submit: false,
             read_error: None,
         }
     }
@@ -239,28 +255,45 @@ impl NewTask {
     /// Put the machines back in step with what the remotes have answered, keeping
     /// the one the operator chose where it is still offered.
     pub(in crate::tui) fn refresh_hosts(&mut self, hosts: Vec<Host>) {
-        let chosen = self
-            .hosts
-            .get(self.host)
-            .and_then(|host| host.address.clone());
-        self.hosts = hosts;
+        let chosen = self.host.chosen_value().cloned().flatten();
+        self.host.set_offers(host_offers(hosts));
         // A machine that stopped being ready is not kept chosen: the question
         // would otherwise be answered into a delegation that cannot run.
-        let kept = chosen.and_then(|address| {
-            self.hosts
-                .iter()
-                .position(|host| host.address.as_deref() == Some(address.as_str()))
+        let kept = chosen.is_some_and(|address| {
+            self.host.choose_offer(|offer| {
+                offer.ready && offer.value.as_deref() == Some(address.as_str())
+            })
         });
-        self.host = match kept {
-            Some(index) if self.hosts[index].ready => index,
-            _ => 0,
-        };
+        if !kept {
+            self.host.choose(0);
+        }
     }
 
-    /// Whether the intent is taking characters, in which case `?` and `q` are
-    /// characters too.
+    /// Whether something here is taking characters, in which case `?` and `q`
+    /// are characters too.
     pub(in crate::tui) fn is_typing(&self) -> bool {
-        self.focus == Focus::Task
+        self.focus == Focus::Task || self.list_open()
+    }
+
+    /// Whether the focused pill has its list open.
+    fn list_open(&self) -> bool {
+        match self.focus {
+            Focus::Environment => self.environment.is_open(),
+            Focus::Agent => self.agent.is_open(),
+            Focus::Host => self.host.is_open(),
+            _ => false,
+        }
+    }
+
+    /// Whether that list takes a query, rather than only the keys that move
+    /// through it.
+    fn list_searching(&self) -> bool {
+        match self.focus {
+            Focus::Environment => self.environment.is_searching(),
+            Focus::Agent => self.agent.is_searching(),
+            Focus::Host => self.host.is_searching(),
+            _ => false,
+        }
     }
 
     /// Whether a search or a snapshot read is still out, which is what keeps the
@@ -270,37 +303,54 @@ impl NewTask {
     }
 
     /// The keys that work here, for the guidance line. They follow the focus,
-    /// because a second line of intent is only a key while it can be typed.
+    /// because enter is only a new line while the prompt has the caret.
     pub fn hints(&self) -> Vec<chrome::Hint> {
+        // An open list explains itself, because its keys are not the page's.
+        if self.list_open() {
+            let mut hints = Vec::new();
+            if self.list_searching() {
+                hints.push(chrome::Hint::new("type", "narrow"));
+            }
+            hints.push(chrome::Hint::new(
+                if self.list_searching() {
+                    "↑/↓"
+                } else {
+                    "j/k · ↑/↓"
+                },
+                "choose",
+            ));
+            hints.push(chrome::Hint::new("enter", "take it"));
+            hints.push(chrome::Hint::new("esc", "close"));
+            return hints;
+        }
         let mut hints = vec![chrome::Hint::new("tab", "field")];
-        hints.push(if self.is_typing() {
-            chrome::Hint::new("shift-enter", "new line")
-        } else {
-            chrome::Hint::new("←/→", "change")
-        });
+        // Enter does what the thing holding the focus does, so the guidance says
+        // that rather than "activate". In the prompt it needs no saying: it is a
+        // line, and that is what the caret does.
+        match self.focus {
+            Focus::Task => {}
+            Focus::Cancel => hints.push(chrome::Hint::new("enter", "cancel")),
+            Focus::Create => hints.push(chrome::Hint::new("enter", "create")),
+            _ => hints.push(chrome::Hint::new("enter", "open")),
+        }
         hints.push(chrome::Hint::new("ctrl-k", "issue / prompt"));
         if self.issue {
             hints.push(chrome::Hint::new("↑/↓", "result"));
         }
         hints.push(chrome::Hint::new(
-            "enter",
+            "ctrl-enter",
             if self.issue { "link" } else { "create" },
-        ));
-        // The portable chord, because a terminal does not always deliver the
-        // command key macOS would use.
-        hints.push(chrome::Hint::new(
-            "ctrl-shift-enter",
-            if self.issue {
-                "link + keep"
-            } else {
-                "create + keep"
-            },
         ));
         hints.push(chrome::Hint::new("esc", "cancel"));
         hints
     }
 
     pub fn paste(&mut self, text: &str) {
+        // A pasted word narrows the open list rather than landing behind it.
+        if self.list_open() {
+            self.paste_into_list(text);
+            return;
+        }
         if !self.is_typing() {
             return;
         }
@@ -311,11 +361,20 @@ impl NewTask {
         }
     }
 
+    fn paste_into_list(&mut self, text: &str) {
+        match self.focus {
+            Focus::Environment => self.environment.paste(text),
+            Focus::Agent => self.agent.paste(text),
+            Focus::Host => self.host.paste(text),
+            _ => {}
+        }
+    }
+
     /// Whether the question can be answered, and what is missing when it cannot.
     pub fn refusal(&self) -> Option<&'static str> {
         // A read under way, or a submission waiting for the first result, is not
         // a second answer.
-        if self.submission.is_some() || self.queued_submit.is_some() {
+        if self.submission.is_some() || self.queued_submit {
             return None;
         }
         if self.issue {
@@ -334,12 +393,17 @@ impl NewTask {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Answer> {
+        // An open list holds every key, escape included: escape closes the list
+        // rather than the page, which is what a dropdown does everywhere else.
+        if self.list_key(key) {
+            return None;
+        }
         // Escape leaves the question from anywhere. `q` is a letter while the
         // prompt has the keys, and the answer to the question once it does not.
         // A read that has not created anything yet is cancelled with it.
         if key.code == KeyCode::Esc || (key.code == KeyCode::Char('q') && !self.is_typing()) {
             self.submission = None;
-            self.queued_submit = None;
+            self.queued_submit = false;
             return Some(Answer::Cancel);
         }
         // The mode toggle works whether or not the prompt has the caret, because
@@ -352,37 +416,59 @@ impl NewTask {
             self.toggle_mode();
             return None;
         }
-        // Checked before the shift-enter line below, so a chord that means
-        // create-and-continue is never read as a second line.
-        if key.code == KeyCode::Enter
-            && key
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
-            && key.modifiers.contains(KeyModifiers::SHIFT)
-        {
-            return self.answer(true);
+        // The answer is a chord, so it is never a key that writes the intent.
+        if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return self.answer();
         }
         if self.is_typing() {
             return self.prompt_key(key);
         }
         match key.code {
-            KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Tab
+            | KeyCode::Down
+            | KeyCode::Char('j')
+            | KeyCode::Right
+            | KeyCode::Char('l') => {
                 self.move_focus(true);
                 None
             }
-            KeyCode::BackTab | KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::BackTab
+            | KeyCode::Up
+            | KeyCode::Char('k')
+            | KeyCode::Left
+            | KeyCode::Char('h') => {
                 self.move_focus(false);
-                None
-            }
-            KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l') => {
-                self.change(matches!(key.code, KeyCode::Right | KeyCode::Char('l')));
                 None
             }
             KeyCode::Enter => match self.focus {
                 Focus::Cancel => Some(Answer::Cancel),
-                _ => self.answer(false),
+                Focus::Create => self.answer(),
+                // A pill opens rather than choosing: the choice is the list's.
+                _ => {
+                    self.open_list();
+                    None
+                }
             },
             _ => None,
+        }
+    }
+
+    /// Give the key to the pill whose list is open, answering whether one was.
+    fn list_key(&mut self, key: KeyEvent) -> bool {
+        match self.focus {
+            Focus::Environment => self.environment.handle_key(key),
+            Focus::Agent => self.agent.handle_key(key),
+            Focus::Host => self.host.handle_key(key),
+            _ => false,
+        }
+    }
+
+    fn open_list(&mut self) {
+        match self.focus {
+            Focus::Environment => self.environment.open(),
+            Focus::Agent => self.agent.open(),
+            Focus::Host => self.host.open(),
+            _ => {}
         }
     }
 
@@ -390,23 +476,11 @@ impl NewTask {
     /// keys that do something else here are the ones that cannot be typed.
     fn prompt_key(&mut self, key: KeyEvent) -> Option<Answer> {
         match key.code {
-            // A second line, where the terminal can report the modifier. Alt
-            // arrives as an escape prefix in every terminal, so it means the
-            // same thing and is the one that works when shift does not.
-            KeyCode::Enter
-                if key
-                    .modifiers
-                    .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
-            {
-                let before = self.task.value();
-                self.task.handle_key(key);
-                if self.task.value() != before {
-                    self.after_edit();
-                }
-                None
-            }
-            // Enter answers the question, because the prompt is the question.
-            KeyCode::Enter => self.answer(false),
+            // The issue page's prompt is one line of query, so enter is not a
+            // second line there: it does nothing rather than writing a query
+            // Linear cannot search for. Linking is the answer chord, as creating
+            // is on the prompt.
+            KeyCode::Enter if self.issue => None,
             KeyCode::Tab => {
                 self.move_focus(true);
                 None
@@ -472,7 +546,7 @@ impl NewTask {
         self.selected_result = 0;
         self.read_error = None;
         self.submission = None;
-        self.queued_submit = None;
+        self.queued_submit = false;
         self.generation = self.generation.wrapping_add(1);
         self.query_due = None;
         self.search_in_flight = false;
@@ -490,7 +564,7 @@ impl NewTask {
         self.selected_result = 0;
         self.read_error = None;
         self.submission = None;
-        self.queued_submit = None;
+        self.queued_submit = false;
         let has_query = !self.task.value().trim().is_empty();
         self.phase = if has_query {
             IssuePhase::Searching
@@ -551,7 +625,7 @@ impl NewTask {
             }
             Err(error) => {
                 self.phase = IssuePhase::Failed(error);
-                self.queued_submit = None;
+                self.queued_submit = false;
                 None
             }
         }
@@ -566,11 +640,10 @@ impl NewTask {
     /// Answer a submission queued while the search was out, now that there is a
     /// first result. Nothing is read when the search found nothing.
     fn take_queued_submit(&mut self) -> Option<u64> {
-        let reopen = self.queued_submit.take()?;
-        if self.results.is_empty() {
+        if !mem::take(&mut self.queued_submit) || self.results.is_empty() {
             return None;
         }
-        self.begin_submission(reopen)
+        self.begin_submission()
     }
 
     /// Say that there is no credential to search with, which is a state of its
@@ -580,7 +653,7 @@ impl NewTask {
             return;
         }
         self.search_in_flight = false;
-        self.queued_submit = None;
+        self.queued_submit = false;
         self.phase = IssuePhase::Failed(message);
     }
 
@@ -611,24 +684,6 @@ impl NewTask {
         }
     }
 
-    /// Ask again with the same choices once this task is made.
-    pub(in crate::tui) fn reset_for_next(&mut self) {
-        self.task = TextBox::new("");
-        self.generation = self.generation.wrapping_add(1);
-        self.results.clear();
-        self.selected_result = 0;
-        self.read_error = None;
-        self.submission = None;
-        self.queued_submit = None;
-        self.query_due = None;
-        self.search_in_flight = false;
-        self.phase = IssuePhase::Idle;
-        self.refused = false;
-        self.focus = Focus::Task;
-        // A task was just made, so the agent is no longer unchosen.
-        self.agent_unchosen = false;
-    }
-
     fn move_focus(&mut self, forward: bool) {
         let at = ORDER
             .iter()
@@ -640,43 +695,6 @@ impl NewTask {
             (at + ORDER.len() - 1) % ORDER.len()
         };
         self.focus = ORDER[next];
-    }
-
-    fn change(&mut self, forward: bool) {
-        match self.focus {
-            Focus::Environment if !self.environments.is_empty() => {
-                let count = self.environments.len();
-                self.environment = if forward {
-                    (self.environment + 1) % count
-                } else {
-                    (self.environment + count - 1) % count
-                };
-            }
-            // A machine that cannot be given work is stepped over rather than shown
-            // as chosen, because choosing it would mean nothing happens.
-            Focus::Host if self.hosts.len() > 1 => {
-                let count = self.hosts.len();
-                for step in 1..=count {
-                    let candidate = if forward {
-                        (self.host + step) % count
-                    } else {
-                        (self.host + count - step) % count
-                    };
-                    if self.hosts[candidate].ready {
-                        self.host = candidate;
-                        break;
-                    }
-                }
-            }
-            Focus::Agent => {
-                self.agent = if forward {
-                    (self.agent + 1) % AGENTS.len()
-                } else {
-                    (self.agent + AGENTS.len() - 1) % AGENTS.len()
-                };
-            }
-            _ => {}
-        }
     }
 
     fn select_result(&mut self, forward: bool) {
@@ -691,16 +709,16 @@ impl NewTask {
         };
     }
 
-    fn answer(&mut self, reopen: bool) -> Option<Answer> {
+    fn answer(&mut self) -> Option<Answer> {
         if self.issue {
             // A search that is still resting or out is not a lost answer: the
             // submission waits for the first result, keeping the choices made
             // for the environment, the agent and the machine.
-            if self.queued_submit.is_some() {
+            if self.queued_submit {
                 return None;
             }
             if self.is_search_pending() {
-                self.queued_submit = Some(reopen);
+                self.queued_submit = true;
                 return None;
             }
         }
@@ -712,7 +730,7 @@ impl NewTask {
             return None;
         }
         if self.issue {
-            let token = self.begin_submission(reopen)?;
+            let token = self.begin_submission()?;
             return Some(Answer::ReadIssue { token });
         }
         let (environment, agent, host, remember) = self.selections()?;
@@ -722,12 +740,11 @@ impl NewTask {
             agent,
             host,
             remember,
-            reopen,
         })
     }
 
     /// Start reading the chosen issue, remembering what to found when it lands.
-    fn begin_submission(&mut self, reopen: bool) -> Option<u64> {
+    fn begin_submission(&mut self) -> Option<u64> {
         if self.submission.is_some() {
             return None;
         }
@@ -742,15 +759,14 @@ impl NewTask {
             agent,
             host,
             remember,
-            reopen,
         });
         Some(token)
     }
 
     fn selections(&self) -> Option<(Environment, AgentKind, Option<String>, Option<AgentKind>)> {
-        let environment = self.environments.get(self.environment)?.clone();
-        let agent = AGENTS[self.agent];
-        let host = self.hosts.get(self.host)?.address.clone();
+        let environment = self.environment.chosen_value()?.clone();
+        let agent = *self.agent.chosen_value()?;
+        let host = self.host.chosen_value()?.clone();
         Some((
             environment,
             agent,
@@ -759,28 +775,34 @@ impl NewTask {
         ))
     }
 
-    /// What the machine this task would run on is called, as the operator reads it.
-    fn host_label(&self) -> String {
-        self.hosts
-            .get(self.host)
-            .map_or_else(|| "this machine".to_owned(), |host| host.label.clone())
+    /// The open list, over the prompt above the pill it belongs to.
+    fn draw_open_list(&self, frame: &mut Frame, area: Rect, anchors: [Rect; 3]) {
+        match self.focus {
+            Focus::Environment if self.environment.is_open() => {
+                self.environment.draw_list(frame, area, anchors[0]);
+            }
+            Focus::Agent if self.agent.is_open() => {
+                self.agent.draw_list(frame, area, anchors[1]);
+            }
+            Focus::Host if self.host.is_open() => {
+                self.host.draw_list(frame, area, anchors[2]);
+            }
+            _ => {}
+        }
     }
+}
 
-    /// Whether that machine can be given work, which is what its value's colour
-    /// says.
-    fn host_is_ready(&self) -> bool {
-        self.hosts.get(self.host).is_some_and(|host| host.ready)
-    }
-
-    fn environment_name(&self) -> &str {
-        self.environments
-            .get(self.environment)
-            .map_or("", |environment| environment.name.as_str())
-    }
-
-    fn agent_name(&self) -> String {
-        AGENTS[self.agent].to_string()
-    }
+/// The machines, as offers: one that cannot be given work is listed all the
+/// same, because the reason it cannot is worth reading on its own pill.
+fn host_offers(hosts: Vec<Host>) -> Vec<Offer<Option<String>>> {
+    hosts
+        .into_iter()
+        .map(|host| Offer {
+            value: host.address,
+            label: host.label,
+            ready: host.ready,
+        })
+        .collect()
 }
 
 pub fn draw(frame: &mut Frame, area: Rect, new_task: &NewTask, tick: Option<usize>) -> Rect {
@@ -796,35 +818,34 @@ pub fn draw(frame: &mut Frame, area: Rect, new_task: &NewTask, tick: Option<usiz
     if inner.height < 8 {
         return popup;
     }
+    // The pills sit under the prompt rather than over it: the question is
+    // written first, and what it will run as reads as a footer to it.
+    let [label, body, _, pills, actions] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(4),
+        Constraint::Length(1),
+        Constraint::Length(3),
+        Constraint::Length(3),
+    ])
+    .areas(inner);
+    frame.render_widget(
+        Line::styled(
+            if new_task.issue { "Issue" } else { "Prompt" },
+            palette::muted(),
+        ),
+        label,
+    );
+    let anchors = draw_choices(frame, pills, new_task);
     if new_task.issue {
-        let [label, body, choices, actions] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(6),
-            Constraint::Length(3),
-            Constraint::Length(3),
-        ])
-        .areas(inner);
-        frame.render_widget(Line::styled("Issue", palette::muted()), label);
         let [query, results] =
-            Layout::vertical([Constraint::Length(3), Constraint::Min(4)]).areas(body);
+            Layout::vertical([Constraint::Length(3), Constraint::Min(3)]).areas(body);
         new_task.task.draw(frame, query, new_task.is_typing());
         draw_issue(frame, results, new_task, tick);
-        draw_choices(frame, choices, new_task, true);
-        draw_actions(frame, actions, new_task);
     } else {
-        let [label, prompt, choices, actions] = Layout::vertical([
-            Constraint::Length(1),
-            // The prompt takes what is left, because it is the part that is written.
-            Constraint::Min(3),
-            Constraint::Length(6),
-            Constraint::Length(3),
-        ])
-        .areas(inner);
-        frame.render_widget(Line::styled("Task", palette::muted()), label);
-        new_task.task.draw(frame, prompt, new_task.is_typing());
-        draw_choices(frame, choices, new_task, false);
-        draw_actions(frame, actions, new_task);
+        new_task.task.draw(frame, body, new_task.is_typing());
     }
+    draw_actions(frame, actions, new_task);
+    new_task.draw_open_list(frame, body, anchors);
     popup
 }
 
@@ -837,7 +858,6 @@ fn draw_issue(frame: &mut Frame, area: Rect, new_task: &NewTask, tick: Option<us
         .or_else(|| {
             new_task
                 .queued_submit
-                .is_some()
                 .then(|| Line::styled("linking the first result…", palette::attention()))
         });
     let [note_area, body] = Layout::vertical([
@@ -914,74 +934,46 @@ fn result_line(summary: &IssueSummary, width: usize, focused: bool) -> Line<'sta
     Line::from(spans)
 }
 
-/// Where it runs, and what drives it: one decision a line, each named.
-fn draw_choices(frame: &mut Frame, area: Rect, new_task: &NewTask, compact: bool) {
-    let rows = if compact {
-        area
+/// The three decisions, as pills: what is chosen is what you press.
+fn draw_choices(frame: &mut Frame, area: Rect, new_task: &NewTask) -> [Rect; 3] {
+    let named = [
+        new_task.environment.pill_width(true),
+        new_task.agent.pill_width(true),
+        new_task.host.pill_width(true),
+    ];
+    let valued = [
+        new_task.environment.pill_width(false),
+        new_task.agent.pill_width(false),
+        new_task.host.pill_width(false),
+    ];
+    let available = area.width.saturating_sub(PILL_GAP * 2);
+    // A pill is its value first: a row too narrow for the names keeps what each
+    // one is set to, and the open list says which decision it belongs to.
+    let (widths, with_name) = if named.iter().sum::<u16>() <= available {
+        (named, true)
+    } else if valued.iter().sum::<u16>() <= available {
+        (valued, false)
     } else {
-        let [_, rows, _] = Layout::vertical([
-            Constraint::Length(2),
-            Constraint::Length(3),
-            Constraint::Min(0),
-        ])
-        .areas(area);
-        rows
+        ([available / 3; 3], false)
     };
-    let [environment, agent, host] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
+    let [environment, agent, host] = Layout::horizontal([
+        Constraint::Length(widths[0]),
+        Constraint::Length(widths[1]),
+        Constraint::Length(widths[2]),
     ])
-    .areas(rows);
-
-    choice(
-        frame,
-        environment,
-        "Environment",
-        new_task.environment_name(),
-        new_task.focus == Focus::Environment,
-        palette::accent(),
-    );
-    choice(
-        frame,
-        agent,
-        "Agent",
-        &new_task.agent_name(),
-        new_task.focus == Focus::Agent,
-        palette::accent(),
-    );
-    // A machine that cannot be given work is drawn as it is rather than hidden: the
-    // reason it is not offered is worth reading.
-    let unfocused = if new_task.host_is_ready() {
-        palette::accent()
-    } else {
-        palette::attention()
-    };
-    choice(
-        frame,
-        host,
-        "Runs on",
-        &new_task.host_label(),
-        new_task.focus == Focus::Host,
-        unfocused,
-    );
-}
-
-/// One decision: what it is called, and what it is set to.
-fn choice(
-    frame: &mut Frame,
-    area: Rect,
-    label: &str,
-    value: &str,
-    focused: bool,
-    unfocused: Style,
-) {
-    let [name, held] =
-        Layout::horizontal([Constraint::Length(LABEL_WIDTH), Constraint::Min(0)]).areas(area);
-    frame.render_widget(Line::styled(label, palette::muted()), name);
-    let style = if focused { palette::focus() } else { unfocused };
-    let value = truncate(&format!(" ‹ {value} › "), usize::from(held.width));
-    frame.render_widget(Line::styled(value, style), held);
+    .spacing(PILL_GAP)
+    .areas(area);
+    let focused = new_task.focus;
+    new_task
+        .environment
+        .draw_pill(frame, environment, focused == Focus::Environment, with_name);
+    new_task
+        .agent
+        .draw_pill(frame, agent, focused == Focus::Agent, with_name);
+    new_task
+        .host
+        .draw_pill(frame, host, focused == Focus::Host, with_name);
+    [environment, agent, host]
 }
 
 /// The actions, and what is missing when they cannot be taken.

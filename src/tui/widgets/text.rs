@@ -15,6 +15,7 @@ use ratatui::{
     text::Line,
     widgets::{Block, BorderType, Padding, Paragraph},
 };
+use unicode_width::UnicodeWidthChar;
 
 /// How a field should be drawn.
 pub struct FieldStyle<'a> {
@@ -238,8 +239,12 @@ impl TextBox {
         }
     }
 
-    /// Draws a bordered box holding these lines, scrolled to keep the caret in
-    /// view.
+    /// Draws a bordered box holding these lines, wrapped to its width and
+    /// scrolled to keep the caret in view.
+    ///
+    /// Wrapping is the box's, not the paragraph's, because the caret has to land
+    /// on the character it belongs to: a renderer that wraps on its own knows
+    /// where the text went and not where the caret should follow it.
     pub fn draw(&self, frame: &mut Frame, area: Rect, focused: bool) {
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
@@ -250,23 +255,55 @@ impl TextBox {
         if inner.height == 0 || inner.width == 0 {
             return;
         }
+        let rows = self.rows(usize::from(inner.width));
+        // The caret's row, not the caret's line: a long paragraph is several
+        // rows, and scrolling by line would leave the caret off screen.
+        let caret = rows
+            .iter()
+            .position(|row| row.line == self.row && row.end >= self.column)
+            .unwrap_or(rows.len().saturating_sub(1));
         let visible = usize::from(inner.height);
-        let offset = self.row.saturating_sub(visible.saturating_sub(1));
-        let text: Vec<Line> = self
-            .lines
+        let offset = caret.saturating_sub(visible.saturating_sub(1));
+        let text: Vec<Line> = rows
             .iter()
             .skip(offset)
             .take(visible)
-            .map(|line| Line::from(line.clone()))
+            .map(|row| {
+                Line::from(
+                    self.lines[row.line]
+                        .chars()
+                        .skip(row.start)
+                        .take(row.end - row.start)
+                        .collect::<String>(),
+                )
+            })
             .collect();
         frame.render_widget(Paragraph::new(text), inner);
         if focused {
-            let before_caret = &self.lines[self.row][..self.byte_column()];
+            let row = &rows[caret];
+            let before_caret = self.lines[row.line]
+                .chars()
+                .skip(row.start)
+                .take(self.column - row.start)
+                .collect::<String>();
             frame.set_cursor_position((
                 inner.x + Line::from(before_caret).width() as u16,
-                inner.y + (self.row - offset) as u16,
+                inner.y + (caret - offset) as u16,
             ));
         }
+    }
+
+    /// The lines as they are drawn at `width`, in rows rather than lines.
+    fn rows(&self, width: usize) -> Vec<Row> {
+        self.lines
+            .iter()
+            .enumerate()
+            .flat_map(|(line, text)| {
+                wrap(text, width)
+                    .into_iter()
+                    .map(move |(start, end)| Row { line, start, end })
+            })
+            .collect()
     }
 
     fn byte_column(&self) -> usize {
@@ -275,6 +312,54 @@ impl TextBox {
             .nth(self.column)
             .map_or(self.lines[self.row].len(), |(index, _)| index)
     }
+}
+
+/// One drawn row of a box: a stretch of one of its lines, by character.
+struct Row {
+    line: usize,
+    start: usize,
+    end: usize,
+}
+
+/// Where `text` breaks to fit `width` terminal columns, as character ranges.
+///
+/// Breaks after the last space that fits, so a paragraph wraps between words;
+/// with no space in reach it breaks at the column, because a URL is still one
+/// word. The space broken at is not drawn again, so a wrapped paragraph does
+/// not gain a leading space.
+fn wrap(text: &str, width: usize) -> Vec<(usize, usize)> {
+    let characters: Vec<char> = text.chars().collect();
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    let mut start = 0;
+    while start < characters.len() {
+        let mut cells = 0;
+        let mut space = None;
+        let mut end = characters.len();
+        let mut index = start;
+        while index < characters.len() {
+            let character_width = characters[index].width().unwrap_or(0);
+            if cells + character_width > width {
+                end = space.unwrap_or(index).max(start + 1);
+                break;
+            }
+            cells += character_width;
+            if characters[index] == ' ' {
+                space = Some(index);
+            }
+            index += 1;
+        }
+        rows.push((start, end));
+        start = if characters.get(end) == Some(&' ') {
+            end + 1
+        } else {
+            end.max(start + 1)
+        };
+    }
+    if rows.is_empty() {
+        rows.push((0, 0));
+    }
+    rows
 }
 
 /// The border a field or box wears, so it is obvious which one has the caret.

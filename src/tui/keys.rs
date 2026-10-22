@@ -107,16 +107,26 @@ pub fn help_sections() -> Vec<HelpSection> {
         HelpSection {
             title: "Task creation",
             bindings: &[
-                ("Enter", "Start work using the displayed settings"),
+                ("Ctrl-Enter", "Start work using the displayed settings"),
+                ("Enter (prompt)", "Add a line to the prompt"),
+                ("Enter (pill)", "Open the choices"),
                 (
-                    "Ctrl/Cmd-Shift-Enter",
-                    "Start work and keep the creation window open",
+                    "j/k · ↑/↓ · Enter/Esc",
+                    "Move through the open list, take or close it",
+                ),
+                (
+                    "Letters (five choices or more)",
+                    "Narrow the open list instead of moving in it",
                 ),
                 ("Ctrl/Cmd-K", "Switch between an issue search and a prompt"),
-                ("Shift/Alt-Enter", "Add a line to the prompt"),
-                ("Tab / Shift-Tab", "Move between the prompt and settings"),
-                ("j/k · ↓/↑ (settings)", "Move between fields"),
-                ("h/l · ←/→ (settings)", "Change the selected setting"),
+                (
+                    "Tab / Shift-Tab",
+                    "Move between the prompt, pills and actions",
+                ),
+                (
+                    "j/k · ←/→ · ↓/↑",
+                    "Move between the prompt, pills and actions",
+                ),
                 ("↓ / ↑ (issue search)", "Select a search result"),
                 ("Esc", "Cancel; q also cancels outside a text field"),
             ],

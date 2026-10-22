@@ -2668,7 +2668,6 @@ impl App {
                 agent,
                 host,
                 remember,
-                reopen,
             }) => {
                 // The first answer becomes the default, because there was nothing
                 // to default to and guessing is not Altitude's to do.
@@ -2687,10 +2686,6 @@ impl App {
                     ),
                     // Founded here, so whose work it is needs no saying.
                     None => event_loop.create(task, environment, agent, None),
-                }
-                if reopen {
-                    question.reset_for_next();
-                    self.foreground = Foreground::NewTask(question);
                 }
             }
             // The prompt stays in front, reading the issue: the operator sees the
@@ -2830,13 +2825,7 @@ impl App {
                         );
                     }
                 }
-                if submission.reopen {
-                    if let Foreground::NewTask(question) = &mut self.foreground {
-                        question.reset_for_next();
-                    }
-                } else {
-                    self.foreground = Foreground::Tasks;
-                }
+                self.foreground = Foreground::Tasks;
             }
             Err(error) => {
                 if let Foreground::NewTask(question) = &mut self.foreground {
