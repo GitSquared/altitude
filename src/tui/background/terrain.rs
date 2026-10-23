@@ -3,7 +3,7 @@
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
 };
 
 pub fn draw(frame: &mut Frame, area: Rect, tick: usize) {
@@ -32,7 +32,6 @@ pub fn draw(frame: &mut Frame, area: Rect, tick: usize) {
     for row in 0..area.height {
         for column in 0..area.width {
             let mut dots = 0;
-            let mut highest_level = 0.0_f32;
             for (dot_row, row_dots) in DOTS.iter().enumerate() {
                 for (dot_column, dot) in row_dots.iter().enumerate() {
                     let pixel_x = usize::from(column) * 2 + dot_column;
@@ -49,25 +48,23 @@ pub fn draw(frame: &mut Frame, area: Rect, tick: usize) {
                     let level = (minimum * 8.0).floor().max(0.0) + 1.0;
                     if level <= maximum * 8.0 {
                         dots |= *dot;
-                        highest_level = highest_level.max(level);
                     }
                 }
             }
             if dots == 0 {
                 continue;
             }
-            let shade = highest_level.min(8.0) as u8;
-            // One hue only — grey — so the field reads as background rather than
-            // as another status colour, and dark enough that the interface on top
-            // stays the brightest thing on screen.
-            let value = 22 + shade * 6;
-            let color = Color::Rgb(value, value, value);
             let symbol = char::from_u32(0x2800 + u32::from(dots))
                 .expect("braille dots always form a Unicode scalar")
                 .to_string();
+            // The theme's own foreground, dimmed rather than painted in greys of
+            // our choosing: a contour field should sit a shade off the background
+            // whichever background the operator has, and only the terminal knows
+            // what that is.
+            let style = Style::new().fg(Color::Reset).add_modifier(Modifier::DIM);
             buffer[(area.x + column, area.y + row)]
                 .set_symbol(&symbol)
-                .set_style(Style::new().fg(color));
+                .set_style(style);
         }
     }
 }

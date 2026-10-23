@@ -2,9 +2,15 @@
 //!
 //! Every style the interface draws with comes from here, named for its role
 //! rather than its colour, so a screen that means "this failed" asks for
-//! [`bad`] and cannot quietly decide that red means something else. The colours
-//! themselves are the terminal's own, so the theme an operator has already
-//! chosen is the one they see.
+//! [`bad`] and cannot quietly decide that red means something else.
+//!
+//! The terminal's theme decides, as far as it can: where a role means "this is
+//! content" or "this is furniture", it asks for the theme's own foreground,
+//! normal or dimmed, rather than naming a colour that is only right on one
+//! background. A colour is named only where the meaning *is* the colour (good,
+//! waiting, failed) or where a fill has to sit under the interface (focus,
+//! pressed) — those are the three roles that would need a background colour to
+//! do their job, and the terminal has already chosen one.
 
 use ratatui::style::{Color, Modifier, Style};
 
@@ -16,16 +22,10 @@ pub fn focus() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-/// The answer a modal is asking for: a filled block, so it reads as the one to
-/// take even while the keys are somewhere else.
-pub fn answer() -> Style {
-    Style::new().fg(Color::Black).bg(Color::Cyan)
-}
-
-/// A filled thing holding the keys: the terminal's own colours turned over, so
-/// it cannot be mistaken for the answer's fill. Turning the theme's own colours
-/// over, rather than naming two, is what keeps this visible on a light terminal
-/// as well as a dark one.
+/// A thing holding the keys: the terminal's own colours turned over. Turning
+/// them over rather than naming two is what keeps this visible on a light
+/// terminal as well as a dark one, and it is the one focus cue this interface
+/// uses on anything filled.
 pub fn pressed() -> Style {
     Style::new().add_modifier(Modifier::REVERSED)
 }
@@ -41,16 +41,20 @@ pub fn accent() -> Style {
 
 /// What you are looking at, named.
 ///
-/// White rather than the accent, because the accent is for the edge of the thing you
-/// are on: a heading is not a caret, and a screen whose headings and focus share a
-/// colour makes you look for the caret.
+/// The theme's own foreground rather than the accent, because the accent is for
+/// the edge of the thing you are on: a heading is not a caret, and a screen whose
+/// headings and focus share a colour makes you look for the caret.
 pub fn heading() -> Style {
-    Style::new().fg(Color::White).add_modifier(Modifier::BOLD)
+    Style::new().fg(Color::Reset).add_modifier(Modifier::BOLD)
 }
 
 /// Text that is the point of the screen rather than its furniture.
+///
+/// The theme's foreground at full strength. Its difference from [`muted`] is the
+/// difference between a value and the word naming it, so it has to be the same
+/// colour the rest of the terminal writes in.
 pub fn primary() -> Style {
-    Style::new().fg(Color::White)
+    Style::new().fg(Color::Reset)
 }
 
 /// The interface talking about itself: hints, labels, metadata.
@@ -79,13 +83,15 @@ pub fn bad() -> Style {
 
 /// The travelling highlight on text that is waiting.
 ///
-/// Greys rather than a colour, because waiting is not a status: nothing is
-/// wrong and nothing is finished, and a coloured word would claim otherwise.
+/// The theme's own foreground rather than a colour, because waiting is not a
+/// status: nothing is wrong and nothing is finished, and a coloured word would
+/// claim otherwise.
 pub fn waiting() -> Style {
-    Style::new().fg(Color::Gray)
+    Style::new().fg(Color::Reset)
 }
 
-/// The text the waiting highlight travels over.
+/// The text the waiting highlight travels over: the same foreground, dimmed, so
+/// the highlight is a brightness rather than a second colour.
 pub fn waiting_rest() -> Style {
-    Style::new().fg(Color::DarkGray)
+    Style::new().fg(Color::Reset).add_modifier(Modifier::DIM)
 }
