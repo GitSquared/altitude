@@ -1,10 +1,8 @@
 //! A quiet contour field for the space around Altitude's work.
 
-use ratatui::{
-    Frame,
-    layout::Rect,
-    style::{Color, Modifier, Style},
-};
+use ratatui::{Frame, layout::Rect};
+
+use crate::tui::widgets::palette;
 
 pub fn draw(frame: &mut Frame, area: Rect, tick: usize) {
     if area.width < 8 || area.height < 4 {
@@ -57,14 +55,9 @@ pub fn draw(frame: &mut Frame, area: Rect, tick: usize) {
             let symbol = char::from_u32(0x2800 + u32::from(dots))
                 .expect("braille dots always form a Unicode scalar")
                 .to_string();
-            // The theme's own foreground, dimmed rather than painted in greys of
-            // our choosing: a contour field should sit a shade off the background
-            // whichever background the operator has, and only the terminal knows
-            // what that is.
-            let style = Style::new().fg(Color::Reset).add_modifier(Modifier::DIM);
             buffer[(area.x + column, area.y + row)]
                 .set_symbol(&symbol)
-                .set_style(style);
+                .set_style(palette::backdrop());
         }
     }
 }

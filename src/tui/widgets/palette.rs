@@ -1,16 +1,19 @@
 //! What colour means, in one place.
 //!
-//! Every style the interface draws with comes from here, named for its role
-//! rather than its colour, so a screen that means "this failed" asks for
-//! [`bad`] and cannot quietly decide that red means something else.
+//! The palette is the terminal's own. It has sixteen colours, and a theme picks
+//! them to be legible on the background it also picked, so they are the only
+//! hues named here; each hue has a base half and a bright half, which is the
+//! shade scale this interface uses rather than hand-picked greys. Anything that
+//! is simply text asks for the terminal's foreground instead of naming a
+//! colour, because the terminal is the only thing that knows what colour its
+//! text is.
 //!
-//! The terminal's theme decides, as far as it can: where a role means "this is
-//! content" or "this is furniture", it asks for the theme's own foreground,
-//! normal or dimmed, rather than naming a colour that is only right on one
-//! background. A colour is named only where the meaning *is* the colour (good,
-//! waiting, failed) or where a fill has to sit under the interface (focus,
-//! pressed) — those are the three roles that would need a background colour to
-//! do their job, and the terminal has already chosen one.
+//! Nothing here is RGB. A sixteen-colour terminal is the floor, and it is a
+//! good floor: it already knows what "quiet" looks like on its own background.
+//!
+//! Roles are named for what they mean rather than how they look, so a screen
+//! that means "this failed" asks for [`bad`] and cannot quietly decide that red
+//! means something else.
 
 use ratatui::style::{Color, Modifier, Style};
 
@@ -31,7 +34,7 @@ pub fn pressed() -> Style {
 }
 
 pub fn inactive_selection() -> Style {
-    Style::new().fg(Color::White).bg(Color::DarkGray)
+    Style::new().fg(Color::Reset).bg(Color::DarkGray)
 }
 
 /// The edge of whatever holds the caret, and marks that invite a second look.
@@ -57,13 +60,24 @@ pub fn primary() -> Style {
     Style::new().fg(Color::Reset)
 }
 
-/// The interface talking about itself: hints, labels, metadata.
+/// The interface talking about itself: hints, labels, and the name of a value.
 ///
-/// The foreground is named even though it is the terminal's own, so text drawn
-/// over a coloured backdrop takes the default colour back rather than inheriting
-/// whatever the backdrop left in the cell.
+/// The dim half of the text colour — ANSI 8 — rather than the terminal's own
+/// foreground dimmed, because a terminal is allowed to ignore the dim attribute,
+/// and a name that looks exactly like the value it names is worse than a shade
+/// that is a little too loud.
 pub fn muted() -> Style {
-    Style::new().fg(Color::Reset).add_modifier(Modifier::DIM)
+    Style::new().fg(Color::DarkGray)
+}
+
+/// The field behind everything: one shade quieter than furniture, because it is
+/// the background rather than something on it.
+///
+/// The dim attribute on top of [`muted`] is what makes it a shade below the
+/// sixteen; a terminal that ignores it still draws the quiet shade, which is
+/// closer to the background than the text is on either kind of terminal.
+pub fn backdrop() -> Style {
+    muted().add_modifier(Modifier::DIM)
 }
 
 /// Work that is going well: running, accepted, in review.
@@ -90,8 +104,8 @@ pub fn waiting() -> Style {
     Style::new().fg(Color::Reset)
 }
 
-/// The text the waiting highlight travels over: the same foreground, dimmed, so
-/// the highlight is a brightness rather than a second colour.
+/// The text the waiting highlight travels over: the same quiet shade as
+/// furniture, so the highlight is a brightness rather than a second colour.
 pub fn waiting_rest() -> Style {
-    Style::new().fg(Color::Reset).add_modifier(Modifier::DIM)
+    muted()
 }
