@@ -139,10 +139,16 @@ where
                 let engine = self.agents.engine(kind);
                 let conversation_id = self.agent_conversation(&task, resume).await?;
                 // A task the host woke because a linked pull request needed
-                // attention carries why; anything else is an ordinary resume.
+                // attention carries why. Anything else is a paused capsule coming
+                // back, whose last turn may be days old by now, so the agent is
+                // told what happened to it rather than simply asked to resume.
                 let prompt = task.facts.review_wake_reason.clone().unwrap_or_else(|| {
                     if resume {
-                        "Resume the task and continue making progress.".to_owned()
+                        "Altitude paused this task and restored its capsule from a snapshot. You \
+                         are continuing the same conversation, and the current time is in the \
+                         context below. Review the conversation and workspace state, then continue \
+                         the task where it left off."
+                            .to_owned()
                     } else {
                         task.facts.intent.clone()
                     }
