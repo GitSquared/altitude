@@ -2,7 +2,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 use crate::{
-    isolation::{EnvironmentRecipe, GuestPath, PersistentDirectory, shell_quote},
+    isolation::{EnvironmentRecipe, GuestPath, PersistentDirectory, SignInCommand, shell_quote},
     vcs::{
         CodeContribution, ContributionObservation, ContributionState, MergeStanding, VcsProvider,
         VcsProviderKind,
@@ -28,7 +28,10 @@ impl VcsProvider for GitHub {
         EnvironmentRecipe {
             profile: "vcs/github",
             display: "GitHub",
-            sign_in: "Run gh auth login and follow its sign-in instructions.",
+            sign_in: "Follow the GitHub CLI's sign-in instructions.",
+            // The one profile whose sign-in is a command of its own: it finishes,
+            // and the terminal with it.
+            sign_in_command: SignInCommand::Direct("exec gh auth login"),
             // The one profile whose CLI can be asked, and answers with the account and
             // the token's scopes.
             status_command: "gh auth status",

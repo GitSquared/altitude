@@ -23,9 +23,10 @@ use crate::isolation::Environment;
 
 use super::{
     BaseSandboxRecipe, BaseSandboxSnapshot, CREDENTIAL_PREFIX, Command, CommandEvent,
-    CommandSession, CredentialReport, EnvironmentDescription, EnvironmentProgress,
-    EnvironmentProgressSink, EnvironmentRecipe, IsolationEngine, IsolationError, IsolationStatus,
-    OutputStream, SandboxOptions, SetupStep, VsockRoute, WATCHER_PREFIX,
+    CommandSession, CredentialCheck, CredentialReport, CredentialSandbox, EnvironmentDescription,
+    EnvironmentProgress, EnvironmentProgressSink, EnvironmentRecipe, IsolationEngine,
+    IsolationError, IsolationStatus, OutputStream, SandboxOptions, SetupStep, VsockRoute,
+    WATCHER_PREFIX,
     environment::{self, REFRESH_AFTER, private_directory},
     mount_git_cache, trust_host_roots,
 };
@@ -676,22 +677,11 @@ impl IsolationEngine for MicrosandboxIsolation {
 
     async fn credential_shell(
         &self,
-        id: String,
-        environment: Environment,
-        recipes: Vec<EnvironmentRecipe>,
+        sandbox: CredentialSandbox,
         profile: &'static str,
         progress: &dyn EnvironmentProgressSink,
     ) -> Result<String, IsolationError> {
-        environment::credential_shell(
-            self,
-            &self.config,
-            id,
-            environment,
-            recipes,
-            profile,
-            progress,
-        )
-        .await
+        environment::credential_shell(self, &self.config, sandbox, profile, progress).await
     }
 
     async fn watcher(
@@ -704,44 +694,26 @@ impl IsolationEngine for MicrosandboxIsolation {
         environment::watcher(self, &self.config, id, environment, recipes, progress).await
     }
 
-    fn environment_built(&self, environment: Environment, recipes: Vec<EnvironmentRecipe>) -> bool {
-        let Ok(recipe) = environment::composed_recipe(&self.config, environment, recipes) else {
-            return false;
-        };
-        let store = BaseSandboxSnapshotStore::new(&recipe);
-        let current = store.current().ok().flatten();
-        // The same question `ensure_snapshot` asks, minus the build it would do about
-        // it: a child is rebuilt when its workspace base is newer than it.
-        let workspace_newer =
-            BaseSandboxSnapshotStore::at(self.config.workspace_snapshots_dir(), REFRESH_AFTER)
-                .current()
-                .ok()
-                .flatten()
-                .zip(current.as_ref())
-                .is_some_and(|(workspace, current)| {
-                    workspace.created_at_ms > current.created_at_ms
-                });
-        !workspace_newer && !store.needs_refresh(current.as_ref(), &recipe.setup_command())
-    }
-
-    async fn credential_report(
+    fn environment_snapshot(
         &self,
-        id: String,
         environment: Environment,
         recipes: Vec<EnvironmentRecipe>,
-        command: String,
+    ) -> Option<String> {
+        let recipe = environment::composed_recipe(&self.config, environment, recipes).ok()?;
+        let snapshot = BaseSandboxSnapshotStore::new(&recipe)
+            .current()
+            .ok()
+            .flatten()?;
+        Some(snapshot.path.to_string_lossy().into_owned())
+    }
+
+    async fn credential_reports(
+        &self,
+        sandbox: CredentialSandbox,
+        checks: Vec<CredentialCheck>,
         progress: &dyn EnvironmentProgressSink,
-    ) -> Result<CredentialReport, IsolationError> {
-        environment::credential_report(
-            self,
-            &self.config,
-            id,
-            environment,
-            recipes,
-            command,
-            progress,
-        )
-        .await
+    ) -> Result<Option<Vec<(&'static str, CredentialReport)>>, IsolationError> {
+        environment::credential_reports(self, &self.config, sandbox, checks, progress).await
     }
 
     async fn remove_leftover_sandboxes(&self) {

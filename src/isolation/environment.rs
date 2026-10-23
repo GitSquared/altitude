@@ -10,9 +10,9 @@ use std::{
 use crate::config::Config;
 
 use super::{
-    BaseSandboxRecipe, BaseSandboxSnapshot, CommandEvent, CredentialReport,
-    EnvironmentProgressSink, IsolationEngine, IsolationError, SandboxMount, SandboxOptions,
-    SandboxSize, SetupStep, VsockRoute,
+    BaseSandboxRecipe, BaseSandboxSnapshot, CommandEvent, CredentialCheck, CredentialReport,
+    CredentialSandbox, EnvironmentProgressSink, IsolationEngine, IsolationError, SandboxMount,
+    SandboxOptions, SandboxSize, SetupStep, VsockRoute,
 };
 
 /// The current Alpine environment runs as root, so home-relative requirements
@@ -22,6 +22,35 @@ const GUEST_HOME: &str = "/root";
 const OPENER: &str = "/usr/local/bin/xdg-open";
 pub const REFRESH_AFTER: Duration = Duration::from_secs(72 * 60 * 60);
 
+/// What a credential shell runs to sign a profile in.
+///
+/// It replaces the login shell the sandbox would otherwise open, so the operator
+/// lands in the CLI's own sign-in rather than at a prompt to type it into.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignInCommand {
+    /// A command that signs in and exits on its own, so the terminal lasts exactly
+    /// as long as the sign-in does.
+    Direct(&'static str),
+    /// A CLI whose own interface has to be driven, so the operator is told what to
+    /// do there before the terminal opens.
+    Interactive(&'static str),
+}
+
+impl SignInCommand {
+    /// The command a credential shell runs.
+    pub fn command(self) -> &'static str {
+        match self {
+            Self::Direct(command) | Self::Interactive(command) => command,
+        }
+    }
+
+    /// Whether the sign-in is a screen the operator drives rather than a command
+    /// that finishes on its own.
+    pub fn is_interactive(self) -> bool {
+        matches!(self, Self::Interactive(_))
+    }
+}
+
 /// Knowledge supplied by an agent or VCS module. No host I/O or lifecycle hooks.
 #[derive(Clone)]
 pub struct EnvironmentRecipe {
@@ -30,7 +59,10 @@ pub struct EnvironmentRecipe {
     /// What this profile is called where an operator reads it, which is the name
     /// the settings list shows and the shell that sets it up names.
     pub display: &'static str,
+    /// What the operator does to sign in, said before a sign-in they have to drive.
     pub sign_in: &'static str,
+    /// What a credential shell runs instead of a login prompt.
+    pub sign_in_command: SignInCommand,
     /// A command that exits 0 when this profile is signed in, and prints what it
     /// found. Run in a sandbox with the profile mounted, so it sees the login a task
     /// would see and never its contents: what it prints is what an operator reads.
@@ -131,17 +163,34 @@ impl EnvironmentPlan {
             .validate()
             .map_err(|error| IsolationError::new(error.to_string()))?;
         let environment_name = environment.name;
+        // Each contributor to the build is its own step, so a task waiting on a cold
+        // environment can say what it is waiting for. The commands are also what the
+        // build is, and so what names its snapshot.
+        let mut steps = vec![SetupStep::new(
+            format!("preparing the {environment_name} environment"),
+            environment.setup_command,
+        )];
+        for recipe in &recipes {
+            steps.push(SetupStep::new(recipe.label, recipe.setup_command));
+        }
+        let identity = steps
+            .iter()
+            .map(|step| step.command.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let tag = blake3::hash(identity.as_bytes()).to_hex()[..12].to_owned();
         let mut plan = Self {
             recipe: BaseSandboxRecipe::new(
                 format!("coding-{environment_name}"),
-                config.environment_snapshots_dir(&environment_name),
+                // Two compositions of the same environment name are two different
+                // builds — a sign-in's narrower one and the one tasks run on — and a
+                // store shared between them would have each replace the other's
+                // snapshot.
+                config
+                    .environment_snapshots_dir(&environment_name)
+                    .join(tag),
                 REFRESH_AFTER,
-                // Each contributor to the build is its own step, so a task
-                // waiting on a cold environment can say what it is waiting for.
-                vec![SetupStep::new(
-                    format!("preparing the {environment_name} environment"),
-                    environment.setup_command,
-                )],
+                steps,
             ),
             options: SandboxOptions {
                 snapshot_path: None,
@@ -168,9 +217,6 @@ impl EnvironmentPlan {
             if !profiles.insert(recipe.profile) {
                 return Err(IsolationError::new("duplicate profile recipe"));
             }
-            plan.recipe
-                .steps
-                .push(SetupStep::new(recipe.label, recipe.setup_command));
             for directory in recipe.directories {
                 relative_path(directory.relative_path, true)?;
                 let host_path = config
@@ -358,6 +404,17 @@ pub async fn ensure_environment(
     engine.ensure_base(plan.recipe, progress).await
 }
 
+/// What a sandbox is made from, when it is not built for it.
+enum SnapshotSource {
+    /// A task's capsule: the environment boundary it was exported with is part of
+    /// what it is, and a capsule that travels has to prove it.
+    Capsule(String),
+    /// An environment already built here, taken as it is. A sign-in or a check
+    /// reads or writes a login, which is no less true of a day-old image, so no
+    /// build is asked about and no boundary is read: that belongs to a capsule.
+    Environment(String),
+}
+
 /// What a sandbox is for, which decides where its own state goes and whether it
 /// records the environment it was built on.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -416,7 +473,7 @@ pub(super) async fn provision(
         id,
         plan,
         SandboxKind::Task,
-        snapshot,
+        snapshot.map(SnapshotSource::Capsule),
         progress,
     )
     .await
@@ -434,21 +491,30 @@ pub(super) fn composed_recipe(
     EnvironmentPlan::compose(config, environment, recipes).map(|plan| plan.recipe)
 }
 
-/// What a profile's own check says about it, run in a sandbox that is thrown away
-/// after it.
+/// What profiles' own checks say about them, run in one sandbox that is thrown away
+/// after them.
 ///
-/// The sandbox is the one a credential shell for that profile would get, so a report
-/// is what opening one would find. Nothing of the check is kept: it prints what it
-/// found, and the operator reads that.
-pub(super) async fn credential_report(
+/// The sandbox is the one a credential shell would get, so a report is what opening
+/// one would find. It is made from the environment's snapshot as it is rather than
+/// from a build: a check reads a login, and an environment a few days past its
+/// refresh can still answer. Nothing of the check is kept: each command prints what
+/// it found, and the operator reads that.
+pub(super) async fn credential_reports(
     engine: &impl IsolationEngine,
     config: &Config,
-    id: String,
-    environment: Environment,
-    recipes: Vec<EnvironmentRecipe>,
-    command: String,
+    sandbox: CredentialSandbox,
+    checks: Vec<CredentialCheck>,
     progress: &dyn EnvironmentProgressSink,
-) -> Result<CredentialReport, IsolationError> {
+) -> Result<Option<Vec<(&'static str, CredentialReport)>>, IsolationError> {
+    let CredentialSandbox {
+        id,
+        environment,
+        recipes,
+        snapshot,
+    } = sandbox;
+    let Some(snapshot) = snapshot else {
+        return Ok(None);
+    };
     let plan = EnvironmentPlan::compose(config, environment, recipes)?;
     create(
         engine,
@@ -456,19 +522,32 @@ pub(super) async fn credential_report(
         id.clone(),
         plan,
         SandboxKind::Shell,
-        None,
+        Some(SnapshotSource::Environment(snapshot)),
         progress,
     )
     .await?;
-    let result = run_to_end(engine, id.clone(), command).await;
+    let mut reports = Vec::with_capacity(checks.len());
+    for check in checks {
+        match run_to_end(engine, id.clone(), check.command).await {
+            Ok((status, output)) => reports.push((
+                check.profile,
+                CredentialReport {
+                    output,
+                    signed_in: status == 0,
+                },
+            )),
+            Err(error) => {
+                if let Err(error) = engine.remove(id.clone()).await {
+                    tracing::warn!(sandbox_id = %id, %error, "could not remove a sandbox after a check");
+                }
+                return Err(error);
+            }
+        }
+    }
     if let Err(error) = engine.remove(id.clone()).await {
         tracing::warn!(sandbox_id = %id, %error, "could not remove a sandbox after a check");
     }
-    let (status, output) = result?;
-    Ok(CredentialReport {
-        output,
-        signed_in: status == 0,
-    })
+    Ok(Some(reports))
 }
 
 /// A sandbox for setting up one profile's credentials, and the command that opens
@@ -480,34 +559,36 @@ pub(super) async fn credential_report(
 /// scratch directory instead, because a login shell writes session files and they
 /// must not reach the profile every task shares.
 ///
-/// The banner is printed by the sandbox rather than drawn by the interface, so it
-/// scrolls with the session it belongs to.
 pub(super) async fn credential_shell(
     engine: &impl IsolationEngine,
     config: &Config,
-    id: String,
-    environment: Environment,
-    recipes: Vec<EnvironmentRecipe>,
+    sandbox: CredentialSandbox,
     profile: &str,
     progress: &dyn EnvironmentProgressSink,
 ) -> Result<String, IsolationError> {
-    let (display, sign_in) = recipes
+    let CredentialSandbox {
+        id,
+        environment,
+        recipes,
+        snapshot,
+    } = sandbox;
+    let command = recipes
         .iter()
         .find(|recipe| recipe.profile == profile)
-        .map(|recipe| (recipe.display, recipe.sign_in))
+        .map(|recipe| recipe.sign_in_command.command())
         .ok_or_else(|| IsolationError::new(format!("no recipe for the {profile} profile")))?;
     let plan = EnvironmentPlan::compose(config, environment, recipes)?;
-    create(engine, config, id, plan, SandboxKind::Shell, None, progress).await?;
-    let banner = include_str!("assets/credential-shell.md")
-        .replace("{{display}}", display)
-        .replace("{{sign_in}}", sign_in);
-    let mut script = String::from("printf '%s\\n'");
-    for line in banner.lines() {
-        script.push(' ');
-        script.push_str(&shell_quote(line));
-    }
-    script.push_str("\nexec bash -l\n");
-    Ok(script)
+    create(
+        engine,
+        config,
+        id,
+        plan,
+        SandboxKind::Shell,
+        snapshot.map(SnapshotSource::Environment),
+        progress,
+    )
+    .await?;
+    Ok(command.to_owned())
 }
 
 /// A sandbox that answers a provider's read commands with an owner's profile
@@ -540,17 +621,18 @@ async fn create(
     id: String,
     mut plan: EnvironmentPlan,
     kind: SandboxKind,
-    snapshot: Option<String>,
+    snapshot: Option<SnapshotSource>,
     progress: &dyn EnvironmentProgressSink,
 ) -> Result<(), IsolationError> {
     plan.initialize(config)?;
     let (path, base) = match snapshot {
-        Some(path) => {
+        Some(SnapshotSource::Capsule(path)) => {
             let base = super::capsule::EnvironmentBase::from_capsule(&path)
                 .await
                 .map_err(IsolationError::new)?;
             (path, Some(base))
         }
+        Some(SnapshotSource::Environment(path)) => (path, None),
         None => {
             let path = engine
                 .ensure_base(plan.recipe, progress)

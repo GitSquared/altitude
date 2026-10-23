@@ -1,36 +1,25 @@
 use crate::{
-    agent::{AgentEngines, AgentError, AgentKind, mcp, tools::AgentToolRegistry},
-    config::InstallationIdentity,
+    agent::{AgentChannels, AgentEngines, AgentError, AgentKind, tools::AgentToolRegistry},
+    config::{Config, InstallationIdentity},
+    credentials::Credentials,
     isolation::{
-        Environment, EnvironmentDescription, EnvironmentProgress, EnvironmentRecipe,
-        IsolationEngine, IsolationError, ProfileSummary, private_directory,
+        Environment, EnvironmentDescription, EnvironmentProgress, IsolationEngine, IsolationError,
     },
     tracker::{IssueReader, TrackerProvider},
-    vcs::{self, tools::VcsAgentTools},
+    vcs::tools::VcsAgentTools,
 };
-use std::{
-    collections::HashMap,
-    error::Error,
-    fmt, fs, io,
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
-use tokio::{net::UnixListener, task::JoinHandle};
+use std::{collections::HashMap, error::Error, fmt, io, path::PathBuf, sync::Arc};
 use uuid::Uuid;
 
 use tools::TaskAgentTools;
 
 mod agents;
 mod capacity;
-mod credential;
 mod event_loop;
 mod lifecycle;
 mod signals;
 mod state;
 mod turns;
-pub use credential::{
-    CredentialShell, CredentialShellCancel, CredentialShellEvent, credential_shell_id,
-};
 pub use event_loop::{TaskEventLoop, TaskExecutionUpdate};
 mod progress;
 mod review;
@@ -64,17 +53,11 @@ pub struct TaskService<E> {
     identity: InstallationIdentity,
     environment_progress: EnvironmentProgressRegistry,
     /// Where each running task's agent channel listens.
-    agent_channel_dir: PathBuf,
-    agent_channels: Arc<Mutex<HashMap<String, AgentChannel>>>,
+    agent_channels: AgentChannels,
+    /// The logins tasks run under: a separate service, because a login is not a task.
+    credentials: Credentials<E>,
     trackers: Option<Arc<dyn TrackerHost>>,
     issue_reader: Option<Arc<dyn IssueReader>>,
-}
-
-/// One task's agent channel: the listener serving its tools, and the socket it is
-/// on.
-struct AgentChannel {
-    handle: JoinHandle<()>,
-    path: PathBuf,
 }
 
 fn failure_events(task: &Task, error: String) -> [TaskHistoryEvent; 2] {
@@ -143,7 +126,6 @@ pub enum TaskServiceError {
     Isolation(IsolationError),
     InvalidReport(String),
     AgentChannel(io::Error),
-    Credentials(String),
 }
 impl fmt::Display for TaskServiceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -153,7 +135,6 @@ impl fmt::Display for TaskServiceError {
             Self::Isolation(error) => error.fmt(formatter),
             Self::InvalidReport(error) => write!(formatter, "invalid agent turn report: {error}"),
             Self::AgentChannel(error) => write!(formatter, "agent channel error: {error}"),
-            Self::Credentials(error) => write!(formatter, "{error}"),
         }
     }
 }
@@ -196,23 +177,27 @@ where
     pub fn new(
         store: TaskStore,
         isolation: E,
-        snapshots_dir: PathBuf,
+        config: Config,
         agents: AgentEngines,
         identity: InstallationIdentity,
-        agent_channel_dir: PathBuf,
     ) -> Self {
         Self {
             store,
+            snapshots_dir: config.task_snapshots_dir(),
+            agent_channels: AgentChannels::new(config.agent_channel_dir()),
+            credentials: Credentials::new(isolation.clone(), config, agents.clone()),
             isolation,
-            snapshots_dir,
             agents,
             identity,
             environment_progress: EnvironmentProgressRegistry::default(),
-            agent_channel_dir,
-            agent_channels: Arc::new(Mutex::new(HashMap::new())),
             trackers: None,
             issue_reader: None,
         }
+    }
+
+    /// The logins tasks run under.
+    pub fn credentials(&self) -> &Credentials<E> {
+        &self.credentials
     }
 
     pub fn with_tracker(mut self, tracker: Option<Arc<dyn TrackerProvider>>) -> Self {
@@ -264,57 +249,16 @@ where
     /// Bound on every provisioning rather than kept: a restored capsule gets a
     /// new sandbox, and a vsock route is fixed when the sandbox is made.
     pub(super) fn bind_agent_channel(&self, task_id: &str) -> Result<PathBuf, TaskServiceError> {
-        self.release_agent_channel(task_id);
-        private_directory(&self.agent_channel_dir).map_err(TaskServiceError::Isolation)?;
-        let path = self.agent_channel_dir.join(format!("{task_id}.sock"));
-        let _ = fs::remove_file(&path);
-        let listener = UnixListener::bind(&path).map_err(TaskServiceError::AgentChannel)?;
-        let tools = self.agent_tools(task_id);
-        let listening = task_id.to_owned();
-        let handle = tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((stream, _)) => {
-                        let tools = tools.clone();
-                        tokio::spawn(async move {
-                            let (reader, writer) = stream.into_split();
-                            if let Err(error) = mcp::serve_agent(tools, reader, writer).await {
-                                tracing::debug!(%error, "an agent session ended");
-                            }
-                        });
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, task_id = %listening, "the agent channel stopped listening");
-                        break;
-                    }
-                }
-            }
-        });
         self.agent_channels
-            .lock()
-            .expect("agent channel lock poisoned")
-            .insert(
-                task_id.to_owned(),
-                AgentChannel {
-                    handle,
-                    path: path.clone(),
-                },
-            );
-        Ok(path)
+            .bind(task_id, self.agent_tools(task_id))
+            .map_err(TaskServiceError::AgentChannel)
     }
 
     /// Close a task's agent channel and remove the socket behind it.
     pub(super) fn release_agent_channel(&self, task_id: &str) {
-        if let Some(channel) = self
-            .agent_channels
-            .lock()
-            .expect("agent channel lock poisoned")
-            .remove(task_id)
-        {
-            channel.handle.abort();
-            let _ = fs::remove_file(&channel.path);
-        }
+        self.agent_channels.release(task_id);
     }
+
     /// What each task's environment build is doing, for an interface to show.
     ///
     /// Keyed by task, and only present while this service is building for it.
@@ -329,30 +273,6 @@ where
     /// Recovery is not starting. This puts a task's work back on disk and leaves
     /// it waiting, so the caller decides what the host can carry; starting here
     /// would run everything at once on the way up.
-    /// Every profile a task mounts, so an interface can say what logins exist.
-    ///
-    /// Built from the same recipes a task is provisioned with, so this cannot
-    /// drift from what is actually mounted.
-    pub fn profiles(&self) -> Vec<ProfileSummary> {
-        self.recipes()
-            .into_iter()
-            .map(|recipe| ProfileSummary {
-                profile: recipe.profile,
-                display: recipe.display,
-            })
-            .collect()
-    }
-
-    /// The recipes a task is provisioned with, in the order it mounts them.
-    fn recipes(&self) -> Vec<EnvironmentRecipe> {
-        let mut recipes = vec![
-            self.agents.engine(AgentKind::Pi).environment_recipe(),
-            self.agents.engine(AgentKind::Claude).environment_recipe(),
-        ];
-        recipes.extend(vcs::environment_recipes());
-        recipes
-    }
-
     /// What the workspace base says about itself, for an interface that
     /// describes environments rather than runs them.
     pub fn base_description(&self) -> Option<EnvironmentDescription> {

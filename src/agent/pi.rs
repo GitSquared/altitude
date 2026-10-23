@@ -2,7 +2,7 @@ use super::{
     AUTOPILOT_SYSTEM_PROMPT, AgentEngine, REPORT_SCHEMA, REPORT_SYSTEM_PROMPT, TaskReportDecoder,
 };
 use crate::isolation::{
-    DefaultFile, EnvironmentRecipe, GuestPath, PersistentDirectory, shell_quote,
+    DefaultFile, EnvironmentRecipe, GuestPath, PersistentDirectory, SignInCommand, shell_quote,
 };
 use crate::task::{TaskAgentTurnContext, TaskAgentTurnReport};
 use serde_json::Value;
@@ -259,7 +259,9 @@ impl AgentEngine for PiCode {
         EnvironmentRecipe {
             profile: "agents/pi",
             display: "Pi",
-            sign_in: "Run pi, then use /login to connect your provider.",
+            sign_in: "Use /login in Pi to connect your provider.",
+            // Pi has no sign-in command: the provider is chosen in its own interface.
+            sign_in_command: SignInCommand::Interactive("exec pi"),
             // Pi keeps one credential per provider in auth.json, and writes an empty
             // object when there are none, so the question is whether it has any.
             status_command: "jq -e 'length > 0' /altitude/pi/auth.json >/dev/null \

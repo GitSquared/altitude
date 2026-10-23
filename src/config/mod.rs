@@ -289,7 +289,11 @@ impl Config {
             .join("snapshots")
     }
 
-    /// Where one environment's snapshot is kept.
+    /// Where one environment's snapshots are kept, one directory per build.
+    ///
+    /// An environment name is not a build: a sign-in builds only the CLI it signs
+    /// in to, and tasks build all of it. The caller adds the directory that names
+    /// the build, so the two cannot replace each other's snapshot.
     pub fn environment_snapshots_dir(&self, name: &str) -> PathBuf {
         self.scoped_data_dir()
             .join("environments")

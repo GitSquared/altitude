@@ -21,7 +21,7 @@ pub(crate) use environment::private_directory;
 pub(crate) use environment::shell_quote;
 pub use environment::{
     BASE_NAME, DefaultFile, Environment, EnvironmentRecipe, GuestPath, PersistentDirectory,
-    is_base_name,
+    SignInCommand, is_base_name,
 };
 pub use microsandbox::MicrosandboxIsolation;
 
@@ -87,6 +87,20 @@ pub struct SetupStep {
     pub command: String,
 }
 
+/// A sandbox made for a profile's login: where it runs, and what it is made from.
+///
+/// The pieces travel together because a sign-in and a check are the same sandbox
+/// with a different command, and because a sandbox id plus an environment plus its
+/// recipes plus an optional snapshot is one thing rather than four.
+#[derive(Clone)]
+pub struct CredentialSandbox {
+    pub id: String,
+    pub environment: Environment,
+    pub recipes: Vec<EnvironmentRecipe>,
+    /// The built environment to make it from, if there is one to reuse.
+    pub snapshot: Option<String>,
+}
+
 impl SetupStep {
     pub fn new(label: impl Into<String>, command: impl Into<String>) -> Self {
         Self {
@@ -142,6 +156,11 @@ pub struct ProfileSummary {
     pub profile: &'static str,
     /// What this profile is called where an operator reads it.
     pub display: &'static str,
+    /// What the operator does to sign in, for a sign-in they have to drive.
+    pub sign_in: &'static str,
+    /// How this profile's sign-in is run, which decides whether it needs telling
+    /// first.
+    pub sign_in_command: SignInCommand,
 }
 
 /// What a sandbox made for credentials is called: the shell an operator signs in in,
@@ -165,6 +184,17 @@ pub struct CredentialReport {
     pub output: String,
     /// Whether it exited 0, which is how a profile says it is signed in.
     pub signed_in: bool,
+}
+
+/// One profile's login check, as the sandbox should run it.
+///
+/// Several travel together because one sandbox can answer them all: making a
+/// sandbox is the expensive part of asking, not running a command in it.
+#[derive(Clone, Debug)]
+pub struct CredentialCheck {
+    /// The profile whose login the command reads, so its answer reaches that row.
+    pub profile: &'static str,
+    pub command: String,
 }
 
 /// What a built environment says about itself.
@@ -416,9 +446,7 @@ pub trait IsolationEngine: Send + Sync {
     /// be thrown away when the shell ends.
     fn credential_shell(
         &self,
-        id: String,
-        environment: Environment,
-        recipes: Vec<EnvironmentRecipe>,
+        sandbox: CredentialSandbox,
         profile: &'static str,
         progress: &dyn EnvironmentProgressSink,
     ) -> impl Future<Output = Result<String, IsolationError>> + Send;
@@ -483,25 +511,33 @@ pub trait IsolationEngine: Send + Sync {
         command: String,
     ) -> impl Future<Output = Result<CommandSession, IsolationError>> + Send;
 
-    /// Whether an environment is already built here, and current.
+    /// The environment's snapshot path, if one is built here.
     ///
     /// Asked instead of building one: a check that a profile can be read has to be
     /// able to answer "not built here" rather than start a build, because looking at
-    /// a page is not the place for minutes of work.
-    fn environment_built(&self, environment: Environment, recipes: Vec<EnvironmentRecipe>) -> bool;
-
-    /// Run a profile's own check command in a sandbox that is thrown away after it.
-    ///
-    /// The same sandbox a credential shell for that profile would get, so a report is
-    /// what opening one would find.
-    fn credential_report(
+    /// a page is not the place for minutes of work. A snapshot past its refresh is
+    /// still answered with: it runs, and the check only reads a login.
+    fn environment_snapshot(
         &self,
-        id: String,
         environment: Environment,
         recipes: Vec<EnvironmentRecipe>,
-        command: String,
+    ) -> Option<String>;
+
+    /// Run profiles' own check commands in one sandbox that is thrown away after
+    /// them.
+    ///
+    /// The same sandbox a credential shell would get, so a report is what opening one
+    /// would find, and one sandbox answers every profile asked about rather than one
+    /// each. Given the environment's snapshot it uses that as it is rather than
+    /// building, which is what lets a page ask a profile whose environment is only due
+    /// for a refresh. With no snapshot it answers with nothing rather than starting
+    /// the build a page must not start.
+    fn credential_reports(
+        &self,
+        sandbox: CredentialSandbox,
+        checks: Vec<CredentialCheck>,
         progress: &dyn EnvironmentProgressSink,
-    ) -> impl Future<Output = Result<CredentialReport, IsolationError>> + Send;
+    ) -> impl Future<Output = Result<Option<Vec<(&'static str, CredentialReport)>>, IsolationError>> + Send;
 
     /// Throw away sandboxes a client left behind.
     ///

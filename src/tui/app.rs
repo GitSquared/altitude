@@ -22,6 +22,10 @@ use tokio::{process::Command as HostCommand, sync::mpsc, task::JoinHandle};
 use crate::{
     agent::AgentKind,
     config::{Config, DEFAULT_PORT, SettingsError, SettingsFile},
+    credentials::{
+        CredentialAnswer, CredentialShell, CredentialShellCancel, CredentialShellEvent,
+        credential_shell_id,
+    },
     isolation::{
         Environment, EnvironmentDescription, EnvironmentProgress, IsolationEngine, ProfileSummary,
     },
@@ -30,11 +34,9 @@ use crate::{
         RemoteKeyStatus, RemoteKeys, RemoteState, TaskOrigin, TaskRequest, TaskSummary,
         TrackerConnection, bring_home, meet, send::send_to_remote,
     },
-    task,
     task::{
-        CredentialShell, CredentialShellCancel, CredentialShellEvent, Task, TaskEventLoop,
-        TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus, TaskExecutionUpdate,
-        TaskOperatorSignal, TaskService, TaskServiceError,
+        Task, TaskEventLoop, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
+        TaskExecutionUpdate, TaskOperatorSignal, TaskService, TaskServiceError,
     },
     tracker::{IssueReference, IssueSnapshot, IssueSummary, TrackerKind},
     tui::keys::{is_dismiss, is_remove},
@@ -49,6 +51,7 @@ use popups::open_link::{self, Link, OpenLink};
 use popups::reply::{Prompt, PromptAction, Reply};
 use popups::send_task::{Decision as SendDecision, SendTask};
 use popups::setup::{Setup, SetupKind};
+use popups::sign_in::{Decision as SignInDecision, SignIn};
 use screens::settings::{
     CredentialKind, Depth, Focus, Form, GitIdentity, Panel, RowKind, Section, Setting, Target,
 };
@@ -80,6 +83,8 @@ pub(in crate::tui) enum Foreground {
     /// The settings panel: environments, remotes, the interface, the identity.
     Panel,
     Setup(Setup),
+    /// What a tool's own sign-in asks, before its terminal opens.
+    SignIn(Box<SignIn>),
     /// A task's signals, over the list it was opened from.
     Signals,
     /// A terminal, taking every key there is.
@@ -93,7 +98,10 @@ pub(in crate::tui) enum Foreground {
 impl Foreground {
     pub(in crate::tui) fn shows_settings(&self) -> bool {
         match self {
-            Self::Panel | Self::Setup(_) => true,
+            Self::Panel | Self::Setup(_) | Self::SignIn(_) => true,
+            // A credential shell is opened from the settings list it is about, and
+            // goes back to them, so the panel is the screen it sits on.
+            Self::Shell(ShellId::Credentials(_)) => true,
             Self::Confirm(confirm) => confirm.is_settings(),
             Self::Keys(behind) => behind.shows_settings(),
             _ => false,
@@ -146,6 +154,10 @@ pub(in crate::tui) enum CredentialStatus {
     Checking,
     /// Answered, with what the profile's own command printed.
     Checked { signed_in: bool, output: String },
+    /// A login file is on disk, but no CLI has been asked whether it still works.
+    Saved,
+    /// Nothing could answer: no check ran, so nothing is known either way.
+    Unanswered,
 }
 
 impl CredentialStatus {
@@ -155,9 +167,8 @@ impl CredentialStatus {
 }
 
 pub(in crate::tui) struct CredentialCheckReply {
-    pub profile: &'static str,
-    pub status: CredentialStatus,
     pub generation: u64,
+    pub answers: Vec<(&'static str, CredentialStatus)>,
 }
 
 /// What is known about the Linear tracker's live session.
@@ -230,6 +241,10 @@ pub(in crate::tui) const NO_LINEAR: &str = "Linear support is not available in t
 /// the sections does not reach anything.
 const ASK_AFTER: Duration = Duration::from_millis(400);
 
+/// How long after nothing could check a login the section tries again, so a sandbox
+/// that will not start is not asked on every tick.
+const CHECK_RETRY_AFTER: Duration = Duration::from_secs(15);
+
 /// Which terminal is in front.
 ///
 /// One shell with two owners: everything about drawing it, sizing it, pasting into
@@ -253,11 +268,24 @@ pub(in crate::tui) enum CredentialShellState {
     Opening {
         id: String,
         display: String,
-        progress: String,
+        /// What there is to say about the wait. Absent when the environment is
+        /// already built, because then there is no wait to show.
+        progress: Option<String>,
         cancel: CredentialShellCancel,
     },
     /// A terminal to draw, and the channel its keys go down.
     Open(CredentialShell),
+}
+
+/// A task travelling here from another machine.
+///
+/// Leaving the wait gives up watching it, not the transfer: the capsule is already
+/// moving, and the remote has already stopped running it. The task arrives either
+/// way, and only its terminal is given up with the wait.
+pub(in crate::tui) struct Landing {
+    pub(in crate::tui) message: String,
+    /// Whether the terminal was asked for, which is what leaving the wait gives up.
+    pub(in crate::tui) open_terminal: bool,
 }
 
 /// A task another machine owns, and which machine that is.
@@ -376,6 +404,8 @@ pub struct App {
     pub(in crate::tui) panel: Panel,
     /// What the keyboard is answering to.
     pub(in crate::tui) foreground: Foreground,
+    /// A task travelling here from a remote, while it travels.
+    pub(in crate::tui) landing: Option<Landing>,
     /// What each address last answered, for the list to show.
     pub(in crate::tui) remote_status: HashMap<String, RemoteStatus>,
     /// What each address's last announcement said about the trackers it runs.
@@ -387,6 +417,8 @@ pub struct App {
     /// measured from. Absent while it is not showing.
     credentials_visible_since: Option<Instant>,
     credential_check_generation: u64,
+    /// When a section's checks may be tried again after nothing could run them.
+    credential_retry_at: Option<Instant>,
     /// What the remotes are holding, as of the last time each answered. Read from
     /// them rather than copied: a task belongs to the machine running it, so this is
     /// only ever as good as the last answer.
@@ -470,11 +502,13 @@ impl App {
             settings_file,
             panel: Panel::new(),
             foreground: Foreground::default(),
+            landing: None,
             remote_status: HashMap::new(),
             remote_trackers: HashMap::new(),
             credential_status: HashMap::new(),
             credentials_visible_since: None,
             credential_check_generation: 0,
+            credential_retry_at: None,
             remote_synced: HashMap::new(),
             configuration_digest: None,
             remote_config_inflight: HashSet::new(),
@@ -619,6 +653,9 @@ impl App {
 
     /// The few actions worth keeping visible below the current screen.
     pub(in crate::tui) fn hints(&self) -> Vec<Hint> {
+        if self.landing.is_some() {
+            return vec![Hint::new("esc / q", "stop waiting")];
+        }
         let mut hints = self.hints_for(&self.foreground);
         hints.retain(|hint| {
             !matches!(hint.keys, "tab" | "j/k" | "h/j/k/l" | "pgup/pgdn")
@@ -657,7 +694,12 @@ impl App {
             Foreground::SendTask(sending) => sending.hints(),
             Foreground::NewTask(new_task) => new_task.hints(),
             Foreground::Panel => {
-                if matches!(self.credential_shell, CredentialShellState::Opening { .. }) {
+                // Only a wait with something to show offers leaving it; a shell that
+                // opens at once would otherwise flash a key that means nothing yet.
+                if let CredentialShellState::Opening {
+                    progress: Some(_), ..
+                } = &self.credential_shell
+                {
                     return vec![Hint::new("esc / q", "cancel")];
                 }
                 if self.panel.form.is_some() {
@@ -694,6 +736,7 @@ impl App {
                 hints.push(dismiss());
                 hints
             }
+            Foreground::SignIn(sign_in) => sign_in.hints(),
             Foreground::Setup(setup) => match &setup.kind {
                 SetupKind::RemoteTrackers => vec![
                     Hint::new("j/k", "choose"),
@@ -790,18 +833,21 @@ impl App {
     /// Whether a modal is in front: a pop-up or the panel, rather than the work
     /// itself or a terminal. What the transition animates.
     pub(in crate::tui) fn has_modal(&self) -> bool {
-        matches!(
-            self.foreground,
-            Foreground::Keys(_)
-                | Foreground::Confirm(_)
-                | Foreground::Reply(_)
-                | Foreground::SendTask(_)
-                | Foreground::NewTask(_)
-                | Foreground::Panel
-                | Foreground::Setup(_)
-                | Foreground::Signals
-                | Foreground::OpenLink(_)
-        )
+        // A task on its way here is a wait over the list, and leaves like one.
+        self.landing.is_some()
+            || matches!(
+                self.foreground,
+                Foreground::Keys(_)
+                    | Foreground::Confirm(_)
+                    | Foreground::Reply(_)
+                    | Foreground::SendTask(_)
+                    | Foreground::NewTask(_)
+                    | Foreground::Panel
+                    | Foreground::Setup(_)
+                    | Foreground::SignIn(_)
+                    | Foreground::Signals
+                    | Foreground::OpenLink(_)
+            )
     }
 
     /// Whether the app wants the terminal's mouse reports.
@@ -889,6 +935,60 @@ impl App {
         }
     }
 
+    /// Start a profile's sign-in, with what it asks said first when the tool's own
+    /// interface is where it happens.
+    ///
+    /// A command that signs in and exits needs no page: the terminal is the
+    /// sign-in. A tool that has to be driven gets its instructions before its
+    /// screen, so the operator arrives knowing what to do there.
+    fn begin_sign_in<E>(
+        &mut self,
+        display: &str,
+        profile: &'static str,
+        task_service: &TaskService<E>,
+        events: &mpsc::UnboundedSender<CredentialShellEvent>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        match self
+            .profiles
+            .iter()
+            .find(|summary| summary.profile == profile)
+        {
+            Some(summary) if summary.sign_in_command.is_interactive() => {
+                self.foreground = Foreground::SignIn(Box::new(SignIn::new(
+                    summary.display,
+                    profile,
+                    summary.sign_in,
+                )));
+                self.notice = None;
+            }
+            _ => self.open_credential_shell(display, profile, task_service, events),
+        }
+    }
+
+    /// The keys of the page that says what a sign-in asks.
+    pub(in crate::tui) async fn sign_in_key<E>(
+        &mut self,
+        key: KeyEvent,
+        task_service: &TaskService<E>,
+        events: &mpsc::UnboundedSender<CredentialShellEvent>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let Foreground::SignIn(sign_in) = mem::take(&mut self.foreground) else {
+            return;
+        };
+        match sign_in.handle_key(key) {
+            None => self.foreground = Foreground::SignIn(sign_in),
+            Some(SignInDecision::Cancel) => self.foreground = Foreground::Panel,
+            Some(SignInDecision::Open) => {
+                self.foreground = Foreground::Panel;
+                self.open_credential_shell(&sign_in.display, sign_in.profile, task_service, events);
+            }
+        }
+    }
+
     /// Open a terminal in a throwaway sandbox, for one profile's login.
     ///
     /// Off the loop, because the sandbox may have to be built first and a build is
@@ -909,21 +1009,27 @@ impl App {
             return;
         }
         let cancel = CredentialShellCancel::new();
-        let id = task::credential_shell_id();
+        let id = credential_shell_id();
+        let environment = self.default_environment_value();
+        // A built environment is a wait of a moment, so it gets no wait to look at:
+        // the box appears only when there is an install to watch.
+        let progress = (!task_service
+            .credentials()
+            .environment_built(environment.clone(), profile))
+        .then(|| "Preparing your sign-in environment…".to_owned());
         self.credential_shell = CredentialShellState::Opening {
             id: id.clone(),
             display: display.to_owned(),
-            progress: "Preparing your sign-in environment…".to_owned(),
+            progress,
             cancel: cancel.clone(),
         };
         self.notice = None;
-        let environment = self.default_environment_value();
-        let chosen = self.agent();
         let service = task_service.clone();
         let events = events.clone();
         tokio::spawn(async move {
             match service
-                .open_credential_shell(id.clone(), environment, profile, chosen, cancel, &events)
+                .credentials()
+                .open_shell(id.clone(), environment, profile, cancel, &events)
                 .await
             {
                 Ok(()) => {}
@@ -955,7 +1061,7 @@ impl App {
             if let CredentialShellEvent::Opened(shell) = event {
                 let service = task_service.clone();
                 tokio::spawn(async move {
-                    let _ = service.close_credential_shell(shell.id()).await;
+                    let _ = service.credentials().close_shell(shell.id()).await;
                 });
             }
             return;
@@ -963,7 +1069,7 @@ impl App {
         match event {
             CredentialShellEvent::Preparing { label, .. } => {
                 if let CredentialShellState::Opening { progress, .. } = &mut self.credential_shell {
-                    *progress = label;
+                    *progress = Some(label);
                 }
             }
             CredentialShellEvent::Opened(shell) => {
@@ -971,7 +1077,7 @@ impl App {
                     mem::replace(&mut self.credential_shell, CredentialShellState::Idle)
                 else {
                     // Nothing is waiting for it any more, so it has no reason to run.
-                    if let Err(error) = task_service.close_credential_shell(shell.id()).await {
+                    if let Err(error) = task_service.credentials().close_shell(shell.id()).await {
                         tracing::warn!(%error, "could not remove an unwanted credential shell");
                     }
                     return;
@@ -982,7 +1088,7 @@ impl App {
                 let Some((rows, cols)) = self.shell_size(terminal) else {
                     let service = task_service.clone();
                     tokio::spawn(async move {
-                        let _ = service.close_credential_shell(shell.id()).await;
+                        let _ = service.credentials().close_shell(shell.id()).await;
                     });
                     self.foreground = Foreground::Panel;
                     return;
@@ -1000,9 +1106,10 @@ impl App {
                 self.process_shell_output(&ShellId::Credentials(id), bytes)
             }
             CredentialShellEvent::Exited { code, .. } => {
-                if code != 0 {
-                    self.notice = Some(format!("the shell exited with {code}"));
-                }
+                // Leaving the terminal is not an error: a cancelled sign-in and a
+                // finished one look the same from here, and the row's next check says
+                // what came of it.
+                tracing::debug!(code, "a credential shell exited");
                 self.close_credential_shell(task_service).await;
             }
             CredentialShellEvent::Failed { error, .. } => {
@@ -1040,7 +1147,7 @@ impl App {
         }
         let service = task_service.clone();
         tokio::spawn(async move {
-            if let Err(error) = service.close_credential_shell(shell.id()).await {
+            if let Err(error) = service.credentials().close_shell(shell.id()).await {
                 tracing::warn!(%error, "could not remove a credential shell's sandbox");
             }
         });
@@ -1181,15 +1288,15 @@ impl App {
             }
             Some(RowKind::Agent { credential, .. }) => {
                 if let CredentialKind::Profile { profile, .. } = credential.kind {
-                    self.open_credential_shell(&credential.label, profile, task_service, events);
+                    self.begin_sign_in(&credential.label, profile, task_service, events);
                 }
             }
             Some(RowKind::GitIdentity(_)) => {
-                self.open_credential_shell("Git identity", "vcs/github", task_service, events);
+                self.begin_sign_in("Git identity", "vcs/github", task_service, events);
             }
             Some(RowKind::Credential(credential)) => {
                 if let CredentialKind::Profile { profile, .. } = credential.kind {
-                    self.open_credential_shell(&credential.label, profile, task_service, events);
+                    self.begin_sign_in(&credential.label, profile, task_service, events);
                 } else {
                     self.foreground = Foreground::Setup(Setup::new(
                         SetupKind::Remote,
@@ -1322,7 +1429,11 @@ impl App {
         let client = self.link.clone();
         let event_loop = event_loop.clone();
         let landings = landings.clone();
-        self.notice = Some(format!("asking {address} for the task…"));
+        self.notice = None;
+        self.landing = Some(Landing {
+            message: format!("bringing the task home from {address}…"),
+            open_terminal: true,
+        });
         tokio::spawn(async move {
             let outcome = bring_home(&address, &summary, &keys, &client, &event_loop).await;
             // A take-over runs away from the interface, so where it stopped is a log
@@ -1333,6 +1444,28 @@ impl App {
             }
             let _ = landings.send(outcome);
         });
+    }
+
+    /// Take a task that has arrived, and open the terminal that was asked for
+    /// unless the wait was left in the meantime.
+    pub(in crate::tui) fn task_landed<E>(
+        &mut self,
+        id: &str,
+        terminal: &DefaultTerminal,
+        event_loop: &TaskEventLoop<E>,
+        landings: &mpsc::UnboundedSender<Result<String, String>>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let open_terminal = self
+            .landing
+            .take()
+            .is_none_or(|landing| landing.open_terminal);
+        if open_terminal {
+            self.take_over(id, terminal, event_loop, landings);
+        } else {
+            self.notice = Some("the task arrived".to_owned());
+        }
     }
 
     /// Ask a remote to run a task of its own, off the event loop.
@@ -1690,6 +1823,7 @@ impl App {
                 self.credentials_visible_since = Some(Instant::now());
                 self.credential_check_generation = self.credential_check_generation.wrapping_add(1);
                 self.credential_status.clear();
+                self.credential_retry_at = None;
                 true
             }
             (false, Some(_)) => {
@@ -1708,78 +1842,100 @@ impl App {
             .any(CredentialStatus::is_in_progress)
     }
 
-    /// Whether it is time to ask about another profile: the list is showing, it has
-    /// been showing long enough to mean it, and nothing is in flight.
+    /// Whether it is time to ask about this page's logins: the list is showing, it
+    /// has been showing long enough to mean it, and nothing is in flight.
     pub(in crate::tui) fn wants_credential_check(&self) -> bool {
         let Some(since) = self.credentials_visible_since else {
             return false;
         };
         since.elapsed() >= ASK_AFTER
             && !self.is_asking_credentials()
-            && self.next_unasked_profile().is_some()
+            && !self.unasked_profiles().is_empty()
     }
 
-    /// The first profile whose login has not been asked about.
-    fn next_unasked_profile(&self) -> Option<&'static str> {
-        let prefix = self.panel.section.profile_prefix()?;
+    /// The profiles on this page still to be asked about.
+    ///
+    /// An answer that came back is not asked again, and one that could not run waits
+    /// out a backoff rather than being retried on the next tick.
+    fn unasked_profiles(&self) -> Vec<&'static str> {
+        let Some(prefix) = self.panel.section.profile_prefix() else {
+            return Vec::new();
+        };
+        let retry_due = self
+            .credential_retry_at
+            .is_none_or(|at| Instant::now() >= at);
         self.profiles
             .iter()
-            .map(|profile| profile.profile)
+            .map(|summary| summary.profile)
             .filter(|profile| profile.starts_with(prefix))
-            .find(|profile| !self.credential_status.contains_key(profile))
+            .filter(|profile| match self.credential_status.get(*profile) {
+                None => true,
+                Some(CredentialStatus::Unanswered) => retry_due,
+                Some(_) => false,
+            })
+            .collect()
     }
 
-    /// Ask a profile's own command about its login, and let it report back when it
-    /// answers. Off the loop: the answer comes from a sandbox.
-    pub(in crate::tui) fn ask_next_credential<E>(
+    /// Ask this page's profiles about their logins in one sandbox, off the loop.
+    ///
+    /// One sandbox for the page rather than one per profile: making it is the
+    /// expensive part of asking, and a check is a command inside it.
+    pub(in crate::tui) fn ask_credential_checks<E>(
         &mut self,
         task_service: &TaskService<E>,
         reports: &mpsc::UnboundedSender<CredentialCheckReply>,
     ) where
         E: IsolationEngine + Clone + 'static,
     {
-        let Some(profile) = self.next_unasked_profile() else {
+        let profiles = self.unasked_profiles();
+        if profiles.is_empty() {
             return;
-        };
-        self.credential_status
-            .insert(profile, CredentialStatus::Checking);
+        }
+        for profile in &profiles {
+            self.credential_status
+                .insert(*profile, CredentialStatus::Checking);
+        }
+        self.credential_retry_at = None;
         let environment = self.default_environment_value();
-        let chosen = self.agent();
         let service = task_service.clone();
         let reports = reports.clone();
         let generation = self.credential_check_generation;
         tokio::spawn(async move {
-            let status = match service
-                .credential_report(environment, profile, chosen)
+            let answers = match service
+                .credentials()
+                .answers(environment, profiles.clone())
                 .await
             {
-                Ok(Some(report)) => CredentialStatus::Checked {
-                    signed_in: report.signed_in,
-                    output: report.output,
-                },
-                Ok(None) => CredentialStatus::Checked {
-                    signed_in: false,
-                    output: String::new(),
-                },
+                Ok(answers) => answers
+                    .into_iter()
+                    .map(|(profile, answer)| (profile, credential_status(answer)))
+                    .collect(),
                 Err(error) => {
-                    tracing::debug!(%error, profile, "credential check unavailable");
-                    CredentialStatus::Checked {
-                        signed_in: false,
-                        output: String::new(),
-                    }
+                    tracing::debug!(%error, "credential checks unavailable");
+                    profiles
+                        .into_iter()
+                        .map(|profile| (profile, CredentialStatus::Unanswered))
+                        .collect()
                 }
             };
             let _ = reports.send(CredentialCheckReply {
-                profile,
-                status,
                 generation,
+                answers,
             });
         });
     }
 
     pub(in crate::tui) fn credential_checked(&mut self, reply: CredentialCheckReply) {
-        if reply.generation == self.credential_check_generation {
-            self.credential_status.insert(reply.profile, reply.status);
+        if reply.generation != self.credential_check_generation {
+            return;
+        }
+        let mut nothing_answered = false;
+        for (profile, status) in reply.answers {
+            nothing_answered |= matches!(status, CredentialStatus::Unanswered);
+            self.credential_status.insert(profile, status);
+        }
+        if nothing_answered {
+            self.credential_retry_at = Some(Instant::now() + CHECK_RETRY_AFTER);
         }
     }
 
@@ -2043,8 +2199,8 @@ impl App {
     {
         let result = match target {
             CredentialTarget::Profile(profile) => service
-                .forget_credentials(profile)
-                .await
+                .credentials()
+                .forget(profile)
                 .map_err(|error| error.to_string()),
             CredentialTarget::Linear => {
                 if let Some(handle) = self.tracker_connect.take() {
@@ -3673,6 +3829,22 @@ impl App {
     }
 }
 
+/// What one profile's login came to, as the list shows it.
+fn credential_status(answer: CredentialAnswer) -> CredentialStatus {
+    match (answer.is_verified, answer.signed_in) {
+        (true, signed_in) => CredentialStatus::Checked {
+            signed_in,
+            output: answer.output,
+        },
+        (false, true) => CredentialStatus::Saved,
+        // No login file at all is an answer: there is nothing a task would mount.
+        (false, false) => CredentialStatus::Checked {
+            signed_in: false,
+            output: String::new(),
+        },
+    }
+}
+
 fn copy_to_clipboard(text: String) -> Result<(), arboard::Error> {
     let mut clipboard = arboard::Clipboard::new()?;
     clipboard.set_text(text)
@@ -3744,7 +3916,7 @@ where
         return;
     }
     app.base_description = task_service.base_description();
-    app.profiles = task_service.profiles();
+    app.profiles = task_service.credentials().profiles();
     app.tracker_state = match task_service.tracker() {
         Some(tracker) if tracker.is_connected() => TrackerState::Connected,
         _ => TrackerState::NotConnected,
