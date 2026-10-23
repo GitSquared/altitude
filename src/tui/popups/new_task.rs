@@ -191,6 +191,9 @@ pub struct NewTask {
     /// A submission asked for while the search was still out, waiting for the
     /// first result.
     queued_submit: bool,
+    /// Where the keys were before a chord jumped to a pill, so closing its list
+    /// puts them back: a chord is a detour, tabbing is a move.
+    focus_return: Option<Focus>,
     /// A snapshot read that failed, kept so the operator can try again.
     read_error: Option<String>,
 }
@@ -266,8 +269,16 @@ impl NewTask {
             search_in_flight: false,
             submission: None,
             queued_submit: false,
+            focus_return: None,
             read_error: None,
         }
+    }
+
+    /// Ask the issue page instead of the prompt: the same question, reached from
+    /// a task that wants a tracker link rather than a free intent.
+    pub(in crate::tui) fn linking(mut self) -> Self {
+        self.activate_issue();
+        self
     }
 
     /// Put the machines back in step with what the remotes have answered, keeping
@@ -413,13 +424,14 @@ impl NewTask {
     }
 
     fn click(&mut self, target: Option<&Hit>) -> Option<Answer> {
-        match target {
+        let answer = match target {
             Some(Hit::Prompt) => {
                 self.focus = Focus::Task;
                 None
             }
             Some(Hit::Pill(pill)) => {
                 self.focus = *pill;
+                self.focus_return = None;
                 self.open_list();
                 None
             }
@@ -437,7 +449,13 @@ impl NewTask {
                 self.close_lists();
                 None
             }
+        };
+        // Whatever closed the list, a chord-opened one goes back where it came
+        // from; a clicked one had no earlier place to go back to.
+        if !self.list_open() {
+            self.restore_focus();
         }
+        answer
     }
 
     fn choose(&mut self, index: usize) {
@@ -491,6 +509,9 @@ impl NewTask {
         // An open list holds every key, escape included: escape closes the list
         // rather than the page, which is what a dropdown does everywhere else.
         if self.list_key(key) {
+            if !self.list_open() {
+                self.restore_focus();
+            }
             return None;
         }
         // Escape leaves the question from anywhere. `q` is a letter while the
@@ -501,18 +522,10 @@ impl NewTask {
             self.queued_submit = false;
             return Some(Answer::Cancel);
         }
-        // The mode toggle works whether or not the prompt has the caret, because
-        // it is about what the caret is for.
-        if key.code == KeyCode::Char('k')
-            && key
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
-        {
-            self.toggle_mode();
-            return None;
-        }
         // The three decisions have chords of their own: reaching for a pill with
-        // the keys should not mean tabbing past the prompt to get to it.
+        // the keys should not mean tabbing past the prompt to get to it. A chord
+        // is a detour rather than a move, so closing the list puts the keys back
+        // where they were.
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             let pill = match key.code {
                 KeyCode::Char('e') => Some(Focus::Environment),
@@ -521,6 +534,7 @@ impl NewTask {
                 _ => None,
             };
             if let Some(pill) = pill {
+                self.focus_return = Some(self.focus);
                 self.focus = pill;
                 self.open_list();
                 return None;
@@ -555,6 +569,7 @@ impl NewTask {
                 Focus::Create => self.answer(),
                 // A pill opens rather than choosing: the choice is the list's.
                 _ => {
+                    self.focus_return = None;
                     self.open_list();
                     None
                 }
@@ -631,14 +646,6 @@ impl NewTask {
         }
     }
 
-    fn toggle_mode(&mut self) {
-        if self.issue {
-            self.leave_issue();
-        } else {
-            self.activate_issue();
-        }
-    }
-
     fn activate_issue(&mut self) {
         if self.issue {
             return;
@@ -646,22 +653,6 @@ impl NewTask {
         self.issue = true;
         self.read_error = None;
         self.query_changed();
-    }
-
-    fn leave_issue(&mut self) {
-        if !self.issue {
-            return;
-        }
-        self.issue = false;
-        self.results.clear();
-        self.selected_result = 0;
-        self.read_error = None;
-        self.submission = None;
-        self.queued_submit = false;
-        self.generation = self.generation.wrapping_add(1);
-        self.query_due = None;
-        self.search_in_flight = false;
-        self.phase = IssuePhase::Idle;
     }
 
     /// A new query invalidates every answer that is out about the old one,
@@ -795,7 +786,16 @@ impl NewTask {
         }
     }
 
+    /// Put the keys back where a chord found them, if it was a chord that moved
+    /// them here.
+    fn restore_focus(&mut self) {
+        if let Some(focus) = self.focus_return.take() {
+            self.focus = focus;
+        }
+    }
+
     fn move_focus(&mut self, forward: bool) {
+        self.focus_return = None;
         let at = ORDER
             .iter()
             .position(|focus| *focus == self.focus)

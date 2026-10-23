@@ -774,12 +774,16 @@ impl App {
                 // Only what there is something to do it to. A remote's tasks sit
                 // beside this machine's, so a list holding only theirs still has
                 // something to select and act on.
-                let mut hints = vec![Hint::new("c", "create"), Hint::new("s", "settings")];
+                let mut hints = vec![
+                    Hint::new("c", "create"),
+                    Hint::new("l", "link issue"),
+                    Hint::new("s", "settings"),
+                ];
                 if !self.tasks.is_empty() || !self.remote_tasks.is_empty() {
                     hints.extend([
                         Hint::new("enter", "signals"),
                         Hint::new("o", "take over"),
-                        Hint::new("h/j/k/l", "select"),
+                        Hint::new("arrows · j/k", "select"),
                     ]);
                 }
                 // Removing a task is this machine's act on its own capsule; a
@@ -3201,6 +3205,21 @@ impl App {
                     )));
                 }
             }
+            // Linking an issue is the other way to start work: the same question,
+            // asked of the tracker instead of the operator's prose.
+            KeyCode::Char('l') => {
+                if self.reload_settings() {
+                    self.foreground = Foreground::NewTask(Box::new(
+                        NewTask::new(
+                            self.environments(),
+                            self.default_environment_name(),
+                            self.agent(),
+                            self.task_hosts(),
+                        )
+                        .linking(),
+                    ));
+                }
+            }
             KeyCode::Char('s') => {
                 open_panel(self, task_service).await;
             }
@@ -3213,11 +3232,11 @@ impl App {
                 let columns = self.grid_columns();
                 self.select_adjacent(-(columns as isize), columns);
             }
-            KeyCode::Char('l') | KeyCode::Right | KeyCode::Tab => {
+            KeyCode::Right | KeyCode::Tab => {
                 let columns = self.grid_columns();
                 self.select_adjacent(1, columns);
             }
-            KeyCode::Char('h') | KeyCode::Left | KeyCode::BackTab => {
+            KeyCode::Left | KeyCode::BackTab => {
                 let columns = self.grid_columns();
                 self.select_adjacent(-1, columns);
             }

@@ -39,7 +39,7 @@ pub fn help_sections() -> Vec<HelpSection> {
         HelpSection {
             title: "Navigation",
             bindings: &[
-                ("h / l · ← / →", "Move across columns or cards"),
+                ("← / → · Tab", "Move across columns or cards"),
                 ("j / k · ↓ / ↑", "Select the next or previous item"),
                 (
                     "Tab / Shift-Tab",
@@ -63,6 +63,7 @@ pub fn help_sections() -> Vec<HelpSection> {
             title: "Tasks",
             bindings: &[
                 ("c", "Create a task"),
+                ("l", "Link a Linear issue and start work on it"),
                 ("s", "Open Settings"),
                 ("Enter / i", "Read and answer the selected task's signals"),
                 ("o", "Take over its terminal, or bring a remote task home"),
@@ -122,7 +123,10 @@ pub fn help_sections() -> Vec<HelpSection> {
                     "Ctrl-E · Ctrl-A · Ctrl-H",
                     "Open the environment, agent or machine list",
                 ),
-                ("Ctrl/Cmd-K", "Switch between an issue search and a prompt"),
+                (
+                    "An issue ID or URL",
+                    "Switch the prompt to linking that issue",
+                ),
                 (
                     "Tab / Shift-Tab",
                     "Move between the prompt, pills and actions",

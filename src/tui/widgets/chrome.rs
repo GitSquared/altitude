@@ -222,8 +222,9 @@ pub fn draw_help(
 
 /// What an answer is for, which is what decides how loudly it is drawn.
 pub enum Emphasis {
-    /// The answer the page is asking for: the accent, so it is the one the eye
-    /// lands on without being told.
+    /// The answer the page is asking for: the terminal's own text, at full
+    /// strength, so it is the one the eye lands on without being told. The
+    /// accent is for what is selected, and at rest nothing is.
     Primary,
     /// The way out, or the answer that is not the point: quiet, but still bold,
     /// because it is still somewhere to press.
@@ -302,7 +303,7 @@ pub fn actions(frame: &mut Frame, modal: Rect, area: Rect, actions: &[Action]) -
                 palette::focus()
             } else {
                 match action.emphasis {
-                    Emphasis::Primary => palette::accent().bold(),
+                    Emphasis::Primary => palette::primary().bold(),
                     Emphasis::Secondary => palette::muted().bold(),
                 }
             };
