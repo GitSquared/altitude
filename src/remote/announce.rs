@@ -53,12 +53,36 @@ pub struct Announcement {
     pub trackers: Vec<TrackerConnection>,
 }
 
-/// Setup is checked when the remote starts; this does not establish public
-/// webhook reachability or continuing service health.
+/// What a remote's tracker can do right now.
+///
+/// Setup is checked when the remote starts, so this says how far its owner got,
+/// not whether the public webhook address actually reaches it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackerReadiness {
+    Ready,
+    /// Configured, and the shared app has never been installed on that machine.
+    NotInstalled,
+    /// Installed, and the login would not verify — a replaced secret, a revoked
+    /// grant, or a clock far enough off to break the signature.
+    Unavailable,
+}
+
+/// One tracker a remote is configured for.
+///
+/// Capability only: a client needs to know whether to wait or to nag, and nothing
+/// here names a workspace, an app, a path, or a secret. Those stay on the machine
+/// that holds them.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct TrackerConnection {
     pub provider: TrackerKind,
-    pub is_ready: bool,
+    pub state: TrackerReadiness,
+}
+
+impl TrackerConnection {
+    pub fn is_ready(&self) -> bool {
+        self.state == TrackerReadiness::Ready
+    }
 }
 
 /// What a remote can do with a task right now.

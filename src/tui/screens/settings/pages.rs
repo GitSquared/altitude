@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span};
 use crate::{
     agent::AgentKind,
     isolation::{EnvironmentDescription, REFRESH_AFTER},
-    remote::{RemoteKey, TrackerConnection},
+    remote::{RemoteKey, TrackerConnection, TrackerReadiness},
     tracker::TrackerKind,
     tui::{
         app::{CredentialStatus, RemoteStatus, TrackerState},
@@ -526,28 +526,37 @@ pub(super) fn tracker_summary(
         spans.push(Span::styled("none configured", palette::muted().bold()));
         return Line::from(spans);
     }
-    let initialized = connections
+    // How far the remote's owner got, not just that something is wrong: an app
+    // that was never installed and one that will not sign in send them to
+    // different steps.
+    let ready = connections
         .iter()
-        .filter(|connection| connection.is_ready)
-        .map(|connection| connection.provider.label())
-        .collect::<Vec<_>>();
-    if initialized.is_empty() {
-        let waiting = connections
-            .iter()
-            .map(|connection| connection.provider.label())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let mut spans = tracker_dot(Some(false)).spans(tick);
-        spans.push(Span::styled(
-            format!("{waiting} · needs setup on the remote"),
-            palette::muted().bold(),
-        ));
-        return Line::from(spans);
-    }
-    let mut spans = tracker_dot(Some(true)).spans(tick);
+        .any(|connection| connection.state == TrackerReadiness::Ready);
+    let said = connections
+        .iter()
+        .map(|connection| match connection.state {
+            TrackerReadiness::Ready => connection.provider.label().to_owned(),
+            TrackerReadiness::NotInstalled => {
+                format!(
+                    "{} · not installed on the remote",
+                    connection.provider.label()
+                )
+            }
+            TrackerReadiness::Unavailable => format!(
+                "{} · cannot sign in on the remote",
+                connection.provider.label()
+            ),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut spans = tracker_dot(Some(ready)).spans(tick);
     spans.push(Span::styled(
-        initialized.join(", "),
-        palette::primary().bold(),
+        said,
+        if ready {
+            palette::primary().bold()
+        } else {
+            palette::muted().bold()
+        },
     ));
     Line::from(spans)
 }

@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::{
-    remote::TrackerConnection,
+    remote::{TrackerConnection, TrackerReadiness},
     tracker::TrackerKind,
     tui::{
         screens::settings::{remote_tracker_setup_lines, tracker_dot},
@@ -24,33 +24,35 @@ pub enum SetupKind {
 
 struct TrackerOption {
     provider: TrackerKind,
+    /// The mark: on, off, or nothing to say yet.
     is_ready: Option<bool>,
+    status: &'static str,
 }
 
-impl TrackerOption {
-    fn status(&self) -> &'static str {
-        match self.is_ready {
-            Some(true) => "configured",
-            Some(false) => "needs setup",
-            None => "unknown",
-        }
-    }
-}
-
-/// The supported task trackers, one row each, with the remote's own answer about
-/// whether it runs them. A remote that has not answered leaves them unknown
-/// rather than guessed.
+/// The supported task trackers, one row each, saying how far the remote's own
+/// setup got. A remote that has not answered leaves them unknown rather than
+/// guessed, and one that answered with no tracker at all has none configured.
 fn candidates(report: Option<&[TrackerConnection]>) -> Vec<TrackerOption> {
     TrackerKind::ALL
         .iter()
-        .map(|&provider| TrackerOption {
-            provider,
-            is_ready: report.map(|connections| {
+        .map(|&provider| {
+            let connection = report.and_then(|connections| {
                 connections
                     .iter()
                     .find(|connection| connection.provider == provider)
-                    .is_some_and(|connection| connection.is_ready)
-            }),
+            });
+            let (is_ready, status) = match connection.map(|connection| connection.state) {
+                None if report.is_none() => (None, "unknown"),
+                None => (Some(false), "not configured"),
+                Some(TrackerReadiness::Ready) => (Some(true), "ready"),
+                Some(TrackerReadiness::NotInstalled) => (Some(false), "not installed"),
+                Some(TrackerReadiness::Unavailable) => (Some(false), "cannot sign in"),
+            };
+            TrackerOption {
+                provider,
+                is_ready,
+                status,
+            }
         })
         .collect()
 }
@@ -229,7 +231,7 @@ impl Setup {
 }
 
 fn candidate_line(candidate: &TrackerOption, width: usize, focused: bool) -> Line<'static> {
-    let status = candidate.status();
+    let status = candidate.status;
     let label = candidate.provider.label();
     let mut spans = tracker_dot(candidate.is_ready).spans(None);
     let used = spans.iter().map(Span::width).sum::<usize>() + label.len() + status.len();

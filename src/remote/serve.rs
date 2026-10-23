@@ -48,7 +48,7 @@ use crate::{
     remote::protocol::{TaskRequest, TaskSummary},
     remote::{
         ClientRecord, InstallationKey, LinkServer, TrackerConnection,
-        announce::RemoteState,
+        announce::{RemoteState, TrackerReadiness},
         server::{BoxFuture, ServerParts, TaskHost},
     },
     task::{Task, TaskEventLoop, TaskExecutionUpdate, TaskService, TaskStore},
@@ -1031,9 +1031,17 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     // Only a tracker this machine is configured for is announced. A host that
     // will never run Linear must not tell every client that Linear is missing.
     let trackers = if settings.linear.is_some() {
+        let state = match &linear_runtime {
+            Some(_) => TrackerReadiness::Ready,
+            // Configured but unusable: distinguishing an app that was never
+            // installed from one that will not sign in sends the owner to
+            // different steps.
+            None if oauth::installed(&credentials_path).is_some() => TrackerReadiness::Unavailable,
+            None => TrackerReadiness::NotInstalled,
+        };
         vec![TrackerConnection {
             provider: TrackerKind::Linear,
-            is_ready: linear_runtime.is_some(),
+            state,
         }]
     } else {
         Vec::new()

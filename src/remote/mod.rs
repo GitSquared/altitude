@@ -27,7 +27,7 @@ mod protocol;
 use std::error::Error;
 
 pub use {
-    announce::{Announcement, RemoteState, TrackerConnection},
+    announce::{Announcement, RemoteState, TrackerConnection, TrackerReadiness},
     bundle::ConfigBundle,
     client::LinkClient,
     clients::ClientRecord,
