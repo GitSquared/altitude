@@ -41,12 +41,24 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Run as a headless remote hosting agents for clients
-    #[command(
-        long_about = SERVE_MODE,
-        after_help = "Set LOG_LEVEL=debug for detailed logs. Terminal colors are automatic; set NO_COLOR to disable them."
-    )]
+    #[command(long_about = SERVE_MODE, after_help = SERVE_AFTER_HELP)]
     Serve(ServeArgs),
 }
+
+/// What a tracker-integrated remote needs, which is the same shape for any
+/// provider: an app its owner administers, an address that reaches this machine,
+/// and one command that installs it here.
+const SERVE_AFTER_HELP: &str = "\
+A remote can run work delegated from a task tracker. That needs, on this machine:
+\x20 1. an OAuth application in the tracker, owned by whoever administers it here
+\x20 2. an HTTPS address that reaches this machine, with a reverse proxy to the
+\x20    tracker's webhook port (127.0.0.1:25849 by default)
+\x20 3. the application installed once, by `altitude serve --connect-linear`
+
+Without one, this remote still runs work sent from Altitude, and reports through
+each operator's own login.
+
+Set LOG_LEVEL=debug for detailed logs. Terminal colors are automatic; set NO_COLOR to disable them.";
 
 #[derive(Debug, Args)]
 pub struct ServeArgs {
@@ -68,7 +80,12 @@ pub struct ServeArgs {
     #[arg(long, value_name = "PATH", display_order = 3)]
     pub data_dir: Option<PathBuf>,
 
-    /// Install the shared Linear app, then exit. Reads the Linear settings in serve.toml.
+    /// Install the shared Linear app on this machine, then exit.
+    ///
+    /// Prints the URLs the application must register, what this machine's settings
+    /// and secrets are, and what it ended up installed as. Every fact it prints
+    /// belongs to this machine: the steps are the same ones Altitude shows
+    /// anywhere, but the addresses, ports and logins are this host's own.
     #[arg(long, help_heading = "Task tracker integration")]
     pub connect_linear: bool,
 

@@ -17,6 +17,7 @@ pub mod serve;
 mod server;
 mod takeover;
 mod tracker;
+mod tracker_setup;
 pub mod transfer;
 
 mod client;

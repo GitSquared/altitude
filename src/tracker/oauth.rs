@@ -1,6 +1,13 @@
 //! Infrastructure-owned Linear app installation and token refresh.
 
-use std::{fs, io::Write, os::unix::fs::OpenOptionsExt, path::Path, sync::Arc, time::Duration};
+use std::{
+    fs,
+    io::Write,
+    os::unix::fs::OpenOptionsExt,
+    path::Path,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 use crate::isolation::private_directory;
 use axum::{
@@ -27,7 +34,30 @@ pub struct AppCredentials {
     refresh_token: String,
     expires_at_ms: i64,
     pub workspace_id: String,
+    /// What the workspace was called when it was installed, so a machine can say
+    /// what it holds without asking Linear again.
+    #[serde(default)]
+    pub workspace_name: String,
     pub app_user_id: String,
+}
+
+/// What a machine already has installed, read from the file it saved.
+pub struct Installed {
+    pub credentials: AppCredentials,
+    pub installed_at: Option<SystemTime>,
+}
+
+pub fn installed(path: &Path) -> Option<Installed> {
+    let credentials = fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())?;
+    let installed_at = fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok());
+    Some(Installed {
+        credentials,
+        installed_at,
+    })
 }
 
 #[derive(Deserialize)]
@@ -75,6 +105,7 @@ impl AppCredentials {
                 .unwrap_or_else(|| self.refresh_token.clone()),
             expires_at_ms: expiry(response.expires_in)?,
             workspace_id: self.workspace_id.clone(),
+            workspace_name: self.workspace_name.clone(),
             app_user_id: self.app_user_id.clone(),
         };
         candidate
@@ -225,7 +256,9 @@ async fn install(settings: &LinearSettings, code: &str) -> Result<AppCredentials
     let response = http_client()?
         .post("https://api.linear.app/graphql")
         .bearer_auth(&token.access_token)
-        .json(&serde_json::json!({"query": "query { viewer { id app organization { id } } }"}))
+        .json(&serde_json::json!({
+            "query": "query { viewer { id app organization { id name } } }"
+        }))
         .send()
         .await
         .map_err(|_| "Linear did not identify the installed app")?;
@@ -258,6 +291,11 @@ async fn install(settings: &LinearSettings, code: &str) -> Result<AppCredentials
         .and_then(serde_json::Value::as_str)
         .ok_or("Linear returned no workspace")?
         .to_owned();
+    let workspace_name = viewer
+        .pointer("/organization/name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
     Ok(AppCredentials {
         access_token: token.access_token,
         refresh_token: token
@@ -265,11 +303,12 @@ async fn install(settings: &LinearSettings, code: &str) -> Result<AppCredentials
             .ok_or("Linear returned no refresh token")?,
         expires_at_ms: expiry(token.expires_in)?,
         workspace_id,
+        workspace_name,
         app_user_id,
     })
 }
 
-pub async fn connect(settings: LinearSettings, path: &Path) -> Result<(), String> {
+pub async fn connect(settings: LinearSettings, path: &Path) -> Result<AppCredentials, String> {
     settings.client_secret()?;
     settings.webhook_secret()?;
     let redirect = settings.endpoint("/linear/oauth/callback")?;
@@ -300,8 +339,7 @@ pub async fn connect(settings: LinearSettings, path: &Path) -> Result<(), String
     let router = Router::new()
         .route("/linear/oauth/callback", get(callback))
         .with_state(installation);
-    println!("In Linear's app settings, register this callback: {redirect}");
-    println!("Open this URL as a workspace administrator to install Altitude:\n{authorize}");
+    println!("Open this as a workspace administrator:\n\n{authorize}\n");
     let (stop, stopped) = oneshot::channel::<()>();
     let server = tokio::spawn(async move {
         axum::serve(listener, router)
@@ -320,6 +358,5 @@ pub async fn connect(settings: LinearSettings, path: &Path) -> Result<(), String
         .map_err(|_| "Linear sign-in timed out; run --connect-linear again")?
         .ok_or("Linear sign-in listener stopped before completion")??;
     credentials.save(path)?;
-    println!("Linear app installed. Start altitude serve to receive delegated work.");
-    Ok(())
+    Ok(credentials)
 }

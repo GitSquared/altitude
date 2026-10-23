@@ -992,13 +992,16 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     let settings_path = args.config.unwrap_or_else(|| config.serve_settings_path());
     let settings = ServeSettings::load_or_create(&settings_path)?;
     let credentials_path = config.data_dir().join("trackers/linear/oauth.json");
+    // Installing a tracker is an interactive report rather than a service start:
+    // what it prints is the whole of what it has to say, so it takes neither the
+    // banner nor a log preamble.
     if args.connect_linear {
-        let linear = settings.linear.ok_or_else(|| io::Error::other("Add [linear] client_id and public_url to serve.toml, then set ALTITUDE_LINEAR_CLIENT_SECRET and ALTITUDE_LINEAR_WEBHOOK_SECRET on this host"))?;
-        return oauth::connect(linear, &credentials_path)
-            .await
-            .map_err(|error| io::Error::other(error).into());
+        return super::tracker_setup::connect_linear(&settings, &settings_path, &credentials_path)
+            .await;
     }
 
+    logging::init_service();
+    tracing::info!("⛰  altitude v{} · remote", env!("CARGO_PKG_VERSION"));
     tracing::debug!("Checking sandbox host requirements");
     MicrosandboxIsolation::check_host()?;
     tracing::debug!("Sandbox host requirements passed");
@@ -1017,25 +1020,44 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         })?;
 
     let mut linear_runtime = None;
+    let mut linear_error = None;
     if let Some(linear) = settings.linear.clone() {
         match connect_tracker(&config, &linear, &credentials_path).await {
             Ok(runtime) => linear_runtime = Some(runtime),
-            Err(error) => {
-                tracing::warn!(%error, "Linear needs setup; this remote can still run tasks from Altitude")
-            }
+            // Reported once, below, with what to run about it.
+            Err(error) => linear_error = Some(error),
         }
     }
-    let trackers = vec![TrackerConnection {
-        provider: TrackerKind::Linear,
-        is_ready: linear_runtime.is_some(),
-    }];
-    if linear_runtime.is_some() {
-        tracing::info!("Linear connected");
-    } else if settings.linear.is_none() {
-        tracing::info!(
-            "No Linear app configured · delegated issues still run, reported through each \
-             operator's own login"
-        );
+    // Only a tracker this machine is configured for is announced. A host that
+    // will never run Linear must not tell every client that Linear is missing.
+    let trackers = if settings.linear.is_some() {
+        vec![TrackerConnection {
+            provider: TrackerKind::Linear,
+            is_ready: linear_runtime.is_some(),
+        }]
+    } else {
+        Vec::new()
+    };
+    match (&settings.linear, &linear_runtime) {
+        (_, Some(runtime)) => tracing::info!(
+            "{}: workspace {} · webhooks on {}",
+            TrackerKind::Linear.label(),
+            runtime.workspace_name,
+            runtime
+                .listener
+                .local_addr()
+                .map(|address| address.to_string())
+                .unwrap_or_default(),
+        ),
+        (Some(_), None) => tracing::warn!(
+            error = linear_error.as_deref().unwrap_or("no reason given"),
+            "{}: not connected · run `altitude serve --connect-linear` on this machine",
+            TrackerKind::Linear.label(),
+        ),
+        (None, None) => tracing::info!(
+            "Task tracker: none configured · run `altitude serve --connect-linear` to pilot work \
+             from Linear"
+        ),
     }
 
     let identity = InstallationKey::load_or_create(config.data_dir().join("identity.key"))
@@ -1339,6 +1361,9 @@ struct LinearRuntime {
     automation: Arc<LinearAutomation>,
     tracker: Arc<super::tracker::RemoteTracker>,
     listener: TcpListener,
+    /// What the install said it was, so startup can name it instead of saying
+    /// only that something is connected.
+    workspace_name: String,
 }
 
 async fn connect_tracker(
@@ -1350,6 +1375,7 @@ async fn connect_tracker(
     credentials
         .refresh_if_needed(settings, credentials_path)
         .await?;
+    let workspace_name = credentials.workspace_name.clone();
     let automation = Arc::new(
         credentials
             .client()
@@ -1390,6 +1416,7 @@ async fn connect_tracker(
         automation,
         tracker,
         listener,
+        workspace_name,
     })
 }
 
