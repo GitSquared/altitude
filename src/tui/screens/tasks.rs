@@ -125,6 +125,9 @@ struct Card {
     host: String,
     /// The tracker issue this task is bound to, when it is bound to one.
     issue: Option<String>,
+    /// Whether this task is asking for a person loudly enough to be marked out by
+    /// its frame rather than only by a line inside it.
+    is_alarm: bool,
     /// How it is going, already in the words the card has room for.
     status: Line<'static>,
     /// What else it has to say, in the order it should be read.
@@ -151,6 +154,7 @@ impl Card {
                 .tracker_issue
                 .as_ref()
                 .map(|issue| format!("{} · Linear", issue.identifier)),
+            is_alarm: is_alarming(summary),
             status: card_status(summary, at_capacity, tick, build),
             extras: card_extras(summary, now_ms),
         }
@@ -195,10 +199,18 @@ fn cards(app: &App) -> Vec<Card> {
 
 fn draw_card(frame: &mut Frame, area: Rect, card: &Card, focused: bool) {
     frame.render_widget(Clear, area);
-    let border = if focused {
-        palette::accent()
-    } else {
-        palette::muted()
+    // What has to be looked at is marked out by its frame, so it can be found
+    // without reading every card. Focus still owns the accent, and the alarm
+    // keeps the title, so the two do not cancel each other on the card in front.
+    let border = match (focused, card.is_alarm) {
+        (true, _) => palette::accent(),
+        (false, true) => palette::bad(),
+        (false, false) => palette::muted(),
+    };
+    let title_style = match (focused, card.is_alarm) {
+        (_, true) => palette::bad().bold(),
+        (true, false) => palette::heading(),
+        (false, false) => palette::muted(),
     };
     let block = Block::bordered()
         .title(Span::styled(
@@ -206,11 +218,7 @@ fn draw_card(frame: &mut Frame, area: Rect, card: &Card, focused: bool) {
                 " {} ",
                 truncate(&card.title, usize::from(area.width.saturating_sub(4)))
             ),
-            if focused {
-                palette::heading()
-            } else {
-                palette::muted()
-            },
+            title_style,
         ))
         .border_type(BorderType::Rounded)
         .border_style(border)
@@ -282,6 +290,16 @@ fn card_status(
     }
 }
 
+/// Whether the task is asking for a person loudly enough to be marked out.
+///
+/// The frame and the word inside it read one answer, so a card cannot be outlined
+/// as an alarm without saying what it is.
+fn is_alarming(summary: &TaskSummary) -> bool {
+    summary.status == TaskExecutionStatus::Paused
+        && summary.pause_reason.as_ref() == Some(&TaskExecutionPauseReason::AwaitingOperator)
+        && summary.attention == TaskOperatorAttentionLevel::Alarm
+}
+
 /// What else a card has to say: the things that mean someone has to look.
 fn card_extras(summary: &TaskSummary, now_ms: i64) -> Vec<Line<'static>> {
     let mut extras = Vec::new();
@@ -296,15 +314,13 @@ fn card_extras(summary: &TaskSummary, now_ms: i64) -> Vec<Line<'static>> {
             Some(TaskOperatorSignalKind::InReview) => {
                 extras.push(Line::styled("in review", palette::good().bold()))
             }
+            _ if is_alarming(summary) => extras.push(Line::styled("ALARM", palette::bad().bold())),
             _ => match summary.attention {
-                TaskOperatorAttentionLevel::Alarm => {
-                    extras.push(Line::styled("ALARM", palette::bad().bold()))
-                }
                 TaskOperatorAttentionLevel::Requested => extras.push(Line::styled(
                     "attention required",
                     palette::attention().bold(),
                 )),
-                TaskOperatorAttentionLevel::Nominal => {}
+                TaskOperatorAttentionLevel::Alarm | TaskOperatorAttentionLevel::Nominal => {}
             },
         }
     }

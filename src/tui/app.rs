@@ -47,6 +47,8 @@ use crate::{
 };
 
 use super::widgets::alert::Alert;
+use futures_util::future;
+
 use popups::confirm::{CredentialTarget, PendingConfirm};
 use popups::new_task::{Answer, Hit as NewTaskHit, Host, NewTask, SearchToken};
 use popups::open_link::{self, Link, OpenLink};
@@ -292,6 +294,8 @@ pub(in crate::tui) struct TransferView {
     /// Whether the operator has asked it to stop, which the bar says while the
     /// transfer finishes the piece it is on.
     is_stopping: bool,
+    /// Whether the terminal opens when it arrives, or the task is only moved here.
+    opens_terminal: bool,
 }
 
 impl TransferView {
@@ -893,6 +897,7 @@ impl App {
                 // remote's task is not here to remove, and neither is it this
                 // machine's to send anywhere.
                 if self.selected_is_remote() {
+                    hints.push(Hint::new("p", "pull here"));
                     hints.push(Hint::new("d", "drop"));
                     if self
                         .selected_held()
@@ -1514,18 +1519,32 @@ impl App {
         let client = self.link.clone();
         let reads = reads.clone();
         tokio::spawn(async move {
-            let mut held = Vec::new();
-            for address in addresses {
-                match Self::read_tasks(&address, &keys, &client).await {
-                    Ok(tasks) => held.extend(tasks.into_iter().map(|summary| HeldTask {
-                        address: address.clone(),
-                        summary,
-                    })),
-                    Err(error) => {
-                        tracing::debug!(%error, address, "could not read a remote's tasks")
+            // Every machine is asked at once: one slow or unanswering remote used
+            // to hold up the cards of all the others.
+            let asking = addresses.into_iter().map(|address| {
+                let keys = keys.clone();
+                let client = client.clone();
+                async move {
+                    match Self::read_tasks(&address, &keys, &client).await {
+                        Ok(tasks) => tasks
+                            .into_iter()
+                            .map(|summary| HeldTask {
+                                address: address.clone(),
+                                summary,
+                            })
+                            .collect::<Vec<_>>(),
+                        Err(error) => {
+                            tracing::debug!(%error, %address, "could not read a remote's tasks");
+                            Vec::new()
+                        }
                     }
                 }
-            }
+            });
+            let held = future::join_all(asking)
+                .await
+                .into_iter()
+                .flatten()
+                .collect();
             let _ = reads.send(held);
         });
     }
@@ -1544,6 +1563,29 @@ impl App {
         self.foreground = Foreground::Confirm(PendingConfirm::taking_over(id.to_owned(), question));
     }
 
+    /// Move a task here without taking its terminal over.
+    ///
+    /// The same transfer as taking it over, with the one difference an operator
+    /// chooses: the task keeps running where it lands rather than handing the
+    /// terminal over with it.
+    pub(in crate::tui) fn pull_task<E>(
+        &mut self,
+        id: &str,
+        event_loop: &TaskEventLoop<E>,
+        landings: &mpsc::UnboundedSender<Result<String, String>>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        if let Some(held) = self
+            .remote_tasks
+            .iter()
+            .find(|held| held.summary.id == id)
+            .cloned()
+        {
+            self.ask_for_task(&held, event_loop, landings, false);
+        }
+    }
+
     /// Bring a task home from the machine that owns it.
     ///
     /// The remote stops running it, its capsule travels, and it is founded here with the
@@ -1555,6 +1597,7 @@ impl App {
         held: &HeldTask,
         event_loop: &TaskEventLoop<E>,
         landings: &mpsc::UnboundedSender<Result<String, String>>,
+        opens_terminal: bool,
     ) where
         E: IsolationEngine + Clone + 'static,
     {
@@ -1569,6 +1612,7 @@ impl App {
             &format!("Pulling task from {}", self.remote_name(&address)),
             summary.display_title(),
             "packaging…",
+            opens_terminal,
         );
         tokio::spawn(async move {
             let outcome =
@@ -1584,7 +1628,13 @@ impl App {
     }
 
     /// Start watching a transfer, and answer with the moving end of it.
-    fn begin_transfer(&mut self, title: &str, label: &str, stage: &str) -> transfer::Transfer {
+    fn begin_transfer(
+        &mut self,
+        title: &str,
+        label: &str,
+        stage: &str,
+        opens_terminal: bool,
+    ) -> transfer::Transfer {
         let (moving, watching) = transfer::Transfer::start(stage);
         let update = watching.updates.borrow().clone();
         self.transfer = Some(TransferView {
@@ -1595,6 +1645,7 @@ impl App {
             measured: None,
             rate: None,
             is_stopping: false,
+            opens_terminal,
         });
         moving
     }
@@ -1619,8 +1670,8 @@ impl App {
         self.transfer.as_ref().map(TransferView::progress)
     }
 
-    /// A task that has arrived is the operator's: the terminal it was asked for is
-    /// the next thing they see.
+    /// A task that has arrived is the operator's. Taking it over ends in its
+    /// terminal; pulling it here only moves it.
     pub(in crate::tui) fn task_landed<E>(
         &mut self,
         id: &str,
@@ -1630,8 +1681,15 @@ impl App {
     ) where
         E: IsolationEngine + Clone + 'static,
     {
-        self.transfer = None;
-        self.take_over(id, terminal, event_loop, landings);
+        let opens_terminal = self
+            .transfer
+            .take()
+            .is_none_or(|transfer| transfer.opens_terminal);
+        if opens_terminal {
+            self.take_over(id, terminal, event_loop, landings);
+        } else {
+            self.say("The task is here");
+        }
     }
 
     /// Ask a remote to run a task of its own, off the event loop.
@@ -1810,6 +1868,7 @@ impl App {
             &format!("Sending task to {}", self.remote_name(&address)),
             &title,
             "packaging…",
+            false,
         );
         let config = self.config.clone();
         let keys = self.remote_keys.clone();
@@ -3391,6 +3450,21 @@ impl App {
         }
 
         if self.selected_is_remote() {
+            // Moving a task here without its terminal is the one action a card on
+            // another machine has that this machine's cards do not.
+            if key.code == KeyCode::Char('p')
+                && let Some(held) = self.selected_held()
+            {
+                self.foreground = Foreground::Confirm(PendingConfirm::pulling(
+                    held.summary.id.clone(),
+                    format!(
+                        "Pull \"{}\" here? It stops on {} and keeps running here.",
+                        held.summary.display_title(),
+                        self.remote_name(&held.address)
+                    ),
+                ));
+                return Ok(false);
+            }
             // The same pop-up this machine's tasks use, over a task whose actions
             // travel to the machine that owns it.
             if key.code == KeyCode::Enter || key.code == KeyCode::Char('i') {
@@ -3550,7 +3624,7 @@ impl App {
             .find(|held| held.summary.id == id)
             .cloned()
         {
-            self.ask_for_task(&held, event_loop, landings);
+            self.ask_for_task(&held, event_loop, landings, true);
             return;
         }
         let Some(task) = self.tasks.iter().find(|task| task.id == id).cloned() else {

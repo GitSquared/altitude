@@ -162,6 +162,15 @@ impl PendingConfirm {
         }
     }
 
+    /// Confirming moves a task here without taking its terminal: the same transfer
+    /// as taking it over, with one answer different.
+    pub(in crate::tui) fn pulling(task_id: String, question: String) -> Self {
+        Self {
+            dialog: Confirm::new(question, "pull"),
+            action: ConfirmAction::PullTask { id: task_id },
+        }
+    }
+
     /// Confirming removes a task from the overview and disposes of its capsule.
     pub(in crate::tui) fn removing(task_id: String, question: String) -> Self {
         Self {
@@ -191,6 +200,7 @@ impl PendingConfirm {
 enum ConfirmAction {
     RemoveTask { id: String },
     RemoveRemoteTask { address: String, task_id: String },
+    PullTask { id: String },
     TakeOver { id: String },
     DeleteSetting(Target),
     ForgetCredentials(CredentialTarget),
@@ -229,6 +239,7 @@ pub(in crate::tui) async fn handle_confirm_key<E>(
             ConfirmAction::RemoveRemoteTask { address, task_id } => {
                 app.begin_remove_remote(&address, &task_id, removals);
             }
+            ConfirmAction::PullTask { id } => app.pull_task(&id, event_loop, landings),
             ConfirmAction::TakeOver { id } => app.take_over(&id, terminal, event_loop, landings),
             ConfirmAction::DeleteSetting(target) => {
                 app.foreground = Foreground::Panel;

@@ -84,6 +84,7 @@ pub fn help_sections() -> Vec<HelpSection> {
                     "Take over the task; a remote task moves here first",
                 ),
                 ("r", "Send a local task to a remote"),
+                ("p", "Pull a remote task here, without taking its terminal"),
                 ("b", "Open its linked issue in your browser"),
                 (
                     "d / Delete / Backspace",
