@@ -28,8 +28,8 @@ use crate::{
     config::{Config, DEFAULT_PORT},
     isolation::{IsolationEngine, MicrosandboxIsolation, capsule::verify_environment},
     remote::{
-        ConfigBundle, Handover, HandoverRecord, LinkClient, RemoteKeyStatus, RemoteKeys, Transfer,
-        TransferArchive, TransferPart, meet,
+        ConfigBundle, ConfigPush, Handover, HandoverRecord, LinkClient, RemoteKeyStatus,
+        RemoteKeys, Transfer, TransferArchive, TransferPart, meet,
         protocol::{MAX_BLOB_BYTES, TRANSFER_PIECE_BYTES},
     },
     task::{Task, TaskArrival, TaskEventLoop, TaskHistoryEvent},
@@ -104,10 +104,22 @@ where
     let bundle =
         ConfigBundle::of(&settings, config.data_dir(), &profiles, &held).map_err(message)?;
     let config_bytes = serde_json::to_vec(&bundle).map_err(message)?;
-    client
-        .put_config(peer.clone(), &config_bytes)
+    // Sending a task is not where an account is taken over: the background sync
+    // asks, and until it has an answer this machine cannot build the task there.
+    if let ConfigPush::TrackerLinkedElsewhere {
+        provider,
+        display_name,
+    } = client
+        .put_config(peer.clone(), &config_bytes, false)
         .await
-        .map_err(message)?;
+        .map_err(message)?
+    {
+        return Err(format!(
+            "the {} account {display_name} is already linked for another client there; \
+             take it over from Settings → Remotes first",
+            provider.label()
+        ));
+    }
 
     // Packing is the first wait, and it has nothing to count: the archives do not
     // exist until it finishes.

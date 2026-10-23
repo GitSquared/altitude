@@ -12,8 +12,8 @@ use super::{
     bundle::ProfileDigest,
     discovery::{self, Scan},
     protocol::{
-        BlobHash, CHUNK_BYTES, Handover, LINK_ALPN, LinkRequest, LinkResponse, TaskRequest,
-        TransferArchive, WatchEvent, builder, read_body, read_frame, write_frame,
+        BlobHash, CHUNK_BYTES, ConfigPush, Handover, LINK_ALPN, LinkRequest, LinkResponse,
+        TaskRequest, TransferArchive, WatchEvent, builder, read_body, read_frame, write_frame,
     },
 };
 
@@ -542,13 +542,30 @@ impl LinkClient {
         .await
     }
     /// Sends this machine's configuration for a remote to build from.
-    pub async fn put_config(&self, peer: impl Into<EndpointAddr>, bytes: &[u8]) -> LinkResult<()> {
+    ///
+    /// `take_tracker` is consent to take over a task tracker account that is
+    /// already linked for another client, and it is false until somebody has been
+    /// asked.
+    pub async fn put_config(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        bytes: &[u8],
+        take_tracker: bool,
+    ) -> LinkResult<ConfigPush> {
         let request = LinkRequest::PutConfig {
             hash: BlobHash::of(bytes),
             len: bytes.len() as u64,
+            take_tracker,
         };
         match self.say_with_body(peer, &request, bytes).await? {
-            LinkResponse::Configured => Ok(()),
+            LinkResponse::Configured => Ok(ConfigPush::Stored),
+            LinkResponse::TrackerLinkedElsewhere {
+                provider,
+                display_name,
+            } => Ok(ConfigPush::TrackerLinkedElsewhere {
+                provider,
+                display_name,
+            }),
             LinkResponse::Rejected { reason } => Err(reason.into()),
             other => Err(format!("unexpected answer: {other:?}").into()),
         }

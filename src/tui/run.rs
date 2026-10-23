@@ -460,6 +460,19 @@ where
                     app.animation_tick(),
                 ));
             }
+            // A question about an account holds the screen until it is answered.
+            if let Some((title, question, answers)) = app.tracker_conflict_question() {
+                widgets::chrome::dim(frame, content);
+                let answers: Vec<&str> = answers;
+                modal = Some(widgets::question::draw(
+                    frame,
+                    content,
+                    &title,
+                    &question,
+                    &answers,
+                    app.conflict_choice,
+                ));
+            }
             // A message is read over whatever asked for it, including a wait.
             if let Some(alert) = &app.alert {
                 widgets::chrome::dim(frame, content);
@@ -780,6 +793,11 @@ where
         return Ok(false);
     };
     if !key.is_press() {
+        return Ok(false);
+    }
+    // A tracker account that is already claimed stops everything until it is
+    // answered: it decides whose work the machine attributes.
+    if app.tracker_conflict_key(key) {
         return Ok(false);
     }
     // A message is in front of the work, so it holds every key until it is read:

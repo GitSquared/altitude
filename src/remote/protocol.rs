@@ -21,7 +21,7 @@ use crate::task::{
     Task, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent,
     TaskOperatorAttentionLevel, TaskOperatorSignal, TaskOperatorSignalKind,
 };
-use crate::tracker::{IssueReference, IssueSnapshot};
+use crate::tracker::{IssueReference, IssueSnapshot, TrackerKind};
 use crate::vcs::ContributionState;
 use crate::{agent::AgentKind, isolation::Environment};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -186,9 +186,28 @@ pub enum LinkRequest {
     /// Announce a configuration: `len` raw bytes follow, whose digest must be
     /// `hash`. It is what this client runs tasks with, so a remote that holds it
     /// can build the same environments.
+    ///
+    /// `take_tracker` says whether a task tracker account that is already linked
+    /// for another client may be taken over. It is false until someone has been
+    /// asked: an account is who the work is attributed to, and a machine that
+    /// quietly reassigned one would be attributing somebody else's work.
     PutConfig {
         hash: BlobHash,
         len: u64,
+        take_tracker: bool,
+    },
+}
+
+/// What a remote did with a pushed configuration.
+#[derive(Clone, Debug)]
+pub enum ConfigPush {
+    /// It holds the configuration now.
+    Stored,
+    /// The tracker account already belongs to another client there, and nothing
+    /// was written until somebody says which client it should be.
+    TrackerLinkedElsewhere {
+        provider: TrackerKind,
+        display_name: String,
     },
 }
 
@@ -220,6 +239,14 @@ pub enum LinkResponse {
     },
     /// The configuration arrived, and the remote holds it now.
     Configured,
+    /// The tracker account this configuration carries is already linked for
+    /// another client, so nothing was written.
+    TrackerLinkedElsewhere {
+        provider: TrackerKind,
+        /// The account as it names itself, which came from the configuration being
+        /// pushed rather than from the client that already had it.
+        display_name: String,
+    },
     /// The remote took the task. What it called it is read from the machine rather
     /// than returned, because the machine is where the task is.
     Accepted,

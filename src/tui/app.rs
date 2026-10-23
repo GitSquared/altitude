@@ -30,8 +30,8 @@ use crate::{
         Environment, EnvironmentDescription, EnvironmentProgress, IsolationEngine, ProfileSummary,
     },
     remote::{
-        Announcement, ConfigBundle, DiscoveredRemote, DiscoveryEvent, LinkClient, RemoteKey,
-        RemoteKeyStatus, RemoteKeys, RemoteState, TaskOrigin, TaskRequest, TaskSummary,
+        Announcement, ConfigBundle, ConfigPush, DiscoveredRemote, DiscoveryEvent, LinkClient,
+        RemoteKey, RemoteKeyStatus, RemoteKeys, RemoteState, TaskOrigin, TaskRequest, TaskSummary,
         TrackerConnection, WatchEvent, bring_home, meet, send::send_to_remote, transfer,
         transfer::TransferUpdate,
     },
@@ -449,7 +449,18 @@ pub(in crate::tui) struct RemoveTaskReply {
 pub(in crate::tui) struct ConfigPushReply {
     pub(in crate::tui) address: String,
     pub(in crate::tui) digest: String,
-    pub(in crate::tui) result: Result<(), String>,
+    pub(in crate::tui) result: Result<ConfigPush, String>,
+}
+
+/// A task tracker account this machine pushed that another client already claims
+/// on the same remote.
+///
+/// Nothing was written until this is answered: an account says whose work work is,
+/// and a machine that quietly reassigned one would attribute somebody else's.
+pub(in crate::tui) struct TrackerConflict {
+    address: String,
+    provider: TrackerKind,
+    display_name: String,
 }
 
 pub struct App {
@@ -527,6 +538,16 @@ pub struct App {
     /// The remote card to select once the next read of a remote's tasks lands,
     /// so a task that has just been sent there is the one in view.
     pending_remote: Option<(String, String)>,
+    /// A tracker account another client already claims, waiting to be answered.
+    pub(in crate::tui) tracker_conflict: Option<TrackerConflict>,
+    /// Which answer the question is on: leave it, or take it over.
+    pub(in crate::tui) conflict_choice: usize,
+    /// Addresses whose account the operator said to take over, so the next push
+    /// carries the consent.
+    taking_over: HashSet<String>,
+    /// Addresses whose account the operator chose to leave alone, until the
+    /// configuration changes.
+    conflict_declined: HashSet<String>,
     /// Machines whose tasks are being watched, one watch each, and where a watch
     /// reports what it finds.
     watched: HashMap<String, JoinHandle<()>>,
@@ -615,6 +636,10 @@ impl App {
             credentials_visible_since: None,
             credential_check_generation: 0,
             credential_retry_at: None,
+            tracker_conflict: None,
+            conflict_choice: 0,
+            taking_over: HashSet::new(),
+            conflict_declined: HashSet::new(),
             watched: HashMap::new(),
             watch_events,
             remote_synced: HashMap::new(),
@@ -2226,9 +2251,18 @@ impl App {
     }
 
     pub(in crate::tui) fn remote_needs_config(&self, address: &str) -> bool {
-        self.configuration_digest
-            .as_ref()
-            .is_none_or(|digest| self.remote_synced.get(address) != Some(digest))
+        // An account someone chose to leave alone, or one being decided about, is
+        // not something to keep pushing at.
+        let waiting = self.conflict_declined.contains(address)
+            || self
+                .tracker_conflict
+                .as_ref()
+                .is_some_and(|conflict| conflict.address == address);
+        !waiting
+            && self
+                .configuration_digest
+                .as_ref()
+                .is_none_or(|digest| self.remote_synced.get(address) != Some(digest))
     }
 
     pub(in crate::tui) fn configuration_read(
@@ -2250,6 +2284,11 @@ impl App {
                 return;
             }
         };
+        // A configuration that changed may carry a different login, so a question
+        // already answered about an account is worth asking again.
+        if self.configuration_digest.as_deref() != Some(digest.as_str()) {
+            self.conflict_declined.clear();
+        }
         self.configuration_digest = Some(digest.clone());
         let bundle = Arc::new(bundle);
         for address in self.configured_remotes() {
@@ -2268,8 +2307,11 @@ impl App {
                 let keys = self.remote_keys.clone();
                 let client = self.link.clone();
                 let replies = replies.clone();
+                let take_tracker = self.taking_over.contains(&address);
                 tokio::spawn(async move {
-                    let result = deliver_config(&address, (*bundle).clone(), &keys, &client).await;
+                    let result =
+                        deliver_config(&address, (*bundle).clone(), &keys, &client, take_tracker)
+                            .await;
                     let _ = replies
                         .send(ConfigPushReply {
                             address,
@@ -2293,11 +2335,29 @@ impl App {
             return;
         }
         match reply.result {
-            Ok(()) => {
+            Ok(ConfigPush::Stored) => {
+                self.taking_over.remove(&reply.address);
+                self.conflict_declined.remove(&reply.address);
                 self.remote_synced
                     .insert(reply.address.clone(), reply.digest);
                 self.remote_status
                     .insert(reply.address, RemoteStatus::Reached);
+            }
+            // Nothing was written, and the remote is waiting to be told whose the
+            // account is.
+            Ok(ConfigPush::TrackerLinkedElsewhere {
+                provider,
+                display_name,
+            }) => {
+                self.taking_over.remove(&reply.address);
+                self.remote_status
+                    .insert(reply.address.clone(), RemoteStatus::Reached);
+                self.tracker_conflict = Some(TrackerConflict {
+                    address: reply.address,
+                    provider,
+                    display_name,
+                });
+                self.conflict_choice = 0;
             }
             Err(error) => {
                 tracing::warn!(address=%reply.address, %error, "remote configuration sync failed");
@@ -2447,6 +2507,66 @@ impl App {
         self.remote_status
             .values()
             .any(RemoteStatus::is_in_progress)
+    }
+
+    /// The keys of the question about a tracker account that is already claimed.
+    ///
+    /// It holds every key while it is up: nothing behind it acts on a keystroke
+    /// meant for it, and there are two answers rather than a way to slip past.
+    pub(in crate::tui) fn tracker_conflict_key(&mut self, key: KeyEvent) -> bool {
+        let Some(conflict) = &self.tracker_conflict else {
+            return false;
+        };
+        let address = conflict.address.clone();
+        match key.code {
+            KeyCode::Left | KeyCode::Up | KeyCode::BackTab => self.conflict_choice = 0,
+            KeyCode::Right | KeyCode::Down | KeyCode::Tab => self.conflict_choice = 1,
+            KeyCode::Enter => {
+                if self.conflict_choice == 1 {
+                    self.take_over_tracker(&address);
+                } else {
+                    self.leave_tracker_conflict(&address);
+                }
+            }
+            _ if is_dismiss(key) => self.leave_tracker_conflict(&address),
+            _ => {}
+        }
+        true
+    }
+
+    /// Say yes: the next push carries the consent, and the remote stops attributing
+    /// the account to whoever had it.
+    fn take_over_tracker(&mut self, address: &str) {
+        self.tracker_conflict = None;
+        self.conflict_declined.remove(address);
+        self.taking_over.insert(address.to_owned());
+    }
+
+    /// Say no: the account stays with the client that had it, and this machine
+    /// stops asking until its configuration changes.
+    fn leave_tracker_conflict(&mut self, address: &str) {
+        self.tracker_conflict = None;
+        self.taking_over.remove(address);
+        self.conflict_declined.insert(address.to_owned());
+    }
+
+    /// What the question says, in the words of the thing that happened.
+    pub(in crate::tui) fn tracker_conflict_question(
+        &self,
+    ) -> Option<(String, String, Vec<&'static str>)> {
+        let conflict = self.tracker_conflict.as_ref()?;
+        Some((
+            "Tracker account in use".to_owned(),
+            format!(
+                "Your {} account {} is already linked for another client on {}. Taking it \
+                 over makes that machine attribute its work to your access from now on; \
+                 leaving it alone sends nothing.",
+                conflict.provider.label(),
+                conflict.display_name,
+                self.remote_name(&conflict.address)
+            ),
+            vec!["leave it", "take it over"],
+        ))
     }
 
     /// Ask a machine about itself again, now.
@@ -4297,7 +4417,8 @@ async fn deliver_config(
     mut bundle: ConfigBundle,
     keys: &RemoteKeys,
     client: &LinkClient,
-) -> Result<(), String> {
+    take_tracker: bool,
+) -> Result<ConfigPush, String> {
     let remembered = keys.remembered(address).await.ok().flatten();
     let sighting = meet(address, DEFAULT_PORT, remembered.as_deref())
         .await
@@ -4318,7 +4439,7 @@ async fn deliver_config(
     bundle.retain_changed_profiles(&held);
     let bytes = serde_json::to_vec(&bundle).map_err(|error| error.to_string())?;
     client
-        .put_config(peer, &bytes)
+        .put_config(peer, &bytes, take_tracker)
         .await
         .map_err(|error| error.to_string())
 }

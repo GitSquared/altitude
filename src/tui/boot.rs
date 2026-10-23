@@ -4,16 +4,16 @@ use crossterm::event::{EventStream, KeyCode, KeyModifiers};
 use futures_util::StreamExt;
 use ratatui::{
     DefaultTerminal, Frame,
-    layout::{Constraint, Flex, Layout},
+    layout::{Constraint, Layout},
     text::Line,
-    widgets::{Clear, Paragraph, Wrap},
+    widgets::Paragraph,
 };
 use tokio::{signal::unix::Signal, sync::watch};
 
 use crate::tui::{
     background::terrain,
     keys,
-    widgets::{chrome, palette},
+    widgets::{palette, question},
 };
 use crate::{
     isolation::IsolationStatus,
@@ -196,41 +196,7 @@ fn draw_question(
     if let Some(tick) = tick {
         terrain::draw(frame, frame.area(), tick);
     }
-    let [row] = Layout::horizontal([Constraint::Percentage(60)])
-        .flex(Flex::Center)
-        .areas(frame.area());
-    let [popup] = Layout::vertical([Constraint::Length(10)])
-        .flex(Flex::Center)
-        .areas(row);
-    frame.render_widget(Clear, popup);
-    let block = chrome::modal(title.to_owned());
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-    let [body, actions] =
-        Layout::vertical([Constraint::Min(3), Constraint::Length(2)]).areas(inner);
-    frame.render_widget(
-        Paragraph::new(question.to_owned())
-            .style(palette::primary())
-            .wrap(Wrap { trim: true }),
-        body,
-    );
-    chrome::actions(
-        frame,
-        popup,
-        actions,
-        &answers
-            .iter()
-            .enumerate()
-            .map(|(index, answer)| {
-                let action = if index == 0 {
-                    chrome::Action::secondary(answer)
-                } else {
-                    chrome::Action::primary(answer)
-                };
-                action.focused(index == chosen)
-            })
-            .collect::<Vec<_>>(),
-    );
+    question::draw(frame, frame.area(), title, question, answers, chosen);
 }
 
 fn isolation_label(status: &IsolationStatus) -> &'static str {
