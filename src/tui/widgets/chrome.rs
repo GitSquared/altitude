@@ -220,27 +220,100 @@ pub fn draw_help(
     popup
 }
 
-/// A button: the one holding the focus is inverted, and the primary one is
-/// accented when it is not.
-pub fn button(frame: &mut Frame, area: Rect, label: &str, focused: bool, primary: bool) {
-    let style = if focused {
-        palette::focus()
-    } else if primary {
-        palette::accent()
-    } else {
-        palette::muted()
-    };
-    let [_, line, _] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(0),
-    ])
-    .areas(area);
-    frame.render_widget(
-        Paragraph::new(Line::styled(format!(" {label} "), style)),
-        line,
-    );
+/// One answer at the foot of a modal.
+pub struct Action<'a> {
+    pub label: &'a str,
+    pub focused: bool,
+    /// The answer the page is asking for: filled, so it reads as the one to take
+    /// even while the keys are somewhere else.
+    pub primary: bool,
+    /// Whether it can be taken. One that cannot is drawn quiet, because the page
+    /// has already said why under the prompt.
+    pub enabled: bool,
 }
+
+impl<'a> Action<'a> {
+    pub fn new(label: &'a str) -> Self {
+        Self {
+            label,
+            focused: false,
+            primary: false,
+            enabled: true,
+        }
+    }
+
+    pub fn focused(mut self, focused: bool) -> Self {
+        self.focused = focused;
+        self
+    }
+
+    pub fn primary(mut self) -> Self {
+        self.primary = true;
+        self
+    }
+
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+}
+
+/// Draws the rule that closes a modal's body and the answers under it, and
+/// answers with where each one was drawn so a click can find it.
+///
+/// `area` is two rows: the rule, then the buttons. The rule runs the full width
+/// of the modal and breaks its borders, because the answers belong to the window
+/// rather than to the form inside it.
+pub fn actions(frame: &mut Frame, modal: Rect, area: Rect, actions: &[Action]) -> Vec<Rect> {
+    if area.height < 2 || area.width == 0 {
+        return Vec::new();
+    }
+    let buffer = frame.buffer_mut();
+    buffer[(modal.x, area.y)].set_symbol("├");
+    for column in (modal.x + 1)..modal.right().saturating_sub(1) {
+        buffer[(column, area.y)].set_symbol("─");
+    }
+    buffer[(modal.right().saturating_sub(1), area.y)].set_symbol("┤");
+
+    let row = Rect {
+        y: area.y + 1,
+        height: 1,
+        ..area
+    };
+    let widths: Vec<Constraint> = actions
+        .iter()
+        .map(|action| Constraint::Length(action.label.chars().count() as u16 + 4))
+        .collect();
+    let drawn = Layout::horizontal(widths)
+        .flex(Flex::End)
+        .spacing(ACTION_GAP)
+        .split(row);
+    actions
+        .iter()
+        .zip(drawn.iter())
+        .map(|(action, area)| {
+            // The fill covers the padding too, so an answer is a block rather
+            // than a word with a background behind the letters.
+            let style = if action.focused {
+                palette::pressed()
+            } else if !action.enabled {
+                palette::muted()
+            } else if action.primary {
+                palette::answer()
+            } else {
+                palette::muted()
+            };
+            frame.render_widget(
+                Paragraph::new(Line::styled(format!("  {}  ", action.label), style)),
+                *area,
+            );
+            *area
+        })
+        .collect()
+}
+
+/// Between two answers, so they are two things rather than one row of text.
+const ACTION_GAP: u16 = 3;
 
 /// A box a percentage of the width and a fixed height, centred.
 /// The frame a modal wears: a rounded border with what it is at the top.

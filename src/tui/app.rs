@@ -42,11 +42,11 @@ use crate::{
     tui::keys::{is_dismiss, is_remove},
     tui::popups,
     tui::screens,
-    tui::widgets::chrome::Hint,
+    tui::widgets::{chrome::Hint, pointer::Targets},
 };
 
 use popups::confirm::{CredentialTarget, PendingConfirm};
-use popups::new_task::{Answer, Host, NewTask, SearchToken};
+use popups::new_task::{Answer, Hit as NewTaskHit, Host, NewTask, SearchToken};
 use popups::open_link::{self, Link, OpenLink};
 use popups::reply::{Prompt, PromptAction, Reply};
 use popups::send_task::{Decision as SendDecision, SendTask};
@@ -375,6 +375,9 @@ pub struct App {
     pub(in crate::tui) selected: usize,
     pub(in crate::tui) first_visible_task: usize,
     pub(in crate::tui) shells: HashMap<ShellId, Shell>,
+    /// Where the creation question's controls were drawn last, so a click can
+    /// land on what is on screen.
+    pub(in crate::tui) new_task_targets: Targets<NewTaskHit>,
     /// The shell opened to set up credentials, if there is one.
     ///
     /// One at a time: a profile is a shared directory, and two shells writing it
@@ -488,6 +491,7 @@ impl App {
             selected: 0,
             first_visible_task: 0,
             shells: HashMap::new(),
+            new_task_targets: Targets::default(),
             credential_shell: CredentialShellState::Idle,
             git_identity: GitIdentity::default(),
             operator_signals: Vec::new(),
@@ -863,6 +867,7 @@ impl App {
                     | Foreground::Setup(_)
                     | Foreground::Signals
                     | Foreground::Panel
+                    | Foreground::NewTask(_)
             )
     }
 
@@ -2657,7 +2662,59 @@ impl App {
         let Foreground::NewTask(mut question) = mem::take(&mut self.foreground) else {
             return;
         };
-        match question.handle_key(key) {
+        let answer = question.handle_key(key);
+        self.resolve_new_task(
+            question,
+            answer,
+            event_loop,
+            task_service,
+            issue_reads,
+            delegations,
+        )
+        .await;
+    }
+
+    /// What a click on the creation question means, read against the rectangles
+    /// the last frame drew.
+    pub(in crate::tui) async fn new_task_mouse<E>(
+        &mut self,
+        mouse: MouseEvent,
+        event_loop: &TaskEventLoop<E>,
+        task_service: &TaskService<E>,
+        issue_reads: &mpsc::UnboundedSender<IssueReadReply>,
+        delegations: &mpsc::Sender<TaskDelegationReply>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let Foreground::NewTask(mut question) = mem::take(&mut self.foreground) else {
+            return;
+        };
+        let answer = question.mouse(mouse, &self.new_task_targets);
+        self.resolve_new_task(
+            question,
+            answer,
+            event_loop,
+            task_service,
+            issue_reads,
+            delegations,
+        )
+        .await;
+    }
+
+    /// Take an answer to the creation question, whether it came from a key or a
+    /// click: what a task being founded does is the same either way.
+    async fn resolve_new_task<E>(
+        &mut self,
+        question: Box<NewTask>,
+        answer: Option<Answer>,
+        event_loop: &TaskEventLoop<E>,
+        task_service: &TaskService<E>,
+        issue_reads: &mpsc::UnboundedSender<IssueReadReply>,
+        delegations: &mpsc::Sender<TaskDelegationReply>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        match answer {
             None => self.foreground = Foreground::NewTask(question),
             // The question is dropped, and with it any read that had not yet
             // founded a task.

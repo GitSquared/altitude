@@ -124,12 +124,12 @@ pub enum Decision {
 }
 
 pub fn draw(frame: &mut Frame, area: Rect, asking: &OpenLink) -> Rect {
-    let popup = chrome::centered(area, 60, 9);
+    let popup = chrome::centered(area, 60, 10);
     frame.render_widget(Clear, popup);
     let block = chrome::modal("Sandbox asks");
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
-    let [question, buttons] =
+    let [question, actions] =
         Layout::vertical([Constraint::Min(5), Constraint::Length(2)]).areas(inner);
     frame.render_widget(
         Paragraph::new(vec![
@@ -141,14 +141,16 @@ pub fn draw(frame: &mut Frame, area: Rect, asking: &OpenLink) -> Rect {
         .wrap(Wrap { trim: true }),
         question,
     );
-    let [_, cancel, _, open] = Layout::horizontal([
-        Constraint::Min(1),
-        Constraint::Length(10),
-        Constraint::Length(3),
-        Constraint::Length(10),
-    ])
-    .areas(buttons);
-    chrome::button(frame, cancel, "cancel", asking.button == 0, false);
-    chrome::button(frame, open, "open", asking.button == 1, true);
+    chrome::actions(
+        frame,
+        popup,
+        actions,
+        &[
+            chrome::Action::new("cancel").focused(asking.button == 0),
+            chrome::Action::new("open")
+                .focused(asking.button == 1)
+                .primary(),
+        ],
+    );
     popup
 }

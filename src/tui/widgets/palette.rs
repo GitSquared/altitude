@@ -16,6 +16,20 @@ pub fn focus() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
+/// The answer a modal is asking for: a filled block, so it reads as the one to
+/// take even while the keys are somewhere else.
+pub fn answer() -> Style {
+    Style::new().fg(Color::Black).bg(Color::Cyan)
+}
+
+/// A filled thing holding the keys: the terminal's own colours turned over, so
+/// it cannot be mistaken for the answer's fill. Turning the theme's own colours
+/// over, rather than naming two, is what keeps this visible on a light terminal
+/// as well as a dark one.
+pub fn pressed() -> Style {
+    Style::new().add_modifier(Modifier::REVERSED)
+}
+
 pub fn inactive_selection() -> Style {
     Style::new().fg(Color::White).bg(Color::DarkGray)
 }

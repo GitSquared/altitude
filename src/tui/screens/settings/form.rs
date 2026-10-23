@@ -180,15 +180,22 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &Form) {
     }
 
     // The actions sit at the bottom right, where the eye ends up.
-    let [_, cancel, _, save] = Layout::horizontal([
-        Constraint::Min(1),
-        Constraint::Length(10),
-        Constraint::Length(3),
-        Constraint::Length(10),
-    ])
-    .areas(buttons);
-    chrome::button(frame, cancel, "cancel", form.focus == Focus::Cancel, false);
-    chrome::button(frame, save, "save", form.focus == Focus::Save, true);
+    chrome::actions(
+        frame,
+        area,
+        Rect {
+            y: buttons.y,
+            height: 2,
+            ..buttons
+        },
+        &[
+            chrome::Action::new("cancel").focused(form.focus == Focus::Cancel),
+            chrome::Action::new("save")
+                .focused(form.focus == Focus::Save)
+                .primary()
+                .enabled(form.refusal().is_none()),
+        ],
+    );
 }
 
 fn draw_label(frame: &mut Frame, area: Rect, text: &str) {

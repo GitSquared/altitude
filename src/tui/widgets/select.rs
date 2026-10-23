@@ -23,7 +23,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::Style,
     text::{Line, Span},
-    widgets::{Block, BorderType, Clear, List, ListItem, ListState, Padding, Paragraph},
+    widgets::{Block, BorderType, Clear, Padding, Paragraph},
 };
 
 use crate::tui::widgets::{palette, utils::truncate};
@@ -200,13 +200,26 @@ impl<T> Select<T> {
         true
     }
 
-    /// Move the keys one match, without wrapping: a list has an end, and it is
-    /// where the operator's eye already is.
+    /// Move the keys one match, for a wheel notch over the open list.
+    pub fn scroll(&mut self, forward: bool) {
+        if self.open {
+            let matches = self.matches();
+            self.step(forward, matches.len());
+        }
+    }
+
+    /// Move the keys one match, and round again at either end: a list of three
+    /// is quicker to run round than to hit its last row and stop.
     fn step(&mut self, forward: bool, matches: usize) {
+        if matches == 0 {
+            self.at = 0;
+            return;
+        }
+        let at = self.at.min(matches - 1);
         self.at = if forward {
-            (self.at + 1).min(matches.saturating_sub(1))
+            (at + 1) % matches
         } else {
-            self.at.saturating_sub(1)
+            (at + matches - 1) % matches
         };
     }
 
@@ -285,16 +298,17 @@ impl<T> Select<T> {
         }
     }
 
-    /// Draws the open list over `area`, ending where `anchor` begins.
+    /// Draws the open list over `area`, ending where `anchor` begins, and
+    /// answers with where each offer was drawn so a click can find it.
     ///
     /// The list opens upwards, because the pills sit above the actions: down is
     /// the button row, and a menu that covers what the page is asking is worse
     /// than one that covers what has been written. It is as tall as its matches
     /// and no taller, and as wide as its widest row so it does not paper over
     /// the page it is drawn on.
-    pub fn draw_list(&self, frame: &mut Frame, area: Rect, anchor: Rect) {
+    pub fn draw_list(&self, frame: &mut Frame, area: Rect, anchor: Rect) -> Vec<(Rect, usize)> {
         if !self.open || area.height == 0 || area.width == 0 {
-            return;
+            return Vec::new();
         }
         let searching = self.is_searching();
         let matches = self.matches();
@@ -313,7 +327,7 @@ impl<T> Select<T> {
             .max(if searching { 20 } else { 0 })
             .min(usize::from(area.width)) as u16;
         if area.height < 3 {
-            return;
+            return Vec::new();
         }
         let height = (matches.len() as u16 + 2 + u16::from(searching))
             .max(3)
@@ -333,7 +347,7 @@ impl<T> Select<T> {
         let inner = block.inner(popup);
         frame.render_widget(block, popup);
         if inner.height == 0 {
-            return;
+            return Vec::new();
         }
         let [query_row, list_area] =
             Layout::vertical([Constraint::Length(u16::from(searching)), Constraint::Min(0)])
@@ -356,32 +370,47 @@ impl<T> Select<T> {
             ));
         }
         if list_area.height == 0 {
-            return;
+            return Vec::new();
         }
         if matches.is_empty() {
             frame.render_widget(
                 Paragraph::new(Line::styled("nothing matches", palette::muted())),
                 list_area,
             );
-            return;
+            return Vec::new();
         }
-        let rows: Vec<ListItem> = matches
+        // Drawn row by row rather than through a list widget, because the same
+        // rectangles have to be handed to the mouse: a widget that scrolls knows
+        // where its rows went and does not say.
+        let height = usize::from(list_area.height);
+        let offset = (self.at + 1).saturating_sub(height);
+        matches
             .iter()
-            .filter_map(|index| self.offers.get(*index).map(|offer| (index, offer)))
             .enumerate()
-            .map(|(row, (index, offer))| {
+            .skip(offset)
+            .take(height)
+            .filter_map(|(row, index)| {
+                let offer = self.offers.get(*index)?;
+                let area = Rect {
+                    x: list_area.x,
+                    y: list_area.y + (row - offset) as u16,
+                    width: list_area.width,
+                    height: 1,
+                };
                 let chosen = *index == self.chosen;
-                ListItem::new(offer_line(
-                    offer,
-                    chosen,
-                    row == self.at,
-                    usize::from(list_area.width),
-                ))
+                let focused = row == self.at;
+                frame.render_widget(
+                    Paragraph::new(offer_line(offer, chosen, focused, usize::from(area.width)))
+                        .style(if focused {
+                            palette::focus()
+                        } else {
+                            Style::default()
+                        }),
+                    area,
+                );
+                Some((area, *index))
             })
-            .collect();
-        let mut state = ListState::default();
-        state.select(Some(self.at.min(matches.len().saturating_sub(1))));
-        frame.render_stateful_widget(List::new(rows), list_area, &mut state);
+            .collect()
     }
 }
 

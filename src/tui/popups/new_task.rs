@@ -27,6 +27,10 @@
 //! It is also the one key here that a terminal has to be told to report as a key
 //! of its own, which is why the page asks for that protocol while it is open.
 //!
+//! Everything drawn here can also be clicked: the pills, the offers under them,
+//! the prompt and the two answers. The rectangles come from the last frame, so a
+//! click lands on what the operator saw rather than on what the layout would be.
+//!
 //! The agent's first answer becomes its default. On a fresh installation there
 //! is nothing to default to, and guessing on someone's behalf is not Altitude's
 //! to do.
@@ -37,16 +41,17 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Flex, Layout, Rect},
     text::{Line, Span},
     widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
 use crate::tui::widgets::{
     chrome, palette,
+    pointer::Targets,
     select::{Offer, Select},
     text::TextBox,
     utils::{shimmer, truncate},
@@ -98,6 +103,18 @@ const ORDER: [Focus; 6] = [
     Focus::Cancel,
     Focus::Create,
 ];
+
+/// What a click on this page can land on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::tui) enum Hit {
+    Prompt,
+    /// One of the three decisions, by the control it belongs to.
+    Pill(Focus),
+    /// One offer of the open list, by its place among the offers.
+    Offer(usize),
+    Cancel,
+    Create,
+}
 
 /// A machine a task could run on.
 pub struct Host {
@@ -370,6 +387,81 @@ impl NewTask {
         }
     }
 
+    /// Read a mouse event against what the last frame drew.
+    pub(in crate::tui) fn mouse(
+        &mut self,
+        mouse: MouseEvent,
+        targets: &Targets<Hit>,
+    ) -> Option<Answer> {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.scroll_list(true);
+                None
+            }
+            MouseEventKind::ScrollDown => {
+                self.scroll_list(false);
+                None
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.click(targets.at(mouse.column, mouse.row))
+            }
+            _ => None,
+        }
+    }
+
+    fn click(&mut self, target: Option<&Hit>) -> Option<Answer> {
+        match target {
+            Some(Hit::Prompt) => {
+                self.focus = Focus::Task;
+                None
+            }
+            Some(Hit::Pill(pill)) => {
+                self.focus = *pill;
+                self.open_list();
+                None
+            }
+            // A menu row is a choice made: one click, not click then confirm.
+            Some(Hit::Offer(index)) => {
+                let index = *index;
+                self.choose(index);
+                None
+            }
+            Some(Hit::Cancel) => Some(Answer::Cancel),
+            Some(Hit::Create) => self.answer(),
+            // A click that lands on nothing closes the menu, the way a click
+            // outside one does everywhere else.
+            None => {
+                self.close_lists();
+                None
+            }
+        }
+    }
+
+    fn choose(&mut self, index: usize) {
+        match self.focus {
+            Focus::Environment => self.environment.choose(index),
+            Focus::Agent => self.agent.choose(index),
+            Focus::Host => self.host.choose(index),
+            _ => {}
+        }
+        self.close_lists();
+    }
+
+    fn scroll_list(&mut self, forward: bool) {
+        match self.focus {
+            Focus::Environment => self.environment.scroll(forward),
+            Focus::Agent => self.agent.scroll(forward),
+            Focus::Host => self.host.scroll(forward),
+            _ => {}
+        }
+    }
+
+    fn close_lists(&mut self) {
+        self.environment.close();
+        self.agent.close();
+        self.host.close();
+    }
+
     /// Whether the question can be answered, and what is missing when it cannot.
     pub fn refusal(&self) -> Option<&'static str> {
         // A read under way, or a submission waiting for the first result, is not
@@ -464,6 +556,7 @@ impl NewTask {
     }
 
     fn open_list(&mut self) {
+        self.close_lists();
         match self.focus {
             Focus::Environment => self.environment.open(),
             Focus::Agent => self.agent.open(),
@@ -775,19 +868,21 @@ impl NewTask {
         ))
     }
 
-    /// The open list, over the prompt above the pill it belongs to.
-    fn draw_open_list(&self, frame: &mut Frame, area: Rect, anchors: [Rect; 3]) {
+    /// The open list, over the prompt above the pill it belongs to, and where
+    /// each offer was drawn.
+    fn draw_open_list(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        anchors: [Rect; 3],
+    ) -> Vec<(Rect, usize)> {
         match self.focus {
             Focus::Environment if self.environment.is_open() => {
-                self.environment.draw_list(frame, area, anchors[0]);
+                self.environment.draw_list(frame, area, anchors[0])
             }
-            Focus::Agent if self.agent.is_open() => {
-                self.agent.draw_list(frame, area, anchors[1]);
-            }
-            Focus::Host if self.host.is_open() => {
-                self.host.draw_list(frame, area, anchors[2]);
-            }
-            _ => {}
+            Focus::Agent if self.agent.is_open() => self.agent.draw_list(frame, area, anchors[1]),
+            Focus::Host if self.host.is_open() => self.host.draw_list(frame, area, anchors[2]),
+            _ => Vec::new(),
         }
     }
 }
@@ -805,7 +900,13 @@ fn host_offers(hosts: Vec<Host>) -> Vec<Offer<Option<String>>> {
         .collect()
 }
 
-pub fn draw(frame: &mut Frame, area: Rect, new_task: &NewTask, tick: Option<usize>) -> Rect {
+pub fn draw(
+    frame: &mut Frame,
+    area: Rect,
+    new_task: &NewTask,
+    tick: Option<usize>,
+    targets: &mut Targets<Hit>,
+) -> Rect {
     let popup = chrome::centered(area, WIDTH_PERCENT, HEIGHT);
     frame.render_widget(Clear, popup);
     let block = chrome::modal(if new_task.issue {
@@ -815,16 +916,19 @@ pub fn draw(frame: &mut Frame, area: Rect, new_task: &NewTask, tick: Option<usiz
     });
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
+    targets.clear();
     if inner.height < 8 {
         return popup;
     }
-    // The pills sit under the prompt rather than over it: the question is
-    // written first, and what it will run as reads as a footer to it.
-    let [label, body, _, pills, actions] = Layout::vertical([
+    // The pills sit right under the prompt, on the right like a toolbar, and the
+    // answers close the window under a rule: the prompt is the question, what it
+    // will run as qualifies it, and the two answers end it.
+    let [label, body, pills, actions] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(4),
-        Constraint::Length(1),
         Constraint::Length(3),
+        // The answers take one row and leave one under them, so the window does
+        // not end on the buttons.
         Constraint::Length(3),
     ])
     .areas(inner);
@@ -835,17 +939,64 @@ pub fn draw(frame: &mut Frame, area: Rect, new_task: &NewTask, tick: Option<usiz
         ),
         label,
     );
+
     let anchors = draw_choices(frame, pills, new_task);
-    if new_task.issue {
+    for (pill, anchor) in [Focus::Environment, Focus::Agent, Focus::Host]
+        .into_iter()
+        .zip(anchors)
+    {
+        targets.add(anchor, Hit::Pill(pill));
+    }
+
+    let prompt = if new_task.issue {
         let [query, results] =
             Layout::vertical([Constraint::Length(3), Constraint::Min(3)]).areas(body);
         new_task.task.draw(frame, query, new_task.is_typing());
         draw_issue(frame, results, new_task, tick);
+        query
     } else {
         new_task.task.draw(frame, body, new_task.is_typing());
+        body
+    };
+    targets.add(prompt, Hit::Prompt);
+
+    // Said only once it has been asked for: an empty prompt is not a mistake
+    // until an answer says it is. It goes beside the pills, which leave the left
+    // of their row free by sitting on the right.
+    if new_task.refused
+        && let Some(refusal) = new_task.refusal()
+    {
+        frame.render_widget(
+            Line::styled(refusal, palette::attention()),
+            Rect {
+                x: inner.x,
+                y: pills.y + 1,
+                width: inner.width,
+                height: 1,
+            },
+        );
     }
-    draw_actions(frame, actions, new_task);
-    new_task.draw_open_list(frame, body, anchors);
+
+    let buttons = chrome::actions(
+        frame,
+        popup,
+        actions,
+        &[
+            chrome::Action::new("cancel").focused(new_task.focus == Focus::Cancel),
+            chrome::Action::new(if new_task.issue { "link" } else { "create" })
+                .focused(new_task.focus == Focus::Create)
+                .primary()
+                .enabled(new_task.refusal().is_none()),
+        ],
+    );
+    if let [cancel, create] = buttons[..] {
+        targets.add(cancel, Hit::Cancel);
+        targets.add(create, Hit::Create);
+    }
+
+    for (row, offer) in new_task.draw_open_list(frame, body, anchors) {
+        targets.add(row, Hit::Offer(offer));
+    }
     popup
 }
 
@@ -961,6 +1112,7 @@ fn draw_choices(frame: &mut Frame, area: Rect, new_task: &NewTask) -> [Rect; 3] 
         Constraint::Length(widths[1]),
         Constraint::Length(widths[2]),
     ])
+    .flex(Flex::End)
     .spacing(PILL_GAP)
     .areas(area);
     let focused = new_task.focus;
@@ -974,42 +1126,6 @@ fn draw_choices(frame: &mut Frame, area: Rect, new_task: &NewTask) -> [Rect; 3] 
         .host
         .draw_pill(frame, host, focused == Focus::Host, with_name);
     [environment, agent, host]
-}
-
-/// The actions, and what is missing when they cannot be taken.
-fn draw_actions(frame: &mut Frame, area: Rect, new_task: &NewTask) {
-    // A button is drawn on the second of the two rows it is given, so the reason
-    // sits above them both.
-    let [reason, buttons] =
-        Layout::vertical([Constraint::Length(1), Constraint::Length(2)]).areas(area);
-    // Said only once it has been asked for: an empty prompt is not a mistake
-    // until enter says it is.
-    if new_task.refused
-        && let Some(refusal) = new_task.refusal()
-    {
-        frame.render_widget(Line::styled(refusal, palette::attention()), reason);
-    }
-    let [_, cancel, _, create] = Layout::horizontal([
-        Constraint::Min(1),
-        Constraint::Length(10),
-        Constraint::Length(3),
-        Constraint::Length(10),
-    ])
-    .areas(buttons);
-    chrome::button(
-        frame,
-        cancel,
-        "cancel",
-        new_task.focus == Focus::Cancel,
-        false,
-    );
-    chrome::button(
-        frame,
-        create,
-        if new_task.issue { "link" } else { "create" },
-        new_task.focus == Focus::Create,
-        new_task.refusal().is_none(),
-    );
 }
 
 /// Whether text is shaped like something Linear can be asked about directly: an

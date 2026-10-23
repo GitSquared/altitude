@@ -418,6 +418,7 @@ where
                     content,
                     new_task,
                     app.animation_tick(),
+                    &mut app.new_task_targets,
                 ));
             }
             if matches!(app.foreground, Foreground::Keys(_)) {
@@ -714,6 +715,11 @@ where
         return Ok(false);
     }
     if let Event::Mouse(mouse) = event {
+        if matches!(app.foreground, Foreground::NewTask(_)) {
+            app.new_task_mouse(mouse, event_loop, task_service, issue_reads, delegations)
+                .await;
+            return Ok(false);
+        }
         if let Some(id) = app.open_shell().cloned() {
             let size = app.shell_area(terminal.size()?.into());
             let bytes = app

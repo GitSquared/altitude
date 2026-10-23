@@ -75,19 +75,18 @@ impl SignIn {
         let block = chrome::modal(format!("Sign in to {}", self.display));
         let inner = block.inner(popup);
         frame.render_widget(block, popup);
-        let [text, _, button] = Layout::vertical([
-            Constraint::Min(3),
-            Constraint::Length(1),
-            Constraint::Length(3),
-        ])
-        .areas(inner);
+        let [text, actions] =
+            Layout::vertical([Constraint::Min(3), Constraint::Length(3)]).areas(inner);
         frame.render_widget(
             Paragraph::new(self.lines.clone()).wrap(Wrap { trim: true }),
             text,
         );
-        let [_, ok] =
-            Layout::horizontal([Constraint::Min(1), Constraint::Length(10)]).areas(button);
-        chrome::button(frame, ok, "sign in", true, true);
+        chrome::actions(
+            frame,
+            popup,
+            actions,
+            &[chrome::Action::new("sign in").focused(true).primary()],
+        );
         popup
     }
 }
