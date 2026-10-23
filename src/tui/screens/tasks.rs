@@ -146,7 +146,7 @@ impl Card {
         now_ms: i64,
     ) -> Self {
         Self {
-            title: summary.display_title().to_owned(),
+            title: summary.title.clone(),
             environment: summary.environment.clone(),
             agent: summary.agent,
             host: summary.host.clone(),

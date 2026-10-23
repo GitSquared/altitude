@@ -2,6 +2,7 @@ use std::{error::Error, io, process::ExitCode, sync::Arc, time::Duration};
 
 use tokio::{
     signal::unix::{SignalKind, signal},
+    sync::mpsc,
     time::{MissedTickBehavior, interval},
 };
 
@@ -164,6 +165,7 @@ async fn client() -> Result<(), Box<dyn Error>> {
                 }
             }
         });
+        let (watched, watched_tasks) = mpsc::unbounded_channel();
         let result = tui::run(
             &mut terminal,
             &mut terminate,
@@ -176,8 +178,12 @@ async fn client() -> Result<(), Box<dyn Error>> {
                 settings,
                 remote_keys,
                 link.clone(),
+                watched,
             ),
-            task_execution_updates,
+            tui::Feeds {
+                task_execution: task_execution_updates,
+                watched_tasks,
+            },
         )
         .await;
         tracker_sync.abort();

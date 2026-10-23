@@ -29,7 +29,7 @@ use tokio::{
 };
 
 use super::send::IncomingTransfers;
-use super::{Handover, HandoverDraft, RecordedEvent, TaskEvent, TransferArchive};
+use super::{Handover, HandoverDraft, RecordedEvent, TransferArchive, WatchEvent};
 
 use tokio::{
     net::TcpListener,
@@ -100,11 +100,11 @@ struct Watchers {
 
 struct WatchingPeer {
     peer: EndpointId,
-    changes: mpsc::UnboundedSender<TaskEvent>,
+    changes: mpsc::UnboundedSender<WatchEvent>,
 }
 
 impl Watchers {
-    fn subscribe(&self, peer: EndpointId) -> mpsc::UnboundedReceiver<TaskEvent> {
+    fn subscribe(&self, peer: EndpointId) -> mpsc::UnboundedReceiver<WatchEvent> {
         let (changes, receiving) = mpsc::unbounded_channel();
         let mut peers = self.peers.lock().expect("watchers lock poisoned");
         peers.retain(|watching| !watching.changes.is_closed());
@@ -122,8 +122,20 @@ impl Watchers {
             if watching.peer.to_string() == operator {
                 let _ = watching
                     .changes
-                    .send(TaskEvent::Changed(Box::new(summary.clone())));
+                    .send(WatchEvent::Changed(Box::new(summary.clone())));
             }
+            true
+        });
+    }
+
+    /// The machine can be given work, which nothing about a task says.
+    fn ready(&self) {
+        let mut peers = self.peers.lock().expect("watchers lock poisoned");
+        peers.retain(|watching| {
+            if watching.changes.is_closed() {
+                return false;
+            }
+            let _ = watching.changes.send(WatchEvent::Ready);
             true
         });
     }
@@ -136,7 +148,7 @@ impl Watchers {
             if watching.changes.is_closed() {
                 return false;
             }
-            let _ = watching.changes.send(TaskEvent::Removed(id.clone()));
+            let _ = watching.changes.send(WatchEvent::Removed(id.clone()));
             true
         });
     }
@@ -1049,6 +1061,19 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     let task_loop = Arc::new(task_loop);
     let watchers = Arc::new(Watchers::default());
     {
+        // A machine that finishes preparing says so, rather than leaving the
+        // clients that asked before it was ready believing it never got there.
+        let watchers = Arc::clone(&watchers);
+        let mut state = state.subscribe();
+        tokio::spawn(async move {
+            while state.changed().await.is_ok() {
+                if *state.borrow_and_update() == RemoteState::Ready {
+                    watchers.ready();
+                }
+            }
+        });
+    }
+    {
         let watchers = Arc::clone(&watchers);
         let tasks = Arc::clone(&task_loop);
         tokio::spawn(async move {
@@ -1063,15 +1088,17 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
                     | TaskExecutionUpdate::OperatorReady(task)
                     | TaskExecutionUpdate::Report { task, .. } => watchers.publish(&task),
                     TaskExecutionUpdate::Removed(id, _) => watchers.removed(id),
-                    TaskExecutionUpdate::Created(Err(_)) | TaskExecutionUpdate::Started(Err(_)) => {
-                    }
-                    // A run that ended badly still changed the task it belongs to,
-                    // so the card is read again rather than left as it was.
-                    TaskExecutionUpdate::Finished(id, Err(_)) => {
-                        if let Ok(all) = tasks.list().await
-                            && let Some(task) = all.iter().find(|task| task.id == id)
-                        {
-                            watchers.publish(task);
+                    // A failure that came before a task existed carries no task
+                    // with it, so what changed is read from the store rather than
+                    // guessed at. Errors are rare; a card left saying the wrong
+                    // thing is not.
+                    TaskExecutionUpdate::Created(Err(_))
+                    | TaskExecutionUpdate::Started(Err(_))
+                    | TaskExecutionUpdate::Finished(_, Err(_)) => {
+                        if let Ok(all) = tasks.list().await {
+                            for task in &all {
+                                watchers.publish(task);
+                            }
                         }
                     }
                 }

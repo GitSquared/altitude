@@ -192,16 +192,18 @@ pub enum LinkRequest {
     },
 }
 
-/// One thing that happened to a watched machine's tasks.
+/// One thing a watch reported: what the machine holds, what changed, and when it
+/// became able to take work.
 ///
-/// The snapshot is what the machine holds when a watch opens; the changes are what
-/// has happened since. A change that repeats a task already in the snapshot costs
+/// The snapshot is what it holds when the watch opens; the changes are what has
+/// happened since. A change that repeats a task already in the snapshot costs
 /// nothing, because a card is keyed by its task.
 #[derive(Clone, Debug)]
-pub enum TaskEvent {
+pub enum WatchEvent {
     Snapshot(Vec<TaskSummary>),
     Changed(Box<TaskSummary>),
     Removed(String),
+    Ready,
 }
 
 /// The remote's answer to a [`LinkRequest`].
@@ -236,6 +238,8 @@ pub enum LinkResponse {
     TaskRemoved {
         id: String,
     },
+    /// The machine can be given work now, which is not a change to any task.
+    Ready,
     Signals {
         signals: Vec<TaskOperatorSignal>,
     },
@@ -306,11 +310,11 @@ pub struct TaskSummary {
     pub id: String,
     /// The machine that owns it, which is the machine answering.
     pub host: String,
-    /// The agent's short title, when it has chosen one. A client draws this in
-    /// place of the intent, and reads the intent when there is none.
-    #[serde(default)]
-    pub title: Option<String>,
-    pub intent: String,
+    /// What a card calls it: the agent's name for the work, or its first line.
+    ///
+    /// Resolved by the machine that owns the task, because that is where the
+    /// intent is and a card is not where a sentence gets cut.
+    pub title: String,
     pub environment: String,
     pub agent: Option<AgentKind>,
     pub status: TaskExecutionStatus,
@@ -368,14 +372,7 @@ impl TaskSummary {
         Self {
             id: task.id.clone(),
             host: task.host.clone(),
-            title: task.facts.title.clone(),
-            intent: task
-                .facts
-                .intent
-                .lines()
-                .next()
-                .unwrap_or_default()
-                .to_owned(),
+            title: task.title().to_owned(),
             environment: task.facts.environment_name.clone(),
             agent: task.agent_kind,
             status: task.facts.execution_status.clone(),
@@ -404,11 +401,6 @@ impl TaskSummary {
                 })
                 .collect(),
         }
-    }
-
-    /// What a card calls it: the agent's name for the work, or the intent.
-    pub fn display_title(&self) -> &str {
-        self.title.as_deref().unwrap_or(&self.intent)
     }
 }
 

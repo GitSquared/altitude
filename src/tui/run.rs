@@ -125,6 +125,13 @@ struct EventReplies<'a> {
     removals: &'a mpsc::Sender<RemoveTaskReply>,
 }
 
+/// What the loop hears from outside the terminal: the work changing, and what the
+/// machines this client uses are holding.
+pub struct Feeds {
+    pub task_execution: mpsc::UnboundedReceiver<TaskExecutionUpdate>,
+    pub watched_tasks: mpsc::UnboundedReceiver<WatchedTasks>,
+}
+
 pub async fn run<E>(
     terminal: &mut DefaultTerminal,
     terminate: &mut Signal,
@@ -132,7 +139,7 @@ pub async fn run<E>(
     event_loop: TaskEventLoop<E>,
     task_service: TaskService<E>,
     app: App,
-    task_execution_updates: mpsc::UnboundedReceiver<TaskExecutionUpdate>,
+    feeds: Feeds,
 ) -> io::Result<()>
 where
     E: IsolationEngine + Clone + 'static,
@@ -144,7 +151,7 @@ where
         event_loop.clone(),
         task_service,
         app,
-        task_execution_updates,
+        feeds,
     )
     .await;
     // Given back whether or not it was asked for: a terminal that never took it
@@ -173,16 +180,21 @@ async fn run_loop<E>(
     event_loop: TaskEventLoop<E>,
     task_service: TaskService<E>,
     mut app: App,
-    mut task_execution_updates: mpsc::UnboundedReceiver<TaskExecutionUpdate>,
+    feeds: Feeds,
 ) -> io::Result<()>
 where
     E: IsolationEngine + Clone + 'static,
 {
     execute!(io::stdout(), EnableBracketedPaste)?;
+    app.watch_remotes();
     // What each remote answered with last time, before anything is asked, so the
     // first picker of a session names its machines instead of printing addresses
     // the operator never typed as names.
     app.reload_remembered_keys().await;
+    let Feeds {
+        task_execution: mut task_execution_updates,
+        watched_tasks: mut watched,
+    } = feeds;
     let mut events = EventStream::new();
     let mut refresh = time::interval(Duration::from_secs(2));
     let mut shell_notice = time::interval(Duration::from_millis(100));
@@ -193,7 +205,6 @@ where
     let mut progress_clock = time::interval(Duration::from_millis(100));
     progress_clock.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     let mut configuration_clock = time::interval(Duration::from_secs(3));
-    let mut connection_clock = time::interval(Duration::from_secs(15));
     let mut reading_configuration = false;
     let (configuration_reads, mut configuration_read) = mpsc::unbounded_channel();
     let mut scan = None;
@@ -202,13 +213,10 @@ where
     let mut mouse_captured = false;
     // Whether the terminal is reporting the keys the creation question needs.
     let mut keys_enhanced = false;
-    // Reaching an address is the one thing here that waits on another machine, so
-    // it happens off this loop and reports back like a task's run does.
-    let (remote_answers, mut answered) = mpsc::unbounded_channel();
+    // Anything that waits on another machine reports back through a watch, so the
+    // clock below only drives what this machine checks about itself.
     let mut ask = time::interval(Duration::from_millis(250));
-    // A machine's tasks are watched rather than polled: one channel carries what
-    // every watch says, named by the machine that said it.
-    let (watched_tasks, mut watched) = mpsc::unbounded_channel::<WatchedTasks>();
+
     // Bringing a task home is a dial, a transfer and a load, so it happens away from
     // this loop and reports back with the task it landed.
     let (landings, mut landed) = mpsc::unbounded_channel::<Result<String, String>>();
@@ -511,10 +519,6 @@ where
                 }
                 redraw = true;
             }
-            _ = connection_clock.tick(), if !app.configured_remotes().is_empty() => {
-                app.refresh_remote_connections();
-                redraw = true;
-            }
             _ = configuration_clock.tick(), if !reading_configuration => {
                 reading_configuration = true;
                 let config = app.config.clone();
@@ -538,10 +542,6 @@ where
                 // Every quarter second, so it only asks for a frame when one of the
                 // checks it runs actually changed something.
                 let mut changed = false;
-                if app.wants_remote_check() {
-                    app.ask_next_remote(&remote_answers).await;
-                    changed = true;
-                }
                 changed |= app.sync_credentials();
                 if app.wants_credential_check() {
                     app.ask_credential_checks(&task_service, &credential_reports);
@@ -549,16 +549,12 @@ where
                 }
                 redraw |= changed;
             }
-            Some(answer) = answered.recv() => {
-                app.remote_answered(answer, &watched_tasks).await;
-                redraw = true;
-            }
             Some(reply) = reported.recv() => {
                 app.credential_checked(reply);
                 redraw = true;
             }
             Some(event) = watched.recv() => {
-                app.tasks_watched(event);
+                app.tasks_watched(event).await;
                 redraw = true;
             }
             Some(outcome) = landed.recv() => {

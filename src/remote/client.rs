@@ -12,8 +12,8 @@ use super::{
     bundle::ProfileDigest,
     discovery::{self, Scan},
     protocol::{
-        BlobHash, CHUNK_BYTES, Handover, LINK_ALPN, LinkRequest, LinkResponse, TaskEvent,
-        TaskRequest, TransferArchive, builder, read_body, read_frame, write_frame,
+        BlobHash, CHUNK_BYTES, Handover, LINK_ALPN, LinkRequest, LinkResponse, TaskRequest,
+        TransferArchive, WatchEvent, builder, read_body, read_frame, write_frame,
     },
 };
 
@@ -175,7 +175,7 @@ impl LinkClient {
     pub async fn watch_tasks(
         &self,
         peer: impl Into<EndpointAddr>,
-        events: mpsc::UnboundedSender<TaskEvent>,
+        events: mpsc::UnboundedSender<WatchEvent>,
     ) -> LinkResult<()> {
         let dial = self.dial(peer).await?;
         let (mut send, mut recv) = dial.0.open_bi().await?;
@@ -184,9 +184,10 @@ impl LinkClient {
         loop {
             let answer: LinkResponse = read_frame(&mut recv).await?;
             let event = match answer {
-                LinkResponse::Tasks { summaries } => TaskEvent::Snapshot(summaries),
-                LinkResponse::TaskChanged { summary } => TaskEvent::Changed(summary),
-                LinkResponse::TaskRemoved { id } => TaskEvent::Removed(id),
+                LinkResponse::Tasks { summaries } => WatchEvent::Snapshot(summaries),
+                LinkResponse::TaskChanged { summary } => WatchEvent::Changed(summary),
+                LinkResponse::TaskRemoved { id } => WatchEvent::Removed(id),
+                LinkResponse::Ready => WatchEvent::Ready,
                 LinkResponse::Rejected { reason } => return Err(reason.into()),
                 other => return Err(format!("unexpected answer: {other:?}").into()),
             };

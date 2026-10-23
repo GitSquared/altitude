@@ -35,7 +35,7 @@ use super::{
     identity::InstallationKey,
     protocol::{
         BlobHash, Handover, LINK_ALPN, LinkRequest, LinkResponse, MAX_BLOB_BYTES, RemoteTicket,
-        TRANSFER_PIECE_BYTES, TaskEvent, TaskRequest, TaskSummary, builder, read_body, read_frame,
+        TRANSFER_PIECE_BYTES, TaskRequest, TaskSummary, WatchEvent, builder, read_body, read_frame,
         write_frame,
     },
 };
@@ -368,7 +368,7 @@ pub trait TaskHost: Send + Sync + 'static {
 /// it is being read is queued behind it rather than lost.
 pub struct Watching {
     pub snapshot: Vec<TaskSummary>,
-    pub changes: UnboundedReceiver<TaskEvent>,
+    pub changes: UnboundedReceiver<WatchEvent>,
 }
 
 /// A future a trait object can hold, which an `async fn` in a trait cannot be.
@@ -456,9 +456,10 @@ async fn answer(
             let mut changes = watching.changes;
             while let Some(change) = changes.recv().await {
                 let response = match change {
-                    TaskEvent::Changed(summary) => LinkResponse::TaskChanged { summary },
-                    TaskEvent::Removed(id) => LinkResponse::TaskRemoved { id },
-                    TaskEvent::Snapshot(_) => continue,
+                    WatchEvent::Changed(summary) => LinkResponse::TaskChanged { summary },
+                    WatchEvent::Removed(id) => LinkResponse::TaskRemoved { id },
+                    WatchEvent::Ready => LinkResponse::Ready,
+                    WatchEvent::Snapshot(_) => continue,
                 };
                 write_frame(&mut send, &response).await?;
             }

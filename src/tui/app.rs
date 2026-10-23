@@ -31,8 +31,8 @@ use crate::{
     },
     remote::{
         Announcement, ConfigBundle, DiscoveredRemote, DiscoveryEvent, LinkClient, RemoteKey,
-        RemoteKeyStatus, RemoteKeys, RemoteState, TaskEvent, TaskOrigin, TaskRequest, TaskSummary,
-        TrackerConnection, bring_home, meet, send::send_to_remote, transfer,
+        RemoteKeyStatus, RemoteKeys, RemoteState, TaskOrigin, TaskRequest, TaskSummary,
+        TrackerConnection, WatchEvent, bring_home, meet, send::send_to_remote, transfer,
         transfer::TransferUpdate,
     },
     task::{
@@ -190,20 +190,6 @@ pub(in crate::tui) enum TrackerState {
     Connected,
 }
 
-/// What came back from reaching an address. Sent from the dial, which runs on its
-/// own so a slow one cannot hold up the interface.
-pub(in crate::tui) enum RemoteAnswer {
-    Reached {
-        address: String,
-        announcement: Announcement,
-        key_status: RemoteKeyStatus,
-    },
-    Silent {
-        address: String,
-        reason: String,
-    },
-}
-
 /// What came back from a Linear search. The token says which popup and which
 /// query it answers, so a late one is dropped rather than shown under a query it
 /// was not about.
@@ -343,7 +329,22 @@ impl TransferView {
 
 /// What a machine's watch reported, named by the machine so one channel can carry
 /// every remote.
-pub(in crate::tui) enum WatchedTasks {
+pub enum WatchedTasks {
+    /// The watch is dialling, so this machine is being asked about.
+    Dialling {
+        address: String,
+    },
+    /// It answered. What it said about itself is the only place an address becomes
+    /// a machine with a name, a key and a state.
+    Reached {
+        address: String,
+        announcement: Box<Announcement>,
+        key_status: RemoteKeyStatus,
+    },
+    /// It can be given work now, which is not a change to any task.
+    Ready {
+        address: String,
+    },
     /// Everything it holds for this client, as of the moment the watch opened.
     Snapshot {
         address: String,
@@ -357,10 +358,23 @@ pub(in crate::tui) enum WatchedTasks {
         address: String,
         id: String,
     },
-    /// The watch ended, so the machine is not answering any more.
+    /// The watch ended: the machine is not answering any more, and its tasks are
+    /// its own.
     Ended {
         address: String,
+        reason: String,
     },
+}
+
+/// Why a watch stopped dialling, which is what decides whether it dials again.
+enum WatchEnd {
+    /// The interface is gone.
+    Closed,
+    /// It answered with a key that is not the one remembered, so there is nothing
+    /// to listen to until the operator decides which key this machine is.
+    UnapprovedKey,
+    /// It did not answer, or the stream ended.
+    Lost,
 }
 
 /// A task another machine owns, and which machine that is.
@@ -513,14 +527,14 @@ pub struct App {
     /// The remote card to select once the next read of a remote's tasks lands,
     /// so a task that has just been sent there is the one in view.
     pending_remote: Option<(String, String)>,
-    /// Machines whose tasks are being watched. One watch each, however often the
-    /// machine answers.
-    watched: HashSet<String>,
+    /// Machines whose tasks are being watched, one watch each, and where a watch
+    /// reports what it finds.
+    watched: HashMap<String, JoinHandle<()>>,
+    watch_events: mpsc::UnboundedSender<WatchedTasks>,
     /// Acknowledged digests stay in memory; reconnecting rechecks the remote.
     remote_synced: HashMap<String, String>,
     configuration_digest: Option<String>,
     remote_config_inflight: HashSet<String>,
-    remote_checks_due: HashSet<String>,
     pub(in crate::tui) discovered_remotes: HashMap<EndpointId, DiscoveredRemote>,
 
     /// What each address last answered with. Written by the dial once there is
@@ -559,6 +573,7 @@ impl App {
         settings: Result<SettingsFile, SettingsError>,
         remote_keys: RemoteKeys,
         link: LinkClient,
+        watch_events: mpsc::UnboundedSender<WatchedTasks>,
     ) -> Self {
         let (settings_file, settings_error) = match settings {
             Ok(file) => (Some(file), None),
@@ -600,11 +615,11 @@ impl App {
             credentials_visible_since: None,
             credential_check_generation: 0,
             credential_retry_at: None,
-            watched: HashSet::new(),
+            watched: HashMap::new(),
+            watch_events,
             remote_synced: HashMap::new(),
             configuration_digest: None,
             remote_config_inflight: HashSet::new(),
-            remote_checks_due: HashSet::new(),
             discovered_remotes: HashMap::new(),
             remote_tasks: Vec::new(),
             pending_remote: None,
@@ -1378,9 +1393,6 @@ impl App {
                 self.refresh_git_identity().await;
             }
             self.credentials_visible_since = None;
-            if self.panel.section == Section::Remotes {
-                self.refresh_remote_connections();
-            }
         }
     }
 
@@ -1530,33 +1542,29 @@ impl App {
 
     /// Watch a machine's tasks, for as long as the interface runs.
     ///
-    /// Started once per machine, when it answers. The watch re-dials on its own
-    /// when it ends, and every watch opens with a snapshot, so a machine that went
-    /// away and came back needs nothing remembered about what was missed.
-    pub(in crate::tui) fn watch_remote(
-        &mut self,
-        address: &str,
-        events: &mpsc::UnboundedSender<WatchedTasks>,
-    ) {
-        if !self.watched.insert(address.to_owned()) {
+    /// The one thing that dials a remote. What the watch finds on the way in is
+    /// what the interface shows about the machine, so nothing else has to ask it
+    /// the same question on a clock of its own.
+    pub(in crate::tui) fn watch_remote(&mut self, address: &str) {
+        if self.watched.contains_key(address) {
             return;
         }
         let address = address.to_owned();
         let keys = self.remote_keys.clone();
         let client = self.link.clone();
-        let events = events.clone();
-        tokio::spawn(async move {
+        let events = self.watch_events.clone();
+        let watching = address.clone();
+        let handle = tokio::spawn(async move {
             let mut wait = WATCH_RETRY;
             loop {
                 let began = Instant::now();
-                match Self::watch_tasks(&address, &keys, &client, &events).await {
+                match Self::watch_once(&watching, &keys, &client, &events).await {
                     // Nothing is reading any more, which is the interface ending.
-                    Ok(()) => break,
-                    Err(error) => {
-                        tracing::debug!(%error, %address, "a remote's task watch ended");
-                        let _ = events.send(WatchedTasks::Ended {
-                            address: address.clone(),
-                        });
+                    WatchEnd::Closed => break,
+                    // Dialling again will get the same answer until the operator
+                    // says which key this machine is.
+                    WatchEnd::UnapprovedKey => break,
+                    WatchEnd::Lost => {
                         // A watch that ran for a while was working, and its retry
                         // should be quick; one that failed at once backs off.
                         if began.elapsed() > WATCH_SETTLED {
@@ -1568,45 +1576,98 @@ impl App {
                 }
             }
         });
+        self.watched.insert(address, handle);
     }
 
-    /// Watch one machine until the watch ends, naming the machine on every event.
-    async fn watch_tasks(
+    /// Stop watching a machine, which is what forgetting one means.
+    pub(in crate::tui) fn unwatch_remote(&mut self, address: &str) {
+        if let Some(handle) = self.watched.remove(address) {
+            handle.abort();
+        }
+    }
+
+    /// Watch every machine this client is configured to use.
+    pub(in crate::tui) fn watch_remotes(&mut self) {
+        for address in self.configured_remotes() {
+            self.watch_remote(&address);
+        }
+    }
+
+    /// Dial one machine, say what it answered, and carry its changes until the
+    /// stream ends.
+    async fn watch_once(
         address: &str,
         keys: &RemoteKeys,
         client: &LinkClient,
         events: &mpsc::UnboundedSender<WatchedTasks>,
-    ) -> Result<(), String> {
-        let peer = Self::remote_peer(address, keys).await?;
-        let (says, mut receiving) = mpsc::unbounded_channel();
-        let watching = client.watch_tasks(peer, says);
+    ) -> WatchEnd {
+        let _ = events.send(WatchedTasks::Dialling {
+            address: address.to_owned(),
+        });
+        let remembered = keys.remembered(address).await.ok().flatten();
+        let sighting = match meet(address, DEFAULT_PORT, remembered.as_deref()).await {
+            Ok(sighting) => sighting,
+            Err(error) => {
+                let _ = events.send(WatchedTasks::Ended {
+                    address: address.to_owned(),
+                    reason: error.to_string(),
+                });
+                return WatchEnd::Lost;
+            }
+        };
+        // What it said is reported before the key is judged, so a machine that
+        // answered with a different one can be seen and decided about.
+        let key_status = sighting.key_status;
+        let _ = events.send(WatchedTasks::Reached {
+            address: address.to_owned(),
+            announcement: Box::new(sighting.announcement.clone()),
+            key_status: key_status.clone(),
+        });
+        if key_status == RemoteKeyStatus::Changed {
+            return WatchEnd::UnapprovedKey;
+        }
+        let (said, mut receiving) = mpsc::unbounded_channel();
+        let watching = client.watch_tasks(sighting.ticket, said);
         tokio::pin!(watching);
         loop {
             tokio::select! {
-                ended = &mut watching => return ended.map_err(|error| error.to_string()),
+                ended = &mut watching => match ended {
+                    Ok(()) => return WatchEnd::Closed,
+                    Err(error) => {
+                        let _ = events.send(WatchedTasks::Ended {
+                            address: address.to_owned(),
+                            reason: error.to_string(),
+                        });
+                        return WatchEnd::Lost;
+                    }
+                },
                 said = receiving.recv() => {
-                    let Some(said) = said else { return Ok(()) };
+                    let Some(said) = said else { return WatchEnd::Lost };
                     let address = address.to_owned();
                     let event = match said {
-                        TaskEvent::Snapshot(summaries) => WatchedTasks::Snapshot { address, summaries },
-                        TaskEvent::Changed(summary) => WatchedTasks::Changed { address, summary },
-                        TaskEvent::Removed(id) => WatchedTasks::Removed { address, id },
+                        WatchEvent::Snapshot(summaries) => WatchedTasks::Snapshot { address, summaries },
+                        WatchEvent::Changed(summary) => WatchedTasks::Changed { address, summary },
+                        WatchEvent::Removed(id) => WatchedTasks::Removed { address, id },
+                        WatchEvent::Ready => WatchedTasks::Ready { address },
                     };
                     if events.send(event).is_err() {
-                        return Ok(());
+                        return WatchEnd::Closed;
                     }
                 }
             }
         }
     }
 
-    /// Take what a watch reported about one machine's tasks.
-    pub(in crate::tui) fn tasks_watched(&mut self, event: WatchedTasks) {
+    /// Take what a watch reported about a machine.
+    pub(in crate::tui) async fn tasks_watched(&mut self, event: WatchedTasks) {
         let address = match &event {
-            WatchedTasks::Snapshot { address, .. }
+            WatchedTasks::Dialling { address }
+            | WatchedTasks::Reached { address, .. }
+            | WatchedTasks::Ready { address }
+            | WatchedTasks::Snapshot { address, .. }
             | WatchedTasks::Changed { address, .. }
             | WatchedTasks::Removed { address, .. }
-            | WatchedTasks::Ended { address } => address.clone(),
+            | WatchedTasks::Ended { address, .. } => address.clone(),
         };
         // A machine that is no longer configured keeps a watch alive but not a
         // card: forgetting it is what makes its tasks go away.
@@ -1614,6 +1675,39 @@ impl App {
             return;
         }
         match event {
+            WatchedTasks::Dialling { address } => {
+                self.remote_status.insert(address, RemoteStatus::Asking);
+            }
+            // It answered, so this is what the interface knows about it: the key,
+            // the name it gave, and whether it can be given work.
+            WatchedTasks::Reached {
+                address,
+                announcement,
+                key_status,
+            } => match key_status {
+                RemoteKeyStatus::New | RemoteKeyStatus::Known => {
+                    self.remember(&address, &announcement).await;
+                    self.note_remote_trackers(&address, &announcement);
+                    let status = match announcement.state {
+                        RemoteState::Preparing => RemoteStatus::Syncing,
+                        RemoteState::Ready => RemoteStatus::Reached,
+                    };
+                    self.remote_status.insert(address, status);
+                    self.reload_remembered_keys().await;
+                }
+                // Reported, and not written: accepting a changed key means
+                // forgetting the address first, which is a second act. Nothing the
+                // unaccepted answer said is shown either, and nothing it holds is
+                // listened to.
+                RemoteKeyStatus::Changed => {
+                    self.clear_remote_trackers(&address);
+                    self.remote_tasks.retain(|held| held.address != address);
+                    self.remote_status.insert(address, RemoteStatus::Changed);
+                }
+            },
+            WatchedTasks::Ready { address } => {
+                self.remote_status.insert(address, RemoteStatus::Reached);
+            }
             WatchedTasks::Snapshot { address, summaries } => self.holding(address, summaries),
             WatchedTasks::Changed { address, summary } => {
                 let held = HeldTask {
@@ -1634,11 +1728,18 @@ impl App {
                 self.settle_selection();
             }
             // Its tasks are its own, and there is no copy here to fall back on.
-            WatchedTasks::Ended { address } => {
+            WatchedTasks::Ended { address, reason } => {
+                self.clear_remote_trackers(&address);
+                self.remote_synced.remove(&address);
                 self.remote_tasks.retain(|held| held.address != address);
+                self.remote_status
+                    .insert(address, RemoteStatus::Silent(reason));
                 self.settle_selection();
             }
         }
+        // A creation question may be open over the list, and a machine that just
+        // answered may now be one it can offer.
+        self.refresh_task_hosts();
     }
 
     /// Put one machine's tasks where the others are not, in the order it sent them.
@@ -1740,7 +1841,7 @@ impl App {
         self.alert = None;
         let transfer = self.begin_transfer(
             &format!("Pulling task from {}", self.remote_name(&address)),
-            summary.display_title(),
+            &summary.title,
             "packaging…",
             opens_terminal,
         );
@@ -2207,17 +2308,6 @@ impl App {
         self.refresh_task_hosts();
     }
 
-    pub(in crate::tui) fn refresh_remote_connections(&mut self) {
-        for address in self.configured_remotes() {
-            if !matches!(
-                self.remote_status.get(&address),
-                Some(RemoteStatus::Changed | RemoteStatus::Asking)
-            ) {
-                self.remote_checks_due.insert(address);
-            }
-        }
-    }
-
     /// Note whether the credentials list is showing, and start its clock when it
     /// appears.
     ///
@@ -2351,7 +2441,7 @@ impl App {
         }
     }
 
-    /// Whether any address is being asked about right now, which is what keeps the
+    /// Whether any address is being dialled right now, which is what keeps the
     /// dot moving while it waits.
     pub(in crate::tui) fn is_asking_remotes(&self) -> bool {
         self.remote_status
@@ -2359,144 +2449,17 @@ impl App {
             .any(RemoteStatus::is_in_progress)
     }
 
-    pub(in crate::tui) fn wants_remote_check(&self) -> bool {
-        !self
-            .remote_status
-            .values()
-            .any(|status| *status == RemoteStatus::Asking)
-            && self.next_unasked_remote().is_some()
-    }
-
-    /// The first address in the list that has not been asked about.
-    fn next_unasked_remote(&self) -> Option<String> {
-        self.configured_remotes().into_iter().find(|address| {
-            !self.remote_config_inflight.contains(address)
-                && (!self.remote_status.contains_key(address)
-                    || self.remote_checks_due.contains(address))
-        })
-    }
-
-    /// Dial the next address in the list, and let it report back when it answers.
-    pub(in crate::tui) async fn ask_next_remote(
-        &mut self,
-        answers: &mpsc::UnboundedSender<RemoteAnswer>,
-    ) {
-        let Some(address) = self.next_unasked_remote() else {
-            return;
-        };
-        self.remote_checks_due.remove(&address);
-        self.remote_status
-            .insert(address.clone(), RemoteStatus::Asking);
-        let remembered = self.remote_keys.remembered(&address).await.ok().flatten();
-        let answers = answers.clone();
-        tokio::spawn(async move {
-            let answer = match meet(&address, DEFAULT_PORT, remembered.as_deref()).await {
-                Ok(sighting) => RemoteAnswer::Reached {
-                    address,
-                    announcement: sighting.announcement,
-                    key_status: sighting.key_status,
-                },
-                Err(error) => RemoteAnswer::Silent {
-                    address,
-                    reason: error.to_string(),
-                },
-            };
-            let _ = answers.send(answer);
-        });
-    }
-
-    /// Take an answer from the dial, and write down what it said.
-    pub(in crate::tui) async fn remote_answered(
-        &mut self,
-        answer: RemoteAnswer,
-        watched: &mpsc::UnboundedSender<WatchedTasks>,
-    ) {
-        match answer {
-            RemoteAnswer::Reached {
-                address,
-                announcement,
-                key_status,
-            } => {
-                let status = match key_status {
-                    RemoteKeyStatus::New | RemoteKeyStatus::Known => {
-                        self.remember(&address, &announcement).await;
-                        self.note_remote_trackers(&address, &announcement);
-                        // It answered, but a machine still building what it needs
-                        // cannot be given work, and that is worth knowing before you
-                        // delegate to it.
-                        match announcement.state {
-                            RemoteState::Preparing => RemoteStatus::Syncing,
-                            RemoteState::Ready => RemoteStatus::Reached,
-                        }
-                    }
-                    // Reported, and not written: accepting a changed key means
-                    // forgetting the address first, which is a second act. Nothing
-                    // the unaccepted answer said is shown either.
-                    RemoteKeyStatus::Changed => {
-                        self.clear_remote_trackers(&address);
-                        RemoteStatus::Changed
-                    }
-                };
-                // A machine that answered is watched from now on: its cards are
-                // what it says they are, for as long as it keeps saying. One whose
-                // key is not the one remembered is not one to listen to.
-                if !matches!(&status, RemoteStatus::Changed) {
-                    self.watch_remote(&address, watched);
-                }
-                self.remote_status.insert(address, status);
-                self.reload_remembered_keys().await;
-            }
-            RemoteAnswer::Silent { address, reason } => {
-                self.clear_remote_trackers(&address);
-                self.remote_synced.remove(&address);
-                self.remote_status
-                    .insert(address, RemoteStatus::Silent(reason));
-            }
-        }
-        // A creation question may be open over the list, and a remote that just
-        // answered may now be a machine it can offer.
-        self.refresh_task_hosts();
-    }
-
-    /// Reach a remote at this address, and write down what it answers with.
+    /// Ask a machine about itself again, now.
     ///
-    /// The first key an address gives is unauthenticated, so meeting it is the
-    /// operator's decision, and this is the gesture that makes it. A key that
-    /// differs from the one remembered is reported and *not* written: accepting a
-    /// change means forgetting the address first, which is a second, deliberate
-    /// act rather than something that happens because someone pressed enter.
+    /// The watch is what asks a machine anything, so asking again is starting a
+    /// fresh one rather than waiting out the backoff. This is also how a changed
+    /// key is accepted: forget the one remembered, then ask.
     pub(in crate::tui) async fn check_remote(&mut self, address: &str) {
-        let remembered = self.remote_keys.remembered(address).await.ok().flatten();
-        let said = match meet(address, DEFAULT_PORT, remembered.as_deref()).await {
-            Ok(sighting) => {
-                let said = &sighting.announcement;
-                match sighting.key_status {
-                    // Reaching a remote already shows in its row and in the third
-                    // column, so an answer that changed nothing says nothing here.
-                    RemoteKeyStatus::New | RemoteKeyStatus::Known => {
-                        self.remember(address, said).await;
-                        self.note_remote_trackers(address, said);
-                        None
-                    }
-                    RemoteKeyStatus::Changed => {
-                        self.clear_remote_trackers(address);
-                        Some(format!(
-                            "{address} answered with a different key. d forgets the one you have, \
-                             then enter accepts this one."
-                        ))
-                    }
-                }
-            }
-            Err(error) => {
-                self.clear_remote_trackers(address);
-                Some(format!("{address} did not answer: {error}"))
-            }
-        };
-        match said {
-            Some(message) => self.say(message),
-            None => self.alert = None,
-        }
-        self.reload_remembered_keys().await;
+        self.unwatch_remote(address);
+        self.remote_status
+            .insert(address.to_owned(), RemoteStatus::Asking);
+        self.watch_remote(address);
+        self.refresh_task_hosts();
     }
 
     /// Note what an announcement said about the trackers a remote runs. Called
@@ -2797,6 +2760,11 @@ impl App {
 
     /// Destroy what a confirmation was about.
     pub(in crate::tui) async fn delete(&mut self, target: Target) {
+        // Stopping the watch is not the settings file's business, so it happens
+        // before the file is borrowed.
+        if let Target::Remote { original } = &target {
+            self.unwatch_remote(original);
+        }
         let Some(file) = self.settings_file.as_mut() else {
             return;
         };
@@ -2809,7 +2777,6 @@ impl App {
                 self.remote_synced.remove(original);
                 self.remote_status.remove(original);
                 self.remote_config_inflight.remove(original);
-                self.remote_checks_due.remove(original);
                 self.remote_trackers.remove(original);
                 self.remote_tasks
                     .retain(|held| !held.address.eq_ignore_ascii_case(original));
@@ -3551,7 +3518,7 @@ impl App {
             let asked = self.selected_held().map(|held| {
                 (
                     held.summary.id.clone(),
-                    held.summary.display_title().to_owned(),
+                    held.summary.title.clone(),
                     Some(self.remote_name(&held.address)),
                 )
             });
@@ -3575,7 +3542,7 @@ impl App {
                     held.summary.id.clone(),
                     format!(
                         "Pull \"{}\" here? It stops on {} and keeps running here.",
-                        held.summary.display_title(),
+                        held.summary.title,
                         self.remote_name(&held.address)
                     ),
                 ));
@@ -3662,7 +3629,7 @@ impl App {
                 if let Some(held) = self.selected_held() {
                     let question = format!(
                         "Drop \"{}\" from {}?",
-                        held.summary.display_title(),
+                        held.summary.title,
                         self.remote_name(&held.address)
                     );
                     self.foreground = Foreground::Confirm(PendingConfirm::removing_remote(
