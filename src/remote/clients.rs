@@ -82,16 +82,6 @@ impl ClientRecord {
         Ok(true)
     }
 
-    /// The keys this server has seen.
-    pub fn seen(&self) -> Vec<EndpointId> {
-        self.seen
-            .read()
-            .expect("client record")
-            .iter()
-            .copied()
-            .collect()
-    }
-
     fn persist(&self, seen: &BTreeSet<EndpointId>) -> LinkResult<()> {
         let keys: Vec<String> = seen.iter().map(EndpointId::to_string).collect();
         let text = format!("{}\n", serde_json::to_string_pretty(&keys)?);
