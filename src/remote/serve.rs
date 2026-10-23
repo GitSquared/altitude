@@ -19,6 +19,7 @@ use std::{
 use crate::{
     isolation::capsule::{ENVIRONMENT_LABEL, EnvironmentBase},
     task::TaskExecutionPauseReason,
+    vcs::now_ms,
 };
 use iroh::EndpointId;
 use microsandbox::{SaveOpts, Snapshot};
@@ -64,11 +65,21 @@ struct PreparedTransfer {
     handover: Handover,
 }
 
+/// How long a prepared transfer may sit still before the task is taken back.
+///
+/// Long enough that a slow link is not mistaken for an abandoned one, because
+/// what arrives is the only sign that a recipient is still there.
+const TRANSFER_IDLE_MS: i64 = 120_000;
+
 struct OwnTasks {
     config: Arc<Config>,
     tasks: Arc<TaskEventLoop<MicrosandboxIsolation>>,
     incoming: IncomingTransfers,
     preparation_lock: Arc<AsyncMutex<()>>,
+    /// When each prepared transfer was last read from, by its id. A transfer is
+    /// alive while pieces are being fetched; the history says when it was staged,
+    /// which is the floor a restart starts from.
+    activity: Arc<Mutex<HashMap<String, i64>>>,
     read_slots: Arc<Semaphore>,
     readiness: watch::Sender<RemoteState>,
     runtime: watch::Receiver<IsolationStatus>,
@@ -76,6 +87,74 @@ struct OwnTasks {
 }
 
 impl OwnTasks {
+    /// Take back tasks whose transfer stopped moving.
+    ///
+    /// A recipient that goes away mid-transfer leaves the task stopped here,
+    /// owned and run by nobody. Nothing on the other side will ever say so, so the
+    /// machine that owns the task decides: after a while with no piece read, the
+    /// task waits to run here again.
+    async fn release_stalled_transfers(&self) {
+        // Packaging holds this lock, and a transfer being packaged is not stalled.
+        let Ok(_packaging) = self.preparation_lock.try_lock() else {
+            return;
+        };
+        let tasks = match self.tasks.list().await {
+            Ok(tasks) => tasks,
+            Err(error) => {
+                tracing::warn!(%error, "could not read tasks to release a stalled transfer");
+                return;
+            }
+        };
+        for task in tasks {
+            if task.facts.execution_pause_reason != Some(TaskExecutionPauseReason::Transfer) {
+                continue;
+            }
+            let Some((transfer_id, staged_at)) = self.staged_transfer(&task.id).await else {
+                continue;
+            };
+            let last = self
+                .activity
+                .lock()
+                .expect("transfer activity lock poisoned")
+                .get(&transfer_id)
+                .copied()
+                .unwrap_or(staged_at);
+            if now_ms() - last < TRANSFER_IDLE_MS {
+                continue;
+            }
+            if let Err(error) = self.tasks.abandon_transfer(&task.id, &transfer_id).await {
+                tracing::warn!(task = %task.id, %transfer_id, %error, "could not take a stalled transfer back");
+                continue;
+            }
+            tracing::info!(task = %task.id, %transfer_id, "a transfer stopped moving; the task stays here");
+            self.activity
+                .lock()
+                .expect("transfer activity lock poisoned")
+                .remove(&transfer_id);
+            if let Ok(directory) = self.transfer_directory(&transfer_id) {
+                for name in ["environment.tar.zst", "capsule.tar.zst", "history.json"] {
+                    let _ = fs::remove_file(directory.join(name));
+                }
+            }
+        }
+    }
+
+    /// The transfer a task is staged for, and when it was staged.
+    async fn staged_transfer(&self, task_id: &str) -> Option<(String, i64)> {
+        self.tasks
+            .events(task_id)
+            .await
+            .ok()?
+            .into_iter()
+            .rev()
+            .find_map(|(recorded_at_ms, event)| match event {
+                TaskHistoryEvent::TransferStaged { transfer_id, .. } => {
+                    Some((transfer_id, recorded_at_ms))
+                }
+                _ => None,
+            })
+    }
+
     fn transfer_directory(&self, id: &str) -> Result<PathBuf, String> {
         let id = uuid::Uuid::parse_str(id).map_err(|_| "invalid transfer identifier".to_owned())?;
         Ok(self
@@ -182,6 +261,7 @@ impl TaskHost for OwnTasks {
         let tasks = self.tasks.clone();
         let config = self.config.clone();
         let lock = self.preparation_lock.clone();
+        let activity = Arc::clone(&self.activity);
         Box::pin(async move {
             let _preparing = lock.lock().await;
             if let Some(task) = tasks
@@ -194,7 +274,14 @@ impl TaskHost for OwnTasks {
             {
                 return Err("that task belongs to another operator".into());
             }
-            export_task(&config, &tasks, &task_id, &peer.to_string()).await
+            let handover = export_task(&config, &tasks, &task_id, &peer.to_string()).await?;
+            // Packaging is done, so the wait for the first piece starts now rather
+            // than from when the task was staged.
+            activity
+                .lock()
+                .expect("transfer activity lock poisoned")
+                .insert(handover.transfer_id.clone(), now_ms());
+            Ok(handover)
         })
     }
 
@@ -208,6 +295,7 @@ impl TaskHost for OwnTasks {
     ) -> BoxFuture<Result<Vec<u8>, String>> {
         let directory = self.transfer_directory(&transfer_id);
         let read_slots = Arc::clone(&self.read_slots);
+        let activity = Arc::clone(&self.activity);
         Box::pin(async move {
             if len == 0 || len > super::protocol::TRANSFER_PIECE_BYTES {
                 return Err("invalid transfer piece length".into());
@@ -224,6 +312,10 @@ impl TaskHost for OwnTasks {
             if prepared.recipient != peer.to_string() {
                 return Err("this transfer belongs to another recipient".into());
             }
+            activity
+                .lock()
+                .expect("transfer activity lock poisoned")
+                .insert(transfer_id.clone(), now_ms());
             let filename = match part {
                 super::TransferPart::Environment => "environment.tar.zst",
                 super::TransferPart::History => "history.json",
@@ -906,6 +998,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         tasks: task_loop,
         incoming,
         preparation_lock: Arc::new(AsyncMutex::new(())),
+        activity: Arc::new(Mutex::new(HashMap::new())),
         read_slots: Arc::new(Semaphore::new(4)),
         readiness: state,
         runtime: prepared,
@@ -1004,9 +1097,14 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
 
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
+    // A transfer nobody is reading is a task nobody is running, and the only
+    // thing that can tell is the machine holding it.
+    let mut transfers = interval(Duration::from_secs(30));
+    transfers.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut is_ready = false;
     let result = loop {
         tokio::select! {
+            _ = transfers.tick(), if is_ready => host.release_stalled_transfers().await,
             result = &mut preparation, if !is_ready => match result {
                 Ok(()) => is_ready = true,
                 Err(error) => {
