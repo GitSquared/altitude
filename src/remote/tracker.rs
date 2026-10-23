@@ -19,7 +19,10 @@ use std::{
     io::{self, ErrorKind},
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -127,6 +130,11 @@ pub struct RemoteTracker {
     ledger: Mutex<Ledger>,
     /// Woken when a webhook is recorded, so the operator does not wait a tick.
     notify: Notify,
+    /// Whether anything has arrived since this process started. The first
+    /// delivery is said at info because it is the only proof a freshly installed
+    /// app can reach this machine, and a silent first install is indistinguishable
+    /// from a broken proxy.
+    delivered: AtomicBool,
 }
 
 impl RemoteTracker {
@@ -140,6 +148,7 @@ impl RemoteTracker {
             config,
             ledger: Mutex::new(ledger),
             notify: Notify::new(),
+            delivered: AtomicBool::new(false),
         }))
     }
 
@@ -1145,68 +1154,103 @@ async fn webhook(
         .get(SIGNATURE_HEADER)
         .and_then(|value| value.to_str().ok());
     if !verify_signature(&tracker.config.webhook_secret, signature, &body) {
+        // Loud, and without the value: a secret that does not match the app's is
+        // the one misconfiguration that otherwise looks like Linear sending
+        // nothing at all.
+        tracing::warn!(
+            header = signature.is_some(),
+            "Linear delivery rejected · its signature does not match this machine's webhook secret"
+        );
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let event = match classify_webhook(&tracker, &body) {
         WebhookOutcome::Store(event) => event,
         // A well-formed webhook for another resource is not this coordinator's
         // work. Acknowledging it stops Linear retrying it forever.
-        WebhookOutcome::Ignore => return StatusCode::OK.into_response(),
-        WebhookOutcome::Reject => return StatusCode::BAD_REQUEST.into_response(),
+        WebhookOutcome::Ignore(reason) => {
+            tracing::debug!(reason, "Linear delivery ignored");
+            return StatusCode::OK.into_response();
+        }
+        WebhookOutcome::Reject(reason) => {
+            tracing::warn!(reason, "Linear delivery rejected");
+            return StatusCode::BAD_REQUEST.into_response();
+        }
     };
+    // The line says what arrived, never what it said: a delivery carries the
+    // operator's own words, and a log is not the place to keep them.
+    let delivery = event.describe();
     // Identity comes from the signed body, not the unsigned delivery header:
     // a header a sender can choose is transport, not what the event is.
     let key = event.dedupe_key();
     match tracker.enqueue(key, event) {
-        Ok(_) => StatusCode::OK.into_response(),
+        Ok(true) if !tracker.delivered.swap(true, Ordering::Relaxed) => tracing::info!(
+            %delivery,
+            "Linear delivery received · the first one since this machine started"
+        ),
+        Ok(true) => tracing::debug!(%delivery, "Linear delivery recorded"),
+        Ok(false) => tracing::debug!(%delivery, "Linear delivery was already recorded"),
         Err(error) => {
             tracing::error!(%error, "could not durably record a Linear delivery");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     }
+    StatusCode::OK.into_response()
 }
 
+/// What a signed webhook turns into, or why it turns into nothing.
+///
+/// The reasons are logged where the outcome is returned, so the operator reading
+/// the log can tell a misconfiguration (a warning) from chatter (debug).
 enum WebhookOutcome {
     Store(StoredEvent),
-    Ignore,
-    Reject,
+    Ignore(&'static str),
+    Reject(&'static str),
 }
 
 fn classify_webhook(tracker: &RemoteTracker, body: &[u8]) -> WebhookOutcome {
     let Some(event_type) = webhook_event_type(body) else {
-        return WebhookOutcome::Reject;
+        return WebhookOutcome::Reject("the body has no event type");
     };
     match event_type.as_str() {
         "AgentSessionEvent" => match parse_agent_session_event(body) {
-            Ok(event)
+            Err(WebhookError::UnsupportedEvent(_)) => {
+                WebhookOutcome::Ignore("an agent session action this coordinator does not run")
+            }
+            Err(_) => WebhookOutcome::Reject("the agent session event could not be read"),
+            Ok(event) => {
                 if event
                     .validate(
                         tracker.config.automation.workspace_id(),
                         tracker.config.automation.app_user_id(),
                     )
-                    .is_ok()
-                    && event.oauth_client_id == tracker.config.oauth_client_id =>
-            {
+                    .is_err()
+                {
+                    return WebhookOutcome::Reject("another workspace or app");
+                }
+                if event.oauth_client_id != tracker.config.oauth_client_id {
+                    return WebhookOutcome::Reject("another OAuth application");
+                }
                 WebhookOutcome::Store(StoredEvent::Session(Box::new(SessionEvent::from(&event))))
             }
-            Ok(_) => WebhookOutcome::Reject,
-            Err(WebhookError::UnsupportedEvent(_)) => WebhookOutcome::Ignore,
-            Err(_) => WebhookOutcome::Reject,
         },
         "Issue" => match parse_issue_event(body) {
-            Ok(event)
-                if event.organization_id == tracker.config.automation.workspace_id()
-                    && event.is_fresh() =>
-            {
+            Err(_) => WebhookOutcome::Reject("the issue event could not be read"),
+            Ok(event) => {
+                if event.organization_id != tracker.config.automation.workspace_id() {
+                    return WebhookOutcome::Reject("another workspace");
+                }
+                if !event.is_fresh() {
+                    return WebhookOutcome::Reject(
+                        "older than the freshness window · check this machine's clock",
+                    );
+                }
                 match event.into_stored() {
                     Some(stored) => WebhookOutcome::Store(stored),
-                    None => WebhookOutcome::Ignore,
+                    None => WebhookOutcome::Ignore("not a state change a person made"),
                 }
             }
-            Ok(_) => WebhookOutcome::Reject,
-            Err(_) => WebhookOutcome::Reject,
         },
-        _ => WebhookOutcome::Ignore,
+        _ => WebhookOutcome::Ignore("not a resource this coordinator handles"),
     }
 }
 
@@ -1501,6 +1545,19 @@ enum StoredEvent {
 }
 
 impl StoredEvent {
+    /// What arrived, by id, for a log line that says what happened without
+    /// repeating what the delivery said.
+    fn describe(&self) -> String {
+        match self {
+            StoredEvent::Session(event) => {
+                format!("session {} · {}", event.session_id, event.action)
+            }
+            StoredEvent::IssueStateChanged(change) => {
+                format!("issue {} · state {}", change.issue_id, change.state_id)
+            }
+        }
+    }
+
     /// The signed content that makes a redelivery the same work.
     fn dedupe_key(&self) -> String {
         match self {
