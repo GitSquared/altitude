@@ -268,6 +268,50 @@ impl TaskHost for OwnTasks {
         Box::pin(async move { incoming.put(peer, &transfer_id, part, offset, &bytes).await })
     }
 
+    fn abandon_import(
+        &self,
+        peer: EndpointId,
+        transfer_id: String,
+    ) -> BoxFuture<Result<(), String>> {
+        let incoming = self.incoming.clone();
+        Box::pin(async move { incoming.abandon(peer, &transfer_id).await })
+    }
+
+    fn abandon_take(&self, peer: EndpointId, transfer_id: String) -> BoxFuture<Result<(), String>> {
+        let tasks = Arc::clone(&self.tasks);
+        let root = self.config.data_dir().join("transfers");
+        Box::pin(async move {
+            let mut staged = None;
+            for task in tasks.list().await.map_err(|error| error.to_string())? {
+                let history = tasks
+                    .events(&task.id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let matches = history.iter().rev().find_map(|(_, event)| match event {
+                    TaskHistoryEvent::TransferStaged {
+                        transfer_id: current,
+                        peer: recipient,
+                        ..
+                    } => Some(current == &transfer_id && recipient == &peer.to_string()),
+                    _ => None,
+                });
+                if matches == Some(true) {
+                    staged = Some(task);
+                    break;
+                }
+            }
+            let task = staged.ok_or("that transfer is no longer staged")?;
+            tasks
+                .abandon_transfer(&task.id, &transfer_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            for name in ["environment.tar.zst", "capsule.tar.zst", "history.json"] {
+                let _ = fs::remove_file(root.join(&transfer_id).join(name));
+            }
+            Ok(())
+        })
+    }
+
     fn stage_import(
         &self,
         peer: EndpointId,
@@ -453,8 +497,29 @@ impl TaskHost for OwnTasks {
                 .map_err(|e| e.to_string())?
                 .iter()
                 .filter(|task| task.operator_id() == Some(owner.as_str()))
-                .map(summarise)
+                .map(TaskSummary::of)
                 .collect())
+        })
+    }
+
+    fn remove(&self, peer: EndpointId, task_id: String) -> BoxFuture<Result<(), String>> {
+        let tasks = Arc::clone(&self.tasks);
+        Box::pin(async move {
+            let owner = peer.to_string();
+            let task = tasks
+                .list()
+                .await
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .find(|task| task.id == task_id)
+                .ok_or("that task is no longer here")?;
+            if task.operator_id() != Some(owner.as_str()) {
+                return Err("that task belongs to another operator".into());
+            }
+            tasks
+                .remove_and_wait(task)
+                .await
+                .map_err(|error| error.to_string())
         })
     }
 }
@@ -629,6 +694,7 @@ fn is_machine_local_event(event: &TaskHistoryEvent) -> bool {
             | TaskHistoryEvent::TransferStaged { .. }
             | TaskHistoryEvent::TransferCommitted { .. }
             | TaskHistoryEvent::TransferLanded { .. }
+            | TaskHistoryEvent::TransferAbandoned { .. }
             | TaskHistoryEvent::SandboxProvisioned { .. }
             | TaskHistoryEvent::SandboxRemoved { .. }
             | TaskHistoryEvent::SnapshotRemoved { .. }
@@ -714,36 +780,6 @@ fn file_digest(path: &Path) -> Result<String, String> {
         hasher.update(&buffer[..read]);
     }
     Ok(hasher.finalize().to_hex().to_string())
-}
-
-fn summarise(task: &Task) -> TaskSummary {
-    let mut extras = Vec::new();
-    if task.facts.unread_operator_signal_count > 0 {
-        extras.push(format!(
-            "{} unread",
-            task.facts.unread_operator_signal_count
-        ));
-    }
-    TaskSummary {
-        id: task.id.clone(),
-        host: task.host.clone(),
-        title: task.facts.title.clone(),
-        intent: task
-            .facts
-            .intent
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .to_owned(),
-        environment: task.facts.environment_name.clone(),
-        agent: task.agent_kind,
-        status: task.facts.execution_status.clone(),
-        mode: task.facts.execution_mode,
-        tracker_issue: task.facts.tracker_issue.clone(),
-        operator_label: task.facts.operator_label.clone(),
-        latest_turn_summary: task.facts.latest_turn_summary.clone(),
-        extras,
-    }
 }
 
 pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {

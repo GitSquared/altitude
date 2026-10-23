@@ -352,6 +352,19 @@ pub enum TaskHistoryEvent {
         transfer_id: String,
         recipient: String,
     },
+    /// A transfer stopped before the source gave the task up.
+    ///
+    /// The task goes back to waiting to be run here. The pause field is part of
+    /// the record even though it is always empty: a reader takes the task's pause
+    /// from the latest event that carries the field, so leaving it out would leave
+    /// this task recorded as still being transferred.
+    TransferAbandoned {
+        transfer_id: String,
+        execution_status: TaskExecutionStatus,
+        execution_pause_reason: Option<TaskExecutionPauseReason>,
+        snapshot_available: bool,
+        snapshot_path: Option<String>,
+    },
     ExecutionQueued {
         execution_status: TaskExecutionStatus,
     },

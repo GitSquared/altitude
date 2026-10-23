@@ -33,7 +33,7 @@ where
         terminate,
         interrupt,
         animations,
-        || "migrating database...",
+        || "migrating the database…",
         async { initialize.await.map_err(io::Error::other) },
     )
     .await
@@ -87,7 +87,7 @@ pub async fn task_resume<T>(
         terminate,
         interrupt,
         animations,
-        || "resuming tasks...",
+        || "resuming tasks…",
         async { Ok(resume.await) },
     )
     .await
@@ -130,12 +130,10 @@ async fn wait_for<T>(
 
 fn isolation_label(status: &IsolationStatus) -> &'static str {
     match status {
-        IsolationStatus::Starting | IsolationStatus::InstallingRuntime => {
-            "setting up isolation runtime..."
-        }
-        IsolationStatus::PreparingBaseImage => "fetching base sandbox image...",
-        IsolationStatus::PreparingWorkspacePackages => "preparing workspace packages...",
-        IsolationStatus::Ready | IsolationStatus::Failed(_) => "setting up isolation runtime...",
+        IsolationStatus::Starting | IsolationStatus::InstallingRuntime => "starting up…",
+        IsolationStatus::PreparingBaseImage => "fetching the sandbox image…",
+        IsolationStatus::PreparingWorkspacePackages => "installing workspace packages…",
+        IsolationStatus::Ready | IsolationStatus::Failed(_) => "starting up…",
     }
 }
 

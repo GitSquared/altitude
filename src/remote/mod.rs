@@ -16,6 +16,7 @@ pub mod serve;
 mod server;
 mod takeover;
 mod tracker;
+pub mod transfer;
 
 mod client;
 mod known;
@@ -38,6 +39,7 @@ pub use {
     },
     server::LinkServer,
     takeover::bring_home,
+    transfer::Transfer,
 };
 
 /// Boxed errors: a typed error enum would be speculation until a caller exists.

@@ -17,8 +17,12 @@ use iroh::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::task::{TaskExecutionMode, TaskExecutionStatus, TaskHistoryEvent, TaskOperatorSignal};
+use crate::task::{
+    Task, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent,
+    TaskOperatorAttentionLevel, TaskOperatorSignal, TaskOperatorSignalKind,
+};
 use crate::tracker::{IssueReference, IssueSnapshot};
+use crate::vcs::ContributionState;
 use crate::{agent::AgentKind, isolation::Environment};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -105,6 +109,14 @@ pub enum LinkRequest {
     /// whatever the remote holds for everyone, which is why it is a request
     /// rather than something an anonymous announcement carries.
     HeldProfiles,
+    /// Remove a task and dispose of its capsule.
+    ///
+    /// A remote is compute, not a different kind of task: deleting one of its
+    /// tasks is the same act as deleting one held here, performed by the machine
+    /// that holds it.
+    RemoveTask {
+        task_id: String,
+    },
     /// Ask the remote to hand a task over.
     ///
     /// Preparation stops the task but keeps ownership at the source until the
@@ -139,6 +151,18 @@ pub enum LinkRequest {
         offset: u64,
         hash: BlobHash,
         len: u64,
+    },
+    /// Give up a prepared transfer, putting the task back the way it was.
+    ///
+    /// A stopped transfer is not a lost task: whoever was taking it says so, and
+    /// the machine that owns it runs it again rather than holding it stopped
+    /// forever.
+    AbandonTake {
+        transfer_id: String,
+    },
+    /// Give up a staged import, so a stopped push leaves nothing half-written.
+    AbandonImport {
+        transfer_id: String,
     },
     /// The recipient has every piece and may land and boot the task.
     StageImport {
@@ -190,6 +214,8 @@ pub enum LinkResponse {
     HeldProfiles {
         profiles: Vec<ProfileDigest>,
     },
+    /// The remote removed the task and disposed of its capsule.
+    Removed,
     /// The task is stopped, and this is what has to travel for it to continue.
     Handover {
         handover: Box<Handover>,
@@ -244,7 +270,8 @@ pub enum SignalCommand {
 ///
 /// The whole task does not travel: what a client needs to draw a row is not what a
 /// machine needs to run one, and a summary keeps the link's contract to the part the
-/// interface actually reads.
+/// interface actually reads. This is also what a card is drawn from whichever
+/// machine owns the task, so a task here and a task on a remote read the same way.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskSummary {
     pub id: String,
@@ -259,6 +286,19 @@ pub struct TaskSummary {
     pub agent: Option<AgentKind>,
     pub status: TaskExecutionStatus,
     pub mode: TaskExecutionMode,
+    /// Why it is not running, when it is not.
+    #[serde(default)]
+    pub pause_reason: Option<TaskExecutionPauseReason>,
+    /// How loudly this task is asking to be looked at.
+    pub attention: TaskOperatorAttentionLevel,
+    /// The blocking signal the operator is being waited on for, when one is open.
+    #[serde(default)]
+    pub awaiting_signal_kind: Option<TaskOperatorSignalKind>,
+    #[serde(default)]
+    pub unread_operator_signal_count: u32,
+    /// What went wrong, when something did.
+    #[serde(default)]
+    pub last_error: Option<String>,
     /// The tracker issue this task is bound to, when it is bound to one, so a
     /// client can act on the binding without reading the whole task.
     #[serde(default)]
@@ -269,8 +309,78 @@ pub struct TaskSummary {
     /// What the agent last reported, in the words a card has room for.
     #[serde(default)]
     pub latest_turn_summary: Option<String>,
-    /// Something the operator has to look at, in the words the card has room for.
-    pub extras: Vec<String>,
+    /// What this task has open for review, so a client reads the same rows the
+    /// owning machine would.
+    #[serde(default)]
+    pub contributions: Vec<ContributionSummary>,
+}
+
+/// One pull request a task has open, as the owning machine last read it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ContributionSummary {
+    pub reference: String,
+    /// One operator-facing line, e.g. `ci 1 failing, 2 passing · merge blocked`.
+    #[serde(default)]
+    pub summary: Option<String>,
+    /// What the provider last reported. Its meaning is read where it is drawn,
+    /// because a contribution settles with time and the clock that reads it is
+    /// the reader's.
+    #[serde(default)]
+    pub state: Option<ContributionState>,
+}
+
+impl TaskSummary {
+    /// The card a task is drawn as, on the machine that owns it.
+    ///
+    /// One projection for both machines: a remote fills its answer with this, and
+    /// the client draws its own tasks with the same call, so the two cannot drift
+    /// into saying different things about the same kind of task.
+    pub fn of(task: &Task) -> Self {
+        Self {
+            id: task.id.clone(),
+            host: task.host.clone(),
+            title: task.facts.title.clone(),
+            intent: task
+                .facts
+                .intent
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_owned(),
+            environment: task.facts.environment_name.clone(),
+            agent: task.agent_kind,
+            status: task.facts.execution_status.clone(),
+            mode: task.facts.execution_mode,
+            pause_reason: task.facts.execution_pause_reason.clone(),
+            attention: task.facts.operator_attention_level.clone(),
+            awaiting_signal_kind: task.facts.awaiting_signal_kind,
+            unread_operator_signal_count: task.facts.unread_operator_signal_count,
+            last_error: task.facts.last_error.clone(),
+            tracker_issue: task.facts.tracker_issue.clone(),
+            operator_label: task.facts.operator_label.clone(),
+            latest_turn_summary: task.facts.latest_turn_summary.clone(),
+            contributions: task
+                .code_contributions
+                .iter()
+                .map(|contribution| {
+                    let observed = task
+                        .code_contribution_observations
+                        .iter()
+                        .find(|observation| observation.contribution_id == contribution.id);
+                    ContributionSummary {
+                        reference: contribution.reference.clone(),
+                        summary: observed.map(|observation| observation.summary.clone()),
+                        state: observed.map(|observation| observation.state.clone()),
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    /// What a card calls it: the agent's name for the work, or the intent.
+    pub fn display_title(&self) -> &str {
+        self.title.as_deref().unwrap_or(&self.intent)
+    }
 }
 
 /// Everything a machine needs to continue a task it did not start.

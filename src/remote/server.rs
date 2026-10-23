@@ -311,6 +311,8 @@ pub trait TaskHost: Send + Sync + 'static {
     fn configure(&self, peer: EndpointId) -> BoxFuture<Result<(), String>>;
     fn run(&self, peer: EndpointId, request: TaskRequest) -> BoxFuture<Result<(), String>>;
     fn list(&self, peer: EndpointId) -> BoxFuture<Result<Vec<TaskSummary>, String>>;
+    /// Remove a task and dispose of its capsule, as the owning machine would.
+    fn remove(&self, peer: EndpointId, task_id: String) -> BoxFuture<Result<(), String>>;
     /// Stop a task and bundle it for another machine to continue.
     fn hand_over(&self, peer: EndpointId, task_id: String) -> BoxFuture<Result<Handover, String>>;
     fn transfer_piece(
@@ -321,6 +323,14 @@ pub trait TaskHost: Send + Sync + 'static {
         offset: u64,
         len: u64,
     ) -> BoxFuture<Result<Vec<u8>, String>>;
+    /// Give up a prepared transfer, running the task here again.
+    fn abandon_take(&self, peer: EndpointId, transfer_id: String) -> BoxFuture<Result<(), String>>;
+    /// Give up a staged import the source stopped sending.
+    fn abandon_import(
+        &self,
+        peer: EndpointId,
+        transfer_id: String,
+    ) -> BoxFuture<Result<(), String>>;
     /// Commit source removal after the prepared recipient verifies its arrival.
     fn handed_over(&self, peer: EndpointId, transfer_id: String) -> BoxFuture<Result<(), String>>;
     /// Accept a pushed task and say whether the base environment must follow.
@@ -424,6 +434,27 @@ async fn answer(
         LinkRequest::Signal { command } => {
             let response = match handler.tasks.signal(peer, command).await {
                 Ok(()) => LinkResponse::Accepted,
+                Err(reason) => LinkResponse::Rejected { reason },
+            };
+            write_frame(&mut send, &response).await?;
+        }
+        LinkRequest::AbandonTake { transfer_id } => {
+            let response = match handler.tasks.abandon_take(peer, transfer_id).await {
+                Ok(()) => LinkResponse::Accepted,
+                Err(reason) => LinkResponse::Rejected { reason },
+            };
+            write_frame(&mut send, &response).await?;
+        }
+        LinkRequest::AbandonImport { transfer_id } => {
+            let response = match handler.tasks.abandon_import(peer, transfer_id).await {
+                Ok(()) => LinkResponse::Accepted,
+                Err(reason) => LinkResponse::Rejected { reason },
+            };
+            write_frame(&mut send, &response).await?;
+        }
+        LinkRequest::RemoveTask { task_id } => {
+            let response = match handler.tasks.remove(peer, task_id).await {
+                Ok(()) => LinkResponse::Removed,
                 Err(reason) => LinkResponse::Rejected { reason },
             };
             write_frame(&mut send, &response).await?;

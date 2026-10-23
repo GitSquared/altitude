@@ -50,6 +50,7 @@ use ratatui::{
     widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
+use crate::tui::keys;
 use crate::tui::widgets::{
     chrome, palette,
     pointer::Targets,
@@ -533,8 +534,9 @@ impl NewTask {
                 return None;
             }
         }
-        // The answer is a chord, so it is never a key that writes the intent.
-        if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL) {
+        // The answer is a chord, so it is never a key that writes the intent:
+        // enter adds a line, and this starts the work.
+        if keys::is_proceed(key) {
             return self.answer();
         }
         if self.is_typing() {

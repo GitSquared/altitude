@@ -14,10 +14,9 @@ use ratatui::{
 use crate::{
     isolation::EnvironmentProgress,
     task::{
-        Task, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
+        TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
         TaskOperatorAttentionLevel, TaskOperatorSignalKind,
     },
-    tracker::IssueReference,
     tui::widgets::utils::{shimmer, truncate},
     vcs::{ContributionReadiness, now_ms},
 };
@@ -114,96 +113,87 @@ fn draw_tasks(
     }
 }
 
-/// What a card draws, whether the task is this machine's or one it is reading.
-struct Card<'a> {
-    title: &'a str,
-    environment: &'a str,
+/// What a card draws, whichever machine owns the task.
+///
+/// Built from a [`TaskSummary`], which is what a remote answers with and what a
+/// local task projects to, so a card cannot say one thing about a task here and
+/// another about the same kind of task on another machine.
+struct Card {
+    title: String,
+    environment: String,
     agent: Option<AgentKind>,
-    host: &'a str,
+    host: String,
     /// The tracker issue this task is bound to, when it is bound to one.
-    issue: Option<&'a IssueReference>,
+    issue: Option<String>,
     /// How it is going, already in the words the card has room for.
     status: Line<'static>,
     /// What else it has to say, in the order it should be read.
     extras: Vec<Line<'static>>,
 }
 
+impl Card {
+    /// `at_capacity` is whether the machine this card is drawn on has room for
+    /// another sandbox. It is only ever true of this machine's tasks: a remote
+    /// reports its own reasons for a task that is not starting.
+    fn of(
+        summary: &TaskSummary,
+        at_capacity: bool,
+        tick: Option<usize>,
+        build: Option<&EnvironmentProgress>,
+        now_ms: i64,
+    ) -> Self {
+        Self {
+            title: summary.display_title().to_owned(),
+            environment: summary.environment.clone(),
+            agent: summary.agent,
+            host: summary.host.clone(),
+            issue: summary
+                .tracker_issue
+                .as_ref()
+                .map(|issue| format!("{} · Linear", issue.identifier)),
+            status: card_status(summary, at_capacity, tick, build),
+            extras: card_extras(summary, now_ms),
+        }
+    }
+}
+
 /// The list: this machine's tasks, then what the remotes are holding.
 ///
 /// A remote's tasks are read from it rather than copied, so they are here because it
-/// answered and they are gone when it does not.
-fn cards(app: &App) -> Vec<Card<'_>> {
+/// answered and they are gone when it does not. Its card is built from the same
+/// summary this machine builds for its own.
+fn cards(app: &App) -> Vec<Card> {
     let occupied = app
         .tasks
         .iter()
         .filter(|task| task.facts.sandbox_available)
         .count();
     let at_capacity = app.capacity.is_some_and(|limit| occupied >= limit);
-    let mut cards: Vec<Card<'_>> = app
+    let tick = app.animation_tick();
+    let now = now_ms();
+    let mut cards: Vec<Card> = app
         .tasks
         .iter()
-        .map(|task| Card {
-            title: task.title(),
-            environment: &task.facts.environment_name,
-            agent: task.agent_kind,
-            host: &task.host,
-            issue: task.facts.tracker_issue.as_ref(),
-            status: card_status(
-                task,
+        .map(|task| {
+            let summary = TaskSummary::of(task);
+            Card::of(
+                &summary,
                 at_capacity,
-                app.animation_tick(),
+                tick,
                 app.environment_builds.get(&task.id),
-            ),
-            extras: card_extras(task),
+                now,
+            )
         })
         .collect();
-    cards.extend(app.remote_tasks.iter().map(|held| {
-        let summary = &held.summary;
-        let mut extras: Vec<Line<'static>> = summary
-            .extras
+    cards.extend(
+        app.remote_tasks
             .iter()
-            .map(|extra| Line::styled(extra.clone(), palette::attention()))
-            .collect();
-        // Whose work this is, when it is not the machine holding the capsule, on
-        // the same terms as a local card.
-        if let Some(operator) = summary.operator_label.as_deref()
-            && !operator.is_empty()
-            && operator != summary.host.as_str()
-        {
-            extras.push(Line::styled(format!("for {operator}"), palette::muted()));
-        }
-        Card {
-            title: summary.title.as_deref().unwrap_or(&summary.intent),
-            environment: &summary.environment,
-            agent: summary.agent,
-            host: &summary.host,
-            issue: summary.tracker_issue.as_ref(),
-            status: held_status(summary),
-            extras,
-        }
-    }));
+            .map(|held| Card::of(&held.summary, false, tick, None, now)),
+    );
     cards
 }
 
-/// How a task on another machine is going, in the words the card has room for.
-///
-/// Nothing here is live: it is what that machine said when it last answered.
-fn held_status(held: &TaskSummary) -> Line<'static> {
-    match held.status {
-        TaskExecutionStatus::Pending => Line::styled("starting up...", palette::muted()),
-        TaskExecutionStatus::Running => Line::from(match held.mode {
-            TaskExecutionMode::Autopilot => "autopilot · working",
-            TaskExecutionMode::AutopilotReport => "autopilot · reporting",
-            TaskExecutionMode::Operator => "operator override",
-        })
-        .style(palette::good()),
-        TaskExecutionStatus::Paused => Line::styled("paused", palette::attention()),
-        TaskExecutionStatus::Completed => Line::styled("completed", palette::muted()),
-        TaskExecutionStatus::Failed => Line::styled("blocked · failed", palette::bad()),
-    }
-}
-
-fn draw_card(frame: &mut Frame, area: Rect, card: &Card<'_>, focused: bool) {
+fn draw_card(frame: &mut Frame, area: Rect, card: &Card, focused: bool) {
     frame.render_widget(Clear, area);
     let border = if focused {
         palette::accent()
@@ -214,7 +204,7 @@ fn draw_card(frame: &mut Frame, area: Rect, card: &Card<'_>, focused: bool) {
         .title(Span::styled(
             format!(
                 " {} ",
-                truncate(card.title, usize::from(area.width.saturating_sub(4)))
+                truncate(&card.title, usize::from(area.width.saturating_sub(4)))
             ),
             if focused {
                 palette::heading()
@@ -236,13 +226,10 @@ fn draw_card(frame: &mut Frame, area: Rect, card: &Card<'_>, focused: bool) {
         None => "no agent".to_owned(),
     };
     let mut lines = vec![card.status.clone()];
-    if let Some(issue) = card.issue {
-        lines.push(Line::styled(
-            format!("{} · Linear", issue.identifier),
-            palette::accent(),
-        ));
+    if let Some(issue) = &card.issue {
+        lines.push(Line::styled(issue.clone(), palette::accent()));
     }
-    lines.push(Line::styled(card.environment.to_owned(), palette::muted()));
+    lines.push(Line::styled(card.environment.clone(), palette::muted()));
     lines.push(Line::styled(
         format!("{agent} on {}", card.host),
         palette::muted(),
@@ -251,9 +238,12 @@ fn draw_card(frame: &mut Frame, area: Rect, card: &Card<'_>, focused: bool) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
-/// How a task is going, in the words the card has room for.
+/// How a task is going, in the words a card has room for.
+///
+/// `build` is this machine's own progress building the environment, which only
+/// exists here: a task on another machine is built there.
 fn card_status(
-    task: &Task,
+    summary: &TaskSummary,
     at_capacity: bool,
     tick: Option<usize>,
     build: Option<&EnvironmentProgress>,
@@ -261,52 +251,52 @@ fn card_status(
     if let Some(progress) = build {
         return Line::from_iter(shimmer(&build_label(progress, 40), tick));
     }
-    match task.facts.execution_status {
+    match summary.status {
         TaskExecutionStatus::Pending => {
             // Both are recorded as `Pending`; the only difference is whether the
             // host has room yet, and neither lasts long enough to be worth
             // distinguishing further.
             let label = if at_capacity {
-                "waiting for capacity..."
+                "waiting for capacity…"
             } else {
-                "starting up..."
+                "starting up…"
             };
             Line::from_iter(shimmer(label, tick))
         }
-        TaskExecutionStatus::Running => Line::from(match task.facts.execution_mode {
+        TaskExecutionStatus::Running => Line::from(match summary.mode {
             TaskExecutionMode::Autopilot => "autopilot · working",
             TaskExecutionMode::AutopilotReport => "autopilot · reporting",
-            TaskExecutionMode::Operator => "operator override",
+            TaskExecutionMode::Operator => "at the terminal",
         })
         .style(palette::good()),
-        TaskExecutionStatus::Paused => Line::from(match task.facts.execution_pause_reason {
+        TaskExecutionStatus::Paused => Line::from(match summary.pause_reason {
             Some(TaskExecutionPauseReason::AwaitingOperator) => "paused · awaiting operator",
             Some(TaskExecutionPauseReason::AwaitingReviewChecks) => "paused · watching PRs",
-            Some(TaskExecutionPauseReason::ApplicationShutdown) => "paused · app stopped",
+            Some(TaskExecutionPauseReason::ApplicationShutdown) => "paused · altitude closed",
             Some(TaskExecutionPauseReason::Transfer) => "paused · transferring",
             None => "paused",
         })
         .style(palette::attention()),
         TaskExecutionStatus::Completed => Line::styled("completed", palette::muted()),
-        TaskExecutionStatus::Failed => Line::styled("blocked · failed", palette::bad()),
+        TaskExecutionStatus::Failed => Line::styled("failed", palette::bad()),
     }
 }
 
 /// What else a card has to say: the things that mean someone has to look.
-fn card_extras(task: &Task) -> Vec<Line<'static>> {
+fn card_extras(summary: &TaskSummary, now_ms: i64) -> Vec<Line<'static>> {
     let mut extras = Vec::new();
     // A previous report's request is not a current interruption after execution
     // resumes.
-    if task.facts.execution_status == TaskExecutionStatus::Paused
-        && task.facts.execution_pause_reason == Some(TaskExecutionPauseReason::AwaitingOperator)
+    if summary.status == TaskExecutionStatus::Paused
+        && summary.pause_reason.as_ref() == Some(&TaskExecutionPauseReason::AwaitingOperator)
     {
-        match task.facts.awaiting_signal_kind {
+        match summary.awaiting_signal_kind {
             // A wrap-up request is not a problem to solve. It is work waiting to
             // be accepted, so it reads as ready rather than as an alarm.
             Some(TaskOperatorSignalKind::InReview) => {
                 extras.push(Line::styled("in review", palette::good().bold()))
             }
-            _ => match task.facts.operator_attention_level {
+            _ => match summary.attention {
                 TaskOperatorAttentionLevel::Alarm => {
                     extras.push(Line::styled("ALARM", palette::bad().bold()))
                 }
@@ -318,13 +308,13 @@ fn card_extras(task: &Task) -> Vec<Line<'static>> {
             },
         }
     }
-    if task.facts.unread_operator_signal_count > 0 {
+    if summary.unread_operator_signal_count > 0 {
         extras.push(Line::styled(
-            format!("● {} unread", task.facts.unread_operator_signal_count),
+            format!("● {} unread", summary.unread_operator_signal_count),
             palette::accent().bold(),
         ));
     }
-    match task.code_contributions.len() {
+    match summary.contributions.len() {
         0 => {}
         1 => extras.push(Line::styled("1 contribution", palette::accent())),
         count => extras.push(Line::styled(
@@ -332,41 +322,42 @@ fn card_extras(task: &Task) -> Vec<Line<'static>> {
             palette::accent(),
         )),
     }
-    let shown = task.code_contributions.len().min(2);
-    for contribution in task.code_contributions.iter().take(shown) {
+    let shown = summary.contributions.len().min(2);
+    for contribution in summary.contributions.iter().take(shown) {
         let label = format!("PR #{}", contribution.reference);
-        let observation = task
-            .code_contribution_observations
-            .iter()
-            .find(|observation| observation.contribution_id == contribution.id);
-        let status = observation.map_or("status not observed", |observation| {
-            observation.summary.as_str()
-        });
-        let style = match observation.map(|observation| observation.state.readiness(now_ms())) {
+        let status = contribution
+            .summary
+            .as_deref()
+            .unwrap_or("status not observed");
+        let style = match contribution
+            .state
+            .as_ref()
+            .map(|state| state.readiness(now_ms))
+        {
             Some(ContributionReadiness::NeedsAction) => palette::bad(),
             Some(ContributionReadiness::Pending) => palette::attention(),
             _ => palette::muted(),
         };
         extras.push(Line::styled(format!("{label} · {status}"), style));
     }
-    if task.code_contributions.len() > shown {
+    if summary.contributions.len() > shown {
         // The card lists a couple of pull requests; say so, so the two shown are
         // not read as the whole set.
         extras.push(Line::styled(
-            format!("+{} more", task.code_contributions.len() - shown),
+            format!("+{} more", summary.contributions.len() - shown),
             palette::muted(),
         ));
     }
-    if task.facts.execution_status == TaskExecutionStatus::Failed
-        && let Some(error) = &task.facts.last_error
+    if summary.status == TaskExecutionStatus::Failed
+        && let Some(error) = &summary.last_error
     {
         extras.push(Line::styled(error.clone(), palette::bad()));
     }
     // Whose work this is, when it is not the machine holding the capsule. A task
     // delegated here from another operator names them.
-    if let Some(operator) = task.facts.operator_label.as_deref()
+    if let Some(operator) = summary.operator_label.as_deref()
         && !operator.is_empty()
-        && operator != task.host.as_str()
+        && operator != summary.host.as_str()
     {
         extras.push(Line::styled(format!("for {operator}"), palette::muted()));
     }

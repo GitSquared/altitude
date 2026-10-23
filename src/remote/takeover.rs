@@ -4,7 +4,8 @@ use crate::{
     config::DEFAULT_PORT,
     isolation::{IsolationEngine, capsule::verify_environment},
     remote::{
-        HandoverRecord, LinkClient, RemoteKeyStatus, RemoteKeys, TaskSummary, TransferPart, meet,
+        Handover, HandoverRecord, LinkClient, RemoteKeyStatus, RemoteKeys, TaskSummary, Transfer,
+        TransferPart, meet,
     },
     task::{Task, TaskArrival, TaskEventLoop, TaskHistoryEvent},
 };
@@ -17,6 +18,7 @@ pub async fn bring_home<E>(
     keys: &RemoteKeys,
     client: &LinkClient,
     event_loop: &TaskEventLoop<E>,
+    transfer: &Transfer,
 ) -> Result<String, String>
 where
     E: IsolationEngine + Clone + 'static,
@@ -59,18 +61,54 @@ where
         }
         return Ok(task.id);
     }
+    let outcome = receive(&peer, &handover, client, event_loop, transfer).await;
+    if outcome.is_err() && transfer.is_stopped() {
+        // Best effort: the task is resumable from here either way, because the
+        // source only gives ownership up once this machine has landed it.
+        if let Err(error) = client.abandon_take(&peer, &handover.transfer_id).await {
+            tracing::warn!(%error, "could not give a stopped transfer back to the source");
+        }
+    }
+    outcome
+}
+
+/// Take everything a prepared transfer offers, and land it here.
+///
+/// Apart from `bring_home` so a stop can be answered where it happened: the
+/// machine that stopped the transfer still owns the task, and has to run it
+/// again rather than hold it stopped for a transfer nobody is making.
+async fn receive<E>(
+    peer: &iroh::EndpointAddr,
+    handover: &Handover,
+    client: &LinkClient,
+    event_loop: &TaskEventLoop<E>,
+    transfer: &Transfer,
+) -> Result<String, String>
+where
+    E: IsolationEngine + Clone + 'static,
+{
     let landing = tempfile::tempdir().map_err(|e| e.to_string())?;
     if handover.history.len > super::protocol::MAX_BLOB_BYTES {
         return Err("task history exceeds the transfer limit".into());
     }
+    // What has to travel, before any of it does: one bar for the whole arrival
+    // rather than one per archive.
+    let whole = handover.history.len
+        + handover.capsule.len
+        + handover
+            .environment
+            .as_ref()
+            .map_or(0, |base| base.archive.len);
+    transfer.counting(whole);
     let history_path = landing.path().join("history.json");
     client
         .fetch_part(
-            &peer,
+            peer,
             &handover.transfer_id,
             TransferPart::History,
             &handover.history,
             &history_path,
+            transfer,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -78,6 +116,9 @@ where
         serde_json::from_reader(fs::File::open(history_path).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
     let environment = record.draft.environment;
+    // Building the base here is a wait with nothing to count, so the bar gives
+    // way to the words until there are bytes again.
+    transfer.waiting("building environment…");
     event_loop
         .prepare_environment(&environment, record.draft.agent)
         .await
@@ -94,11 +135,12 @@ where
                     let path = landing.path().join("environment.tar.zst");
                     client
                         .fetch_part(
-                            &peer,
+                            peer,
                             &handover.transfer_id,
                             TransferPart::Environment,
                             &base.archive,
                             &path,
+                            transfer,
                         )
                         .await
                         .map_err(|e| e.to_string())?;
@@ -127,14 +169,16 @@ where
     let capsule = if handover.capsule.len == 0 {
         None
     } else {
+        transfer.counting(whole);
         let path = landing.path().join("capsule.tar.zst");
         client
             .fetch_part(
-                &peer,
+                peer,
                 &handover.transfer_id,
                 TransferPart::Capsule,
                 &handover.capsule,
                 &path,
+                transfer,
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -161,6 +205,7 @@ where
         .into_iter()
         .map(|recorded| (recorded.recorded_at_ms, recorded.event))
         .collect::<Vec<_>>();
+    transfer.waiting("starting it…");
     let task = event_loop
         .land(TaskArrival {
             intent: record.draft.intent,
@@ -174,7 +219,7 @@ where
         })
         .await
         .map_err(|e| e.to_string())?;
-    complete_landing(&peer, &handover.transfer_id, client, event_loop, &task).await?;
+    complete_landing(peer, &handover.transfer_id, client, event_loop, &task).await?;
     Ok(task.id)
 }
 
