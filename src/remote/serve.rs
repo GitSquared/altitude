@@ -29,12 +29,12 @@ use tokio::{
 };
 
 use super::send::IncomingTransfers;
-use super::{Handover, HandoverDraft, RecordedEvent, TransferArchive};
+use super::{Handover, HandoverDraft, RecordedEvent, TaskEvent, TransferArchive};
 
 use tokio::{
     net::TcpListener,
     signal::unix::{SignalKind, signal},
-    sync::watch,
+    sync::{mpsc, watch},
     time::{MissedTickBehavior, interval},
 };
 
@@ -51,7 +51,7 @@ use crate::{
         announce::RemoteState,
         server::{BoxFuture, ServerParts, TaskHost},
     },
-    task::{Task, TaskEventLoop, TaskService, TaskStore},
+    task::{Task, TaskEventLoop, TaskExecutionUpdate, TaskService, TaskStore},
     task::{TaskHistoryEvent, TaskOperatorSignal, TrackerHost},
     tracker::{
         IssueReader, IssueSnapshot, Linear, TrackerKind, TrackerProvider,
@@ -80,10 +80,72 @@ struct OwnTasks {
     /// alive while pieces are being fetched; the history says when it was staged,
     /// which is the floor a restart starts from.
     activity: Arc<Mutex<HashMap<String, i64>>>,
+    /// Who is watching this machine's tasks, and where each one's changes go.
+    watchers: Arc<Watchers>,
     read_slots: Arc<Semaphore>,
     readiness: watch::Sender<RemoteState>,
     runtime: watch::Receiver<IsolationStatus>,
     tracker: Option<Arc<super::tracker::RemoteTracker>>,
+}
+
+/// Who is watching this machine's tasks, one entry per open watch.
+///
+/// A watch is a peer that asked what this machine holds and is still listening;
+/// what it may see is its own work, which is the whole reason the filter is here
+/// and not in the task list.
+#[derive(Default)]
+struct Watchers {
+    peers: Mutex<Vec<WatchingPeer>>,
+}
+
+struct WatchingPeer {
+    peer: EndpointId,
+    changes: mpsc::UnboundedSender<TaskEvent>,
+}
+
+impl Watchers {
+    fn subscribe(&self, peer: EndpointId) -> mpsc::UnboundedReceiver<TaskEvent> {
+        let (changes, receiving) = mpsc::unbounded_channel();
+        let mut peers = self.peers.lock().expect("watchers lock poisoned");
+        peers.retain(|watching| !watching.changes.is_closed());
+        peers.push(WatchingPeer { peer, changes });
+        receiving
+    }
+
+    /// A task changed, and this is who it belongs to.
+    fn changed(&self, operator: &str, summary: TaskSummary) {
+        let mut peers = self.peers.lock().expect("watchers lock poisoned");
+        peers.retain(|watching| {
+            if watching.changes.is_closed() {
+                return false;
+            }
+            if watching.peer.to_string() == operator {
+                let _ = watching
+                    .changes
+                    .send(TaskEvent::Changed(Box::new(summary.clone())));
+            }
+            true
+        });
+    }
+
+    /// A task is gone. Every watcher is told: an id that is not one of a peer's
+    /// tasks changes nothing there, and the id says nothing about whose it was.
+    fn removed(&self, id: String) {
+        let mut peers = self.peers.lock().expect("watchers lock poisoned");
+        peers.retain(|watching| {
+            if watching.changes.is_closed() {
+                return false;
+            }
+            let _ = watching.changes.send(TaskEvent::Removed(id.clone()));
+            true
+        });
+    }
+
+    fn publish(&self, task: &Task) {
+        if let Some(operator) = task.operator_id() {
+            self.changed(operator, TaskSummary::of(task));
+        }
+    }
 }
 
 impl OwnTasks {
@@ -594,6 +656,26 @@ impl TaskHost for OwnTasks {
         })
     }
 
+    fn watch(&self, peer: EndpointId) -> BoxFuture<Result<super::server::Watching, String>> {
+        let tasks = Arc::clone(&self.tasks);
+        let watchers = Arc::clone(&self.watchers);
+        Box::pin(async move {
+            // Registered before the snapshot is read, so a change made while it is
+            // being read is queued behind it rather than lost.
+            let changes = watchers.subscribe(peer);
+            let owner = peer.to_string();
+            let snapshot = tasks
+                .list()
+                .await
+                .map_err(|error| error.to_string())?
+                .iter()
+                .filter(|task| task.operator_id() == Some(owner.as_str()))
+                .map(TaskSummary::of)
+                .collect();
+            Ok(super::server::Watching { snapshot, changes })
+        })
+    }
+
     fn remove(&self, peer: EndpointId, task_id: String) -> BoxFuture<Result<(), String>> {
         let tasks = Arc::clone(&self.tasks);
         Box::pin(async move {
@@ -964,12 +1046,38 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         tasks = tasks.with_trackers(Arc::new(PushedTrackers::new(config.clone())));
     }
     let (task_loop, mut updates) = TaskEventLoop::waiting_for_runtime(tasks);
-    tokio::spawn(async move {
-        while updates.recv().await.is_some() {
-            tracing::debug!("a task changed");
-        }
-    });
     let task_loop = Arc::new(task_loop);
+    let watchers = Arc::new(Watchers::default());
+    {
+        let watchers = Arc::clone(&watchers);
+        let tasks = Arc::clone(&task_loop);
+        tokio::spawn(async move {
+            while let Some(update) = updates.recv().await {
+                match update {
+                    // Bytes for a terminal are not a card: what a watcher reads is
+                    // the task, and only the events that carry one change it.
+                    TaskExecutionUpdate::Output { .. } => {}
+                    TaskExecutionUpdate::Created(Ok(task))
+                    | TaskExecutionUpdate::Started(Ok(task))
+                    | TaskExecutionUpdate::Finished(_, Ok(task))
+                    | TaskExecutionUpdate::OperatorReady(task)
+                    | TaskExecutionUpdate::Report { task, .. } => watchers.publish(&task),
+                    TaskExecutionUpdate::Removed(id, _) => watchers.removed(id),
+                    TaskExecutionUpdate::Created(Err(_)) | TaskExecutionUpdate::Started(Err(_)) => {
+                    }
+                    // A run that ended badly still changed the task it belongs to,
+                    // so the card is read again rather than left as it was.
+                    TaskExecutionUpdate::Finished(id, Err(_)) => {
+                        if let Ok(all) = tasks.list().await
+                            && let Some(task) = all.iter().find(|task| task.id == id)
+                        {
+                            watchers.publish(task);
+                        }
+                    }
+                }
+            }
+        });
+    }
     // What this machine can mount is what a pushed configuration may carry,
     // besides the tracker profiles that only travel.
     let mounted_profiles: Vec<&'static str> = task_loop
@@ -999,6 +1107,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         incoming,
         preparation_lock: Arc::new(AsyncMutex::new(())),
         activity: Arc::new(Mutex::new(HashMap::new())),
+        watchers,
         read_slots: Arc::new(Semaphore::new(4)),
         readiness: state,
         runtime: prepared,

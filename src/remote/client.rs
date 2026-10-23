@@ -3,6 +3,7 @@
 use std::{fmt, fs, io::Write, path::Path};
 
 use iroh::{Endpoint, EndpointAddr, EndpointId, endpoint::Connection};
+use tokio::sync::mpsc;
 
 use crate::task::TaskOperatorSignal;
 
@@ -11,8 +12,8 @@ use super::{
     bundle::ProfileDigest,
     discovery::{self, Scan},
     protocol::{
-        BlobHash, CHUNK_BYTES, Handover, LINK_ALPN, LinkRequest, LinkResponse, TaskRequest,
-        TaskSummary, TransferArchive, builder, read_body, read_frame, write_frame,
+        BlobHash, CHUNK_BYTES, Handover, LINK_ALPN, LinkRequest, LinkResponse, TaskEvent,
+        TaskRequest, TransferArchive, builder, read_body, read_frame, write_frame,
     },
 };
 
@@ -165,19 +166,37 @@ impl LinkClient {
         }
     }
 
-    /// Asks what tasks a remote owns.
-    pub async fn list_tasks(&self, peer: impl Into<EndpointAddr>) -> LinkResult<Vec<TaskSummary>> {
-        match self.say(peer, &LinkRequest::ListTasks).await? {
-            LinkResponse::Tasks { summaries } => Ok(summaries),
-            LinkResponse::Rejected { reason } => Err(reason.into()),
-            other => Err(format!("unexpected answer: {other:?}").into()),
+    /// Watches a machine's tasks: what it holds now, and every change after.
+    ///
+    /// The first frame is the snapshot and the rest are changes, so a watch that
+    /// reconnects re-syncs itself and nobody has to track a gap. Returning means
+    /// the watch ended, either because the machine stopped answering or because
+    /// the reader went away.
+    pub async fn watch_tasks(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        events: mpsc::UnboundedSender<TaskEvent>,
+    ) -> LinkResult<()> {
+        let dial = self.dial(peer).await?;
+        let (mut send, mut recv) = dial.0.open_bi().await?;
+        write_frame(&mut send, &LinkRequest::WatchTasks).await?;
+        send.finish()?;
+        loop {
+            let answer: LinkResponse = read_frame(&mut recv).await?;
+            let event = match answer {
+                LinkResponse::Tasks { summaries } => TaskEvent::Snapshot(summaries),
+                LinkResponse::TaskChanged { summary } => TaskEvent::Changed(summary),
+                LinkResponse::TaskRemoved { id } => TaskEvent::Removed(id),
+                LinkResponse::Rejected { reason } => return Err(reason.into()),
+                other => return Err(format!("unexpected answer: {other:?}").into()),
+            };
+            if events.send(event).is_err() {
+                // Nobody is reading: the watch ends with its reader.
+                return Ok(());
+            }
         }
     }
 
-    /// Asks which profiles a remote already holds for this client.
-    ///
-    /// Answered from the authenticated peer, so it is this client's stamps and
-    /// not whatever the remote holds for everyone else.
     /// Removes a task from the machine that holds it, disposing of its capsule.
     ///
     /// The same act as removing a task here, performed by the machine it belongs
@@ -202,6 +221,10 @@ impl LinkClient {
         }
     }
 
+    /// Asks which profiles a remote already holds for this client.
+    ///
+    /// Answered from the authenticated peer, so it is this client's stamps and not
+    /// whatever the remote holds for everyone else.
     pub async fn held_profiles(
         &self,
         peer: impl Into<EndpointAddr>,

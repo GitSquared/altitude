@@ -33,8 +33,8 @@ use crate::{
 
 use super::App;
 use super::app::{
-    ConfigPushReply, Foreground, HeldTask, IssueReadReply, IssueSearchReply, NO_LINEAR,
-    RemoteSignalsReply, RemoveTaskReply, SendTaskReply, TaskDelegationReply, TrackerConnectReply,
+    ConfigPushReply, Foreground, IssueReadReply, IssueSearchReply, NO_LINEAR, RemoteSignalsReply,
+    RemoveTaskReply, SendTaskReply, TaskDelegationReply, TrackerConnectReply, WatchedTasks,
 };
 use super::keys::{is_dismiss, is_help};
 use super::popups;
@@ -206,13 +206,12 @@ where
     // it happens off this loop and reports back like a task's run does.
     let (remote_answers, mut answered) = mpsc::unbounded_channel();
     let mut ask = time::interval(Duration::from_millis(250));
-    // Reading a remote's tasks is a dial, so it happens on its own clock rather than
-    // every frame, and away from this loop.
-    let (remote_task_reads, mut remote_tasks_read) = mpsc::unbounded_channel::<Vec<HeldTask>>();
+    // A machine's tasks are watched rather than polled: one channel carries what
+    // every watch says, named by the machine that said it.
+    let (watched_tasks, mut watched) = mpsc::unbounded_channel::<WatchedTasks>();
     // Bringing a task home is a dial, a transfer and a load, so it happens away from
     // this loop and reports back with the task it landed.
     let (landings, mut landed) = mpsc::unbounded_channel::<Result<String, String>>();
-    let mut read_clock = time::interval(Duration::from_secs(3));
     // A credential shell is opened, prints, and ends on its own time: the sandbox may
     // have to be built first, which is minutes rather than frames.
     let (credential_events, mut credential_shell_events) = mpsc::unbounded_channel();
@@ -551,18 +550,15 @@ where
                 redraw |= changed;
             }
             Some(answer) = answered.recv() => {
-                app.remote_answered(answer).await;
+                app.remote_answered(answer, &watched_tasks).await;
                 redraw = true;
             }
             Some(reply) = reported.recv() => {
                 app.credential_checked(reply);
                 redraw = true;
             }
-            _ = read_clock.tick(), if matches!(app.foreground, Foreground::Tasks) => {
-                app.read_remote_tasks(&remote_task_reads);
-            }
-            Some(tasks) = remote_tasks_read.recv() => {
-                app.remote_tasks_read(tasks);
+            Some(event) = watched.recv() => {
+                app.tasks_watched(event);
                 redraw = true;
             }
             Some(outcome) = landed.recv() => {
@@ -641,7 +637,7 @@ where
                 redraw = true;
             }
             Some(reply) = delegated.recv() => {
-                app.task_delegation_resolved(reply, &remote_task_reads);
+                app.task_delegation_resolved(reply);
                 redraw = true;
             }
             Some(reply) = removed.recv() => {
@@ -649,7 +645,7 @@ where
                 redraw = true;
             }
             Some(reply) = sent.recv() => {
-                app.send_task_resolved(reply, &remote_task_reads);
+                app.send_task_resolved(reply);
                 redraw = true;
             }
             Some(reply) = config_pushed.recv() => {
@@ -661,7 +657,7 @@ where
                 redraw = true;
             }
             Some(reply) = remote_signals_replied.recv() => {
-                app.remote_signals_resolved(reply, &remote_task_reads);
+                app.remote_signals_resolved(reply);
                 redraw = true;
             }
             event = events.next() => {

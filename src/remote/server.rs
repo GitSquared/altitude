@@ -12,7 +12,7 @@ use std::{
 };
 
 use cap_std::fs::{Dir, OpenOptions, OpenOptionsExt, Permissions, PermissionsExt};
-use tokio::sync::{Mutex as AsyncMutex, watch};
+use tokio::sync::{Mutex as AsyncMutex, mpsc::UnboundedReceiver, watch};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 
@@ -35,7 +35,7 @@ use super::{
     identity::InstallationKey,
     protocol::{
         BlobHash, Handover, LINK_ALPN, LinkRequest, LinkResponse, MAX_BLOB_BYTES, RemoteTicket,
-        TRANSFER_PIECE_BYTES, TaskRequest, TaskSummary, builder, read_body, read_frame,
+        TRANSFER_PIECE_BYTES, TaskEvent, TaskRequest, TaskSummary, builder, read_body, read_frame,
         write_frame,
     },
 };
@@ -311,6 +311,8 @@ pub trait TaskHost: Send + Sync + 'static {
     fn configure(&self, peer: EndpointId) -> BoxFuture<Result<(), String>>;
     fn run(&self, peer: EndpointId, request: TaskRequest) -> BoxFuture<Result<(), String>>;
     fn list(&self, peer: EndpointId) -> BoxFuture<Result<Vec<TaskSummary>, String>>;
+    /// What this peer may see now, and the changes that follow.
+    fn watch(&self, peer: EndpointId) -> BoxFuture<Result<Watching, String>>;
     /// Remove a task and dispose of its capsule, as the owning machine would.
     fn remove(&self, peer: EndpointId, task_id: String) -> BoxFuture<Result<(), String>>;
     /// Stop a task and bundle it for another machine to continue.
@@ -357,6 +359,16 @@ pub trait TaskHost: Send + Sync + 'static {
     /// The source relinquished ownership; begin the landed task.
     fn commit_import(&self, peer: EndpointId, transfer_id: String)
     -> BoxFuture<Result<(), String>>;
+}
+
+/// A peer's view of the tasks it may see: what the machine holds now, and the
+/// changes after that.
+///
+/// The snapshot is taken after the listener is registered, so a change made while
+/// it is being read is queued behind it rather than lost.
+pub struct Watching {
+    pub snapshot: Vec<TaskSummary>,
+    pub changes: UnboundedReceiver<TaskEvent>,
 }
 
 /// A future a trait object can hold, which an `async fn` in a trait cannot be.
@@ -423,6 +435,34 @@ async fn answer(
                 Err(reason) => LinkResponse::Rejected { reason },
             };
             write_frame(&mut send, &response).await?;
+        }
+        LinkRequest::WatchTasks => {
+            let watching = match handler.tasks.watch(peer).await {
+                Ok(watching) => watching,
+                Err(reason) => {
+                    write_frame(&mut send, &LinkResponse::Rejected { reason }).await?;
+                    return Ok(());
+                }
+            };
+            // The snapshot is written before the changes queued behind it are
+            // drained, so what a watch opens with is never older than what follows.
+            write_frame(
+                &mut send,
+                &LinkResponse::Tasks {
+                    summaries: watching.snapshot,
+                },
+            )
+            .await?;
+            let mut changes = watching.changes;
+            while let Some(change) = changes.recv().await {
+                let response = match change {
+                    TaskEvent::Changed(summary) => LinkResponse::TaskChanged { summary },
+                    TaskEvent::Removed(id) => LinkResponse::TaskRemoved { id },
+                    TaskEvent::Snapshot(_) => continue,
+                };
+                write_frame(&mut send, &response).await?;
+            }
+            return Ok(());
         }
         LinkRequest::ListSignals { task_id } => {
             let response = match handler.tasks.signals(peer, task_id).await {

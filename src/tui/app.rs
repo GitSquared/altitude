@@ -17,7 +17,7 @@ use std::{
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use iroh::{EndpointAddr, EndpointId};
 use ratatui::{DefaultTerminal, layout::Rect, text::Line};
-use tokio::{process::Command as HostCommand, sync::mpsc, task::JoinHandle};
+use tokio::{process::Command as HostCommand, sync::mpsc, task::JoinHandle, time::sleep};
 
 use crate::{
     agent::AgentKind,
@@ -31,7 +31,7 @@ use crate::{
     },
     remote::{
         Announcement, ConfigBundle, DiscoveredRemote, DiscoveryEvent, LinkClient, RemoteKey,
-        RemoteKeyStatus, RemoteKeys, RemoteState, TaskOrigin, TaskRequest, TaskSummary,
+        RemoteKeyStatus, RemoteKeys, RemoteState, TaskEvent, TaskOrigin, TaskRequest, TaskSummary,
         TrackerConnection, bring_home, meet, send::send_to_remote, transfer,
         transfer::TransferUpdate,
     },
@@ -47,8 +47,6 @@ use crate::{
 };
 
 use super::widgets::alert::Alert;
-use futures_util::future;
-
 use popups::confirm::{CredentialTarget, PendingConfirm};
 use popups::new_task::{Answer, Hit as NewTaskHit, Host, NewTask, SearchToken};
 use popups::open_link::{self, Link, OpenLink};
@@ -244,6 +242,11 @@ const ASK_AFTER: Duration = Duration::from_millis(400);
 /// How long after nothing could check a login the section tries again, so a sandbox
 /// that will not start is not asked on every tick.
 const CHECK_RETRY_AFTER: Duration = Duration::from_secs(15);
+/// How long a task watch waits before dialling again, and how far that grows.
+const WATCH_RETRY: Duration = Duration::from_secs(1);
+const WATCH_RETRY_MAX: Duration = Duration::from_secs(30);
+/// A watch that lasted less than this never connected, so its retry backs off.
+const WATCH_SETTLED: Duration = Duration::from_secs(5);
 
 /// Which terminal is in front.
 ///
@@ -336,6 +339,28 @@ impl TransferView {
             rate: self.rate,
         }
     }
+}
+
+/// What a machine's watch reported, named by the machine so one channel can carry
+/// every remote.
+pub(in crate::tui) enum WatchedTasks {
+    /// Everything it holds for this client, as of the moment the watch opened.
+    Snapshot {
+        address: String,
+        summaries: Vec<TaskSummary>,
+    },
+    Changed {
+        address: String,
+        summary: Box<TaskSummary>,
+    },
+    Removed {
+        address: String,
+        id: String,
+    },
+    /// The watch ended, so the machine is not answering any more.
+    Ended {
+        address: String,
+    },
 }
 
 /// A task another machine owns, and which machine that is.
@@ -488,6 +513,9 @@ pub struct App {
     /// The remote card to select once the next read of a remote's tasks lands,
     /// so a task that has just been sent there is the one in view.
     pending_remote: Option<(String, String)>,
+    /// Machines whose tasks are being watched. One watch each, however often the
+    /// machine answers.
+    watched: HashSet<String>,
     /// Acknowledged digests stay in memory; reconnecting rechecks the remote.
     remote_synced: HashMap<String, String>,
     configuration_digest: Option<String>,
@@ -572,6 +600,7 @@ impl App {
             credentials_visible_since: None,
             credential_check_generation: 0,
             credential_retry_at: None,
+            watched: HashSet::new(),
             remote_synced: HashMap::new(),
             configuration_digest: None,
             remote_config_inflight: HashSet::new(),
@@ -1499,54 +1528,155 @@ impl App {
         }
     }
 
-    /// Ask each remote that answered what it is holding, off the event loop: reading one
-    /// is a dial, and a dial does not belong between two frames.
+    /// Watch a machine's tasks, for as long as the interface runs.
     ///
-    /// A remote that does not answer contributes nothing. Its tasks are its own, and
-    /// there is no copy here to fall back on.
-    pub(in crate::tui) fn read_remote_tasks(&self, reads: &mpsc::UnboundedSender<Vec<HeldTask>>) {
-        let addresses: Vec<String> = self
-            .configured_remotes()
-            .into_iter()
-            .filter(|address| {
-                matches!(self.remote_status.get(address), Some(RemoteStatus::Reached))
-            })
-            .collect();
-        if addresses.is_empty() {
+    /// Started once per machine, when it answers. The watch re-dials on its own
+    /// when it ends, and every watch opens with a snapshot, so a machine that went
+    /// away and came back needs nothing remembered about what was missed.
+    pub(in crate::tui) fn watch_remote(
+        &mut self,
+        address: &str,
+        events: &mpsc::UnboundedSender<WatchedTasks>,
+    ) {
+        if !self.watched.insert(address.to_owned()) {
             return;
         }
+        let address = address.to_owned();
         let keys = self.remote_keys.clone();
         let client = self.link.clone();
-        let reads = reads.clone();
+        let events = events.clone();
         tokio::spawn(async move {
-            // Every machine is asked at once: one slow or unanswering remote used
-            // to hold up the cards of all the others.
-            let asking = addresses.into_iter().map(|address| {
-                let keys = keys.clone();
-                let client = client.clone();
-                async move {
-                    match Self::read_tasks(&address, &keys, &client).await {
-                        Ok(tasks) => tasks
-                            .into_iter()
-                            .map(|summary| HeldTask {
-                                address: address.clone(),
-                                summary,
-                            })
-                            .collect::<Vec<_>>(),
-                        Err(error) => {
-                            tracing::debug!(%error, %address, "could not read a remote's tasks");
-                            Vec::new()
+            let mut wait = WATCH_RETRY;
+            loop {
+                let began = Instant::now();
+                match Self::watch_tasks(&address, &keys, &client, &events).await {
+                    // Nothing is reading any more, which is the interface ending.
+                    Ok(()) => break,
+                    Err(error) => {
+                        tracing::debug!(%error, %address, "a remote's task watch ended");
+                        let _ = events.send(WatchedTasks::Ended {
+                            address: address.clone(),
+                        });
+                        // A watch that ran for a while was working, and its retry
+                        // should be quick; one that failed at once backs off.
+                        if began.elapsed() > WATCH_SETTLED {
+                            wait = WATCH_RETRY;
                         }
+                        sleep(wait).await;
+                        wait = (wait * 2).min(WATCH_RETRY_MAX);
                     }
                 }
-            });
-            let held = future::join_all(asking)
-                .await
-                .into_iter()
-                .flatten()
-                .collect();
-            let _ = reads.send(held);
+            }
         });
+    }
+
+    /// Watch one machine until the watch ends, naming the machine on every event.
+    async fn watch_tasks(
+        address: &str,
+        keys: &RemoteKeys,
+        client: &LinkClient,
+        events: &mpsc::UnboundedSender<WatchedTasks>,
+    ) -> Result<(), String> {
+        let peer = Self::remote_peer(address, keys).await?;
+        let (says, mut receiving) = mpsc::unbounded_channel();
+        let watching = client.watch_tasks(peer, says);
+        tokio::pin!(watching);
+        loop {
+            tokio::select! {
+                ended = &mut watching => return ended.map_err(|error| error.to_string()),
+                said = receiving.recv() => {
+                    let Some(said) = said else { return Ok(()) };
+                    let address = address.to_owned();
+                    let event = match said {
+                        TaskEvent::Snapshot(summaries) => WatchedTasks::Snapshot { address, summaries },
+                        TaskEvent::Changed(summary) => WatchedTasks::Changed { address, summary },
+                        TaskEvent::Removed(id) => WatchedTasks::Removed { address, id },
+                    };
+                    if events.send(event).is_err() {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Take what a watch reported about one machine's tasks.
+    pub(in crate::tui) fn tasks_watched(&mut self, event: WatchedTasks) {
+        let address = match &event {
+            WatchedTasks::Snapshot { address, .. }
+            | WatchedTasks::Changed { address, .. }
+            | WatchedTasks::Removed { address, .. }
+            | WatchedTasks::Ended { address } => address.clone(),
+        };
+        // A machine that is no longer configured keeps a watch alive but not a
+        // card: forgetting it is what makes its tasks go away.
+        if !self.configured_remotes().contains(&address) {
+            return;
+        }
+        match event {
+            WatchedTasks::Snapshot { address, summaries } => self.holding(address, summaries),
+            WatchedTasks::Changed { address, summary } => {
+                let held = HeldTask {
+                    address: address.clone(),
+                    summary: *summary,
+                };
+                match self.remote_tasks.iter_mut().find(|existing| {
+                    existing.address == address && existing.summary.id == held.summary.id
+                }) {
+                    Some(existing) => *existing = held,
+                    None => self.remote_tasks.push(held),
+                }
+                self.reveal_pending();
+            }
+            WatchedTasks::Removed { address, id } => {
+                self.remote_tasks
+                    .retain(|held| !(held.address == address && held.summary.id == id));
+                self.settle_selection();
+            }
+            // Its tasks are its own, and there is no copy here to fall back on.
+            WatchedTasks::Ended { address } => {
+                self.remote_tasks.retain(|held| held.address != address);
+                self.settle_selection();
+            }
+        }
+    }
+
+    /// Put one machine's tasks where the others are not, in the order it sent them.
+    fn holding(&mut self, address: String, summaries: Vec<TaskSummary>) {
+        let at = self
+            .remote_tasks
+            .iter()
+            .position(|held| held.address == address)
+            .unwrap_or(self.remote_tasks.len());
+        self.remote_tasks.retain(|held| held.address != address);
+        let arrived: Vec<HeldTask> = summaries
+            .into_iter()
+            .map(|summary| HeldTask {
+                address: address.clone(),
+                summary,
+            })
+            .collect();
+        self.remote_tasks.splice(at..at, arrived);
+        self.reveal_pending();
+        self.settle_selection();
+    }
+
+    /// Select the card a machine just said it holds, when one was asked for.
+    fn reveal_pending(&mut self) {
+        if let Some((address, id)) = self.pending_remote.take()
+            && let Some(index) = self
+                .remote_tasks
+                .iter()
+                .position(|held| held.address == address && held.summary.id == id)
+        {
+            self.selected = self.tasks.len() + index;
+        }
+    }
+
+    fn settle_selection(&mut self) {
+        self.selected = self
+            .selected
+            .min((self.tasks.len() + self.remote_tasks.len()).saturating_sub(1));
     }
 
     /// Ask before taking a task over, naming where it is now when it is not here.
@@ -1768,11 +1898,7 @@ impl App {
     }
 
     /// Take what a remote answered when it was asked to run a task.
-    pub(in crate::tui) fn task_delegation_resolved(
-        &mut self,
-        reply: TaskDelegationReply,
-        reads: &mpsc::UnboundedSender<Vec<HeldTask>>,
-    ) {
+    pub(in crate::tui) fn task_delegation_resolved(&mut self, reply: TaskDelegationReply) {
         match reply.result {
             Ok(()) => self.say(format!(
                 "{} took the task",
@@ -1783,9 +1909,6 @@ impl App {
                 self.remote_name(&reply.address)
             )),
         }
-        // The machine holds a task this client did not have, so its cards are read
-        // again rather than guessed at.
-        self.read_remote_tasks(reads);
     }
 
     /// Ask the machine that holds a task to remove it and dispose of its capsule.
@@ -1898,11 +2021,7 @@ impl App {
     ///
     /// The source stays in the list until it is really relinquished, so a failure
     /// leaves the stopped task visible rather than pretending it moved.
-    pub(in crate::tui) fn send_task_resolved(
-        &mut self,
-        reply: SendTaskReply,
-        reads: &mpsc::UnboundedSender<Vec<HeldTask>>,
-    ) {
+    pub(in crate::tui) fn send_task_resolved(&mut self, reply: SendTaskReply) {
         self.transfer = None;
         match reply.result {
             Ok(task_id) => {
@@ -1927,25 +2046,10 @@ impl App {
                 self.problem(format!("Could not send the task: {error}"));
             }
         }
-        // The machine holds a task this client may not have, so its cards are read
-        // again rather than guessed at.
-        self.read_remote_tasks(reads);
     }
 
     /// Take a fresh read of what the remotes hold, and put the highlight on a task
     /// that has just been sent when it appears.
-    pub(in crate::tui) fn remote_tasks_read(&mut self, tasks: Vec<HeldTask>) {
-        self.remote_tasks = tasks;
-        if let Some((address, task_id)) = self.pending_remote.take()
-            && let Some(index) = self
-                .remote_tasks
-                .iter()
-                .position(|held| held.address == address && held.summary.id == task_id)
-        {
-            self.selected = self.tasks.len() + index;
-        }
-    }
-
     /// The keys of the send chooser: choose a machine, or leave without sending.
     pub(in crate::tui) async fn send_task_key<E>(
         &mut self,
@@ -2302,7 +2406,11 @@ impl App {
     }
 
     /// Take an answer from the dial, and write down what it said.
-    pub(in crate::tui) async fn remote_answered(&mut self, answer: RemoteAnswer) {
+    pub(in crate::tui) async fn remote_answered(
+        &mut self,
+        answer: RemoteAnswer,
+        watched: &mpsc::UnboundedSender<WatchedTasks>,
+    ) {
         match answer {
             RemoteAnswer::Reached {
                 address,
@@ -2329,6 +2437,12 @@ impl App {
                         RemoteStatus::Changed
                     }
                 };
+                // A machine that answered is watched from now on: its cards are
+                // what it says they are, for as long as it keeps saying. One whose
+                // key is not the one remembered is not one to listen to.
+                if !matches!(&status, RemoteStatus::Changed) {
+                    self.watch_remote(&address, watched);
+                }
                 self.remote_status.insert(address, status);
                 self.reload_remembered_keys().await;
             }
@@ -2697,6 +2811,8 @@ impl App {
                 self.remote_config_inflight.remove(original);
                 self.remote_checks_due.remove(original);
                 self.remote_trackers.remove(original);
+                self.remote_tasks
+                    .retain(|held| !held.address.eq_ignore_ascii_case(original));
                 // A forgotten remote's key is forgotten with it: the next
                 // sighting is a first sighting again, which is what forgetting
                 // means.
@@ -3738,22 +3854,6 @@ impl App {
         super::widgets::chrome::content_area(area, &self.hints(), self.keyboard_hints())
     }
 
-    /// Asks one machine what it is holding, which is where those tasks live.
-    async fn read_tasks(
-        address: &str,
-        keys: &RemoteKeys,
-        client: &LinkClient,
-    ) -> Result<Vec<TaskSummary>, String> {
-        let remembered = keys.remembered(address).await.ok().flatten();
-        let sighting = meet(address, DEFAULT_PORT, remembered.as_deref())
-            .await
-            .map_err(|error| error.to_string())?;
-        client
-            .list_tasks(sighting.ticket)
-            .await
-            .map_err(|error| error.to_string())
-    }
-
     /// Read what a task is asking, and show it.
     ///
     /// A task on another machine is asked over the link, off this loop; this
@@ -3973,11 +4073,7 @@ impl App {
     /// Take what came back from a remote task's signals. A reply that belongs to
     /// a pop-up the operator has left changes nothing; one that succeeds drops the
     /// resolved signal and re-reads the machine's cards.
-    pub(in crate::tui) fn remote_signals_resolved(
-        &mut self,
-        reply: RemoteSignalsReply,
-        reads: &mpsc::UnboundedSender<Vec<HeldTask>>,
-    ) {
+    pub(in crate::tui) fn remote_signals_resolved(&mut self, reply: RemoteSignalsReply) {
         match reply {
             RemoteSignalsReply::Opened { remote, signals } => {
                 if !self.is_current_remote_signals(&remote) {
@@ -4017,9 +4113,8 @@ impl App {
                         if action == RemoteSignalAction::Confirm {
                             self.say("Task completed");
                         }
-                        // The card's unread count comes from the machine, so it
-                        // is read again rather than guessed at.
-                        self.read_remote_tasks(reads);
+                        // The card's unread count is the machine's to say, and its
+                        // watch says it.
                     }
                     Err(error) => self.say(error),
                 }

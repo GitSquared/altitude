@@ -95,8 +95,14 @@ pub enum LinkRequest {
         hash: BlobHash,
         len: u64,
     },
-    /// Ask what tasks the remote owns.
+    /// Ask what tasks the remote owns, once.
     ListTasks,
+    /// Watch what the remote owns: the answer is what it holds now, followed by
+    /// one frame per change for as long as this stream is open.
+    ///
+    /// A list is a question with a moment for an answer, and a card list is not
+    /// that: what it shows is a machine's state, which changes when it changes.
+    WatchTasks,
     ListSignals {
         task_id: String,
     },
@@ -186,6 +192,18 @@ pub enum LinkRequest {
     },
 }
 
+/// One thing that happened to a watched machine's tasks.
+///
+/// The snapshot is what the machine holds when a watch opens; the changes are what
+/// has happened since. A change that repeats a task already in the snapshot costs
+/// nothing, because a card is keyed by its task.
+#[derive(Clone, Debug)]
+pub enum TaskEvent {
+    Snapshot(Vec<TaskSummary>),
+    Changed(Box<TaskSummary>),
+    Removed(String),
+}
+
 /// The remote's answer to a [`LinkRequest`].
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum LinkResponse {
@@ -206,6 +224,17 @@ pub enum LinkResponse {
     /// What the remote owns, as its own cards would show it.
     Tasks {
         summaries: Vec<TaskSummary>,
+    },
+    /// One task changed, sent while a watch is open.
+    TaskChanged {
+        summary: Box<TaskSummary>,
+    },
+    /// One task is gone, sent while a watch is open.
+    ///
+    /// Sent to every watcher: a task id a peer does not know is not one of its
+    /// tasks, and the id says nothing about whose it was.
+    TaskRemoved {
+        id: String,
     },
     Signals {
         signals: Vec<TaskOperatorSignal>,
