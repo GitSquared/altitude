@@ -352,16 +352,10 @@ impl NewTask {
             hints.push(chrome::Hint::new("esc", "close"));
             return hints;
         }
+        // Enter needs no line of its own: it takes whatever holds the focus, and
+        // saying so for each thing the focus can be on would be a line that
+        // changes as you move rather than tells you anything.
         let mut hints = vec![chrome::Hint::new("tab", "field")];
-        // Enter does what the thing holding the focus does, so the guidance says
-        // that rather than "activate". In the prompt it needs no saying: it is a
-        // line, and that is what the caret does.
-        match self.focus {
-            Focus::Task => {}
-            Focus::Cancel => hints.push(chrome::Hint::new("enter", "cancel")),
-            Focus::Create => hints.push(chrome::Hint::new("enter", "create")),
-            _ => hints.push(chrome::Hint::new("enter", "open")),
-        }
         hints.push(chrome::Hint::new("ctrl-e", "env"));
         hints.push(chrome::Hint::new("ctrl-a", "agent"));
         hints.push(chrome::Hint::new("ctrl-h", "host"));
