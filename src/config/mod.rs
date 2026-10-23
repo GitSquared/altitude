@@ -86,6 +86,34 @@ impl Config {
         &self.data_dir
     }
 
+    /// Whether this installation has a name but no key, which is not a first
+    /// start.
+    ///
+    /// The name is written before the key on a first start, so a name without one
+    /// is a key that has gone. Minting a replacement silently is the one thing not
+    /// to do: every remote knows this installation by the key, not the name.
+    pub fn has_lost_identity(&self) -> bool {
+        self.data_dir.join("identity").is_file() && !self.data_dir.join("identity.key").is_file()
+    }
+
+    /// Move everything this installation has recorded out of the way, so the next
+    /// start is a first start.
+    ///
+    /// Renamed rather than deleted: this is what a person's task history and
+    /// links live in, and a decision made at a prompt is not worth losing it to.
+    pub fn forget_installation(&self) -> io::Result<PathBuf> {
+        let name = self.data_dir.file_name().map_or_else(
+            || "altitude".to_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+        let aside = self
+            .data_dir
+            .with_file_name(format!("{name}-orphaned-{stamp}"));
+        fs::rename(&self.data_dir, &aside)?;
+        Ok(aside)
+    }
+
     /// The same installation's paths, as the serve role sees them.
     ///
     /// The serve role is not a client: it keeps its own key, its own record of who has

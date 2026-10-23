@@ -4,13 +4,17 @@ use crossterm::event::{EventStream, KeyCode, KeyModifiers};
 use futures_util::StreamExt;
 use ratatui::{
     DefaultTerminal, Frame,
-    layout::{Constraint, Layout},
+    layout::{Constraint, Flex, Layout},
     text::Line,
-    widgets::Paragraph,
+    widgets::{Clear, Paragraph, Wrap},
 };
 use tokio::{signal::unix::Signal, sync::watch};
 
-use crate::tui::{background::terrain, widgets::palette};
+use crate::tui::{
+    background::terrain,
+    keys,
+    widgets::{chrome, palette},
+};
 use crate::{
     isolation::IsolationStatus,
     tui::widgets::utils::{shimmer, shimmer_clock},
@@ -126,6 +130,107 @@ async fn wait_for<T>(
             }
         }
     }
+}
+
+/// Ask one question before the interface is up, and answer which answer was chosen.
+///
+/// Two answers and nothing else: a boot that has found something wrong stops until
+/// somebody decides. Escape and `q` are the way out, which is the first answer.
+pub async fn confirm(
+    terminal: &mut DefaultTerminal,
+    terminate: &mut Signal,
+    interrupt: &mut Signal,
+    animations: bool,
+    title: &str,
+    question: &str,
+    answers: &[&str],
+) -> io::Result<Option<usize>> {
+    let mut events = EventStream::new();
+    let mut shimmer = 0;
+    let mut animation = shimmer_clock();
+    let mut chosen = 0;
+    loop {
+        terminal.draw(|frame| {
+            draw_question(
+                frame,
+                title,
+                question,
+                answers,
+                chosen,
+                animations.then_some(shimmer),
+            );
+        })?;
+        tokio::select! {
+            _ = terminate.recv() => return Ok(None),
+            _ = interrupt.recv() => return Ok(None),
+            _ = animation.tick(), if animations => shimmer = shimmer.wrapping_add(1),
+            event = events.next() => {
+                let Some(event) = event else { return Ok(None) };
+                let Some(key) = event?.as_key_press_event() else { continue };
+                if keys::is_dismiss(key) {
+                    return Ok(None);
+                }
+                match key.code {
+                    KeyCode::Left | KeyCode::Up | KeyCode::BackTab => {
+                        chosen = chosen.saturating_sub(1);
+                    }
+                    KeyCode::Right | KeyCode::Down | KeyCode::Tab => {
+                        chosen = (chosen + 1).min(answers.len().saturating_sub(1));
+                    }
+                    KeyCode::Enter => return Ok(Some(chosen)),
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+fn draw_question(
+    frame: &mut Frame,
+    title: &str,
+    question: &str,
+    answers: &[&str],
+    chosen: usize,
+    tick: Option<usize>,
+) {
+    if let Some(tick) = tick {
+        terrain::draw(frame, frame.area(), tick);
+    }
+    let [row] = Layout::horizontal([Constraint::Percentage(60)])
+        .flex(Flex::Center)
+        .areas(frame.area());
+    let [popup] = Layout::vertical([Constraint::Length(10)])
+        .flex(Flex::Center)
+        .areas(row);
+    frame.render_widget(Clear, popup);
+    let block = chrome::modal(title.to_owned());
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let [body, actions] =
+        Layout::vertical([Constraint::Min(3), Constraint::Length(2)]).areas(inner);
+    frame.render_widget(
+        Paragraph::new(question.to_owned())
+            .style(palette::primary())
+            .wrap(Wrap { trim: true }),
+        body,
+    );
+    chrome::actions(
+        frame,
+        popup,
+        actions,
+        &answers
+            .iter()
+            .enumerate()
+            .map(|(index, answer)| {
+                let action = if index == 0 {
+                    chrome::Action::secondary(answer)
+                } else {
+                    chrome::Action::primary(answer)
+                };
+                action.focused(index == chosen)
+            })
+            .collect::<Vec<_>>(),
+    );
 }
 
 fn isolation_label(status: &IsolationStatus) -> &'static str {
