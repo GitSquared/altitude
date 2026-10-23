@@ -352,11 +352,10 @@ impl NewTask {
             hints.push(chrome::Hint::new("esc", "close"));
             return hints;
         }
-        // Enter needs no line of its own: it takes whatever holds the focus, and
-        // saying so for each thing the focus can be on would be a line that
-        // changes as you move rather than tells you anything.
-        let mut hints = vec![chrome::Hint::new("tab", "field")];
-        hints.push(chrome::Hint::new("ctrl-e", "env"));
+        // Only what this page adds. Tab and enter are the same here as anywhere,
+        // and a line that repeats them costs a line that could say something the
+        // page alone knows.
+        let mut hints = vec![chrome::Hint::new("ctrl-e", "env")];
         hints.push(chrome::Hint::new("ctrl-a", "agent"));
         hints.push(chrome::Hint::new("ctrl-h", "host"));
         if self.issue {
