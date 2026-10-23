@@ -6,7 +6,7 @@
 //! mean each role carrying fields it cannot interpret.
 
 use std::{
-    env, fs,
+    env, fmt, fs,
     io::{self, Write},
     os::unix::fs::OpenOptionsExt,
     path::Path,
@@ -81,16 +81,45 @@ fn write_new(path: &Path, contents: &str) -> Result<(), SettingsError> {
     Ok(())
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// The shared Linear app a remote runs.
+///
+/// The secrets live in this file, which is created 0600, so a host does not have
+/// to carry them through its service manager as well. The environment is read
+/// when they are absent, for a host that would rather keep them out of a file an
+/// operator might copy.
+#[derive(Clone, Deserialize, Serialize)]
 pub struct LinearSettings {
     pub client_id: String,
     pub public_url: String,
     #[serde(default = "default_linear_listen")]
     pub listen: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook_secret: Option<String>,
     #[serde(default = "default_client_secret_env")]
     pub client_secret_env: String,
     #[serde(default = "default_webhook_secret_env")]
     pub webhook_secret_env: String,
+}
+
+/// Written by hand, so a debug print must not be the way a secret leaves.
+impl fmt::Debug for LinearSettings {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fn redacted(secret: &Option<String>) -> Option<&'static str> {
+            secret.as_ref().map(|_| "redacted")
+        }
+        formatter
+            .debug_struct("LinearSettings")
+            .field("client_id", &self.client_id)
+            .field("public_url", &self.public_url)
+            .field("listen", &self.listen)
+            .field("client_secret", &redacted(&self.client_secret))
+            .field("webhook_secret", &redacted(&self.webhook_secret))
+            .field("client_secret_env", &self.client_secret_env)
+            .field("webhook_secret_env", &self.webhook_secret_env)
+            .finish()
+    }
 }
 
 fn default_linear_listen() -> String {
@@ -126,17 +155,29 @@ impl LinearSettings {
     }
 
     pub fn client_secret(&self) -> Result<String, String> {
-        secret_from_environment(&self.client_secret_env)
+        secret(self.client_secret.as_deref(), &self.client_secret_env)
     }
 
     pub fn webhook_secret(&self) -> Result<String, String> {
-        secret_from_environment(&self.webhook_secret_env)
+        secret(self.webhook_secret.as_deref(), &self.webhook_secret_env)
     }
+}
+
+/// A secret written in the settings file, or else the variable named beside it.
+fn secret(inline: Option<&str>, environment: &str) -> Result<String, String> {
+    if let Some(secret) = inline.map(str::trim).filter(|secret| !secret.is_empty()) {
+        return Ok(secret.to_owned());
+    }
+    secret_from_environment(environment)
 }
 
 fn secret_from_environment(name: &str) -> Result<String, String> {
     env::var(name)
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| format!("set {name} on the remote host before starting Altitude"))
+        .ok_or_else(|| {
+            format!(
+                "set {name} on the remote host, or write the value into this file's [linear] section"
+            )
+        })
 }
