@@ -1,4 +1,4 @@
-use crate::tui::widgets::{palette, utils::shimmer};
+use crate::tui::widgets::palette;
 
 use std::{
     str,
@@ -12,7 +12,7 @@ use ratatui::{
     Frame,
     layout::{Constraint, Flex, Layout, Rect},
     text::Line,
-    widgets::{Block, BorderType, Clear, Paragraph},
+    widgets::{Block, BorderType, Clear},
 };
 use terminput::Encoding;
 use terminput_crossterm::to_terminput;
@@ -169,31 +169,6 @@ impl Shell {
         frame.render_widget(Clear, area);
         frame.render_widget(PseudoTerminal::new(self.parser.screen()).block(block), area);
     }
-}
-
-pub fn draw_preparing(
-    frame: &mut Frame,
-    area: Rect,
-    display: &str,
-    progress: &str,
-    tick: Option<usize>,
-) -> Rect {
-    let popup = popup_area(area);
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(palette::accent())
-        .title(format!(" Sign in to {display} "));
-    let inner = block.inner(popup);
-    frame.render_widget(Clear, popup);
-    frame.render_widget(block, popup);
-    let [line] = Layout::vertical([Constraint::Length(1)])
-        .flex(Flex::Center)
-        .areas(inner);
-    frame.render_widget(
-        Paragraph::new(Line::from_iter(shimmer(progress, tick))).centered(),
-        line,
-    );
-    popup
 }
 
 /// The escape sequences a program in a sandbox uses to ask for something only this

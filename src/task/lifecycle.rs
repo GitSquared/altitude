@@ -5,7 +5,7 @@ use crate::{
     config::InstallationIdentity,
     isolation::Environment,
     isolation::{CommandEvent, CommandSession, IsolationEngine, SandboxOptions, VsockRoute},
-    vcs,
+    mounts, vcs,
 };
 use futures_util::future::join_all;
 
@@ -98,11 +98,7 @@ where
         self.isolation
             .ensure_environment(
                 environment.clone(),
-                [
-                    vec![self.agents.engine(agent).environment_recipe()],
-                    vcs::environment_recipes(),
-                ]
-                .concat(),
+                mounts::task(&self.agents, agent),
                 &Unwatched,
             )
             .await

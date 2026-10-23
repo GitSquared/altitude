@@ -95,6 +95,7 @@ where
     let held = client.held_profiles(peer.clone()).await.map_err(message)?;
     let profiles: Vec<&str> = event_loop
         .service()
+        .credentials()
         .profiles()
         .iter()
         .map(|p| p.profile)

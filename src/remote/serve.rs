@@ -819,10 +819,9 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     let tasks = TaskService::new(
         TaskStore::new(&database),
         isolation,
-        config.task_snapshots_dir(),
+        config.clone(),
         AgentEngines::new(),
         config.identity().map_err(io::Error::other)?,
-        config.agent_channel_dir(),
     );
     // A remote with no Linear app of its own still reports task status, through
     // the login the task's own peer synced here. When the app is configured,
@@ -847,6 +846,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     // besides the tracker profiles that only travel.
     let mounted_profiles: Vec<&'static str> = task_loop
         .service()
+        .credentials()
         .profiles()
         .iter()
         .map(|profile| profile.profile)

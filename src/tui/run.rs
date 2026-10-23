@@ -36,14 +36,14 @@ use super::app::{
     ConfigPushReply, Foreground, HeldTask, IssueReadReply, IssueSearchReply, NO_LINEAR,
     RemoteSignalsReply, SendTaskReply, TaskDelegationReply, TrackerConnectReply,
 };
-use super::keys::is_help;
+use super::keys::{is_dismiss, is_help};
 use super::popups;
 use super::popups::confirm::handle_confirm_key;
 use super::screens;
 use super::screens::settings::Focus;
 use super::widgets;
 use super::widgets::utils::shimmer_clock;
-use crate::task::CredentialShellEvent;
+use crate::credentials::CredentialShellEvent;
 
 /// A modal's last frame, kept so it can be drawn once more while it leaves.
 ///
@@ -255,6 +255,18 @@ where
     let mut redraw = true;
     let mut motion = time::interval(Duration::from_millis(8));
     motion.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+    // A task's environment is built before a task asks for it, so the first task is
+    // not a cold start. Off the loop, and only once an agent has been chosen, because
+    // only then is there a task that could run.
+    if let Some(agent) = app.agent() {
+        let environment = app.default_environment_value();
+        let service = task_service.clone();
+        tokio::spawn(async move {
+            if let Err(error) = service.prepare_environment(&environment, agent).await {
+                tracing::debug!(%error, "could not prepare the default environment");
+            }
+        });
+    }
     loop {
         let showing_remotes = app.foreground.shows_settings()
             && app.panel.section == screens::settings::Section::Remotes;
@@ -328,17 +340,9 @@ where
             let content =
                 widgets::chrome::draw(frame, &hints, app.keyboard_hints(), app.notice.as_deref());
             screens::tasks::draw(frame, content, &mut app);
-            if let Some(shell) = app.open_shell().and_then(|id| app.shells.get(id)) {
-                shell.draw(frame, content);
-            }
             // What the modal in front occupied, so the transition animates what
             // was actually drawn rather than a size written down a second time.
             let mut modal: Option<Rect> = None;
-            // Over the terminal that asked, which goes on running behind it.
-            if let Foreground::OpenLink(asking) = &app.foreground {
-                widgets::chrome::dim(frame, content);
-                modal = Some(popups::open_link::draw(frame, content, asking));
-            }
             if app.foreground.shows_settings() {
                 // Fullscreen: it is the screen, not something over it.
                 let view = app.settings_view();
@@ -351,19 +355,31 @@ where
                     scan.is_some(),
                 ));
                 if let super::app::CredentialShellState::Opening {
-                    display, progress, ..
+                    progress: Some(progress),
+                    ..
                 } = &app.credential_shell
                 {
                     widgets::chrome::dim(frame, content);
-                    modal = Some(screens::shell::draw_preparing(
+                    modal = Some(widgets::loading::draw(
                         frame,
                         content,
-                        display,
                         progress,
                         app.animation_tick(),
                     ));
                 }
-            } else if matches!(app.foreground, Foreground::Signals) {
+            }
+            // A terminal goes over the screen it was opened from, which is the
+            // settings panel for a sign-in and the task list for a task's run. It
+            // is drawn after that screen and before the popups above it.
+            if let Some(shell) = app.open_shell().and_then(|id| app.shells.get(id)) {
+                shell.draw(frame, content);
+            }
+            // Over the terminal that asked, which goes on running behind it.
+            if let Foreground::OpenLink(asking) = &app.foreground {
+                widgets::chrome::dim(frame, content);
+                modal = Some(popups::open_link::draw(frame, content, asking));
+            }
+            if matches!(app.foreground, Foreground::Signals) {
                 widgets::chrome::dim(frame, content);
                 let summary = app.signals_summary();
                 modal = Some(popups::signals::draw(
@@ -383,6 +399,10 @@ where
                     .and_then(|address| app.remote_trackers.get(address))
                     .map(Vec::as_slice);
                 modal = Some(setup.draw(frame, content, report));
+            }
+            if let Foreground::SignIn(sign_in) = &app.foreground {
+                widgets::chrome::dim(frame, content);
+                modal = Some(sign_in.draw(frame, content));
             }
             if let Foreground::Confirm(confirm) = &app.foreground {
                 widgets::chrome::dim(frame, content);
@@ -414,6 +434,16 @@ where
             if let Foreground::Reply(reply) = &app.foreground {
                 widgets::chrome::dim(frame, content);
                 modal = Some(reply.prompt.draw(frame, content));
+            }
+            // A task travelling here is a wait over the list it will join.
+            if let Some(landing) = &app.landing {
+                widgets::chrome::dim(frame, content);
+                modal = Some(widgets::loading::draw(
+                    frame,
+                    content,
+                    &landing.message,
+                    app.animation_tick(),
+                ));
             }
             // Keep the modal's last frame, ready to draw once more when it
             // leaves. Modals arrive at once; only the panel is drawn in.
@@ -476,7 +506,7 @@ where
             _ = configuration_clock.tick(), if !reading_configuration => {
                 reading_configuration = true;
                 let config = app.config.clone();
-                let profiles: Vec<_> = task_service.profiles().iter().map(|profile| profile.profile).collect();
+                let profiles: Vec<_> = task_service.credentials().profiles().iter().map(|profile| profile.profile).collect();
                 let reports = configuration_reads.clone();
                 tokio::spawn(async move {
                     let result = spawn_blocking(move || {
@@ -502,7 +532,7 @@ where
                 }
                 changed |= app.sync_credentials();
                 if app.wants_credential_check() {
-                    app.ask_next_credential(&task_service, &credential_reports);
+                    app.ask_credential_checks(&task_service, &credential_reports);
                     changed = true;
                 }
                 redraw |= changed;
@@ -528,9 +558,10 @@ where
                         if let Ok(tasks) = event_loop.list().await {
                             app.tasks = tasks;
                         }
-                        app.take_over(&id, terminal, &event_loop, &landings);
+                        app.task_landed(&id, terminal, &event_loop, &landings);
                     }
                     Err(error) => {
+                        app.landing = None;
                         app.notice = Some(format!("could not bring it home: {error}"));
                     }
                 }
@@ -704,6 +735,15 @@ where
     if !key.is_press() {
         return Ok(false);
     }
+    // A task on its way here is a wait with one answer: leave it. The transfer
+    // goes on without being watched.
+    if let Some(landing) = &mut app.landing {
+        if is_dismiss(key) {
+            landing.open_terminal = false;
+            app.landing = None;
+        }
+        return Ok(false);
+    }
     // Help owns its scrolling keys; actions behind it stay untouched.
     if matches!(app.foreground, Foreground::Keys(_)) {
         app.help_key(key);
@@ -735,6 +775,7 @@ where
                 .await
         }
         Foreground::Setup(_) => app.setup_key(key),
+        Foreground::SignIn(_) => app.sign_in_key(key, task_service, credential_events).await,
         Foreground::Signals => app.signals_key(key, task_service, remote_signals).await,
         Foreground::Shell(_) => app.shell_key(key, event_loop, task_service).await,
         Foreground::OpenLink(_) => app.open_link_key(key),

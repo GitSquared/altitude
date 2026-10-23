@@ -2,7 +2,7 @@ use super::{
     AUTOPILOT_SYSTEM_PROMPT, AgentEngine, REPORT_SCHEMA, REPORT_SYSTEM_PROMPT, TaskReportDecoder,
 };
 use crate::isolation::{
-    DefaultFile, EnvironmentRecipe, GuestPath, PersistentDirectory, shell_quote,
+    DefaultFile, EnvironmentRecipe, GuestPath, PersistentDirectory, SignInCommand, shell_quote,
 };
 use crate::task::{TaskAgentTurnContext, TaskAgentTurnReport};
 use serde_json::Value;
@@ -194,7 +194,10 @@ impl AgentEngine for ClaudeCode {
         EnvironmentRecipe {
             profile: "agents/claude",
             display: "Claude Code",
-            sign_in: "Run claude and follow its sign-in instructions.",
+            sign_in: "Follow Claude Code's sign-in instructions.",
+            // The sign-in is a command inside Claude Code's own interface, so there
+            // is nothing to run but Claude Code itself.
+            sign_in_command: SignInCommand::Interactive("exec claude"),
             // Claude Code writes this file when it is signed in, and its own CLI has
             // no way to be asked. Existence and size only: the contents are the
             // credential, and Altitude does not read it.

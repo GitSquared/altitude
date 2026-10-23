@@ -323,8 +323,18 @@ pub(super) fn profile_connector(
         CredentialStatus::Checked {
             signed_in: true, ..
         } => (Reach::On, "signed in"),
-        _ => (Reach::Off, "not signed in"),
+        CredentialStatus::Checked {
+            signed_in: false, ..
+        } => (Reach::Off, "not signed in"),
+        CredentialStatus::Saved => (Reach::On, "saved login"),
+        // Not asked, or nothing to ask: neither is a sign-out.
+        CredentialStatus::Unknown | CredentialStatus::Unanswered => (Reach::Off, "not checked"),
     };
+    let note = matches!(status, CredentialStatus::Saved).then(|| {
+        "A login is saved on this machine. No environment has been built here to ask \
+         the tool whether it still works."
+            .to_owned()
+    });
     let identity = match status {
         CredentialStatus::Checked {
             signed_in: true,
@@ -338,13 +348,13 @@ pub(super) fn profile_connector(
         status: word.to_owned(),
         status_value: None,
         identity,
-        note: None,
+        note,
         action: matches!(
             status,
             CredentialStatus::Checked {
                 signed_in: false,
                 ..
-            }
+            } | CredentialStatus::Unanswered
         )
         .then_some("Press enter to sign in."),
         purpose,

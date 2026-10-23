@@ -20,9 +20,11 @@ use crate::{
 mod agent;
 mod cli;
 mod config;
+mod credentials;
 mod db;
 mod isolation;
 mod logging;
+mod mounts;
 mod remote;
 mod task;
 mod tracker;
@@ -101,10 +103,9 @@ async fn client() -> Result<(), Box<dyn Error>> {
         let tasks = TaskService::new(
             TaskStore::new(&database),
             isolation,
-            config.task_snapshots_dir(),
+            config.clone(),
             AgentEngines::new(),
             identity,
-            config.agent_channel_dir(),
         )
         .with_tracker(tracker);
         let Some(recovered) = tui::boot_task_resume(

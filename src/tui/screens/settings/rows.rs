@@ -171,14 +171,14 @@ impl Row {
                 hints.push(chrome::Hint::new("space", "set as default"));
                 hints
             }
-            RowKind::GitIdentity(_) => vec![chrome::Hint::new("enter", "open setup shell")],
+            RowKind::GitIdentity(_) => vec![chrome::Hint::new("enter", "sign in")],
             RowKind::Credential(credential) => match &credential.kind {
                 CredentialKind::Installation { .. } => {
                     vec![chrome::Hint::new("enter", "remote guide")]
                 }
                 CredentialKind::Profile { .. } if credential.is_pending() => Vec::new(),
                 CredentialKind::Profile { .. } => {
-                    vec![chrome::Hint::new("enter", "open setup shell")]
+                    vec![chrome::Hint::new("enter", "sign in")]
                 }
             },
             RowKind::Remote { .. } => vec![
@@ -311,9 +311,11 @@ fn credential_mark(status: &CredentialStatus) -> Dot {
         CredentialStatus::Checked {
             signed_in: true, ..
         } => mark(true, false),
-        // Everything that is not a confirmed sign-in reads as not signed in, so
-        // a failed check and a check that has not run look the same here.
+        // A check that has not run and one that could not run are not answers, so
+        // they stay hollow rather than claiming a sign-out.
+        CredentialStatus::Saved => mark(true, false),
         CredentialStatus::Unknown
+        | CredentialStatus::Unanswered
         | CredentialStatus::Checked {
             signed_in: false, ..
         } => mark(false, false),
