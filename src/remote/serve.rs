@@ -1267,9 +1267,14 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     };
 
     tracing::info!("Stopping remote · suspending active tasks");
-    server.shutdown().await.map_err(io::Error::other)?;
-    host.tasks.suspend_all().await?;
+    // Suspension comes before the links close: every task's disk is flushed to
+    // this host first, so a link that refuses to shut down cleanly is a smaller
+    // loss than work that never reached a snapshot.
+    let suspended = host.tasks.suspend_all().await;
+    let stopped = server.shutdown().await.map_err(io::Error::other);
     result?;
+    suspended?;
+    stopped?;
     tracing::info!("Remote stopped");
     Ok(())
 }
