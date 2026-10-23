@@ -162,85 +162,44 @@ pub(in crate::tui) fn remote_setup_lines() -> Vec<Line<'static>> {
     ]
 }
 
-/// The guide for one task tracker a remote runs, opened from the provider list.
+/// The provider's manual, styled for this panel.
+///
+/// The words are the ones `altitude serve --connect-linear` prints on the machine
+/// that performs the steps, so the two cannot drift. Nothing here depends on what
+/// a particular remote is configured with: the guide is the same everywhere, and
+/// the values that fill it in are printed where they belong.
 pub(in crate::tui) fn remote_tracker_setup_lines(kind: TrackerKind) -> Vec<Line<'static>> {
-    match kind {
-        TrackerKind::Linear => linear_remote_tracker_lines(),
+    let guide = kind.guide();
+    let mut lines = Vec::new();
+    for paragraph in guide.intro {
+        lines.push(Line::from(""));
+        lines.push(Line::from(*paragraph));
     }
+    for (index, step) in guide.steps.iter().enumerate() {
+        lines.push(Line::from(""));
+        lines.push(step_line(&format!("{}.", index + 1), step.prose));
+        if !step.code.is_empty() {
+            lines.push(Line::from(""));
+            lines.extend(step.code.iter().map(|line| sample(line)));
+        }
+    }
+    for paragraph in guide.closing {
+        lines.push(Line::from(""));
+        lines.push(Line::styled(*paragraph, palette::muted()));
+    }
+    lines
 }
 
-/// Instructions for the shared Linear app a remote runs.
-fn linear_remote_tracker_lines() -> Vec<Line<'static>> {
-    vec![
-        section_heading("Shared Linear app"),
-        Line::from(
-            "A remote signs in as a shared Linear app, not as you. Its owner installs the app \
-             once, and every task delegated there acts as it. This is separate from your \
-             personal Linear sign-in under Settings → Task tracker.",
-        ),
-        Line::from(""),
-        Line::from(vec![
-            Span::raw("On the remote, edit "),
-            Span::styled("~/.config/altitude/serve.toml", palette::accent()),
-            Span::raw(
-                ". The server prints its settings path when it starts; XDG_CONFIG_HOME, \
-                 ALTITUDE_CONFIG_DIR or --config can change it.",
-            ),
-        ]),
-        Line::from(""),
-        step(
-            "1.",
-            "As a workspace administrator, create an OAuth application in Linear's API settings. \
-             Name it Altitude and enable Agent Session and Issue webhook events.",
-        ),
-        step("2.", "Add this section to the remote's serve.toml:"),
-        Line::from(""),
-        sample("[linear]"),
-        sample("client_id = \"<the application's client ID>\""),
-        sample("public_url = \"https://altitude.example.com\""),
-        Line::from(""),
-        step(
-            "3.",
-            "Route that public HTTPS address to 127.0.0.1:25849 on the remote. Register \
-             https://altitude.example.com/linear/oauth/callback as the app's redirect URL and \
-             https://altitude.example.com/linear/webhook as its webhook URL. Replace the example \
-             domain with yours.",
-        ),
-        step(
-            "4.",
-            "Set ALTITUDE_LINEAR_CLIENT_SECRET and ALTITUDE_LINEAR_WEBHOOK_SECRET in the \
-             remote's environment, using the app's client secret and webhook signing secret. \
-             Keep these available to the service when it starts.",
-        ),
-        step(
-            "5.",
-            "Stop altitude serve, then run altitude serve --connect-linear with the same \
-             settings. Open the printed URL in your browser to install the app. Once it exits, \
-             start altitude serve again.",
-        ),
-        Line::from(""),
-        Line::styled(
-            "Steps 1–5 belong to whoever owns this remote. On the machine that should run the \
-             work, connect Linear under Settings → Task tracker: that account syncs here, and \
-             decides which machine receives an issue delegated in Linear. The remote shows \
-             configured once its app is installed and altitude serve is running with it; this \
-             panel does not check Linear from here.",
-            palette::muted(),
-        ),
-    ]
-}
-
-fn step(number: &'static str, text: &'static str) -> Line<'static> {
+fn step_line(number: &str, text: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("{number} "), palette::accent()),
-        Span::raw(text),
+        Span::raw(text.to_owned()),
     ])
 }
 
-fn sample(text: &'static str) -> Line<'static> {
-    Line::styled(text, palette::accent())
+fn sample(text: &str) -> Line<'static> {
+    Line::styled(text.to_owned(), palette::accent())
 }
-
 /// The built-in environment, described rather than configured.
 ///
 /// The version and the packages are read back from the built snapshot, because
@@ -560,14 +519,29 @@ pub(super) fn tracker_summary(
         spans.push(Span::styled("unknown", palette::muted().bold()));
         return Line::from(spans);
     };
+    // Answered, and answered nothing: this machine runs no shared app. Not a
+    // failure, and not a reason to name a provider that is not configured.
+    if connections.is_empty() {
+        let mut spans = tracker_dot(None).spans(tick);
+        spans.push(Span::styled("none configured", palette::muted().bold()));
+        return Line::from(spans);
+    }
     let initialized = connections
         .iter()
         .filter(|connection| connection.is_ready)
         .map(|connection| connection.provider.label())
         .collect::<Vec<_>>();
     if initialized.is_empty() {
+        let waiting = connections
+            .iter()
+            .map(|connection| connection.provider.label())
+            .collect::<Vec<_>>()
+            .join(", ");
         let mut spans = tracker_dot(Some(false)).spans(tick);
-        spans.push(Span::styled("not connected", palette::muted().bold()));
+        spans.push(Span::styled(
+            format!("{waiting} · needs setup on the remote"),
+            palette::muted().bold(),
+        ));
         return Line::from(spans);
     }
     let mut spans = tracker_dot(Some(true)).spans(tick);

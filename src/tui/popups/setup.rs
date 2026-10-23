@@ -31,7 +31,7 @@ impl TrackerOption {
     fn status(&self) -> &'static str {
         match self.is_ready {
             Some(true) => "configured",
-            Some(false) => "not connected",
+            Some(false) => "needs setup",
             None => "unknown",
         }
     }

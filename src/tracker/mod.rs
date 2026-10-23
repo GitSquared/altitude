@@ -10,6 +10,7 @@ pub(crate) mod automation;
 mod linear;
 mod linear_auth;
 pub(crate) mod oauth;
+pub(crate) mod setup;
 
 pub use linear::Linear;
 
