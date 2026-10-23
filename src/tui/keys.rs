@@ -118,6 +118,10 @@ pub fn help_sections() -> Vec<HelpSection> {
                     "Letters (five choices or more)",
                     "Narrow the open list instead of moving in it",
                 ),
+                (
+                    "Ctrl-E · Ctrl-A · Ctrl-H",
+                    "Open the environment, agent or machine list",
+                ),
                 ("Ctrl/Cmd-K", "Switch between an issue search and a prompt"),
                 (
                     "Tab / Shift-Tab",

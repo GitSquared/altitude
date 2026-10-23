@@ -20,7 +20,8 @@
 //! The three decisions are pills rather than rows: what is chosen is the thing
 //! you press, and enter opens it into a list you can narrow by typing. They sit
 //! under the prompt, so the list opens up over what has been written rather than
-//! down over the actions.
+//! down over the actions. Each has a chord of its own, so reaching one does not
+//! mean tabbing past the prompt.
 //!
 //! Enter is a line in the prompt, because an intent is prose. Answering is
 //! ctrl-enter, so the keys that start a task are never the keys that write one.
@@ -350,7 +351,9 @@ impl NewTask {
             Focus::Create => hints.push(chrome::Hint::new("enter", "create")),
             _ => hints.push(chrome::Hint::new("enter", "open")),
         }
-        hints.push(chrome::Hint::new("ctrl-k", "issue / prompt"));
+        hints.push(chrome::Hint::new("ctrl-e", "env"));
+        hints.push(chrome::Hint::new("ctrl-a", "agent"));
+        hints.push(chrome::Hint::new("ctrl-h", "host"));
         if self.issue {
             hints.push(chrome::Hint::new("↑/↓", "result"));
         }
@@ -507,6 +510,21 @@ impl NewTask {
         {
             self.toggle_mode();
             return None;
+        }
+        // The three decisions have chords of their own: reaching for a pill with
+        // the keys should not mean tabbing past the prompt to get to it.
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            let pill = match key.code {
+                KeyCode::Char('e') => Some(Focus::Environment),
+                KeyCode::Char('a') => Some(Focus::Agent),
+                KeyCode::Char('h') => Some(Focus::Host),
+                _ => None,
+            };
+            if let Some(pill) = pill {
+                self.focus = pill;
+                self.open_list();
+                return None;
+            }
         }
         // The answer is a chord, so it is never a key that writes the intent.
         if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -982,11 +1000,9 @@ pub fn draw(
         popup,
         actions,
         &[
-            chrome::Action::new("cancel").focused(new_task.focus == Focus::Cancel),
-            chrome::Action::new(if new_task.issue { "link" } else { "create" })
-                .focused(new_task.focus == Focus::Create)
-                .primary()
-                .enabled(new_task.refusal().is_none()),
+            chrome::Action::secondary("cancel").focused(new_task.focus == Focus::Cancel),
+            chrome::Action::primary(if new_task.issue { "link" } else { "create" })
+                .focused(new_task.focus == Focus::Create),
         ],
     );
     if let [cancel, create] = buttons[..] {

@@ -220,40 +220,42 @@ pub fn draw_help(
     popup
 }
 
+/// What an answer is for, which is what decides how loudly it is drawn.
+pub enum Emphasis {
+    /// The answer the page is asking for: the accent, so it is the one the eye
+    /// lands on without being told.
+    Primary,
+    /// The way out, or the answer that is not the point: quiet, but still bold,
+    /// because it is still somewhere to press.
+    Secondary,
+}
+
 /// One answer at the foot of a modal.
 pub struct Action<'a> {
     pub label: &'a str,
     pub focused: bool,
-    /// The answer the page is asking for: filled, so it reads as the one to take
-    /// even while the keys are somewhere else.
-    pub primary: bool,
-    /// Whether it can be taken. One that cannot is drawn quiet, because the page
-    /// has already said why under the prompt.
-    pub enabled: bool,
+    pub emphasis: Emphasis,
 }
 
 impl<'a> Action<'a> {
-    pub fn new(label: &'a str) -> Self {
+    pub fn primary(label: &'a str) -> Self {
         Self {
             label,
             focused: false,
-            primary: false,
-            enabled: true,
+            emphasis: Emphasis::Primary,
+        }
+    }
+
+    pub fn secondary(label: &'a str) -> Self {
+        Self {
+            label,
+            focused: false,
+            emphasis: Emphasis::Secondary,
         }
     }
 
     pub fn focused(mut self, focused: bool) -> Self {
         self.focused = focused;
-        self
-    }
-
-    pub fn primary(mut self) -> Self {
-        self.primary = true;
-        self
-    }
-
-    pub fn enabled(mut self, enabled: bool) -> Self {
-        self.enabled = enabled;
         self
     }
 }
@@ -298,10 +300,11 @@ pub fn actions(frame: &mut Frame, modal: Rect, area: Rect, actions: &[Action]) -
         .map(|(action, area)| {
             let style = if action.focused {
                 palette::focus()
-            } else if !action.enabled || !action.primary {
-                palette::muted().bold()
             } else {
-                palette::accent().bold()
+                match action.emphasis {
+                    Emphasis::Primary => palette::accent().bold(),
+                    Emphasis::Secondary => palette::muted().bold(),
+                }
             };
             // The spaces belong to the label so the fill covers the whole button
             // and not just the letters, which is what makes it read as pressed

@@ -85,7 +85,7 @@ impl SignIn {
             frame,
             popup,
             actions,
-            &[chrome::Action::new("sign in").focused(true).primary()],
+            &[chrome::Action::primary("sign in").focused(true)],
         );
         popup
     }

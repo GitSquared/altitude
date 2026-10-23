@@ -98,10 +98,8 @@ pub fn draw(frame: &mut Frame, area: Rect, confirm: &Confirm) -> Rect {
         popup,
         actions,
         &[
-            chrome::Action::new("cancel").focused(confirm.button == 0),
-            chrome::Action::new(confirm.destructive)
-                .focused(confirm.button == 1)
-                .primary(),
+            chrome::Action::secondary("cancel").focused(confirm.button == 0),
+            chrome::Action::primary(confirm.destructive).focused(confirm.button == 1),
         ],
     );
     popup

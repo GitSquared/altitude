@@ -185,11 +185,8 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &Form) {
         area,
         actions,
         &[
-            chrome::Action::new("cancel").focused(form.focus == Focus::Cancel),
-            chrome::Action::new("save")
-                .focused(form.focus == Focus::Save)
-                .primary()
-                .enabled(form.refusal().is_none()),
+            chrome::Action::secondary("cancel").focused(form.focus == Focus::Cancel),
+            chrome::Action::primary("save").focused(form.focus == Focus::Save),
         ],
     );
 }

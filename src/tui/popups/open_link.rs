@@ -146,10 +146,8 @@ pub fn draw(frame: &mut Frame, area: Rect, asking: &OpenLink) -> Rect {
         popup,
         actions,
         &[
-            chrome::Action::new("cancel").focused(asking.button == 0),
-            chrome::Action::new("open")
-                .focused(asking.button == 1)
-                .primary(),
+            chrome::Action::secondary("cancel").focused(asking.button == 0),
+            chrome::Action::primary("open").focused(asking.button == 1),
         ],
     );
     popup
