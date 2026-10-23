@@ -71,4 +71,19 @@ pub struct ServeArgs {
     /// Install the shared Linear app, then exit. Reads the Linear settings in serve.toml.
     #[arg(long, help_heading = "Task tracker integration")]
     pub connect_linear: bool,
+
+    /// What to do instead of running the remote: look after the clients it has seen.
+    #[command(subcommand)]
+    pub command: Option<ServeCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ServeCommand {
+    /// List the clients that have used this remote, and what each one pushed
+    Clients,
+    /// Forget a client: its pushed configuration, its logins, and its tasks
+    Evict {
+        /// The client's public key, as `clients` prints it
+        key: String,
+    },
 }

@@ -5,6 +5,7 @@
 //! run work until the source commits relinquishment. Prepared transfers bind all
 //! downloads and acknowledgements to one recipient and survive process restarts.
 
+mod admin;
 mod announce;
 mod bundle;
 mod clients;
