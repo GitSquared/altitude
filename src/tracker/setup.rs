@@ -59,9 +59,10 @@ static LINEAR: Guide = Guide {
             ],
         },
         Step {
-            prose: "Route /linear/oauth/callback and /linear/webhook from that address to \
-                    127.0.0.1:25849 on the remote, then register both as the application's \
-                    redirect and webhook URLs.",
+            prose: "Route /linear/oauth/callback and /linear/webhook from that address to the \
+                    webhook port in that machine's settings — 127.0.0.1:25849 unless it was \
+                    changed — then register both as the application's redirect and webhook \
+                    URLs.",
             code: &[],
         },
         Step {
