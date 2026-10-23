@@ -48,6 +48,14 @@ pub struct Settings {
     /// interface cannot guess on someone's behalf.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agent: Option<AgentKind>,
+    /// The machine the last task was founded on, so the next creation question
+    /// opens where the previous answer was given.
+    ///
+    /// Absent means this machine, which is also where a task goes when nobody has
+    /// chosen. It records a choice rather than promising anything: a machine that
+    /// has since been removed, or that is not answering, is not preselected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_task_host: Option<String>,
 }
 
 /// Preferences about the interface itself.
@@ -175,6 +183,22 @@ impl Settings {
         &self.remotes
     }
 
+    /// The configuration a remote is sent, which is the part it can act on.
+    ///
+    /// A remote builds this machine's environments, so it needs those and the
+    /// agent. It has no screen, and what this one shows — the keys, the
+    /// animations, the machine the last task went to — is not configuration it
+    /// could use. Sending it anyway would make a preference look like a change
+    /// worth syncing, and every task created would push a new configuration to
+    /// every remote.
+    pub fn shared(&self) -> Self {
+        let mut shared = self.clone();
+        shared.remotes.clear();
+        shared.interface = Interface::default();
+        shared.last_task_host = None;
+        shared
+    }
+
     /// The coding agent Altitude drives, if one has been chosen.
     pub fn agent(&self) -> Option<AgentKind> {
         self.agent
@@ -183,6 +207,16 @@ impl Settings {
     /// Choose the coding agent Altitude drives.
     pub fn set_agent(&mut self, agent: AgentKind) {
         self.agent = Some(agent);
+    }
+
+    /// The machine the last task was founded on, when it was not this one.
+    pub fn last_task_host(&self) -> Option<&str> {
+        self.last_task_host.as_deref()
+    }
+
+    /// Remember where a task was founded, so the next one starts there.
+    pub fn set_last_task_host(&mut self, address: Option<&str>) {
+        self.last_task_host = address.map(str::to_owned);
     }
 
     /// How the interface behaves.
@@ -234,10 +268,17 @@ impl Settings {
         self.remotes.push(address.to_owned());
     }
 
-    /// Forget a remote address.
+    /// Forget a remote address, and stop defaulting to it.
     pub fn remove_remote(&mut self, address: &str) {
         self.remotes
             .retain(|existing| !existing.eq_ignore_ascii_case(address));
+        if self
+            .last_task_host
+            .as_deref()
+            .is_some_and(|host| host.eq_ignore_ascii_case(address))
+        {
+            self.last_task_host = None;
+        }
     }
 
     fn validate(&self) -> Result<(), SettingsError> {

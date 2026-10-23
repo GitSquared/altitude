@@ -220,12 +220,24 @@ pub enum Answer {
 
 impl NewTask {
     /// Ask, with the configured defaults already chosen.
+    ///
+    /// `default_host` is where the last task was founded. It is only a default:
+    /// a machine that cannot be given work is not preselected, because a question
+    /// whose answer would not run is worse than the plain one.
     pub fn new(
         environments: Vec<Environment>,
         default_environment: &str,
         default_agent: Option<AgentKind>,
         hosts: Vec<Host>,
+        default_host: Option<&str>,
     ) -> Self {
+        let chosen_host = default_host
+            .and_then(|address| {
+                hosts
+                    .iter()
+                    .position(|host| host.ready && host.address.as_deref() == Some(address))
+            })
+            .unwrap_or(0);
         let chosen = environments
             .iter()
             .position(|candidate| candidate.name.eq_ignore_ascii_case(default_environment))
@@ -256,7 +268,7 @@ impl NewTask {
             task: TextBox::new(""),
             environment,
             agent,
-            host: Select::new("host", host_offers(hosts), 0),
+            host: Select::new("host", host_offers(hosts), chosen_host),
             agent_unchosen: default_agent.is_none(),
             refused: false,
             focus: Focus::Task,

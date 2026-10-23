@@ -702,6 +702,31 @@ impl App {
         }
     }
 
+    /// Where the last task was founded, when it was not this machine: the answer
+    /// the next creation question opens on.
+    pub(in crate::tui) fn last_task_host(&self) -> Option<String> {
+        self.settings_file
+            .as_ref()?
+            .settings()
+            .last_task_host()
+            .map(str::to_owned)
+    }
+
+    /// Remember where a task was founded, so the next one starts there.
+    fn set_last_task_host(&mut self, address: Option<&str>) {
+        let Some(file) = self.settings_file.as_mut() else {
+            return;
+        };
+        if file.settings().last_task_host() == address {
+            return;
+        }
+        let mut proposed = file.settings().clone();
+        proposed.set_last_task_host(address);
+        if let Err(error) = file.save(proposed) {
+            self.problem(error.to_string());
+        }
+    }
+
     /// Whether the keys that work are listed at the bottom of the screen.
     pub(in crate::tui) fn keyboard_hints(&self) -> bool {
         self.settings_file
@@ -2957,6 +2982,8 @@ impl App {
                 if let Some(agent) = remember {
                     self.set_agent(agent);
                 }
+                // Where this one was founded is where the next one starts.
+                self.set_last_task_host(host.as_deref());
                 match host {
                     // A task for a remote is founded there, off this loop. Nothing is
                     // copied: the machine that runs it is the machine that owns it.
@@ -3092,6 +3119,7 @@ impl App {
                 if let Some(agent) = submission.remember {
                     self.set_agent(agent);
                 }
+                self.set_last_task_host(submission.host.as_deref());
                 match submission.host {
                     Some(address) => self.begin_delegation(
                         &address,
@@ -3398,6 +3426,7 @@ impl App {
                         self.default_environment_name(),
                         self.agent(),
                         self.task_hosts(),
+                        self.last_task_host().as_deref(),
                     )));
                 }
             }
@@ -3411,6 +3440,7 @@ impl App {
                             self.default_environment_name(),
                             self.agent(),
                             self.task_hosts(),
+                            self.last_task_host().as_deref(),
                         )
                         .linking(),
                     ));

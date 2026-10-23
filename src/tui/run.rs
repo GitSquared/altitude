@@ -524,7 +524,7 @@ where
                 tokio::spawn(async move {
                     let result = spawn_blocking(move || {
                         let settings = fs::read_to_string(config.settings_path())?;
-                        ConfigBundle::of(settings, config.data_dir(), &profiles, &[])
+                        ConfigBundle::of(&settings, config.data_dir(), &profiles, &[])
                     }).await.map_err(|error| error.to_string())
                         .and_then(|result| result.map_err(|error| error.to_string()));
                     let _ = reports.send(result);

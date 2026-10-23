@@ -7,12 +7,17 @@ use std::{fs, io, path::Path};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 
+use crate::config::Settings;
 use crate::tracker::TrackerKind;
 
 /// Everything a remote needs to be this client, as far as running a task goes.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConfigBundle {
-    /// The configuration file as written, so the remote holds the same environments.
+    /// The configuration, so the remote holds the same environments.
+    ///
+    /// The part a remote can act on, not the file as written: what this interface
+    /// does is no business of a machine running a task, and hashing it would sync a
+    /// preference as though it were configuration.
     pub settings: String,
     /// The logins, one entry per profile, and only the ones being sent.
     pub profiles: Vec<ProfileBundle>,
@@ -100,11 +105,13 @@ impl ConfigBundle {
     /// `held` is what the remote said it has. A profile is sent when it is not there
     /// at all, or when its contents differ.
     pub fn of(
-        settings: String,
+        settings: &str,
         data_dir: &Path,
         mounted: &[&str],
         held: &[ProfileDigest],
     ) -> Result<Self, io::Error> {
+        let parsed: Settings = toml::from_str(settings).map_err(io::Error::other)?;
+        let settings = toml::to_string(&parsed.shared()).map_err(io::Error::other)?;
         let profiles = mounted
             .iter()
             .copied()

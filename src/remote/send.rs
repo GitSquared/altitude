@@ -102,7 +102,7 @@ where
         .map(|p| p.profile)
         .collect();
     let bundle =
-        ConfigBundle::of(settings, config.data_dir(), &profiles, &held).map_err(message)?;
+        ConfigBundle::of(&settings, config.data_dir(), &profiles, &held).map_err(message)?;
     let config_bytes = serde_json::to_vec(&bundle).map_err(message)?;
     client
         .put_config(peer.clone(), &config_bytes)
