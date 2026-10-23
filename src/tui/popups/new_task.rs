@@ -226,7 +226,7 @@ impl NewTask {
             .position(|candidate| candidate.name.eq_ignore_ascii_case(default_environment))
             .unwrap_or(0);
         let environment = Select::new(
-            "Environment",
+            "env",
             environments
                 .into_iter()
                 .map(|environment| {
@@ -237,7 +237,7 @@ impl NewTask {
             chosen,
         );
         let agent = Select::new(
-            "Agent",
+            "agent",
             AGENTS
                 .iter()
                 .copied()
@@ -251,7 +251,7 @@ impl NewTask {
             task: TextBox::new(""),
             environment,
             agent,
-            host: Select::new("Runs on", host_offers(hosts), 0),
+            host: Select::new("host", host_offers(hosts), 0),
             agent_unchosen: default_agent.is_none(),
             refused: false,
             focus: Focus::Task,
@@ -927,9 +927,9 @@ pub fn draw(
         Constraint::Length(1),
         Constraint::Min(4),
         Constraint::Length(3),
-        // The answers take one row and leave one under them, so the window does
-        // not end on the buttons.
-        Constraint::Length(3),
+        // A rule, then the answers, and nothing under them: the window ends
+        // where they do.
+        Constraint::Length(4),
     ])
     .areas(inner);
     frame.render_widget(

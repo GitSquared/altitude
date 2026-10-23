@@ -12,7 +12,7 @@ use std::{
 use crossterm::{
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, EventStream, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+        Event, EventStream, KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
         PushKeyboardEnhancementFlags,
     },
     execute,
@@ -638,8 +638,13 @@ where
             }
             event = events.next() => {
                 let Some(event) = event else { return Ok(()) };
+                let event = event?;
+                // A captured mouse reports every movement it makes, and a movement
+                // that only passes over something changes nothing. Drawing for
+                // each of them is what turns a moving pointer into a stutter.
+                let quiet = matches!(&event, Event::Mouse(mouse) if mouse.kind == MouseEventKind::Moved);
                 let quit = handle_event(
-                    event?,
+                    event,
                     terminal,
                     &event_loop,
                     &task_service,
@@ -658,7 +663,9 @@ where
                 if quit {
                     return Ok(());
                 }
-                redraw = true;
+                if !quiet {
+                    redraw = true;
+                }
             }
         }
     }
@@ -715,6 +722,11 @@ where
         return Ok(false);
     }
     if let Event::Mouse(mouse) = event {
+        // Movement alone says nothing has been chosen or scrolled: the loop has
+        // already declined to draw for it.
+        if mouse.kind == MouseEventKind::Moved {
+            return Ok(false);
+        }
         if matches!(app.foreground, Foreground::NewTask(_)) {
             app.new_task_mouse(mouse, event_loop, task_service, issue_reads, delegations)
                 .await;

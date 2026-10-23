@@ -253,13 +253,15 @@ impl<T> Select<T> {
     /// Draws the chosen value as a small box: its name, what it is set to, and a
     /// mark that it opens.
     ///
-    /// The border says whether the keys are here, exactly as the prompt's does,
-    /// so the page shows where the caret is one way rather than two.
+    /// The box says it can be pressed; being filled with the terminal's colours
+    /// turned over says the keys are on it, the same way a button or a list row
+    /// does. Inside, the name is dim and the value is not, which is the whole
+    /// difference between the two.
     pub fn draw_pill(&self, frame: &mut Frame, area: Rect, focused: bool, with_name: bool) {
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(if focused {
-                palette::accent()
+                palette::pressed()
             } else {
                 palette::muted()
             });
@@ -269,10 +271,17 @@ impl<T> Select<T> {
             return;
         }
         let chosen = self.chosen_offer();
-        let value_style = if chosen.is_some_and(|offer| !offer.ready) {
+        let value_style = if focused {
+            palette::pressed()
+        } else if chosen.is_some_and(|offer| !offer.ready) {
             palette::attention()
         } else {
             palette::primary()
+        };
+        let quiet = if focused {
+            palette::pressed()
+        } else {
+            palette::muted()
         };
         let value = truncate(
             self.label(),
@@ -280,13 +289,20 @@ impl<T> Select<T> {
         );
         let mut spans = Vec::new();
         if with_name {
-            spans.push(Span::styled(format!(" {} ", self.name), palette::muted()));
+            spans.push(Span::styled(format!(" {} ", self.name), quiet));
         } else {
-            spans.push(Span::styled(" ", palette::muted()));
+            spans.push(Span::styled(" ", quiet));
         }
         spans.push(Span::styled(value, value_style));
-        spans.push(Span::styled(format!(" {OPENS} "), palette::muted()));
-        frame.render_widget(Paragraph::new(Line::from(spans)), inner);
+        spans.push(Span::styled(format!(" {OPENS} "), quiet));
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)).style(if focused {
+                palette::pressed()
+            } else {
+                Style::default()
+            }),
+            inner,
+        );
     }
 
     /// Add pasted text to the query, as one line: a list is narrowed by words,

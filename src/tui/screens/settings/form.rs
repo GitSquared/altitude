@@ -141,9 +141,9 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &Form) {
         return;
     }
 
-    let fields_height = inner.height.saturating_sub(3);
-    let [fields, buttons] =
-        Layout::vertical([Constraint::Length(fields_height), Constraint::Length(3)]).areas(inner);
+    let fields_height = inner.height.saturating_sub(4);
+    let [fields, actions] =
+        Layout::vertical([Constraint::Length(fields_height), Constraint::Length(4)]).areas(inner);
 
     if form.target.is_remote() {
         let [primary, rest] =
@@ -183,11 +183,7 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &Form) {
     chrome::actions(
         frame,
         area,
-        Rect {
-            y: buttons.y,
-            height: 2,
-            ..buttons
-        },
+        actions,
         &[
             chrome::Action::new("cancel").focused(form.focus == Focus::Cancel),
             chrome::Action::new("save")

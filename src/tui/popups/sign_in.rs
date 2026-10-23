@@ -76,7 +76,7 @@ impl SignIn {
         let inner = block.inner(popup);
         frame.render_widget(block, popup);
         let [text, actions] =
-            Layout::vertical([Constraint::Min(3), Constraint::Length(3)]).areas(inner);
+            Layout::vertical([Constraint::Min(3), Constraint::Length(4)]).areas(inner);
         frame.render_widget(
             Paragraph::new(self.lines.clone()).wrap(Wrap { trim: true }),
             text,
