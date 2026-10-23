@@ -141,9 +141,9 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &Form) {
         return;
     }
 
-    let fields_height = inner.height.saturating_sub(4);
+    let fields_height = inner.height.saturating_sub(2);
     let [fields, actions] =
-        Layout::vertical([Constraint::Length(fields_height), Constraint::Length(4)]).areas(inner);
+        Layout::vertical([Constraint::Length(fields_height), Constraint::Length(2)]).areas(inner);
 
     if form.target.is_remote() {
         let [primary, rest] =

@@ -14,23 +14,22 @@
 //! Roles are named for what they mean rather than how they look, so a screen
 //! that means "this failed" asks for [`bad`] and cannot quietly decide that red
 //! means something else.
+//!
+//! There is one exception to the sixteen: [`focus`] fills a control with the
+//! accent and writes on it in black. That is the only place two colours are
+//! named for one role, because a fill has to be a pair, and only the accent is
+//! guaranteed to be legible under black text on either kind of theme.
 
 use ratatui::style::{Color, Modifier, Style};
 
-/// The cyan bar marks where the keys go.
+/// Where the keys are: the accent, filled, with the text that it was chosen to
+/// carry. Used by the pill, the button and the list row alike, so focus is one
+/// thing to recognise rather than one per control.
 pub fn focus() -> Style {
     Style::new()
         .fg(Color::Black)
         .bg(Color::Cyan)
         .add_modifier(Modifier::BOLD)
-}
-
-/// A thing holding the keys: the terminal's own colours turned over. Turning
-/// them over rather than naming two is what keeps this visible on a light
-/// terminal as well as a dark one, and it is the one focus cue this interface
-/// uses on anything filled.
-pub fn pressed() -> Style {
-    Style::new().add_modifier(Modifier::REVERSED)
 }
 
 pub fn inactive_selection() -> Style {

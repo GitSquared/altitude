@@ -234,10 +234,10 @@ impl<T> Select<T> {
             .collect()
     }
 
-    /// How wide this pill wants to be: its value, the mark that it opens, its
-    /// name when there is room for one, and the box around them.
+    /// How wide this pill wants to be: its name when there is room for one, its
+    /// value, and the mark that it opens.
     pub fn pill_width(&self, with_name: bool) -> u16 {
-        (self.name_width(with_name) + self.label().chars().count() + 5) as u16
+        (self.name_width(with_name) + self.label().chars().count() + 3) as u16
     }
 
     /// How much of a pill its name takes: the word and the space around it, or
@@ -250,42 +250,28 @@ impl<T> Select<T> {
         }
     }
 
-    /// Draws the chosen value as a small box: its name, what it is set to, and a
-    /// mark that it opens.
+    /// Draws the chosen value as a pill: its name, what it is set to, and a mark
+    /// that it opens.
     ///
-    /// The box says it can be pressed; being filled with the terminal's colours
-    /// turned over says the keys are on it, the same way a button or a list row
-    /// does. Inside, the name is dim and the value is not, which is the whole
-    /// difference between the two.
+    /// The accent fill is the same one a button or a list row uses when it holds
+    /// the keys, so "the keys are here" is one thing to recognise across the
+    /// interface. Inside, the name is quiet and the value is not, which is the
+    /// whole difference between the two.
     pub fn draw_pill(&self, frame: &mut Frame, area: Rect, focused: bool, with_name: bool) {
-        let block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(if focused {
-                palette::pressed()
-            } else {
-                palette::muted()
-            });
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        if inner.height == 0 || inner.width == 0 {
+        if area.height == 0 || area.width == 0 {
             return;
         }
         let chosen = self.chosen_offer();
-        let value_style = if focused {
-            palette::pressed()
+        let (value_style, quiet) = if focused {
+            (palette::focus(), palette::focus())
         } else if chosen.is_some_and(|offer| !offer.ready) {
-            palette::attention()
+            (palette::attention(), palette::muted())
         } else {
-            palette::primary()
-        };
-        let quiet = if focused {
-            palette::pressed()
-        } else {
-            palette::muted()
+            (palette::primary(), palette::muted())
         };
         let value = truncate(
             self.label(),
-            usize::from(inner.width).saturating_sub(self.name_width(with_name) + 3),
+            usize::from(area.width).saturating_sub(self.name_width(with_name) + 3),
         );
         let mut spans = Vec::new();
         if with_name {
@@ -295,13 +281,15 @@ impl<T> Select<T> {
         }
         spans.push(Span::styled(value, value_style));
         spans.push(Span::styled(format!(" {OPENS} "), quiet));
+        // The fill covers the spaces as well as the words, because the pill is
+        // the whole of what the fill is for.
         frame.render_widget(
             Paragraph::new(Line::from(spans)).style(if focused {
-                palette::pressed()
+                palette::focus()
             } else {
                 Style::default()
             }),
-            inner,
+            area,
         );
     }
 

@@ -71,7 +71,7 @@ pub(in crate::tui) const AGENTS: [AgentKind; 2] = [AgentKind::Pi, AgentKind::Cla
 const WIDTH_PERCENT: u16 = 70;
 /// Its height, which is the prompt's room plus what the pills and the actions
 /// need. The prompt takes what is left of it.
-const HEIGHT: u16 = 18;
+const HEIGHT: u16 = 15;
 /// Between two pills, so they read as three things rather than one strip.
 const PILL_GAP: u16 = 2;
 /// How long a query rests before it is searched, so a word typed a letter at a
@@ -926,10 +926,10 @@ pub fn draw(
     let [label, body, pills, actions] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(4),
-        Constraint::Length(3),
+        Constraint::Length(1),
         // A rule, then the answers, and nothing under them: the window ends
         // where they do.
-        Constraint::Length(4),
+        Constraint::Length(2),
     ])
     .areas(inner);
     frame.render_widget(
@@ -970,7 +970,7 @@ pub fn draw(
             Line::styled(refusal, palette::attention()),
             Rect {
                 x: inner.x,
-                y: pills.y + 1,
+                y: pills.y,
                 width: inner.width,
                 height: 1,
             },

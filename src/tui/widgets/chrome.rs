@@ -261,16 +261,15 @@ impl<'a> Action<'a> {
 /// Draws the rule that closes a modal's body and the answers under it, and
 /// answers with where each one was drawn so a click can find it.
 ///
-/// `area` is four rows: the rule, then three rows of buttons. The rule runs the
-/// full width of the modal and breaks its borders, because the answers belong to
-/// the window rather than to the form inside it.
+/// `area` is two rows: the rule, then the buttons. The rule runs the full width
+/// of the modal and breaks its borders, because the answers belong to the window
+/// rather than to the form inside it.
 ///
-/// A button is a small box, the same one a pill wears: a border is how this
-/// interface says a control can be used rather than read. What the border cannot
-/// say on its own is which control the keys are on, so that one is filled with
-/// the terminal's colours turned over, exactly as a pill or a list row is.
+/// A button is a word with room around it. The answer the page asks for is in
+/// the accent, the one holding the keys is filled with it, and both are bold so
+/// a footer made of two words still reads as somewhere to press.
 pub fn actions(frame: &mut Frame, modal: Rect, area: Rect, actions: &[Action]) -> Vec<Rect> {
-    if area.height < 4 || area.width == 0 {
+    if area.height < 2 || area.width == 0 {
         return Vec::new();
     }
     let buffer = frame.buffer_mut();
@@ -282,12 +281,12 @@ pub fn actions(frame: &mut Frame, modal: Rect, area: Rect, actions: &[Action]) -
 
     let row = Rect {
         y: area.y + 1,
-        height: 3,
+        height: 1,
         ..area
     };
     let widths: Vec<Constraint> = actions
         .iter()
-        .map(|action| Constraint::Length(action.label.chars().count() as u16 + 4))
+        .map(|action| Constraint::Length(action.label.chars().count() as u16 + 2))
         .collect();
     let drawn = Layout::horizontal(widths)
         .flex(Flex::End)
@@ -298,23 +297,19 @@ pub fn actions(frame: &mut Frame, modal: Rect, area: Rect, actions: &[Action]) -
         .zip(drawn.iter())
         .map(|(action, area)| {
             let style = if action.focused {
-                palette::pressed()
-            } else if !action.enabled {
-                palette::muted()
-            } else if action.primary {
-                palette::accent()
+                palette::focus()
+            } else if !action.enabled || !action.primary {
+                palette::muted().bold()
             } else {
-                palette::muted()
+                palette::accent().bold()
             };
-            let block = Block::bordered()
-                .border_type(BorderType::Rounded)
-                .border_style(style)
-                .padding(Padding::horizontal(1));
-            let inner = block.inner(*area);
-            frame.render_widget(block, *area);
-            if inner.height > 0 {
-                frame.render_widget(Paragraph::new(Line::styled(action.label, style)), inner);
-            }
+            // The spaces belong to the label so the fill covers the whole button
+            // and not just the letters, which is what makes it read as pressed
+            // rather than as a highlighted word.
+            frame.render_widget(
+                Paragraph::new(Line::styled(format!(" {} ", action.label), style)),
+                *area,
+            );
             *area
         })
         .collect()

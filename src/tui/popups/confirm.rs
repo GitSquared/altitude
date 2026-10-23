@@ -82,13 +82,13 @@ impl Confirm {
 }
 
 pub fn draw(frame: &mut Frame, area: Rect, confirm: &Confirm) -> Rect {
-    let popup = chrome::centered(area, 60, 9);
+    let popup = chrome::centered(area, 60, 8);
     frame.render_widget(Clear, popup);
     let block = chrome::modal("Are you sure?");
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     let [question, actions] =
-        Layout::vertical([Constraint::Min(3), Constraint::Length(4)]).areas(inner);
+        Layout::vertical([Constraint::Min(3), Constraint::Length(2)]).areas(inner);
     frame.render_widget(
         Paragraph::new(confirm.question.clone()).wrap(Wrap { trim: true }),
         question,
