@@ -55,14 +55,37 @@ impl ServeSettings {
         match fs::read_to_string(path) {
             Ok(source) => toml::from_str(&source).map_err(SettingsError::Parse),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                let settings = Self::default();
-                let source = toml::to_string_pretty(&settings).map_err(SettingsError::Serialize)?;
-                write_new(path, &source)?;
-                Ok(settings)
+                write_new(path, &template())?;
+                Ok(Self::default())
             }
             Err(error) => Err(SettingsError::Io(error)),
         }
     }
+}
+
+/// What a host starts from: the one setting it must have, and the shape of the
+/// tracker section it will probably want.
+///
+/// Written out rather than serialised from the defaults, so the file that is left
+/// behind teaches the next step. The section is commented, so an untouched file
+/// is still exactly the default one, and no host is told about a tracker it does
+/// not run.
+fn template() -> String {
+    format!(
+        "# Where clients reach this remote: discovery over TCP, tasks over UDP.\n\
+         listen = \"{}\"\n\
+         \n\
+         # A shared app for work delegated from a task tracker. Install it with\n\
+         # `altitude serve --connect-linear`, which prints the exact addresses to register.\n\
+         # public_url is the HTTPS address that reaches this machine, and the secrets belong\n\
+         # here, in a file only this machine's user can read.\n\
+         # [linear]\n\
+         # client_id = \"\"\n\
+         # public_url = \"\"\n\
+         # client_secret = \"\"\n\
+         # webhook_secret = \"\"\n",
+        default_listen()
+    )
 }
 
 /// Writes a file only the owner can read, refusing to replace one that exists.
