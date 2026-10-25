@@ -3345,7 +3345,13 @@ impl App {
         threads.sort_by(|left, right| {
             let group = |thread: &TaskOperatorSignalThread| {
                 let settled = thread.is_resolved() && !(keeping && is_lingering(thread, now));
-                (u8::from(settled), thread.kind.tier())
+                // Resolved threads share one RESOLVED heading, so their kind's
+                // tier is not a visible group; ordering them by it would put a
+                // newer update below an older decision for no reason.
+                (
+                    u8::from(settled),
+                    if settled { 0 } else { thread.kind.tier() },
+                )
             };
             group(left).cmp(&group(right)).then_with(|| {
                 let when = |thread: &TaskOperatorSignalThread| {
