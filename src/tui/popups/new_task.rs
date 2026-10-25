@@ -548,7 +548,7 @@ impl NewTask {
         }
         // The answer is a chord, so it is never a key that writes the intent:
         // enter adds a line, and this starts the work.
-        if keys::is_proceed(key) {
+        if keys::is_secondary(key) {
             return self.answer();
         }
         if self.is_typing() {

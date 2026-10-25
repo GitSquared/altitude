@@ -14,13 +14,17 @@ pub fn draw(frame: &mut Frame, area: Rect, tick: usize) {
     // contour crossings into the eight dots of each cell.
     let pixel_width = usize::from(area.width) * 2;
     let pixel_height = usize::from(area.height) * 4;
-    let drift = tick as f32 * 0.0042;
+    // The clock runs for as long as the interface does, so the field's maths is
+    // f64 and the lattice is i64. In f32 the drift stops changing between frames
+    // after about a week of animation; in i32 the lattice saturates long before
+    // the tick itself could wrap.
+    let drift = tick as f64 * 0.0042;
     let stride = pixel_width + 1;
-    let mut heights = vec![0.0; stride * (pixel_height + 1)];
+    let mut heights = vec![0.0_f64; stride * (pixel_height + 1)];
     for row in 0..=pixel_height {
         for column in 0..=pixel_width {
-            let x = column as f32 / pixel_width as f32 * 3.2;
-            let y = row as f32 / pixel_height as f32 * 2.0;
+            let x = column as f64 / pixel_width as f64 * 3.2;
+            let y = row as f64 / pixel_height as f64 * 2.0;
             heights[row * stride + column] = elevation(x, y, drift);
         }
     }
@@ -41,8 +45,8 @@ pub fn draw(frame: &mut Frame, area: Rect, tick: usize) {
                         heights[index + stride],
                         heights[index + stride + 1],
                     ];
-                    let minimum = corners.into_iter().fold(f32::INFINITY, f32::min);
-                    let maximum = corners.into_iter().fold(f32::NEG_INFINITY, f32::max);
+                    let minimum = corners.into_iter().fold(f64::INFINITY, f64::min);
+                    let maximum = corners.into_iter().fold(f64::NEG_INFINITY, f64::max);
                     let level = (minimum * 8.0).floor().max(0.0) + 1.0;
                     if level <= maximum * 8.0 {
                         dots |= *dot;
@@ -62,7 +66,7 @@ pub fn draw(frame: &mut Frame, area: Rect, tick: usize) {
     }
 }
 
-fn elevation(x: f32, y: f32, drift: f32) -> f32 {
+fn elevation(x: f64, y: f64, drift: f64) -> f64 {
     // One broad swell, reaching past every edge, so the contours are a landscape
     // that fills the area rather than an island in the middle of it. The texture
     // is what makes it terrain; the swell is what gives it a horizon.
@@ -82,13 +86,13 @@ fn elevation(x: f32, y: f32, drift: f32) -> f32 {
     swell + texture
 }
 
-fn perlin(x: f32, y: f32) -> f32 {
-    let left = x.floor() as i32;
-    let top = y.floor() as i32;
-    let u = x - left as f32;
-    let v = y - top as f32;
-    let fade = |t: f32| t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
-    let dot = |corner_x: i32, corner_y: i32, offset_x: f32, offset_y: f32| {
+fn perlin(x: f64, y: f64) -> f64 {
+    let left = x.floor() as i64;
+    let top = y.floor() as i64;
+    let u = x - left as f64;
+    let v = y - top as f64;
+    let fade = |t: f64| t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+    let dot = |corner_x: i64, corner_y: i64, offset_x: f64, offset_y: f64| {
         let hash = (corner_x.wrapping_mul(374_761_393) ^ corner_y.wrapping_mul(668_265_263))
             .wrapping_mul(1_274_126_177);
         match hash & 7 {

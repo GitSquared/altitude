@@ -7,7 +7,7 @@ use crate::{
     isolation::ProfileSummary,
     tui::{
         App,
-        app::{CredentialStatus, RemoteStatus, TrackerState},
+        app::{CredentialStatus, RemoteStatus},
         popups::new_task::AGENTS,
     },
 };
@@ -30,41 +30,45 @@ impl App {
             ],
             Section::Agents => AGENTS
                 .into_iter()
-                .map(|kind| Row {
-                    label: kind.to_string(),
-                    note: (self.agent() == Some(kind)).then_some("(default)"),
-                    kind: RowKind::Agent {
-                        kind,
-                        credential: self.agent_credential(kind),
-                    },
+                .map(|kind| {
+                    let credential = self.agent_credential(kind);
+                    let mut detail = credential.summary().to_owned();
+                    if self.agent() == Some(kind) {
+                        detail.push_str(" · default");
+                    }
+                    Row {
+                        label: kind.to_string(),
+                        detail: Some(detail),
+                        kind: RowKind::Agent { kind, credential },
+                    }
                 })
                 .collect(),
             Section::VersionControl => {
                 let identity = self.git_identity();
                 let mut rows = vec![Row {
                     label: "Git identity".to_owned(),
-                    note: identity.is_set().then_some("(set)"),
+                    detail: Some(if identity.is_set() { "set" } else { "not set" }.to_owned()),
                     kind: RowKind::GitIdentity(identity),
                 }];
                 rows.extend(
                     self.profiles
                         .iter()
                         .filter(|profile| profile.profile.starts_with("vcs/"))
-                        .map(|profile| Row {
-                            label: profile.display.to_owned(),
-                            note: None,
-                            kind: RowKind::Credential(self.profile_credential(profile)),
+                        .map(|profile| {
+                            let credential = self.profile_credential(profile);
+                            let detail = credential.summary().to_owned();
+                            Row {
+                                label: profile.display.to_owned(),
+                                detail: Some(detail),
+                                kind: RowKind::Credential(credential),
+                            }
                         }),
                 );
                 rows
             }
             Section::Trackers => vec![Row {
                 label: "Linear".to_owned(),
-                note: Some(match self.tracker_state {
-                    TrackerState::Connected => "(connected)",
-                    TrackerState::Connecting => "(connecting)",
-                    TrackerState::NotConnected => "(not connected)",
-                }),
+                detail: Some(self.tracker_state.summary().to_owned()),
                 kind: RowKind::Tracker {
                     state: self.tracker_state,
                 },
@@ -79,11 +83,16 @@ impl App {
                         label: environment.name.clone(),
                         // The built-in one says what it is rather than what it is
                         // used for: there is nothing to choose about it.
-                        note: if built_in {
-                            Some("(built in)")
-                        } else {
-                            is_default.then_some("(default)")
-                        },
+                        detail: Some(
+                            if built_in {
+                                "built in"
+                            } else if is_default {
+                                "default"
+                            } else {
+                                "custom"
+                            }
+                            .to_owned(),
+                        ),
                         kind: if built_in {
                             RowKind::Base
                         } else {
@@ -181,9 +190,10 @@ impl App {
         let installation = self.installation_credential();
         // This installation comes first: it is the identity a remote knows this
         // machine by.
+        let detail = installation.summary().to_owned();
         let mut rows = vec![Row {
             label: installation.label.clone(),
-            note: None,
+            detail: Some(detail),
             kind: RowKind::Credential(installation),
         }];
         rows.extend(self.configured_remotes().into_iter().map(|address| {
@@ -205,7 +215,7 @@ impl App {
                     Some(key) => key.label.clone(),
                     None => address.clone(),
                 },
-                note: None,
+                detail: Some(address.clone()),
                 kind: RowKind::Remote {
                     needs_config: self.remote_needs_config(&address),
                     address,
@@ -249,7 +259,7 @@ impl App {
                 } else {
                     remote.label.clone()
                 },
-                note: None,
+                detail: Some(remote.address.clone()),
                 kind: RowKind::Discovered(remote),
             })
             .collect()
@@ -267,6 +277,6 @@ impl App {
         self.settings_view()
             .rows
             .into_iter()
-            .nth(self.panel.selected)
+            .nth(self.panel.selected())
     }
 }

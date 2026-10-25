@@ -229,12 +229,12 @@ impl<'a> Action<'a> {
     }
 }
 
-/// Draws the rule that closes a modal's body and the answers under it, and
+/// Draws the divider that closes a modal's body and the answers under it, and
 /// answers with where each one was drawn so a click can find it.
 ///
-/// `area` is two rows: the rule, then the buttons. The rule runs the full width
-/// of the modal and breaks its borders, because the answers belong to the window
-/// rather than to the form inside it.
+/// `area` is two rows: the divider, then the buttons. The divider runs the full
+/// width of the modal and breaks its borders, because the answers belong to the
+/// window rather than to the form inside it.
 ///
 /// A button is a word with room around it. The answer the page asks for is in
 /// the accent, the one holding the keys is filled with it, and both are bold so

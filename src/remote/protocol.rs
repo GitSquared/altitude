@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::task::{
     Task, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent,
-    TaskOperatorAttentionLevel, TaskOperatorSignal, TaskOperatorSignalKind,
+    TaskOperatorAttentionLevel, TaskOperatorSignalKind, TaskOperatorSignalThread,
 };
 use crate::tracker::{IssueReference, IssueSnapshot, TrackerKind};
 use crate::vcs::ContributionState;
@@ -268,7 +268,7 @@ pub enum LinkResponse {
     /// The machine can be given work now, which is not a change to any task.
     Ready,
     Signals {
-        signals: Vec<TaskOperatorSignal>,
+        signals: Vec<TaskOperatorSignalThread>,
     },
     /// What the remote holds for the asking peer's profiles.
     HeldProfiles {
@@ -318,12 +318,23 @@ pub enum TaskOrigin {
     Issue(Box<IssueSnapshot>),
 }
 
+/// A change an operator asks of one task thread.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SignalCommand {
-    Read { task_id: String },
-    Acknowledge { signal_id: String },
-    Answer { signal_id: String, answer: String },
-    Accept { signal_id: String },
+    Reply {
+        task_id: String,
+        signal_id: String,
+        body: String,
+    },
+    Resolve {
+        task_id: String,
+        signal_id: String,
+        resolved: bool,
+    },
+    Accept {
+        task_id: String,
+        signal_id: String,
+    },
 }
 
 /// A task as a card shows it.
@@ -353,9 +364,9 @@ pub struct TaskSummary {
     pub attention: TaskOperatorAttentionLevel,
     /// The blocking signal the operator is being waited on for, when one is open.
     #[serde(default)]
-    pub awaiting_signal_kind: Option<TaskOperatorSignalKind>,
+    pub blocking_signal_kind: Option<TaskOperatorSignalKind>,
     #[serde(default)]
-    pub unread_operator_signal_count: u32,
+    pub unresolved_signal_count: u32,
     /// What went wrong, when something did.
     #[serde(default)]
     pub last_error: Option<String>,
@@ -406,8 +417,8 @@ impl TaskSummary {
             mode: task.facts.execution_mode,
             pause_reason: task.facts.execution_pause_reason.clone(),
             attention: task.facts.operator_attention_level.clone(),
-            awaiting_signal_kind: task.facts.awaiting_signal_kind,
-            unread_operator_signal_count: task.facts.unread_operator_signal_count,
+            blocking_signal_kind: task.facts.blocking_signal_kind,
+            unresolved_signal_count: task.facts.unresolved_signal_count,
             last_error: task.facts.last_error.clone(),
             tracker_issue: task.facts.tracker_issue.clone(),
             operator_label: task.facts.operator_label.clone(),

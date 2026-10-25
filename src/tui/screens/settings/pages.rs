@@ -277,18 +277,20 @@ pub(super) fn profile_connector(
     directory: &str,
     status: &CredentialStatus,
 ) -> Connector {
-    let (reach, word) = match status {
-        CredentialStatus::Checking => (Reach::Asking, "checking…"),
+    let reach = match status {
+        CredentialStatus::Checking => Reach::Asking,
         CredentialStatus::Checked {
             signed_in: true, ..
-        } => (Reach::On, "signed in"),
+        }
+        | CredentialStatus::Saved => Reach::On,
+        // Not asked, or nothing to ask: neither is a sign-out.
         CredentialStatus::Checked {
             signed_in: false, ..
-        } => (Reach::Off, "not signed in"),
-        CredentialStatus::Saved => (Reach::On, "saved login"),
-        // Not asked, or nothing to ask: neither is a sign-out.
-        CredentialStatus::Unknown | CredentialStatus::Unanswered => (Reach::Off, "not checked"),
+        }
+        | CredentialStatus::Unknown
+        | CredentialStatus::Unanswered => Reach::Off,
     };
+    let word = status.summary();
     let note = matches!(status, CredentialStatus::Saved).then(|| {
         "A login is saved on this machine. No environment has been built here to ask \
          the tool whether it still works."
@@ -400,10 +402,9 @@ pub(super) fn git_connector(identity: &GitIdentity) -> Connector {
 
 /// Linear, as the page reads it: a live session rather than a login kept on disk.
 pub(super) fn tracker_connector(state: TrackerState, profile_dir: &Path) -> Connector {
-    let (reach, status, note, action) = match state {
+    let (reach, note, action) = match state {
         TrackerState::Connected => (
             Reach::On,
-            "signed in",
             Some(
                 "This account syncs to your remotes, and decides which machine receives \
                  an issue delegated in Linear."
@@ -411,14 +412,10 @@ pub(super) fn tracker_connector(state: TrackerState, profile_dir: &Path) -> Conn
             ),
             None,
         ),
-        TrackerState::Connecting => (Reach::Asking, "connecting…", None, None),
-        TrackerState::NotConnected => (
-            Reach::Off,
-            "not signed in",
-            None,
-            Some("Press enter to sign in."),
-        ),
+        TrackerState::Connecting => (Reach::Asking, None, None),
+        TrackerState::NotConnected => (Reach::Off, None, Some("Press enter to sign in.")),
     };
+    let status = state.summary();
     Connector {
         title: "Linear".to_owned(),
         reach,

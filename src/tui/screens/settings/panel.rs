@@ -3,6 +3,7 @@
 
 use super::form::Form;
 use super::rows::{Row, View};
+use crate::tui::widgets::list;
 
 /// The lists the panel holds, in the order the rail shows them.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -33,6 +34,18 @@ impl Section {
             Self::Trackers => "Task tracker",
             Self::Environments => "Environments",
             Self::Remotes => "Remotes",
+        }
+    }
+
+    /// One line under the section's name in the rail.
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Interface => "Adjust look and feel",
+            Self::Agents => "Connect your favorite",
+            Self::VersionControl => "Git and commit signing",
+            Self::Trackers => "Keep your team in the loop",
+            Self::Environments => "Give agents more tools",
+            Self::Remotes => "Automate and keep work going",
         }
     }
 
@@ -93,7 +106,9 @@ pub enum Depth {
 /// The panel's state: where the focus is, and whatever is drawn over it.
 pub struct Panel {
     pub section: Section,
-    pub selected: usize,
+    /// The list's selection and where its view starts, so a long list can be
+    /// stepped through and scrolled like any other.
+    pub cursor: list::Cursor,
     pub depth: Depth,
     pub form: Option<Form>,
     pub detail_scroll: u16,
@@ -103,7 +118,7 @@ impl Panel {
     pub fn new() -> Self {
         Self {
             section: Section::ALL[0],
-            selected: 0,
+            cursor: list::Cursor::default(),
             // The rail, so the panel opens on its shape rather than on the
             // details of whatever row happens to be first.
             depth: Depth::Rail,
@@ -135,22 +150,24 @@ impl Panel {
                     (at + Section::ALL.len() - 1) % Section::ALL.len()
                 };
                 self.section = Section::ALL[next];
-                self.selected = 0;
+                self.cursor.reset();
             }
-            Depth::List => {
-                if rows > 0 {
-                    self.selected = if forward {
-                        (self.selected + 1) % rows
-                    } else {
-                        (self.selected + rows - 1) % rows
-                    };
-                }
-            }
+            Depth::List => self.cursor.move_by(forward, rows),
         }
+    }
+
+    /// Where the list's cursor is.
+    pub fn selected(&self) -> usize {
+        self.cursor.selected()
+    }
+
+    /// Put the list's cursor on a row.
+    pub fn select_row(&mut self, index: usize) {
+        self.cursor.select(index);
     }
 
     /// The row the focus is on, in the list the rail has selected.
     pub fn selected_row<'a>(&self, view: &'a View) -> Option<&'a Row> {
-        view.rows.get(self.selected)
+        view.rows.get(self.selected())
     }
 }

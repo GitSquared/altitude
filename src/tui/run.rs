@@ -18,12 +18,17 @@ use crossterm::{
     execute,
 };
 use futures_util::StreamExt;
-use ratatui::{DefaultTerminal, Frame, buffer::Buffer, layout::Rect};
+use ratatui::{DefaultTerminal, Frame, buffer::Buffer, layout::Rect, widgets::Clear};
 use tachyonfx::{
     Effect, EffectManager, Interpolation, fx,
     pattern::{InvertedPattern, RadialPattern, SweepPattern},
 };
-use tokio::{signal::unix::Signal, sync::mpsc, task::spawn_blocking, time};
+use tokio::{
+    signal::unix::Signal,
+    sync::{broadcast, mpsc},
+    task::spawn_blocking,
+    time,
+};
 
 use crate::{
     isolation::IsolationEngine,
@@ -36,6 +41,7 @@ use super::app::{
     ConfigPushReply, Foreground, IssueReadReply, IssueSearchReply, NO_LINEAR, RemoteSignalsReply,
     RemoveTaskReply, SendTaskReply, TaskDelegationReply, TrackerConnectReply, WatchedTasks,
 };
+use super::background::terrain;
 use super::keys::{is_dismiss, is_help};
 use super::popups;
 use super::popups::confirm::handle_confirm_key;
@@ -254,6 +260,9 @@ where
     // Acknowledgements identify the exact content sent while local edits continue.
     let (config_pushes, mut config_pushed) = mpsc::channel::<ConfigPushReply>(8);
     let mut issue_search_clock = time::interval(Duration::from_millis(80));
+    // A resolved thread stays on the signals list for five seconds. The clock is
+    // what makes the last second happen without waiting for another key.
+    let mut signal_linger_clock = time::interval(Duration::from_millis(250));
     let mut effects: EffectManager<()> = EffectManager::default();
     let mut previous_foreground = mem::discriminant(&app.foreground);
     let mut last_frame = Instant::now();
@@ -263,13 +272,24 @@ where
     let mut leaving: Option<Leaving> = None;
     let mut modal_cells: Option<Leaving> = None;
     let mut was_modal = app.has_modal();
-    let mut was_panel = matches!(app.foreground, Foreground::Panel);
+    let mut was_panel = app.foreground.is_screen();
     // A frame is drawn only when something asks for one: at rest the loop sits in
     // its select and the terminal is left alone. While an effect runs, the clock
     // wakes it fast enough for the animation to move smoothly.
     let mut redraw = true;
+    // Comments on a signal thread come from the agent's tools, not from this
+    // loop, so the service tells whoever is showing the thread instead of the
+    // screen asking on a clock.
+    let mut signal_changes = task_service.subscribe_signals();
+    let mut listen_signals = true;
     let mut motion = time::interval(Duration::from_millis(8));
     motion.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+    // A trackpad can deliver wheel events faster than a frame is worth drawing.
+    // The state is updated for every one of them; the paint waits for the next
+    // tick, so a fast scroll does not queue a frame per event.
+    let mut scroll_pending = false;
+    let mut paint = time::interval(Duration::from_millis(16));
+    paint.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     // A task's environment is built before a task asks for it, so the first task is
     // not a cold start. Off the loop, and only once an agent has been chosen, because
     // only then is there a task that could run.
@@ -309,11 +329,13 @@ where
                 execute!(io::stdout(), DisableMouseCapture)?;
             }
         }
-        // The gesture that proceeds is ctrl-enter, which only this protocol reports
-        // as a key of its own. It is held for the two screens that offer it, and
-        // given back everywhere else, so no other surface reads its keys
-        // differently and a shell never sees the protocol's own sequences.
-        let wants_enhanced = matches!(app.foreground, Foreground::NewTask(_) | Foreground::Tasks);
+        // ctrl-enter and shift-enter only arrive as keys of their own under this
+        // protocol. The task grid and signals use ctrl-enter as their secondary
+        // action; the creation page and the signal composer use both.
+        let wants_enhanced = matches!(
+            app.foreground,
+            Foreground::NewTask(_) | Foreground::Tasks | Foreground::Signals
+        ) || app.signal_composer.is_some();
         if keys_enhanced != wants_enhanced {
             keys_enhanced = !keys_enhanced;
             if keys_enhanced {
@@ -335,7 +357,7 @@ where
         // A modal that has just gone keeps its last frame for a moment, so it can
         // be animated out after the screen behind it has taken the foreground.
         let is_modal = app.has_modal();
-        let is_panel = matches!(app.foreground, Foreground::Panel);
+        let is_panel = app.foreground.is_screen();
         if !app.animations() {
             leaving = None;
         } else if was_modal && !is_modal {
@@ -353,20 +375,35 @@ where
         draw_when(&mut redraw, terminal, |frame| {
             let hints = app.hints();
             let content = widgets::chrome::draw(frame, &hints, app.keyboard_hints());
-            screens::tasks::draw(frame, content, &mut app);
+            // A screen replaces the grid rather than lying over it, so the grid is
+            // not drawn underneath one. The field is one layer under every screen:
+            // drawn once, on the shared clock, so moving between screens does not
+            // restart it or give it a new origin.
+            let screen = app.foreground.shows_settings() || app.foreground.shows_signals();
+            if screen {
+                frame.render_widget(Clear, content);
+            }
+            if app.animations() {
+                terrain::draw(frame, content, app.shimmer);
+            }
+            if !screen {
+                screens::tasks::draw(frame, content, &mut app);
+            }
             // What the modal in front occupied, so the transition animates what
             // was actually drawn rather than a size written down a second time.
             let mut modal: Option<Rect> = None;
             if app.foreground.shows_settings() {
                 // Fullscreen: it is the screen, not something over it.
                 let view = app.settings_view();
+                let tick = app.animation_tick();
                 modal = Some(screens::settings::draw(
                     frame,
                     content,
-                    &app.panel,
+                    &mut app.panel,
                     &view,
-                    app.animation_tick(),
+                    tick,
                     scan.is_some(),
+                    &mut app.settings_targets,
                 ));
                 if let super::app::CredentialShellState::Opening {
                     progress: Some(progress),
@@ -381,6 +418,12 @@ where
                         app.animation_tick(),
                     ));
                 }
+            } else if app.foreground.shows_signals() {
+                // Fullscreen too: it is the screen the operator is reading, not
+                // something laid over the work. A question about a signal is
+                // drawn over it, so the thread it is about stays in view.
+                screens::signals::draw(frame, content, &mut app);
+                modal = Some(content);
             }
             // A terminal goes over the screen it was opened from, which is the
             // settings panel for a sign-in and the task list for a task's run. It
@@ -392,19 +435,6 @@ where
             if let Foreground::OpenLink(asking) = &app.foreground {
                 widgets::chrome::dim(frame, content);
                 modal = Some(popups::open_link::draw(frame, content, asking));
-            }
-            if matches!(app.foreground, Foreground::Signals) {
-                widgets::chrome::dim(frame, content);
-                let summary = app.signals_summary();
-                modal = Some(popups::signals::draw(
-                    frame,
-                    content,
-                    &app.operator_signals,
-                    summary.as_deref(),
-                    app.selected_operator_signal,
-                    app.selected_signal_action,
-                    &mut app.operator_signal_scroll,
-                ));
             }
             if let Foreground::Setup(setup) = &mut app.foreground {
                 widgets::chrome::dim(frame, content);
@@ -444,11 +474,6 @@ where
                     &super::keys::help_sections(),
                     &mut app.help_scroll,
                 ));
-            }
-            // Input belongs above the settings overlay that opened it.
-            if let Foreground::Reply(reply) = &app.foreground {
-                widgets::chrome::dim(frame, content);
-                modal = Some(reply.prompt.draw(frame, content));
             }
             // A transfer in flight is the one wait with something to count.
             if let Some(progress) = app.transfer_progress() {
@@ -590,9 +615,16 @@ where
                 redraw = true;
             }
             _ = shell_notice.tick(), if app.shell_has_active_notice() => {}
+            _ = signal_linger_clock.tick(), if app.has_lingering_signals() => {
+                app.expire_signal_linger();
+                redraw = true;
+            }
             _ = shimmer.tick(), if app.animations() && app.open_shell().is_none() => {
                 app.shimmer = app.shimmer.wrapping_add(1);
                 redraw = true;
+                // The cursor moves on the same clock as the rest of the motion,
+                // so a list can catch up with a jump between two keys.
+                redraw |= app.glide_lists();
             }
             _ = motion.tick(), if effects.is_running() => {
                 redraw = true;
@@ -669,13 +701,45 @@ where
                 app.remote_signals_resolved(reply);
                 redraw = true;
             }
+            changed = signal_changes.recv(), if listen_signals => {
+                match changed {
+                    Ok(task_id) => app.signal_changed(&task_id, &event_loop).await,
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        app.signal_changes_lagged(&event_loop).await
+                    }
+                    Err(broadcast::error::RecvError::Closed) => listen_signals = false,
+                }
+                redraw = true;
+            }
             event = events.next() => {
                 let Some(event) = event else { return Ok(()) };
                 let event = event?;
                 // A captured mouse reports every movement it makes, and a movement
                 // that only passes over something changes nothing. Drawing for
                 // each of them is what turns a moving pointer into a stutter.
-                let quiet = matches!(&event, Event::Mouse(mouse) if mouse.kind == MouseEventKind::Moved);
+                let quiet = matches!(
+                    &event,
+                    Event::Mouse(mouse)
+                        if matches!(
+                            mouse.kind,
+                            MouseEventKind::Moved
+                                | MouseEventKind::ScrollUp
+                                | MouseEventKind::ScrollDown
+                                | MouseEventKind::ScrollLeft
+                                | MouseEventKind::ScrollRight
+                        )
+                );
+                let scrolling = matches!(
+                    &event,
+                    Event::Mouse(mouse)
+                        if matches!(
+                            mouse.kind,
+                            MouseEventKind::ScrollUp
+                                | MouseEventKind::ScrollDown
+                                | MouseEventKind::ScrollLeft
+                                | MouseEventKind::ScrollRight
+                        )
+                );
                 let quit = handle_event(
                     event,
                     terminal,
@@ -697,9 +761,15 @@ where
                 if quit {
                     return Ok(());
                 }
-                if !quiet {
+                if scrolling {
+                    scroll_pending = true;
+                } else if !quiet {
                     redraw = true;
                 }
+            }
+            _ = paint.tick(), if scroll_pending => {
+                scroll_pending = false;
+                redraw = true;
             }
         }
     }
@@ -739,8 +809,8 @@ where
         if app.alert.is_some() {
             return Ok(false);
         }
-        if let Foreground::Reply(reply) = &mut app.foreground {
-            reply.prompt.paste(&text);
+        if let Some(composer) = &mut app.signal_composer {
+            composer.body.paste(&text);
         } else if let Foreground::NewTask(new_task) = &mut app.foreground {
             new_task.paste(&text);
         } else if let Some(form) = &mut app.panel.form {
@@ -773,6 +843,19 @@ where
         if matches!(app.foreground, Foreground::NewTask(_)) {
             app.new_task_mouse(mouse, event_loop, task_service, issue_reads, delegations)
                 .await;
+            return Ok(false);
+        }
+        if matches!(app.foreground, Foreground::Signals) {
+            app.signals_mouse(mouse, task_service, remote_signals, event_loop)
+                .await;
+            return Ok(false);
+        }
+        if matches!(app.foreground, Foreground::Tasks) {
+            app.task_mouse(mouse);
+            return Ok(false);
+        }
+        if matches!(app.foreground, Foreground::Panel) {
+            app.panel_mouse(mouse);
             return Ok(false);
         }
         if let Some(id) = app.open_shell().cloned() {
@@ -831,9 +914,17 @@ where
     match &app.foreground {
         Foreground::Keys(_) => app.dismiss_keys(),
         Foreground::Confirm(_) => {
-            handle_confirm_key(app, terminal, event_loop, key, landings, removals).await
+            handle_confirm_key(
+                app,
+                terminal,
+                event_loop,
+                key,
+                landings,
+                removals,
+                remote_signals,
+            )
+            .await
         }
-        Foreground::Reply(_) => app.reply_key(key, event_loop, remote_signals),
         Foreground::SendTask(_) => {
             app.send_task_key(key, event_loop, task_service, sends)
                 .await
@@ -848,7 +939,10 @@ where
         }
         Foreground::Setup(_) => app.setup_key(key),
         Foreground::SignIn(_) => app.sign_in_key(key, task_service, credential_events).await,
-        Foreground::Signals => app.signals_key(key, task_service, remote_signals).await,
+        Foreground::Signals => {
+            app.signals_key(key, task_service, remote_signals, event_loop)
+                .await
+        }
         Foreground::Shell(_) => app.shell_key(key, event_loop, task_service).await,
         Foreground::OpenLink(_) => app.open_link_key(key),
         Foreground::Tasks => {

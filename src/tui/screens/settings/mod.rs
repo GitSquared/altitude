@@ -20,7 +20,7 @@ mod panel;
 pub(in crate::tui) mod rows;
 mod view;
 
-pub(in crate::tui) use draw::draw;
+pub(in crate::tui) use draw::{SettingsHit, draw};
 pub(in crate::tui) use form::{Focus, Form, Target};
 pub(in crate::tui) use pages::{remote_setup_lines, remote_tracker_setup_lines, tracker_dot};
 pub(in crate::tui) use panel::{Depth, Panel, Section, Setting};

@@ -141,3 +141,28 @@ pub fn truncate(text: &str, width: usize) -> String {
     truncated.push('…');
     truncated
 }
+
+/// How long ago something happened, in the fewest characters that still say it.
+///
+/// Ages are read at a glance and compared down a column, so they stay short and
+/// change unit rather than growing words: `12m`, not `12 minutes ago`. Anything
+/// under a minute is `just now`: a clock that counts seconds makes an idle
+/// screen look busy.
+pub fn since(at_ms: i64, now_ms: i64) -> String {
+    let seconds = now_ms.saturating_sub(at_ms) / 1000;
+    match seconds {
+        0..=59 => "just now".to_owned(),
+        60..=3_599 => format!("{}m", seconds / 60),
+        3_600..=86_399 => format!("{}h", seconds / 3_600),
+        _ => format!("{}d", seconds / 86_400),
+    }
+}
+
+/// The same age as a phrase: `just now`, or `12m ago`.
+pub fn ago(at_ms: i64, now_ms: i64) -> String {
+    if now_ms.saturating_sub(at_ms) < 60_000 {
+        "just now".to_owned()
+    } else {
+        format!("{} ago", since(at_ms, now_ms))
+    }
+}

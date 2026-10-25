@@ -36,6 +36,20 @@ pub fn inactive_selection() -> Style {
     Style::new().fg(Color::Reset).bg(Color::DarkGray)
 }
 
+/// The quiet line under a focused row's name: the focus fill, on the quieter
+/// half of its pair, so the name still leads.
+pub fn focus_detail() -> Style {
+    Style::new().fg(Color::DarkGray).bg(Color::Cyan)
+}
+
+/// The quiet line under a selected row while the focus is elsewhere.
+///
+/// The inactive bar is already the muted shade, so this takes the next shade up
+/// rather than disappearing into the bar the way [`muted`] would.
+pub fn selection_detail() -> Style {
+    Style::new().fg(Color::Gray)
+}
+
 /// The edge of whatever holds the caret, and marks that invite a second look.
 pub fn accent() -> Style {
     Style::new().fg(Color::Cyan)
@@ -87,6 +101,11 @@ pub fn good() -> Style {
 /// Work that is waiting on a person.
 pub fn attention() -> Style {
     Style::new().fg(Color::Yellow)
+}
+
+/// An assumption worth reviewing, rather than work that needs answering.
+pub fn decision() -> Style {
+    Style::new().fg(Color::LightBlue)
 }
 
 /// Work that has failed, or something the operator has to see.

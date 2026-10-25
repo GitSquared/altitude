@@ -123,7 +123,7 @@ fn initialize(params: &Value) -> Value {
         "protocolVersion": version,
         "capabilities": { "tools": {} },
         "serverInfo": { "name": "altitude", "version": env!("CARGO_PKG_VERSION") },
-        "instructions": "Altitude owns this task. Its tools read and change the task's own state; the operator is usually away and reaches you through signals."
+        "instructions": "Altitude owns this task. Its tools read and change the task's own state. `tasks_signal` is the one signal tool: action=list, read, open, reply, or resolve, with signal_id, kind, title, body, resolved, and reason as the action needs. A reply is a message; a thread is unresolved or resolved; reading a message is the agent's job, not the harness's. Use `tasks_title` for the task name and `tasks_read_issue` for tracker context. The operator is usually away; a question that needs their answer ends your turn and stops the task."
     })
 }
 

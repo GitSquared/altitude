@@ -68,6 +68,9 @@ pub struct Select<T> {
     /// Which match the keys are on, as an index into the matches rather than
     /// into the offers.
     at: usize,
+    /// How many offers it takes before typing narrows the list. A filter of
+    /// seven known values wants j/k; a list of machines wants a query.
+    search_from: usize,
 }
 
 impl<T> Select<T> {
@@ -79,7 +82,16 @@ impl<T> Select<T> {
             open: false,
             query: String::new(),
             at: 0,
+            search_from: SEARCH_FROM,
         }
+    }
+
+    /// Keep every key for stepping, even when the list is longer than the search
+    /// threshold. For a short, known set of values, a query is a mode to
+    /// remember for no gain.
+    pub fn without_search(mut self) -> Self {
+        self.search_from = usize::MAX;
+        self
     }
 
     pub fn chosen_offer(&self) -> Option<&Offer<T>> {
@@ -128,7 +140,7 @@ impl<T> Select<T> {
     /// Whether this list is long enough that typing narrows it, which is what
     /// decides whether the keys are a query or a way through.
     pub fn is_searching(&self) -> bool {
-        self.open && self.offers.len() >= SEARCH_FROM
+        self.open && self.offers.len() >= self.search_from
     }
 
     /// Open the list on the chosen offer, with nothing typed.
@@ -302,15 +314,31 @@ impl<T> Select<T> {
         }
     }
 
-    /// Draws the open list over `area`, ending where `anchor` begins, and
+    /// Draws the open list over `area`, opening upwards from `anchor`, and
     /// answers with where each offer was drawn so a click can find it.
-    ///
-    /// The list opens upwards, because the pills sit above the actions: down is
-    /// the button row, and a menu that covers what the page is asking is worse
-    /// than one that covers what has been written. It is as tall as its matches
-    /// and no taller, and as wide as its widest row so it does not paper over
-    /// the page it is drawn on.
     pub fn draw_list(&self, frame: &mut Frame, area: Rect, anchor: Rect) -> Vec<(Rect, usize)> {
+        self.draw_list_in(frame, area, anchor, true)
+    }
+
+    /// Draws the open list downwards from `anchor`, for a pill above the content
+    /// it filters. It is as tall as its matches and no taller, and as wide as its
+    /// widest row so it does not paper over the page it is drawn on.
+    pub fn draw_list_below(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        anchor: Rect,
+    ) -> Vec<(Rect, usize)> {
+        self.draw_list_in(frame, area, anchor, false)
+    }
+
+    fn draw_list_in(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        anchor: Rect,
+        opens_up: bool,
+    ) -> Vec<(Rect, usize)> {
         if !self.open || area.height == 0 || area.width == 0 {
             return Vec::new();
         }
@@ -336,9 +364,17 @@ impl<T> Select<T> {
         let height = (matches.len() as u16 + 2 + u16::from(searching))
             .max(3)
             .min(area.height);
+        let y = if opens_up {
+            anchor.y.saturating_sub(height).max(area.y)
+        } else {
+            anchor
+                .bottom()
+                .min(area.bottom().saturating_sub(height))
+                .max(area.y)
+        };
         let popup = Rect {
             x: anchor.x.min(area.right().saturating_sub(width)),
-            y: anchor.y.saturating_sub(height).max(area.y),
+            y,
             width,
             height,
         };

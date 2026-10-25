@@ -89,10 +89,29 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      WHERE task_id = tasks.id
        AND json_type(payload, '$.data.summary') IS NOT NULL
      ORDER BY sequence DESC LIMIT 1) AS latest_turn_summary,
-    (SELECT payload -> '$.data'
-     FROM task_event_logs
-     WHERE task_id = tasks.id AND event_type = 'operator_signal_answered'
-     ORDER BY sequence DESC LIMIT 1) AS latest_operator_answer,
+    (SELECT json_object(
+         'id', 'm' || (
+             SELECT count(*)
+             FROM task_event_logs AS earlier
+             WHERE earlier.task_id = tasks.id
+               AND earlier.sequence <= e.sequence
+               AND (
+                   (earlier.event_type = 'operator_signal_raised'
+                    AND json_extract(earlier.payload, '$.data.signal.id')
+                        = json_extract(e.payload, '$.data.signal_id'))
+                   OR (earlier.event_type = 'operator_signal_message'
+                    AND json_extract(earlier.payload, '$.data.signal_id')
+                        = json_extract(e.payload, '$.data.signal_id'))
+               )
+         ),
+         'author', 'operator',
+         'body', json_extract(e.payload, '$.data.body'),
+         'at_ms', e.recorded_at_ms)
+     FROM task_event_logs AS e
+     WHERE e.task_id = tasks.id
+       AND e.event_type = 'operator_signal_message'
+       AND json_extract(e.payload, '$.data.author') = 'operator'
+     ORDER BY e.sequence DESC LIMIT 1) AS latest_operator_message,
     (SELECT payload -> '$.data.issue.issue.reference'
      FROM task_event_logs
      WHERE task_id = tasks.id AND event_type = 'tracker_issue_bound'
@@ -101,10 +120,10 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      FROM task_operator_signals
      WHERE task_id = tasks.id
        AND resolved = 0
-       AND kind IN ('decision', 'in_review')
-     ORDER BY raised_at_ms DESC LIMIT 1) AS awaiting_signal_kind,
+       AND kind IN ('blocked', 'in_review')
+     ORDER BY raised_at_ms DESC LIMIT 1) AS blocking_signal_kind,
     (SELECT count(*) FROM task_operator_signals
-     WHERE task_id = tasks.id AND read = 0 AND resolved = 0) AS unread_operator_signal_count,
+     WHERE task_id = tasks.id AND resolved = 0) AS unresolved_signal_count,
     (SELECT json_object(
          'signal', json(payload -> '$.data.signal'),
          'agent_run_id', payload -> '$.data.agent_run_id')

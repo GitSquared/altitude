@@ -52,7 +52,7 @@ use crate::{
         server::{BoxFuture, ServerParts, TaskHost},
     },
     task::{Task, TaskEventLoop, TaskExecutionUpdate, TaskService, TaskStore},
-    task::{TaskHistoryEvent, TaskOperatorSignal, TrackerHost},
+    task::{TaskHistoryEvent, TaskOperatorSignalThread, TrackerHost},
     tracker::{
         IssueReader, IssueSnapshot, Linear, TrackerKind, TrackerProvider,
         automation::LinearAutomation, oauth,
@@ -240,11 +240,11 @@ impl OwnTasks {
 }
 
 impl TaskHost for OwnTasks {
-    fn signals(
+    fn signal_threads(
         &self,
         peer: EndpointId,
         task_id: String,
-    ) -> BoxFuture<Result<Vec<TaskOperatorSignal>, String>> {
+    ) -> BoxFuture<Result<Vec<TaskOperatorSignalThread>, String>> {
         let tasks = self.tasks.clone();
         Box::pin(async move {
             let task = tasks
@@ -258,7 +258,7 @@ impl TaskHost for OwnTasks {
                 .ok_or("this task is not active under your identity")?;
             tasks
                 .service()
-                .operator_signals(&task.id)
+                .signal_threads(&task.id)
                 .await
                 .map_err(|error| error.to_string())
         })
@@ -273,17 +273,15 @@ impl TaskHost for OwnTasks {
         Box::pin(async move {
             use super::protocol::SignalCommand;
             let task = match &command {
-                SignalCommand::Read { task_id } => tasks
-                    .list()
-                    .await
-                    .map_err(|error| error.to_string())?
-                    .into_iter()
-                    .find(|task| task.id == *task_id),
-                SignalCommand::Acknowledge { signal_id }
-                | SignalCommand::Answer { signal_id, .. }
-                | SignalCommand::Accept { signal_id } => tasks
+                SignalCommand::Reply {
+                    task_id, signal_id, ..
+                }
+                | SignalCommand::Resolve {
+                    task_id, signal_id, ..
+                }
+                | SignalCommand::Accept { task_id, signal_id } => tasks
                     .service()
-                    .task_for_signal(signal_id)
+                    .task_for_signal(task_id, signal_id)
                     .await
                     .map_err(|error| error.to_string())?,
             }
@@ -301,28 +299,29 @@ impl TaskHost for OwnTasks {
                 return Err("this task is no longer active".into());
             }
             match command {
-                SignalCommand::Read { task_id } => {
-                    tasks
-                        .service()
-                        .read_operator_signals(&task_id)
-                        .await
-                        .map_err(|error| error.to_string())?;
-                }
-                SignalCommand::Acknowledge { signal_id } => {
-                    tasks
-                        .service()
-                        .acknowledge_operator_signal(&signal_id)
-                        .await
-                        .map_err(|error| error.to_string())?;
-                }
-                SignalCommand::Answer { signal_id, answer } => tasks
-                    .reply(&signal_id, answer)
+                SignalCommand::Reply {
+                    task_id,
+                    signal_id,
+                    body,
+                } => tasks
+                    .reply(&task_id, &signal_id, body)
                     .await
                     .map_err(|error| error.to_string())?,
-                SignalCommand::Accept { signal_id } => {
+                SignalCommand::Resolve {
+                    task_id,
+                    signal_id,
+                    resolved,
+                } => {
                     tasks
                         .service()
-                        .confirm_operator_signal(&signal_id)
+                        .resolve_signal(&task_id, &signal_id, resolved)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                }
+                SignalCommand::Accept { task_id, signal_id } => {
+                    tasks
+                        .service()
+                        .confirm_operator_signal(&task_id, &signal_id)
                         .await
                         .map_err(|error| error.to_string())?;
                 }
@@ -779,11 +778,14 @@ impl super::tracker::Host for OwnTasks {
         })
     }
 
-    fn signals(&self, task_id: String) -> super::tracker::HostFuture<'_, Vec<TaskOperatorSignal>> {
+    fn unresolved_signals(
+        &self,
+        task_id: String,
+    ) -> super::tracker::HostFuture<'_, Vec<TaskOperatorSignalThread>> {
         Box::pin(async move {
             self.tasks
                 .service()
-                .operator_signals(&task_id)
+                .unresolved_signal_threads(&task_id)
                 .await
                 .map_err(|error| error.to_string())
         })
@@ -810,20 +812,25 @@ impl super::tracker::Host for OwnTasks {
         })
     }
 
-    fn reply(&self, signal_id: String, answer: String) -> super::tracker::HostFuture<'_, ()> {
+    fn reply(
+        &self,
+        task_id: String,
+        signal_id: String,
+        answer: String,
+    ) -> super::tracker::HostFuture<'_, ()> {
         Box::pin(async move {
             self.tasks
-                .reply(&signal_id, answer)
+                .reply(&task_id, &signal_id, answer)
                 .await
                 .map_err(|error| error.to_string())
         })
     }
 
-    fn accept(&self, signal_id: String) -> super::tracker::HostFuture<'_, ()> {
+    fn accept(&self, task_id: String, signal_id: String) -> super::tracker::HostFuture<'_, ()> {
         Box::pin(async move {
             self.tasks
                 .service()
-                .confirm_operator_signal(&signal_id)
+                .confirm_operator_signal(&task_id, &signal_id)
                 .await
                 .map(|_| ())
                 .map_err(|error| error.to_string())

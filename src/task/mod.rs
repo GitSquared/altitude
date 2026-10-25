@@ -9,6 +9,7 @@ use crate::{
     vcs::tools::VcsAgentTools,
 };
 use std::{collections::HashMap, error::Error, fmt, io, path::PathBuf, sync::Arc};
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use tools::TaskAgentTools;
@@ -58,20 +59,22 @@ pub struct TaskService<E> {
     credentials: Credentials<E>,
     trackers: Option<Arc<dyn TrackerHost>>,
     issue_reader: Option<Arc<dyn IssueReader>>,
+    /// Told whenever a signal thread is written by an agent tool. The interface
+    /// reads the change rather than asking the store on a clock: a tool write is
+    /// not a task update, so nothing else would carry it to the screen.
+    signal_changes: broadcast::Sender<String>,
 }
 
-fn failure_events(task: &Task, error: String) -> [TaskHistoryEvent; 2] {
+fn failure_events(task: &Task, error: String, signal_id: String) -> [TaskHistoryEvent; 2] {
     let signal = TaskOperatorSignal {
-        id: Uuid::new_v4().to_string(),
+        id: signal_id,
         task_id: task.id.clone(),
-        kind: TaskOperatorSignalKind::Failure,
-        priority: TaskOperatorSignalPriority::High,
+        kind: TaskOperatorSignalKind::Blocked,
         title: "Execution stopped".into(),
         body: format!(
-            "{error}\n\nAltitude cannot continue this task. If ignored, it stays stopped.\n\nFix the problem first; open the task's shell with Enter if needed. Then answer this signal to retry with your instructions."
+            "{error}\n\nAltitude cannot continue this task. If ignored, it stays stopped.\n\nFix the problem first; take over the task with ctrl-enter if needed. Then reply here to retry with your instructions."
         ),
         raised_at_ms: chrono::Utc::now().timestamp_millis(),
-        read: false,
     };
     [
         TaskHistoryEvent::ExecutionFailed {
@@ -192,7 +195,21 @@ where
             environment_progress: EnvironmentProgressRegistry::default(),
             trackers: None,
             issue_reader: None,
+            // Small on purpose: a receiver that falls behind more than this has
+            // missed changes it can read from the store anyway.
+            signal_changes: broadcast::channel(32).0,
         }
+    }
+
+    /// A receiver told when a signal thread changes, so a screen showing one can
+    /// read it instead of polling.
+    pub fn subscribe_signals(&self) -> broadcast::Receiver<String> {
+        self.signal_changes.subscribe()
+    }
+
+    /// One task as it reads now, for an interface keeping a card current.
+    pub async fn task(&self, id: &str) -> Result<Option<Task>, TaskServiceError> {
+        self.store.get(id).await.map_err(TaskServiceError::Task)
     }
 
     /// The logins tasks run under.
@@ -238,6 +255,7 @@ where
             self.store.clone(),
             task_id.to_owned(),
             self.issue_reader.clone(),
+            self.signal_changes.clone(),
         ));
         tools.register(VcsAgentTools::new(self.store.clone(), task_id.to_owned()));
         tools

@@ -14,7 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use iroh::{EndpointAddr, EndpointId};
 use ratatui::{DefaultTerminal, layout::Rect, text::Line};
 use tokio::{process::Command as HostCommand, sync::mpsc, task::JoinHandle, time::sleep};
@@ -37,27 +37,36 @@ use crate::{
     },
     task::{
         Task, TaskEventLoop, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
-        TaskExecutionUpdate, TaskOperatorSignal, TaskService, TaskServiceError,
+        TaskExecutionUpdate, TaskOperatorSignalAuthor, TaskOperatorSignalKind,
+        TaskOperatorSignalMessage, TaskOperatorSignalThread, TaskService, TaskServiceError,
     },
     tracker::{IssueReference, IssueSnapshot, IssueSummary, TrackerKind},
-    tui::keys::{is_dismiss, is_proceed, is_remove},
+    tui::keys::{is_dismiss, is_remove, is_secondary},
     tui::popups,
     tui::screens,
-    tui::widgets::{chrome::Hint, pointer::Targets},
+    tui::widgets::{
+        chrome::Hint,
+        pointer::Targets,
+        select::{Offer, Select},
+    },
 };
 
-use super::widgets::alert::Alert;
+use super::widgets::{alert::Alert, list};
 use popups::confirm::{CredentialTarget, PendingConfirm};
 use popups::new_task::{Answer, Hit as NewTaskHit, Host, NewTask, SearchToken};
 use popups::open_link::{self, Link, OpenLink};
-use popups::reply::{Prompt, PromptAction, Reply};
 use popups::send_task::{Decision as SendDecision, SendTask};
 use popups::setup::{Setup, SetupKind};
 use popups::sign_in::{Decision as SignInDecision, SignIn};
 use screens::settings::{
-    CredentialKind, Depth, Focus, Form, GitIdentity, Panel, RowKind, Section, Setting, Target,
+    CredentialKind, Depth, Focus, Form, GitIdentity, Panel, RowKind, Section, Setting, SettingsHit,
+    Target,
 };
 use screens::shell::{GuestRequest, Shell};
+use screens::signals::{
+    Composer, SignalAction, SignalFilter, SignalFocus, SignalHit, SignalSort, actions,
+    is_lingering, primary_action, secondary_action,
+};
 
 /// What the keyboard is answering to, most immediate first.
 ///
@@ -76,8 +85,6 @@ pub(in crate::tui) enum Foreground {
     Keys(Box<Foreground>),
     /// A question waiting on an answer, and what the answer would do.
     Confirm(PendingConfirm),
-    /// A reply being written to a signal.
-    Reply(Reply),
     /// Choosing a machine to continue a task that is already here.
     SendTask(Box<SendTask>),
     /// The creation question, holding the prompt until it is answered.
@@ -87,7 +94,7 @@ pub(in crate::tui) enum Foreground {
     Setup(Setup),
     /// What a tool's own sign-in asks, before its terminal opens.
     SignIn(Box<SignIn>),
-    /// A task's signals, over the list it was opened from.
+    /// A task's signal threads: what is waiting, and the conversations about it.
     Signals,
     /// A terminal, taking every key there is.
     Shell(ShellId),
@@ -98,6 +105,27 @@ pub(in crate::tui) enum Foreground {
 }
 
 impl Foreground {
+    /// Whether this is a fullscreen screen rather than a pop-up over the work.
+    /// Screens arrive and leave the same way, whatever they show.
+    pub(in crate::tui) fn is_screen(&self) -> bool {
+        match self {
+            Self::Panel | Self::Signals => true,
+            Self::Keys(behind) => behind.is_screen(),
+            _ => false,
+        }
+    }
+
+    /// Whether the signals screen is what is being read, possibly with a
+    /// question about one of its threads laid over it.
+    pub(in crate::tui) fn shows_signals(&self) -> bool {
+        match self {
+            Self::Signals => true,
+            Self::Confirm(confirm) => confirm.is_signal(),
+            Self::Keys(behind) => behind.shows_signals(),
+            _ => false,
+        }
+    }
+
     pub(in crate::tui) fn shows_settings(&self) -> bool {
         match self {
             Self::Panel | Self::Setup(_) | Self::SignIn(_) => true,
@@ -166,6 +194,22 @@ impl CredentialStatus {
     fn is_in_progress(&self) -> bool {
         *self == Self::Checking
     }
+
+    /// The list's word for this status, so the row and the page say the same
+    /// thing rather than keeping two vocabularies in step.
+    pub(in crate::tui) fn summary(&self) -> &'static str {
+        match self {
+            Self::Checking => "checking…",
+            Self::Checked {
+                signed_in: true, ..
+            } => "signed in",
+            Self::Checked {
+                signed_in: false, ..
+            } => "not signed in",
+            Self::Saved => "saved login",
+            Self::Unknown | Self::Unanswered => "not checked",
+        }
+    }
 }
 
 pub(in crate::tui) struct CredentialCheckReply {
@@ -188,6 +232,17 @@ pub(in crate::tui) enum TrackerState {
     Connecting,
     /// The provider reports a live session.
     Connected,
+}
+
+impl TrackerState {
+    /// The list's word for this state, shared with the page below it.
+    pub(in crate::tui) fn summary(self) -> &'static str {
+        match self {
+            Self::NotConnected => "not signed in",
+            Self::Connecting => "connecting…",
+            Self::Connected => "signed in",
+        }
+    }
 }
 
 /// What came back from a Linear search. The token says which popup and which
@@ -387,10 +442,10 @@ pub(in crate::tui) struct HeldTask {
     pub(in crate::tui) summary: TaskSummary,
 }
 
-/// The remote task the signals pop-up is about.
+/// The remote task the signals screen is about.
 ///
 /// The attempt says which opening this is, so a reply carrying another attempt
-/// belongs to a pop-up the operator has already left and changes nothing.
+/// belongs to a screen the operator has already left and changes nothing.
 #[derive(Clone, PartialEq, Eq)]
 pub(in crate::tui) struct RemoteSignals {
     pub(in crate::tui) address: String,
@@ -401,9 +456,9 @@ pub(in crate::tui) struct RemoteSignals {
 /// What the operator did with a remote signal.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::tui) enum RemoteSignalAction {
-    Answer,
-    Acknowledge,
-    Confirm,
+    Reply,
+    Resolve(bool),
+    Accept,
 }
 
 /// What came back from a remote task's signals: the list when it opens, or the
@@ -411,7 +466,7 @@ pub(in crate::tui) enum RemoteSignalAction {
 pub(in crate::tui) enum RemoteSignalsReply {
     Opened {
         remote: RemoteSignals,
-        signals: Result<Vec<TaskOperatorSignal>, String>,
+        signals: Result<Vec<TaskOperatorSignalThread>, String>,
     },
     Resolved {
         remote: RemoteSignals,
@@ -493,18 +548,40 @@ pub struct App {
     /// is a way to confuse yourself.
     pub(in crate::tui) credential_shell: CredentialShellState,
     git_identity: GitIdentity,
-    /// The selected task's signals, and where you are among them. Read when the
-    /// signals open; the pop-up is a view over what the task already recorded.
-    pub(in crate::tui) operator_signals: Vec<TaskOperatorSignal>,
-    pub(in crate::tui) selected_operator_signal: usize,
-    pub(in crate::tui) selected_signal_action: usize,
-    pub(in crate::tui) operator_signal_scroll: u16,
-    /// The remote task the signals pop-up is about, when it is showing one from
+    /// The task the signals screen is about. Held rather than read from the
+    /// grid, so the screen stays about the same task while the grid is behind it.
+    pub(in crate::tui) signal_task_id: Option<String>,
+    /// Every thread of that task, as read when the screen opened and refreshed
+    /// as the task moves. The screen shows the filtered view below.
+    pub(in crate::tui) signal_all_threads: Vec<TaskOperatorSignalThread>,
+    /// The threads after the filter and sort the operator chose.
+    pub(in crate::tui) signal_threads: Vec<TaskOperatorSignalThread>,
+    pub(in crate::tui) signal_filter: Select<SignalFilter>,
+    pub(in crate::tui) signal_sort: Select<SignalSort>,
+    pub(in crate::tui) signals_cursor: list::Cursor,
+    /// The first message of the selected thread on screen.
+    pub(in crate::tui) signal_scroll: u16,
+    /// The reply being written, if one is.
+    pub(in crate::tui) signal_composer: Option<Composer>,
+    /// What the keys are on inside the signals screen, and which message of the
+    /// selected thread they are on.
+    pub(in crate::tui) signal_focus: SignalFocus,
+    pub(in crate::tui) signal_message_cursor: usize,
+    /// What the last signals frame drew, so a click lands on what was seen.
+    pub(in crate::tui) signal_targets: Targets<SignalHit>,
+    /// What the last task-grid frame drew, by card.
+    pub(in crate::tui) task_targets: Targets<usize>,
+    /// What the last settings frame drew, by section or row.
+    pub(in crate::tui) settings_targets: Targets<SettingsHit>,
+    /// Threads whose conversation changed since the last frame, with when it was
+    /// noticed, so a new arrival moves rather than appearing already settled.
+    pub(in crate::tui) signal_arrivals: HashMap<String, Instant>,
+    /// The remote task the signals screen is about, when it is showing one from
     /// another machine.
     pub(in crate::tui) remote_signals: Option<RemoteSignals>,
     /// Whether that remote's signals are still being read.
     pub(in crate::tui) remote_signals_loading: bool,
-    /// Which opening of the pop-up this is, so a reply from an earlier one is
+    /// Which opening of the screen this is, so a reply from an earlier one is
     /// dropped rather than replacing what is on screen.
     remote_signals_attempt: u64,
     /// Where `config.toml` lives, so the manage view can persist changes.
@@ -601,7 +678,7 @@ impl App {
             Err(error) => (
                 None,
                 Some(format!(
-                    "Settings unavailable. Fix {}, then press s to reload.\n{error}",
+                    "Altitude could not read {}.\n\n{error}",
                     config.settings_path().display()
                 )),
             ),
@@ -617,10 +694,40 @@ impl App {
             new_task_targets: Targets::default(),
             credential_shell: CredentialShellState::Idle,
             git_identity: GitIdentity::default(),
-            operator_signals: Vec::new(),
-            selected_operator_signal: 0,
-            selected_signal_action: 0,
-            operator_signal_scroll: 0,
+            signal_task_id: None,
+            signal_all_threads: Vec::new(),
+            signal_threads: Vec::new(),
+            signal_filter: Select::new(
+                "Filter",
+                vec![
+                    Offer::new(SignalFilter::Unresolved, "Unresolved"),
+                    Offer::new(SignalFilter::All, "All"),
+                    Offer::new(SignalFilter::NeedsYou, "Needs you"),
+                    Offer::new(SignalFilter::Review, "Ready to review"),
+                    Offer::new(SignalFilter::Decisions, "Decisions"),
+                    Offer::new(SignalFilter::Info, "Info log"),
+                    Offer::new(SignalFilter::Resolved, "Resolved"),
+                ],
+                0,
+            )
+            .without_search(),
+            signal_sort: Select::new(
+                "Sort",
+                vec![
+                    Offer::new(SignalSort::Oldest, "Oldest"),
+                    Offer::new(SignalSort::Newest, "Newest"),
+                ],
+                0,
+            ),
+            signals_cursor: list::Cursor::default(),
+            signal_scroll: 0,
+            signal_composer: None,
+            signal_focus: SignalFocus::List,
+            signal_message_cursor: 0,
+            signal_targets: Targets::default(),
+            task_targets: Targets::default(),
+            settings_targets: Targets::default(),
+            signal_arrivals: HashMap::new(),
             remote_signals: None,
             remote_signals_loading: false,
             remote_signals_attempt: 0,
@@ -698,6 +805,56 @@ impl App {
         let _ = columns;
     }
 
+    /// Read a mouse event against the last task-grid frame.
+    pub(in crate::tui) fn task_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(index) = self.task_targets.at(mouse.column, mouse.row).copied() {
+                    self.selected = index;
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                let columns = self.grid_columns();
+                self.select_adjacent(-(columns as isize), columns);
+            }
+            MouseEventKind::ScrollDown => {
+                let columns = self.grid_columns();
+                self.select_adjacent(columns as isize, columns);
+            }
+            _ => {}
+        }
+    }
+
+    /// Read a mouse event against the last settings frame.
+    pub(in crate::tui) fn panel_mouse(&mut self, mouse: MouseEvent) {
+        if self.panel.form.is_some() {
+            return;
+        }
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let Some(target) = self.settings_targets.at(mouse.column, mouse.row).copied()
+                else {
+                    return;
+                };
+                match target {
+                    SettingsHit::Section(index) => {
+                        if let Some(section) = Section::ALL.get(index) {
+                            self.panel.section = *section;
+                            self.panel.cursor.reset();
+                            self.panel.depth = Depth::Rail;
+                        }
+                    }
+                    SettingsHit::Row(index) => {
+                        self.panel.cursor.select(index);
+                        self.panel.depth = Depth::List;
+                    }
+                }
+            }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => self.scroll_mouse(mouse),
+            _ => {}
+        }
+    }
+
     /// How many cards fit across the body, which is what a grid step needs.
     pub(in crate::tui) fn grid_columns(&self) -> usize {
         self.grid_columns.max(1)
@@ -743,12 +900,11 @@ impl App {
                 true
             }
             Err(error) => {
-                let message = format!(
-                    "Settings unavailable. Fix {}, then press s to reload.\n{error}",
-                    self.config.settings_path().display()
-                );
                 self.settings_file = None;
-                self.say(message);
+                self.problem(format!(
+                    "Altitude could not read {}.\n\n{error}",
+                    self.config.settings_path().display()
+                ));
                 false
             }
         }
@@ -866,11 +1022,6 @@ impl App {
                 Hint::new("esc / q", "close"),
             ],
             Foreground::Confirm(pending) => pending.hints(),
-            Foreground::Reply(_) => vec![
-                Hint::new("enter", "send"),
-                dismiss(),
-                Hint::new("?", "keys"),
-            ],
             Foreground::SendTask(sending) => sending.hints(),
             Foreground::NewTask(new_task) => new_task.hints(),
             Foreground::Panel => {
@@ -932,13 +1083,62 @@ impl App {
                     Hint::new("esc / q", "close"),
                 ],
             },
-            Foreground::Signals => vec![
-                Hint::new("tab", "action"),
-                Hint::new("enter", "validate"),
-                Hint::new("j/k", "signal"),
-                Hint::new("pgup/pgdn", "scroll"),
-                dismiss(),
-            ],
+            Foreground::Signals => {
+                if self.signal_composer.is_some() {
+                    return vec![
+                        Hint::new("enter", "send"),
+                        Hint::new("shift-enter", "new line"),
+                        Hint::new("esc", "cancel"),
+                    ];
+                }
+                if self.signal_filter.is_open() || self.signal_sort.is_open() {
+                    return vec![
+                        Hint::new("j/k", "choose"),
+                        Hint::new("enter", "take"),
+                        Hint::new("esc", "close"),
+                    ];
+                }
+                let mut hints = vec![
+                    Hint::new("tab", "focus"),
+                    Hint::new(
+                        "j/k",
+                        match self.signal_focus {
+                            SignalFocus::List => "thread",
+                            SignalFocus::Detail => "message",
+                            SignalFocus::Action(_) => "button",
+                            SignalFocus::Filter | SignalFocus::Sort => "control",
+                        },
+                    ),
+                    Hint::new("f", "filter"),
+                    Hint::new("s", "sort"),
+                ];
+                if matches!(self.signal_focus, SignalFocus::Filter | SignalFocus::Sort) {
+                    hints.push(Hint::new("enter", "open"));
+                } else if let Some(thread) = self.signal_thread() {
+                    if let SignalFocus::Action(index) = self.signal_focus
+                        && let Some(action) = self.signal_actions().get(index).copied()
+                    {
+                        hints.push(Hint::new(
+                            "enter",
+                            action.label(thread.kind, thread.is_resolved()),
+                        ));
+                    } else if let Some(action) = primary_action(thread) {
+                        hints.push(Hint::new(
+                            "enter",
+                            action.label(thread.kind, thread.is_resolved()),
+                        ));
+                    }
+                    if let Some(action) = secondary_action(thread) {
+                        hints.push(Hint::new(
+                            "ctrl-enter",
+                            action.label(thread.kind, thread.is_resolved()),
+                        ));
+                    }
+                }
+                hints.push(Hint::new("pgup/pgdn", "scroll"));
+                hints.push(dismiss());
+                hints
+            }
             // A shell takes every key there is, so it has no `?` to offer.
             Foreground::Shell(ShellId::Task(_)) => {
                 vec![Hint::new("ctrl-a", "hand it back")]
@@ -995,13 +1195,15 @@ impl App {
     /// Whether a text box has the keys, in which case `?` is a character.
     pub(in crate::tui) fn is_typing(&self) -> bool {
         match &self.foreground {
-            Foreground::Reply(_) => true,
             Foreground::NewTask(new_task) => new_task.is_typing(),
-            _ => self
-                .panel
-                .form
-                .as_ref()
-                .is_some_and(|form| form.focus.takes_text()),
+            _ => {
+                self.signal_composer.is_some()
+                    || self
+                        .panel
+                        .form
+                        .as_ref()
+                        .is_some_and(|form| form.focus.takes_text())
+            }
         }
     }
 
@@ -1015,6 +1217,13 @@ impl App {
         }
     }
 
+    /// Move the lists that are still catching up with their cursors, which is
+    /// what makes a jump read as the list moving. Answers whether anything
+    /// moved, so the loop knows to draw.
+    pub(in crate::tui) fn glide_lists(&mut self) -> bool {
+        self.signals_cursor.glide() | self.panel.cursor.glide()
+    }
+
     /// Whether a modal is in front: a pop-up or the panel, rather than the work
     /// itself or a terminal. What the transition animates.
     pub(in crate::tui) fn has_modal(&self) -> bool {
@@ -1026,7 +1235,6 @@ impl App {
                 self.foreground,
                 Foreground::Keys(_)
                     | Foreground::Confirm(_)
-                    | Foreground::Reply(_)
                     | Foreground::SendTask(_)
                     | Foreground::NewTask(_)
                     | Foreground::Panel
@@ -1051,6 +1259,7 @@ impl App {
                     | Foreground::Signals
                     | Foreground::Panel
                     | Foreground::NewTask(_)
+                    | Foreground::Tasks
             )
     }
 
@@ -1073,7 +1282,6 @@ impl App {
         match &mut self.foreground {
             Foreground::Keys(_) => self.help_scroll = step(self.help_scroll),
             Foreground::Setup(setup) => setup.wheel(up, ROWS),
-            Foreground::Signals => self.operator_signal_scroll = step(self.operator_signal_scroll),
             Foreground::Panel => self.panel.detail_scroll = step(self.panel.detail_scroll),
             _ => {}
         }
@@ -2213,7 +2421,7 @@ impl App {
             Some(SendDecision::Settings) => {
                 open_panel(self, task_service).await;
                 self.panel.section = Section::Remotes;
-                self.panel.selected = 0;
+                self.panel.select_row(0);
             }
             Some(SendDecision::Send { address }) => {
                 self.begin_send_to_remote(
@@ -2259,12 +2467,13 @@ impl App {
             }
         }
         if let Some(id) = selected {
-            self.panel.selected = self
+            let index = self
                 .settings_view()
                 .rows
                 .iter()
                 .position(|row| matches!(&row.kind, RowKind::Discovered(remote) if remote.id == id))
                 .unwrap_or(0);
+            self.panel.select_row(index);
         }
     }
 
@@ -2948,7 +3157,8 @@ impl App {
         }
         match file.save(proposed) {
             Ok(()) => {
-                self.panel.selected = self.panel.selected.saturating_sub(1);
+                let index = self.panel.selected().saturating_sub(1);
+                self.panel.select_row(index);
                 self.alert = None;
             }
             Err(error) => self.problem(error.to_string()),
@@ -2997,62 +3207,336 @@ impl App {
         }
     }
 
-    /// Drop a signal the operator has just resolved, keeping the highlight inside
-    /// the list that remains.
-    pub(in crate::tui) fn resolved_operator_signal(&mut self, index: usize) {
-        if index < self.operator_signals.len() {
-            self.operator_signals.remove(index);
-        }
-        self.operator_signal_scroll = 0;
-        self.selected_signal_action = 0;
-        self.selected_operator_signal = self
-            .selected_operator_signal
-            .min(self.operator_signals.len().saturating_sub(1));
+    /// The thread the screen has selected.
+    pub(in crate::tui) fn signal_thread(&self) -> Option<&TaskOperatorSignalThread> {
+        self.signal_threads.get(self.signals_cursor.selected())
     }
 
-    /// The actions the selected signal offers.
-    pub(in crate::tui) fn selected_signal_actions(
-        &self,
-    ) -> &'static [popups::signals::SignalAction] {
-        self.operator_signals
-            .get(self.selected_operator_signal)
-            .map_or(&[], |signal| popups::signals::actions_for(signal.kind))
+    /// The task the signals screen is about, when this machine holds it.
+    pub(in crate::tui) fn signal_task(&self) -> Option<&Task> {
+        let id = self.signal_task_id.as_deref()?;
+        self.tasks.iter().find(|task| task.id == id)
     }
 
-    /// Move the focus between the selected signal's actions.
-    pub(in crate::tui) fn focus_next_signal_action(&mut self) {
-        let count = self.selected_signal_actions().len();
-        if count > 0 {
-            self.selected_signal_action = (self.selected_signal_action + 1) % count;
+    /// The task the signals screen is about, when another machine holds it.
+    fn signal_held(&self) -> Option<&HeldTask> {
+        let remote = self.remote_signals.as_ref()?;
+        self.remote_tasks
+            .iter()
+            .find(|held| held.address == remote.address && held.summary.id == remote.task_id)
+    }
+
+    /// The name the agent is known by here, which is its harness rather than the
+    /// word "agent": the operator is reading a conversation, not a category.
+    pub(in crate::tui) fn signal_agent_label(&self) -> String {
+        self.signal_task()
+            .and_then(|task| task.agent_kind)
+            .or_else(|| self.signal_held().and_then(|held| held.summary.agent))
+            .map_or_else(|| "the agent".to_owned(), |kind| kind.to_string())
+    }
+
+    pub(in crate::tui) fn signal_task_title(&self) -> String {
+        if let Some(task) = self.signal_task() {
+            return task.title().to_owned();
+        }
+        self.signal_held()
+            .map_or_else(String::new, |held| held.summary.title.clone())
+    }
+
+    /// The actions the selected thread offers, in footer order.
+    fn signal_actions(&self) -> Vec<SignalAction> {
+        self.signal_thread().map(actions).unwrap_or_default()
+    }
+
+    /// Move the keyboard between the parts of the signals screen.
+    pub(in crate::tui) fn move_signal_focus(&mut self, forward: bool) {
+        let actions = self.signal_actions().len();
+        self.signal_focus = self.signal_focus.next(forward, actions);
+        if self.signal_focus == SignalFocus::Detail {
+            let len = self
+                .signal_thread()
+                .map_or(0, |thread| thread.messages.len());
+            self.signal_message_cursor = self.signal_message_cursor.min(len.saturating_sub(1));
+            self.signal_scroll = if self.signal_message_cursor + 1 == len {
+                u16::MAX
+            } else {
+                u16::try_from(self.signal_message_cursor).unwrap_or(u16::MAX)
+            };
         }
     }
 
-    pub(in crate::tui) fn focus_previous_signal_action(&mut self) {
-        let count = self.selected_signal_actions().len();
-        if count > 0 {
-            self.selected_signal_action = (self.selected_signal_action + count - 1) % count;
+    /// Put the selected thread back on its newest message.
+    fn reset_signal_message(&mut self) {
+        self.signal_message_cursor = self
+            .signal_thread()
+            .map_or(0, |thread| thread.messages.len().saturating_sub(1));
+        self.signal_scroll = u16::MAX;
+    }
+
+    /// Move the focused message by one, scrolling the conversation to it.
+    pub(in crate::tui) fn move_signal_message(&mut self, forward: bool) {
+        let Some(thread) = self.signal_thread() else {
+            return;
+        };
+        let len = thread.messages.len();
+        if len == 0 {
+            self.signal_message_cursor = 0;
+            return;
+        }
+        self.signal_message_cursor = if forward {
+            (self.signal_message_cursor + 1) % len
+        } else {
+            (self.signal_message_cursor + len - 1) % len
+        };
+        self.signal_scroll = if self.signal_message_cursor + 1 == len {
+            u16::MAX
+        } else {
+            u16::try_from(self.signal_message_cursor).unwrap_or(u16::MAX)
+        };
+    }
+
+    /// Keep a focus that a changed thread made impossible from sticking around.
+    fn normalise_signal_focus(&mut self) {
+        let actions = self.signal_actions().len();
+        if matches!(self.signal_focus, SignalFocus::Action(index) if index >= actions) {
+            self.signal_focus = SignalFocus::List;
+        }
+        if self.signal_focus == SignalFocus::Detail {
+            let len = self
+                .signal_thread()
+                .map_or(0, |thread| thread.messages.len());
+            self.signal_message_cursor = self.signal_message_cursor.min(len.saturating_sub(1));
+            self.signal_scroll = if self.signal_message_cursor + 1 == len {
+                u16::MAX
+            } else {
+                u16::try_from(self.signal_message_cursor).unwrap_or(u16::MAX)
+            };
         }
     }
 
-    pub(in crate::tui) fn select_next_operator_signal(&mut self) {
-        self.operator_signal_scroll = 0;
-        // Focus follows the selection rather than the list position, so moving to
-        // another signal always starts from its first action.
-        self.selected_signal_action = 0;
-        if !self.operator_signals.is_empty() {
-            self.selected_operator_signal =
-                (self.selected_operator_signal + 1) % self.operator_signals.len();
+    /// Rebuild the visible threads from the chosen filter and sort.
+    ///
+    /// The groups keep their order: unresolved first, then the kind tier. The
+    /// sort only chooses the direction inside a tier, so a new message can move a
+    /// row but cannot move it past the group the operator is reading.
+    pub(in crate::tui) fn apply_signal_view(&mut self) {
+        let selected = self.signal_thread().map(|thread| thread.id.clone());
+        let filter = self
+            .signal_filter
+            .chosen_value()
+            .copied()
+            .unwrap_or(SignalFilter::Unresolved);
+        let sort = self
+            .signal_sort
+            .chosen_value()
+            .copied()
+            .unwrap_or(SignalSort::Oldest);
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut threads: Vec<_> = self
+            .signal_all_threads
+            .iter()
+            .filter(|thread| filter.matches(thread, now))
+            .cloned()
+            .collect();
+        // A resolved thread that is still lingering in the unresolved view
+        // keeps the place it had: the point of the five seconds is that it does
+        // not move out from under the operator before they have seen it end.
+        let keeping = filter == SignalFilter::Unresolved;
+        threads.sort_by(|left, right| {
+            let group = |thread: &TaskOperatorSignalThread| {
+                let settled = thread.is_resolved() && !(keeping && is_lingering(thread, now));
+                // Resolved threads share one RESOLVED heading, so their kind's
+                // tier is not a visible group; ordering them by it would put a
+                // newer update below an older decision for no reason.
+                (
+                    u8::from(settled),
+                    if settled { 0 } else { thread.kind.tier() },
+                )
+            };
+            group(left).cmp(&group(right)).then_with(|| {
+                let when = |thread: &TaskOperatorSignalThread| thread.opened_at_ms;
+                match sort {
+                    SignalSort::Oldest => when(left).cmp(&when(right)),
+                    SignalSort::Newest => when(right).cmp(&when(left)),
+                }
+            })
+        });
+        self.signal_threads = threads;
+        match selected.as_ref().and_then(|id| {
+            self.signal_threads
+                .iter()
+                .position(|thread| &thread.id == id)
+        }) {
+            Some(index) => self.signals_cursor.select(index),
+            None => self.signals_cursor.select(0),
+        }
+        self.normalise_signal_focus();
+    }
+
+    /// Whether a resolved thread is still being shown in the unresolved view,
+    /// either because its five seconds have not run out or because it has not yet
+    /// been removed after they did.
+    pub(in crate::tui) fn has_lingering_signals(&self) -> bool {
+        self.signal_filter.chosen_value() == Some(&SignalFilter::Unresolved)
+            && self
+                .signal_threads
+                .iter()
+                .any(TaskOperatorSignalThread::is_resolved)
+    }
+
+    /// Rebuild the view once a linger has run out, so the row leaves on time
+    /// instead of waiting for the next event.
+    pub(in crate::tui) fn expire_signal_linger(&mut self) {
+        if self.has_lingering_signals() {
+            self.apply_signal_view();
         }
     }
 
-    pub(in crate::tui) fn select_previous_operator_signal(&mut self) {
-        self.operator_signal_scroll = 0;
-        self.selected_signal_action = 0;
-        if !self.operator_signals.is_empty() {
-            self.selected_operator_signal =
-                (self.selected_operator_signal + self.operator_signals.len() - 1)
-                    % self.operator_signals.len();
+    /// Mark the thread the operator is leaving behind as read, when it is one of
+    /// the agent's logs. Reading is navigation, not appearance: the log stays
+    /// unresolved until the operator has had the screen on it and moved on.
+    async fn read_info_thread<E>(
+        &mut self,
+        thread: TaskOperatorSignalThread,
+        task_service: &TaskService<E>,
+        remote_signals: &mpsc::Sender<RemoteSignalsReply>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        if thread.kind != TaskOperatorSignalKind::Update || thread.is_resolved() {
+            return;
         }
+        if self.remote_signals.is_some() {
+            self.act_on_remote_signal(
+                thread.id,
+                RemoteSignalAction::Resolve(true),
+                None,
+                remote_signals,
+            );
+            return;
+        }
+        match task_service
+            .resolve_signal(&thread.task_id, &thread.id, true)
+            .await
+        {
+            Ok(task) => {
+                self.resolve_signal_locally(&thread.id, true);
+                self.replace_task(task);
+            }
+            Err(error) => self.problem(error.to_string()),
+        }
+    }
+
+    async fn read_selected_info<E>(
+        &mut self,
+        task_service: &TaskService<E>,
+        remote_signals: &mpsc::Sender<RemoteSignalsReply>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        if let Some(thread) = self.signal_thread().cloned() {
+            self.read_info_thread(thread, task_service, remote_signals)
+                .await;
+        }
+    }
+
+    /// Move between threads, and start the one now selected at its newest
+    /// message.
+    pub(in crate::tui) async fn move_signal_cursor<E>(
+        &mut self,
+        forward: bool,
+        task_service: &TaskService<E>,
+        remote_signals: &mpsc::Sender<RemoteSignalsReply>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        // Move first, then resolve what was left behind: resolving changes which
+        // group the old row belongs to, and the cursor should not be following a
+        // row that is moving under it.
+        let previous = self.signal_thread().cloned();
+        self.signals_cursor
+            .move_by(forward, self.signal_threads.len());
+        self.reset_signal_message();
+        if let Some(thread) = previous {
+            self.read_info_thread(thread, task_service, remote_signals)
+                .await;
+        }
+    }
+
+    /// Mark a thread resolved locally; the filter decides whether it stays on
+    /// screen. The store keeps the thread either way.
+    pub(in crate::tui) fn resolve_signal_locally(&mut self, signal_id: &str, resolved: bool) {
+        if let Some(thread) = self
+            .signal_all_threads
+            .iter_mut()
+            .find(|thread| thread.id == signal_id)
+        {
+            thread.resolved = resolved;
+            thread.resolved_by = resolved.then_some(TaskOperatorSignalAuthor::Operator);
+            thread.resolved_at_ms = resolved.then(|| chrono::Utc::now().timestamp_millis());
+        }
+        self.apply_signal_view();
+    }
+
+    /// Put the cursor on the next thread that is still unresolved.
+    pub(in crate::tui) fn select_next_open_thread(&mut self) {
+        let len = self.signal_threads.len();
+        if len == 0 {
+            return;
+        }
+        let start = self.signals_cursor.selected();
+        for offset in 1..=len {
+            let index = (start + offset) % len;
+            if self.signal_threads[index].is_unresolved() {
+                self.signals_cursor.select(index);
+                self.reset_signal_message();
+                return;
+            }
+        }
+    }
+
+    /// Read the threads again, keeping the selection on the same thread.
+    pub(in crate::tui) async fn reload_signals<E>(&mut self, task_service: &TaskService<E>)
+    where
+        E: IsolationEngine + Clone + 'static,
+    {
+        if self.remote_signals.is_some() {
+            return;
+        }
+        let Some(task_id) = self.signal_task_id.clone() else {
+            return;
+        };
+        let Ok(threads) = task_service.signal_threads(&task_id).await else {
+            return;
+        };
+        self.signal_all_threads = threads;
+        self.apply_signal_view();
+    }
+
+    /// The operator's answer, shown where it will be read: in the thread, at the
+    /// bottom, before the agent has come back to it.
+    pub(in crate::tui) fn remember_signal_reply(&mut self, signal_id: &str, answer: String) {
+        if let Some(thread) = self
+            .signal_all_threads
+            .iter_mut()
+            .find(|thread| thread.id == signal_id)
+        {
+            thread.messages.push(TaskOperatorSignalMessage {
+                id: format!("m{}", thread.messages.len() + 1),
+                author: TaskOperatorSignalAuthor::Operator,
+                body: answer,
+                at_ms: chrono::Utc::now().timestamp_millis(),
+            });
+            // A message is the whole conversation: it reopens a resolved thread.
+            thread.resolved = false;
+            thread.resolved_by = None;
+            thread.resolved_at_ms = None;
+        }
+        self.apply_signal_view();
+        self.signal_message_cursor = self
+            .signal_thread()
+            .map_or(0, |thread| thread.messages.len().saturating_sub(1));
+        self.signal_scroll = u16::MAX;
     }
 }
 
@@ -3114,8 +3598,13 @@ impl App {
         }
     }
 
-    /// Take the answer to a reply, and act on it.
-    pub(in crate::tui) fn reply_key<E>(
+    /// The keys of the inline reply box.
+    ///
+    /// Enter sends, shift-enter (or alt-enter, where a terminal reports it as its
+    /// own key) adds a line, and escape puts the box away without answering. The
+    /// reply joins the thread as soon as it is sent, so the screen says what was
+    /// said while the agent is still working out what to do about it.
+    pub(in crate::tui) fn composer_key<E>(
         &mut self,
         key: KeyEvent,
         event_loop: &TaskEventLoop<E>,
@@ -3123,39 +3612,40 @@ impl App {
     ) where
         E: IsolationEngine + Clone + 'static,
     {
-        let Foreground::Reply(Reply {
-            mut prompt,
-            answering,
-        }) = mem::take(&mut self.foreground)
-        else {
+        if key.code == KeyCode::Esc {
+            self.signal_composer = None;
             return;
-        };
-        match prompt.handle_key(key) {
-            None => self.foreground = Foreground::Reply(Reply { prompt, answering }),
-            // Leaving the box without answering returns to the signals it was
-            // opened from, rather than all the way out to the list.
-            Some(PromptAction::Cancel) => self.foreground = Foreground::Signals,
-            Some(PromptAction::Submit(command)) => {
-                // Answering the last signal leaves nothing to go back to, so that
-                // is the one case that returns to the task list.
-                let was_last = self
-                    .operator_signals
-                    .last()
-                    .is_some_and(|signal| signal.id == answering);
-                if self.remote_signals.is_some() {
-                    self.act_on_remote_signal(
-                        answering,
-                        RemoteSignalAction::Answer,
-                        Some(command),
-                        remote_signals,
-                    );
-                } else {
-                    event_loop.answer_operator_signal(answering, command);
-                }
-                if !was_last {
-                    self.foreground = Foreground::Signals;
-                }
+        }
+        let newline = key.code == KeyCode::Enter
+            && key
+                .modifiers
+                .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT);
+        if key.code == KeyCode::Enter && !newline {
+            let Some(composer) = self.signal_composer.take() else {
+                return;
+            };
+            if composer.is_blank() {
+                self.signal_composer = Some(composer);
+                return;
             }
+            let answer = composer.body.value().trim().to_owned();
+            let task_id = composer.task_id;
+            let signal_id = composer.signal_id;
+            if self.remote_signals.is_some() {
+                self.act_on_remote_signal(
+                    signal_id.clone(),
+                    RemoteSignalAction::Reply,
+                    Some(answer.clone()),
+                    remote_signals,
+                );
+            } else {
+                event_loop.reply_signal(task_id, signal_id.clone(), answer.clone());
+            }
+            self.remember_signal_reply(&signal_id, answer);
+            return;
+        }
+        if let Some(composer) = self.signal_composer.as_mut() {
+            composer.body.handle_key(key);
         }
     }
 
@@ -3556,101 +4046,319 @@ impl App {
         }
     }
 
-    /// The keys of the signals pop-up.
+    /// Read a mouse event against the signals rectangles the last frame drew.
+    pub(in crate::tui) async fn signals_mouse<E>(
+        &mut self,
+        mouse: MouseEvent,
+        task_service: &TaskService<E>,
+        remote_signals: &mpsc::Sender<RemoteSignalsReply>,
+        event_loop: &TaskEventLoop<E>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let target = self.signal_targets.at(mouse.column, mouse.row).copied();
+        match mouse.kind {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let up = mouse.kind == MouseEventKind::ScrollUp;
+                if self.signal_filter.is_open() {
+                    self.signal_filter.scroll(up);
+                    return;
+                }
+                if self.signal_sort.is_open() {
+                    self.signal_sort.scroll(up);
+                    return;
+                }
+                match target {
+                    Some(SignalHit::List | SignalHit::Thread(_)) => {
+                        self.move_signal_cursor(!up, task_service, remote_signals)
+                            .await;
+                    }
+                    Some(
+                        SignalHit::Action(_)
+                        | SignalHit::ComposerSend
+                        | SignalHit::ComposerCancel
+                        | SignalHit::Filter
+                        | SignalHit::Sort,
+                    ) => {}
+                    _ => {
+                        self.signal_focus = SignalFocus::Detail;
+                        self.move_signal_message(!up);
+                    }
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if (self.signal_filter.is_open() || self.signal_sort.is_open())
+                    && !matches!(
+                        target,
+                        Some(SignalHit::FilterOffer(_) | SignalHit::SortOffer(_))
+                    )
+                {
+                    self.signal_filter.close();
+                    self.signal_sort.close();
+                    return;
+                }
+                let Some(target) = target else {
+                    return;
+                };
+                match target {
+                    SignalHit::List => self.signal_focus = SignalFocus::List,
+                    SignalHit::Thread(index) => {
+                        let previous = self.signal_thread().cloned();
+                        self.signals_cursor.select(index);
+                        self.signal_focus = SignalFocus::List;
+                        self.reset_signal_message();
+                        if let Some(thread) = previous {
+                            self.read_info_thread(thread, task_service, remote_signals)
+                                .await;
+                        }
+                    }
+                    SignalHit::Detail => self.signal_focus = SignalFocus::Detail,
+                    SignalHit::Message(index) => {
+                        self.signal_focus = SignalFocus::Detail;
+                        self.signal_message_cursor = index;
+                        self.signal_scroll = if self
+                            .signal_thread()
+                            .is_some_and(|thread| index + 1 == thread.messages.len())
+                        {
+                            u16::MAX
+                        } else {
+                            u16::try_from(index).unwrap_or(u16::MAX)
+                        };
+                    }
+                    SignalHit::Action(index) => {
+                        self.signal_focus = SignalFocus::Action(index);
+                        if let Some(action) = self.signal_actions().get(index).copied() {
+                            self.act_on_signal(action, task_service, remote_signals)
+                                .await;
+                        }
+                    }
+                    SignalHit::ComposerSend => {
+                        self.composer_key(
+                            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                            event_loop,
+                            remote_signals,
+                        );
+                    }
+                    SignalHit::ComposerCancel => self.signal_composer = None,
+                    SignalHit::Filter => {
+                        self.signal_focus = SignalFocus::Filter;
+                        self.signal_filter.open();
+                    }
+                    SignalHit::Sort => {
+                        self.signal_focus = SignalFocus::Sort;
+                        self.signal_sort.open();
+                    }
+                    SignalHit::FilterOffer(index) => {
+                        let before = self.signal_filter.chosen_value().copied();
+                        let previous = self.signal_thread().cloned();
+                        self.signal_filter.choose(index);
+                        self.signal_filter.close();
+                        self.apply_signal_view();
+                        if self.signal_filter.chosen_value().copied() != before
+                            && let Some(thread) = previous
+                        {
+                            self.read_info_thread(thread, task_service, remote_signals)
+                                .await;
+                        }
+                    }
+                    SignalHit::SortOffer(index) => {
+                        self.signal_sort.choose(index);
+                        self.signal_sort.close();
+                        self.apply_signal_view();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The keys of the signals screen.
     pub(in crate::tui) async fn signals_key<E>(
         &mut self,
         key: KeyEvent,
         task_service: &TaskService<E>,
         remote_signals: &mpsc::Sender<RemoteSignalsReply>,
+        event_loop: &TaskEventLoop<E>,
     ) where
         E: IsolationEngine + Clone + 'static,
     {
+        if self.signal_composer.is_some() {
+            self.composer_key(key, event_loop, remote_signals);
+            return;
+        }
+        // A dropdown owns every key while it is open, escape included.
+        if self.signal_filter.is_open() {
+            let before = self.signal_filter.chosen_value().copied();
+            let leaving = self.signal_thread().cloned();
+            self.signal_filter.handle_key(key);
+            self.apply_signal_view();
+            if self.signal_filter.chosen_value().copied() != before
+                && let Some(thread) = leaving
+            {
+                self.read_info_thread(thread, task_service, remote_signals)
+                    .await;
+            }
+            return;
+        }
+        if self.signal_sort.is_open() {
+            self.signal_sort.handle_key(key);
+            self.apply_signal_view();
+            return;
+        }
+        // Tab and the horizontal arrows move between the parts of the screen.
+        // j/k and the vertical arrows move inside the part that has the keys.
+        if matches!(
+            key.code,
+            KeyCode::Tab
+                | KeyCode::BackTab
+                | KeyCode::Right
+                | KeyCode::Left
+                | KeyCode::Char('l')
+                | KeyCode::Char('h')
+        ) {
+            let forward = matches!(key.code, KeyCode::Tab | KeyCode::Right | KeyCode::Char('l'));
+            self.move_signal_focus(forward);
+            return;
+        }
         match key.code {
-            KeyCode::PageDown => {
-                self.operator_signal_scroll = self.operator_signal_scroll.saturating_add(5)
+            KeyCode::PageDown => self.signal_scroll = self.signal_scroll.saturating_add(1),
+            KeyCode::PageUp => self.signal_scroll = self.signal_scroll.saturating_sub(1),
+            KeyCode::Home => self.signal_scroll = 0,
+            KeyCode::End => self.signal_scroll = u16::MAX,
+            _ if is_dismiss(key) || key.code == KeyCode::Char('q') => {
+                self.read_selected_info(task_service, remote_signals).await;
+                self.leave_signals();
             }
-            KeyCode::PageUp => {
-                self.operator_signal_scroll = self.operator_signal_scroll.saturating_sub(5)
+            KeyCode::Down | KeyCode::Char('j') => match self.signal_focus {
+                SignalFocus::List => {
+                    self.move_signal_cursor(true, task_service, remote_signals)
+                        .await
+                }
+                SignalFocus::Detail => self.move_signal_message(true),
+                SignalFocus::Action(_) => self.move_signal_focus(true),
+                SignalFocus::Filter | SignalFocus::Sort => {}
+            },
+            KeyCode::Up | KeyCode::Char('k') => match self.signal_focus {
+                SignalFocus::List => {
+                    self.move_signal_cursor(false, task_service, remote_signals)
+                        .await
+                }
+                SignalFocus::Detail => self.move_signal_message(false),
+                SignalFocus::Action(_) => self.move_signal_focus(false),
+                SignalFocus::Filter | SignalFocus::Sort => {}
+            },
+            KeyCode::Char('f') => {
+                self.signal_focus = SignalFocus::Filter;
+                self.signal_filter.open();
             }
-            KeyCode::Home => self.operator_signal_scroll = 0,
-            KeyCode::End => self.operator_signal_scroll = u16::MAX,
-            _ if is_dismiss(key) || key.code == KeyCode::Char('i') => self.leave_signals(),
-            KeyCode::Tab => self.focus_next_signal_action(),
-            KeyCode::BackTab => self.focus_previous_signal_action(),
-            KeyCode::Down | KeyCode::Char('j') => self.select_next_operator_signal(),
-            KeyCode::Up | KeyCode::Char('k' | 'h') => self.select_previous_operator_signal(),
-            KeyCode::Enter => {
-                let actions = self.selected_signal_actions();
-                let Some(action) = actions
-                    .get(
-                        self.selected_signal_action
-                            .min(actions.len().saturating_sub(1)),
-                    )
-                    .copied()
-                else {
-                    return;
-                };
-                let Some(signal) = self
-                    .operator_signals
-                    .get(self.selected_operator_signal)
-                    .cloned()
-                else {
-                    return;
-                };
-                let remote = self.remote_signals.is_some();
-                match action {
-                    popups::signals::SignalAction::Reply => {
-                        // A remote task is not in this list, so it is not looked
-                        // for there; its reply travels to where it is.
-                        if remote || self.tasks.iter().any(|task| task.id == signal.task_id) {
-                            self.foreground = Foreground::Reply(Reply {
-                                prompt: Prompt::new("answer operator signal"),
-                                answering: signal.id,
-                            });
-                        } else {
-                            self.say("This task is no longer in the list");
-                        }
+            KeyCode::Char('s') => {
+                self.signal_focus = SignalFocus::Sort;
+                self.signal_sort.open();
+            }
+            KeyCode::Enter if is_secondary(key) => {
+                if let Some(action) = self.signal_thread().and_then(secondary_action) {
+                    self.act_on_signal(action, task_service, remote_signals)
+                        .await
+                }
+            }
+            KeyCode::Enter => match self.signal_focus {
+                SignalFocus::Filter => self.signal_filter.open(),
+                SignalFocus::Sort => self.signal_sort.open(),
+                SignalFocus::Action(index) => {
+                    if let Some(action) = self.signal_actions().get(index).copied() {
+                        self.act_on_signal(action, task_service, remote_signals)
+                            .await
                     }
-                    popups::signals::SignalAction::Acknowledge => {
-                        if remote {
-                            self.act_on_remote_signal(
-                                signal.id,
-                                RemoteSignalAction::Acknowledge,
-                                None,
-                                remote_signals,
-                            );
-                        } else {
-                            match task_service.acknowledge_operator_signal(&signal.id).await {
-                                Ok(task) => {
-                                    self.replace_task(task);
-                                    self.resolved_operator_signal(self.selected_operator_signal);
-                                }
-                                Err(error) => self.problem(error.to_string()),
+                }
+                SignalFocus::List | SignalFocus::Detail => {
+                    if let Some(action) = self.signal_thread().and_then(primary_action) {
+                        self.act_on_signal(action, task_service, remote_signals)
+                            .await
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+
+    /// Do one of the things a thread offers.
+    async fn act_on_signal<E>(
+        &mut self,
+        action: SignalAction,
+        task_service: &TaskService<E>,
+        remote_signals: &mpsc::Sender<RemoteSignalsReply>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let Some(thread) = self.signal_thread().cloned() else {
+            return;
+        };
+        let remote = self.remote_signals.is_some();
+        match action {
+            // A remote task is not in this list, so it is not looked for there;
+            // its reply travels to where it is.
+            SignalAction::Reply => {
+                if remote || self.tasks.iter().any(|task| task.id == thread.task_id) {
+                    self.signal_composer = Some(Composer::new(thread.task_id, thread.id));
+                    // The box takes room from the conversation, so the newest
+                    // message stays the one just above it.
+                    self.signal_scroll = u16::MAX;
+                } else {
+                    self.say("This task is no longer in the list");
+                }
+            }
+            SignalAction::Resolve => {
+                if !matches!(
+                    thread.kind,
+                    TaskOperatorSignalKind::Update | TaskOperatorSignalKind::Decision
+                ) {
+                    return;
+                }
+                // An update is resolved, never reopened: once read it is history.
+                let resolved = if thread.kind == TaskOperatorSignalKind::Update {
+                    true
+                } else {
+                    !thread.resolved
+                };
+                if resolved == thread.resolved {
+                    return;
+                }
+                if remote {
+                    self.act_on_remote_signal(
+                        thread.id,
+                        RemoteSignalAction::Resolve(resolved),
+                        None,
+                        remote_signals,
+                    );
+                } else {
+                    match task_service
+                        .resolve_signal(&thread.task_id, &thread.id, resolved)
+                        .await
+                    {
+                        Ok(task) => {
+                            self.resolve_signal_locally(&thread.id, resolved);
+                            self.replace_task(task);
+                            if resolved {
+                                self.select_next_open_thread();
                             }
                         }
-                    }
-                    popups::signals::SignalAction::Confirm => {
-                        if remote {
-                            self.act_on_remote_signal(
-                                signal.id,
-                                RemoteSignalAction::Confirm,
-                                None,
-                                remote_signals,
-                            );
-                        } else {
-                            match task_service.confirm_operator_signal(&signal.id).await {
-                                Ok(task) => {
-                                    self.replace_task(task);
-                                    self.resolved_operator_signal(self.selected_operator_signal);
-                                    self.say("Task completed");
-                                }
-                                Err(error) => self.problem(error.to_string()),
-                            }
-                        }
+                        Err(error) => self.problem(error.to_string()),
                     }
                 }
             }
-            _ => {}
+            SignalAction::Accept => {
+                if thread.kind != TaskOperatorSignalKind::InReview || thread.resolved {
+                    return;
+                }
+                let question = "Accept this work and close the task?\n\
+                    The agent will be shut down and its workspace cleared up."
+                    .to_owned();
+                self.foreground = Foreground::Confirm(PendingConfirm::confirming_signal(
+                    thread.task_id,
+                    thread.id,
+                    question,
+                ));
+            }
         }
     }
 
@@ -3668,7 +4376,7 @@ impl App {
         // wherever the card is drawn and only the trip differs: a task on another
         // machine is reached over the link rather than called directly. Taking one
         // over has to move it here first, and its question says so.
-        if is_proceed(key) {
+        if is_secondary(key) {
             let asked = self.selected_held().map(|held| {
                 (
                     held.summary.id.clone(),
@@ -3702,7 +4410,7 @@ impl App {
                 ));
                 return Ok(false);
             }
-            // The same pop-up this machine's tasks use, over a task whose actions
+            // The same screen this machine's tasks use, for a task whose actions
             // travel to the machine that owns it.
             if key.code == KeyCode::Enter || key.code == KeyCode::Char('i') {
                 self.open_signals(task_service, remote_signals).await;
@@ -4001,38 +4709,34 @@ impl App {
         let Some(task) = self.selected_task() else {
             return;
         };
-        // The list is this machine's now, whatever remote was open before.
+        let task_id = task.id.clone();
+        // The threads are this machine's now, whatever remote was open before.
         self.remote_signals = None;
         self.remote_signals_loading = false;
-        let signals = match task_service.operator_signals(&task.id).await {
-            Ok(signals) => signals,
+        let threads = match task_service.signal_threads(&task_id).await {
+            Ok(threads) => threads,
             Err(error) => {
                 self.problem(error.to_string());
                 return;
             }
         };
-        let read = match task_service.read_operator_signals(&task.id).await {
-            Ok(task) => task,
-            Err(error) => {
-                self.problem(error.to_string());
-                return;
-            }
-        };
-        self.operator_signals = signals;
-        self.replace_task(read);
-        for signal in &mut self.operator_signals {
-            signal.read = true;
-        }
-        self.selected_operator_signal = 0;
-        self.selected_signal_action = 0;
-        self.operator_signal_scroll = 0;
+        self.signal_task_id = Some(task_id);
+        self.signal_all_threads = threads;
+        self.signal_threads.clear();
+        self.signals_cursor = list::Cursor::default();
+        self.apply_signal_view();
+        self.signal_arrivals.clear();
+        self.signal_focus = SignalFocus::List;
+        self.signal_scroll = u16::MAX;
+        self.signal_composer = None;
         self.foreground = Foreground::Signals;
+        self.reset_signal_message();
     }
 
     /// Open the signals of a task another machine owns, and read them over the
     /// link.
     ///
-    /// The pop-up is shown before the answer arrives, so the operator sees the
+    /// The screen is shown before the answer arrives, so the operator sees the
     /// wait rather than a frozen list. The attempt in the reply says which opening
     /// it belongs to, so a reply from one already left behind cannot replace what
     /// is on screen.
@@ -4045,10 +4749,15 @@ impl App {
         };
         self.remote_signals = Some(remote.clone());
         self.remote_signals_loading = true;
-        self.operator_signals.clear();
-        self.selected_operator_signal = 0;
-        self.selected_signal_action = 0;
-        self.operator_signal_scroll = 0;
+        self.signal_task_id = Some(remote.task_id.clone());
+        self.signal_all_threads.clear();
+        self.signal_threads.clear();
+        self.signals_cursor = list::Cursor::default();
+        self.signal_arrivals.clear();
+        self.signal_focus = SignalFocus::List;
+        self.signal_message_cursor = 0;
+        self.signal_scroll = u16::MAX;
+        self.signal_composer = None;
         self.foreground = Foreground::Signals;
         let client = self.link.clone();
         let keys = self.remote_keys.clone();
@@ -4062,16 +4771,25 @@ impl App {
         });
     }
 
-    /// Leave the signals pop-up, forgetting which remote task it was about so a
-    /// reply that lands after this changes nothing.
+    /// Leave the signals screen, forgetting which task it was about so a reply
+    /// that lands after this changes nothing.
     fn leave_signals(&mut self) {
+        self.foreground = Foreground::Tasks;
         self.remote_signals = None;
         self.remote_signals_loading = false;
-        self.foreground = Foreground::Tasks;
+        self.signal_task_id = None;
+        self.signal_all_threads.clear();
+        self.signal_threads.clear();
+        self.signal_arrivals.clear();
+        self.signal_targets.clear();
+        self.signal_composer = None;
+        self.signal_focus = SignalFocus::List;
+        self.signal_message_cursor = 0;
+        self.signal_scroll = 0;
     }
 
-    /// What the signals pop-up says above the list: the wait while a remote is
-    /// being asked, or the selected task's own last words.
+    /// What the screen says when there is no thread to read: the wait while a
+    /// remote is being asked, or the task's own last words.
     pub(in crate::tui) fn signals_summary(&self) -> Option<String> {
         // A remote's own last words, read from what it last answered with. The
         // task is not in this machine's list, so it is not looked for there.
@@ -4085,8 +4803,8 @@ impl App {
                 .find(|held| held.address == remote.address && held.summary.id == remote.task_id)
                 .and_then(|held| held.summary.latest_turn_summary.clone());
         }
-        self.selected_task()
-            .and_then(|task| task.facts.latest_turn_summary)
+        self.signal_task()
+            .and_then(|task| task.facts.latest_turn_summary.clone())
     }
 
     /// The address to reach a remote at, once its key is checked against the one
@@ -4109,31 +4827,23 @@ impl App {
         Ok(sighting.ticket.into())
     }
 
-    /// Read one remote task's unresolved signals, and mark them read there.
+    /// Read one remote task's signals. Info logs resolve where they live when
+    /// the operator leaves them, just as they do here.
     async fn read_remote_signals(
         address: &str,
         task_id: &str,
         keys: &RemoteKeys,
         client: &LinkClient,
-    ) -> Result<Vec<TaskOperatorSignal>, String> {
+    ) -> Result<Vec<TaskOperatorSignalThread>, String> {
         let peer = Self::remote_peer(address, keys).await?;
-        let mut signals = client
-            .operator_signals(peer.clone(), task_id)
+        client
+            .signal_threads(peer, task_id)
             .await
-            .map_err(|error| error.to_string())?;
-        // Marking them read is best effort: the questions are what the operator
-        // came for, and a read that fails should not hide them.
-        if let Err(error) = client.read_operator_signals(peer, task_id).await {
-            tracing::debug!(%error, address, task_id, "could not mark a remote's signals read");
-        }
-        for signal in &mut signals {
-            signal.read = true;
-        }
-        Ok(signals)
+            .map_err(|error| error.to_string())
     }
 
     /// Send one action to the machine that owns the open signals.
-    fn act_on_remote_signal(
+    pub(in crate::tui) fn act_on_remote_signal(
         &self,
         signal_id: String,
         action: RemoteSignalAction,
@@ -4177,16 +4887,16 @@ impl App {
     ) -> Result<(), String> {
         let peer = Self::remote_peer(&remote.address, keys).await?;
         match action {
-            RemoteSignalAction::Answer => client
-                .answer_operator_signal(peer, signal_id, answer.unwrap_or_default())
+            RemoteSignalAction::Reply => client
+                .reply_operator_signal(peer, &remote.task_id, signal_id, answer.unwrap_or_default())
                 .await
                 .map_err(|error| error.to_string()),
-            RemoteSignalAction::Acknowledge => client
-                .acknowledge_operator_signal(peer, signal_id)
+            RemoteSignalAction::Resolve(resolved) => client
+                .resolve_signal(peer, &remote.task_id, signal_id, resolved)
                 .await
                 .map_err(|error| error.to_string()),
-            RemoteSignalAction::Confirm => client
-                .confirm_operator_signal(peer, signal_id)
+            RemoteSignalAction::Accept => client
+                .confirm_operator_signal(peer, &remote.task_id, signal_id)
                 .await
                 .map_err(|error| error.to_string()),
         }
@@ -4203,13 +4913,14 @@ impl App {
                 }
                 self.remote_signals_loading = false;
                 match signals {
-                    Ok(signals) => {
-                        self.operator_signals = signals;
-                        self.selected_operator_signal = 0;
-                        self.selected_signal_action = 0;
-                        self.operator_signal_scroll = 0;
+                    Ok(threads) => {
+                        self.signal_all_threads = threads;
+                        self.signal_threads.clear();
+                        self.signals_cursor = list::Cursor::default();
+                        self.apply_signal_view();
+                        self.reset_signal_message();
                     }
-                    // The pop-up stays open with what it has, which is nothing
+                    // The screen stays open with what it has, which is nothing
                     // new: the operator can retry by opening it again.
                     Err(error) => self.say(error),
                 }
@@ -4224,27 +4935,26 @@ impl App {
                     return;
                 }
                 match result {
-                    Ok(()) => {
-                        if let Some(index) = self
-                            .operator_signals
-                            .iter()
-                            .position(|signal| signal.id == signal_id)
-                        {
-                            self.resolved_operator_signal(index);
+                    Ok(()) => match action {
+                        RemoteSignalAction::Reply => {}
+                        RemoteSignalAction::Resolve(resolved) => {
+                            self.resolve_signal_locally(&signal_id, resolved);
+                            if resolved {
+                                self.select_next_open_thread();
+                            }
                         }
-                        if action == RemoteSignalAction::Confirm {
+                        RemoteSignalAction::Accept => {
+                            self.resolve_signal_locally(&signal_id, true);
                             self.say("Task completed");
                         }
-                        // The card's unread count is the machine's to say, and its
-                        // watch says it.
-                    }
+                    },
                     Err(error) => self.say(error),
                 }
             }
         }
     }
 
-    /// Whether a reply is about the pop-up that is open right now.
+    /// Whether a reply is about the screen that is open right now.
     fn is_current_remote_signals(&self, remote: &RemoteSignals) -> bool {
         self.remote_signals.as_ref() == Some(remote)
     }
@@ -4318,7 +5028,95 @@ impl App {
             }
             _ => {}
         }
+        // Any news about a task can be news about its threads: the agent may
+        // have answered while the screen was open. The read is cheap and the
+        // selection is kept by id, so this cannot move the ground under the
+        // operator.
+        if matches!(self.foreground, Foreground::Signals) {
+            self.refresh_signal_threads(event_loop).await;
+        }
         Ok(())
+    }
+
+    /// Read the threads again, keeping the selection. Resolved ones come back
+    /// too, because a conversation that ended is part of what the screen shows.
+    pub(in crate::tui) async fn refresh_signal_threads<E>(&mut self, event_loop: &TaskEventLoop<E>)
+    where
+        E: IsolationEngine + Clone + 'static,
+    {
+        if self.remote_signals.is_some() {
+            return;
+        }
+        let Some(task_id) = self.signal_task_id.clone() else {
+            return;
+        };
+        let selected = self.signal_thread().map(|thread| thread.id.clone());
+        // What each thread looked like before this read, so a new message or a
+        // new ending can be the one that moves on screen.
+        let previous: HashMap<String, (usize, bool)> = self
+            .signal_all_threads
+            .iter()
+            .map(|thread| (thread.id.clone(), (thread.messages.len(), thread.resolved)))
+            .collect();
+        let Ok(threads) = event_loop.signal_threads(&task_id).await else {
+            return;
+        };
+        let grown = selected.as_ref().is_some_and(|id| {
+            threads
+                .iter()
+                .find(|thread| &thread.id == id)
+                .is_some_and(|thread| {
+                    thread.messages.len() > previous.get(id).map_or(0, |before| before.0)
+                })
+        });
+        let now = Instant::now();
+        for thread in &threads {
+            let changed = previous.get(&thread.id).is_none_or(|before| {
+                before.0 != thread.messages.len() || before.1 != thread.resolved
+            });
+            if changed {
+                self.signal_arrivals.insert(thread.id.clone(), now);
+            }
+        }
+        self.signal_arrivals
+            .retain(|id, _| threads.iter().any(|thread| &thread.id == id));
+        self.signal_all_threads = threads;
+        self.apply_signal_view();
+        if grown {
+            self.reset_signal_message();
+        }
+    }
+
+    /// A signal thread changed. Keep the card's unresolved count current, and
+    /// read the screen again when it is showing this task.
+    pub(in crate::tui) async fn signal_changed<E>(
+        &mut self,
+        task_id: &str,
+        event_loop: &TaskEventLoop<E>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        if self.tasks.iter().any(|task| task.id == task_id)
+            && let Ok(Some(task)) = event_loop.task(task_id).await
+        {
+            self.replace_task(task);
+        }
+        if matches!(self.foreground, Foreground::Signals)
+            && self.signal_task_id.as_deref() == Some(task_id)
+        {
+            self.refresh_signal_threads(event_loop).await;
+        }
+    }
+
+    /// The change notices fell behind. The store has every change, so the open
+    /// screen is simply read again.
+    pub(in crate::tui) async fn signal_changes_lagged<E>(&mut self, event_loop: &TaskEventLoop<E>)
+    where
+        E: IsolationEngine + Clone + 'static,
+    {
+        if matches!(self.foreground, Foreground::Signals) && self.remote_signals.is_none() {
+            self.refresh_signal_threads(event_loop).await;
+        }
     }
 
     pub(in crate::tui) fn shell_has_active_notice(&self) -> bool {
