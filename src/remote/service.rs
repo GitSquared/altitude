@@ -86,13 +86,25 @@ pub async fn uninstall(_args: &ServeArgs, _base: &Config) -> Result<(), Box<dyn 
             ),
         );
     }
-    println!();
     let steps = installations
         .iter()
         .flat_map(|installation| installation.steps.iter().cloned())
         .collect::<Vec<_>>();
-    for step in &steps {
-        println!("  $ {}{}", prefix(step.privileged), step.command.join(" "));
+    let privileged = steps.iter().any(|step| step.privileged);
+    println!();
+    prose(
+        "This stops the remote and deletes what starts it. Your tasks, logins and settings \
+         stay where they are.",
+        "",
+        "",
+    );
+    if privileged {
+        println!();
+        prose(
+            "Removing the machine-wide service needs your permission once (sudo).",
+            "",
+            "",
+        );
     }
     if !ask("Remove it? [y/N]", false)? {
         println!("\nNothing was removed.");
@@ -103,13 +115,6 @@ pub async fn uninstall(_args: &ServeArgs, _base: &Config) -> Result<(), Box<dyn 
     for installation in &installations {
         field("removed", installation.path.display());
     }
-    println!();
-    prose(
-        "Your tasks, logins and settings are where they were: a service only decides whether \
-         the remote starts by itself.",
-        "",
-        "",
-    );
     Ok(())
 }
 
@@ -616,35 +621,55 @@ impl Plan {
         field("scope", scope_word(self.scope));
         field("runs", service.exec_line());
         field("logs", &self.logs);
-        println!();
-        for step in &self.commands {
-            println!("  $ {}{}", prefix(step.privileged), step.command.join(" "));
+
+        let mut says = vec![match (env::consts::OS, self.scope) {
+            ("macos", Scope::User) => {
+                "It starts when you log in and restarts if it stops, running as you so it uses \
+                 the sandboxes and logins this machine already has"
+            }
+            (_, Scope::User) => {
+                "It starts at boot and runs without a session, using the sandboxes and logins \
+                 this machine already has"
+            }
+            ("macos", Scope::Machine) => {
+                "It starts at boot with nobody logged in, runs as you, and restarts if it stops"
+            }
+            (_, Scope::Machine) => "It starts at boot with nobody logged in and runs as you",
+        }];
+        if self.scope == Scope::Machine {
+            says.push("Writing it and starting it needs your permission once (sudo)");
         }
         if self.scope == Scope::User && matches!(env::consts::OS, "linux") {
-            println!("\n  $ loginctl enable-linger {}", service.user);
-            prose(
-                "Without lingering, a user service stops when your last session ends — the \
-                 remote would go away the moment you close the terminal you started it from.",
-                "",
-                "",
+            says.push(
+                "Lingering is turned on for your user as part of this, without which a user \
+                 service stops with your last session",
             );
         }
+        for said in says {
+            println!();
+            prose(said, "", "");
+        }
         println!();
+        let kind = if matches!(env::consts::OS, "linux") {
+            "unit"
+        } else {
+            "launch job"
+        };
         prose(
-            "It is an ordinary unit you can read and edit afterwards; Altitude does not manage \
-             it again after this.",
+            &format!(
+                "The file is an ordinary {kind} you can read or edit later; Altitude does \
+                      not manage it again after this."
+            ),
             "",
             "",
         );
     }
 
     fn write(&self) -> Result<(), Box<dyn Error>> {
-        println!();
         if let (Some(directory), false) = (self.path.parent(), self.privileged) {
             fs::create_dir_all(directory)?;
         }
         if self.privileged {
-            println!("  $ sudo tee {}", self.path.display());
             let mut child = Command::new("sudo")
                 .arg("tee")
                 .arg(&self.path)
@@ -664,7 +689,6 @@ impl Plan {
             }
         } else {
             fs::write(&self.path, &self.contents)?;
-            println!("  wrote {}", self.path.display());
         }
         Ok(())
     }
@@ -684,7 +708,6 @@ impl Plan {
             "enable-linger".to_owned(),
             self.user.clone(),
         ];
-        println!("  $ {}", command.join(" "));
         if run_command(&command, false, true)? {
             return Ok(());
         }
@@ -699,7 +722,8 @@ impl Plan {
     }
 
     fn verify(&self) {
-        println!();
+        println!("\nInstalled.");
+        field("file", self.path.display());
         for check in &self.verify {
             let running = run_command(&check.command, check.privileged, false).unwrap_or(false);
             field(
@@ -714,8 +738,8 @@ impl Plan {
         field("logs", &self.logs);
         println!();
         prose(
-            "With a shared tracker app installed, the first issue delegated to it is proven by a \
-             delivery line in these logs.",
+            "With a shared tracker app installed, the first issue delegated to it shows up in \
+             these logs.",
             "",
             "",
         );
@@ -748,19 +772,16 @@ fn scope_word(scope: Scope) -> &'static str {
     }
 }
 
-fn prefix(privileged: bool) -> &'static str {
-    if privileged { "sudo " } else { "" }
-}
-
 /// Run one command, and answer whether it succeeded.
 ///
-/// A step whose failure is not fatal keeps its complaints to itself: unloading a
-/// job that was never loaded prints "no such process", which reads like a failure
-/// in the middle of a first install that is going perfectly well.
+/// A step speaks only when it has something to complain about, and only when that
+/// complaint matters: unloading a job that was never loaded prints "no such
+/// process", which reads like a failure in the middle of a first install that is
+/// going perfectly well.
 fn run_command(command: &[String], privileged: bool, show_errors: bool) -> io::Result<bool> {
     let mut process = process_for(command, privileged)?;
+    process.stdout(Stdio::null());
     if !show_errors {
-        process.stdout(Stdio::null());
         process.stderr(Stdio::null());
     }
     Ok(process.status()?.success())
