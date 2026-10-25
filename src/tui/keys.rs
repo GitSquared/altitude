@@ -187,6 +187,10 @@ pub fn help_sections() -> Vec<HelpSection> {
             title: "Forms, choices and confirmations",
             bindings: &[
                 ("Tab / Shift-Tab", "Move between fields or buttons"),
+                (
+                    "Ctrl-Enter",
+                    "Save an environment or remote from wherever the caret is",
+                ),
                 ("← / → (confirmation)", "Switch between cancel and confirm"),
                 ("j/k · ↓/↑ (send task)", "Choose a remote"),
                 ("s (send task)", "Open Settings if no remote is ready"),

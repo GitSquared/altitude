@@ -331,11 +331,13 @@ where
         }
         // ctrl-enter and shift-enter only arrive as keys of their own under this
         // protocol. The task grid and signals use ctrl-enter as their secondary
-        // action; the creation page and the signal composer use both.
+        // action, and so do the creation page, the signal composer and a settings
+        // form; the signal composer uses shift-enter as well.
         let wants_enhanced = matches!(
             app.foreground,
             Foreground::NewTask(_) | Foreground::Tasks | Foreground::Signals
-        ) || app.signal_composer.is_some();
+        ) || app.signal_composer.is_some()
+            || app.panel.form.is_some();
         if keys_enhanced != wants_enhanced {
             keys_enhanced = !keys_enhanced;
             if keys_enhanced {

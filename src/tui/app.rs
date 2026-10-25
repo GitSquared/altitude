@@ -1036,6 +1036,7 @@ impl App {
                 if self.panel.form.is_some() {
                     return vec![
                         Hint::new("tab", "next"),
+                        Hint::new("ctrl-enter", "save"),
                         Hint::new("enter", "next, or add a line"),
                         Hint::new("esc", "leave the box, then the page"),
                     ];
@@ -3040,6 +3041,10 @@ impl App {
             // operator in it.
             KeyCode::Esc if form.focus.takes_text() => form.focus = Focus::Cancel,
             _ if is_dismiss(key) && !form.focus.takes_text() => keep = false,
+            // The chord that starts work on the creation page saves here, so a
+            // page with fields is finished the same way from wherever the caret
+            // is.
+            _ if is_secondary(key) => save = true,
             KeyCode::BackTab => form.move_focus(false),
             KeyCode::Tab => form.move_focus(true),
             KeyCode::Enter if form.focus == Focus::Setup => form.setup.handle_key(key),
