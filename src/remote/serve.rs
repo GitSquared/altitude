@@ -40,7 +40,7 @@ use tokio::{
 
 use crate::{
     agent::AgentEngines,
-    cli::{ServeArgs, ServeCommand},
+    cli::{ServeArgs, ServeCommand, Tracker},
     config::{Config, DEFAULT_PORT, InstallationIdentity, LinearSettings, ServeSettings},
     db::Database,
     isolation::{self, IsolationEngine, IsolationStatus, MicrosandboxIsolation},
@@ -978,34 +978,46 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         .config
         .clone()
         .unwrap_or_else(|| config.serve_settings_path());
-    // Housekeeping happens instead of serving, and before the log is pointed at
-    // stdout: what it prints is the answer, not a report about it.
-    if let Some(command) = args.command {
+    // Everything below happens instead of serving, and before the log is pointed
+    // at stdout: what it prints is the answer, not a report about it.
+    if let Some(command) = &args.command {
         match command {
-            ServeCommand::Clients => super::admin::list(&config)
-                .await
-                .map_err(|error| error.to_string())?,
-            ServeCommand::Evict { key } => super::admin::evict(&config, &key)
-                .await
-                .map_err(|error| error.to_string())?,
+            ServeCommand::Clients => {
+                super::admin::list(&config)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                return Ok(());
+            }
+            ServeCommand::Evict { key } => {
+                super::admin::evict(&config, key)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                return Ok(());
+            }
+            // A service definition carries this machine's own paths, so it is
+            // written by the process that has them rather than from a template
+            // somebody downloaded.
+            ServeCommand::Install => return super::service::install(&args, &base).await,
+            ServeCommand::Uninstall => return super::service::uninstall(&args, &base).await,
+            ServeCommand::Connect(connect) => {
+                let settings = ServeSettings::load_or_create(&settings_path)?;
+                let credentials_path = config.data_dir().join("trackers/linear/oauth.json");
+                return match connect.tracker {
+                    Tracker::Linear => {
+                        super::tracker_setup::connect_linear(
+                            &settings,
+                            &settings_path,
+                            &credentials_path,
+                        )
+                        .await
+                    }
+                };
+            }
         }
-        return Ok(());
-    }
-    // A service definition carries this machine's own paths, so it is written by
-    // the process that has them rather than from a template somebody downloaded.
-    if args.service {
-        return super::service::install(&args, &base).await;
-    }
-    let settings = ServeSettings::load_or_create(&settings_path)?;
-    let credentials_path = config.data_dir().join("trackers/linear/oauth.json");
-    // Installing a tracker is an interactive report rather than a service start:
-    // what it prints is the whole of what it has to say, so it takes neither the
-    // banner nor a log preamble.
-    if args.connect_linear {
-        return super::tracker_setup::connect_linear(&settings, &settings_path, &credentials_path)
-            .await;
     }
 
+    let settings = ServeSettings::load_or_create(&settings_path)?;
+    let credentials_path = config.data_dir().join("trackers/linear/oauth.json");
     logging::init_service();
     tracing::info!("⛰  altitude v{} · remote", env!("CARGO_PKG_VERSION"));
     tracing::debug!("Checking sandbox host requirements");
@@ -1065,11 +1077,11 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         ),
         (Some(_), None) => tracing::warn!(
             error = linear_error.as_deref().unwrap_or("no reason given"),
-            "{}: not connected · run `altitude serve --connect-linear` on this machine",
+            "{}: not connected · run `altitude serve connect linear` on this machine",
             TrackerKind::Linear.label(),
         ),
         (None, None) => tracing::info!(
-            "Task tracker: none configured · run `altitude serve --connect-linear` to pilot work \
+            "Task tracker: none configured · run `altitude serve connect linear` to pilot work \
              from Linear"
         ),
     }

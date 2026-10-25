@@ -1,4 +1,4 @@
-//! What `altitude serve --connect-linear` does: say what this machine holds, read
+//! What `altitude serve connect linear` does: say what this machine holds, read
 //! the manual, install the app, say what landed.
 //!
 //! Every fact printed here belongs to this machine. The manual it reads is shared

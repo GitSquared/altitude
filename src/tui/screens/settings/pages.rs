@@ -164,7 +164,7 @@ pub(in crate::tui) fn remote_setup_lines() -> Vec<Line<'static>> {
 
 /// The provider's manual, styled for this panel.
 ///
-/// The words are the ones `altitude serve --connect-linear` prints on the machine
+/// The words are the ones `altitude serve connect linear` prints on the machine
 /// that performs the steps, so the two cannot drift. Nothing here depends on what
 /// a particular remote is configured with: the guide is the same everywhere, and
 /// the values that fill it in are printed where they belong.

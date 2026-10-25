@@ -68,7 +68,7 @@ static LINEAR: Guide = Guide {
         Step {
             prose: "Run this on the remote. It prints the exact URLs to register, installs the \
                     app, and saves the login there, which is the only machine that holds it.",
-            code: &["altitude serve --connect-linear"],
+            code: &["altitude serve connect linear"],
         },
     ],
     closing: &[

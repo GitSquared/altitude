@@ -76,7 +76,7 @@ fn template() -> String {
          listen = \"{}\"\n\
          \n\
          # A shared app for work delegated from a task tracker. Install it with\n\
-         # `altitude serve --connect-linear`, which prints the exact addresses to register.\n\
+         # `altitude serve connect linear`, which prints the exact addresses to register.\n\
          # public_url is the HTTPS address that reaches this machine, and the secrets belong\n\
          # here, in a file only this machine's user can read.\n\
          # [linear]\n\

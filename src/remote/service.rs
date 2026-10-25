@@ -13,7 +13,7 @@ use std::{
     fs,
     io::{self, Write},
     iter,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -59,6 +59,153 @@ pub async fn install(args: &ServeArgs, base: &Config) -> Result<(), Box<dyn Erro
     Ok(())
 }
 
+pub async fn uninstall(_args: &ServeArgs, _base: &Config) -> Result<(), Box<dyn Error>> {
+    if !has_terminal() {
+        return Err(io::Error::other(
+            "run this from a terminal: it shows what it will stop and remove, and asks first",
+        )
+        .into());
+    }
+    let installations = Installation::find();
+    if installations.is_empty() {
+        println!("\nNo Altitude service on this machine.\n");
+        for scope in [Scope::User, Scope::Machine] {
+            field("looked", Installation::path(scope).display());
+        }
+        return Ok(());
+    }
+
+    println!("\nAltitude remote · remove the service\n");
+    for installation in &installations {
+        field(
+            "found",
+            format!(
+                "{} · {}",
+                installation.path.display(),
+                scope_name(installation.scope)
+            ),
+        );
+    }
+    println!();
+    let steps = installations
+        .iter()
+        .flat_map(|installation| installation.steps.iter().cloned())
+        .collect::<Vec<_>>();
+    for step in &steps {
+        println!("  $ {}{}", prefix(step.privileged), step.command.join(" "));
+    }
+    if !ask("Remove it? [y/N]", false)? {
+        println!("\nNothing was removed.");
+        return Ok(());
+    }
+    run_steps(&steps)?;
+    println!();
+    for installation in &installations {
+        field("removed", installation.path.display());
+    }
+    println!();
+    prose(
+        "Your tasks, logins and settings are where they were: a service only decides whether \
+         the remote starts by itself.",
+        "",
+        "",
+    );
+    Ok(())
+}
+
+/// One service found on this machine, and what removing it takes.
+struct Installation {
+    path: PathBuf,
+    scope: Scope,
+    steps: Vec<Step>,
+}
+
+impl Installation {
+    fn find() -> Vec<Self> {
+        let mut found = Vec::new();
+        for scope in [Scope::User, Scope::Machine] {
+            let path = Self::path(scope);
+            if path.exists() {
+                found.push(Self {
+                    steps: Self::steps(&path, scope),
+                    path,
+                    scope,
+                });
+            }
+        }
+        found
+    }
+
+    fn path(scope: Scope) -> PathBuf {
+        if matches!(env::consts::OS, "linux") {
+            return match scope {
+                Scope::User => config_home().join("systemd/user").join(UNIT),
+                Scope::Machine => PathBuf::from("/etc/systemd/system").join(UNIT),
+            };
+        }
+        let directory = match scope {
+            Scope::User => home().join("Library/LaunchAgents"),
+            Scope::Machine => PathBuf::from("/Library/LaunchDaemons"),
+        };
+        directory.join(format!("{LABEL}.plist"))
+    }
+
+    /// Stops it, then removes the file. Both are best-effort until the removal: a
+    /// service that is already stopped still has a file to delete, and a stop that
+    /// refuses does not make the file less of a leftover.
+    fn steps(path: &Path, scope: Scope) -> Vec<Step> {
+        let privileged = scope == Scope::Machine;
+        let stop = if matches!(env::consts::OS, "linux") {
+            Step {
+                command: systemctl(&["disable", "--now", UNIT], scope),
+                privileged,
+                required: false,
+            }
+        } else {
+            let domain = match scope {
+                Scope::User => format!("gui/{}", uid_of()),
+                Scope::Machine => "system".to_owned(),
+            };
+            Step {
+                command: launchctl(&["bootout", &format!("{domain}/{LABEL}")]),
+                privileged,
+                required: false,
+            }
+        };
+        let mut steps = vec![
+            stop,
+            Step {
+                command: vec!["rm".to_owned(), "--".to_owned(), path.display().to_string()],
+                privileged,
+                required: true,
+            },
+        ];
+        if matches!(env::consts::OS, "linux") {
+            steps.push(Step {
+                command: systemctl(&["daemon-reload"], scope),
+                privileged,
+                required: false,
+            });
+        }
+        steps
+    }
+}
+
+fn home() -> PathBuf {
+    env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
+}
+
+fn config_home() -> PathBuf {
+    env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".config"))
+}
+
+/// `Service` already holds this; removal needs it without a service to describe.
+fn uid_of() -> String {
+    uid().unwrap_or_else(|_| "0".to_owned())
+}
+
 /// Everything about this machine that the definition needs to carry.
 struct Service {
     exe: PathBuf,
@@ -77,6 +224,7 @@ impl Service {
         let home = env::var_os("HOME")
             .map(PathBuf::from)
             .ok_or_else(|| io::Error::other("this machine has no HOME to install for"))?;
+
         let settings_path = args
             .config
             .clone()
@@ -214,7 +362,7 @@ impl Service {
 
     fn systemd_plan(&self, scope: Scope) -> Plan {
         let path = match scope {
-            Scope::User => self.config_home().join("systemd/user").join(UNIT),
+            Scope::User => config_home().join("systemd/user").join(UNIT),
             Scope::Machine => PathBuf::from("/etc/systemd/system").join(UNIT),
         };
         let privileged = scope == Scope::Machine;
@@ -369,11 +517,12 @@ impl Service {
         environment
     }
 
-    fn config_home(&self) -> PathBuf {
-        env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-            .unwrap_or_else(|| self.home.join(".config"))
+    /// How the service starts this binary, for a summary shorter than the file.
+    fn exec_line(&self) -> String {
+        iter::once(self.exe.display().to_string())
+            .chain(self.arguments.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 }
 
@@ -417,6 +566,7 @@ impl Check {
     }
 }
 
+#[derive(Clone)]
 struct Step {
     command: Vec<String>,
     privileged: bool,
@@ -461,18 +611,11 @@ fn launchctl(arguments: &[&str]) -> Vec<String> {
 
 impl Plan {
     fn show(&self, service: &Service) {
-        println!(
-            "\nAltitude remote · as a service\n\n  writes   {}\n  scope    {}\n  logs     {}",
-            self.path.display(),
-            match (env::consts::OS, self.scope) {
-                ("macos", Scope::User) => "this user · starts when you log in",
-                ("macos", Scope::Machine) => "the whole machine · starts at boot",
-                (_, Scope::User) => "this user · starts at boot, no session needed",
-                (_, Scope::Machine) => "the whole machine · starts at boot",
-            },
-            self.logs,
-        );
-        println!("\n  {}", self.contents.replace('\n', "\n  ").trim_end());
+        println!("\nAltitude remote · as a service\n");
+        field("file", self.path.display());
+        field("scope", scope_word(self.scope));
+        field("runs", service.exec_line());
+        field("logs", &self.logs);
         println!();
         for step in &self.commands {
             println!("  $ {}{}", prefix(step.privileged), step.command.join(" "));
@@ -486,6 +629,13 @@ impl Plan {
                 "",
             );
         }
+        println!();
+        prose(
+            "It is an ordinary unit you can read and edit afterwards; Altitude does not manage \
+             it again after this.",
+            "",
+            "",
+        );
     }
 
     fn write(&self) -> Result<(), Box<dyn Error>> {
@@ -523,16 +673,7 @@ impl Plan {
         if self.scope == Scope::User && matches!(env::consts::OS, "linux") {
             self.linger()?;
         }
-        for step in &self.commands {
-            println!("  $ {}{}", prefix(step.privileged), step.command.join(" "));
-            if run_command(&step.command, step.privileged, step.required)? || !step.required {
-                continue;
-            }
-            return Err(
-                io::Error::other(format!("{} did not succeed", step.command.join(" "))).into(),
-            );
-        }
-        Ok(())
+        run_steps(&self.commands)
     }
 
     /// A user service on Linux stops with the last session unless it is lingering,
@@ -578,6 +719,32 @@ impl Plan {
             "",
             "",
         );
+    }
+}
+
+fn run_steps(steps: &[Step]) -> Result<(), Box<dyn Error>> {
+    for step in steps {
+        if run_command(&step.command, step.privileged, step.required)? || !step.required {
+            continue;
+        }
+        return Err(io::Error::other(format!("{} did not succeed", step.command.join(" "))).into());
+    }
+    Ok(())
+}
+
+fn scope_name(scope: Scope) -> &'static str {
+    match scope {
+        Scope::User => "this user",
+        Scope::Machine => "the whole machine",
+    }
+}
+
+fn scope_word(scope: Scope) -> &'static str {
+    match (env::consts::OS, scope) {
+        ("macos", Scope::User) => "this user · starts when you log in",
+        ("macos", Scope::Machine) => "the whole machine · starts at boot",
+        (_, Scope::User) => "this user · starts at boot, no session needed",
+        (_, Scope::Machine) => "the whole machine · starts at boot",
     }
 }
 

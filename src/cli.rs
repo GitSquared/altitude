@@ -7,7 +7,9 @@
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+
+use crate::tracker::TrackerKind;
 
 /// The serve mode, written once so the root's long help and the subcommand agree.
 const SERVE_MODE: &str = "Run altitude serve on a headless server to let your team run agents beyond their own machines, and pilot them directly from your task tracker.";
@@ -53,7 +55,7 @@ A remote can run work delegated from a task tracker. That needs, on this machine
 \x20 1. an OAuth application in the tracker, owned by whoever administers it here
 \x20 2. an HTTPS address that reaches this machine, with a reverse proxy to the
 \x20    tracker's webhook port (127.0.0.1:25849 by default)
-\x20 3. the application installed once, by `altitude serve --connect-linear`
+\x20 3. the application installed once, by `altitude serve connect linear`
 
 Without one, this remote still runs work sent from Altitude, and reports through
 each operator's own login.
@@ -80,28 +82,10 @@ pub struct ServeArgs {
     #[arg(long, value_name = "PATH", display_order = 3)]
     pub data_dir: Option<PathBuf>,
 
-    /// Install Altitude as a service on this machine, then exit.
+    /// Something to do instead of serving.
     ///
-    /// Asks whether it should run for this user or for the whole machine, shows
-    /// the unit or launch job it will write and the commands it will run, then
-    /// starts it. Needs a terminal, and writes nothing before you agree.
-    #[arg(
-        long,
-        help_heading = "Run it as a service",
-        conflicts_with = "connect_linear"
-    )]
-    pub service: bool,
-
-    /// Install the shared Linear app on this machine, then exit.
-    ///
-    /// Prints the URLs the application must register, what this machine's settings
-    /// and secrets are, and what it ended up installed as. Every fact it prints
-    /// belongs to this machine: the steps are the same ones Altitude shows
-    /// anywhere, but the addresses, ports and logins are this host's own.
-    #[arg(long, help_heading = "Task tracker integration")]
-    pub connect_linear: bool,
-
-    /// What to do instead of running the remote: look after the clients it has seen.
+    /// Housekeeping and installing belong to this role rather than to a run of it,
+    /// so they are subcommands: a run has options, and these do not serve at all.
     #[command(subcommand)]
     pub command: Option<ServeCommand>,
 }
@@ -115,4 +99,41 @@ pub enum ServeCommand {
         /// The client's public key, as `clients` prints it
         key: String,
     },
+    /// Install Altitude as a service on this machine, then exit
+    ///
+    /// Asks whether it should run for this user or for the whole machine, then
+    /// starts it. Needs a terminal, and writes nothing before you agree.
+    Install,
+    /// Remove the service this machine runs, keeping everything it holds
+    ///
+    /// Finds what is installed here, stops it and removes it, and leaves the
+    /// tasks, logins and settings alone. Needs a terminal.
+    Uninstall,
+    /// Install a task tracker's shared app on this machine, then exit
+    ///
+    /// Prints the URLs the application must register, what this machine's settings
+    /// and secrets are, and what it ended up installed as. Every fact it prints
+    /// belongs to this machine: the steps are the same ones Altitude shows
+    /// anywhere, but the addresses, ports and logins are this host's own.
+    Connect(ConnectArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ConnectArgs {
+    /// The task tracker whose shared app to install
+    #[arg(value_enum)]
+    pub tracker: Tracker,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum Tracker {
+    Linear,
+}
+
+impl From<Tracker> for TrackerKind {
+    fn from(tracker: Tracker) -> Self {
+        match tracker {
+            Tracker::Linear => Self::Linear,
+        }
+    }
 }

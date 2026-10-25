@@ -70,7 +70,7 @@ struct TokenResponse {
 impl AppCredentials {
     pub fn load(path: &Path) -> Result<Self, String> {
         let text = fs::read_to_string(path).map_err(|error| {
-            format!("Linear app is not connected: {error}. Run altitude serve --connect-linear on this host.")
+            format!("Linear app is not connected: {error}. Run altitude serve connect linear on this host.")
         })?;
         serde_json::from_str(&text).map_err(|_| "the saved Linear app login is invalid".into())
     }
@@ -355,7 +355,7 @@ pub async fn connect(settings: LinearSettings, path: &Path) -> Result<AppCredent
         .map_err(|_| "Linear sign-in listener stopped unexpectedly")?;
     server_result.map_err(|_| "Linear sign-in listener failed")?;
     let credentials = credentials
-        .map_err(|_| "Linear sign-in timed out; run --connect-linear again")?
+        .map_err(|_| "Linear sign-in timed out; run `altitude serve connect linear` again")?
         .ok_or("Linear sign-in listener stopped before completion")??;
     credentials.save(path)?;
     Ok(credentials)
