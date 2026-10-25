@@ -740,7 +740,7 @@ impl super::tracker::Host for OwnTasks {
                 .find(|environment| {
                     environment
                         .name
-                        .eq_ignore_ascii_case(&settings.settings().default_environment)
+                        .eq_ignore_ascii_case(settings.settings().default_environment())
                 })
                 .ok_or("The pushed default environment is missing; push your setup again")?;
             let task = self

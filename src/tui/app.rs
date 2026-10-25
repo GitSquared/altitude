@@ -719,7 +719,7 @@ impl App {
     pub(in crate::tui) fn default_environment_name(&self) -> &str {
         self.settings_file
             .as_ref()
-            .map(|file| file.settings().default_environment.as_str())
+            .map(|file| file.settings().default_environment())
             .unwrap_or_default()
     }
 
@@ -777,24 +777,24 @@ impl App {
 
     /// Where the last task was founded, when it was not this machine: the answer
     /// the next creation question opens on.
-    pub(in crate::tui) fn last_task_host(&self) -> Option<String> {
+    pub(in crate::tui) fn default_task_host(&self) -> Option<String> {
         self.settings_file
             .as_ref()?
             .settings()
-            .last_task_host()
+            .default_task_host()
             .map(str::to_owned)
     }
 
     /// Remember where a task was founded, so the next one starts there.
-    fn set_last_task_host(&mut self, address: Option<&str>) {
+    fn set_default_task_host(&mut self, address: Option<&str>) {
         let Some(file) = self.settings_file.as_mut() else {
             return;
         };
-        if file.settings().last_task_host() == address {
+        if file.settings().default_task_host() == address {
             return;
         }
         let mut proposed = file.settings().clone();
-        proposed.set_last_task_host(address);
+        proposed.set_default_task_host(address);
         if let Err(error) = file.save(proposed) {
             self.problem(error.to_string());
         }
@@ -2846,7 +2846,9 @@ impl App {
                 if let Some(original) = form.target.original() {
                     // Renaming the default must not quietly hand the default
                     // back to the base, so it is carried across the change.
-                    let was_default = proposed.default_environment.eq_ignore_ascii_case(original);
+                    let was_default = proposed
+                        .default_environment()
+                        .eq_ignore_ascii_case(original);
                     proposed.remove_environment(original);
                     if was_default {
                         proposed.set_default_environment(&name);
@@ -3244,7 +3246,7 @@ impl App {
                     self.set_agent(agent);
                 }
                 // Where this one was founded is where the next one starts.
-                self.set_last_task_host(host.as_deref());
+                self.set_default_task_host(host.as_deref());
                 match host {
                     // A task for a remote is founded there, off this loop. Nothing is
                     // copied: the machine that runs it is the machine that owns it.
@@ -3380,7 +3382,7 @@ impl App {
                 if let Some(agent) = submission.remember {
                     self.set_agent(agent);
                 }
-                self.set_last_task_host(submission.host.as_deref());
+                self.set_default_task_host(submission.host.as_deref());
                 match submission.host {
                     Some(address) => self.begin_delegation(
                         &address,
@@ -3702,7 +3704,7 @@ impl App {
                         self.default_environment_name(),
                         self.agent(),
                         self.task_hosts(),
-                        self.last_task_host().as_deref(),
+                        self.default_task_host().as_deref(),
                     )));
                 }
             }
@@ -3716,7 +3718,7 @@ impl App {
                             self.default_environment_name(),
                             self.agent(),
                             self.task_hosts(),
-                            self.last_task_host().as_deref(),
+                            self.default_task_host().as_deref(),
                         )
                         .linking(),
                     ));
