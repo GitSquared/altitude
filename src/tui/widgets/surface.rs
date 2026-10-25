@@ -12,6 +12,7 @@
 
 use ratatui::{
     Frame,
+    buffer::Buffer,
     layout::Rect,
     style::Style,
     widgets::{Block, BorderType, Clear, Padding},
@@ -36,27 +37,95 @@ pub fn cover(frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, area);
 }
 
-/// A horizontal rule dividing a panel, joined to its sides.
+/// A horizontal divider across one panel column, joined to its sides.
 ///
-/// `area` is the inside of one column: the rule starts at the surface's left
-/// border, runs across the column, and meets the vertical rule on the right.
-pub fn rule(frame: &mut Frame, area: Rect, y: u16) {
+/// `area` is the inside of one column: the divider starts at the surface's
+/// left border, runs across the column, and meets the vertical divider on the
+/// right. Both ends are joined to whatever was already there rather than
+/// replaced with a letter chosen by this function, so a divider ending at a
+/// vertical divider makes a tee and one ending at nothing makes a corner.
+pub fn horizontal_divider(frame: &mut Frame, area: Rect, y: u16) {
     if area.width == 0 || y < area.y || y >= area.bottom() {
         return;
     }
     let outline = outline();
     let buffer = frame.buffer_mut();
     if let Some(left) = area.x.checked_sub(1) {
-        buffer[(left, y)].set_symbol("├").set_style(outline);
+        join(buffer, left, y, RIGHT);
+        buffer[(left, y)].set_style(outline);
     }
     for x in area.x..area.right() {
         buffer[(x, y)].set_symbol("─").set_style(outline);
     }
-    buffer[(area.right(), y)].set_symbol("┼").set_style(outline);
+    join(buffer, area.right(), y, LEFT);
+    buffer[(area.right(), y)].set_style(outline);
 }
 
-/// A single rule between columns, joined to the frame at both ends.
-pub fn divider(frame: &mut Frame, inner: Rect, x: u16) {
+// Which strokes leave a cell. A junction is the union of what was there and what
+// is being drawn through it, which is why a divider joined to a vertical line makes
+// a tee rather than a cross.
+const UP: u8 = 1;
+const DOWN: u8 = 2;
+const LEFT: u8 = 4;
+const RIGHT: u8 = 8;
+
+fn join(buffer: &mut Buffer, x: u16, y: u16, added: u8) {
+    if x < buffer.area.x
+        || x >= buffer.area.right()
+        || y < buffer.area.y
+        || y >= buffer.area.bottom()
+    {
+        return;
+    }
+    let directions = strokes(buffer[(x, y)].symbol()) | added;
+    buffer[(x, y)].set_symbol(stroke(directions));
+}
+
+fn strokes(symbol: &str) -> u8 {
+    match symbol {
+        "│" => UP | DOWN,
+        "─" => LEFT | RIGHT,
+        "┌" => DOWN | RIGHT,
+        "┐" => DOWN | LEFT,
+        "└" => UP | RIGHT,
+        "┘" => UP | LEFT,
+        "├" => UP | DOWN | RIGHT,
+        "┤" => UP | DOWN | LEFT,
+        "┬" => DOWN | LEFT | RIGHT,
+        "┴" => UP | LEFT | RIGHT,
+        "┼" => UP | DOWN | LEFT | RIGHT,
+        _ => 0,
+    }
+}
+
+fn stroke(directions: u8) -> &'static str {
+    match (
+        directions & UP != 0,
+        directions & DOWN != 0,
+        directions & LEFT != 0,
+        directions & RIGHT != 0,
+    ) {
+        (false, false, false, false) => " ",
+        (true, false, false, false) => "╵",
+        (false, true, false, false) => "╷",
+        (false, false, true, false) => "╴",
+        (false, false, false, true) => "╶",
+        (true, true, false, false) => "│",
+        (false, false, true, true) => "─",
+        (false, true, false, true) => "┌",
+        (false, true, true, false) => "┐",
+        (true, false, false, true) => "└",
+        (true, false, true, false) => "┘",
+        (true, true, false, true) => "├",
+        (true, true, true, false) => "┤",
+        (false, true, true, true) => "┬",
+        (true, false, true, true) => "┴",
+        (true, true, true, true) => "┼",
+    }
+}
+
+/// A vertical divider between columns, joined to the frame at both ends.
+pub fn vertical_divider(frame: &mut Frame, inner: Rect, x: u16) {
     if inner.height == 0 || x < inner.x || x >= inner.right() {
         return;
     }

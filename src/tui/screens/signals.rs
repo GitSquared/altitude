@@ -4,7 +4,7 @@
 //! to read at a glance, and the one it has selected is the conversation on the
 //! right: what each side said, and the keys that reply or resolve it. The left
 //! column draws no background, so the terrain behind it shows through the gaps
-//! between rows.
+//! between rows; the conversation is an opaque pane.
 //!
 //! A thread has one state: unresolved or resolved. Reading is not a separate
 //! fact. An info log stays unresolved until the operator leaves the thread it
@@ -230,8 +230,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         Constraint::Min(0),
     ])
     .areas(list);
-    // Opaque: the thread's half is a surface, so the field is cleared from it
-    // after the frame and rule have taken their own cells.
+    // The conversation is opaque: it is a pane, not a window onto the field.
     frame.render_widget(Clear, detail);
     draw_threads(frame, threads, app);
     draw_conversation(frame, detail, app);
@@ -239,7 +238,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     // panel; their open lists overlay the rows rather than pushing them.
     surface::cover(frame, toolbar);
     draw_controls(frame, toolbar, threads, app);
-    surface::rule(frame, list, rule.y);
+    surface::horizontal_divider(frame, list, rule.y);
 }
 
 /// The filter and sort pills at the top of the list.

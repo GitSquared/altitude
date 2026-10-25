@@ -56,7 +56,7 @@ impl<'a> Columns<'a> {
             .split(inner)
             .to_vec();
         for pair in rects.windows(2) {
-            surface::divider(frame, inner, pair[0].right());
+            surface::vertical_divider(frame, inner, pair[0].right());
         }
         rects
     }
