@@ -16,16 +16,17 @@ pub fn is_dismiss(key: KeyEvent) -> bool {
     matches!(key.code, KeyCode::Esc | KeyCode::Char('q'))
 }
 
-/// Whether the operator asked to proceed rather than look: ctrl-enter, the heavier
-/// of the two actions a surface offers. It starts the work a creation page is
-/// showing, and it takes a task over from the list.
+/// Whether the operator asked for the secondary action rather than the primary
+/// one: ctrl-enter, the heavier of the two gestures a surface offers. It starts
+/// the work a creation page is showing, takes a task over from the list, and
+/// replies where enter accepts.
 ///
 /// One chord everywhere, so the gesture is one thing to learn and one thing to
 /// state. What it costs is stated here once: a chorded enter is a key of its own
 /// only under the terminal's keyboard protocol, and elsewhere it arrives as plain
 /// enter. What sits behind this therefore asks before it does anything the
 /// operator would not want by pressing the key beside it.
-pub fn is_proceed(key: KeyEvent) -> bool {
+pub fn is_secondary(key: KeyEvent) -> bool {
     key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
@@ -164,11 +165,12 @@ pub fn help_sections() -> Vec<HelpSection> {
                 ("j/k · ↓/↑", "Move between signal threads"),
                 (
                     "Enter",
-                    "Do the thread's default: reply to a question, acknowledge an update",
+                    "Take the primary action: mark a log read, acknowledge a decision, accept a review, or reply where that is all there is",
                 ),
-                ("r", "Reply: write instructions back to the agent"),
-                ("a", "Acknowledge an update"),
-                ("c", "Accept the work and close the task; asks first"),
+                (
+                    "Ctrl-Enter",
+                    "Take the secondary action where the thread has one: reply to the agent. A reply reopens the thread it answers",
+                ),
                 (
                     "PgUp / PgDn · Home / End",
                     "Scroll the conversation by a message",

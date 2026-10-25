@@ -41,7 +41,7 @@ use crate::{
         TaskOperatorSignalMessage, TaskOperatorSignalThread, TaskService, TaskServiceError,
     },
     tracker::{IssueReference, IssueSnapshot, IssueSummary, TrackerKind},
-    tui::keys::{is_dismiss, is_proceed, is_remove},
+    tui::keys::{is_dismiss, is_remove, is_secondary},
     tui::popups,
     tui::screens,
     tui::widgets::{
@@ -62,7 +62,10 @@ use screens::settings::{
     CredentialKind, Depth, Focus, Form, GitIdentity, Panel, RowKind, Section, Setting, Target,
 };
 use screens::shell::{GuestRequest, Shell};
-use screens::signals::{Composer, SignalAction, SignalFilter, SignalSort};
+use screens::signals::{
+    Composer, SignalAction, SignalFilter, SignalSort, is_lingering, primary_action,
+    secondary_action,
+};
 
 /// What the keyboard is answering to, most immediate first.
 ///
@@ -688,9 +691,15 @@ impl App {
                 vec![
                     Offer::new(SignalFilter::Unresolved, "Unresolved"),
                     Offer::new(SignalFilter::All, "All"),
+                    Offer::new(SignalFilter::NeedsYou, "Needs you"),
+                    Offer::new(SignalFilter::Review, "Ready to review"),
+                    Offer::new(SignalFilter::Decisions, "Decisions"),
+                    Offer::new(SignalFilter::Info, "Info log"),
+                    Offer::new(SignalFilter::Resolved, "Resolved"),
                 ],
                 0,
-            ),
+            )
+            .without_search(),
             signal_sort: Select::new(
                 "Sort",
                 vec![
@@ -1029,26 +1038,17 @@ impl App {
                     Hint::new("s", "sort"),
                 ];
                 if let Some(thread) = self.signal_thread() {
-                    let replyable = thread.is_unresolved()
-                        || matches!(
-                            thread.kind,
-                            TaskOperatorSignalKind::Decision | TaskOperatorSignalKind::Blocked
-                        );
-                    if replyable {
-                        hints.push(Hint::new("enter", "reply"));
-                    }
-                    if thread.kind == TaskOperatorSignalKind::Decision {
+                    if let Some(action) = primary_action(thread) {
                         hints.push(Hint::new(
-                            "x",
-                            if thread.is_resolved() {
-                                "reopen"
-                            } else {
-                                "resolve"
-                            },
+                            "enter",
+                            action.label(thread.kind, thread.is_resolved()),
                         ));
                     }
-                    if thread.kind == TaskOperatorSignalKind::InReview && thread.is_unresolved() {
-                        hints.push(Hint::new("c", "accept"));
+                    if let Some(action) = secondary_action(thread) {
+                        hints.push(Hint::new(
+                            "ctrl-enter",
+                            action.label(thread.kind, thread.is_resolved()),
+                        ));
                     }
                 }
                 hints.push(Hint::new("pgup/pgdn", "scroll"));
@@ -3184,15 +3184,21 @@ impl App {
             .chosen_value()
             .copied()
             .unwrap_or(SignalSort::Oldest);
+        let now = chrono::Utc::now().timestamp_millis();
         let mut threads: Vec<_> = self
             .signal_all_threads
             .iter()
-            .filter(|thread| filter == SignalFilter::All || thread.is_unresolved())
+            .filter(|thread| filter.matches(thread, now))
             .cloned()
             .collect();
+        // A resolved thread that is still lingering in the unresolved view
+        // keeps the place it had: the point of the five seconds is that it does
+        // not move out from under the operator before they have seen it end.
+        let keeping = filter == SignalFilter::Unresolved;
         threads.sort_by(|left, right| {
             let group = |thread: &TaskOperatorSignalThread| {
-                (u8::from(thread.is_resolved()), thread.kind.tier())
+                let settled = thread.is_resolved() && !(keeping && is_lingering(thread, now));
+                (u8::from(settled), thread.kind.tier())
             };
             group(left).cmp(&group(right)).then_with(|| match sort {
                 SignalSort::Oldest => left.opened_at_ms.cmp(&right.opened_at_ms),
@@ -3210,12 +3216,94 @@ impl App {
         }
     }
 
+    /// Whether a resolved thread is still being shown in the unresolved view,
+    /// either because its five seconds have not run out or because it has not yet
+    /// been removed after they did.
+    pub(in crate::tui) fn has_lingering_signals(&self) -> bool {
+        self.signal_filter.chosen_value() == Some(&SignalFilter::Unresolved)
+            && self
+                .signal_threads
+                .iter()
+                .any(TaskOperatorSignalThread::is_resolved)
+    }
+
+    /// Rebuild the view once a linger has run out, so the row leaves on time
+    /// instead of waiting for the next event.
+    pub(in crate::tui) fn expire_signal_linger(&mut self) {
+        if self.has_lingering_signals() {
+            self.apply_signal_view();
+        }
+    }
+
+    /// Mark the thread the operator is leaving behind as read, when it is one of
+    /// the agent's logs. Reading is navigation, not appearance: the log stays
+    /// unresolved until the operator has had the screen on it and moved on.
+    async fn read_info_thread<E>(
+        &mut self,
+        thread: TaskOperatorSignalThread,
+        task_service: &TaskService<E>,
+        remote_signals: &mpsc::Sender<RemoteSignalsReply>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        if thread.kind != TaskOperatorSignalKind::Update || thread.is_resolved() {
+            return;
+        }
+        if self.remote_signals.is_some() {
+            self.act_on_remote_signal(
+                thread.id,
+                RemoteSignalAction::Resolve(true),
+                None,
+                remote_signals,
+            );
+            return;
+        }
+        match task_service
+            .resolve_signal(&thread.task_id, &thread.id, true)
+            .await
+        {
+            Ok(task) => {
+                self.resolve_signal_locally(&thread.id, true);
+                self.replace_task(task);
+            }
+            Err(error) => self.problem(error.to_string()),
+        }
+    }
+
+    async fn read_selected_info<E>(
+        &mut self,
+        task_service: &TaskService<E>,
+        remote_signals: &mpsc::Sender<RemoteSignalsReply>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        if let Some(thread) = self.signal_thread().cloned() {
+            self.read_info_thread(thread, task_service, remote_signals)
+                .await;
+        }
+    }
+
     /// Move between threads, and start the one now selected at its newest
     /// message.
-    pub(in crate::tui) fn move_signal_cursor(&mut self, forward: bool) {
+    pub(in crate::tui) async fn move_signal_cursor<E>(
+        &mut self,
+        forward: bool,
+        task_service: &TaskService<E>,
+        remote_signals: &mpsc::Sender<RemoteSignalsReply>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        // Move first, then resolve what was left behind: resolving changes which
+        // group the old row belongs to, and the cursor should not be following a
+        // row that is moving under it.
+        let previous = self.signal_thread().cloned();
         self.signals_cursor
             .move_by(forward, self.signal_threads.len());
         self.signal_scroll = u16::MAX;
+        if let Some(thread) = previous {
+            self.read_info_thread(thread, task_service, remote_signals)
+                .await;
+        }
     }
 
     /// Mark a thread resolved locally; the filter decides whether it stays on
@@ -3261,11 +3349,6 @@ impl App {
         let Some(task_id) = self.signal_task_id.clone() else {
             return;
         };
-        // Info logs are read by appearing. Resolve them before the list is read,
-        // so the screen and the store agree on what is already seen.
-        if let Ok(task) = task_service.resolve_info_signals(&task_id).await {
-            self.replace_task(task);
-        }
         let Ok(threads) = task_service.signal_threads(&task_id).await else {
             return;
         };
@@ -3819,8 +3902,18 @@ impl App {
         }
         // A dropdown owns every key while it is open, escape included.
         if self.signal_filter.is_open() {
+            let before = self.signal_filter.chosen_value().copied();
+            let leaving = self.signal_thread().cloned();
             self.signal_filter.handle_key(key);
-            self.apply_signal_view();
+            if self.signal_filter.chosen_value().copied() != before {
+                self.apply_signal_view();
+                if let Some(thread) = leaving {
+                    self.read_info_thread(thread, task_service, remote_signals)
+                        .await;
+                }
+            } else {
+                self.apply_signal_view();
+            }
             return;
         }
         if self.signal_sort.is_open() {
@@ -3833,22 +3926,31 @@ impl App {
             KeyCode::PageUp => self.signal_scroll = self.signal_scroll.saturating_sub(1),
             KeyCode::Home => self.signal_scroll = 0,
             KeyCode::End => self.signal_scroll = u16::MAX,
-            _ if is_dismiss(key) || key.code == KeyCode::Char('q') => self.leave_signals(),
-            KeyCode::Down | KeyCode::Char('j') => self.move_signal_cursor(true),
-            KeyCode::Up | KeyCode::Char('k') => self.move_signal_cursor(false),
+            _ if is_dismiss(key) || key.code == KeyCode::Char('q') => {
+                self.read_selected_info(task_service, remote_signals).await;
+                self.leave_signals();
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.move_signal_cursor(true, task_service, remote_signals)
+                    .await
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.move_signal_cursor(false, task_service, remote_signals)
+                    .await
+            }
             KeyCode::Char('f') => self.signal_filter.open(),
             KeyCode::Char('s') => self.signal_sort.open(),
-            KeyCode::Enter | KeyCode::Char('r') => {
-                self.act_on_signal(SignalAction::Reply, task_service, remote_signals)
-                    .await
+            KeyCode::Enter if is_secondary(key) => {
+                if let Some(action) = self.signal_thread().and_then(secondary_action) {
+                    self.act_on_signal(action, task_service, remote_signals)
+                        .await
+                }
             }
-            KeyCode::Char('x') => {
-                self.act_on_signal(SignalAction::Resolve, task_service, remote_signals)
-                    .await
-            }
-            KeyCode::Char('c') => {
-                self.act_on_signal(SignalAction::Accept, task_service, remote_signals)
-                    .await
+            KeyCode::Enter => {
+                if let Some(action) = self.signal_thread().and_then(primary_action) {
+                    self.act_on_signal(action, task_service, remote_signals)
+                        .await
+                }
             }
             _ => {}
         }
@@ -3881,10 +3983,21 @@ impl App {
                 }
             }
             SignalAction::Resolve => {
-                if !matches!(thread.kind, TaskOperatorSignalKind::Decision) {
+                if !matches!(
+                    thread.kind,
+                    TaskOperatorSignalKind::Update | TaskOperatorSignalKind::Decision
+                ) {
                     return;
                 }
-                let resolved = !thread.resolved;
+                // An update is resolved, never reopened: once read it is history.
+                let resolved = if thread.kind == TaskOperatorSignalKind::Update {
+                    true
+                } else {
+                    !thread.resolved
+                };
+                if resolved == thread.resolved {
+                    return;
+                }
                 if remote {
                     self.act_on_remote_signal(
                         thread.id,
@@ -3941,7 +4054,7 @@ impl App {
         // wherever the card is drawn and only the trip differs: a task on another
         // machine is reached over the link rather than called directly. Taking one
         // over has to move it here first, and its question says so.
-        if is_proceed(key) {
+        if is_secondary(key) {
             let asked = self.selected_held().map(|held| {
                 (
                     held.summary.id.clone(),
@@ -4278,15 +4391,6 @@ impl App {
         // The threads are this machine's now, whatever remote was open before.
         self.remote_signals = None;
         self.remote_signals_loading = false;
-        // Info logs are read by appearing, so opening the screen resolves every
-        // open one before the list is drawn.
-        let task = match task_service.resolve_info_signals(&task_id).await {
-            Ok(task) => task,
-            Err(error) => {
-                self.problem(error.to_string());
-                return;
-            }
-        };
         let threads = match task_service.signal_threads(&task_id).await {
             Ok(threads) => threads,
             Err(error) => {
@@ -4300,7 +4404,6 @@ impl App {
         self.signals_cursor = list::Cursor::default();
         self.apply_signal_view();
         self.signal_arrivals.clear();
-        self.replace_task(task);
         self.signal_scroll = u16::MAX;
         self.signal_composer = None;
         self.foreground = Foreground::Signals;
@@ -4394,7 +4497,7 @@ impl App {
     }
 
     /// Read one remote task's signals. Info logs resolve where they live when
-    /// the screen opens; the rest stay unresolved until they are acted on.
+    /// the operator leaves them, just as they do here.
     async fn read_remote_signals(
         address: &str,
         task_id: &str,
@@ -4402,9 +4505,6 @@ impl App {
         client: &LinkClient,
     ) -> Result<Vec<TaskOperatorSignalThread>, String> {
         let peer = Self::remote_peer(address, keys).await?;
-        if let Err(error) = client.resolve_info_signals(peer.clone(), task_id).await {
-            tracing::debug!(%error, address, task_id, "could not resolve a remote's info logs");
-        }
         client
             .operator_signals(peer, task_id)
             .await
@@ -4627,11 +4727,6 @@ impl App {
             .iter()
             .map(|thread| (thread.id.clone(), (thread.messages.len(), thread.resolved)))
             .collect();
-        // A new info log is read by being on this screen; resolve it before the
-        // list is read so it cannot stay unresolved behind the operator's eyes.
-        if let Ok(task) = event_loop.service().resolve_info_signals(&task_id).await {
-            self.replace_task(task);
-        }
         let Ok(threads) = event_loop.signal_threads(&task_id).await else {
             return;
         };

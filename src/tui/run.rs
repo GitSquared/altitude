@@ -260,6 +260,9 @@ where
     // Acknowledgements identify the exact content sent while local edits continue.
     let (config_pushes, mut config_pushed) = mpsc::channel::<ConfigPushReply>(8);
     let mut issue_search_clock = time::interval(Duration::from_millis(80));
+    // A resolved thread stays on the signals list for five seconds. The clock is
+    // what makes the last second happen without waiting for another key.
+    let mut signal_linger_clock = time::interval(Duration::from_millis(250));
     let mut effects: EffectManager<()> = EffectManager::default();
     let mut previous_foreground = mem::discriminant(&app.foreground);
     let mut last_frame = Instant::now();
@@ -321,10 +324,12 @@ where
             }
         }
         // ctrl-enter and shift-enter only arrive as keys of their own under this
-        // protocol. The task grid uses ctrl-enter; the creation page and the
-        // signal composer use both.
-        let wants_enhanced = matches!(app.foreground, Foreground::NewTask(_) | Foreground::Tasks)
-            || app.signal_composer.is_some();
+        // protocol. The task grid and signals use ctrl-enter as their secondary
+        // action; the creation page and the signal composer use both.
+        let wants_enhanced = matches!(
+            app.foreground,
+            Foreground::NewTask(_) | Foreground::Tasks | Foreground::Signals
+        ) || app.signal_composer.is_some();
         if keys_enhanced != wants_enhanced {
             keys_enhanced = !keys_enhanced;
             if keys_enhanced {
@@ -603,6 +608,10 @@ where
                 redraw = true;
             }
             _ = shell_notice.tick(), if app.shell_has_active_notice() => {}
+            _ = signal_linger_clock.tick(), if app.has_lingering_signals() => {
+                app.expire_signal_linger();
+                redraw = true;
+            }
             _ = shimmer.tick(), if app.animations() && app.open_shell().is_none() => {
                 app.shimmer = app.shimmer.wrapping_add(1);
                 redraw = true;

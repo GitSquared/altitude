@@ -26,6 +26,35 @@ pub fn outline() -> Style {
     Style::reset()
 }
 
+/// Cover an area a widget is about to write in.
+///
+/// The field is a backdrop, not a layer every widget is expected to know about:
+/// anything that is meant to be opaque covers its own rectangle first. A row,
+/// a control bar, a button footer — all of them are opaque. Only the gaps a
+/// screen deliberately leaves open let the contours through.
+pub fn cover(frame: &mut Frame, area: Rect) {
+    frame.render_widget(Clear, area);
+}
+
+/// A horizontal rule dividing a panel, joined to its sides.
+///
+/// `area` is the inside of one column: the rule starts at the surface's left
+/// border, runs across the column, and meets the vertical rule on the right.
+pub fn rule(frame: &mut Frame, area: Rect, y: u16) {
+    if area.width == 0 || y < area.y || y >= area.bottom() {
+        return;
+    }
+    let outline = outline();
+    let buffer = frame.buffer_mut();
+    if let Some(left) = area.x.checked_sub(1) {
+        buffer[(left, y)].set_symbol("├").set_style(outline);
+    }
+    for x in area.x..area.right() {
+        buffer[(x, y)].set_symbol("─").set_style(outline);
+    }
+    buffer[(area.right(), y)].set_symbol("┼").set_style(outline);
+}
+
 /// A single rule between columns, joined to the frame at both ends.
 pub fn divider(frame: &mut Frame, inner: Rect, x: u16) {
     if inner.height == 0 || x < inner.x || x >= inner.right() {

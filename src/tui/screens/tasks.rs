@@ -313,9 +313,15 @@ fn card_extras(summary: &TaskSummary, now_ms: i64) -> Vec<Line<'static>> {
         ));
     }
     if summary.unresolved_signal_count > 0 {
+        let (mark, tone) = summary
+            .blocking_signal_kind
+            .map_or(('●', palette::accent()), |kind| {
+                let view = signal::view(kind);
+                (view.symbol, view.tone)
+            });
         extras.push(Line::styled(
-            format!("● {} unresolved", summary.unresolved_signal_count),
-            palette::accent().bold(),
+            format!("{mark} {} unresolved", summary.unresolved_signal_count),
+            tone.bold(),
         ));
     }
     match summary.contributions.len() {

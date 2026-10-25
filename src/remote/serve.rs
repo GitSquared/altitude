@@ -273,12 +273,6 @@ impl TaskHost for OwnTasks {
         Box::pin(async move {
             use super::protocol::SignalCommand;
             let task = match &command {
-                SignalCommand::ResolveInfo { task_id } => tasks
-                    .list()
-                    .await
-                    .map_err(|error| error.to_string())?
-                    .into_iter()
-                    .find(|task| task.id == *task_id),
                 SignalCommand::Reply {
                     task_id, signal_id, ..
                 }
@@ -305,13 +299,6 @@ impl TaskHost for OwnTasks {
                 return Err("this task is no longer active".into());
             }
             match command {
-                SignalCommand::ResolveInfo { task_id } => {
-                    tasks
-                        .service()
-                        .resolve_info_signals(&task_id)
-                        .await
-                        .map_err(|error| error.to_string())?;
-                }
                 SignalCommand::Reply {
                     task_id,
                     signal_id,

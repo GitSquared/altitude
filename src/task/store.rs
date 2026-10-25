@@ -791,28 +791,6 @@ impl TaskStore {
         .await
     }
 
-    /// Info logs are read by looking at them, so opening the screen resolves
-    /// every open update on the task. The resolved thread remains in the log.
-    pub async fn resolve_info_signals(&self, task_id: &str) -> Result<Task, TaskError> {
-        let events: Vec<_> = self
-            .operator_signal_threads(task_id)
-            .await?
-            .into_iter()
-            .filter(|thread| thread.kind == TaskOperatorSignalKind::Update)
-            .map(|thread| TaskHistoryEvent::OperatorSignalResolved {
-                signal_id: thread.id,
-                resolved: true,
-                by: TaskOperatorSignalAuthor::Operator,
-            })
-            .collect();
-        if events.is_empty() {
-            return self.get(task_id).await?.ok_or(TaskError::OperationRejected(
-                "this task is no longer in play",
-            ));
-        }
-        self.append_events(task_id, &events).await
-    }
-
     /// A signal id unused inside this task. Two words are enough because the
     /// task is the namespace; the check makes the promise real even when a
     /// generation happens to land on a word pair already present.

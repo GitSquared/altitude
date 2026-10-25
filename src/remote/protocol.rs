@@ -320,9 +320,6 @@ pub enum TaskOrigin {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SignalCommand {
-    ResolveInfo {
-        task_id: String,
-    },
     Reply {
         task_id: String,
         signal_id: String,

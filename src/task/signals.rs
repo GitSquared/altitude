@@ -46,15 +46,6 @@ where
             .map_err(TaskServiceError::Task)
     }
 
-    /// Resolve every update log the operator has now seen. Called when the
-    /// signals screen is opened; the history remains under the resolved filter.
-    pub async fn resolve_info_signals(&self, task_id: &str) -> Result<Task, TaskServiceError> {
-        self.store
-            .resolve_info_signals(task_id)
-            .await
-            .map_err(TaskServiceError::Task)
-    }
-
     /// Resolve or reopen a thread. Resolving does not wake the agent and does not
     /// change the task; accepting a review is the separate task-ending action.
     pub async fn resolve_signal(

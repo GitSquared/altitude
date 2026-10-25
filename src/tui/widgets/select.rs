@@ -68,6 +68,9 @@ pub struct Select<T> {
     /// Which match the keys are on, as an index into the matches rather than
     /// into the offers.
     at: usize,
+    /// How many offers it takes before typing narrows the list. A filter of
+    /// seven known values wants j/k; a list of machines wants a query.
+    search_from: usize,
 }
 
 impl<T> Select<T> {
@@ -79,7 +82,16 @@ impl<T> Select<T> {
             open: false,
             query: String::new(),
             at: 0,
+            search_from: SEARCH_FROM,
         }
+    }
+
+    /// Keep every key for stepping, even when the list is longer than the search
+    /// threshold. For a short, known set of values, a query is a mode to
+    /// remember for no gain.
+    pub fn without_search(mut self) -> Self {
+        self.search_from = usize::MAX;
+        self
     }
 
     pub fn chosen_offer(&self) -> Option<&Offer<T>> {
@@ -128,7 +140,7 @@ impl<T> Select<T> {
     /// Whether this list is long enough that typing narrows it, which is what
     /// decides whether the keys are a query or a way through.
     pub fn is_searching(&self) -> bool {
-        self.open && self.offers.len() >= SEARCH_FROM
+        self.open && self.offers.len() >= self.search_from
     }
 
     /// Open the list on the chosen offer, with nothing typed.

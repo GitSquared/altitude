@@ -487,20 +487,6 @@ impl LinkClient {
         }
     }
 
-    pub async fn resolve_info_signals(
-        &self,
-        peer: impl Into<EndpointAddr>,
-        task_id: &str,
-    ) -> LinkResult<()> {
-        self.signal(
-            peer,
-            super::protocol::SignalCommand::ResolveInfo {
-                task_id: task_id.into(),
-            },
-        )
-        .await
-    }
-
     pub async fn reply_operator_signal(
         &self,
         peer: impl Into<EndpointAddr>,

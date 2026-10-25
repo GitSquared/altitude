@@ -7,9 +7,9 @@
 //! between rows.
 //!
 //! A thread has one state: unresolved or resolved. Reading is not a separate
-//! fact. Info logs resolve themselves when the screen reads them; every other
-//! kind is resolved by the operator or the agent. Accepting a review is a
-//! resolve that also ends the task, behind a confirmation.
+//! fact. An info log stays unresolved until the operator leaves the thread it
+//! was reading, so it cannot disappear before it has been seen. Accepting a
+//! review is a resolve that also ends the task, behind a confirmation.
 
 use std::{collections::HashMap, time::Duration};
 
@@ -17,6 +17,7 @@ use chrono::Utc;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
+    style::Style,
     text::{Line, Span},
     widgets::{Clear, Paragraph, Wrap},
 };
@@ -26,14 +27,14 @@ use crate::{
     tui::{
         App,
         widgets::{
-            card,
+            card, chrome,
             columns::Columns,
             header,
             list::{self, Row},
             palette, signal,
-            surface::Surface,
+            surface::{self, Surface},
             text::TextBox,
-            utils::{Dot, ago, shimmer, since, truncate},
+            utils::{ago, shimmer, since, truncate},
         },
     },
 };
@@ -49,10 +50,44 @@ const LIST_PADDING: u16 = 1;
 const COMPOSER_HEIGHT: u16 = 5;
 
 /// Which threads the list shows.
+///
+/// The groups are the filters: a kind has one heading, and choosing that heading
+/// is how the operator asks for the whole history of that kind. `Unresolved`
+/// keeps a just-resolved thread for a moment so it can be seen leaving rather
+/// than vanishing under the cursor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignalFilter {
-    Unresolved,
     All,
+    Unresolved,
+    NeedsYou,
+    Review,
+    Decisions,
+    Info,
+    Resolved,
+}
+
+impl SignalFilter {
+    pub fn matches(self, thread: &TaskOperatorSignalThread, now_ms: i64) -> bool {
+        match self {
+            Self::All => true,
+            Self::Unresolved => thread.is_unresolved() || is_lingering(thread, now_ms),
+            Self::Resolved => thread.is_resolved(),
+            Self::NeedsYou => thread.kind == TaskOperatorSignalKind::Blocked,
+            Self::Review => thread.kind == TaskOperatorSignalKind::InReview,
+            Self::Decisions => thread.kind == TaskOperatorSignalKind::Decision,
+            Self::Info => thread.kind == TaskOperatorSignalKind::Update,
+        }
+    }
+}
+
+/// How long a resolved thread stays in the unresolved view.
+pub const LINGER_MS: i64 = 5_000;
+
+pub fn is_lingering(thread: &TaskOperatorSignalThread, now_ms: i64) -> bool {
+    thread.is_resolved()
+        && thread
+            .resolved_at_ms
+            .is_some_and(|at| now_ms.saturating_sub(at) < LINGER_MS)
 }
 
 /// Which way the threads inside a tier read.
@@ -64,9 +99,9 @@ pub enum SignalSort {
 
 /// What the operator can do with the selected thread.
 ///
-/// A reply is always a reply: the words are the meaning, and the agent reads
-/// them. Resolve is the one explicit thread state. Accept is only a review's
-/// resolve, because it also ends the task; it is never on Enter.
+/// The screen shows one primary action and, where there is a second, one
+/// secondary action. They are the same gestures everywhere: enter is primary,
+/// ctrl-enter is secondary. What they mean follows from the kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignalAction {
     Reply,
@@ -75,29 +110,82 @@ pub enum SignalAction {
 }
 
 impl SignalAction {
-    pub fn verb(self) -> &'static str {
+    /// What the button and the hint call this action in a given thread.
+    pub fn label(self, kind: TaskOperatorSignalKind, resolved: bool) -> &'static str {
         match self {
             Self::Reply => "reply",
-            Self::Resolve => "resolve",
             Self::Accept => "accept",
+            Self::Resolve => match (kind, resolved) {
+                (TaskOperatorSignalKind::Update, _) => "mark read",
+                (TaskOperatorSignalKind::Decision, true) => "reopen",
+                (TaskOperatorSignalKind::Decision, false) => "acknowledge",
+                _ => "resolve",
+            },
         }
     }
 }
 
-/// The keys a thread of this kind offers.
-///
-/// Info has no manual resolve: reading it is resolving it. Answering is the
-/// operator's move on a blocked thread; the agent resolves it once it has
-/// resumed. A decision can be resolved directly, and a review is accepted with
-/// its own deliberate key.
-pub fn actions_for(kind: TaskOperatorSignalKind) -> &'static [SignalAction] {
-    const REPLY: &[SignalAction] = &[SignalAction::Reply];
-    const DISCUSS: &[SignalAction] = &[SignalAction::Reply, SignalAction::Resolve];
-    const REVIEW: &[SignalAction] = &[SignalAction::Reply, SignalAction::Accept];
-    match kind {
-        TaskOperatorSignalKind::Update | TaskOperatorSignalKind::Blocked => REPLY,
-        TaskOperatorSignalKind::Decision => DISCUSS,
-        TaskOperatorSignalKind::InReview => REVIEW,
+/// The action enter takes on this thread.
+pub fn primary_action(thread: &TaskOperatorSignalThread) -> Option<SignalAction> {
+    if thread.is_resolved() {
+        return (thread.kind == TaskOperatorSignalKind::Decision).then_some(SignalAction::Resolve);
+    }
+    Some(match thread.kind {
+        TaskOperatorSignalKind::Blocked => SignalAction::Reply,
+        TaskOperatorSignalKind::Update | TaskOperatorSignalKind::Decision => SignalAction::Resolve,
+        TaskOperatorSignalKind::InReview => SignalAction::Accept,
+    })
+}
+
+/// The action ctrl-enter takes. A blocked thread's primary is already a reply,
+/// so there is no second thing to offer there.
+pub fn secondary_action(thread: &TaskOperatorSignalThread) -> Option<SignalAction> {
+    if thread.is_resolved() {
+        return matches!(
+            thread.kind,
+            TaskOperatorSignalKind::Decision | TaskOperatorSignalKind::Blocked
+        )
+        .then_some(SignalAction::Reply);
+    }
+    (thread.kind != TaskOperatorSignalKind::Blocked).then_some(SignalAction::Reply)
+}
+
+/// How a group reads: its name, the mark beside it, and its tone.
+struct Group {
+    title: &'static str,
+    symbol: char,
+    tone: Style,
+}
+
+fn group_of(thread: &TaskOperatorSignalThread, linger: bool) -> Group {
+    if thread.is_resolved() && !linger {
+        return Group {
+            title: "RESOLVED",
+            symbol: '✓',
+            tone: palette::muted(),
+        };
+    }
+    match thread.kind {
+        TaskOperatorSignalKind::Blocked => Group {
+            title: "NEEDS YOU",
+            symbol: '?',
+            tone: palette::attention(),
+        },
+        TaskOperatorSignalKind::InReview => Group {
+            title: "READY TO REVIEW",
+            symbol: '◆',
+            tone: palette::good(),
+        },
+        TaskOperatorSignalKind::Decision => Group {
+            title: "DECISIONS",
+            symbol: '→',
+            tone: palette::decision(),
+        },
+        TaskOperatorSignalKind::Update => Group {
+            title: "INFO LOG",
+            symbol: '○',
+            tone: palette::muted(),
+        },
     }
 }
 
@@ -107,21 +195,27 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     let [header_area, body] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
     let task = app.signal_task_title();
-    let unresolved = app
-        .signal_threads
-        .iter()
-        .filter(|thread| thread.is_unresolved())
-        .count();
-    let showing = app.signal_filter.chosen_value();
-    let count = if showing == Some(&SignalFilter::All) {
-        match app.signal_threads.len() {
+    let showing = app.signal_filter.chosen_value().copied();
+    let count = match showing {
+        Some(SignalFilter::Unresolved) => {
+            let unresolved = app
+                .signal_threads
+                .iter()
+                .filter(|thread| thread.is_unresolved())
+                .count();
+            match unresolved {
+                1 => "1 unresolved".to_owned(),
+                count => format!("{count} unresolved"),
+            }
+        }
+        Some(SignalFilter::Resolved) => match app.signal_threads.len() {
+            1 => "1 resolved".to_owned(),
+            count => format!("{count} resolved"),
+        },
+        _ => match app.signal_threads.len() {
             1 => "1 thread".to_owned(),
             count => format!("{count} threads"),
-        }
-    } else if unresolved == 1 {
-        "1 unresolved".to_owned()
-    } else {
-        format!("{unresolved} unresolved")
+        },
     };
     header::draw(frame, header_area, "SIGNALS", Some(&task), Some(&count));
     // One frame, split by a single rule: the sections are two halves of the same
@@ -130,16 +224,22 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     let columns = Columns::new(&[LIST_WIDTH]).draw(frame, inner);
     let list = columns[0];
     let detail = columns[1];
-    let [toolbar, threads] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(list);
+    let [toolbar, rule, threads] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(list);
     // Opaque: the thread's half is a surface, so the field is cleared from it
     // after the frame and rule have taken their own cells.
     frame.render_widget(Clear, detail);
     draw_threads(frame, threads, app);
     draw_conversation(frame, detail, app);
-    // The controls sit above the list they change; their open lists overlay the
-    // rows rather than pushing them.
+    // The controls sit above the list they change in their own subdivision of the
+    // panel; their open lists overlay the rows rather than pushing them.
+    surface::cover(frame, toolbar);
     draw_controls(frame, toolbar, threads, app);
+    surface::rule(frame, list, rule.y);
 }
 
 /// The filter and sort pills at the top of the list.
@@ -179,39 +279,25 @@ fn draw_controls(frame: &mut Frame, toolbar: Rect, popup_area: Rect, app: &App) 
 /// The list of threads, in the left half of the frame, with the field visible
 /// through it.
 fn draw_threads(frame: &mut Frame, area: Rect, app: &mut App) {
-    let tick = app.animation_tick();
     let agent = app.signal_agent_label();
     let now = Utc::now().timestamp_millis();
-    let group_of = |thread: &TaskOperatorSignalThread| {
-        if thread.is_resolved() {
-            "RESOLVED"
-        } else {
-            match thread.kind {
-                TaskOperatorSignalKind::Blocked | TaskOperatorSignalKind::InReview => "NEEDS YOU",
-                TaskOperatorSignalKind::Decision => "DECISIONS",
-                TaskOperatorSignalKind::Update => "INFO LOG",
-            }
-        }
-    };
+    let keeping = app.signal_filter.chosen_value() == Some(&SignalFilter::Unresolved);
     let mut counts: HashMap<&'static str, usize> = HashMap::new();
     for thread in &app.signal_threads {
-        *counts.entry(group_of(thread)).or_default() += 1;
+        let linger = keeping && is_lingering(thread, now);
+        *counts.entry(group_of(thread, linger).title).or_default() += 1;
     }
-    let mut previous = None;
+    let mut previous: Option<&'static str> = None;
     let rows = app
         .signal_threads
         .iter()
         .map(|thread| {
-            let group = group_of(thread);
-            let starts = previous != Some(group);
-            previous = Some(group);
+            let linger = keeping && is_lingering(thread, now);
+            let group = group_of(thread, linger);
+            let starts = previous != Some(group.title);
+            previous = Some(group.title);
             let view = signal::view(thread.kind);
             let unresolved = thread.is_unresolved();
-            let style = if unresolved {
-                view.tone
-            } else {
-                palette::muted()
-            };
             let last = thread.messages.last();
             let note = last.map(|message| since(message.at_ms, now));
             let detail = match (unresolved, last) {
@@ -230,39 +316,33 @@ fn draw_threads(frame: &mut Frame, area: Rect, app: &mut App) {
                 }
                 (true, None) => view.label.to_owned(),
             };
-            // A thread that just changed moves before it settles: the symbol
-            // travels and the name carries the accent for a moment.
             let arriving = app.animations()
                 && unresolved
                 && app
                     .signal_arrivals
                     .get(&thread.id)
                     .is_some_and(|noticed| noticed.elapsed() < Duration::from_millis(1600));
-            let mark = if arriving {
-                Dot::travelling(view.symbol, palette::accent())
-            } else {
-                Dot::still(if unresolved { view.symbol } else { '✓' }, style)
-            };
-            let mut row = Row::new(thread.title.clone())
-                .detail(detail)
-                .mark(mark.spans(tick))
-                .gap(true);
+            // The group heading carries the kind's mark and colour, so the row
+            // can spend its width on the title and the age instead.
+            let mut row = Row::new(thread.title.clone()).detail(detail).gap(true);
             if starts {
-                row = row.heading(group, counts[group].to_string());
-            }
-            // Inside the two homogeneous groups the heading already says what
-            // the kind is; the two-kind group and the mixed resolved history
-            // need the row to say which one it is.
-            if !matches!(group, "DECISIONS" | "INFO LOG") {
-                row = row.label(Span::styled(view.label, style));
-            }
-            if let Some(note) = note {
-                row = row.note(note);
+                let mark = vec![Span::styled(
+                    format!("{} ", group.symbol),
+                    group.tone.bold(),
+                )];
+                row = row
+                    .heading(group.title, counts[group.title].to_string())
+                    .heading_kind(mark, group.tone.bold());
             }
             if arriving {
                 row = row.tone(palette::accent());
             } else if !unresolved {
                 row = row.tone(palette::muted());
+            } else {
+                row = row.tone(view.tone);
+            }
+            if let Some(note) = note {
+                row = row.note(note);
             }
             row
         })
@@ -321,7 +401,20 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
     let agent = app.signal_agent_label();
     let now = Utc::now().timestamp_millis();
     let view = signal::view(thread.kind);
-    let mut meta_line = vec![Span::styled(view.label.to_lowercase(), view.tone)];
+    let meta_tone = if thread.is_resolved() {
+        palette::muted()
+    } else {
+        view.tone
+    };
+    let meta_mark = if thread.is_resolved() {
+        '✓'
+    } else {
+        view.symbol
+    };
+    let mut meta_line = vec![Span::styled(
+        format!("{meta_mark} {}", view.label.to_lowercase()),
+        meta_tone,
+    )];
     if thread.is_resolved() {
         meta_line.push(Span::styled(
             format!(
@@ -343,34 +436,33 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
     }
     frame.render_widget(Paragraph::new(Line::from(meta_line)), meta);
     let composing = app.signal_composer.is_some();
-    let tail_height = if composing { COMPOSER_HEIGHT + 1 } else { 2 };
+    let tail_height = if composing { COMPOSER_HEIGHT + 2 } else { 2 };
     let [cards, tail] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(tail_height)]).areas(rest);
     let mut scroll = app.signal_scroll;
     draw_messages(frame, cards, thread, &agent, &mut scroll);
     if composing {
-        let [box_area, hint] =
-            Layout::vertical([Constraint::Length(COMPOSER_HEIGHT), Constraint::Length(1)])
+        let [box_area, actions_area] =
+            Layout::vertical([Constraint::Length(COMPOSER_HEIGHT), Constraint::Length(2)])
                 .areas(tail);
-        draw_composer(frame, box_area, hint, app, &agent);
-    } else {
-        let [rule, keys] =
-            Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(tail);
-        // Full width, padding included, so it belongs to the pane rather than to
-        // the text inside it.
-        frame.render_widget(
-            Paragraph::new(Line::styled(
-                "─".repeat(usize::from(area.width)),
-                palette::muted(),
-            )),
-            Rect {
-                x: area.x,
-                y: rule.y,
-                width: area.width,
-                height: 1,
-            },
+        draw_composer(frame, box_area, app, &agent);
+        draw_buttons(
+            frame,
+            area,
+            actions_area,
+            &[
+                chrome::Action::primary("send").focused(true),
+                chrome::Action::secondary("cancel"),
+            ],
         );
-        frame.render_widget(Paragraph::new(action_keys(thread, &agent)), keys);
+    } else {
+        let primary = primary_action(thread)
+            .map(|action| chrome::Action::primary(action.label(thread.kind, thread.is_resolved())));
+        let secondary = secondary_action(thread).map(|action| {
+            chrome::Action::secondary(action.label(thread.kind, thread.is_resolved()))
+        });
+        let actions: Vec<_> = primary.into_iter().chain(secondary).collect();
+        draw_buttons(frame, area, tail, &actions);
     }
     app.signal_scroll = scroll;
 }
@@ -426,20 +518,27 @@ fn draw_messages(
 
 /// The reply being written, where the conversation is, rather than in a box over
 /// it: the sentence belongs to the thread it will join.
-fn draw_composer(frame: &mut Frame, box_area: Rect, hint: Rect, app: &App, agent: &str) {
+fn draw_composer(frame: &mut Frame, box_area: Rect, app: &App, agent: &str) {
     let Some(composer) = &app.signal_composer else {
         return;
     };
     composer
         .body
         .draw_titled(frame, box_area, true, Some(&format!("reply to {agent}")));
-    frame.render_widget(
-        Paragraph::new(Line::styled(
-            "enter send · shift-enter new line · esc cancel",
-            palette::muted(),
-        )),
-        hint,
-    );
+}
+
+/// The buttons at the foot of the conversation. The keys are in the frame's
+/// guidance; the buttons say what they do, not which key does it.
+fn draw_buttons(frame: &mut Frame, surface: Rect, area: Rect, actions: &[chrome::Action<'_>]) {
+    surface::cover(frame, area);
+    // The rule starts at the column's rule and ends at the panel's edge, so the
+    // footer belongs to the pane rather than floating inside it.
+    let frame_rect = Rect {
+        x: surface.x.saturating_sub(1),
+        width: surface.width.saturating_add(2),
+        ..surface
+    };
+    chrome::actions(frame, frame_rect, area, actions);
 }
 
 fn draw_empty(frame: &mut Frame, area: Rect, app: &App) {
@@ -461,68 +560,6 @@ fn draw_empty(frame: &mut Frame, area: Rect, app: &App) {
             area,
         );
     }
-}
-
-/// The keys the thread offers. Reply is always on Enter; accepting is its own
-/// deliberate key because it also ends the task.
-fn action_keys(thread: &TaskOperatorSignalThread, agent: &str) -> Line<'static> {
-    if thread.is_resolved() {
-        let status = match thread.kind {
-            TaskOperatorSignalKind::Update => "✓ read".to_owned(),
-            TaskOperatorSignalKind::InReview => {
-                format!("✓ accepted by {}", who(thread.resolved_by, agent))
-            }
-            _ => format!("✓ resolved by {}", who(thread.resolved_by, agent)),
-        };
-        let mut spans = vec![Span::styled(status, palette::muted())];
-        let replyable = matches!(
-            thread.kind,
-            TaskOperatorSignalKind::Decision | TaskOperatorSignalKind::Blocked
-        );
-        if replyable {
-            spans.push(Span::raw("   "));
-            spans.push(Span::styled(" enter ", palette::focus()));
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled("reply", palette::primary()));
-        }
-        if thread.kind == TaskOperatorSignalKind::Decision {
-            spans.push(Span::raw("   "));
-            spans.push(Span::styled(" x ", palette::accent()));
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled("reopen", palette::muted()));
-        }
-        return Line::from(spans);
-    }
-    let mut spans = Vec::new();
-    for action in actions_for(thread.kind) {
-        if !spans.is_empty() {
-            spans.push(Span::raw("   "));
-        }
-        let key = match action {
-            SignalAction::Reply => "enter",
-            SignalAction::Resolve => "x",
-            SignalAction::Accept => "c",
-        };
-        let is_reply = *action == SignalAction::Reply;
-        spans.push(Span::styled(
-            format!(" {key} "),
-            if is_reply {
-                palette::focus()
-            } else {
-                palette::accent()
-            },
-        ));
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(
-            action.verb(),
-            if is_reply {
-                palette::primary()
-            } else {
-                palette::muted()
-            },
-        ));
-    }
-    Line::from(spans)
 }
 
 /// What the agent's message reads as on one line: its first line, so a list row

@@ -23,6 +23,11 @@ use crate::tui::widgets::{palette, utils::truncate};
 pub struct Heading {
     pub title: String,
     pub note: Option<String>,
+    /// The mark before the title and the tone both it and the title take. A
+    /// group of signals is the kind it holds, so the kind's symbol and colour
+    /// belong here rather than on every row under it.
+    pub mark: Vec<Span<'static>>,
+    pub tone: Style,
 }
 
 /// One row of a list.
@@ -31,8 +36,6 @@ pub struct Row {
     pub heading: Option<Heading>,
     /// The line the list is read by.
     pub title: String,
-    /// Said above the title: a category, a state.
-    pub label: Option<Span<'static>>,
     /// Said under the title: what the row last had to say.
     pub detail: Option<String>,
     /// Said at the right edge of the first line.
@@ -52,7 +55,6 @@ impl Row {
         Self {
             title: title.into(),
             heading: None,
-            label: None,
             detail: None,
             note: None,
             mark: Vec::new(),
@@ -65,12 +67,18 @@ impl Row {
         self.heading = Some(Heading {
             title: title.into(),
             note: Some(note.into()),
+            mark: Vec::new(),
+            tone: palette::heading(),
         });
         self
     }
 
-    pub fn label(mut self, label: Span<'static>) -> Self {
-        self.label = Some(label);
+    /// Give the group's heading the mark and tone of what it holds.
+    pub fn heading_kind(mut self, mark: Vec<Span<'static>>, tone: Style) -> Self {
+        if let Some(heading) = &mut self.heading {
+            heading.mark = mark;
+            heading.tone = tone;
+        }
         self
     }
 
@@ -101,10 +109,7 @@ impl Row {
 
     /// How many lines the row takes, before its gap.
     fn height(&self) -> u16 {
-        u16::from(self.heading.is_some())
-            + 1
-            + u16::from(self.label.is_some())
-            + u16::from(self.detail.is_some())
+        u16::from(self.heading.is_some()) + 1 + u16::from(self.detail.is_some())
     }
 
     fn lines(&self, width: usize, focused: bool, selected: bool) -> Vec<Line<'static>> {
@@ -125,39 +130,19 @@ impl Row {
             palette::muted()
         };
         let mut lines = Vec::with_capacity(3);
-        // The mark sits at the left edge of the first line, whether or not the
-        // row has a category line of its own. The lines under it align with the
-        // name so a list of marked rows still reads as a column.
-        if let Some(label) = &self.label {
-            let text = format!("{mark}{}", label.content);
-            let used = Line::from(text.as_str()).width() + note_width;
-            let padding = " ".repeat(width.saturating_sub(used).max(1));
-            if focused {
-                lines.push(Line::from(Span::styled(
-                    format!("{text}{padding}{note}"),
-                    palette::focus(),
-                )));
-            } else {
-                let mut spans = vec![Span::styled(text, self.tone)];
-                spans.push(Span::raw(padding));
-                spans.push(Span::styled(note.to_owned(), secondary));
-                lines.push(Line::from(spans));
-            }
-        }
-        let note_here = if self.label.is_none() { note } else { "" };
-        let note_here_width = Line::from(note_here).width();
+        // The mark sits at the left edge. The lines under it align with the name
+        // so a list of marked rows still reads as a column.
+        let note_here = note;
+        let note_here_width = note_width;
         let available = width
             .saturating_sub(indent)
             .saturating_sub(note_here_width)
+            .saturating_sub(usize::from(!note_here.is_empty()))
             .max(1);
         let title = truncate(&self.title, available);
-        let prefix = if self.label.is_none() {
-            mark.clone()
-        } else {
-            " ".repeat(indent)
-        };
+        let prefix = mark.clone();
         let used = indent + Line::from(title.as_str()).width() + note_here_width;
-        let padding = " ".repeat(width.saturating_sub(used).max(1));
+        let padding = " ".repeat(width.saturating_sub(used));
         if focused {
             // The whole row is one bar, not just the line with the name in it:
             // what is selected is the block, and every line of it belongs to it.
@@ -167,9 +152,14 @@ impl Row {
             )));
         } else {
             // The name carries its tone itself rather than inheriting it from the
-            // line, so what is behind a row cannot decide how the row reads.
-            let mut spans = vec![Span::raw(prefix), Span::styled(title, self.tone)];
-            spans.push(Span::raw(padding));
+            // line, so what is behind a row cannot decide how the row reads. The
+            // padding does inherit the selection, because on an inactive bar it
+            // is the bar that has to continue across the row.
+            let mut spans = vec![
+                prefix_span(&prefix, selected),
+                Span::styled(title, self.tone),
+            ];
+            spans.push(padding_span(&padding, selected));
             if !note_here.is_empty() {
                 spans.push(Span::styled(note_here.to_owned(), secondary));
             }
@@ -179,7 +169,7 @@ impl Row {
             let available = width.saturating_sub(indent).max(1);
             let detail = truncate(detail, available);
             let used = indent + Line::from(detail.as_str()).width();
-            let padding = " ".repeat(width.saturating_sub(used).max(1));
+            let padding = " ".repeat(width.saturating_sub(used));
             if focused {
                 // The fill is the row's, but the detail is not its name: the
                 // quieter foreground keeps the line under the title rather than
@@ -189,13 +179,11 @@ impl Row {
                     palette::focus_detail(),
                 )));
             } else {
-                lines.push(
-                    Line::from(vec![
-                        Span::raw(" ".repeat(indent)),
-                        Span::styled(detail, secondary),
-                    ])
-                    .style(self.tone),
-                );
+                lines.push(Line::from(vec![
+                    prefix_span(&" ".repeat(indent), selected),
+                    Span::styled(detail, secondary),
+                    padding_span(&padding, selected),
+                ]));
             }
         }
         lines
@@ -395,11 +383,7 @@ fn bar(frame: &mut Frame, area: Rect, rows: &[Row], offset: usize, index: usize,
         return;
     }
     let heading = u16::from(rows[index].heading.is_some());
-    let content_height = rows[index]
-        .height()
-        .saturating_sub(heading)
-        .saturating_sub(u16::from(rows[index].gap))
-        .max(1);
+    let content_height = rows[index].height().saturating_sub(heading).max(1);
     let top = area.y.saturating_add(
         rows[offset..index]
             .iter()
@@ -424,12 +408,34 @@ fn bar(frame: &mut Frame, area: Rect, rows: &[Row], offset: usize, index: usize,
 fn heading_line(heading: &Heading, width: usize) -> Line<'static> {
     let note = heading.note.as_deref().unwrap_or_default();
     let note_width = Line::from(note).width();
-    let title = truncate(&heading.title, width.saturating_sub(note_width).max(1));
-    let used = Line::from(title.as_str()).width() + note_width;
-    let padding = " ".repeat(width.saturating_sub(used).max(1));
-    Line::from(vec![
-        Span::styled(title, palette::heading()),
-        Span::raw(padding),
-        Span::styled(note.to_owned(), palette::muted()),
-    ])
+    let mark_width = heading.mark.iter().map(|span| span.width()).sum::<usize>();
+    let title = truncate(
+        &heading.title,
+        width
+            .saturating_sub(mark_width)
+            .saturating_sub(note_width)
+            .saturating_sub(usize::from(!note.is_empty()))
+            .max(1),
+    );
+    let used = mark_width + Line::from(title.as_str()).width() + note_width;
+    let padding = " ".repeat(width.saturating_sub(used));
+    let mut spans = heading.mark.clone();
+    spans.push(Span::styled(title, heading.tone));
+    spans.push(Span::raw(padding));
+    spans.push(Span::styled(note.to_owned(), palette::muted()));
+    Line::from(spans)
+}
+
+/// Padding inside an inactive selection keeps the bar's fill. Outside one there
+/// is nothing to continue, so it is plain space.
+fn padding_span(spaces: &str, selected: bool) -> Span<'static> {
+    if selected {
+        Span::styled(spaces.to_owned(), palette::inactive_selection())
+    } else {
+        Span::raw(spaces.to_owned())
+    }
+}
+
+fn prefix_span(spaces: &str, selected: bool) -> Span<'static> {
+    padding_span(spaces, selected)
 }
