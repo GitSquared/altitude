@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::agent::AgentKind;
+use crate::id;
 use crate::isolation::Environment;
 use crate::tracker::{IssueReference, IssueSnapshot};
 use crate::vcs::{CodeContribution, ContributionObservation};
@@ -592,10 +593,17 @@ impl Task {
         self.facts.operator_id.as_deref()
     }
 
-    /// What a list calls this task: the agent's title, or what was asked for
-    /// before the agent has chosen one.
+    /// What a list calls this task: the agent's title, or the task's own id
+    /// until the agent has chosen one.
+    ///
+    /// The id is what an operator can say to an agent and what a card has room
+    /// for; the intent is a paragraph, and a paragraph in a title slot reads as
+    /// a wall of text that hides the rest of the list.
     pub fn title(&self) -> &str {
-        self.facts.title.as_deref().unwrap_or(&self.facts.intent)
+        self.facts
+            .title
+            .as_deref()
+            .unwrap_or_else(|| id::name(&self.id))
     }
 
     /// The environment this task runs in.

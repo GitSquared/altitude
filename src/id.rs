@@ -20,6 +20,13 @@ pub fn signal() -> String {
     words("signal", SIGNAL_WORDS)
 }
 
+/// The words of an id, without the prefix that says what kind of thing it is.
+///
+/// A task is called by its id until it has a title, and nobody says the prefix.
+pub fn name(id: &str) -> &str {
+    id.split_once('_').map_or(id, |(_, name)| name)
+}
+
 /// An id with the given prefix and distinct, lowercase English words.
 fn words(prefix: &str, count: usize) -> String {
     let list = Language::English.word_list();

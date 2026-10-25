@@ -348,7 +348,8 @@ pub struct TaskSummary {
     pub id: String,
     /// The machine that owns it, which is the machine answering.
     pub host: String,
-    /// What a card calls it: the agent's name for the work, or its first line.
+    /// What a card calls it: the agent's name for the work, or the task's id
+    /// until the agent has given it one.
     ///
     /// Resolved by the machine that owns the task, because that is where the
     /// intent is and a card is not where a sentence gets cut.
