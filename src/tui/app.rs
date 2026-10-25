@@ -962,9 +962,8 @@ impl App {
                         Hint::new("arrows · j/k", "select"),
                     ]);
                 }
-                // Removing a task is this machine's act on its own capsule; a
-                // remote's task is not here to remove, and neither is it this
-                // machine's to send anywhere.
+                // Drawn from different places, but acted on the same way: a task is
+                // moved across with one key, and dropped by the machine holding it.
                 if self.selected_is_remote() {
                     hints.push(Hint::new("p", "pull here"));
                     hints.push(Hint::new("d", "drop"));
@@ -977,7 +976,7 @@ impl App {
                 } else {
                     if !self.tasks.is_empty() {
                         hints.push(Hint::new("d", "drop"));
-                        hints.push(Hint::new("r", "send to remote"));
+                        hints.push(Hint::new("p", "push to remote"));
                     }
                     if self
                         .selected_task()
@@ -3766,9 +3765,9 @@ impl App {
             // Enter reads what the task is asking. Taking over has a key of its
             // own, and asks first, because it ends the agent's autonomy.
             KeyCode::Enter => self.open_signals(task_service, remote_signals).await,
-            // Sending an existing task asks which machine first, and nothing
-            // leaves until that answer is given.
-            KeyCode::Char('r') => {
+            // Moving a task across is one key: which way it goes is decided by
+            // where the task already is, so there is nothing to remember.
+            KeyCode::Char('p') => {
                 if let Some(task) = self.selected_task() {
                     let hosts = self.send_hosts();
                     let title = task.title().to_owned();

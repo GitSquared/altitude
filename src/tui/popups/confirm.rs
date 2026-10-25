@@ -162,11 +162,11 @@ impl PendingConfirm {
         }
     }
 
-    /// Confirming moves a task here without taking its terminal: the same transfer
-    /// as taking it over, with one answer different.
+    /// Confirming unhooks a task from the machine running it: the same transfer as
+    /// taking it over, with one answer different.
     pub(in crate::tui) fn pulling(task_id: String, question: String) -> Self {
         Self {
-            dialog: Confirm::new(question, "pull"),
+            dialog: Confirm::new(question, "unhook"),
             action: ConfirmAction::PullTask { id: task_id },
         }
     }
