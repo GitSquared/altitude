@@ -1444,8 +1444,7 @@ impl App {
                         format!(
                             "The machine at {} is not the one this client knew: it answered \
                              with a different identity, as one that was reinstalled or replaced \
-                             would. Accept it? Everything sent there from now on goes to \
-                             whatever answered.",
+                             would. Accept it?",
                             self.remote_name(&address)
                         ),
                     ));
