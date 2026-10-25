@@ -166,3 +166,53 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/SHA256SUMS
+
+  homebrew:
+    name: update homebrew formula
+    # Pre-releases stay out of the tap; it should only ever serve the latest
+    # stable release.
+    if: ${{ !contains(github.ref_name, '-') }}
+    needs: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    concurrency:
+      group: homebrew-formula
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Download checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$GITHUB_REF_NAME" --pattern SHA256SUMS --dir "$RUNNER_TEMP"
+
+      - name: Generate formula
+        run: ./scripts/homebrew-formula "$GITHUB_REF_NAME" "$RUNNER_TEMP/SHA256SUMS"
+
+      - name: Check formula syntax
+        run: ruby -c Formula/altitude.rb
+
+      - name: Commit formula
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if [[ -z "$(git status --porcelain -- Formula/altitude.rb)" ]]; then
+            echo "formula is already current"
+            exit 0
+          fi
+
+          git add Formula/altitude.rb
+          git commit -m "chore(homebrew): altitude ${GITHUB_REF_NAME}"
+          git fetch origin "${DEFAULT_BRANCH}"
+          git rebase "origin/${DEFAULT_BRANCH}"
+          git push origin "HEAD:${DEFAULT_BRANCH}"

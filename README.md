@@ -11,6 +11,20 @@ so i built **altitude**. it:
 - plugs in bidirectionally with your existing tools (coding harness, version control, task tracker) rather than replacing them
 - supports "remotes" deployment for letting your task run even when your primary device isn't awake
 
+## install
+
+on macOS (apple silicon), via Homebrew:
+
+```sh
+brew tap GitSquared/altitude https://github.com/GitSquared/altitude
+brew install GitSquared/altitude/altitude
+```
+
+tagged releases also publish Linux and macOS archives on the
+[releases page](https://github.com/GitSquared/altitude/releases). the macOS
+binaries are not notarized, so a browser-downloaded copy may need
+`xattr -d com.apple.quarantine altitude-*/altitude` before it will run.
+
 ## development
 
 altitude is built as a single Rust binary.
