@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Render the Homebrew formula for a released tag from that release's checksums.
+set -euo pipefail
+
+if [[ $# -ne 2 ]]; then
+    echo "usage: $0 <tag> <SHA256SUMS>" >&2
+    exit 2
+fi
+
+tag="$1"
+checksums="$2"
+version="${tag#v}"
+repo="${GITHUB_REPOSITORY:-GitSquared/altitude}"
+asset="altitude-${version}-aarch64-apple-darwin.tar.gz"
+sha="$(awk -v asset="$asset" '$2 == asset { print $1 }' "$checksums")"
+
+if [[ -z "$sha" ]]; then
+    echo "no SHA-256 for $asset in $checksums" >&2
+    exit 1
+fi
+
+mkdir -p Formula
+cat >Formula/altitude.rb <<EOF
+class Altitude < Formula
+  desc "Terminal control plane for delegated coding agents"
+  homepage "https://github.com/${repo}"
+  url "https://github.com/${repo}/releases/download/${tag}/${asset}"
+  sha256 "${sha}"
+  license "BUSL-1.1"
+  version "${version}"
+
+  depends_on :macos
+  depends_on arch: :arm64
+
+  def install
+    bin.install "altitude-${version}-aarch64-apple-darwin/altitude"
+  end
+
+  test do
+    assert_match "altitude v#{version}", shell_output("#{bin}/altitude --version")
+  end
+end
+EOF

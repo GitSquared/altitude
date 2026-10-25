@@ -6,6 +6,16 @@ dev:
 build:
     cargo build --release --locked
 
+# Regenerate Formula/altitude.rb from a released tag's published checksums.
+bump-formula tag:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    gh release download "{{tag}}" --pattern SHA256SUMS --dir "$tmp"
+    ./scripts/homebrew-formula "{{tag}}" "$tmp/SHA256SUMS"
+
 # Create an immutable, forward-only SQL migration.
 [positional-arguments]
 migration name:
