@@ -136,7 +136,7 @@ fn print_installed(credentials: &oauth::AppCredentials, credentials_path: &Path)
     field("saved", credentials_path.display());
     println!(
         "\nThe token refreshes itself while `altitude serve` runs. Start it to receive \
-         delegated work."
+         delegated work, and keep it running across reboots with `altitude serve --service`."
     );
 }
 
