@@ -1,10 +1,9 @@
 use std::{
     fs,
-    io::ErrorKind,
+    io::{self, ErrorKind},
     os::unix::fs::symlink,
     path::{Path, PathBuf},
     process,
-    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -20,7 +19,8 @@ use microsandbox::{
 };
 use tokio::{
     process::Command as TokioCommand,
-    sync::{Mutex, mpsc, watch},
+    sync::{mpsc, watch},
+    task::spawn_blocking,
 };
 
 use crate::agent::mcp::AGENT_CHANNEL_PORT;
@@ -110,7 +110,53 @@ pub struct MicrosandboxIsolation {
     cache_home: PathBuf,
     /// Microsandbox's Unix sockets exceed macOS path limits under the longer data home.
     socket_safe_home: PathBuf,
-    base_preparation_lock: Arc<Mutex<()>>,
+    build_lock: BuildLock,
+}
+
+/// One environment build at a time on this machine.
+///
+/// A setup sandbox is named after the store it builds into, so a second build of
+/// one environment would tear down the first one's sandbox: [`Self::remove_leftover`]
+/// cannot tell a leftover from a build that is running beside it. A mutex would
+/// only hold within one process, while the sandbox names and the snapshot store
+/// belong to the machine, so the lock is the file itself. Holding it is what
+/// makes "a sandbox under that name is a leftover" true.
+#[derive(Clone)]
+struct BuildLock {
+    path: PathBuf,
+}
+
+/// A held build slot, released when the build ends or this process dies.
+struct BuildGuard {
+    _file: fs::File,
+}
+
+impl BuildLock {
+    fn new(config: &Config) -> Self {
+        Self {
+            path: config.data_dir().join("environments").join("build.lock"),
+        }
+    }
+
+    /// Wait for the build slot, without holding a runtime thread while waiting.
+    async fn acquire(&self) -> Result<BuildGuard, IsolationError> {
+        let path = self.path.clone();
+        spawn_blocking(move || {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let file = fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)?;
+            file.lock()?;
+            Ok(BuildGuard { _file: file })
+        })
+        .await
+        .map_err(|error| IsolationError::new(error.to_string()))?
+        .map_err(|error: io::Error| IsolationError::new(error.to_string()))
+    }
 }
 
 impl MicrosandboxIsolation {
@@ -183,7 +229,7 @@ impl MicrosandboxIsolation {
             data_home: config.isolation_data_dir(),
             cache_home: config.isolation_cache_dir(),
             socket_safe_home: config.microsandbox_socket_dir(),
-            base_preparation_lock: Arc::new(Mutex::new(())),
+            build_lock: BuildLock::new(config),
         }
     }
 
@@ -441,7 +487,10 @@ impl MicrosandboxIsolation {
         sandbox_id: &str,
         step: &SetupStep,
     ) -> Result<(), IsolationError> {
-        let (status, output) = self.run_to_end(sandbox_id, &step.command).await?;
+        let (status, output) = self
+            .run_to_end(sandbox_id, &step.command)
+            .await
+            .map_err(|error| IsolationError::new(format!("{}: {error}", step.label)))?;
         match status {
             0 => Ok(()),
             code => Err(IsolationError::new(format!(
@@ -682,13 +731,13 @@ impl IsolationEngine for MicrosandboxIsolation {
             .map_err(|error| IsolationError::new(error.to_string()))?;
         Ok(Self {
             config,
-            // The runtime and its preparation lock belong to the machine, not to
-            // one operator: a scoped view shares them rather than making a
-            // second runtime the socket cannot carry.
+            // The runtime and the build slot belong to the machine, not to one
+            // operator: a scoped view shares them rather than making a second
+            // runtime the socket cannot carry.
             data_home: self.data_home.clone(),
             cache_home: self.cache_home.clone(),
             socket_safe_home: self.socket_safe_home.clone(),
-            base_preparation_lock: Arc::clone(&self.base_preparation_lock),
+            build_lock: self.build_lock.clone(),
         })
     }
 
@@ -841,7 +890,7 @@ impl IsolationEngine for MicrosandboxIsolation {
         tracing::debug!("base sandbox image ready");
 
         status.send_replace(IsolationStatus::PreparingWorkspacePackages);
-        let _preparation = self.base_preparation_lock.lock().await;
+        let _build = self.build_lock.acquire().await?;
         self.ensure_workspace().await?;
 
         Ok(())
@@ -877,7 +926,7 @@ impl IsolationEngine for MicrosandboxIsolation {
         recipe: BaseSandboxRecipe,
         progress: &dyn EnvironmentProgressSink,
     ) -> Result<BaseSandboxSnapshot, IsolationError> {
-        let _preparation = self.base_preparation_lock.lock().await;
+        let _build = self.build_lock.acquire().await?;
         // The workspace base is app startup's concern and reports on its own
         // screen; a task waits only on the environment built from it.
         let workspace = self.ensure_workspace().await?;
