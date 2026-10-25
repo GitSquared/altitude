@@ -16,14 +16,19 @@ so i built **altitude**. it:
 on macOS (apple silicon), via Homebrew:
 
 ```sh
-brew tap GitSquared/altitude https://github.com/GitSquared/altitude
-brew install GitSquared/altitude/altitude
+brew tap gitsquared/altitude https://github.com/gitsquared/altitude
+brew install gitsquared/altitude/altitude
 ```
 
-tagged releases also publish Linux and macOS archives on the
-[releases page](https://github.com/GitSquared/altitude/releases). the macOS
-binaries are not notarized, so a browser-downloaded copy may need
-`xattr -d com.apple.quarantine altitude-*/altitude` before it will run.
+on Linux (the host needs KVM access):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/gitsquared/altitude/main/install.sh | sh
+```
+
+the installer verifies the release checksum and puts the binary in `~/.local/bin`.
+set `ALTITUDE_VERSION` to pin a release, or `ALTITUDE_INSTALL_DIR` to install
+somewhere else.
 
 ## development
 

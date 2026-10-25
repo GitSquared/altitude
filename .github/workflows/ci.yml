@@ -21,8 +21,8 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  fmt:
-    name: rustfmt
+  lint:
+    name: lint
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -30,6 +30,9 @@ jobs:
         uses: actions/checkout@v7
         with:
           persist-credentials: false
+
+      - name: Check install script
+        run: shellcheck -s sh install.sh
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -47,7 +50,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
+          # Match the release baseline so the glibc floor is exercised in CI.
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
           - os: macos-15
             target: aarch64-apple-darwin
