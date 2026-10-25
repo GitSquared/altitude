@@ -17,8 +17,8 @@ arboard = { version = "3.6.1", default-features = false }
 async-trait = "0.1"
 base64 = "0.23.1"
 cap-std = "4.0.3"
-microsandbox-image = "0.7.3"
-microsandbox-utils = "0.7.3"
+microsandbox-image = "=0.7.9"
+microsandbox-utils = "=0.7.9"
 tempfile = "3"
 blake3 = "1.8"
 crossterm = { version = "0.29.0", features = ["event-stream"] }
@@ -31,9 +31,9 @@ iroh-mdns-address-lookup = "0.6"
 socket2 = "0.6"
 hmac = "0.13"
 hex = "0.4"
-microsandbox = { version = "0.7.3", default-features = false, features = ["local", "net"] }
+microsandbox = { version = "=0.7.9", default-features = false, features = ["local", "net"] }
 # Embed Microsandbox's guest helper without running its host-runtime installer at build time.
-microsandbox-filesystem = { version = "0.7.3", default-features = false, features = ["download-binaries"] }
+microsandbox-filesystem = { version = "=0.7.9", default-features = false, features = ["download-binaries"] }
 ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "form"] }
 rmcp = { version = "3.5.1", default-features = false, features = ["client", "auth", "transport-streamable-http-client-reqwest"] }

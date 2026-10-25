@@ -12,10 +12,16 @@ use microsandbox::{
     LocalBackend, Sandbox,
     sandbox::{MAX_SANDBOX_LIST_LIMIT, PullPolicy, exec::ExecEvent},
     set_default_backend,
-    setup::{InstallOptions, ensure_runtime},
+    setup::{
+        InstallOptions, RuntimeOrigin, Version, ensure_runtime, install_runtime,
+        resolve_runtime_version,
+    },
     snapshot::Snapshot,
 };
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::{
+    process::Command as TokioCommand,
+    sync::{Mutex, mpsc, watch},
+};
 
 use crate::agent::mcp::AGENT_CHANNEL_PORT;
 use crate::config::Config;
@@ -108,6 +114,50 @@ pub struct MicrosandboxIsolation {
 }
 
 impl MicrosandboxIsolation {
+    async fn ensure_compatible_runtime(backend: &LocalBackend) -> Result<(), IsolationError> {
+        let mut options = InstallOptions::default();
+        let expected = Version::parse(&options.version)
+            .map_err(|error| IsolationError::new(error.to_string()))?;
+        let runtime = ensure_runtime(backend.config(), options.clone())
+            .await
+            .map_err(|error| IsolationError::new(error.to_string()))?;
+        let installed = match resolve_runtime_version(&runtime.msb_path)
+            .map_err(|error| IsolationError::new(error.to_string()))?
+        {
+            Some(version) => version,
+            None => {
+                let output = TokioCommand::new(&runtime.msb_path)
+                    .arg("--version")
+                    .output()
+                    .await
+                    .map_err(|error| IsolationError::new(error.to_string()))?;
+                let version = String::from_utf8_lossy(&output.stdout)
+                    .split_whitespace()
+                    .next_back()
+                    .ok_or_else(|| IsolationError::new("Microsandbox returned no version"))?
+                    .trim_start_matches('v')
+                    .to_owned();
+                Version::parse(&version).map_err(|error| IsolationError::new(error.to_string()))?
+            }
+        };
+        if installed == expected {
+            return Ok(());
+        }
+        if runtime.origin != RuntimeOrigin::Home {
+            return Err(IsolationError::new(format!(
+                "Microsandbox runtime {installed} at {} does not match SDK {expected}; update the configured runtime",
+                runtime.msb_path.display()
+            )));
+        }
+
+        tracing::info!(%installed, %expected, "updating Microsandbox runtime");
+        options.force = true;
+        install_runtime(backend.config(), options)
+            .await
+            .map(|_| ())
+            .map_err(|error| IsolationError::new(error.to_string()))
+    }
+
     pub(crate) fn check_host() -> Result<(), IsolationError> {
         #[cfg(target_os = "linux")]
         fs::OpenOptions::new()
@@ -764,9 +814,7 @@ impl IsolationEngine for MicrosandboxIsolation {
             .build()
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
-        ensure_runtime(backend.config(), InstallOptions::default())
-            .await
-            .map_err(|error| IsolationError::new(error.to_string()))?;
+        Self::ensure_compatible_runtime(&backend).await?;
         set_default_backend(backend);
 
         tracing::debug!("Microsandbox runtime ready");
