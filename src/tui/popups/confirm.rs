@@ -21,7 +21,7 @@ use crate::{
     task::TaskEventLoop,
     tui::{
         App,
-        app::{Foreground, RemoveTaskReply},
+        app::{Foreground, RemoteSignalAction, RemoteSignalsReply, RemoveTaskReply},
         keys,
         screens::settings::Target,
         widgets::chrome,
@@ -188,11 +188,28 @@ impl PendingConfirm {
         }
     }
 
+    /// Confirming accepts a wrap-up request: the task closes and its capsule
+    /// goes. The only way a task ends, which is why it is asked.
+    pub(in crate::tui) fn confirming_signal(
+        task_id: String,
+        signal_id: String,
+        question: String,
+    ) -> Self {
+        Self {
+            dialog: Confirm::new(question, "accept"),
+            action: ConfirmAction::ConfirmSignal { task_id, signal_id },
+        }
+    }
+
     pub(in crate::tui) fn is_settings(&self) -> bool {
         matches!(
             self.action,
             ConfirmAction::DeleteSetting(_) | ConfirmAction::ForgetCredentials(_)
         )
+    }
+
+    pub(in crate::tui) fn is_signal(&self) -> bool {
+        matches!(self.action, ConfirmAction::ConfirmSignal { .. })
     }
 
     pub(in crate::tui) fn draw(&self, frame: &mut Frame, area: Rect) -> Rect {
@@ -214,6 +231,7 @@ enum ConfirmAction {
     TakeOver { id: String },
     DeleteSetting(Target),
     ForgetCredentials(CredentialTarget),
+    ConfirmSignal { task_id: String, signal_id: String },
 }
 
 /// Take an answer to the confirmation, and act on it.
@@ -224,6 +242,7 @@ pub(in crate::tui) async fn handle_confirm_key<E>(
     key: KeyEvent,
     landings: &mpsc::UnboundedSender<Result<String, String>>,
     removals: &mpsc::Sender<RemoveTaskReply>,
+    remote_signals: &mpsc::Sender<RemoteSignalsReply>,
 ) where
     E: IsolationEngine + Clone + 'static,
 {
@@ -235,6 +254,8 @@ pub(in crate::tui) async fn handle_confirm_key<E>(
         Some(Decision::Cancel) => {
             if pending.is_settings() {
                 app.foreground = Foreground::Panel;
+            } else if pending.is_signal() {
+                app.foreground = Foreground::Signals;
             }
         }
         Some(Decision::Confirm) => match pending.action {
@@ -258,6 +279,31 @@ pub(in crate::tui) async fn handle_confirm_key<E>(
             }
             ConfirmAction::ForgetCredentials(target) => {
                 app.forget_credentials(target, event_loop.service()).await
+            }
+            ConfirmAction::ConfirmSignal { task_id, signal_id } => {
+                app.foreground = Foreground::Signals;
+                if app.remote_signals.is_some() {
+                    app.act_on_remote_signal(
+                        signal_id,
+                        RemoteSignalAction::Accept,
+                        None,
+                        remote_signals,
+                    );
+                    return;
+                }
+                match event_loop
+                    .service()
+                    .confirm_operator_signal(&task_id, &signal_id)
+                    .await
+                {
+                    Ok(task) => {
+                        app.replace_task(task);
+                        app.reload_signals(event_loop.service()).await;
+                        app.select_next_open_thread();
+                        app.say("Task completed");
+                    }
+                    Err(error) => app.problem(error.to_string()),
+                }
             }
         },
     }

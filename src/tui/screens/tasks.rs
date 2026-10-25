@@ -1,7 +1,10 @@
 use crate::{
     agent::AgentKind,
     remote::TaskSummary,
-    tui::{App, widgets::palette},
+    tui::{
+        App,
+        widgets::{palette, signal, surface::Surface},
+    },
 };
 
 use ratatui::{
@@ -15,7 +18,7 @@ use crate::{
     isolation::EnvironmentProgress,
     task::{
         TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
-        TaskOperatorAttentionLevel, TaskOperatorSignalKind,
+        TaskOperatorAttentionLevel,
     },
     tui::widgets::utils::{shimmer, truncate},
     vcs::{ContributionReadiness, now_ms},
@@ -37,18 +40,12 @@ fn grid(area: Rect) -> (usize, u16, u16) {
 }
 
 pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
-    // The list sits in a frame like every other screen, and the grid is laid out in
-    // what the frame leaves rather than in the whole area.
-    let panel = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .padding(Padding::uniform(1));
-    let content = panel.inner(area);
-    frame.render_widget(panel, area);
-    // The backdrop goes inside the frame, not under its border, so the contour
-    // lines never crowd the edge they are read against.
-    if app.animations() {
-        super::super::background::terrain::draw(frame, content, app.shimmer);
-    }
+    // The list sits in a surface like every other screen, and the grid is laid out
+    // in what the border leaves. The field under it is drawn by the runner, so
+    // every screen shows the same one.
+    let content = Surface::new()
+        .padding(Padding::uniform(1))
+        .draw(frame, area);
     let (columns, card_width, height) = grid(content);
     app.grid_columns = columns;
     draw_tasks(frame, content, app, columns, card_width, height);
@@ -303,30 +300,21 @@ fn is_alarming(summary: &TaskSummary) -> bool {
 /// What else a card has to say: the things that mean someone has to look.
 fn card_extras(summary: &TaskSummary, now_ms: i64) -> Vec<Line<'static>> {
     let mut extras = Vec::new();
-    // A previous report's request is not a current interruption after execution
-    // resumes.
-    if summary.status == TaskExecutionStatus::Paused
-        && summary.pause_reason.as_ref() == Some(&TaskExecutionPauseReason::AwaitingOperator)
-    {
-        match summary.awaiting_signal_kind {
-            // A wrap-up request is not a problem to solve. It is work waiting to
-            // be accepted, so it reads as ready rather than as an alarm.
-            Some(TaskOperatorSignalKind::InReview) => {
-                extras.push(Line::styled("in review", palette::good().bold()))
-            }
-            _ if is_alarming(summary) => extras.push(Line::styled("ALARM", palette::bad().bold())),
-            _ => match summary.attention {
-                TaskOperatorAttentionLevel::Requested => extras.push(Line::styled(
-                    "attention required",
-                    palette::attention().bold(),
-                )),
-                TaskOperatorAttentionLevel::Alarm | TaskOperatorAttentionLevel::Nominal => {}
-            },
-        }
-    }
-    if summary.unread_operator_signal_count > 0 {
+    let waiting_on_operator = summary.blocking_signal_kind.is_some()
+        && (summary.status == TaskExecutionStatus::Failed
+            || (summary.status == TaskExecutionStatus::Paused
+                && summary.pause_reason.as_ref()
+                    == Some(&TaskExecutionPauseReason::AwaitingOperator)));
+    if waiting_on_operator && let Some(kind) = summary.blocking_signal_kind {
+        let view = signal::view(kind);
         extras.push(Line::styled(
-            format!("● {} unread", summary.unread_operator_signal_count),
+            format!("{} {}", view.symbol, view.task_label),
+            view.tone.bold(),
+        ));
+    }
+    if summary.unresolved_signal_count > 0 {
+        extras.push(Line::styled(
+            format!("● {} unresolved", summary.unresolved_signal_count),
             palette::accent().bold(),
         ));
     }

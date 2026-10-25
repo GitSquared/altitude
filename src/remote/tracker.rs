@@ -43,7 +43,8 @@ use tokio::{
 
 use crate::{
     task::{
-        TaskExecutionPauseReason, TaskHistoryEvent, TaskOperatorSignal, TaskOperatorSignalKind,
+        TaskExecutionPauseReason, TaskHistoryEvent, TaskOperatorSignalAuthor,
+        TaskOperatorSignalKind, TaskOperatorSignalThread,
     },
     tracker::{
         IssueReference, IssueSnapshot, TrackerAccount, TrackerKind, TrackerStatus,
@@ -113,14 +114,14 @@ pub trait Host: Send + Sync + 'static {
     /// Cancel a task and dispose of its capsule. Never an acceptance.
     fn stop(&self, task_id: String) -> HostFuture<'_, ()>;
     /// The task's currently unresolved operator signals.
-    fn signals(&self, task_id: String) -> HostFuture<'_, Vec<TaskOperatorSignal>>;
+    fn signals(&self, task_id: String) -> HostFuture<'_, Vec<TaskOperatorSignalThread>>;
     /// The task's history, oldest first.
     fn events(&self, task_id: String) -> HostFuture<'_, Vec<(i64, TaskHistoryEvent)>>;
     /// Answer a blocking signal, which resumes the work.
     fn instruct(&self, task_id: String, instruction: String) -> HostFuture<'_, ()>;
-    fn reply(&self, signal_id: String, answer: String) -> HostFuture<'_, ()>;
+    fn reply(&self, task_id: String, signal_id: String, answer: String) -> HostFuture<'_, ()>;
     /// Accept a wrap-up request, the only way a task ends.
-    fn accept(&self, signal_id: String) -> HostFuture<'_, ()>;
+    fn accept(&self, task_id: String, signal_id: String) -> HostFuture<'_, ()>;
     /// Whether the task is still in play, so a removed task stops being reported.
     fn is_active(&self, task_id: String) -> HostFuture<'_, bool>;
 }
@@ -548,16 +549,14 @@ impl RemoteTracker {
         // A prompt answers only what was already waiting when it was written. A
         // prompt that predates a signal is stale, and letting it resolve the
         // newer question would answer something the operator never saw.
-        let waiting: Vec<&TaskOperatorSignal> = signals
+        let waiting: Vec<&TaskOperatorSignalThread> = signals
             .iter()
-            .filter(|signal| signal.raised_at_ms <= event.occurred_at_ms)
+            .filter(|signal| signal.last_raised_at_ms <= event.occurred_at_ms)
             .collect();
-        let blocking = waiting.iter().copied().find(|signal| {
-            matches!(
-                signal.kind,
-                TaskOperatorSignalKind::Decision | TaskOperatorSignalKind::Failure
-            )
-        });
+        let blocking = waiting
+            .iter()
+            .copied()
+            .find(|signal| signal.kind == TaskOperatorSignalKind::Blocked);
         let review = waiting
             .iter()
             .copied()
@@ -568,11 +567,13 @@ impl RemoteTracker {
                 .await;
         };
         if signal.kind == TaskOperatorSignalKind::InReview && is_acceptance(answer) {
-            host.accept(signal.id.clone()).await?;
+            host.accept(route.task_id.clone(), signal.id.clone())
+                .await?;
             let events = host.events(route.task_id.clone()).await?;
             return self.finish_accepted(&route, &events).await;
         }
-        host.reply(signal.id.clone(), answer.to_owned()).await
+        host.reply(route.task_id.clone(), signal.id.clone(), answer.to_owned())
+            .await
     }
 
     /// A user changed an issue's workflow state.
@@ -634,10 +635,11 @@ impl RemoteTracker {
         };
         // The review must already have been waiting when the operator marked the
         // issue done; a later one belongs to a later cycle.
-        if review.raised_at_ms > occurred_at_ms {
+        if review.last_raised_at_ms > occurred_at_ms {
             return Ok(());
         }
-        host.accept(review.id.clone()).await?;
+        host.accept(route.task_id.clone(), review.id.clone())
+            .await?;
         let events = host.events(route.task_id.clone()).await?;
         self.finish_accepted(&route, &events).await
     }
@@ -764,7 +766,13 @@ impl RemoteTracker {
             match event {
                 TaskHistoryEvent::AgentRunStarted { agent_run_id, .. } => {
                     if events[..index].iter().any(|(_, event)| {
-                        matches!(event, TaskHistoryEvent::OperatorSignalAnswered { .. })
+                        matches!(
+                            event,
+                            TaskHistoryEvent::OperatorSignalMessage {
+                                author: TaskOperatorSignalAuthor::Operator,
+                                ..
+                            }
+                        )
                     }) {
                         self.config
                             .automation
@@ -773,7 +781,7 @@ impl RemoteTracker {
                                 &activity_id(&route.task_id, agent_run_id),
                                 AgentActivityContent::Thought {
                                     body:
-                                        "Your answer was received. Altitude is continuing the work."
+                                        "Your reply was received. Altitude is continuing the work."
                                             .into(),
                                 },
                             )
@@ -792,7 +800,15 @@ impl RemoteTracker {
                 TaskHistoryEvent::OperatorSignalRaised { signal } => {
                     if unresolved.contains(&signal.id) {
                         let contributions = contribution_details(&events[..=index]);
-                        self.publish_signal(route, signal, &contributions).await?;
+                        self.publish_signal(
+                            route,
+                            &signal.id,
+                            signal.kind,
+                            &signal.title,
+                            &signal.body,
+                            &contributions,
+                        )
+                        .await?;
                     }
                 }
                 TaskHistoryEvent::OperatorSignalConfirmed { .. }
@@ -811,7 +827,18 @@ impl RemoteTracker {
                 if !unresolved.contains(&signal.id) {
                     continue;
                 }
-                self.publish_signal(route, &signal, &contributions).await?;
+                let Some(message) = signal.latest_agent_message() else {
+                    continue;
+                };
+                self.publish_signal(
+                    route,
+                    &signal.id,
+                    signal.kind,
+                    &signal.title,
+                    &message.body,
+                    &contributions,
+                )
+                .await?;
             }
             self.set_cursor(&route.issue_id, events.len())?;
         }
@@ -838,18 +865,17 @@ impl RemoteTracker {
     async fn publish_signal(
         &self,
         route: &Route,
-        signal: &TaskOperatorSignal,
+        signal_id: &str,
+        kind: TaskOperatorSignalKind,
+        title: &str,
+        body: &str,
         contributions: &[String],
     ) -> Result<(), String> {
-        let id = activity_id(&route.task_id, &signal.id);
+        let id = activity_id(&route.task_id, signal_id);
         let reference = self.issue_reference(&route.issue_id);
-        match signal.kind {
+        match kind {
             TaskOperatorSignalKind::Update => {
-                let body = format!(
-                    "**Altitude update: {}**\n\n{}",
-                    signal.title.trim(),
-                    signal.body.trim()
-                );
+                let body = format!("**Altitude update: {}**\n\n{}", title.trim(), body.trim());
                 self.config
                     .automation
                     .create_activity(
@@ -861,10 +887,22 @@ impl RemoteTracker {
                     .map_err(|error| error.to_string())
             }
             TaskOperatorSignalKind::Decision => {
+                let body = format!("**Altitude decision: {}**\n\n{}", title.trim(), body.trim());
+                self.config
+                    .automation
+                    .create_activity(
+                        &route.session_id,
+                        &id,
+                        AgentActivityContent::Thought { body },
+                    )
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+            TaskOperatorSignalKind::Blocked => {
                 let body = format!(
-                    "**Altitude needs a decision: {}**\n\n{}\n\nReply here to answer.",
-                    signal.title.trim(),
-                    signal.body.trim()
+                    "**Altitude needs you: {}**\n\n{}\n\nReply here to unblock the task.",
+                    title.trim(),
+                    body.trim()
                 );
                 self.config
                     .automation
@@ -886,8 +924,8 @@ impl RemoteTracker {
                 // response here would mark it complete before anyone accepted.
                 let mut body = format!(
                     "**Altitude finished the work: {}**\n\n{}\n\nReply to accept and complete, or reply with further instructions.",
-                    signal.title.trim(),
-                    signal.body.trim()
+                    title.trim(),
+                    body.trim()
                 );
                 append_contributions(&mut body, contributions);
                 self.config
@@ -902,18 +940,6 @@ impl RemoteTracker {
                 self.config
                     .automation
                     .status(&reference, TrackerStatus::InReview)
-                    .await
-                    .map_err(|error| error.to_string())
-            }
-            TaskOperatorSignalKind::Failure => {
-                let body = format!(
-                    "**Altitude stopped: {}**\n\n{}",
-                    signal.title.trim(),
-                    signal.body.trim()
-                );
-                self.config
-                    .automation
-                    .create_activity(&route.session_id, &id, AgentActivityContent::Error { body })
                     .await
                     .map_err(|error| error.to_string())
             }

@@ -15,8 +15,9 @@ use uuid::Uuid;
 
 use super::{
     Task, TaskAgentRun, TaskAgentRunOutcome, TaskDraft, TaskError, TaskExecutionMode,
-    TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent, TaskService, TaskServiceError,
-    failure_events, run_ended, should_resume, should_suspend, snapshot_name,
+    TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent, TaskOperatorSignalAuthor,
+    TaskService, TaskServiceError, failure_events, run_ended, should_resume, should_suspend,
+    snapshot_name,
 };
 
 impl<E> TaskService<E>
@@ -162,7 +163,7 @@ where
             }
             None => task.facts.intent.clone(),
         };
-        self.launch(task, command, TaskExecutionMode::Autopilot)
+        self.launch(task, command, TaskExecutionMode::Autopilot, None)
             .await
     }
     pub(super) async fn provision(&self, task: Task) -> Result<Task, TaskServiceError> {
@@ -280,7 +281,7 @@ where
         };
         let error = diagnostic.map_or(error.clone(), |detail| format!("{error}: {detail}"));
         let mut events = vec![run_ended(agent_run, TaskAgentRunOutcome::Failed, exit_code)];
-        events.extend(failure_events(task, error));
+        events.extend(self.stopped_events(task, error).await?);
         self.record(&task.id, &events).await
     }
     pub async fn remove(&self, task: Task) -> Result<(), TaskServiceError> {
@@ -381,7 +382,7 @@ where
                                         TaskExecutionPauseReason::AwaitingReviewChecks,
                                     snapshot_path,
                                 }
-                            } else if task.facts.awaiting_signal_kind.is_some() {
+                            } else if task.facts.blocking_signal_kind.is_some() {
                                 TaskHistoryEvent::ExecutionPaused {
                                     execution_status: TaskExecutionStatus::Paused,
                                     sandbox_available: false,
@@ -515,6 +516,38 @@ where
     }
     pub(super) async fn fail(&self, task: &Task, error: String) -> Result<Task, TaskServiceError> {
         tracing::error!(task_id = %task.id, %error, "task execution failed");
-        self.record(&task.id, &failure_events(task, error)).await
+        let events = self.stopped_events(task, error).await?;
+        self.record(&task.id, &events).await
+    }
+
+    /// The events a failed attempt records: why it stopped, and an end to every
+    /// thread that was waiting on it.
+    ///
+    /// A stopped run ends the conversations it was part of. The failure itself
+    /// is the blocked thread raised beside them.
+    async fn stopped_events(
+        &self,
+        task: &Task,
+        error: String,
+    ) -> Result<Vec<TaskHistoryEvent>, TaskServiceError> {
+        let signal_id = self
+            .store
+            .next_signal_id(&task.id)
+            .await
+            .map_err(TaskServiceError::Task)?;
+        let mut events: Vec<TaskHistoryEvent> = failure_events(task, error, signal_id).into();
+        for thread in self
+            .store
+            .operator_signal_threads(&task.id)
+            .await
+            .map_err(TaskServiceError::Task)?
+        {
+            events.push(TaskHistoryEvent::OperatorSignalResolved {
+                signal_id: thread.id,
+                resolved: true,
+                by: TaskOperatorSignalAuthor::Agent,
+            });
+        }
+        Ok(events)
     }
 }

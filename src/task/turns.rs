@@ -11,9 +11,9 @@ use uuid::Uuid;
 use super::{
     IsolationError, Task, TaskAgentRequestedAction, TaskAgentRun, TaskAgentRunOutcome,
     TaskAgentTurnReport, TaskError, TaskExecutionMode, TaskExecutionPauseReason,
-    TaskExecutionStatus, TaskHistoryEvent, TaskOperatorAttentionLevel, TaskOperatorSignalDraft,
-    TaskOperatorSignalKind, TaskService, TaskServiceError, run_ended, snapshot_name,
-    store::ReviewRequest,
+    TaskExecutionStatus, TaskHistoryEvent, TaskOperatorAttentionLevel, TaskOperatorSignalAuthor,
+    TaskOperatorSignalDraft, TaskOperatorSignalKind, TaskService, TaskServiceError, run_ended,
+    snapshot_name, store::ReviewRequest,
 };
 
 /// What the host says when a wrap-up request arrives with no pull request linked.
@@ -49,20 +49,20 @@ where
             | (
                 TaskAgentRequestedAction::Continue,
                 Some(TaskOperatorSignalDraft {
-                    kind: TaskOperatorSignalKind::Update,
+                    kind: TaskOperatorSignalKind::Update | TaskOperatorSignalKind::Decision,
                     ..
                 }),
             ) => TaskOperatorAttentionLevel::Nominal,
             (
                 TaskAgentRequestedAction::AwaitOperator,
                 Some(TaskOperatorSignalDraft {
-                    kind: TaskOperatorSignalKind::Decision | TaskOperatorSignalKind::InReview,
+                    kind: TaskOperatorSignalKind::Blocked | TaskOperatorSignalKind::InReview,
                     ..
                 }),
             ) => TaskOperatorAttentionLevel::Requested,
             _ => {
                 return Err(TaskServiceError::InvalidReport(
-                    "updates must continue; decisions and wrap-up requests must await the operator"
+                    "updates and decisions continue; blocked questions and review requests await the operator"
                         .into(),
                 ));
             }
@@ -108,6 +108,7 @@ where
         self.start_autopilot_turn(
             task,
             "Continue the task autonomously from the current state.",
+            None,
         )
         .await
     }
@@ -115,7 +116,7 @@ where
         &self,
         task: Task,
     ) -> Result<(Task, TaskAgentRun, CommandSession), TaskServiceError> {
-        self.start_autopilot_turn(task, "The operator has returned control to Altitude. Review the preceding conversation and current workspace state, then continue the task autonomously wherever the original intent reasonably permits. Do not wait for routine confirmation.").await
+        self.start_autopilot_turn(task, "The operator has returned control to Altitude. Review the preceding conversation and current workspace state, then continue the task autonomously wherever the original intent reasonably permits. Do not wait for routine confirmation.", None).await
     }
     /// Run a command in the task's capsule and return its stdout.
     ///
@@ -208,6 +209,9 @@ where
         &self,
         task: Task,
         prompt: &str,
+        // The signal thread this turn answers, when the operator started it by
+        // replying to one.
+        answering: Option<String>,
     ) -> Result<(Task, TaskAgentRun, CommandSession), TaskServiceError> {
         // Refresh what the contributions look like before the agent runs, so a
         // turn is planned against current external state rather than the state
@@ -221,12 +225,15 @@ where
             &task.turn_context(TaskExecutionMode::Autopilot),
             true,
         );
-        self.launch(task, command, TaskExecutionMode::Autopilot)
+        self.launch(task, command, TaskExecutionMode::Autopilot, answering)
             .await
     }
     pub async fn request_autopilot_report(
         &self,
         task: Task,
+        // The thread the run being reported on was answering. The report belongs
+        // to it, so the request turn carries it across.
+        answering: Option<String>,
     ) -> Result<(Task, TaskAgentRun, CommandSession), TaskServiceError> {
         let engine = self.engine(&task)?;
         let conversation_id = self.agent_conversation(&task, true).await?;
@@ -234,7 +241,7 @@ where
             &conversation_id,
             &task.turn_context(TaskExecutionMode::AutopilotReport),
         );
-        self.launch(task, command, TaskExecutionMode::AutopilotReport)
+        self.launch(task, command, TaskExecutionMode::AutopilotReport, answering)
             .await
     }
     /// Hand the task's terminal to the operator.
@@ -255,13 +262,23 @@ where
         // work now, and a hold left behind would keep admission from running the
         // task again after they hand it back.
         if let Some(deferred) = task.facts.deferred_review.clone() {
+            // The request was never delivered, so its thread either does not exist
+            // or is waiting on the agent. Inspecting the task ends the wait either
+            // way, and a later request opens a thread of its own.
             task = self
                 .record(
                     &task.id,
-                    &[TaskHistoryEvent::ReviewDeferralCleared {
-                        signal_id: deferred.signal.id,
-                        reason: "the operator took the task over to inspect it".to_owned(),
-                    }],
+                    &[
+                        TaskHistoryEvent::ReviewDeferralCleared {
+                            signal_id: deferred.signal.id.clone(),
+                            reason: "the operator took the task over to inspect it".to_owned(),
+                        },
+                        TaskHistoryEvent::OperatorSignalResolved {
+                            signal_id: deferred.signal.id,
+                            resolved: true,
+                            by: TaskOperatorSignalAuthor::Operator,
+                        },
+                    ],
                 )
                 .await?;
         }
@@ -276,6 +293,7 @@ where
             task,
             engine.operator_command(&conversation_id),
             TaskExecutionMode::Operator,
+            None,
         )
         .await
     }
@@ -284,6 +302,7 @@ where
         task: Task,
         command: String,
         mode: TaskExecutionMode,
+        answering_signal_id: Option<String>,
     ) -> Result<(Task, TaskAgentRun, CommandSession), TaskServiceError> {
         if task.facts.accepted {
             return Err(TaskServiceError::Task(super::TaskError::OperationRejected(
@@ -298,29 +317,15 @@ where
         let agent_run = TaskAgentRun {
             id: Uuid::new_v4().to_string(),
             task_id: task.id.clone(),
+            answering_signal_id,
         };
-        let mut events = Vec::new();
-        if mode == TaskExecutionMode::Autopilot {
-            // Returning from an operator shell is also an explicit retry. Retire
-            // its old failure signals; another failed attempt raises fresh evidence.
-            events.extend(
-                self.store
-                    .operator_signals(&task.id)
-                    .await
-                    .map_err(TaskServiceError::Task)?
-                    .into_iter()
-                    .filter(|signal| signal.kind == TaskOperatorSignalKind::Failure)
-                    .map(|signal| TaskHistoryEvent::OperatorSignalAcknowledged {
-                        signal_id: signal.id,
-                    }),
-            );
-        }
-        events.push(TaskHistoryEvent::AgentRunStarted {
+        let events = vec![TaskHistoryEvent::AgentRunStarted {
             execution_status: TaskExecutionStatus::Running,
             agent_run_id: agent_run.id.clone(),
             sandbox_id: sandbox_id.clone(),
             execution_mode: mode,
-        });
+            answering_signal_id: agent_run.answering_signal_id.clone(),
+        }];
         let task = self.record(&task.id, &events).await?;
         match self.isolation.run_command(sandbox_id, command).await {
             Ok(session) => Ok((task, agent_run, session)),

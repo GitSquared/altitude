@@ -5,10 +5,18 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     text::{Line, Span},
-    widgets::{Block, BorderType, Clear, List, ListItem, Padding, Paragraph, Wrap},
+    widgets::{Paragraph, Wrap},
 };
 
-use crate::tui::widgets::{chrome, palette, utils::shimmer};
+use crate::tui::widgets::{
+    chrome,
+    columns::Columns,
+    header,
+    list::{self, Row},
+    palette,
+    surface::Surface,
+    utils::shimmer,
+};
 
 use super::{
     form::draw_form,
@@ -20,18 +28,18 @@ use super::{
     rows::{CredentialKind, RowKind, View, mark},
 };
 
-/// The gap between columns, so two focus bars can never touch.
-const GAP: u16 = 3;
-
 pub fn draw(
     frame: &mut Frame,
     area: Rect,
-    panel: &Panel,
+    panel: &mut Panel,
     view: &View,
     tick: Option<usize>,
     is_discovering: bool,
 ) -> Rect {
-    draw_columns(frame, area, panel, view, tick, is_discovering);
+    let [header_area, body] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    header::draw(frame, header_area, "SETTINGS", None, None);
+    draw_columns(frame, body, panel, view, tick, is_discovering);
     if let Some(form) = &panel.form {
         chrome::dim(frame, area);
         draw_form(frame, area, form);
@@ -39,126 +47,113 @@ pub fn draw(
     area
 }
 
-/// One item of a list, in the three places it can hold something: a mark at the
-/// left edge, the title, and a note at the right edge. Only the title is always
-/// there.
-///
-/// The note goes to the right edge rather than after the title, so a column of
-/// notes lines up instead of each one sitting wherever its title happens to end.
-/// The mark is passed in rather than read, because a mark can be the one that
-/// travels while it waits, and only the drawing knows where the frame is.
-fn item(
-    mark: Vec<Span<'static>>,
-    title: &str,
-    note: Option<&str>,
-    width: usize,
-    focused: bool,
-) -> Line<'static> {
-    let note = note.unwrap_or_default();
-    let used = mark.iter().map(Span::width).sum::<usize>()
-        + Line::from(title).width()
-        + Line::from(note).width();
-    let padding = " ".repeat(width.saturating_sub(used).max(1));
-    let mut spans = mark;
-    if focused {
-        // Inverted across the row, which is what makes the mark's own colour read
-        // as not being part of the bar.
-        spans.push(Span::styled(
-            format!("{title}{padding}{note}"),
-            palette::focus(),
-        ));
-        return Line::from(spans);
-    }
-    spans.push(Span::raw(title.to_owned()));
-    spans.push(Span::raw(padding));
-    if !note.is_empty() {
-        spans.push(Span::styled(note.to_owned(), palette::muted()));
-    }
-    Line::from(spans)
-}
-
 fn draw_columns(
     frame: &mut Frame,
     area: Rect,
-    panel: &Panel,
+    panel: &mut Panel,
     view: &View,
     tick: Option<usize>,
     is_discovering: bool,
 ) {
-    let block = Block::bordered()
-        .title(" Settings ")
-        .border_type(BorderType::Rounded)
-        .padding(Padding::horizontal(1));
-    frame.render_widget(Clear, area);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    let [rail, list_area, detail_area] = Layout::horizontal([
-        Constraint::Length(18),
-        Constraint::Length(34),
-        Constraint::Min(20),
-    ])
-    .spacing(GAP)
-    .areas(inner);
+    let inner = Surface::new().opaque().draw(frame, area);
+    // The rail picks a list, the list picks a row, and the detail describes it:
+    // the same columns the signals screen uses, one more of them.
+    const RAIL: u16 = 32;
+    const LIST: u16 = 34;
+    let columns = Columns::new(&[RAIL, LIST]).draw(frame, inner);
+    let rail = columns[0];
+    let list_area = columns[1];
+    // A gutter on both sides of the description, so it does not start on the
+    // rule and end on the frame.
+    let detail_area = Rect {
+        x: columns[2].x.saturating_add(1),
+        width: columns[2].width.saturating_sub(2),
+        ..columns[2]
+    };
 
     let rail_focused = panel.depth == Depth::Rail;
-    let rail_items = Section::ALL
+    let rail_selected = Section::ALL
+        .iter()
+        .position(|section| *section == panel.section)
+        .unwrap_or(0);
+    let rail_rows = Section::ALL
         .iter()
         .map(|section| {
-            let focused = rail_focused && *section == panel.section;
-            let row = item(
-                Vec::new(),
-                section.title(),
-                None,
-                usize::from(rail.width),
-                focused,
-            );
-            ListItem::new(if rail_focused {
-                row
-            } else if *section == panel.section {
-                row.style(palette::inactive_selection())
+            let selected = *section == panel.section;
+            let tone = if selected || rail_focused {
+                palette::primary()
             } else {
-                row.style(palette::muted())
-            })
+                palette::muted()
+            };
+            // Fat rows, like the signal list: the name, then what the section
+            // is for.
+            Row::new(section.title())
+                .detail(section.description())
+                .tone(tone)
+                .gap(true)
         })
         .collect::<Vec<_>>();
-    frame.render_widget(List::new(rail_items), rail);
+    list::draw(
+        frame,
+        rail,
+        &rail_rows,
+        0,
+        Some(rail_selected),
+        rail_focused.then_some(rail_selected),
+        1,
+    );
 
     let list_focused = panel.depth == Depth::List;
-    let width = usize::from(list_area.width);
-    let mut list_items = view
+    let list_rows = view
         .rows
         .iter()
         .enumerate()
         .map(|(index, row)| {
-            let mark = row.dot().map_or_else(Vec::new, |dot| dot.spans(tick));
-            let line = item(
-                mark,
-                &row.label,
-                row.note,
-                width,
-                list_focused && index == panel.selected,
-            );
-            let line = if list_focused {
-                line
-            } else {
-                line.style(palette::muted())
-            };
             // A discovered remote waits at the end of the list until it is
             // adopted, so it stays dim even while the list has the focus.
-            ListItem::new(if matches!(row.kind, RowKind::Discovered(_)) {
-                line.style(palette::muted())
+            let tone = if matches!(row.kind, RowKind::Discovered(_)) {
+                palette::muted()
+            } else if list_focused || index == panel.selected() {
+                palette::primary()
             } else {
-                line
-            })
+                palette::muted()
+            };
+            let mut line = Row::new(row.label.clone()).tone(tone);
+            if let Some(detail) = &row.detail {
+                line = line.detail(detail.clone());
+            }
+            if let Some(dot) = row.dot() {
+                line = line.mark(dot.spans(tick));
+            }
+            line
         })
         .collect::<Vec<_>>();
+    let visible = list::Cursor::visible(list_area.height, list::row_height(&list_rows));
+    panel
+        .cursor
+        .follow(list_rows.len(), visible, tick.is_some());
+    list::draw(
+        frame,
+        list_area,
+        &list_rows,
+        panel.cursor.offset(),
+        Some(panel.selected()),
+        list_focused.then(|| panel.selected()),
+        1,
+    );
     if panel.section == Section::Remotes && is_discovering {
-        list_items.push(ListItem::new(Line::default()));
-        list_items.push(ListItem::new(
-            Line::from(shimmer("scanning…", tick)).centered(),
-        ));
+        // A scan has no row yet, so it is said under the rows rather than in one.
+        let y = (list_area.y + list::row_height(&list_rows) * list_rows.len() as u16 + 1)
+            .min(list_area.bottom().saturating_sub(1));
+        frame.render_widget(
+            Paragraph::new(Line::from(shimmer("scanning…", tick)).centered()),
+            Rect {
+                y,
+                height: 1,
+                ..list_area
+            },
+        );
     }
-    frame.render_widget(List::new(list_items), list_area);
 
     // The third column follows the selection rather than the focus, so it is
     // drawn at full strength whether or not the list is being used.

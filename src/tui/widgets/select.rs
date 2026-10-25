@@ -302,15 +302,31 @@ impl<T> Select<T> {
         }
     }
 
-    /// Draws the open list over `area`, ending where `anchor` begins, and
+    /// Draws the open list over `area`, opening upwards from `anchor`, and
     /// answers with where each offer was drawn so a click can find it.
-    ///
-    /// The list opens upwards, because the pills sit above the actions: down is
-    /// the button row, and a menu that covers what the page is asking is worse
-    /// than one that covers what has been written. It is as tall as its matches
-    /// and no taller, and as wide as its widest row so it does not paper over
-    /// the page it is drawn on.
     pub fn draw_list(&self, frame: &mut Frame, area: Rect, anchor: Rect) -> Vec<(Rect, usize)> {
+        self.draw_list_in(frame, area, anchor, true)
+    }
+
+    /// Draws the open list downwards from `anchor`, for a pill above the content
+    /// it filters. It is as tall as its matches and no taller, and as wide as its
+    /// widest row so it does not paper over the page it is drawn on.
+    pub fn draw_list_below(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        anchor: Rect,
+    ) -> Vec<(Rect, usize)> {
+        self.draw_list_in(frame, area, anchor, false)
+    }
+
+    fn draw_list_in(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        anchor: Rect,
+        opens_up: bool,
+    ) -> Vec<(Rect, usize)> {
         if !self.open || area.height == 0 || area.width == 0 {
             return Vec::new();
         }
@@ -336,9 +352,17 @@ impl<T> Select<T> {
         let height = (matches.len() as u16 + 2 + u16::from(searching))
             .max(3)
             .min(area.height);
+        let y = if opens_up {
+            anchor.y.saturating_sub(height).max(area.y)
+        } else {
+            anchor
+                .bottom()
+                .min(area.bottom().saturating_sub(height))
+                .max(area.y)
+        };
         let popup = Rect {
             x: anchor.x.min(area.right().saturating_sub(width)),
-            y: anchor.y.saturating_sub(height).max(area.y),
+            y,
             width,
             height,
         };

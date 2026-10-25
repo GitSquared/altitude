@@ -398,7 +398,6 @@ pub struct WorkflowState {
 pub enum AgentActivityContent {
     Thought { body: String },
     Response { body: String },
-    Error { body: String },
     Elicitation { body: String },
 }
 

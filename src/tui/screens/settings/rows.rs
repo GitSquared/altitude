@@ -18,15 +18,16 @@ use super::panel::Setting;
 /// One row of the focused list.
 ///
 /// A row is three places: a mark at the left edge where it has a status of its
-/// own, its name, and a note at the right edge where there is more to say about
-/// it than the name. Only the name is always there.
+/// own, its name, and a line under it where there is more to say about it than
+/// the name. Only the name is always there.
 pub struct Row {
     /// What the list shows: a name where there is one, an address where there is
     /// not yet.
     pub label: String,
-    /// Said at the right edge, so a column of notes lines up rather than each
-    /// one sitting wherever its name happens to end.
-    pub note: Option<&'static str>,
+    /// Said under the name: whether it is signed in, which one is the default,
+    /// or where a remote lives. A line rather than a note at the right edge, so
+    /// a long status does not have to fit beside a long name.
+    pub detail: Option<String>,
     pub kind: RowKind,
 }
 
@@ -82,7 +83,7 @@ pub enum RowKind {
 pub(super) fn switch_row(setting: Setting, on: bool) -> Row {
     Row {
         label: setting.label().to_owned(),
-        note: None,
+        detail: Some(if on { "on" } else { "off" }.to_owned()),
         kind: RowKind::Switch { setting, on },
     }
 }
@@ -236,11 +237,23 @@ impl Credential {
 
     /// The mark in front of a credential's row. A profile's says what its own
     /// check last said. This installation is signed in to nothing, so its mark
-    /// says which machine it is instead.
+    /// says which machine it is instead: a filled square, which reads at a
+    /// glance where a small house does not.
     pub(super) fn dot(&self) -> Option<Dot> {
         match &self.kind {
             CredentialKind::Profile { status, .. } => Some(credential_mark(status)),
-            CredentialKind::Installation { .. } => Some(Dot::still('⌂', palette::muted())),
+            CredentialKind::Installation { .. } => Some(Dot::still('■', palette::muted())),
+        }
+    }
+
+    /// Whether this row is signed in, saved, or still being asked about.
+    ///
+    /// The install is not signed in to anything; it is the machine itself, so it
+    /// says that rather than a status it does not have.
+    pub(super) fn summary(&self) -> &'static str {
+        match &self.kind {
+            CredentialKind::Profile { status, .. } => status.summary(),
+            CredentialKind::Installation { .. } => "this machine",
         }
     }
 }

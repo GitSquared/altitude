@@ -23,6 +23,7 @@ mod cli;
 mod config;
 mod credentials;
 mod db;
+mod id;
 mod isolation;
 mod logging;
 mod mounts;

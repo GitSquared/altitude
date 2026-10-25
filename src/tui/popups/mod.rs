@@ -4,9 +4,7 @@
 pub mod confirm;
 pub mod new_task;
 pub mod open_link;
-pub mod reply;
 pub mod send_task;
 pub mod sign_in;
-pub mod signals;
 
 pub mod setup;

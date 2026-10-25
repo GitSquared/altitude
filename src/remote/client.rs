@@ -5,7 +5,7 @@ use std::{fmt, fs, io::Write, path::Path};
 use iroh::{Endpoint, EndpointAddr, EndpointId, endpoint::Connection};
 use tokio::sync::mpsc;
 
-use crate::task::TaskOperatorSignal;
+use crate::task::TaskOperatorSignalThread;
 
 use super::{
     LinkResult,
@@ -459,7 +459,7 @@ impl LinkClient {
         &self,
         peer: impl Into<EndpointAddr>,
         task_id: &str,
-    ) -> LinkResult<Vec<TaskOperatorSignal>> {
+    ) -> LinkResult<Vec<TaskOperatorSignalThread>> {
         match self
             .say(
                 peer,
@@ -487,55 +487,66 @@ impl LinkClient {
         }
     }
 
-    pub async fn read_operator_signals(
+    pub async fn resolve_info_signals(
         &self,
         peer: impl Into<EndpointAddr>,
         task_id: &str,
     ) -> LinkResult<()> {
         self.signal(
             peer,
-            super::protocol::SignalCommand::Read {
+            super::protocol::SignalCommand::ResolveInfo {
                 task_id: task_id.into(),
             },
         )
         .await
     }
-    pub async fn acknowledge_operator_signal(
+
+    pub async fn reply_operator_signal(
         &self,
         peer: impl Into<EndpointAddr>,
+        task_id: &str,
         signal_id: &str,
+        body: &str,
     ) -> LinkResult<()> {
         self.signal(
             peer,
-            super::protocol::SignalCommand::Acknowledge {
+            super::protocol::SignalCommand::Reply {
+                task_id: task_id.into(),
                 signal_id: signal_id.into(),
+                body: body.into(),
             },
         )
         .await
     }
-    pub async fn answer_operator_signal(
+
+    pub async fn resolve_signal(
         &self,
         peer: impl Into<EndpointAddr>,
+        task_id: &str,
         signal_id: &str,
-        answer: &str,
+        resolved: bool,
     ) -> LinkResult<()> {
         self.signal(
             peer,
-            super::protocol::SignalCommand::Answer {
+            super::protocol::SignalCommand::Resolve {
+                task_id: task_id.into(),
                 signal_id: signal_id.into(),
-                answer: answer.into(),
+                resolved,
             },
         )
         .await
     }
+
     pub async fn confirm_operator_signal(
         &self,
         peer: impl Into<EndpointAddr>,
+        task_id: &str,
         signal_id: &str,
     ) -> LinkResult<()> {
         self.signal(
             peer,
             super::protocol::SignalCommand::Accept {
+                task_id: task_id.into(),
                 signal_id: signal_id.into(),
             },
         )

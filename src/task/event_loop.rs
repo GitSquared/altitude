@@ -19,7 +19,8 @@ use crate::{
     },
     task::{
         DeferredReview, Task, TaskAgentRequestedAction, TaskAgentRun, TaskExecutionMode,
-        TaskExecutionStatus, TaskHistoryEvent, TaskOperatorSignal, TaskService, TaskServiceError,
+        TaskExecutionStatus, TaskHistoryEvent, TaskOperatorSignal, TaskOperatorSignalAuthor,
+        TaskService, TaskServiceError,
     },
     tracker::IssueSnapshot,
     vcs::{
@@ -283,6 +284,11 @@ where
         &self.service
     }
 
+    /// One task as it reads now, for a screen that is showing it.
+    pub async fn task(&self, task_id: &str) -> Result<Option<Task>, TaskServiceError> {
+        self.service.task(task_id).await
+    }
+
     pub async fn update_intent(
         &self,
         task_id: &str,
@@ -340,12 +346,28 @@ where
         Ok(())
     }
 
-    pub async fn reply(&self, signal_id: &str, answer: String) -> Result<(), TaskServiceError> {
-        let run = self
+    /// The signal threads of a task, resolved ones included, for the screen that
+    /// is showing them.
+    pub async fn signal_threads(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<super::TaskOperatorSignalThread>, TaskServiceError> {
+        self.service.signal_threads(task_id).await
+    }
+
+    pub async fn reply(
+        &self,
+        task_id: &str,
+        signal_id: &str,
+        answer: String,
+    ) -> Result<(), TaskServiceError> {
+        if let Some(run) = self
             .service
-            .answer_operator_signal(signal_id, answer)
-            .await?;
-        self.watch_agent_run(Ok(run));
+            .reply_operator_signal(task_id, signal_id, answer)
+            .await?
+        {
+            self.watch_agent_run(Ok(run));
+        }
         Ok(())
     }
 
@@ -597,14 +619,18 @@ where
         });
     }
 
-    pub fn answer_operator_signal(&self, signal_id: String, answer: String) {
+    pub fn reply_signal(&self, task_id: String, signal_id: String, body: String) {
         let event_loop = self.clone();
         tokio::spawn(async move {
-            let result = event_loop
+            match event_loop
                 .service
-                .answer_operator_signal(&signal_id, answer)
-                .await;
-            event_loop.watch_agent_run(result);
+                .reply_operator_signal(&task_id, &signal_id, body)
+                .await
+            {
+                Ok(Some(run)) => event_loop.watch_agent_run(Ok(run)),
+                Ok(None) => {}
+                Err(error) => event_loop.watch_agent_run(Err(error)),
+            }
         });
     }
 
@@ -875,15 +901,14 @@ where
     ) -> Result<(), TaskServiceError> {
         let blocked = self
             .service
-            .operator_signals(task_id)
+            .operator_signal_threads(task_id)
             .await?
             .iter()
-            .any(|signal| {
+            .any(|thread| {
                 matches!(
-                    signal.kind,
-                    super::TaskOperatorSignalKind::Decision
+                    thread.kind,
+                    super::TaskOperatorSignalKind::Blocked
                         | super::TaskOperatorSignalKind::InReview
-                        | super::TaskOperatorSignalKind::Failure
                 )
             });
         self.service
@@ -1320,6 +1345,14 @@ where
                 signal_id: deferred.signal.id.clone(),
                 reason,
             },
+            // The review never reached the operator, and the agent is being woken
+            // to do the work it was asking about. Whatever thread the hold was
+            // continuing ends here; the next request opens a new one.
+            TaskHistoryEvent::OperatorSignalResolved {
+                signal_id: deferred.signal.id.clone(),
+                resolved: true,
+                by: TaskOperatorSignalAuthor::Agent,
+            },
             TaskHistoryEvent::ExecutionQueued {
                 execution_status: TaskExecutionStatus::Pending,
             },
@@ -1381,7 +1414,11 @@ where
         match mode {
             TaskExecutionMode::Autopilot => {
                 self.service.continue_turn(run).await?;
-                self.watch_agent_run(self.service.request_autopilot_report(task).await);
+                self.watch_agent_run(
+                    self.service
+                        .request_autopilot_report(task, run.answering_signal_id.clone())
+                        .await,
+                );
             }
             TaskExecutionMode::AutopilotReport => {
                 let report = report_stream

@@ -159,16 +159,25 @@ pub fn help_sections() -> Vec<HelpSection> {
             ],
         },
         HelpSection {
-            title: "Signals and replies",
+            title: "Signals",
             bindings: &[
+                ("j/k · ↓/↑", "Move between signal threads"),
                 (
-                    "j/k · ↓/↑",
-                    "Select a signal (h also selects the previous one)",
+                    "Enter",
+                    "Do the thread's default: reply to a question, acknowledge an update",
                 ),
-                ("Tab / Shift-Tab", "Select an available signal action"),
-                ("Enter", "Use the selected action; send a typed reply"),
-                ("PgUp / PgDn · Home / End", "Scroll the signal body"),
-                ("Esc / q / i", "Close signals; use Esc when typing a reply"),
+                ("r", "Reply: write instructions back to the agent"),
+                ("a", "Acknowledge an update"),
+                ("c", "Accept the work and close the task; asks first"),
+                (
+                    "PgUp / PgDn · Home / End",
+                    "Scroll the conversation by a message",
+                ),
+                (
+                    "Enter (writing a reply)",
+                    "Send it; shift-enter adds a line and esc puts it away",
+                ),
+                ("Esc / q", "Close signals; esc leaves the reply box first"),
             ],
         },
         HelpSection {

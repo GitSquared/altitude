@@ -24,7 +24,7 @@ use iroh::{
 
 use crate::config::Settings;
 
-use crate::task::TaskOperatorSignal;
+use crate::task::TaskOperatorSignalThread;
 
 use super::{
     LinkResult,
@@ -398,7 +398,7 @@ pub trait TaskHost: Send + Sync + 'static {
         &self,
         peer: EndpointId,
         task_id: String,
-    ) -> BoxFuture<Result<Vec<TaskOperatorSignal>, String>>;
+    ) -> BoxFuture<Result<Vec<TaskOperatorSignalThread>, String>>;
     fn signal(
         &self,
         peer: EndpointId,

@@ -34,10 +34,6 @@ pub struct Field {
 }
 
 impl Field {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// A field holding `value`, with the caret at the end of it.
     pub fn with(value: &str) -> Self {
         Self {
@@ -246,10 +242,20 @@ impl TextBox {
     /// on the character it belongs to: a renderer that wraps on its own knows
     /// where the text went and not where the caret should follow it.
     pub fn draw(&self, frame: &mut Frame, area: Rect, focused: bool) {
+        self.draw_titled(frame, area, focused, None);
+    }
+
+    /// The same box with something said on its top border, for a box that is one
+    /// question rather than a field of a larger page.
+    pub fn draw_titled(&self, frame: &mut Frame, area: Rect, focused: bool, title: Option<&str>) {
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(border_style(focused))
             .padding(Padding::horizontal(1));
+        let block = match title {
+            Some(title) => block.title(format!(" {title} ")),
+            None => block,
+        };
         let inner = block.inner(area);
         frame.render_widget(block, area);
         if inner.height == 0 || inner.width == 0 {
