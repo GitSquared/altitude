@@ -77,7 +77,7 @@ pub fn help_sections() -> Vec<HelpSection> {
             title: "Tasks",
             bindings: &[
                 ("c", "Create a task"),
-                ("l", "Link a Linear issue and start work on it"),
+                ("Ctrl-L", "Link a Linear issue and start work on it"),
                 ("s", "Open Settings"),
                 ("Enter / i", "Read and answer the selected task's signals"),
                 (
@@ -91,7 +91,7 @@ pub fn help_sections() -> Vec<HelpSection> {
                 ("b", "Open its linked issue in your browser"),
                 (
                     "d / Delete / Backspace",
-                    "Drop the selected task, after confirmation",
+                    "Delete the selected task, after confirmation",
                 ),
                 ("Tab / Shift-Tab", "Select the next or previous card"),
             ],

@@ -664,6 +664,22 @@ impl Drop for App {
     }
 }
 
+/// Whether a task is one the grid lists.
+///
+/// Completed work is history; the grid is for what there is still something to do.
+fn is_listed(task: &Task) -> bool {
+    task.facts.execution_status != TaskExecutionStatus::Completed
+}
+
+fn listed(tasks: Vec<Task>) -> Vec<Task> {
+    tasks.into_iter().filter(is_listed).collect()
+}
+
+/// The same rule for a task another machine reports.
+fn is_listed_summary(summary: &TaskSummary) -> bool {
+    summary.status != TaskExecutionStatus::Completed
+}
+
 impl App {
     pub fn new(
         tasks: Vec<Task>,
@@ -684,7 +700,7 @@ impl App {
             ),
         };
         Self {
-            tasks,
+            tasks: listed(tasks),
             grid_columns: 1,
             alert: settings_error.map(Alert::problem),
             removing: HashSet::new(),
@@ -784,11 +800,31 @@ impl App {
     }
 
     pub(in crate::tui) fn replace_task(&mut self, task: Task) {
-        if let Some(current) = self.tasks.iter_mut().find(|current| current.id == task.id) {
-            *current = task;
-        } else {
+        let Some(current) = self.tasks.iter_mut().find(|current| current.id == task.id) else {
             self.tasks.insert(0, task);
+            return;
+        };
+        // A task that has just been completed leaves the grid the moment the
+        // record says so, rather than waiting for the next refresh.
+        let stays = is_listed(&task);
+        *current = task;
+        if !stays {
+            self.tasks.retain(is_listed);
+            self.clamp_selection();
         }
+    }
+
+    /// Take the task list the event loop reports, leaving out what the grid does
+    /// not show.
+    pub(in crate::tui) fn list_tasks(&mut self, tasks: Vec<Task>) {
+        self.tasks = listed(tasks);
+        self.clamp_selection();
+    }
+
+    fn clamp_selection(&mut self) {
+        self.selected = self
+            .selected
+            .min((self.tasks.len() + self.remote_tasks.len()).saturating_sub(1));
     }
 
     /// Move within the grid: one card across, or one row of cards.
@@ -1153,21 +1189,20 @@ impl App {
                 // something to select and act on.
                 let mut hints = vec![
                     Hint::new("c", "create"),
-                    Hint::new("l", "link issue"),
+                    Hint::new("ctrl-l", "link issue"),
                     Hint::new("s", "settings"),
                 ];
                 if !self.tasks.is_empty() || !self.remote_tasks.is_empty() {
                     hints.extend([
                         Hint::new("enter", "signals"),
                         Hint::new("ctrl-enter", "take over"),
-                        Hint::new("arrows · j/k", "select"),
                     ]);
                 }
                 // Drawn from different places, but acted on the same way: a task is
-                // moved across with one key, and dropped by the machine holding it.
+                // moved across with one key, and deleted by the machine holding it.
                 if self.selected_is_remote() {
                     hints.push(Hint::new("p", "pull here"));
-                    hints.push(Hint::new("d", "drop"));
+                    hints.push(Hint::new("d", "delete"));
                     if self
                         .selected_held()
                         .is_some_and(|held| held.summary.tracker_issue.is_some())
@@ -1176,7 +1211,7 @@ impl App {
                     }
                 } else {
                     if !self.tasks.is_empty() {
-                        hints.push(Hint::new("d", "drop"));
+                        hints.push(Hint::new("d", "delete"));
                         hints.push(Hint::new("p", "push to remote"));
                     }
                     if self
@@ -1965,11 +2000,16 @@ impl App {
                     address: address.clone(),
                     summary: *summary,
                 };
-                match self.remote_tasks.iter_mut().find(|existing| {
+                let at = self.remote_tasks.iter().position(|existing| {
                     existing.address == address && existing.summary.id == held.summary.id
-                }) {
-                    Some(existing) => *existing = held,
-                    None => self.remote_tasks.push(held),
+                });
+                match (at, is_listed_summary(&held.summary)) {
+                    (Some(at), true) => self.remote_tasks[at] = held,
+                    (Some(at), false) => {
+                        self.remote_tasks.remove(at);
+                    }
+                    (None, true) => self.remote_tasks.push(held),
+                    (None, false) => {}
                 }
                 self.reveal_pending();
             }
@@ -2003,6 +2043,7 @@ impl App {
         self.remote_tasks.retain(|held| held.address != address);
         let arrived: Vec<HeldTask> = summaries
             .into_iter()
+            .filter(is_listed_summary)
             .map(|summary| HeldTask {
                 address: address.clone(),
                 summary,
@@ -4455,8 +4496,9 @@ impl App {
                 }
             }
             // Linking an issue is the other way to start work: the same question,
-            // asked of the tracker instead of the operator's prose.
-            KeyCode::Char('l') => {
+            // asked of the tracker instead of the operator's prose. A chord,
+            // because `l` is navigation wherever there is a column to its right.
+            KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if self.reload_settings() {
                     self.foreground = Foreground::NewTask(Box::new(
                         NewTask::new(
@@ -4495,7 +4537,7 @@ impl App {
                 // is where the act happens, not what the act is.
                 if let Some(held) = self.selected_held() {
                     let question = format!(
-                        "Drop \"{}\" from {}?",
+                        "Delete task \"{}\" from {}?",
                         held.summary.title,
                         self.remote_name(&held.address)
                     );
@@ -4505,7 +4547,7 @@ impl App {
                         question,
                     ));
                 } else if let Some(task) = self.selected_task() {
-                    let question = format!("Drop \"{}\"?", task.title());
+                    let question = format!("Stop any agents and delete task \"{}\"?", task.title());
                     self.foreground =
                         Foreground::Confirm(PendingConfirm::removing(task.id, question));
                 }

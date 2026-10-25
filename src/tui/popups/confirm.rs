@@ -156,15 +156,15 @@ impl PendingConfirm {
         }
     }
 
-    /// Confirming drops a task another machine holds, which is that machine's to
-    /// dispose of.
+    /// Confirming deletes a task another machine holds, which is that machine's
+    /// to dispose of.
     pub(in crate::tui) fn removing_remote(
         address: String,
         task_id: String,
         question: String,
     ) -> Self {
         Self {
-            dialog: Confirm::new(question, "drop"),
+            dialog: Confirm::new(question, "delete"),
             action: ConfirmAction::RemoveRemoteTask { address, task_id },
         }
     }
@@ -190,7 +190,7 @@ impl PendingConfirm {
     /// Confirming removes a task from the overview and disposes of its capsule.
     pub(in crate::tui) fn removing(task_id: String, question: String) -> Self {
         Self {
-            dialog: Confirm::new(question, "drop"),
+            dialog: Confirm::new(question, "delete"),
             action: ConfirmAction::RemoveTask { id: task_id },
         }
     }
@@ -288,8 +288,8 @@ pub(in crate::tui) async fn handle_confirm_key<E>(
                 app.forget_credentials(target, event_loop.service()).await
             }
             ConfirmAction::ConfirmSignal { task_id, signal_id } => {
-                app.foreground = Foreground::Signals;
                 if app.remote_signals.is_some() {
+                    app.foreground = Foreground::Signals;
                     app.act_on_remote_signal(
                         signal_id,
                         RemoteSignalAction::Accept,
@@ -306,10 +306,14 @@ pub(in crate::tui) async fn handle_confirm_key<E>(
                     Ok(task) => {
                         app.replace_task(task);
                         app.reload_signals(event_loop.service()).await;
-                        app.select_next_open_thread();
-                        app.say("Task completed");
+                        // Accepting is the end of the task, so there is nothing
+                        // left to read here: the list is where the next one is.
+                        app.foreground = Foreground::Tasks;
                     }
-                    Err(error) => app.problem(error.to_string()),
+                    Err(error) => {
+                        app.foreground = Foreground::Signals;
+                        app.problem(error.to_string());
+                    }
                 }
             }
         },

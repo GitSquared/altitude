@@ -544,10 +544,7 @@ where
             }
             _ = refresh.tick(), if app.open_shell().is_none() => {
                 if let Ok(tasks) = event_loop.list().await {
-                    app.tasks = tasks;
-                    app.selected = app.selected.min(
-                        (app.tasks.len() + app.remote_tasks.len()).saturating_sub(1),
-                    );
+                    app.list_tasks(tasks);
                 }
                 app.capacity = Some(event_loop.capacity_limit());
                 redraw = true;
@@ -601,7 +598,7 @@ where
                 match outcome {
                     Ok(id) => {
                         if let Ok(tasks) = event_loop.list().await {
-                            app.tasks = tasks;
+                            app.list_tasks(tasks);
                         }
                         app.task_landed(&id, terminal, &event_loop, &landings);
                     }
