@@ -59,7 +59,7 @@ pub fn draw(frame: &mut Frame, area: Rect, alert: &Alert) -> Rect {
         .map(|line| line.chars().count().div_ceil(text_width).max(1))
         .sum::<usize>()
         .max(1);
-    let height = (rows as u16 + 5).min(area.height);
+    let height = chrome::modal_height(u16::try_from(rows).unwrap_or(u16::MAX)).min(area.height);
     let [row] = Layout::horizontal([Constraint::Length(width)])
         .flex(Flex::Center)
         .areas(area);
@@ -70,8 +70,7 @@ pub fn draw(frame: &mut Frame, area: Rect, alert: &Alert) -> Rect {
     let block = chrome::modal(alert.title());
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
-    let [body, actions] =
-        Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).areas(inner);
+    let body = chrome::body(inner);
     frame.render_widget(
         Paragraph::new(alert.message.clone())
             .style(if alert.is_problem {
@@ -80,12 +79,12 @@ pub fn draw(frame: &mut Frame, area: Rect, alert: &Alert) -> Rect {
                 palette::primary()
             })
             .wrap(Wrap { trim: true }),
-        body,
+        body.content,
     );
     chrome::actions(
         frame,
         popup,
-        actions,
+        body.actions,
         &[chrome::Action::primary("dismiss").focused(true)],
     );
     popup

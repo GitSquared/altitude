@@ -13,7 +13,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::Rect,
     text::Line,
     widgets::{Clear, Paragraph, Wrap},
 };
@@ -73,9 +73,8 @@ impl OpenLink {
         Self {
             shell,
             link,
-            // Starting on not now means the key that raised this is never the key
-            // that opens something.
-            button: 0,
+            // The question is whether to open it, so opening holds the keys.
+            button: 1,
         }
     }
 
@@ -124,13 +123,12 @@ pub enum Decision {
 }
 
 pub fn draw(frame: &mut Frame, area: Rect, asking: &OpenLink) -> Rect {
-    let popup = chrome::centered(area, 60, 9);
+    let popup = chrome::centered(area, 60, chrome::modal_height(4));
     frame.render_widget(Clear, popup);
     let block = chrome::modal("Sandbox asks");
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
-    let [question, actions] =
-        Layout::vertical([Constraint::Min(5), Constraint::Length(2)]).areas(inner);
+    let body = chrome::body(inner);
     frame.render_widget(
         Paragraph::new(vec![
             Line::styled("Sandbox wants to open:", palette::muted()),
@@ -139,12 +137,12 @@ pub fn draw(frame: &mut Frame, area: Rect, asking: &OpenLink) -> Rect {
             Line::from("Open in browser now?"),
         ])
         .wrap(Wrap { trim: true }),
-        question,
+        body.content,
     );
     chrome::actions(
         frame,
         popup,
-        actions,
+        body.actions,
         &[
             chrome::Action::secondary("cancel").focused(asking.button == 0),
             chrome::Action::primary("open").focused(asking.button == 1),

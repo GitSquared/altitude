@@ -2,7 +2,7 @@
 
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::Rect,
     text::Line,
     widgets::{Block, BorderType, Clear, Padding, Paragraph},
 };
@@ -126,9 +126,9 @@ impl Form {
 
 pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &Form) {
     let area = if form.target.is_remote() {
-        chrome::centered(area, 45, 9)
+        chrome::centered(area, 45, chrome::modal_height(5))
     } else {
-        chrome::centered(area, 65, 18)
+        chrome::centered(area, 65, chrome::modal_height(14))
     };
     let block = Block::bordered()
         .title(format!(" {} ", form.target.title()))
@@ -141,39 +141,33 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &Form) {
         return;
     }
 
-    let fields_height = inner.height.saturating_sub(2);
-    let [fields, actions] =
-        Layout::vertical([Constraint::Length(fields_height), Constraint::Length(2)]).areas(inner);
+    let body = chrome::body(inner);
+    let fields = body.content;
+    // Four rows hold the first field and its label; whatever a short window
+    // leaves the rest takes, so a small terminal loses the setup box rather than
+    // the whole page.
+    let named = Rect {
+        height: fields.height.min(4),
+        ..fields
+    };
 
-    if form.target.is_remote() {
-        let [primary, rest] =
-            Layout::vertical([Constraint::Length(4), Constraint::Min(0)]).areas(fields);
-        draw_label(frame, primary, form.target.primary_label());
-        form.primary.draw(
-            frame,
-            field_box(primary),
-            &FieldStyle {
-                focused: form.focus == Focus::Primary,
-                title: None,
-                prefix: "",
-            },
-        );
-        let _ = rest;
-    } else {
-        let [primary, setup] =
-            Layout::vertical([Constraint::Length(4), Constraint::Min(5)]).areas(fields);
+    draw_label(frame, named, form.target.primary_label());
+    form.primary.draw(
+        frame,
+        field_box(named),
+        &FieldStyle {
+            focused: form.focus == Focus::Primary,
+            title: None,
+            prefix: "",
+        },
+    );
 
-        draw_label(frame, primary, form.target.primary_label());
-        form.primary.draw(
-            frame,
-            field_box(primary),
-            &FieldStyle {
-                focused: form.focus == Focus::Primary,
-                title: None,
-                prefix: "",
-            },
-        );
-
+    if !form.target.is_remote() {
+        let setup = Rect {
+            y: named.bottom(),
+            height: fields.height.saturating_sub(named.height),
+            ..fields
+        };
         draw_label(frame, setup, "Setup command");
         form.setup
             .draw(frame, field_box(setup), form.focus == Focus::Setup);
@@ -183,7 +177,7 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &Form) {
     chrome::actions(
         frame,
         area,
-        actions,
+        body.actions,
         &[
             chrome::Action::secondary("cancel").focused(form.focus == Focus::Cancel),
             chrome::Action::primary("save").focused(form.focus == Focus::Save),
@@ -192,12 +186,20 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &Form) {
 }
 
 fn draw_label(frame: &mut Frame, area: Rect, text: &str) {
-    let [label, _] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-    frame.render_widget(Paragraph::new(Line::styled(text, palette::muted())), label);
+    frame.render_widget(
+        Paragraph::new(Line::styled(text, palette::muted())),
+        Rect {
+            height: area.height.min(1),
+            ..area
+        },
+    );
 }
 
 /// The box a field's input is drawn in, one row below its label.
 fn field_box(area: Rect) -> Rect {
-    let [_, input] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-    input
+    Rect {
+        y: area.y.saturating_add(1),
+        height: area.height.saturating_sub(1),
+        ..area
+    }
 }

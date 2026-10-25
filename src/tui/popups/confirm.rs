@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     DefaultTerminal, Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::Rect,
     widgets::{Clear, Paragraph, Wrap},
 };
 
@@ -35,8 +35,6 @@ pub struct Confirm {
     pub destructive: &'static str,
     /// 0 is cancel, 1 is the destructive button.
     pub button: usize,
-    /// A short question about a deliberate ending; narrower and spaced as such.
-    compact: bool,
 }
 
 /// What the operator answered.
@@ -50,24 +48,11 @@ impl Confirm {
         Self {
             question: question.into(),
             destructive,
-            // Starting on cancel means the key that opens this is never the key
-            // that destroys something.
-            button: 0,
-            compact: false,
+            // The keys start on the answer the question is asking for, which is
+            // the one on the right. Escape is still the way out, and cancel is
+            // one tab away.
+            button: 1,
         }
-    }
-
-    /// Put the keys on the confirming answer. Used only where confirming is the
-    /// expected next step, never for deleting something irreversible.
-    pub fn starting_on_confirm(mut self) -> Self {
-        self.button = 1;
-        self
-    }
-
-    /// Use the narrow, spaced form for a deliberate ending.
-    pub fn compact(mut self) -> Self {
-        self.compact = true;
-        self
     }
 
     /// The keys that work here, for the guidance line.
@@ -104,44 +89,27 @@ impl Confirm {
 }
 
 pub fn draw(frame: &mut Frame, area: Rect, confirm: &Confirm) -> Rect {
-    let width_percent = if confirm.compact { 30 } else { 60 };
+    let width_percent = 60;
     let width = (area.width * width_percent / 100).max(20);
     let text_width = width.saturating_sub(4).max(1);
-    let lines = Paragraph::new(confirm.question.clone())
+    let rows = Paragraph::new(confirm.question.clone())
         .wrap(Wrap { trim: true })
         .line_count(text_width);
-    let height = u16::try_from(lines).unwrap_or(u16::MAX).saturating_add(6);
+    let height = chrome::modal_height(u16::try_from(rows).unwrap_or(u16::MAX));
     let popup = chrome::centered(area, width_percent, height.min(area.height));
     frame.render_widget(Clear, popup);
     let block = chrome::modal("Are you sure?");
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
-    // The compact ending keeps one empty line above the words and one below
-    // them; the actions keep their own two rows under the rule.
-    let [_, question, _, actions] = Layout::vertical(if confirm.compact {
-        [
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
-            Constraint::Length(2),
-        ]
-    } else {
-        [
-            Constraint::Length(0),
-            Constraint::Min(3),
-            Constraint::Length(0),
-            Constraint::Length(2),
-        ]
-    })
-    .areas(inner);
+    let body = chrome::body(inner);
     frame.render_widget(
         Paragraph::new(confirm.question.clone()).wrap(Wrap { trim: true }),
-        question,
+        body.content,
     );
     chrome::actions(
         frame,
         popup,
-        actions,
+        body.actions,
         &[
             chrome::Action::secondary("cancel").focused(confirm.button == 0),
             chrome::Action::primary(confirm.destructive).focused(confirm.button == 1),
@@ -235,9 +203,7 @@ impl PendingConfirm {
         question: String,
     ) -> Self {
         Self {
-            dialog: Confirm::new(question, "accept")
-                .starting_on_confirm()
-                .compact(),
+            dialog: Confirm::new(question, "accept"),
             action: ConfirmAction::ConfirmSignal { task_id, signal_id },
         }
     }

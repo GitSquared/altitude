@@ -291,6 +291,7 @@ pub fn actions(frame: &mut Frame, modal: Rect, area: Rect, actions: &[Action]) -
 const ACTION_GAP: u16 = 3;
 
 /// A box a percentage of the width and a fixed height, centred.
+///
 /// The frame a modal wears: a rounded border with what it is at the top.
 ///
 /// The keys that work are not printed here. They belong to the frame at the
@@ -307,11 +308,51 @@ pub fn modal(title: impl Into<String>) -> Block<'static> {
 }
 
 pub fn centered(area: Rect, percent_x: u16, height: u16) -> Rect {
+    centered_at_most(area, percent_x, u16::MAX, height)
+}
+
+/// The same box, never wider than `max_width` columns.
+///
+/// A share of the width is a share of whatever the terminal is, and a paragraph
+/// in a box that wide is a line the eye loses its place in.
+pub fn centered_at_most(area: Rect, percent_x: u16, max_width: u16, height: u16) -> Rect {
+    let width = (area.width * percent_x / 100).min(max_width).max(1);
     let [vertical] = Layout::vertical([Constraint::Length(height.min(area.height))])
         .flex(Flex::Center)
         .areas(area);
-    let [horizontal] = Layout::horizontal([Constraint::Percentage(percent_x)])
+    let [horizontal] = Layout::horizontal([Constraint::Length(width)])
         .flex(Flex::Center)
         .areas(vertical);
     horizontal
+}
+
+/// Where a modal's words and its answers go, inside its frame.
+pub struct Body {
+    /// What the modal says, one empty row from the top of the frame and one
+    /// from the rule under it.
+    pub content: Rect,
+    /// The rule, and the answers under it.
+    pub actions: Rect,
+}
+
+/// Splits the inside of a modal into what it says and how it is answered.
+///
+/// One empty row above the words and one below them, everywhere, so no two
+/// modals are spaced differently. A modal that laid this out itself would be the
+/// one that drifts.
+pub fn body(inner: Rect) -> Body {
+    let [_, content, _, actions] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(2),
+    ])
+    .areas(inner);
+    Body { content, actions }
+}
+
+/// The height a modal needs to say `rows` of words: a border on each side, an
+/// empty row above and below the words, and the rule and answers under them.
+pub fn modal_height(rows: u16) -> u16 {
+    rows.saturating_add(6)
 }

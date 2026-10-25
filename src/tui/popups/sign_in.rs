@@ -9,7 +9,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::Rect,
     text::Line,
     widgets::{Clear, Paragraph, Wrap},
 };
@@ -64,27 +64,27 @@ impl SignIn {
     }
 
     pub fn draw(&self, frame: &mut Frame, area: Rect) -> Rect {
-        // Only as tall as the words are: borders, a gap, and the button besides.
+        // Only as tall as the words are: the frame and the spacing around them,
+        // and the button besides.
         let width = (area.width * 60 / 100).max(1);
         let rows = Paragraph::new(self.lines.clone())
             .wrap(Wrap { trim: true })
             .line_count(width.saturating_sub(4).max(1));
-        let height = (rows as u16).saturating_add(6).min(area.height);
-        let popup = chrome::centered(area, 60, height);
+        let height = chrome::modal_height(u16::try_from(rows).unwrap_or(u16::MAX));
+        let popup = chrome::centered(area, 60, height.min(area.height));
         frame.render_widget(Clear, popup);
         let block = chrome::modal(format!("Sign in to {}", self.display));
         let inner = block.inner(popup);
         frame.render_widget(block, popup);
-        let [text, actions] =
-            Layout::vertical([Constraint::Min(3), Constraint::Length(2)]).areas(inner);
+        let body = chrome::body(inner);
         frame.render_widget(
             Paragraph::new(self.lines.clone()).wrap(Wrap { trim: true }),
-            text,
+            body.content,
         );
         chrome::actions(
             frame,
             popup,
-            actions,
+            body.actions,
             &[chrome::Action::primary("sign in").focused(true)],
         );
         popup

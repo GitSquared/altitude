@@ -71,9 +71,12 @@ pub(in crate::tui) const AGENTS: [AgentKind; 2] = [AgentKind::Pi, AgentKind::Cla
 /// The page's width, as a share of the terminal. Wider than a question about one
 /// value, because the answer to this one is a paragraph.
 const WIDTH_PERCENT: u16 = 70;
-/// Its height, which is the prompt's room plus what the pills and the actions
-/// need. The prompt takes what is left of it.
-const HEIGHT: u16 = 15;
+/// How wide it may get. The prompt is read a line at a time, so past a legible
+/// measure a wider window only makes the line harder to follow.
+const MAX_WIDTH: u16 = 88;
+/// Its height, which is the prompt's room plus the spacing, the pills and the
+/// actions. The prompt takes what is left of it.
+const HEIGHT: u16 = 17;
 /// Between two pills, so they read as three things rather than one strip.
 const PILL_GAP: u16 = 2;
 /// How long a query rests before it is searched, so a word typed a letter at a
@@ -932,7 +935,7 @@ pub fn draw(
     tick: Option<usize>,
     targets: &mut Targets<Hit>,
 ) -> Rect {
-    let popup = chrome::centered(area, WIDTH_PERCENT, HEIGHT);
+    let popup = chrome::centered_at_most(area, WIDTH_PERCENT, MAX_WIDTH, HEIGHT);
     frame.render_widget(Clear, popup);
     let block = chrome::modal(if new_task.issue {
         "New task — link an issue"
@@ -942,21 +945,19 @@ pub fn draw(
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     targets.clear();
-    if inner.height < 8 {
+    if inner.height < 10 {
         return popup;
     }
     // The pills sit right under the prompt, on the right like a toolbar, and the
     // answers close the window under a rule: the prompt is the question, what it
     // will run as qualifies it, and the two answers end it.
-    let [label, body, pills, actions] = Layout::vertical([
+    let body = chrome::body(inner);
+    let [label, prompt, pills] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(4),
         Constraint::Length(1),
-        // A rule, then the answers, and nothing under them: the window ends
-        // where they do.
-        Constraint::Length(2),
     ])
-    .areas(inner);
+    .areas(body.content);
     frame.render_widget(
         Line::styled(
             if new_task.issue { "Issue" } else { "Prompt" },
@@ -973,17 +974,17 @@ pub fn draw(
         targets.add(anchor, Hit::Pill(pill));
     }
 
-    let prompt = if new_task.issue {
+    let prompt_area = if new_task.issue {
         let [query, results] =
-            Layout::vertical([Constraint::Length(3), Constraint::Min(3)]).areas(body);
+            Layout::vertical([Constraint::Length(3), Constraint::Min(3)]).areas(prompt);
         new_task.task.draw(frame, query, new_task.is_typing());
         draw_issue(frame, results, new_task, tick);
         query
     } else {
-        new_task.task.draw(frame, body, new_task.is_typing());
-        body
+        new_task.task.draw(frame, prompt, new_task.is_typing());
+        prompt
     };
-    targets.add(prompt, Hit::Prompt);
+    targets.add(prompt_area, Hit::Prompt);
 
     // Said only once it has been asked for: an empty prompt is not a mistake
     // until an answer says it is. It goes beside the pills, which leave the left
@@ -1005,7 +1006,7 @@ pub fn draw(
     let buttons = chrome::actions(
         frame,
         popup,
-        actions,
+        body.actions,
         &[
             chrome::Action::secondary("cancel").focused(new_task.focus == Focus::Cancel),
             chrome::Action::primary(if new_task.issue { "link" } else { "create" })
@@ -1017,7 +1018,7 @@ pub fn draw(
         targets.add(create, Hit::Create);
     }
 
-    for (row, offer) in new_task.draw_open_list(frame, body, anchors) {
+    for (row, offer) in new_task.draw_open_list(frame, prompt, anchors) {
         targets.add(row, Hit::Offer(offer));
     }
     popup
