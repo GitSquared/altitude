@@ -12,7 +12,7 @@ use crate::{
     tracker::{TrackerKind, oauth, setup::Guide, setup::Step},
 };
 
-use super::console::{ask, field, has_terminal, prose};
+use super::console::{ask, field, has_terminal, paragraph, prose};
 
 pub async fn connect_linear(
     settings: &ServeSettings,
@@ -35,10 +35,13 @@ pub async fn connect_linear(
         Some(installed) => replace(&linear, credentials_path, &installed).await,
         None => {
             print_guide(guide);
-            ask(
+            if !ask(
                 "Press enter to open Linear's install page · it waits up to 15 minutes",
                 true,
-            )?;
+            )? {
+                println!("\nNothing was installed.");
+                return Ok(());
+            }
             let credentials = oauth::connect(linear, credentials_path)
                 .await
                 .map_err(io::Error::other)?;
@@ -67,8 +70,8 @@ fn print_report(linear: &LinearSettings, settings_path: &Path) -> Result<(), Box
     field("settings", settings_path.display());
     field("address", &linear.public_url);
     field("webhooks", &linear.listen);
-    field("register", callback);
-    field("", webhook);
+    field("callback", callback);
+    field("webhook", webhook);
 
     // Presence only: the values are never printed, not even redacted ones, so
     // this output is safe to paste into a bug report.
@@ -134,9 +137,10 @@ fn print_installed(credentials: &oauth::AppCredentials, credentials_path: &Path)
     println!("\nInstalled:");
     field("workspace", workspace(credentials));
     field("saved", credentials_path.display());
-    println!(
-        "\nThe token refreshes itself while `altitude serve` runs. Start it to receive \
-         delegated work, and keep it running across reboots with `altitude serve --service`."
+    println!();
+    paragraph(
+        "The token refreshes itself while `altitude serve` runs. Start it to receive delegated \
+         work, and keep it up with `altitude serve install`.",
     );
 }
 
@@ -164,15 +168,15 @@ fn present(secret: &Result<String, String>) -> &'static str {
 }
 
 fn print_guide(guide: &Guide) {
-    for paragraph in guide.intro {
-        prose(paragraph, "", "");
+    for text in guide.intro {
+        paragraph(text);
         println!();
     }
     for (index, step) in guide.steps.iter().enumerate() {
         print_step(index + 1, step);
     }
-    for paragraph in guide.closing {
-        prose(paragraph, "", "");
+    for text in guide.closing {
+        paragraph(text);
         println!();
     }
 }

@@ -1046,26 +1046,25 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
             Err(error) => linear_error = Some(error),
         }
     }
-    // Only a tracker this machine is configured for is announced. A host that
-    // will never run Linear must not tell every client that Linear is missing.
-    let trackers = if settings.linear.is_some() {
-        let state = match &linear_runtime {
-            Some(_) => TrackerReadiness::Ready,
-            // Configured but unusable: distinguishing an app that was never
-            // installed from one that will not sign in sends the owner to
-            // different steps.
-            None if oauth::installed(&credentials_path).is_some() => TrackerReadiness::Unavailable,
-            None => TrackerReadiness::NotInstalled,
-        };
-        vec![TrackerConnection {
-            provider: TrackerKind::Linear,
-            state,
-        }]
-    } else {
-        Vec::new()
-    };
-    match (&settings.linear, &linear_runtime) {
-        (_, Some(runtime)) => tracing::info!(
+    // A machine that will never run Linear must not tell every client that Linear
+    // is missing, so only a configured tracker is announced. An app that was never
+    // installed is worth telling apart from one that will not sign in: they send
+    // its owner to different steps.
+    let readiness = settings.linear.as_ref().map(|_| match &linear_runtime {
+        Some(_) => TrackerReadiness::Ready,
+        None if oauth::installed(&credentials_path).is_some() => TrackerReadiness::Unavailable,
+        None => TrackerReadiness::NotInstalled,
+    });
+    let trackers = readiness
+        .map(|state| {
+            vec![TrackerConnection {
+                provider: TrackerKind::Linear,
+                state,
+            }]
+        })
+        .unwrap_or_default();
+    match (readiness, &linear_runtime) {
+        (Some(_), Some(runtime)) => tracing::info!(
             "{}: workspace {} · webhooks on {}",
             TrackerKind::Linear.label(),
             runtime.workspace_name,
@@ -1075,12 +1074,13 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
                 .map(|address| address.to_string())
                 .unwrap_or_default(),
         ),
-        (Some(_), None) => tracing::warn!(
+        (Some(state), None) => tracing::warn!(
             error = linear_error.as_deref().unwrap_or("no reason given"),
-            "{}: not connected · run `altitude serve connect linear` on this machine",
+            "{}: {} · run `altitude serve connect linear` on this machine",
             TrackerKind::Linear.label(),
+            state.said(),
         ),
-        (None, None) => tracing::info!(
+        (None, _) => tracing::info!(
             "Task tracker: none configured · run `altitude serve connect linear` to pilot work \
              from Linear"
         ),

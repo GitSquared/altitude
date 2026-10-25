@@ -536,15 +536,10 @@ pub(super) fn tracker_summary(
         .iter()
         .map(|connection| match connection.state {
             TrackerReadiness::Ready => connection.provider.label().to_owned(),
-            TrackerReadiness::NotInstalled => {
-                format!(
-                    "{} · not installed on the remote",
-                    connection.provider.label()
-                )
-            }
-            TrackerReadiness::Unavailable => format!(
-                "{} · cannot sign in on the remote",
-                connection.provider.label()
+            state => format!(
+                "{} · {} on the remote",
+                connection.provider.label(),
+                state.said()
             ),
         })
         .collect::<Vec<_>>()

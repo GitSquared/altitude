@@ -68,6 +68,18 @@ pub enum TrackerReadiness {
     Unavailable,
 }
 
+impl TrackerReadiness {
+    /// How the state reads to whoever has to act on it, so the client and the
+    /// remote log say the same words.
+    pub fn said(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::NotInstalled => "not installed",
+            Self::Unavailable => "cannot sign in",
+        }
+    }
+}
+
 /// One tracker a remote is configured for.
 ///
 /// Capability only: a client needs to know whether to wait or to nag, and nothing
@@ -77,12 +89,6 @@ pub enum TrackerReadiness {
 pub struct TrackerConnection {
     pub provider: TrackerKind,
     pub state: TrackerReadiness,
-}
-
-impl TrackerConnection {
-    pub fn is_ready(&self) -> bool {
-        self.state == TrackerReadiness::Ready
-    }
 }
 
 /// What a remote can do with a task right now.

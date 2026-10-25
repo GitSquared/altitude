@@ -12,65 +12,67 @@ use std::{
 };
 
 /// The width the serve role reads at.
-pub const WIDTH: usize = 78;
+const WIDTH: usize = 78;
 
 /// Whether there is someone at the keyboard to answer.
 pub fn has_terminal() -> bool {
     io::stdin().is_terminal()
 }
 
-/// A question with an answer that pressing enter gives.
+/// One answer, or nothing when there is no terminal to read it from.
+fn line(prompt: &str) -> io::Result<Option<String>> {
+    if !has_terminal() {
+        return Ok(None);
+    }
+    print!("\n{prompt}  › ");
+    io::stdout().flush()?;
+    let mut answer = String::new();
+    if io::stdin().read_line(&mut answer)? == 0 {
+        return Ok(None);
+    }
+    Ok(Some(answer.trim().to_owned()))
+}
+
+/// A yes or no, where pressing enter means `default`.
 ///
 /// A run with no terminal answers with `default` instead of waiting for a keypress
 /// nobody is there to make. A step that writes to the machine checks for a
 /// terminal itself rather than trusting this.
 pub fn ask(prompt: &str, default: bool) -> io::Result<bool> {
-    if !io::stdin().is_terminal() {
-        return Ok(default);
-    }
-    print!("\n{prompt}  › ");
-    io::stdout().flush()?;
-    let mut answer = String::new();
-    io::stdin().read_line(&mut answer)?;
-    Ok(match answer.trim() {
-        "" => default,
-        answer => matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes"),
+    Ok(match line(prompt)? {
+        None => default,
+        Some(answer) if answer.is_empty() => default,
+        Some(answer) => matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes"),
     })
 }
 
 /// A question with a small number of answers, given by their number.
 ///
-/// Nothing is assumed about a caller's ordering beyond it being the order shown,
-/// and an answer that is not one of them is asked for again rather than guessed at.
+/// An answer that is not one of them is asked for again rather than guessed at.
 pub fn choose(prompt: &str, count: usize, default: usize) -> io::Result<usize> {
-    if !has_terminal() {
-        return Ok(default);
-    }
     loop {
-        print!("\n{prompt}  › ");
-        io::stdout().flush()?;
-        let mut answer = String::new();
-        if io::stdin().read_line(&mut answer)? == 0 {
-            return Ok(default);
-        }
-        let answer = answer.trim();
-        if answer.is_empty() {
-            return Ok(default);
-        }
-        match answer.parse::<usize>() {
-            Ok(number) if (1..=count).contains(&number) => return Ok(number - 1),
-            _ => println!("  Answer with a number from 1 to {count}."),
+        match line(prompt)? {
+            None => return Ok(default),
+            Some(answer) if answer.is_empty() => return Ok(default),
+            Some(answer) => match answer.parse::<usize>() {
+                Ok(number) if (1..=count).contains(&number) => return Ok(number - 1),
+                _ => println!("  Answer with a number from 1 to {count}."),
+            },
         }
     }
 }
 
-/// One labelled value, aligned with every other line that uses this.
 pub fn field(label: &str, value: impl fmt::Display) {
     println!("  {label:<10}{value}");
 }
 
-/// A paragraph wrapped to what the rest of this output assumes, with the first
-/// line led by `lead` and the rest by `indent`.
+/// A wrapped paragraph.
+pub fn paragraph(text: &str) {
+    prose(text, "", "");
+}
+
+/// A wrapped paragraph whose first line is led by `lead` and whose other lines start
+/// with `indent`, for text that sits beside a number or a label.
 pub fn prose(text: &str, lead: &str, indent: &str) {
     let mut lines = wrap(text, WIDTH.saturating_sub(lead.len())).into_iter();
     if let Some(first) = lines.next() {
@@ -81,7 +83,7 @@ pub fn prose(text: &str, lead: &str, indent: &str) {
     }
 }
 
-pub fn wrap(text: &str, width: usize) -> Vec<String> {
+fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut line = String::new();
     for word in text.split_whitespace() {

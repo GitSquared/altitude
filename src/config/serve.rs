@@ -186,7 +186,6 @@ impl LinearSettings {
     }
 }
 
-/// A secret written in the settings file, or else the variable named beside it.
 fn secret(inline: Option<&str>, environment: &str) -> Result<String, String> {
     if let Some(secret) = inline.map(str::trim).filter(|secret| !secret.is_empty()) {
         return Ok(secret.to_owned());

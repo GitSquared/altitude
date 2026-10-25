@@ -4,8 +4,9 @@
 //! Guided rather than printed, because a service definition is a machine's own
 //! facts — where this binary is, which directories it reads, which user owns the
 //! sandboxes — and someone who can already write one is not who this is for. It
-//! shows everything before writing, never installs in a scope that was not chosen,
-//! and is the only place in the serve role that asks for the machine's owner.
+//! says what it will do before doing it, never installs in a scope that was not
+//! chosen, and is the only place in the serve role that asks for the machine's
+//! owner.
 
 use std::{
     env,
@@ -22,10 +23,11 @@ use crate::{
     config::{Config, ServeSettings},
 };
 
-use super::console::{ask, choose, field, has_terminal, prose};
+use super::console::{ask, choose, field, has_terminal, paragraph};
 
-/// The systemd unit name, and the launchd job label.
+/// The systemd unit name.
 const UNIT: &str = "altitude.service";
+/// The launchd job label, which is reverse-DNS because launchd expects one.
 const LABEL: &str = "dev.saillard.altitude.remote";
 
 /// Who starts it, and whose permissions it runs with.
@@ -35,6 +37,12 @@ enum Scope {
     User,
     /// Without anyone logged in, which is the machine owner's business.
     Machine,
+}
+
+impl Scope {
+    fn privileged(self) -> bool {
+        self == Self::Machine
+    }
 }
 
 pub async fn install(args: &ServeArgs, base: &Config) -> Result<(), Box<dyn Error>> {
@@ -54,7 +62,7 @@ pub async fn install(args: &ServeArgs, base: &Config) -> Result<(), Box<dyn Erro
         return Ok(());
     }
     plan.write()?;
-    plan.run()?;
+    plan.run(&service)?;
     plan.verify();
     Ok(())
 }
@@ -92,19 +100,13 @@ pub async fn uninstall(_args: &ServeArgs, _base: &Config) -> Result<(), Box<dyn 
         .collect::<Vec<_>>();
     let privileged = steps.iter().any(|step| step.privileged);
     println!();
-    prose(
+    paragraph(
         "This stops the remote and deletes what starts it. Your tasks, logins and settings \
          stay where they are.",
-        "",
-        "",
     );
     if privileged {
         println!();
-        prose(
-            "Removing the machine-wide service needs your permission once (sudo).",
-            "",
-            "",
-        );
+        paragraph("Removing the machine-wide service needs your permission once (sudo).");
     }
     if !ask("Remove it? [y/N]", false)? {
         println!("\nNothing was removed.");
@@ -127,18 +129,17 @@ struct Installation {
 
 impl Installation {
     fn find() -> Vec<Self> {
-        let mut found = Vec::new();
-        for scope in [Scope::User, Scope::Machine] {
-            let path = Self::path(scope);
-            if path.exists() {
-                found.push(Self {
-                    steps: Self::steps(&path, scope),
-                    path,
-                    scope,
-                });
-            }
-        }
-        found
+        let uid = uid();
+        [Scope::User, Scope::Machine]
+            .into_iter()
+            .map(|scope| (Self::path(scope), scope))
+            .filter(|(path, _)| path.exists())
+            .map(|(path, scope)| Self {
+                steps: Self::steps(&path, scope, &uid),
+                path,
+                scope,
+            })
+            .collect()
     }
 
     fn path(scope: Scope) -> PathBuf {
@@ -158,39 +159,15 @@ impl Installation {
     /// Stops it, then removes the file. Both are best-effort until the removal: a
     /// service that is already stopped still has a file to delete, and a stop that
     /// refuses does not make the file less of a leftover.
-    fn steps(path: &Path, scope: Scope) -> Vec<Step> {
-        let privileged = scope == Scope::Machine;
-        let stop = if matches!(env::consts::OS, "linux") {
-            Step {
-                command: systemctl(&["disable", "--now", UNIT], scope),
-                privileged,
-                required: false,
-            }
+    fn steps(path: &Path, scope: Scope, uid: &str) -> Vec<Step> {
+        let mut steps = vec![if matches!(env::consts::OS, "linux") {
+            Step::systemctl(scope, &["disable", "--now", UNIT], false)
         } else {
-            let domain = match scope {
-                Scope::User => format!("gui/{}", uid_of()),
-                Scope::Machine => "system".to_owned(),
-            };
-            Step {
-                command: launchctl(&["bootout", &format!("{domain}/{LABEL}")]),
-                privileged,
-                required: false,
-            }
-        };
-        let mut steps = vec![
-            stop,
-            Step {
-                command: vec!["rm".to_owned(), "--".to_owned(), path.display().to_string()],
-                privileged,
-                required: true,
-            },
-        ];
+            Step::launchctl(scope, &["bootout", &domain(scope, uid)], false)
+        }];
+        steps.push(Step::remove(path, scope));
         if matches!(env::consts::OS, "linux") {
-            steps.push(Step {
-                command: systemctl(&["daemon-reload"], scope),
-                privileged,
-                required: false,
-            });
+            steps.push(Step::systemctl(scope, &["daemon-reload"], false));
         }
         steps
     }
@@ -206,9 +183,12 @@ fn config_home() -> PathBuf {
         .unwrap_or_else(|| home().join(".config"))
 }
 
-/// `Service` already holds this; removal needs it without a service to describe.
-fn uid_of() -> String {
-    uid().unwrap_or_else(|_| "0".to_owned())
+/// The launchd domain a job belongs to: this user's session, or the machine's.
+fn domain(scope: Scope, uid: &str) -> String {
+    match scope {
+        Scope::User => format!("gui/{uid}"),
+        Scope::Machine => "system".to_owned(),
+    }
 }
 
 /// Everything about this machine that the definition needs to carry.
@@ -226,9 +206,10 @@ struct Service {
 impl Service {
     fn now(args: &ServeArgs, base: &Config) -> Result<Self, Box<dyn Error>> {
         let exe = env::current_exe()?.canonicalize()?;
-        let home = env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| io::Error::other("this machine has no HOME to install for"))?;
+        let home = home();
+        if home.as_os_str().is_empty() {
+            return Err(io::Error::other("this machine has no HOME to install for").into());
+        }
 
         let settings_path = args
             .config
@@ -273,7 +254,7 @@ impl Service {
             arguments,
             environment,
             user: whoami::username().map_err(io::Error::other)?,
-            uid: uid()?,
+            uid: uid(),
             home,
             settings_path,
         })
@@ -282,7 +263,9 @@ impl Service {
     /// A secret that only this shell's environment holds will not reach a service.
     ///
     /// Said before anything is written, because the service would otherwise start
-    /// without a tracker and look like a failed install.
+    /// without a tracker and look like a failed install. Reading the settings here
+    /// writes a default file when there is none, which is the file the service is
+    /// about to start from anyway.
     fn warn_about_inherited_secrets(&self) -> Result<(), Box<dyn Error>> {
         let settings = ServeSettings::load_or_create(&self.settings_path)?;
         let Some(linear) = settings.linear else {
@@ -292,23 +275,17 @@ impl Service {
             return Ok(());
         }
         println!();
-        prose(
+        paragraph(
             "Some of this machine's Linear secrets come from the environment it is running in \
-             now. A service starts with its own environment and will not see them, so the \
-             remote would come up without a task tracker.",
-            "",
-            "",
+             now. A service starts with its own environment and will not see them, so the remote \
+             would come up without a task tracker.",
         );
         println!();
-        prose(
-            &format!(
-                "Put them in the [linear] section of {} before it starts — that file is only \
-                 readable by this machine's user.",
-                self.settings_path.display()
-            ),
-            "",
-            "",
-        );
+        paragraph(&format!(
+            "Put them in the [linear] section of {} before it starts — that file is only readable \
+             by this machine's user.",
+            self.settings_path.display()
+        ));
         Ok(())
     }
 
@@ -316,21 +293,17 @@ impl Service {
         println!();
         match env::consts::OS {
             "macos" => {
-                prose(
+                paragraph(
                     "A user service starts when you log in, and keeps the sandboxes and logins \
                      this machine already has. A machine service starts at boot with nobody \
                      logged in, runs as you, and needs the machine owner's permission once.",
-                    "",
-                    "",
                 );
             }
             _ => {
-                prose(
+                paragraph(
                     "A user service starts at boot and runs without a session, keeping the \
                      sandboxes and logins this machine already has. A machine service also \
                      starts at boot, but is managed by the machine owner.",
-                    "",
-                    "",
                 );
             }
         }
@@ -370,66 +343,46 @@ impl Service {
             Scope::User => config_home().join("systemd/user").join(UNIT),
             Scope::Machine => PathBuf::from("/etc/systemd/system").join(UNIT),
         };
-        let privileged = scope == Scope::Machine;
-        let commands = vec![
-            Step::systemctl(scope, &["daemon-reload"], true),
-            Step::systemctl(scope, &["enable", "--now", UNIT], true),
-        ];
         Plan {
             path,
             contents: self.systemd_unit(scope),
-            commands,
-            privileged,
+            commands: vec![
+                Step::systemctl(scope, &["daemon-reload"], true),
+                Step::systemctl(scope, &["enable", "--now", UNIT], true),
+            ],
             logs: match scope {
                 Scope::User => format!("journalctl --user -u {UNIT} -f"),
                 Scope::Machine => format!("journalctl -u {UNIT} -f"),
             },
-            verify: vec![Check::systemctl(scope, &["is-active", UNIT])],
+            verify: Step::systemctl(scope, &["is-active", UNIT], false),
             scope,
-            user: self.user.clone(),
         }
     }
 
     fn launchd_plan(&self, scope: Scope) -> Plan {
-        let domain = match scope {
-            Scope::User => format!("gui/{}", self.uid),
-            Scope::Machine => "system".to_owned(),
-        };
         let path = match scope {
             Scope::User => self.home.join("Library/LaunchAgents"),
             Scope::Machine => PathBuf::from("/Library/LaunchDaemons"),
         }
         .join(format!("{LABEL}.plist"));
-        let privileged = scope == Scope::Machine;
-        // Leaving a job loaded beside a new file leaves launchd running the old
-        // definition, so it is unloaded first — and not being loaded is the normal
-        // first install, not an error.
-        let commands = vec![
-            Step::launchctl(scope, &["bootout", &format!("{domain}/{LABEL}")], false),
-            Step::launchctl(
-                scope,
-                &["bootstrap", &domain, &path.display().to_string()],
-                true,
-            ),
-        ];
+        let domain = domain(scope, &self.uid);
         Plan {
             path: path.clone(),
             contents: self.launchd_job(scope),
-            commands,
-            privileged,
-            logs: format!(
-                "tail -f {}",
-                self.home
-                    .join("Library/Logs")
-                    .join("altitude-remote.log")
-                    .display()
-            ),
-            verify: vec![Check::launchctl(
-                scope,
-                &["print", &format!("{domain}/{LABEL}")],
-            )],
+            // A job left loaded beside a new file keeps running the old definition,
+            // so it is unloaded first; finding nothing loaded is the normal first
+            // install and does not stop anything.
+            commands: vec![
+                Step::launchctl(scope, &["bootout", &format!("{domain}/{LABEL}")], false),
+                Step::launchctl(
+                    scope,
+                    &["bootstrap", &domain, &path.display().to_string()],
+                    true,
+                ),
+            ],
+            logs: format!("tail -f {}", self.log_path().display()),
+            verify: Step::launchctl(scope, &["print", &format!("{domain}/{LABEL}")], false),
             scope,
-            user: self.user.clone(),
         }
     }
 
@@ -437,9 +390,10 @@ impl Service {
         let mut unit = String::from(
             "[Unit]\nDescription=Altitude remote\nAfter=network-online.target\n\n[Service]\n",
         );
-        let executable = iter::once(self.exe.display().to_string())
-            .chain(self.arguments.iter().cloned())
-            .map(|argument| systemd_quote(&argument))
+        let executable = self
+            .command_parts()
+            .iter()
+            .map(|argument| systemd_quote(argument))
             .collect::<Vec<_>>()
             .join(" ");
         unit.push_str(&format!("ExecStart={executable}\n"));
@@ -470,9 +424,7 @@ impl Service {
         );
         element(&mut job, "Label", LABEL, 1);
         job.push_str("  <key>ProgramArguments</key>\n  <array>\n");
-        for argument in
-            iter::once(self.exe.display().to_string()).chain(self.arguments.iter().cloned())
-        {
+        for argument in self.command_parts() {
             job.push_str(&format!("    <string>{}</string>\n", xml(&argument)));
         }
         job.push_str("  </array>\n");
@@ -487,17 +439,12 @@ impl Service {
         job.push_str("  </dict>\n");
         // Launchd captures no output of its own, and the serve role logs everything
         // to stdout: without these, a failure leaves nothing to read.
-        let logs = self.home.join("Library/Logs");
-        element(
-            &mut job,
-            "StandardOutPath",
-            &logs.join("altitude-remote.log").display().to_string(),
-            1,
-        );
+        let log = self.log_path();
+        element(&mut job, "StandardOutPath", &log.display().to_string(), 1);
         element(
             &mut job,
             "StandardErrorPath",
-            &logs.join("altitude-remote.err").display().to_string(),
+            &log.with_extension("err").display().to_string(),
             1,
         );
         job.push_str(
@@ -522,12 +469,18 @@ impl Service {
         environment
     }
 
-    /// How the service starts this binary, for a summary shorter than the file.
-    fn exec_line(&self) -> String {
+    fn command_parts(&self) -> Vec<String> {
         iter::once(self.exe.display().to_string())
             .chain(self.arguments.iter().cloned())
-            .collect::<Vec<_>>()
-            .join(" ")
+            .collect()
+    }
+
+    fn command_line(&self) -> String {
+        self.command_parts().join(" ")
+    }
+
+    fn log_path(&self) -> PathBuf {
+        self.home.join("Library/Logs").join("altitude-remote.log")
     }
 }
 
@@ -536,39 +489,9 @@ struct Plan {
     path: PathBuf,
     contents: String,
     commands: Vec<Step>,
-    privileged: bool,
     logs: String,
-    verify: Vec<Check>,
+    verify: Step,
     scope: Scope,
-    user: String,
-}
-
-struct Check {
-    command: Vec<String>,
-    privileged: bool,
-    /// What a successful answer means, in a word. The command's own output is not
-    /// printed: `launchctl print` answers with its whole internal record.
-    said: &'static str,
-}
-
-impl Check {
-    fn systemctl(scope: Scope, arguments: &[&str]) -> Self {
-        Self {
-            command: systemctl(arguments, scope),
-            privileged: scope == Scope::Machine,
-            said: "active",
-        }
-    }
-
-    /// `launchctl print` answers with the job's whole internal record, so only its
-    /// exit status is used: loaded, or not.
-    fn launchctl(scope: Scope, arguments: &[&str]) -> Self {
-        Self {
-            command: launchctl(arguments),
-            privileged: scope == Scope::Machine,
-            said: "loaded",
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -584,7 +507,7 @@ impl Step {
     fn systemctl(scope: Scope, arguments: &[&str], required: bool) -> Self {
         Self {
             command: systemctl(arguments, scope),
-            privileged: scope == Scope::Machine,
+            privileged: scope.privileged(),
             required,
         }
     }
@@ -592,8 +515,16 @@ impl Step {
     fn launchctl(scope: Scope, arguments: &[&str], required: bool) -> Self {
         Self {
             command: launchctl(arguments),
-            privileged: scope == Scope::Machine,
+            privileged: scope.privileged(),
             required,
+        }
+    }
+
+    fn remove(path: &Path, scope: Scope) -> Self {
+        Self {
+            command: vec!["rm".to_owned(), "--".to_owned(), path.display().to_string()],
+            privileged: scope.privileged(),
+            required: true,
         }
     }
 }
@@ -618,25 +549,16 @@ impl Plan {
     fn show(&self, service: &Service) {
         println!("\nAltitude remote · as a service\n");
         field("file", self.path.display());
-        field("scope", scope_word(self.scope));
-        field("runs", service.exec_line());
+        field("scope", scope_name(self.scope));
+        field("starts", starts(self.scope));
+        field("runs", service.command_line());
         field("logs", &self.logs);
 
-        let mut says = vec![match (env::consts::OS, self.scope) {
-            ("macos", Scope::User) => {
-                "It starts when you log in and restarts if it stops, running as you so it uses \
-                 the sandboxes and logins this machine already has"
-            }
-            (_, Scope::User) => {
-                "It starts at boot and runs without a session, using the sandboxes and logins \
-                 this machine already has"
-            }
-            ("macos", Scope::Machine) => {
-                "It starts at boot with nobody logged in, runs as you, and restarts if it stops"
-            }
-            (_, Scope::Machine) => "It starts at boot with nobody logged in and runs as you",
-        }];
-        if self.scope == Scope::Machine {
+        let mut says = vec![
+            "It restarts if it stops, and runs as you so it uses the sandboxes and logins this \
+             machine already has",
+        ];
+        if self.scope.privileged() {
             says.push("Writing it and starting it needs your permission once (sudo)");
         }
         if self.scope == Scope::User && matches!(env::consts::OS, "linux") {
@@ -647,7 +569,7 @@ impl Plan {
         }
         for said in says {
             println!();
-            prose(said, "", "");
+            paragraph(said);
         }
         println!();
         let kind = if matches!(env::consts::OS, "linux") {
@@ -655,21 +577,19 @@ impl Plan {
         } else {
             "launch job"
         };
-        prose(
-            &format!(
-                "The file is an ordinary {kind} you can read or edit later; Altitude does \
-                      not manage it again after this."
-            ),
-            "",
-            "",
-        );
+        paragraph(&format!(
+            "The file is an ordinary {kind} you can read or edit later; Altitude does not manage \
+             it again after this."
+        ));
     }
 
     fn write(&self) -> Result<(), Box<dyn Error>> {
-        if let (Some(directory), false) = (self.path.parent(), self.privileged) {
+        if let Some(directory) = self.path.parent()
+            && !self.scope.privileged()
+        {
             fs::create_dir_all(directory)?;
         }
-        if self.privileged {
+        if self.scope.privileged() {
             let mut child = Command::new("sudo")
                 .arg("tee")
                 .arg(&self.path)
@@ -693,55 +613,59 @@ impl Plan {
         Ok(())
     }
 
-    fn run(&self) -> Result<(), Box<dyn Error>> {
+    fn run(&self, service: &Service) -> Result<(), Box<dyn Error>> {
         if self.scope == Scope::User && matches!(env::consts::OS, "linux") {
-            self.linger()?;
+            self.linger(service)?;
         }
         run_steps(&self.commands)
     }
 
     /// A user service on Linux stops with the last session unless it is lingering,
     /// which is exactly what a headless remote must not do.
-    fn linger(&self) -> Result<(), Box<dyn Error>> {
+    fn linger(&self, service: &Service) -> Result<(), Box<dyn Error>> {
         let command = vec![
             "loginctl".to_owned(),
             "enable-linger".to_owned(),
-            self.user.clone(),
+            service.user.clone(),
         ];
         if run_command(&command, false, true)? {
             return Ok(());
         }
         println!();
-        prose(
+        paragraph(
             "Lingering could not be enabled here. The service will still start, and it will stop \
              when your last session ends unless you enable it yourself.",
-            "",
-            "",
         );
         Ok(())
+    }
+
+    /// What a manager calls a service it has started, in a word.
+    fn running_word(&self) -> &'static str {
+        if matches!(env::consts::OS, "linux") {
+            "active"
+        } else {
+            "loaded"
+        }
     }
 
     fn verify(&self) {
         println!("\nInstalled.");
         field("file", self.path.display());
-        for check in &self.verify {
-            let running = run_command(&check.command, check.privileged, false).unwrap_or(false);
-            field(
-                "state",
-                if running {
-                    check.said
-                } else {
-                    "not running yet"
-                },
-            );
-        }
+        let running =
+            run_command(&self.verify.command, self.verify.privileged, false).unwrap_or(false);
+        field(
+            "state",
+            if running {
+                self.running_word()
+            } else {
+                "not running yet"
+            },
+        );
         field("logs", &self.logs);
         println!();
-        prose(
+        paragraph(
             "With a shared tracker app installed, the first issue delegated to it shows up in \
              these logs.",
-            "",
-            "",
         );
     }
 }
@@ -763,12 +687,10 @@ fn scope_name(scope: Scope) -> &'static str {
     }
 }
 
-fn scope_word(scope: Scope) -> &'static str {
+fn starts(scope: Scope) -> &'static str {
     match (env::consts::OS, scope) {
-        ("macos", Scope::User) => "this user · starts when you log in",
-        ("macos", Scope::Machine) => "the whole machine · starts at boot",
-        (_, Scope::User) => "this user · starts at boot, no session needed",
-        (_, Scope::Machine) => "the whole machine · starts at boot",
+        ("macos", Scope::User) => "when you log in",
+        _ => "at boot",
     }
 }
 
@@ -813,13 +735,12 @@ fn has_systemd() -> bool {
         .is_ok_and(|status| status.success())
 }
 
-fn uid() -> Result<String, Box<dyn Error>> {
-    let output = Command::new("id").arg("-u").output()?;
-    let uid = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if uid.is_empty() {
-        return Err(io::Error::other("this machine has no user id to install for").into());
-    }
-    Ok(uid)
+fn uid() -> String {
+    Command::new("id")
+        .arg("-u")
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .unwrap_or_default()
 }
 
 /// systemd splits `ExecStart` on whitespace unless an argument is quoted.

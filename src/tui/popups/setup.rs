@@ -44,9 +44,7 @@ fn candidates(report: Option<&[TrackerConnection]>) -> Vec<TrackerOption> {
             let (is_ready, status) = match connection.map(|connection| connection.state) {
                 None if report.is_none() => (None, "unknown"),
                 None => (Some(false), "not configured"),
-                Some(TrackerReadiness::Ready) => (Some(true), "ready"),
-                Some(TrackerReadiness::NotInstalled) => (Some(false), "not installed"),
-                Some(TrackerReadiness::Unavailable) => (Some(false), "cannot sign in"),
+                Some(state) => (Some(state == TrackerReadiness::Ready), state.said()),
             };
             TrackerOption {
                 provider,
