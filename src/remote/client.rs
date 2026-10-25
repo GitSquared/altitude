@@ -455,7 +455,8 @@ impl LinkClient {
         }
     }
 
-    pub async fn operator_signals(
+    /// The task's threads, resolved ones included.
+    pub async fn signal_threads(
         &self,
         peer: impl Into<EndpointAddr>,
         task_id: &str,

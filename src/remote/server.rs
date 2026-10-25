@@ -394,7 +394,8 @@ pub struct ServerParts {
 /// machine's business, which is why this is a trait rather than the link reaching
 /// into a task service it should know nothing about.
 pub trait TaskHost: Send + Sync + 'static {
-    fn signals(
+    /// The task's threads, resolved ones included.
+    fn signal_threads(
         &self,
         peer: EndpointId,
         task_id: String,
@@ -562,7 +563,7 @@ async fn answer(
             return Ok(());
         }
         LinkRequest::ListSignals { task_id } => {
-            let response = match handler.tasks.signals(peer, task_id).await {
+            let response = match handler.tasks.signal_threads(peer, task_id).await {
                 Ok(signals) => LinkResponse::Signals { signals },
                 Err(reason) => LinkResponse::Rejected { reason },
             };

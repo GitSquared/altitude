@@ -2,7 +2,7 @@
 //!
 //! Fullscreen, in two columns. The list on the left is every thread, fat enough
 //! to read at a glance, and the one it has selected is the conversation on the
-//! right: what each side said, and the keys that reply or resolve it. The left
+//! right: what each side said, and the actions available on it. The left
 //! column draws no background, so the terrain behind it shows through the gaps
 //! between rows; the conversation is an opaque pane.
 //!
@@ -67,6 +67,8 @@ pub enum SignalFilter {
 }
 
 impl SignalFilter {
+    /// Whether a thread belongs in this view. The kind filters keep that kind's
+    /// history; the unresolved view adds a just-resolved thread for its linger.
     pub fn matches(self, thread: &TaskOperatorSignalThread, now_ms: i64) -> bool {
         match self {
             Self::All => true,
@@ -90,7 +92,8 @@ pub fn is_lingering(thread: &TaskOperatorSignalThread, now_ms: i64) -> bool {
             .is_some_and(|at| now_ms.saturating_sub(at) < LINGER_MS)
 }
 
-/// Which way the threads inside a tier read.
+/// Which way the threads inside a tier read. Resolved history is ordered by when
+/// it ended; the live threads by when they opened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignalSort {
     Oldest,
@@ -165,27 +168,17 @@ fn group_of(thread: &TaskOperatorSignalThread, linger: bool) -> Group {
             tone: palette::muted(),
         };
     }
-    match thread.kind {
-        TaskOperatorSignalKind::Blocked => Group {
-            title: "NEEDS YOU",
-            symbol: '?',
-            tone: palette::attention(),
-        },
-        TaskOperatorSignalKind::InReview => Group {
-            title: "READY TO REVIEW",
-            symbol: '◆',
-            tone: palette::good(),
-        },
-        TaskOperatorSignalKind::Decision => Group {
-            title: "DECISIONS",
-            symbol: '→',
-            tone: palette::decision(),
-        },
-        TaskOperatorSignalKind::Update => Group {
-            title: "INFO LOG",
-            symbol: '○',
-            tone: palette::muted(),
-        },
+    let view = signal::view(thread.kind);
+    let title = match thread.kind {
+        TaskOperatorSignalKind::Blocked => "NEEDS YOU",
+        TaskOperatorSignalKind::InReview => "READY TO REVIEW",
+        TaskOperatorSignalKind::Decision => "DECISIONS",
+        TaskOperatorSignalKind::Update => "INFO LOG",
+    };
+    Group {
+        title,
+        symbol: view.symbol,
+        tone: view.tone,
     }
 }
 
@@ -218,13 +211,13 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         },
     };
     header::draw(frame, header_area, "SIGNALS", Some(&task), Some(&count));
-    // One frame, split by a single rule: the sections are two halves of the same
-    // window rather than two windows that happen to touch.
+    // One frame, split by a single divider: the sections are two halves of the
+    // same window rather than two windows that happen to touch.
     let inner = Surface::new().draw(frame, body);
     let columns = Columns::new(&[LIST_WIDTH]).draw(frame, inner);
     let list = columns[0];
     let detail = columns[1];
-    let [toolbar, rule, threads] = Layout::vertical([
+    let [toolbar, divider, threads] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(0),
@@ -238,7 +231,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     // panel; their open lists overlay the rows rather than pushing them.
     surface::cover(frame, toolbar);
     draw_controls(frame, toolbar, threads, app);
-    surface::horizontal_divider(frame, list, rule.y);
+    surface::horizontal_divider(frame, list, divider.y);
 }
 
 /// The filter and sort pills at the top of the list.
@@ -361,8 +354,8 @@ fn draw_threads(frame: &mut Frame, area: Rect, app: &mut App) {
     );
 }
 
-/// The selected thread: its title, conversation and keys, on the surface of the
-/// right half.
+/// The selected thread: its title, conversation and actions, on the surface of
+/// the right half.
 fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
     // Opaque by construction: the field is never drawn on this side.
     let padded = Rect {
@@ -528,14 +521,14 @@ fn draw_composer(frame: &mut Frame, box_area: Rect, app: &App, agent: &str) {
 
 /// The buttons at the foot of the conversation. The keys are in the frame's
 /// guidance; the buttons say what they do, not which key does it.
-fn draw_buttons(frame: &mut Frame, surface: Rect, area: Rect, actions: &[chrome::Action<'_>]) {
+fn draw_buttons(frame: &mut Frame, pane: Rect, area: Rect, actions: &[chrome::Action<'_>]) {
     surface::cover(frame, area);
-    // The rule starts at the column's rule and ends at the panel's edge, so the
-    // footer belongs to the pane rather than floating inside it.
+    // The divider starts at the column's divider and ends at the panel's edge,
+    // so the footer belongs to the pane rather than floating inside it.
     let frame_rect = Rect {
-        x: surface.x.saturating_sub(1),
-        width: surface.width.saturating_add(2),
-        ..surface
+        x: pane.x.saturating_sub(1),
+        width: pane.width.saturating_add(2),
+        ..pane
     };
     chrome::actions(frame, frame_rect, area, actions);
 }

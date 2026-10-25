@@ -1,10 +1,10 @@
 //! Lists that say what each row is, and the cursor that moves among them.
 //!
-//! A row is a small block rather than a line: an optional category line above
-//! the name, the name itself, and an optional detail under it. The name is what
-//! the list is read by, so it is the line the focus bar covers, and the pieces
+//! A row is a small block rather than a line: an optional mark and note beside
+//! the name, and an optional detail under it. The focus bar covers the whole
+//! block, because what is selected is the row rather than its name. The pieces
 //! are placed the same way in every list that uses one: mark at the left edge,
-//! the note at the right edge so a column of notes lines up.
+//! note at the right edge so a column of notes lines up.
 //!
 //! A row can start a group with a section heading. Rows may then differ in
 //! height, so the cursor measures the list when it decides how many fit.
@@ -23,9 +23,8 @@ use crate::tui::widgets::{palette, utils::truncate};
 pub struct Heading {
     pub title: String,
     pub note: Option<String>,
-    /// The mark before the title and the tone both it and the title take. A
-    /// group of signals is the kind it holds, so the kind's symbol and colour
-    /// belong here rather than on every row under it.
+    /// The mark before the title and the tone both it and the title take.
+    /// A group can use one place for what every row in it shares.
     pub mark: Vec<Span<'static>>,
     pub tone: Style,
 }
@@ -41,8 +40,7 @@ pub struct Row {
     /// Said at the right edge of the first line.
     pub note: Option<String>,
     /// The mark in front of the first line, where the row has a status of its
-    /// own. Already drawn by the caller, because a mark can be one that travels
-    /// while it waits, and only the drawing knows where the frame is.
+    /// own. Its spans keep their own styles; only their width is measured here.
     pub mark: Vec<Span<'static>>,
     /// How the name reads when the focus is elsewhere. The focus bar overrides it.
     pub tone: Style,
@@ -132,36 +130,35 @@ impl Row {
         let mut lines = Vec::with_capacity(3);
         // The mark sits at the left edge. The lines under it align with the name
         // so a list of marked rows still reads as a column.
-        let note_here = note;
-        let note_here_width = note_width;
         let available = width
             .saturating_sub(indent)
-            .saturating_sub(note_here_width)
-            .saturating_sub(usize::from(!note_here.is_empty()))
+            .saturating_sub(note_width)
+            .saturating_sub(usize::from(!note.is_empty()))
             .max(1);
         let title = truncate(&self.title, available);
-        let prefix = mark.clone();
-        let used = indent + Line::from(title.as_str()).width() + note_here_width;
+        let used = indent + Line::from(title.as_str()).width() + note_width;
         let padding = " ".repeat(width.saturating_sub(used));
         if focused {
             // The whole row is one bar, not just the line with the name in it:
             // what is selected is the block, and every line of it belongs to it.
-            lines.push(Line::from(Span::styled(
-                format!("{prefix}{title}{padding}{note_here}"),
+            // The mark keeps its own colour above the fill, so a travelling dot
+            // does not disappear when the row is selected.
+            let mut spans = self.mark.clone();
+            spans.push(Span::styled(
+                format!("{title}{padding}{note}"),
                 palette::focus(),
-            )));
+            ));
+            lines.push(Line::from(spans));
         } else {
             // The name carries its tone itself rather than inheriting it from the
             // line, so what is behind a row cannot decide how the row reads. The
             // padding does inherit the selection, because on an inactive bar it
             // is the bar that has to continue across the row.
-            let mut spans = vec![
-                prefix_span(&prefix, selected),
-                Span::styled(title, self.tone),
-            ];
+            let mut spans = self.mark.clone();
+            spans.push(Span::styled(title, self.tone));
             spans.push(padding_span(&padding, selected));
-            if !note_here.is_empty() {
-                spans.push(Span::styled(note_here.to_owned(), secondary));
+            if !note.is_empty() {
+                spans.push(Span::styled(note.to_owned(), secondary));
             }
             lines.push(Line::from(spans));
         }
@@ -180,7 +177,7 @@ impl Row {
                 )));
             } else {
                 lines.push(Line::from(vec![
-                    prefix_span(&" ".repeat(indent), selected),
+                    padding_span(&" ".repeat(indent), selected),
                     Span::styled(detail, secondary),
                     padding_span(&padding, selected),
                 ]));
@@ -434,8 +431,4 @@ fn padding_span(spaces: &str, selected: bool) -> Span<'static> {
     } else {
         Span::raw(spaces.to_owned())
     }
-}
-
-fn prefix_span(spaces: &str, selected: bool) -> Span<'static> {
-    padding_span(spaces, selected)
 }

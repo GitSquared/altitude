@@ -901,7 +901,7 @@ where
     ) -> Result<(), TaskServiceError> {
         let blocked = self
             .service
-            .operator_signal_threads(task_id)
+            .unresolved_signal_threads(task_id)
             .await?
             .iter()
             .any(|thread| {

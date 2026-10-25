@@ -3200,9 +3200,19 @@ impl App {
                 let settled = thread.is_resolved() && !(keeping && is_lingering(thread, now));
                 (u8::from(settled), thread.kind.tier())
             };
-            group(left).cmp(&group(right)).then_with(|| match sort {
-                SignalSort::Oldest => left.opened_at_ms.cmp(&right.opened_at_ms),
-                SignalSort::Newest => right.opened_at_ms.cmp(&left.opened_at_ms),
+            group(left).cmp(&group(right)).then_with(|| {
+                let when = |thread: &TaskOperatorSignalThread| {
+                    let settled = thread.is_resolved() && !(keeping && is_lingering(thread, now));
+                    if settled {
+                        thread.resolved_at_ms.unwrap_or(thread.opened_at_ms)
+                    } else {
+                        thread.opened_at_ms
+                    }
+                };
+                match sort {
+                    SignalSort::Oldest => when(left).cmp(&when(right)),
+                    SignalSort::Newest => when(right).cmp(&when(left)),
+                }
             })
         });
         self.signal_threads = threads;
@@ -3905,14 +3915,12 @@ impl App {
             let before = self.signal_filter.chosen_value().copied();
             let leaving = self.signal_thread().cloned();
             self.signal_filter.handle_key(key);
-            if self.signal_filter.chosen_value().copied() != before {
-                self.apply_signal_view();
-                if let Some(thread) = leaving {
-                    self.read_info_thread(thread, task_service, remote_signals)
-                        .await;
-                }
-            } else {
-                self.apply_signal_view();
+            self.apply_signal_view();
+            if self.signal_filter.chosen_value().copied() != before
+                && let Some(thread) = leaving
+            {
+                self.read_info_thread(thread, task_service, remote_signals)
+                    .await;
             }
             return;
         }
@@ -4429,6 +4437,7 @@ impl App {
         self.signal_all_threads.clear();
         self.signal_threads.clear();
         self.signals_cursor = list::Cursor::default();
+        self.signal_arrivals.clear();
         self.signal_scroll = u16::MAX;
         self.signal_composer = None;
         self.foreground = Foreground::Signals;
@@ -4453,6 +4462,7 @@ impl App {
         self.signal_task_id = None;
         self.signal_all_threads.clear();
         self.signal_threads.clear();
+        self.signal_arrivals.clear();
         self.signal_composer = None;
         self.signal_scroll = 0;
     }
@@ -4506,7 +4516,7 @@ impl App {
     ) -> Result<Vec<TaskOperatorSignalThread>, String> {
         let peer = Self::remote_peer(address, keys).await?;
         client
-            .operator_signals(peer, task_id)
+            .signal_threads(peer, task_id)
             .await
             .map_err(|error| error.to_string())
     }

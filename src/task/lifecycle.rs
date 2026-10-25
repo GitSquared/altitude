@@ -538,7 +538,7 @@ where
         let mut events: Vec<TaskHistoryEvent> = failure_events(task, error, signal_id).into();
         for thread in self
             .store
-            .operator_signal_threads(&task.id)
+            .unresolved_signal_threads(&task.id)
             .await
             .map_err(TaskServiceError::Task)?
         {

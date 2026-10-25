@@ -318,6 +318,7 @@ pub enum TaskOrigin {
     Issue(Box<IssueSnapshot>),
 }
 
+/// A change an operator asks of one task thread.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SignalCommand {
     Reply {

@@ -240,7 +240,7 @@ impl OwnTasks {
 }
 
 impl TaskHost for OwnTasks {
-    fn signals(
+    fn signal_threads(
         &self,
         peer: EndpointId,
         task_id: String,
@@ -778,14 +778,14 @@ impl super::tracker::Host for OwnTasks {
         })
     }
 
-    fn signals(
+    fn unresolved_signals(
         &self,
         task_id: String,
     ) -> super::tracker::HostFuture<'_, Vec<TaskOperatorSignalThread>> {
         Box::pin(async move {
             self.tasks
                 .service()
-                .operator_signal_threads(&task_id)
+                .unresolved_signal_threads(&task_id)
                 .await
                 .map_err(|error| error.to_string())
         })

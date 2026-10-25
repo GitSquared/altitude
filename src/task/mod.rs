@@ -72,7 +72,7 @@ fn failure_events(task: &Task, error: String, signal_id: String) -> [TaskHistory
         kind: TaskOperatorSignalKind::Blocked,
         title: "Execution stopped".into(),
         body: format!(
-            "{error}\n\nAltitude cannot continue this task. If ignored, it stays stopped.\n\nFix the problem first; open the task's shell with Enter if needed. Then reply here to retry with your instructions."
+            "{error}\n\nAltitude cannot continue this task. If ignored, it stays stopped.\n\nFix the problem first; take over the task with ctrl-enter if needed. Then reply here to retry with your instructions."
         ),
         raised_at_ms: chrono::Utc::now().timestamp_millis(),
     };

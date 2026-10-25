@@ -17,7 +17,7 @@ pub fn task() -> String {
 }
 
 pub fn signal() -> String {
-    words("sig", SIGNAL_WORDS)
+    words("signal", SIGNAL_WORDS)
 }
 
 /// An id with the given prefix and distinct, lowercase English words.

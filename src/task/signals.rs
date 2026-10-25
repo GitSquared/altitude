@@ -15,6 +15,7 @@ impl<E> TaskService<E>
 where
     E: IsolationEngine + Clone,
 {
+    /// The task that owns a signal, when this machine knows the thread.
     pub async fn task_for_signal(
         &self,
         task_id: &str,
@@ -26,16 +27,18 @@ where
             .map_err(TaskServiceError::Task)
     }
 
-    pub async fn operator_signal_threads(
+    /// The threads that still need an answer or an ending.
+    pub async fn unresolved_signal_threads(
         &self,
         task_id: &str,
     ) -> Result<Vec<TaskOperatorSignalThread>, TaskServiceError> {
         self.store
-            .operator_signal_threads(task_id)
+            .unresolved_signal_threads(task_id)
             .await
             .map_err(TaskServiceError::Task)
     }
 
+    /// Every thread a task has, resolved ones included.
     pub async fn signal_threads(
         &self,
         task_id: &str,
@@ -129,8 +132,18 @@ where
                 let Some(task) = existing else {
                     return Err(TaskServiceError::Task(error));
                 };
-                let already_confirmed = self.store.events(&task.id).await.map_err(TaskServiceError::Task)?.iter()
-                    .any(|(_, event)| matches!(event, TaskHistoryEvent::OperatorSignalConfirmed { signal_id: confirmed } if confirmed == signal_id));
+                let events = self
+                    .store
+                    .events(&task.id)
+                    .await
+                    .map_err(TaskServiceError::Task)?;
+                let already_confirmed = events.iter().any(|(_, event)| {
+                    matches!(
+                        event,
+                        TaskHistoryEvent::OperatorSignalConfirmed { signal_id: confirmed }
+                            if confirmed == signal_id
+                    )
+                });
                 if !already_confirmed {
                     return Err(TaskServiceError::Task(error));
                 }

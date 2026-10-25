@@ -82,7 +82,7 @@ Keep routine reasoning, progress, recoverable failures, and decisions you can re
 5. What happens if it is ignored?
 
 Choose the lowest kind that fits:
-- update: a durable log of what you did, or information a future reader would need. It asks for nothing; the operator reads it and it resolves itself. Choose continue.
+- update: a durable log of what you did, or information a future reader would need. It asks for nothing; the operator sees it and it resolves when they move on. Choose continue.
 - decision: an assumption you made that a reasonable operator might challenge. Record it and continue. The operator can ask about it or challenge it in the thread, or at review. A decision is not a blocking question; if you cannot continue without an answer, use blocked.
 - blocked: you cannot continue without the operator, or the run stopped. Say exactly what is stopped, what you need, and what happens if it is ignored. Choose await_operator.
 - in_review: you believe the milestone is finished, and the operator decides whether it is. This is a review request, not a progress report. Account for the whole expressed intent, including anything unfinished or omitted, and say what was and was not verified. Never raise it because you have run out of ideas; raise it when the work is in a state the operator can accept or send back. Choose await_operator.

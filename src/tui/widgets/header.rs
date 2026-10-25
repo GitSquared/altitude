@@ -18,7 +18,7 @@ use crate::tui::widgets::{palette, utils::truncate};
 pub fn draw(frame: &mut Frame, area: Rect, name: &str, detail: Option<&str>, note: Option<&str>) {
     frame.render_widget(Clear, area);
     let note = note.unwrap_or_default();
-    let reserved = name.len() + 3 + note.len() + 2;
+    let reserved = name.chars().count() + 3 + note.chars().count() + 2;
     let available = usize::from(area.width).saturating_sub(reserved);
     let mut line = vec![Span::styled(name.to_owned(), palette::heading())];
     if let Some(detail) = detail.filter(|detail| !detail.is_empty()) {

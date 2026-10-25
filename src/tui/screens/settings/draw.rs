@@ -64,7 +64,7 @@ fn draw_columns(
     let rail = columns[0];
     let list_area = columns[1];
     // A gutter on both sides of the description, so it does not start on the
-    // rule and end on the frame.
+    // divider and end on the frame.
     let detail_area = Rect {
         x: columns[2].x.saturating_add(1),
         width: columns[2].width.saturating_sub(2),
@@ -170,9 +170,6 @@ fn draw_columns(
     frame.render_widget(pane, detail_area);
 }
 
-/// The third column. `focused` is decided by the caller, because whether this
-/// column holds the focus is not the same question as how deep the focus is: a
-/// row with nothing inside it is already here.
 /// The third column: what is known about the row the list has selected.
 fn detail(panel: &Panel, view: &View, tick: Option<usize>) -> Paragraph<'static> {
     let heading = move |text: String| Line::styled(text, palette::heading());

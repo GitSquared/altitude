@@ -114,11 +114,12 @@ pub trait Host: Send + Sync + 'static {
     /// Cancel a task and dispose of its capsule. Never an acceptance.
     fn stop(&self, task_id: String) -> HostFuture<'_, ()>;
     /// The task's currently unresolved operator signals.
-    fn signals(&self, task_id: String) -> HostFuture<'_, Vec<TaskOperatorSignalThread>>;
+    fn unresolved_signals(&self, task_id: String) -> HostFuture<'_, Vec<TaskOperatorSignalThread>>;
     /// The task's history, oldest first.
     fn events(&self, task_id: String) -> HostFuture<'_, Vec<(i64, TaskHistoryEvent)>>;
-    /// Answer a blocking signal, which resumes the work.
+    /// Add the operator's instructions to the task, waking it if it is not running.
     fn instruct(&self, task_id: String, instruction: String) -> HostFuture<'_, ()>;
+    /// Reply in a thread, as the tracker's operator did.
     fn reply(&self, task_id: String, signal_id: String, answer: String) -> HostFuture<'_, ()>;
     /// Accept a wrap-up request, the only way a task ends.
     fn accept(&self, task_id: String, signal_id: String) -> HostFuture<'_, ()>;
@@ -545,7 +546,7 @@ impl RemoteTracker {
         if !event.is_from(&route.tracker_user_id) {
             return Ok(());
         }
-        let signals = host.signals(route.task_id.clone()).await?;
+        let signals = host.unresolved_signals(route.task_id.clone()).await?;
         // A prompt answers only what was already waiting when it was written. A
         // prompt that predates a signal is stale, and letting it resolve the
         // newer question would answer something the operator never saw.
@@ -553,15 +554,19 @@ impl RemoteTracker {
             .iter()
             .filter(|signal| signal.last_raised_at_ms <= event.occurred_at_ms)
             .collect();
-        let blocking = waiting
-            .iter()
-            .copied()
-            .find(|signal| signal.kind == TaskOperatorSignalKind::Blocked);
+        // A decision is not blocking, but a reply from the issue still belongs
+        // in its thread; an update is a log and is not answered here.
+        let question = waiting.iter().copied().find(|signal| {
+            matches!(
+                signal.kind,
+                TaskOperatorSignalKind::Blocked | TaskOperatorSignalKind::Decision
+            )
+        });
         let review = waiting
             .iter()
             .copied()
             .find(|signal| signal.kind == TaskOperatorSignalKind::InReview);
-        let Some(signal) = blocking.or(review) else {
+        let Some(signal) = question.or(review) else {
             return host
                 .instruct(route.task_id.clone(), answer.to_owned())
                 .await;
@@ -626,7 +631,7 @@ impl RemoteTracker {
         if !was_waiting {
             return Ok(());
         }
-        let signals = host.signals(route.task_id.clone()).await?;
+        let signals = host.unresolved_signals(route.task_id.clone()).await?;
         let Some(review) = signals
             .iter()
             .find(|signal| signal.kind == TaskOperatorSignalKind::InReview)
@@ -753,7 +758,7 @@ impl RemoteTracker {
         // Signals still open are the only ones worth publishing; one already
         // answered or confirmed must not be raised again on the next pass.
         let unresolved: HashSet<String> = host
-            .signals(route.task_id.clone())
+            .unresolved_signals(route.task_id.clone())
             .await?
             .into_iter()
             .map(|signal| signal.id)
@@ -823,7 +828,7 @@ impl RemoteTracker {
             // The destination still owes the operator whatever is waiting, even
             // though the rest of the history was already reported at the source.
             let contributions = contribution_details(&events);
-            for signal in host.signals(route.task_id.clone()).await? {
+            for signal in host.unresolved_signals(route.task_id.clone()).await? {
                 if !unresolved.contains(&signal.id) {
                     continue;
                 }

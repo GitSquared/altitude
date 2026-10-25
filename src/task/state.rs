@@ -38,7 +38,7 @@ pub struct TaskOperatorSignalDraft {
 #[sqlx(rename_all = "snake_case")]
 pub enum TaskOperatorSignalKind {
     /// A durable log of what the agent did. It asks for nothing and is resolved
-    /// as soon as the operator reads it.
+    /// once the operator has seen it and moved on.
     Update,
     /// An assumption the agent made that a reasonable operator might challenge.
     /// The task continues; the thread is the place to discuss it.
@@ -161,6 +161,7 @@ pub struct TaskOperatorSignalMessage {
     pub at_ms: i64,
 }
 
+/// Which side of a conversation wrote a message.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskOperatorSignalAuthor {

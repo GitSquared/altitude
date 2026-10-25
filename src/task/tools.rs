@@ -190,6 +190,12 @@ impl TaskAgentTools {
     async fn resolve_signal(&self, arguments: &Value) -> Result<Value, AgentToolError> {
         self.ensure_active().await?;
         let signal_id = argument(arguments, "signal_id")?;
+        let kind = self.thread(signal_id).await?.kind;
+        if kind == TaskOperatorSignalKind::InReview {
+            return Err(AgentToolError::new(
+                "a review request ends when the operator accepts it, not when the agent resolves it",
+            ));
+        }
         let resolved = arguments
             .get("resolved")
             .and_then(Value::as_bool)
@@ -282,7 +288,6 @@ fn thread_json(thread: &TaskOperatorSignalThread) -> Value {
         "title": thread.title,
         "status": if thread.is_resolved() { "resolved" } else { "unresolved" },
         "opened_at_ms": thread.opened_at_ms,
-        "resolved": thread.resolved,
         "resolved_by": thread.resolved_by,
         "resolved_at_ms": thread.resolved_at_ms,
         "messages": thread.messages,
@@ -311,7 +316,7 @@ impl AgentToolProvider for TaskAgentTools {
             ),
             AgentTool::new(
                 "tasks_signal",
-                "Read and change this task's conversations with the operator. A thread has a kind, messages, and one state: unresolved or resolved. action=list returns every thread; action=read needs signal_id; action=open needs kind, title and body and records an update or a decision; action=reply needs signal_id and body; action=resolve needs signal_id, defaults resolved=true, and accepts an optional reason. A reply is a message, not a new question, and reopens a resolved thread. Messages carry ids m1, m2, ... inside their thread. A blocking question or a review request belongs in the turn report, not here.",
+                "Read and change this task's conversations with the operator. A thread has a kind, messages, and one state: unresolved or resolved. action=list returns every thread; action=read needs signal_id; action=open needs kind, title and body and records an update or a decision; action=reply needs signal_id and body; action=resolve needs signal_id, defaults resolved=true, and accepts an optional reason; a review request cannot be resolved here, because only the operator accepts it. A reply is a message, not a new question, and reopens a resolved thread. Messages carry ids m1, m2, ... inside their thread. A blocking question or a review request belongs in the turn report, not here.",
                 json!({
                     "type": "object",
                     "additionalProperties": false,

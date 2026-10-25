@@ -50,15 +50,17 @@ pub fn horizontal_divider(frame: &mut Frame, area: Rect, y: u16) {
     }
     let outline = outline();
     let buffer = frame.buffer_mut();
-    if let Some(left) = area.x.checked_sub(1) {
-        join(buffer, left, y, RIGHT);
+    if let Some(left) = area.x.checked_sub(1)
+        && join(buffer, left, y, RIGHT)
+    {
         buffer[(left, y)].set_style(outline);
     }
     for x in area.x..area.right() {
         buffer[(x, y)].set_symbol("─").set_style(outline);
     }
-    join(buffer, area.right(), y, LEFT);
-    buffer[(area.right(), y)].set_style(outline);
+    if join(buffer, area.right(), y, LEFT) {
+        buffer[(area.right(), y)].set_style(outline);
+    }
 }
 
 // Which strokes leave a cell. A junction is the union of what was there and what
@@ -69,16 +71,18 @@ const DOWN: u8 = 2;
 const LEFT: u8 = 4;
 const RIGHT: u8 = 8;
 
-fn join(buffer: &mut Buffer, x: u16, y: u16, added: u8) {
+/// Add strokes to a cell, answering whether the cell was inside the buffer.
+fn join(buffer: &mut Buffer, x: u16, y: u16, added: u8) -> bool {
     if x < buffer.area.x
         || x >= buffer.area.right()
         || y < buffer.area.y
         || y >= buffer.area.bottom()
     {
-        return;
+        return false;
     }
     let directions = strokes(buffer[(x, y)].symbol()) | added;
     buffer[(x, y)].set_symbol(stroke(directions));
+    true
 }
 
 fn strokes(symbol: &str) -> u8 {
@@ -137,7 +141,9 @@ pub fn vertical_divider(frame: &mut Frame, inner: Rect, x: u16) {
     let top = inner.y.saturating_sub(1);
     let bottom = inner.bottom();
     buffer[(x, top)].set_symbol("┬").set_style(outline);
-    buffer[(x, bottom)].set_symbol("┴").set_style(outline);
+    if bottom < buffer.area.bottom() {
+        buffer[(x, bottom)].set_symbol("┴").set_style(outline);
+    }
 }
 
 /// A bordered region over the field.

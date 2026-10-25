@@ -149,7 +149,7 @@ pub fn truncate(text: &str, width: usize) -> String {
 /// under a minute is `just now`: a clock that counts seconds makes an idle
 /// screen look busy.
 pub fn since(at_ms: i64, now_ms: i64) -> String {
-    let seconds = (now_ms.saturating_sub(at_ms)).max(0) / 1000;
+    let seconds = now_ms.saturating_sub(at_ms) / 1000;
     match seconds {
         0..=59 => "just now".to_owned(),
         60..=3_599 => format!("{}m", seconds / 60),

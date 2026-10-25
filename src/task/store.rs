@@ -593,7 +593,7 @@ impl TaskStore {
 
     /// The signal threads a task still has unresolved, with every message on
     /// them.
-    pub async fn operator_signal_threads(
+    pub async fn unresolved_signal_threads(
         &self,
         task_id: &str,
     ) -> Result<Vec<TaskOperatorSignalThread>, TaskError> {
