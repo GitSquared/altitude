@@ -284,6 +284,12 @@ where
     let mut listen_signals = true;
     let mut motion = time::interval(Duration::from_millis(8));
     motion.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+    // A trackpad can deliver wheel events faster than a frame is worth drawing.
+    // The state is updated for every one of them; the paint waits for the next
+    // tick, so a fast scroll does not queue a frame per event.
+    let mut scroll_pending = false;
+    let mut paint = time::interval(Duration::from_millis(16));
+    paint.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     // A task's environment is built before a task asks for it, so the first task is
     // not a cold start. Off the loop, and only once an agent has been chosen, because
     // only then is there a task that could run.
@@ -397,6 +403,7 @@ where
                     &view,
                     tick,
                     scan.is_some(),
+                    &mut app.settings_targets,
                 ));
                 if let super::app::CredentialShellState::Opening {
                     progress: Some(progress),
@@ -710,7 +717,29 @@ where
                 // A captured mouse reports every movement it makes, and a movement
                 // that only passes over something changes nothing. Drawing for
                 // each of them is what turns a moving pointer into a stutter.
-                let quiet = matches!(&event, Event::Mouse(mouse) if mouse.kind == MouseEventKind::Moved);
+                let quiet = matches!(
+                    &event,
+                    Event::Mouse(mouse)
+                        if matches!(
+                            mouse.kind,
+                            MouseEventKind::Moved
+                                | MouseEventKind::ScrollUp
+                                | MouseEventKind::ScrollDown
+                                | MouseEventKind::ScrollLeft
+                                | MouseEventKind::ScrollRight
+                        )
+                );
+                let scrolling = matches!(
+                    &event,
+                    Event::Mouse(mouse)
+                        if matches!(
+                            mouse.kind,
+                            MouseEventKind::ScrollUp
+                                | MouseEventKind::ScrollDown
+                                | MouseEventKind::ScrollLeft
+                                | MouseEventKind::ScrollRight
+                        )
+                );
                 let quit = handle_event(
                     event,
                     terminal,
@@ -732,9 +761,15 @@ where
                 if quit {
                     return Ok(());
                 }
-                if !quiet {
+                if scrolling {
+                    scroll_pending = true;
+                } else if !quiet {
                     redraw = true;
                 }
+            }
+            _ = paint.tick(), if scroll_pending => {
+                scroll_pending = false;
+                redraw = true;
             }
         }
     }
@@ -808,6 +843,19 @@ where
         if matches!(app.foreground, Foreground::NewTask(_)) {
             app.new_task_mouse(mouse, event_loop, task_service, issue_reads, delegations)
                 .await;
+            return Ok(false);
+        }
+        if matches!(app.foreground, Foreground::Signals) {
+            app.signals_mouse(mouse, task_service, remote_signals, event_loop)
+                .await;
+            return Ok(false);
+        }
+        if matches!(app.foreground, Foreground::Tasks) {
+            app.task_mouse(mouse);
+            return Ok(false);
+        }
+        if matches!(app.foreground, Foreground::Panel) {
+            app.panel_mouse(mouse);
             return Ok(false);
         }
         if let Some(id) = app.open_shell().cloned() {

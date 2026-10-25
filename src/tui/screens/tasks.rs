@@ -29,17 +29,18 @@ const MIN_CARD_WIDTH: u16 = 26;
 
 /// How the cards are laid out in an area.
 ///
-/// A card is 4:3, which on a terminal of ordinary height means one row of them:
-/// a card tall enough for a sentence is also tall enough to fill the body. So
-/// the grid pages rather than scrolling by a card, and the page is what fits.
+/// A card is wider than it is tall, but not by so much that the title has to be
+/// squeezed into a strip above the border. The grid pages rather than scrolling
+/// by a card, and the page is what fits.
 fn grid(area: Rect) -> (usize, u16, u16) {
     let columns = (area.width / MIN_CARD_WIDTH).max(1) as usize;
     let card_width = area.width / columns as u16;
-    let card_height = (card_width * 3 / 4).clamp(5, area.height);
+    let card_height = (card_width * 3 / 8).clamp(5, area.height);
     (columns, card_width, card_height)
 }
 
 pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
+    app.task_targets.clear();
     // The list sits in a surface like every other screen, and the grid is laid out
     // in what the border leaves. The field under it is drawn by the runner, so
     // every screen shows the same one.
@@ -88,6 +89,7 @@ fn draw_tasks(
             height,
         };
         let focused = first + offset == selected;
+        app.task_targets.add(area, first + offset);
         draw_card(frame, area, card, focused);
     }
 
@@ -152,7 +154,7 @@ impl Card {
                 .as_ref()
                 .map(|issue| format!("{} · Linear", issue.identifier)),
             is_alarm: is_alarming(summary),
-            status: card_status(summary, at_capacity, tick, build),
+            status: card_summary(summary, at_capacity, tick, build),
             extras: card_extras(summary, now_ms),
         }
     }
@@ -207,16 +209,9 @@ fn draw_card(frame: &mut Frame, area: Rect, card: &Card, focused: bool) {
     let title_style = match (focused, card.is_alarm) {
         (_, true) => palette::bad().bold(),
         (true, false) => palette::heading(),
-        (false, false) => palette::muted(),
+        (false, false) => palette::primary(),
     };
     let block = Block::bordered()
-        .title(Span::styled(
-            format!(
-                " {} ",
-                truncate(&card.title, usize::from(area.width.saturating_sub(4)))
-            ),
-            title_style,
-        ))
         .border_type(BorderType::Rounded)
         .border_style(border)
         .padding(Padding::horizontal(1));
@@ -230,7 +225,12 @@ fn draw_card(frame: &mut Frame, area: Rect, card: &Card, focused: bool) {
         Some(kind) => kind.to_string(),
         None => "no agent".to_owned(),
     };
-    let mut lines = vec![card.status.clone()];
+    // The title is part of the card, not its frame: a long title wraps inside
+    // the card rather than being cut short on the border.
+    let mut lines = vec![
+        Line::styled(card.title.clone(), title_style),
+        card.status.clone(),
+    ];
     if let Some(issue) = &card.issue {
         lines.push(Line::styled(issue.clone(), palette::accent()));
     }
@@ -241,6 +241,43 @@ fn draw_card(frame: &mut Frame, area: Rect, card: &Card, focused: bool) {
     ));
     lines.extend(card.extras.iter().cloned());
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+}
+
+/// The one line under a task's title: how it is going, or which signal is
+/// holding it. The signal's own mark and tone are reused so a blocked task and
+/// a blocked thread read alike.
+fn card_summary(
+    summary: &TaskSummary,
+    at_capacity: bool,
+    tick: Option<usize>,
+    build: Option<&EnvironmentProgress>,
+) -> Line<'static> {
+    let mut line = if let Some(kind) = summary.blocking_signal_kind {
+        let view = signal::view(kind);
+        Line::from(Span::styled(
+            format!("{} {}", view.symbol, view.task_label),
+            view.tone.bold(),
+        ))
+    } else {
+        card_status(summary, at_capacity, tick, build)
+    };
+    if summary.unresolved_signal_count > 0 {
+        let count = summary.unresolved_signal_count;
+        let style = line.style;
+        line = Line::from_iter(line.spans.into_iter().chain([
+            Span::styled(" · ", palette::muted()),
+            Span::styled(
+                if count == 1 {
+                    "1 unresolved".to_owned()
+                } else {
+                    format!("{count} unresolved")
+                },
+                palette::muted(),
+            ),
+        ]))
+        .style(style);
+    }
+    line
 }
 
 /// How a task is going, in the words a card has room for.
@@ -300,30 +337,6 @@ fn is_alarming(summary: &TaskSummary) -> bool {
 /// What else a card has to say: the things that mean someone has to look.
 fn card_extras(summary: &TaskSummary, now_ms: i64) -> Vec<Line<'static>> {
     let mut extras = Vec::new();
-    let waiting_on_operator = summary.blocking_signal_kind.is_some()
-        && (summary.status == TaskExecutionStatus::Failed
-            || (summary.status == TaskExecutionStatus::Paused
-                && summary.pause_reason.as_ref()
-                    == Some(&TaskExecutionPauseReason::AwaitingOperator)));
-    if waiting_on_operator && let Some(kind) = summary.blocking_signal_kind {
-        let view = signal::view(kind);
-        extras.push(Line::styled(
-            format!("{} {}", view.symbol, view.task_label),
-            view.tone.bold(),
-        ));
-    }
-    if summary.unresolved_signal_count > 0 {
-        let (mark, tone) = summary
-            .blocking_signal_kind
-            .map_or(('●', palette::accent()), |kind| {
-                let view = signal::view(kind);
-                (view.symbol, view.tone)
-            });
-        extras.push(Line::styled(
-            format!("{mark} {} unresolved", summary.unresolved_signal_count),
-            tone.bold(),
-        ));
-    }
     match summary.contributions.len() {
         0 => {}
         1 => extras.push(Line::styled("1 contribution", palette::accent())),

@@ -19,6 +19,8 @@ pub struct Message<'a> {
     pub when: &'a str,
     pub body: &'a str,
     pub from_operator: bool,
+    /// Whether the message has the keyboard's focus in the conversation.
+    pub focused: bool,
 }
 
 /// How many rows the card takes at this width, border included.
@@ -32,13 +34,18 @@ pub fn height(width: u16, body: &str) -> u16 {
 }
 
 pub fn draw(frame: &mut Frame, area: Rect, message: &Message<'_>) {
-    let style = if message.from_operator {
+    let style = if message.focused || message.from_operator {
         palette::accent()
     } else {
         palette::muted()
     };
+    let border_type = if message.focused {
+        BorderType::Thick
+    } else {
+        BorderType::Rounded
+    };
     let block = Block::bordered()
-        .border_type(BorderType::Rounded)
+        .border_type(border_type)
         .border_style(style)
         .padding(Padding::horizontal(1))
         .title(Line::styled(

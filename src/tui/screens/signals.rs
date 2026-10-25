@@ -100,6 +100,51 @@ pub enum SignalSort {
     Newest,
 }
 
+/// What the keyboard is focused on inside the signals screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignalFocus {
+    List,
+    Detail,
+    /// One of the available actions, by its place in the footer.
+    Action(usize),
+    Filter,
+    Sort,
+}
+
+impl SignalFocus {
+    /// The next focus in the ring. The action buttons are only in the ring when
+    /// this thread has any.
+    pub fn next(self, forward: bool, actions: usize) -> Self {
+        let mut ring = vec![Self::List, Self::Detail];
+        ring.extend((0..actions).map(Self::Action));
+        ring.push(Self::Filter);
+        ring.push(Self::Sort);
+        let at = ring.iter().position(|focus| *focus == self).unwrap_or(0);
+        let at = if forward {
+            (at + 1) % ring.len()
+        } else {
+            (at + ring.len() - 1) % ring.len()
+        };
+        ring[at]
+    }
+}
+
+/// What a click on the signals screen can land on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignalHit {
+    List,
+    Thread(usize),
+    Detail,
+    Message(usize),
+    Action(usize),
+    ComposerSend,
+    ComposerCancel,
+    Filter,
+    Sort,
+    FilterOffer(usize),
+    SortOffer(usize),
+}
+
 /// What the operator can do with the selected thread.
 ///
 /// The screen shows one primary action and, where there is a second, one
@@ -153,6 +198,14 @@ pub fn secondary_action(thread: &TaskOperatorSignalThread) -> Option<SignalActio
     (thread.kind != TaskOperatorSignalKind::Blocked).then_some(SignalAction::Reply)
 }
 
+/// The actions available on a thread, in footer order.
+pub fn actions(thread: &TaskOperatorSignalThread) -> Vec<SignalAction> {
+    primary_action(thread)
+        .into_iter()
+        .chain(secondary_action(thread))
+        .collect()
+}
+
 /// How a group reads: its name, the mark beside it, and its tone.
 struct Group {
     title: &'static str,
@@ -183,6 +236,7 @@ fn group_of(thread: &TaskOperatorSignalThread, linger: bool) -> Group {
 }
 
 pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
+    app.signal_targets.clear();
     // The runner clears what was behind this screen and draws the field; the
     // surface below is what the screen puts on top of it.
     let [header_area, body] =
@@ -235,7 +289,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
 }
 
 /// The filter and sort pills at the top of the list.
-fn draw_controls(frame: &mut Frame, toolbar: Rect, popup_area: Rect, app: &App) {
+fn draw_controls(frame: &mut Frame, toolbar: Rect, popup_area: Rect, app: &mut App) {
     let filter_at = Rect {
         x: toolbar.x.saturating_add(LIST_PADDING),
         y: toolbar.y,
@@ -255,22 +309,33 @@ fn draw_controls(frame: &mut Frame, toolbar: Rect, popup_area: Rect, app: &App) 
         ),
         height: 1,
     };
+    let filter_focused = app.signal_focus == SignalFocus::Filter || app.signal_filter.is_open();
+    let sort_focused = app.signal_focus == SignalFocus::Sort || app.signal_sort.is_open();
     app.signal_filter
-        .draw_pill(frame, filter_at, app.signal_filter.is_open(), true);
+        .draw_pill(frame, filter_at, filter_focused, true);
     app.signal_sort
-        .draw_pill(frame, sort_at, app.signal_sort.is_open(), true);
+        .draw_pill(frame, sort_at, sort_focused, true);
+    app.signal_targets.add(filter_at, SignalHit::Filter);
+    app.signal_targets.add(sort_at, SignalHit::Sort);
     if app.signal_filter.is_open() {
-        app.signal_filter
-            .draw_list_below(frame, popup_area, filter_at);
+        for (rect, index) in app
+            .signal_filter
+            .draw_list_below(frame, popup_area, filter_at)
+        {
+            app.signal_targets.add(rect, SignalHit::FilterOffer(index));
+        }
     }
     if app.signal_sort.is_open() {
-        app.signal_sort.draw_list_below(frame, popup_area, sort_at);
+        for (rect, index) in app.signal_sort.draw_list_below(frame, popup_area, sort_at) {
+            app.signal_targets.add(rect, SignalHit::SortOffer(index));
+        }
     }
 }
 
 /// The list of threads, in the left half of the frame, with the field visible
 /// through it.
 fn draw_threads(frame: &mut Frame, area: Rect, app: &mut App) {
+    app.signal_targets.add(area, SignalHit::List);
     let agent = app.signal_agent_label();
     let now = Utc::now().timestamp_millis();
     let keeping = app.signal_filter.chosen_value() == Some(&SignalFilter::Unresolved);
@@ -343,20 +408,27 @@ fn draw_threads(frame: &mut Frame, area: Rect, app: &mut App) {
     app.signals_cursor
         .follow(rows.len(), visible, app.animations());
     let selected = (!rows.is_empty()).then(|| app.signals_cursor.selected());
-    list::draw(
+    let focused = (app.signal_focus == SignalFocus::List)
+        .then_some(selected)
+        .flatten();
+    let hitboxes = list::draw(
         frame,
         area,
         &rows,
         app.signals_cursor.offset(),
         selected,
-        selected,
+        focused,
         LIST_PADDING,
     );
+    for (rect, index) in hitboxes {
+        app.signal_targets.add(rect, SignalHit::Thread(index));
+    }
 }
 
 /// The selected thread: its title, conversation and actions, on the surface of
 /// the right half.
 fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
+    app.signal_targets.add(area, SignalHit::Detail);
     // Opaque by construction: the field is never drawn on this side.
     let padded = Rect {
         x: area.x.saturating_add(1),
@@ -379,14 +451,18 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
         Paragraph::new(Line::styled(
             heading,
             if app.signal_thread().is_some() {
-                palette::heading()
+                if app.signal_focus == SignalFocus::Detail {
+                    palette::accent()
+                } else {
+                    palette::heading()
+                }
             } else {
                 palette::muted()
             },
         )),
         title,
     );
-    let Some(thread) = app.signal_thread() else {
+    let Some(thread) = app.signal_thread().cloned() else {
         draw_empty(frame, rest, app);
         return;
     };
@@ -432,13 +508,20 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
     let [cards, tail] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(tail_height)]).areas(rest);
     let mut scroll = app.signal_scroll;
-    draw_messages(frame, cards, thread, &agent, &mut scroll);
+    let selected_message = (app.signal_focus == SignalFocus::Detail).then_some(
+        app.signal_message_cursor
+            .min(thread.messages.len().saturating_sub(1)),
+    );
+    let messages = draw_messages(frame, cards, &thread, &agent, &mut scroll, selected_message);
+    for (rect, index) in messages {
+        app.signal_targets.add(rect, SignalHit::Message(index));
+    }
     if composing {
         let [box_area, actions_area] =
             Layout::vertical([Constraint::Length(COMPOSER_HEIGHT), Constraint::Length(2)])
                 .areas(tail);
         draw_composer(frame, box_area, app, &agent);
-        draw_buttons(
+        let buttons = draw_buttons(
             frame,
             area,
             actions_area,
@@ -446,15 +529,42 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
                 chrome::Action::primary("send").focused(true),
                 chrome::Action::secondary("cancel"),
             ],
+            None,
         );
+        if let Some(rect) = buttons.first() {
+            app.signal_targets.add(*rect, SignalHit::ComposerSend);
+        }
+        if let Some(rect) = buttons.get(1) {
+            app.signal_targets.add(*rect, SignalHit::ComposerCancel);
+        }
     } else {
-        let primary = primary_action(thread)
-            .map(|action| chrome::Action::primary(action.label(thread.kind, thread.is_resolved())));
-        let secondary = secondary_action(thread).map(|action| {
-            chrome::Action::secondary(action.label(thread.kind, thread.is_resolved()))
+        let actions = actions(&thread);
+        let buttons: Vec<_> = actions
+            .iter()
+            .enumerate()
+            .map(|(index, action)| {
+                let label = action.label(thread.kind, thread.is_resolved());
+                let focused = app.signal_focus == SignalFocus::Action(index);
+                if index == 0 {
+                    chrome::Action::primary(label).focused(focused)
+                } else {
+                    chrome::Action::secondary(label).focused(focused)
+                }
+            })
+            .collect();
+        let status = thread.is_resolved().then(|| {
+            format!(
+                "resolved {}",
+                ago(
+                    thread.resolved_at_ms.unwrap_or(thread.last_raised_at_ms),
+                    now
+                )
+            )
         });
-        let actions: Vec<_> = primary.into_iter().chain(secondary).collect();
-        draw_buttons(frame, area, tail, &actions);
+        let rects = draw_buttons(frame, area, tail, &buttons, status.as_deref());
+        for (index, rect) in rects.into_iter().enumerate() {
+            app.signal_targets.add(rect, SignalHit::Action(index));
+        }
     }
     app.signal_scroll = scroll;
 }
@@ -471,7 +581,8 @@ fn draw_messages(
     thread: &TaskOperatorSignalThread,
     agent: &str,
     scroll: &mut u16,
-) {
+    selected: Option<usize>,
+) -> Vec<(Rect, usize)> {
     let width = area.width;
     let now = Utc::now().timestamp_millis();
     let mut used = 0;
@@ -488,24 +599,29 @@ fn draw_messages(
     let first = usize::from(*scroll).min(latest_first);
     *scroll = u16::try_from(first).unwrap_or(u16::MAX);
     let mut y = area.y;
-    for message in &thread.messages[first..] {
+    let mut hitboxes = Vec::new();
+    for (index, message) in thread.messages.iter().enumerate().skip(first) {
         let height = card::height(width, &message.body);
         if y + height > area.bottom() {
             break;
         }
+        let rect = Rect { y, height, ..area };
         let from_operator = message.author == TaskOperatorSignalAuthor::Operator;
         card::draw(
             frame,
-            Rect { y, height, ..area },
+            rect,
             &card::Message {
                 author: if from_operator { "you" } else { agent },
                 when: &ago(message.at_ms, now),
                 body: &message.body,
                 from_operator,
+                focused: selected == Some(index),
             },
         );
+        hitboxes.push((rect, index));
         y += height + 1;
     }
+    hitboxes
 }
 
 /// The reply being written, where the conversation is, rather than in a box over
@@ -521,7 +637,13 @@ fn draw_composer(frame: &mut Frame, box_area: Rect, app: &App, agent: &str) {
 
 /// The buttons at the foot of the conversation. The keys are in the frame's
 /// guidance; the buttons say what they do, not which key does it.
-fn draw_buttons(frame: &mut Frame, pane: Rect, area: Rect, actions: &[chrome::Action<'_>]) {
+fn draw_buttons(
+    frame: &mut Frame,
+    pane: Rect,
+    area: Rect,
+    actions: &[chrome::Action<'_>],
+    status: Option<&str>,
+) -> Vec<Rect> {
     surface::cover(frame, area);
     // The divider starts at the column's divider and ends at the panel's edge,
     // so the footer belongs to the pane rather than floating inside it.
@@ -530,7 +652,24 @@ fn draw_buttons(frame: &mut Frame, pane: Rect, area: Rect, actions: &[chrome::Ac
         width: pane.width.saturating_add(2),
         ..pane
     };
-    chrome::actions(frame, frame_rect, area, actions);
+    let rects = chrome::actions(frame, frame_rect, area, actions);
+    if let Some(status) = status {
+        // With no buttons the whole footer is the status, so it sits at the
+        // right edge. With buttons it gets the room to their left.
+        let width = rects
+            .first()
+            .map_or(area.width, |button| button.x.saturating_sub(area.x));
+        frame.render_widget(
+            Paragraph::new(Line::styled(status.to_owned(), palette::muted())).right_aligned(),
+            Rect {
+                x: area.x,
+                y: area.y.saturating_add(1),
+                width,
+                height: 1,
+            },
+        );
+    }
+    rects
 }
 
 fn draw_empty(frame: &mut Frame, area: Rect, app: &App) {

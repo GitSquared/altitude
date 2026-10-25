@@ -14,6 +14,7 @@ use crate::tui::widgets::{
     header,
     list::{self, Row},
     palette,
+    pointer::Targets,
     surface::Surface,
     utils::shimmer,
 };
@@ -28,6 +29,13 @@ use super::{
     rows::{CredentialKind, RowKind, View, mark},
 };
 
+/// What a click on the settings screen can select.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsHit {
+    Section(usize),
+    Row(usize),
+}
+
 pub fn draw(
     frame: &mut Frame,
     area: Rect,
@@ -35,11 +43,13 @@ pub fn draw(
     view: &View,
     tick: Option<usize>,
     is_discovering: bool,
+    targets: &mut Targets<SettingsHit>,
 ) -> Rect {
+    targets.clear();
     let [header_area, body] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
     header::draw(frame, header_area, "SETTINGS", None, None);
-    draw_columns(frame, body, panel, view, tick, is_discovering);
+    draw_columns(frame, body, panel, view, tick, is_discovering, targets);
     if let Some(form) = &panel.form {
         chrome::dim(frame, area);
         draw_form(frame, area, form);
@@ -54,6 +64,7 @@ fn draw_columns(
     view: &View,
     tick: Option<usize>,
     is_discovering: bool,
+    targets: &mut Targets<SettingsHit>,
 ) {
     let inner = Surface::new().opaque().draw(frame, area);
     // The rail picks a list, the list picks a row, and the detail describes it:
@@ -93,7 +104,7 @@ fn draw_columns(
                 .gap(true)
         })
         .collect::<Vec<_>>();
-    list::draw(
+    for (rect, index) in list::draw(
         frame,
         rail,
         &rail_rows,
@@ -101,7 +112,9 @@ fn draw_columns(
         Some(rail_selected),
         rail_focused.then_some(rail_selected),
         1,
-    );
+    ) {
+        targets.add(rect, SettingsHit::Section(index));
+    }
 
     let list_focused = panel.depth == Depth::List;
     let list_rows = view
@@ -132,7 +145,7 @@ fn draw_columns(
     panel
         .cursor
         .follow(list_rows.len(), visible, tick.is_some());
-    list::draw(
+    for (rect, index) in list::draw(
         frame,
         list_area,
         &list_rows,
@@ -140,7 +153,9 @@ fn draw_columns(
         Some(panel.selected()),
         list_focused.then(|| panel.selected()),
         1,
-    );
+    ) {
+        targets.add(rect, SettingsHit::Row(index));
+    }
     if panel.section == Section::Remotes && is_discovering {
         // A scan has no row yet, so it is said under the rows rather than in one.
         let y = (list_area.y + list::row_height(&list_rows) * list_rows.len() as u16 + 1)

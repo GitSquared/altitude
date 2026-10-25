@@ -14,7 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use iroh::{EndpointAddr, EndpointId};
 use ratatui::{DefaultTerminal, layout::Rect, text::Line};
 use tokio::{process::Command as HostCommand, sync::mpsc, task::JoinHandle, time::sleep};
@@ -59,12 +59,13 @@ use popups::send_task::{Decision as SendDecision, SendTask};
 use popups::setup::{Setup, SetupKind};
 use popups::sign_in::{Decision as SignInDecision, SignIn};
 use screens::settings::{
-    CredentialKind, Depth, Focus, Form, GitIdentity, Panel, RowKind, Section, Setting, Target,
+    CredentialKind, Depth, Focus, Form, GitIdentity, Panel, RowKind, Section, Setting, SettingsHit,
+    Target,
 };
 use screens::shell::{GuestRequest, Shell};
 use screens::signals::{
-    Composer, SignalAction, SignalFilter, SignalSort, is_lingering, primary_action,
-    secondary_action,
+    Composer, SignalAction, SignalFilter, SignalFocus, SignalHit, SignalSort, actions,
+    is_lingering, primary_action, secondary_action,
 };
 
 /// What the keyboard is answering to, most immediate first.
@@ -562,6 +563,16 @@ pub struct App {
     pub(in crate::tui) signal_scroll: u16,
     /// The reply being written, if one is.
     pub(in crate::tui) signal_composer: Option<Composer>,
+    /// What the keys are on inside the signals screen, and which message of the
+    /// selected thread they are on.
+    pub(in crate::tui) signal_focus: SignalFocus,
+    pub(in crate::tui) signal_message_cursor: usize,
+    /// What the last signals frame drew, so a click lands on what was seen.
+    pub(in crate::tui) signal_targets: Targets<SignalHit>,
+    /// What the last task-grid frame drew, by card.
+    pub(in crate::tui) task_targets: Targets<usize>,
+    /// What the last settings frame drew, by section or row.
+    pub(in crate::tui) settings_targets: Targets<SettingsHit>,
     /// Threads whose conversation changed since the last frame, with when it was
     /// noticed, so a new arrival moves rather than appearing already settled.
     pub(in crate::tui) signal_arrivals: HashMap<String, Instant>,
@@ -711,6 +722,11 @@ impl App {
             signals_cursor: list::Cursor::default(),
             signal_scroll: 0,
             signal_composer: None,
+            signal_focus: SignalFocus::List,
+            signal_message_cursor: 0,
+            signal_targets: Targets::default(),
+            task_targets: Targets::default(),
+            settings_targets: Targets::default(),
             signal_arrivals: HashMap::new(),
             remote_signals: None,
             remote_signals_loading: false,
@@ -787,6 +803,56 @@ impl App {
         let moved = self.selected as isize + step;
         self.selected = moved.clamp(0, count as isize - 1) as usize;
         let _ = columns;
+    }
+
+    /// Read a mouse event against the last task-grid frame.
+    pub(in crate::tui) fn task_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(index) = self.task_targets.at(mouse.column, mouse.row).copied() {
+                    self.selected = index;
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                let columns = self.grid_columns();
+                self.select_adjacent(-(columns as isize), columns);
+            }
+            MouseEventKind::ScrollDown => {
+                let columns = self.grid_columns();
+                self.select_adjacent(columns as isize, columns);
+            }
+            _ => {}
+        }
+    }
+
+    /// Read a mouse event against the last settings frame.
+    pub(in crate::tui) fn panel_mouse(&mut self, mouse: MouseEvent) {
+        if self.panel.form.is_some() {
+            return;
+        }
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let Some(target) = self.settings_targets.at(mouse.column, mouse.row).copied()
+                else {
+                    return;
+                };
+                match target {
+                    SettingsHit::Section(index) => {
+                        if let Some(section) = Section::ALL.get(index) {
+                            self.panel.section = *section;
+                            self.panel.cursor.reset();
+                            self.panel.depth = Depth::Rail;
+                        }
+                    }
+                    SettingsHit::Row(index) => {
+                        self.panel.cursor.select(index);
+                        self.panel.depth = Depth::List;
+                    }
+                }
+            }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => self.scroll_mouse(mouse),
+            _ => {}
+        }
     }
 
     /// How many cards fit across the body, which is what a grid step needs.
@@ -1033,12 +1099,30 @@ impl App {
                     ];
                 }
                 let mut hints = vec![
-                    Hint::new("j/k", "thread"),
+                    Hint::new("tab", "focus"),
+                    Hint::new(
+                        "j/k",
+                        match self.signal_focus {
+                            SignalFocus::List => "thread",
+                            SignalFocus::Detail => "message",
+                            SignalFocus::Action(_) => "button",
+                            SignalFocus::Filter | SignalFocus::Sort => "control",
+                        },
+                    ),
                     Hint::new("f", "filter"),
                     Hint::new("s", "sort"),
                 ];
-                if let Some(thread) = self.signal_thread() {
-                    if let Some(action) = primary_action(thread) {
+                if matches!(self.signal_focus, SignalFocus::Filter | SignalFocus::Sort) {
+                    hints.push(Hint::new("enter", "open"));
+                } else if let Some(thread) = self.signal_thread() {
+                    if let SignalFocus::Action(index) = self.signal_focus
+                        && let Some(action) = self.signal_actions().get(index).copied()
+                    {
+                        hints.push(Hint::new(
+                            "enter",
+                            action.label(thread.kind, thread.is_resolved()),
+                        ));
+                    } else if let Some(action) = primary_action(thread) {
                         hints.push(Hint::new(
                             "enter",
                             action.label(thread.kind, thread.is_resolved()),
@@ -1175,6 +1259,7 @@ impl App {
                     | Foreground::Signals
                     | Foreground::Panel
                     | Foreground::NewTask(_)
+                    | Foreground::Tasks
             )
     }
 
@@ -1197,15 +1282,6 @@ impl App {
         match &mut self.foreground {
             Foreground::Keys(_) => self.help_scroll = step(self.help_scroll),
             Foreground::Setup(setup) => setup.wheel(up, ROWS),
-            // A wheel notch moves the conversation by a message, which is the
-            // unit it is written in; the rows of the list are moved by keys.
-            Foreground::Signals => {
-                self.signal_scroll = if up {
-                    self.signal_scroll.saturating_sub(1)
-                } else {
-                    self.signal_scroll.saturating_add(1)
-                };
-            }
             Foreground::Panel => self.panel.detail_scroll = step(self.panel.detail_scroll),
             _ => {}
         }
@@ -3167,6 +3243,77 @@ impl App {
             .map_or_else(String::new, |held| held.summary.title.clone())
     }
 
+    /// The actions the selected thread offers, in footer order.
+    fn signal_actions(&self) -> Vec<SignalAction> {
+        self.signal_thread().map(actions).unwrap_or_default()
+    }
+
+    /// Move the keyboard between the parts of the signals screen.
+    pub(in crate::tui) fn move_signal_focus(&mut self, forward: bool) {
+        let actions = self.signal_actions().len();
+        self.signal_focus = self.signal_focus.next(forward, actions);
+        if self.signal_focus == SignalFocus::Detail {
+            let len = self
+                .signal_thread()
+                .map_or(0, |thread| thread.messages.len());
+            self.signal_message_cursor = self.signal_message_cursor.min(len.saturating_sub(1));
+            self.signal_scroll = if self.signal_message_cursor + 1 == len {
+                u16::MAX
+            } else {
+                u16::try_from(self.signal_message_cursor).unwrap_or(u16::MAX)
+            };
+        }
+    }
+
+    /// Put the selected thread back on its newest message.
+    fn reset_signal_message(&mut self) {
+        self.signal_message_cursor = self
+            .signal_thread()
+            .map_or(0, |thread| thread.messages.len().saturating_sub(1));
+        self.signal_scroll = u16::MAX;
+    }
+
+    /// Move the focused message by one, scrolling the conversation to it.
+    pub(in crate::tui) fn move_signal_message(&mut self, forward: bool) {
+        let Some(thread) = self.signal_thread() else {
+            return;
+        };
+        let len = thread.messages.len();
+        if len == 0 {
+            self.signal_message_cursor = 0;
+            return;
+        }
+        self.signal_message_cursor = if forward {
+            (self.signal_message_cursor + 1) % len
+        } else {
+            (self.signal_message_cursor + len - 1) % len
+        };
+        self.signal_scroll = if self.signal_message_cursor + 1 == len {
+            u16::MAX
+        } else {
+            u16::try_from(self.signal_message_cursor).unwrap_or(u16::MAX)
+        };
+    }
+
+    /// Keep a focus that a changed thread made impossible from sticking around.
+    fn normalise_signal_focus(&mut self) {
+        let actions = self.signal_actions().len();
+        if matches!(self.signal_focus, SignalFocus::Action(index) if index >= actions) {
+            self.signal_focus = SignalFocus::List;
+        }
+        if self.signal_focus == SignalFocus::Detail {
+            let len = self
+                .signal_thread()
+                .map_or(0, |thread| thread.messages.len());
+            self.signal_message_cursor = self.signal_message_cursor.min(len.saturating_sub(1));
+            self.signal_scroll = if self.signal_message_cursor + 1 == len {
+                u16::MAX
+            } else {
+                u16::try_from(self.signal_message_cursor).unwrap_or(u16::MAX)
+            };
+        }
+    }
+
     /// Rebuild the visible threads from the chosen filter and sort.
     ///
     /// The groups keep their order: unresolved first, then the kind tier. The
@@ -3224,6 +3371,7 @@ impl App {
             Some(index) => self.signals_cursor.select(index),
             None => self.signals_cursor.select(0),
         }
+        self.normalise_signal_focus();
     }
 
     /// Whether a resolved thread is still being shown in the unresolved view,
@@ -3309,7 +3457,7 @@ impl App {
         let previous = self.signal_thread().cloned();
         self.signals_cursor
             .move_by(forward, self.signal_threads.len());
-        self.signal_scroll = u16::MAX;
+        self.reset_signal_message();
         if let Some(thread) = previous {
             self.read_info_thread(thread, task_service, remote_signals)
                 .await;
@@ -3342,7 +3490,7 @@ impl App {
             let index = (start + offset) % len;
             if self.signal_threads[index].is_unresolved() {
                 self.signals_cursor.select(index);
-                self.signal_scroll = u16::MAX;
+                self.reset_signal_message();
                 return;
             }
         }
@@ -3386,6 +3534,9 @@ impl App {
             thread.resolved_at_ms = None;
         }
         self.apply_signal_view();
+        self.signal_message_cursor = self
+            .signal_thread()
+            .map_or(0, |thread| thread.messages.len().saturating_sub(1));
         self.signal_scroll = u16::MAX;
     }
 }
@@ -3896,6 +4047,132 @@ impl App {
         }
     }
 
+    /// Read a mouse event against the signals rectangles the last frame drew.
+    pub(in crate::tui) async fn signals_mouse<E>(
+        &mut self,
+        mouse: MouseEvent,
+        task_service: &TaskService<E>,
+        remote_signals: &mpsc::Sender<RemoteSignalsReply>,
+        event_loop: &TaskEventLoop<E>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let target = self.signal_targets.at(mouse.column, mouse.row).copied();
+        match mouse.kind {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let up = mouse.kind == MouseEventKind::ScrollUp;
+                if self.signal_filter.is_open() {
+                    self.signal_filter.scroll(up);
+                    return;
+                }
+                if self.signal_sort.is_open() {
+                    self.signal_sort.scroll(up);
+                    return;
+                }
+                match target {
+                    Some(SignalHit::List | SignalHit::Thread(_)) => {
+                        self.move_signal_cursor(!up, task_service, remote_signals)
+                            .await;
+                    }
+                    Some(
+                        SignalHit::Action(_)
+                        | SignalHit::ComposerSend
+                        | SignalHit::ComposerCancel
+                        | SignalHit::Filter
+                        | SignalHit::Sort,
+                    ) => {}
+                    _ => {
+                        self.signal_focus = SignalFocus::Detail;
+                        self.move_signal_message(!up);
+                    }
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if (self.signal_filter.is_open() || self.signal_sort.is_open())
+                    && !matches!(
+                        target,
+                        Some(SignalHit::FilterOffer(_) | SignalHit::SortOffer(_))
+                    )
+                {
+                    self.signal_filter.close();
+                    self.signal_sort.close();
+                    return;
+                }
+                let Some(target) = target else {
+                    return;
+                };
+                match target {
+                    SignalHit::List => self.signal_focus = SignalFocus::List,
+                    SignalHit::Thread(index) => {
+                        let previous = self.signal_thread().cloned();
+                        self.signals_cursor.select(index);
+                        self.signal_focus = SignalFocus::List;
+                        self.reset_signal_message();
+                        if let Some(thread) = previous {
+                            self.read_info_thread(thread, task_service, remote_signals)
+                                .await;
+                        }
+                    }
+                    SignalHit::Detail => self.signal_focus = SignalFocus::Detail,
+                    SignalHit::Message(index) => {
+                        self.signal_focus = SignalFocus::Detail;
+                        self.signal_message_cursor = index;
+                        self.signal_scroll = if self
+                            .signal_thread()
+                            .is_some_and(|thread| index + 1 == thread.messages.len())
+                        {
+                            u16::MAX
+                        } else {
+                            u16::try_from(index).unwrap_or(u16::MAX)
+                        };
+                    }
+                    SignalHit::Action(index) => {
+                        self.signal_focus = SignalFocus::Action(index);
+                        if let Some(action) = self.signal_actions().get(index).copied() {
+                            self.act_on_signal(action, task_service, remote_signals)
+                                .await;
+                        }
+                    }
+                    SignalHit::ComposerSend => {
+                        self.composer_key(
+                            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                            event_loop,
+                            remote_signals,
+                        );
+                    }
+                    SignalHit::ComposerCancel => self.signal_composer = None,
+                    SignalHit::Filter => {
+                        self.signal_focus = SignalFocus::Filter;
+                        self.signal_filter.open();
+                    }
+                    SignalHit::Sort => {
+                        self.signal_focus = SignalFocus::Sort;
+                        self.signal_sort.open();
+                    }
+                    SignalHit::FilterOffer(index) => {
+                        let before = self.signal_filter.chosen_value().copied();
+                        let previous = self.signal_thread().cloned();
+                        self.signal_filter.choose(index);
+                        self.signal_filter.close();
+                        self.apply_signal_view();
+                        if self.signal_filter.chosen_value().copied() != before
+                            && let Some(thread) = previous
+                        {
+                            self.read_info_thread(thread, task_service, remote_signals)
+                                .await;
+                        }
+                    }
+                    SignalHit::SortOffer(index) => {
+                        self.signal_sort.choose(index);
+                        self.signal_sort.close();
+                        self.apply_signal_view();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// The keys of the signals screen.
     pub(in crate::tui) async fn signals_key<E>(
         &mut self,
@@ -3929,6 +4206,21 @@ impl App {
             self.apply_signal_view();
             return;
         }
+        // Tab and the horizontal arrows move between the parts of the screen.
+        // j/k and the vertical arrows move inside the part that has the keys.
+        if matches!(
+            key.code,
+            KeyCode::Tab
+                | KeyCode::BackTab
+                | KeyCode::Right
+                | KeyCode::Left
+                | KeyCode::Char('l')
+                | KeyCode::Char('h')
+        ) {
+            let forward = matches!(key.code, KeyCode::Tab | KeyCode::Right | KeyCode::Char('l'));
+            self.move_signal_focus(forward);
+            return;
+        }
         match key.code {
             KeyCode::PageDown => self.signal_scroll = self.signal_scroll.saturating_add(1),
             KeyCode::PageUp => self.signal_scroll = self.signal_scroll.saturating_sub(1),
@@ -3938,28 +4230,54 @@ impl App {
                 self.read_selected_info(task_service, remote_signals).await;
                 self.leave_signals();
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.move_signal_cursor(true, task_service, remote_signals)
-                    .await
+            KeyCode::Down | KeyCode::Char('j') => match self.signal_focus {
+                SignalFocus::List => {
+                    self.move_signal_cursor(true, task_service, remote_signals)
+                        .await
+                }
+                SignalFocus::Detail => self.move_signal_message(true),
+                SignalFocus::Action(_) => self.move_signal_focus(true),
+                SignalFocus::Filter | SignalFocus::Sort => {}
+            },
+            KeyCode::Up | KeyCode::Char('k') => match self.signal_focus {
+                SignalFocus::List => {
+                    self.move_signal_cursor(false, task_service, remote_signals)
+                        .await
+                }
+                SignalFocus::Detail => self.move_signal_message(false),
+                SignalFocus::Action(_) => self.move_signal_focus(false),
+                SignalFocus::Filter | SignalFocus::Sort => {}
+            },
+            KeyCode::Char('f') => {
+                self.signal_focus = SignalFocus::Filter;
+                self.signal_filter.open();
             }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.move_signal_cursor(false, task_service, remote_signals)
-                    .await
+            KeyCode::Char('s') => {
+                self.signal_focus = SignalFocus::Sort;
+                self.signal_sort.open();
             }
-            KeyCode::Char('f') => self.signal_filter.open(),
-            KeyCode::Char('s') => self.signal_sort.open(),
             KeyCode::Enter if is_secondary(key) => {
                 if let Some(action) = self.signal_thread().and_then(secondary_action) {
                     self.act_on_signal(action, task_service, remote_signals)
                         .await
                 }
             }
-            KeyCode::Enter => {
-                if let Some(action) = self.signal_thread().and_then(primary_action) {
-                    self.act_on_signal(action, task_service, remote_signals)
-                        .await
+            KeyCode::Enter => match self.signal_focus {
+                SignalFocus::Filter => self.signal_filter.open(),
+                SignalFocus::Sort => self.signal_sort.open(),
+                SignalFocus::Action(index) => {
+                    if let Some(action) = self.signal_actions().get(index).copied() {
+                        self.act_on_signal(action, task_service, remote_signals)
+                            .await
+                    }
                 }
-            }
+                SignalFocus::List | SignalFocus::Detail => {
+                    if let Some(action) = self.signal_thread().and_then(primary_action) {
+                        self.act_on_signal(action, task_service, remote_signals)
+                            .await
+                    }
+                }
+            },
             _ => {}
         }
     }
@@ -4412,9 +4730,11 @@ impl App {
         self.signals_cursor = list::Cursor::default();
         self.apply_signal_view();
         self.signal_arrivals.clear();
+        self.signal_focus = SignalFocus::List;
         self.signal_scroll = u16::MAX;
         self.signal_composer = None;
         self.foreground = Foreground::Signals;
+        self.reset_signal_message();
     }
 
     /// Open the signals of a task another machine owns, and read them over the
@@ -4438,6 +4758,8 @@ impl App {
         self.signal_threads.clear();
         self.signals_cursor = list::Cursor::default();
         self.signal_arrivals.clear();
+        self.signal_focus = SignalFocus::List;
+        self.signal_message_cursor = 0;
         self.signal_scroll = u16::MAX;
         self.signal_composer = None;
         self.foreground = Foreground::Signals;
@@ -4463,7 +4785,10 @@ impl App {
         self.signal_all_threads.clear();
         self.signal_threads.clear();
         self.signal_arrivals.clear();
+        self.signal_targets.clear();
         self.signal_composer = None;
+        self.signal_focus = SignalFocus::List;
+        self.signal_message_cursor = 0;
         self.signal_scroll = 0;
     }
 
@@ -4597,7 +4922,7 @@ impl App {
                         self.signal_threads.clear();
                         self.signals_cursor = list::Cursor::default();
                         self.apply_signal_view();
-                        self.signal_scroll = u16::MAX;
+                        self.reset_signal_message();
                     }
                     // The screen stays open with what it has, which is nothing
                     // new: the operator can retry by opening it again.
@@ -4762,7 +5087,7 @@ impl App {
         self.signal_all_threads = threads;
         self.apply_signal_view();
         if grown {
-            self.signal_scroll = u16::MAX;
+            self.reset_signal_message();
         }
     }
 

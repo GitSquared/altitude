@@ -314,7 +314,7 @@ pub fn draw(
     selected: Option<usize>,
     focused: Option<usize>,
     gutter: u16,
-) {
+) -> Vec<(Rect, usize)> {
     let gutter = gutter.min(area.width / 2);
     let list_area = Rect {
         x: area.x.saturating_add(gutter),
@@ -325,20 +325,20 @@ pub fn draw(
     // out of the text; they remain visible in the gaps between rows and below
     // the list, which is where a backdrop belongs.
     let mut top = area.y;
-    for row in rows.iter().skip(offset) {
+    let mut hitboxes = Vec::new();
+    for (index, row) in rows.iter().enumerate().skip(offset) {
         if top >= area.bottom() {
             break;
         }
         let height = row.height().min(area.bottom() - top);
-        frame.render_widget(
-            Clear,
-            Rect {
-                x: area.x,
-                y: top,
-                width: area.width,
-                height,
-            },
-        );
+        let rect = Rect {
+            x: area.x,
+            y: top,
+            width: area.width,
+            height,
+        };
+        frame.render_widget(Clear, rect);
+        hitboxes.push((rect, index));
         top = top.saturating_add(row.height() + u16::from(row.gap));
     }
     if let Some(index) = selected.filter(|index| focused != Some(*index)) {
@@ -372,6 +372,7 @@ pub fn draw(
         })
         .collect::<Vec<_>>();
     frame.render_widget(List::new(items), list_area);
+    hitboxes
 }
 
 /// The full-width bar behind one row, gutter included.
