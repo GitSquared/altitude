@@ -92,8 +92,7 @@ pub fn is_lingering(thread: &TaskOperatorSignalThread, now_ms: i64) -> bool {
             .is_some_and(|at| now_ms.saturating_sub(at) < LINGER_MS)
 }
 
-/// Which way the threads inside a tier read. Resolved history is ordered by when
-/// it ended; the live threads by when they opened.
+/// Which way the threads inside a tier read, by when the thread was raised.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignalSort {
     Oldest,
@@ -512,7 +511,28 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
         app.signal_message_cursor
             .min(thread.messages.len().saturating_sub(1)),
     );
-    let messages = draw_messages(frame, cards, &thread, &agent, &mut scroll, selected_message);
+    // A resolution is part of the conversation, not a message: it follows the
+    // last card as a quiet line rather than another bordered block.
+    let status = thread.is_resolved().then(|| {
+        let at = thread.resolved_at_ms.unwrap_or(thread.last_raised_at_ms);
+        Line::styled(
+            format!(
+                "✓ resolved by {} · {}",
+                who(thread.resolved_by, &agent),
+                ago(at, now)
+            ),
+            palette::muted(),
+        )
+    });
+    let messages = draw_messages(
+        frame,
+        cards,
+        &thread,
+        &agent,
+        &mut scroll,
+        selected_message,
+        status,
+    );
     for (rect, index) in messages {
         app.signal_targets.add(rect, SignalHit::Message(index));
     }
@@ -582,6 +602,7 @@ fn draw_messages(
     agent: &str,
     scroll: &mut u16,
     selected: Option<usize>,
+    status: Option<Line<'static>>,
 ) -> Vec<(Rect, usize)> {
     let width = area.width;
     let now = Utc::now().timestamp_millis();
@@ -620,6 +641,23 @@ fn draw_messages(
         );
         hitboxes.push((rect, index));
         y += height + 1;
+    }
+    if let Some(status) = status
+        && y < area.bottom()
+    {
+        // The gap after the last card is the blank line; the status takes the
+        // next one.
+        let y = y.saturating_add(1);
+        if y < area.bottom() {
+            frame.render_widget(
+                Paragraph::new(status),
+                Rect {
+                    y,
+                    height: 1,
+                    ..area
+                },
+            );
+        }
     }
     hitboxes
 }

@@ -35,6 +35,8 @@ pub struct Confirm {
     pub destructive: &'static str,
     /// 0 is cancel, 1 is the destructive button.
     pub button: usize,
+    /// A short question about a deliberate ending; narrower and spaced as such.
+    compact: bool,
 }
 
 /// What the operator answered.
@@ -51,7 +53,21 @@ impl Confirm {
             // Starting on cancel means the key that opens this is never the key
             // that destroys something.
             button: 0,
+            compact: false,
         }
+    }
+
+    /// Put the keys on the confirming answer. Used only where confirming is the
+    /// expected next step, never for deleting something irreversible.
+    pub fn starting_on_confirm(mut self) -> Self {
+        self.button = 1;
+        self
+    }
+
+    /// Use the narrow, spaced form for a deliberate ending.
+    pub fn compact(mut self) -> Self {
+        self.compact = true;
+        self
     }
 
     /// The keys that work here, for the guidance line.
@@ -88,13 +104,36 @@ impl Confirm {
 }
 
 pub fn draw(frame: &mut Frame, area: Rect, confirm: &Confirm) -> Rect {
-    let popup = chrome::centered(area, 60, 8);
+    let width_percent = if confirm.compact { 30 } else { 60 };
+    let width = (area.width * width_percent / 100).max(20);
+    let text_width = width.saturating_sub(4).max(1);
+    let lines = Paragraph::new(confirm.question.clone())
+        .wrap(Wrap { trim: true })
+        .line_count(text_width);
+    let height = u16::try_from(lines).unwrap_or(u16::MAX).saturating_add(6);
+    let popup = chrome::centered(area, width_percent, height.min(area.height));
     frame.render_widget(Clear, popup);
     let block = chrome::modal("Are you sure?");
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
-    let [question, actions] =
-        Layout::vertical([Constraint::Min(3), Constraint::Length(2)]).areas(inner);
+    // The compact ending keeps one empty line above the words and one below
+    // them; the actions keep their own two rows under the rule.
+    let [_, question, _, actions] = Layout::vertical(if confirm.compact {
+        [
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(2),
+        ]
+    } else {
+        [
+            Constraint::Length(0),
+            Constraint::Min(3),
+            Constraint::Length(0),
+            Constraint::Length(2),
+        ]
+    })
+    .areas(inner);
     frame.render_widget(
         Paragraph::new(confirm.question.clone()).wrap(Wrap { trim: true }),
         question,
@@ -196,7 +235,9 @@ impl PendingConfirm {
         question: String,
     ) -> Self {
         Self {
-            dialog: Confirm::new(question, "accept"),
+            dialog: Confirm::new(question, "accept")
+                .starting_on_confirm()
+                .compact(),
             action: ConfirmAction::ConfirmSignal { task_id, signal_id },
         }
     }

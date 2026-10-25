@@ -155,7 +155,14 @@ impl Row {
             // padding does inherit the selection, because on an inactive bar it
             // is the bar that has to continue across the row.
             let mut spans = self.mark.clone();
-            spans.push(Span::styled(title, self.tone));
+            spans.push(Span::styled(
+                title,
+                if selected {
+                    palette::inactive_selection()
+                } else {
+                    self.tone
+                },
+            ));
             spans.push(padding_span(&padding, selected));
             if !note.is_empty() {
                 spans.push(Span::styled(note.to_owned(), secondary));

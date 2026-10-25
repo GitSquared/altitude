@@ -3354,14 +3354,7 @@ impl App {
                 )
             };
             group(left).cmp(&group(right)).then_with(|| {
-                let when = |thread: &TaskOperatorSignalThread| {
-                    let settled = thread.is_resolved() && !(keeping && is_lingering(thread, now));
-                    if settled {
-                        thread.resolved_at_ms.unwrap_or(thread.opened_at_ms)
-                    } else {
-                        thread.opened_at_ms
-                    }
-                };
+                let when = |thread: &TaskOperatorSignalThread| thread.opened_at_ms;
                 match sort {
                     SignalSort::Oldest => when(left).cmp(&when(right)),
                     SignalSort::Newest => when(right).cmp(&when(left)),
@@ -4357,12 +4350,9 @@ impl App {
                 if thread.kind != TaskOperatorSignalKind::InReview || thread.resolved {
                     return;
                 }
-                let question = if remote {
-                    "Accept this work and close the task? Its capsule will be disposed of where it runs.".to_owned()
-                } else {
-                    "Accept this work and close the task? Its capsule will be disposed of."
-                        .to_owned()
-                };
+                let question = "Accept this work and close the task?\n\
+                    The agent will be shut down and its workspace cleared up."
+                    .to_owned();
                 self.foreground = Foreground::Confirm(PendingConfirm::confirming_signal(
                     thread.task_id,
                     thread.id,
