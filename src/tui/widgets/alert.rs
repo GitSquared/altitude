@@ -42,11 +42,7 @@ impl Alert {
     }
 
     fn title(&self) -> &'static str {
-        if self.is_problem {
-            "That did not work"
-        } else {
-            "Notice"
-        }
+        if self.is_problem { "Error" } else { "Notice" }
     }
 }
 
