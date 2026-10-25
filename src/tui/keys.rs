@@ -8,12 +8,25 @@
 //!
 //! Inside a text field the first two are characters, which is why the field is
 //! left with escape. `?` is the one that is only a character there.
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Whether a key means "go away": close what is in front of you, or quit the
 /// application when there is nothing to close.
 pub fn is_dismiss(key: KeyEvent) -> bool {
     matches!(key.code, KeyCode::Esc | KeyCode::Char('q'))
+}
+
+/// Whether the operator asked to proceed rather than look: ctrl-enter, the heavier
+/// of the two actions a surface offers. It starts the work a creation page is
+/// showing, and it takes a task over from the list.
+///
+/// One chord everywhere, so the gesture is one thing to learn and one thing to
+/// state. What it costs is stated here once: a chorded enter is a key of its own
+/// only under the terminal's keyboard protocol, and elsewhere it arrives as plain
+/// enter. What sits behind this therefore asks before it does anything the
+/// operator would not want by pressing the key beside it.
+pub fn is_proceed(key: KeyEvent) -> bool {
+    key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 /// Whether a key means "remove the thing the focus is on".
@@ -66,12 +79,18 @@ pub fn help_sections() -> Vec<HelpSection> {
                 ("l", "Link a Linear issue and start work on it"),
                 ("s", "Open Settings"),
                 ("Enter / i", "Read and answer the selected task's signals"),
-                ("o", "Take over its terminal, or bring a remote task home"),
-                ("r", "Send a local task to a remote"),
+                (
+                    "Ctrl-Enter",
+                    "Take over the task; a remote task moves here first",
+                ),
+                (
+                    "p",
+                    "Push a local task to a remote, or unhook a remote one and run it here",
+                ),
                 ("b", "Open its linked issue in your browser"),
                 (
                     "d / Delete / Backspace",
-                    "Remove a local task, after confirmation",
+                    "Drop the selected task, after confirmation",
                 ),
                 ("Tab / Shift-Tab", "Select the next or previous card"),
             ],

@@ -68,6 +68,20 @@ impl ClientRecord {
         Ok(first)
     }
 
+    /// Forget a client, answering whether it was known.
+    ///
+    /// The record grants nothing, so forgetting one is housekeeping: it is the
+    /// list of who has been here that stops naming someone who never will be
+    /// again.
+    pub fn forget(&self, key: EndpointId) -> LinkResult<bool> {
+        let mut seen = self.seen.write().expect("client record");
+        if !seen.remove(&key) {
+            return Ok(false);
+        }
+        self.persist(&seen)?;
+        Ok(true)
+    }
+
     fn persist(&self, seen: &BTreeSet<EndpointId>) -> LinkResult<()> {
         let keys: Vec<String> = seen.iter().map(EndpointId::to_string).collect();
         let text = format!("{}\n", serde_json::to_string_pretty(&keys)?);

@@ -12,8 +12,8 @@ use std::{
 use crossterm::{
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, EventStream, KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
-        PushKeyboardEnhancementFlags,
+        Event, EventStream, KeyCode, KeyboardEnhancementFlags, MouseEventKind,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
 };
@@ -27,14 +27,14 @@ use tokio::{signal::unix::Signal, sync::mpsc, task::spawn_blocking, time};
 
 use crate::{
     isolation::IsolationEngine,
-    remote::ConfigBundle,
+    remote::{ConfigBundle, transfer},
     task::{TaskEventLoop, TaskExecutionUpdate, TaskService},
 };
 
 use super::App;
 use super::app::{
-    ConfigPushReply, Foreground, HeldTask, IssueReadReply, IssueSearchReply, NO_LINEAR,
-    RemoteSignalsReply, SendTaskReply, TaskDelegationReply, TrackerConnectReply,
+    ConfigPushReply, Foreground, IssueReadReply, IssueSearchReply, NO_LINEAR, RemoteSignalsReply,
+    RemoveTaskReply, SendTaskReply, TaskDelegationReply, TrackerConnectReply, WatchedTasks,
 };
 use super::keys::{is_dismiss, is_help};
 use super::popups;
@@ -122,6 +122,14 @@ struct EventReplies<'a> {
     remote_signals: &'a mpsc::Sender<RemoteSignalsReply>,
     delegations: &'a mpsc::Sender<TaskDelegationReply>,
     sends: &'a mpsc::Sender<SendTaskReply>,
+    removals: &'a mpsc::Sender<RemoveTaskReply>,
+}
+
+/// What the loop hears from outside the terminal: the work changing, and what the
+/// machines this client uses are holding.
+pub struct Feeds {
+    pub task_execution: mpsc::UnboundedReceiver<TaskExecutionUpdate>,
+    pub watched_tasks: mpsc::UnboundedReceiver<WatchedTasks>,
 }
 
 pub async fn run<E>(
@@ -131,7 +139,7 @@ pub async fn run<E>(
     event_loop: TaskEventLoop<E>,
     task_service: TaskService<E>,
     app: App,
-    task_execution_updates: mpsc::UnboundedReceiver<TaskExecutionUpdate>,
+    feeds: Feeds,
 ) -> io::Result<()>
 where
     E: IsolationEngine + Clone + 'static,
@@ -143,7 +151,7 @@ where
         event_loop.clone(),
         task_service,
         app,
-        task_execution_updates,
+        feeds,
     )
     .await;
     // Given back whether or not it was asked for: a terminal that never took it
@@ -172,12 +180,21 @@ async fn run_loop<E>(
     event_loop: TaskEventLoop<E>,
     task_service: TaskService<E>,
     mut app: App,
-    mut task_execution_updates: mpsc::UnboundedReceiver<TaskExecutionUpdate>,
+    feeds: Feeds,
 ) -> io::Result<()>
 where
     E: IsolationEngine + Clone + 'static,
 {
     execute!(io::stdout(), EnableBracketedPaste)?;
+    app.watch_remotes();
+    // What each remote answered with last time, before anything is asked, so the
+    // first picker of a session names its machines instead of printing addresses
+    // the operator never typed as names.
+    app.reload_remembered_keys().await;
+    let Feeds {
+        task_execution: mut task_execution_updates,
+        watched_tasks: mut watched,
+    } = feeds;
     let mut events = EventStream::new();
     let mut refresh = time::interval(Duration::from_secs(2));
     let mut shell_notice = time::interval(Duration::from_millis(100));
@@ -188,7 +205,6 @@ where
     let mut progress_clock = time::interval(Duration::from_millis(100));
     progress_clock.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     let mut configuration_clock = time::interval(Duration::from_secs(3));
-    let mut connection_clock = time::interval(Duration::from_secs(15));
     let mut reading_configuration = false;
     let (configuration_reads, mut configuration_read) = mpsc::unbounded_channel();
     let mut scan = None;
@@ -197,17 +213,13 @@ where
     let mut mouse_captured = false;
     // Whether the terminal is reporting the keys the creation question needs.
     let mut keys_enhanced = false;
-    // Reaching an address is the one thing here that waits on another machine, so
-    // it happens off this loop and reports back like a task's run does.
-    let (remote_answers, mut answered) = mpsc::unbounded_channel();
+    // Anything that waits on another machine reports back through a watch, so the
+    // clock below only drives what this machine checks about itself.
     let mut ask = time::interval(Duration::from_millis(250));
-    // Reading a remote's tasks is a dial, so it happens on its own clock rather than
-    // every frame, and away from this loop.
-    let (remote_task_reads, mut remote_tasks_read) = mpsc::unbounded_channel::<Vec<HeldTask>>();
+
     // Bringing a task home is a dial, a transfer and a load, so it happens away from
     // this loop and reports back with the task it landed.
     let (landings, mut landed) = mpsc::unbounded_channel::<Result<String, String>>();
-    let mut read_clock = time::interval(Duration::from_secs(3));
     // A credential shell is opened, prints, and ends on its own time: the sandbox may
     // have to be built first, which is minutes rather than frames.
     let (credential_events, mut credential_shell_events) = mpsc::unbounded_channel();
@@ -231,11 +243,14 @@ where
     // arrives after the operator has left cannot replace what is on screen.
     let (remote_signals, mut remote_signals_replied) = mpsc::channel::<RemoteSignalsReply>(8);
     // Sending a task to a remote is a dial too. Bounded, and each reply names the
-    // machine, so the notice says which one answered.
+    // machine, so the message says which one answered.
     let (delegations, mut delegated) = mpsc::channel::<TaskDelegationReply>(8);
     // Sending an existing task is a dial, a transfer and a boot. Bounded, and the
-    // reply names the machine so the notice can.
+    // reply names the machine so the message can.
     let (sends, mut sent) = mpsc::channel::<SendTaskReply>(8);
+    // Removing a task another machine holds is a dial, so it happens away from
+    // this loop and reports back what that machine did.
+    let (removals, mut removed) = mpsc::channel::<RemoveTaskReply>(8);
     // Acknowledgements identify the exact content sent while local edits continue.
     let (config_pushes, mut config_pushed) = mpsc::channel::<ConfigPushReply>(8);
     let mut issue_search_clock = time::interval(Duration::from_millis(80));
@@ -279,8 +294,7 @@ where
                     Ok(scan) => Some(scan),
                     Err(error) => {
                         tracing::warn!(%error, "Network discovery unavailable");
-                        app.notice =
-                            Some("Network discovery unavailable · add a remote by hostname".into());
+                        app.say("Network discovery unavailable · add a remote by hostname");
                         None
                     }
                 };
@@ -295,10 +309,12 @@ where
                 execute!(io::stdout(), DisableMouseCapture)?;
             }
         }
-        // Answering the creation question is ctrl-enter, which a terminal only
-        // reports as a key of its own under this protocol. Held for that page
-        // alone, so nothing else has to read its keys differently.
-        if keys_enhanced != matches!(app.foreground, Foreground::NewTask(_)) {
+        // The gesture that proceeds is ctrl-enter, which only this protocol reports
+        // as a key of its own. It is held for the two screens that offer it, and
+        // given back everywhere else, so no other surface reads its keys
+        // differently and a shell never sees the protocol's own sequences.
+        let wants_enhanced = matches!(app.foreground, Foreground::NewTask(_) | Foreground::Tasks);
+        if keys_enhanced != wants_enhanced {
             keys_enhanced = !keys_enhanced;
             if keys_enhanced {
                 execute!(
@@ -336,8 +352,7 @@ where
         was_panel = is_panel;
         draw_when(&mut redraw, terminal, |frame| {
             let hints = app.hints();
-            let content =
-                widgets::chrome::draw(frame, &hints, app.keyboard_hints(), app.notice.as_deref());
+            let content = widgets::chrome::draw(frame, &hints, app.keyboard_hints());
             screens::tasks::draw(frame, content, &mut app);
             // What the modal in front occupied, so the transition animates what
             // was actually drawn rather than a size written down a second time.
@@ -435,14 +450,32 @@ where
                 widgets::chrome::dim(frame, content);
                 modal = Some(reply.prompt.draw(frame, content));
             }
-            // A task travelling here is a wait over the list it will join.
-            if let Some(landing) = &app.landing {
+            // A transfer in flight is the one wait with something to count.
+            if let Some(progress) = app.transfer_progress() {
                 widgets::chrome::dim(frame, content);
-                modal = Some(widgets::loading::draw(
+                modal = Some(widgets::progress::draw(
                     frame,
                     content,
-                    &landing.message,
+                    &progress,
                     app.animation_tick(),
+                ));
+            }
+            // A message is read over whatever asked for it, including a wait.
+            if let Some(alert) = &app.alert {
+                widgets::chrome::dim(frame, content);
+                modal = Some(widgets::alert::draw(frame, content, alert));
+            }
+            // A question about an account holds the screen until it is answered.
+            if let Some((title, question, answers)) = app.tracker_conflict_question() {
+                widgets::chrome::dim(frame, content);
+                let answers: Vec<&str> = answers;
+                modal = Some(widgets::question::draw(
+                    frame,
+                    content,
+                    &title,
+                    &question,
+                    &answers,
+                    app.conflict_choice,
                 ));
             }
             // Keep the modal's last frame, ready to draw once more when it
@@ -499,10 +532,6 @@ where
                 }
                 redraw = true;
             }
-            _ = connection_clock.tick(), if !app.configured_remotes().is_empty() => {
-                app.refresh_remote_connections();
-                redraw = true;
-            }
             _ = configuration_clock.tick(), if !reading_configuration => {
                 reading_configuration = true;
                 let config = app.config.clone();
@@ -511,7 +540,7 @@ where
                 tokio::spawn(async move {
                     let result = spawn_blocking(move || {
                         let settings = fs::read_to_string(config.settings_path())?;
-                        ConfigBundle::of(settings, config.data_dir(), &profiles, &[])
+                        ConfigBundle::of(&settings, config.data_dir(), &profiles, &[])
                     }).await.map_err(|error| error.to_string())
                         .and_then(|result| result.map_err(|error| error.to_string()));
                     let _ = reports.send(result);
@@ -526,10 +555,6 @@ where
                 // Every quarter second, so it only asks for a frame when one of the
                 // checks it runs actually changed something.
                 let mut changed = false;
-                if app.wants_remote_check() {
-                    app.ask_next_remote(&remote_answers).await;
-                    changed = true;
-                }
                 changed |= app.sync_credentials();
                 if app.wants_credential_check() {
                     app.ask_credential_checks(&task_service, &credential_reports);
@@ -537,19 +562,12 @@ where
                 }
                 redraw |= changed;
             }
-            Some(answer) = answered.recv() => {
-                app.remote_answered(answer).await;
-                redraw = true;
-            }
             Some(reply) = reported.recv() => {
                 app.credential_checked(reply);
                 redraw = true;
             }
-            _ = read_clock.tick(), if matches!(app.foreground, Foreground::Tasks) => {
-                app.read_remote_tasks(&remote_task_reads);
-            }
-            Some(tasks) = remote_tasks_read.recv() => {
-                app.remote_tasks_read(tasks);
+            Some(event) = watched.recv() => {
+                app.tasks_watched(event).await;
                 redraw = true;
             }
             Some(outcome) = landed.recv() => {
@@ -560,9 +578,13 @@ where
                         }
                         app.task_landed(&id, terminal, &event_loop, &landings);
                     }
+                    Err(error) if error == transfer::STOPPED => {
+                        app.transfer = None;
+                        app.say("Transfer stopped; the task did not move");
+                    }
                     Err(error) => {
-                        app.landing = None;
-                        app.notice = Some(format!("could not bring it home: {error}"));
+                        app.transfer = None;
+                        app.problem(format!("could not pull the task: {error}"));
                     }
                 }
                 redraw = true;
@@ -575,8 +597,15 @@ where
             _ = motion.tick(), if effects.is_running() => {
                 redraw = true;
             }
-            _ = progress_clock.tick(), if app.open_shell().is_none() && app.is_awaiting_progress() => {
-                app.environment_builds = task_service.environment_builds();
+            // The two waits with something to report: a build's place in its
+            // queue, and a transfer's bytes. One clock, because neither is worth
+            // waking the loop for on its own.
+            _ = progress_clock.tick(), if app.transfer.is_some()
+                || (app.open_shell().is_none() && app.is_awaiting_progress()) => {
+                app.observe_transfer();
+                if app.open_shell().is_none() && app.is_awaiting_progress() {
+                    app.environment_builds = task_service.environment_builds();
+                }
                 redraw = true;
             }
             Some(update) = task_execution_updates.recv() => {
@@ -617,11 +646,15 @@ where
                 redraw = true;
             }
             Some(reply) = delegated.recv() => {
-                app.task_delegation_resolved(reply, &remote_task_reads);
+                app.task_delegation_resolved(reply);
+                redraw = true;
+            }
+            Some(reply) = removed.recv() => {
+                app.remove_remote_resolved(reply);
                 redraw = true;
             }
             Some(reply) = sent.recv() => {
-                app.send_task_resolved(reply, &remote_task_reads);
+                app.send_task_resolved(reply);
                 redraw = true;
             }
             Some(reply) = config_pushed.recv() => {
@@ -633,7 +666,7 @@ where
                 redraw = true;
             }
             Some(reply) = remote_signals_replied.recv() => {
-                app.remote_signals_resolved(reply, &remote_task_reads);
+                app.remote_signals_resolved(reply);
                 redraw = true;
             }
             event = events.next() => {
@@ -657,6 +690,7 @@ where
                         remote_signals: &remote_signals,
                         delegations: &delegations,
                         sends: &sends,
+                        removals: &removals,
                     },
                 )
                 .await?;
@@ -690,6 +724,7 @@ where
         remote_signals,
         delegations,
         sends,
+        removals,
     } = replies;
     if let Event::Resize(_, _) = event
         && app.open_shell().is_some()
@@ -701,6 +736,9 @@ where
         return Ok(false);
     }
     if let Event::Paste(text) = event {
+        if app.alert.is_some() {
+            return Ok(false);
+        }
         if let Foreground::Reply(reply) = &mut app.foreground {
             reply.prompt.paste(&text);
         } else if let Foreground::NewTask(new_task) = &mut app.foreground {
@@ -725,6 +763,11 @@ where
         // Movement alone says nothing has been chosen or scrolled: the loop has
         // already declined to draw for it.
         if mouse.kind == MouseEventKind::Moved {
+            return Ok(false);
+        }
+        // A message holds the pointer too: a click meant for the box behind it is
+        // not a click on the list.
+        if app.alert.is_some() {
             return Ok(false);
         }
         if matches!(app.foreground, Foreground::NewTask(_)) {
@@ -752,12 +795,24 @@ where
     if !key.is_press() {
         return Ok(false);
     }
-    // A task on its way here is a wait with one answer: leave it. The transfer
-    // goes on without being watched.
-    if let Some(landing) = &mut app.landing {
+    // A tracker account that is already claimed stops everything until it is
+    // answered: it decides whose work the machine attributes.
+    if app.tracker_conflict_key(key) {
+        return Ok(false);
+    }
+    // A message is in front of the work, so it holds every key until it is read:
+    // nothing behind it acts on a keystroke meant for it.
+    if app.alert.is_some() {
+        if is_dismiss(key) || matches!(key.code, KeyCode::Enter) {
+            app.dismiss_alert();
+        }
+        return Ok(false);
+    }
+    // A transfer in flight owns the keys: it is the only thing on screen, and it
+    // has one answer.
+    if app.transfer.is_some() {
         if is_dismiss(key) {
-            landing.open_terminal = false;
-            app.landing = None;
+            app.stop_transfer();
         }
         return Ok(false);
     }
@@ -776,7 +831,7 @@ where
     match &app.foreground {
         Foreground::Keys(_) => app.dismiss_keys(),
         Foreground::Confirm(_) => {
-            handle_confirm_key(app, terminal, event_loop, key, landings).await
+            handle_confirm_key(app, terminal, event_loop, key, landings, removals).await
         }
         Foreground::Reply(_) => app.reply_key(key, event_loop, remote_signals),
         Foreground::SendTask(_) => {

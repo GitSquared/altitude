@@ -2,6 +2,7 @@ use std::{error::Error, io, process::ExitCode, sync::Arc, time::Duration};
 
 use tokio::{
     signal::unix::{SignalKind, signal},
+    sync::mpsc,
     time::{MissedTickBehavior, interval},
 };
 
@@ -62,6 +63,9 @@ async fn client() -> Result<(), Box<dyn Error>> {
     let _log_guard = logging::init(&config)?;
     tracing::info!("starting altitude");
     let mut terminal = ratatui::init();
+    // Said after the terminal is given back, which is the only place a person can
+    // read it.
+    let mut farewell: Option<String> = None;
 
     let result = async {
         let Some(database) = tui::boot_database(
@@ -75,6 +79,36 @@ async fn client() -> Result<(), Box<dyn Error>> {
         else {
             return Ok(());
         };
+        // A name with no key is not a first start, and with remotes configured it
+        // is a host they will not recognise. Minting a replacement silently would
+        // make that a discovery rather than a decision.
+        let has_remotes = settings
+            .as_ref()
+            .is_ok_and(|file| !file.settings().remotes().is_empty());
+        if has_remotes && config.has_lost_identity() {
+            let answer = tui::boot_confirm(
+                &mut terminal,
+                &mut terminate,
+                &mut interrupt,
+                animations,
+                "Lost identity",
+                "Altitude's local configuration seems corrupted. Remotes might not \
+                 recognize this host anymore. Reset configuration to start from a clean \
+                 slate?",
+                &["no, quit", "yes, reset"],
+            )
+            .await?;
+            if answer == Some(1) {
+                let aside = config.forget_installation()?;
+                tracing::info!(moved_to = %aside.display(), "installation forgotten");
+                farewell = Some(format!(
+                    "Everything Altitude had recorded was moved to {}. Start it again to begin \
+                     from a clean slate.",
+                    aside.display()
+                ));
+            }
+            return Ok(());
+        }
         // This installation's identity, named once and recorded on every task it
         // delegates.
         let identity = config.identity()?;
@@ -164,6 +198,7 @@ async fn client() -> Result<(), Box<dyn Error>> {
                 }
             }
         });
+        let (watched, watched_tasks) = mpsc::unbounded_channel();
         let result = tui::run(
             &mut terminal,
             &mut terminate,
@@ -176,8 +211,12 @@ async fn client() -> Result<(), Box<dyn Error>> {
                 settings,
                 remote_keys,
                 link.clone(),
+                watched,
             ),
-            task_execution_updates,
+            tui::Feeds {
+                task_execution: task_execution_updates,
+                watched_tasks,
+            },
         )
         .await;
         tracker_sync.abort();
@@ -186,6 +225,9 @@ async fn client() -> Result<(), Box<dyn Error>> {
     }
     .await;
     ratatui::restore();
+    if let Some(farewell) = farewell {
+        eprintln!("{farewell}");
+    }
     result?;
     Ok(())
 }

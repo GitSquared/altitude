@@ -17,7 +17,7 @@ use std::{
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use iroh::{EndpointAddr, EndpointId};
 use ratatui::{DefaultTerminal, layout::Rect, text::Line};
-use tokio::{process::Command as HostCommand, sync::mpsc, task::JoinHandle};
+use tokio::{process::Command as HostCommand, sync::mpsc, task::JoinHandle, time::sleep};
 
 use crate::{
     agent::AgentKind,
@@ -30,21 +30,23 @@ use crate::{
         Environment, EnvironmentDescription, EnvironmentProgress, IsolationEngine, ProfileSummary,
     },
     remote::{
-        Announcement, ConfigBundle, DiscoveredRemote, DiscoveryEvent, LinkClient, RemoteKey,
-        RemoteKeyStatus, RemoteKeys, RemoteState, TaskOrigin, TaskRequest, TaskSummary,
-        TrackerConnection, bring_home, meet, send::send_to_remote,
+        Announcement, ConfigBundle, ConfigPush, DiscoveredRemote, DiscoveryEvent, LinkClient,
+        RemoteKey, RemoteKeyStatus, RemoteKeys, RemoteState, TaskOrigin, TaskRequest, TaskSummary,
+        TrackerConnection, WatchEvent, bring_home, meet, send::send_to_remote, transfer,
+        transfer::TransferUpdate,
     },
     task::{
         Task, TaskEventLoop, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
         TaskExecutionUpdate, TaskOperatorSignal, TaskService, TaskServiceError,
     },
     tracker::{IssueReference, IssueSnapshot, IssueSummary, TrackerKind},
-    tui::keys::{is_dismiss, is_remove},
+    tui::keys::{is_dismiss, is_proceed, is_remove},
     tui::popups,
     tui::screens,
     tui::widgets::{chrome::Hint, pointer::Targets},
 };
 
+use super::widgets::alert::Alert;
 use popups::confirm::{CredentialTarget, PendingConfirm};
 use popups::new_task::{Answer, Hit as NewTaskHit, Host, NewTask, SearchToken};
 use popups::open_link::{self, Link, OpenLink};
@@ -188,20 +190,6 @@ pub(in crate::tui) enum TrackerState {
     Connected,
 }
 
-/// What came back from reaching an address. Sent from the dial, which runs on its
-/// own so a slow one cannot hold up the interface.
-pub(in crate::tui) enum RemoteAnswer {
-    Reached {
-        address: String,
-        announcement: Announcement,
-        key_status: RemoteKeyStatus,
-    },
-    Silent {
-        address: String,
-        reason: String,
-    },
-}
-
 /// What came back from a Linear search. The token says which popup and which
 /// query it answers, so a late one is dropped rather than shown under a query it
 /// was not about.
@@ -230,10 +218,6 @@ pub(in crate::tui) struct TrackerConnectReply {
     pub result: Result<bool, String>,
 }
 
-/// The notice the sign-in sets, kept as one value so a reply can clear its own
-/// without erasing whatever else has happened since.
-const SIGN_IN_NOTICE: &str = "Finish Linear sign-in in your browser";
-
 /// What it says when the build carries no tracker provider at all.
 pub(in crate::tui) const NO_LINEAR: &str = "Linear support is not available in this build.";
 
@@ -244,6 +228,11 @@ const ASK_AFTER: Duration = Duration::from_millis(400);
 /// How long after nothing could check a login the section tries again, so a sandbox
 /// that will not start is not asked on every tick.
 const CHECK_RETRY_AFTER: Duration = Duration::from_secs(15);
+/// How long a task watch waits before dialling again, and how far that grows.
+const WATCH_RETRY: Duration = Duration::from_secs(1);
+const WATCH_RETRY_MAX: Duration = Duration::from_secs(30);
+/// A watch that lasted less than this never connected, so its retry backs off.
+const WATCH_SETTLED: Duration = Duration::from_secs(5);
 
 /// Which terminal is in front.
 ///
@@ -277,15 +266,115 @@ pub(in crate::tui) enum CredentialShellState {
     Open(CredentialShell),
 }
 
-/// A task travelling here from another machine.
+/// A transfer the interface is watching, and what it can say about it.
 ///
-/// Leaving the wait gives up watching it, not the transfer: the capsule is already
-/// moving, and the remote has already stopped running it. The task arrives either
-/// way, and only its terminal is given up with the wait.
-pub(in crate::tui) struct Landing {
-    pub(in crate::tui) message: String,
-    /// Whether the terminal was asked for, which is what leaving the wait gives up.
-    pub(in crate::tui) open_terminal: bool,
+/// Bytes are the only thing a transfer has to report, so the numbers the bar
+/// draws are kept here rather than in the link: the link counts, and this turns
+/// counting into a speed over the last moment.
+pub(in crate::tui) struct TransferView {
+    title: String,
+    label: String,
+    watching: transfer::Watching,
+    update: TransferUpdate,
+    /// The last count and when it was read, which is one half of the next rate.
+    measured: Option<(Instant, u64)>,
+    /// Bytes per second, smoothed: one piece is far too small a sample to show.
+    rate: Option<f64>,
+    /// Whether the operator has asked it to stop, which the bar says while the
+    /// transfer finishes the piece it is on.
+    is_stopping: bool,
+    /// Whether the terminal opens when it arrives, or the task is only moved here.
+    opens_terminal: bool,
+}
+
+impl TransferView {
+    /// Reads what the transfer has to say, and says whether anything changed.
+    fn observe(&mut self) -> bool {
+        if !self.watching.updates.has_changed().unwrap_or(false) {
+            return false;
+        }
+        self.update = self.watching.updates.borrow_and_update().clone();
+        let now = Instant::now();
+        if let Some((then, was)) = self.measured {
+            let elapsed = now.duration_since(then).as_secs_f64();
+            if elapsed > 0.15 && self.update.done >= was {
+                let sample = (self.update.done - was) as f64 / elapsed;
+                self.rate = Some(match self.rate {
+                    Some(previous) => previous * 0.5 + sample * 0.5,
+                    None => sample,
+                });
+                self.measured = Some((now, self.update.done));
+            }
+        } else {
+            self.measured = Some((now, self.update.done));
+        }
+        true
+    }
+
+    fn progress(&self) -> super::widgets::progress::Progress<'_> {
+        super::widgets::progress::Progress {
+            title: &self.title,
+            label: &self.label,
+            stage: if self.is_stopping {
+                "stopping…"
+            } else {
+                &self.update.stage
+            },
+            done: self.update.done,
+            total: self.update.total,
+            rate: self.rate,
+        }
+    }
+}
+
+/// What a machine's watch reported, named by the machine so one channel can carry
+/// every remote.
+pub enum WatchedTasks {
+    /// The watch is dialling, so this machine is being asked about.
+    Dialling {
+        address: String,
+    },
+    /// It answered. What it said about itself is the only place an address becomes
+    /// a machine with a name, a key and a state.
+    Reached {
+        address: String,
+        announcement: Box<Announcement>,
+        key_status: RemoteKeyStatus,
+    },
+    /// It can be given work now, which is not a change to any task.
+    Ready {
+        address: String,
+    },
+    /// Everything it holds for this client, as of the moment the watch opened.
+    Snapshot {
+        address: String,
+        summaries: Vec<TaskSummary>,
+    },
+    Changed {
+        address: String,
+        summary: Box<TaskSummary>,
+    },
+    Removed {
+        address: String,
+        id: String,
+    },
+    /// The watch ended: the machine is not answering any more, and its tasks are
+    /// its own.
+    Ended {
+        address: String,
+        reason: String,
+    },
+}
+
+/// Why a watch stopped dialling, which is what decides whether it dials again.
+enum WatchEnd {
+    /// The interface is gone.
+    Closed,
+    /// It answered with a key that is not the one remembered, so there is nothing
+    /// to listen to until the operator decides which key this machine is.
+    UnapprovedKey,
+    /// It did not answer, or the stream ended.
+    Lost,
 }
 
 /// A task another machine owns, and which machine that is.
@@ -333,7 +422,7 @@ pub(in crate::tui) enum RemoteSignalsReply {
 }
 
 /// What came back from asking a remote to run a task. The address names the
-/// machine that answered, so the notice does.
+/// machine that answered, so the message does.
 pub(in crate::tui) struct TaskDelegationReply {
     pub(in crate::tui) address: String,
     pub(in crate::tui) result: Result<(), String>,
@@ -346,13 +435,32 @@ pub(in crate::tui) struct SendTaskReply {
     pub(in crate::tui) result: Result<String, String>,
 }
 
+/// What came back from asking a machine to remove a task of its own. The address
+/// names the machine, so the message can.
+pub(in crate::tui) struct RemoveTaskReply {
+    pub(in crate::tui) address: String,
+    pub(in crate::tui) task_id: String,
+    pub(in crate::tui) result: Result<(), String>,
+}
+
 /// What came back from sending this client's configuration to a remote.
 ///
 /// The digest names the bytes sent, so edits during a sync remain pending.
 pub(in crate::tui) struct ConfigPushReply {
     pub(in crate::tui) address: String,
     pub(in crate::tui) digest: String,
-    pub(in crate::tui) result: Result<(), String>,
+    pub(in crate::tui) result: Result<ConfigPush, String>,
+}
+
+/// A task tracker account this machine pushed that another client already claims
+/// on the same remote.
+///
+/// Nothing was written until this is answered: an account says whose work work is,
+/// and a machine that quietly reassigned one would attribute somebody else's.
+pub(in crate::tui) struct TrackerConflict {
+    address: String,
+    provider: TrackerKind,
+    display_name: String,
 }
 
 pub struct App {
@@ -370,7 +478,8 @@ pub struct App {
     /// What the host will run at once, so a wait can say whether there is room.
     /// Absent until the first refresh, and never stale by more than one interval.
     pub(in crate::tui) capacity: Option<usize>,
-    pub(in crate::tui) notice: Option<String>,
+    /// What the interface has to say, in front of the work until it is read.
+    pub(in crate::tui) alert: Option<Alert>,
     pub(in crate::tui) removing: HashSet<String>,
     pub(in crate::tui) selected: usize,
     pub(in crate::tui) first_visible_task: usize,
@@ -408,7 +517,7 @@ pub struct App {
     /// What the keyboard is answering to.
     pub(in crate::tui) foreground: Foreground,
     /// A task travelling here from a remote, while it travels.
-    pub(in crate::tui) landing: Option<Landing>,
+    pub(in crate::tui) transfer: Option<TransferView>,
     /// What each address last answered, for the list to show.
     pub(in crate::tui) remote_status: HashMap<String, RemoteStatus>,
     /// What each address's last announcement said about the trackers it runs.
@@ -429,11 +538,24 @@ pub struct App {
     /// The remote card to select once the next read of a remote's tasks lands,
     /// so a task that has just been sent there is the one in view.
     pending_remote: Option<(String, String)>,
+    /// A tracker account another client already claims, waiting to be answered.
+    pub(in crate::tui) tracker_conflict: Option<TrackerConflict>,
+    /// Which answer the question is on: leave it, or take it over.
+    pub(in crate::tui) conflict_choice: usize,
+    /// Addresses whose account the operator said to take over, so the next push
+    /// carries the consent.
+    taking_over: HashSet<String>,
+    /// Addresses whose account the operator chose to leave alone, until the
+    /// configuration changes.
+    conflict_declined: HashSet<String>,
+    /// Machines whose tasks are being watched, one watch each, and where a watch
+    /// reports what it finds.
+    watched: HashMap<String, JoinHandle<()>>,
+    watch_events: mpsc::UnboundedSender<WatchedTasks>,
     /// Acknowledged digests stay in memory; reconnecting rechecks the remote.
     remote_synced: HashMap<String, String>,
     configuration_digest: Option<String>,
     remote_config_inflight: HashSet<String>,
-    remote_checks_due: HashSet<String>,
     pub(in crate::tui) discovered_remotes: HashMap<EndpointId, DiscoveredRemote>,
 
     /// What each address last answered with. Written by the dial once there is
@@ -472,6 +594,7 @@ impl App {
         settings: Result<SettingsFile, SettingsError>,
         remote_keys: RemoteKeys,
         link: LinkClient,
+        watch_events: mpsc::UnboundedSender<WatchedTasks>,
     ) -> Self {
         let (settings_file, settings_error) = match settings {
             Ok(file) => (Some(file), None),
@@ -486,7 +609,7 @@ impl App {
         Self {
             tasks,
             grid_columns: 1,
-            notice: settings_error,
+            alert: settings_error.map(Alert::problem),
             removing: HashSet::new(),
             selected: 0,
             first_visible_task: 0,
@@ -506,17 +629,22 @@ impl App {
             settings_file,
             panel: Panel::new(),
             foreground: Foreground::default(),
-            landing: None,
+            transfer: None,
             remote_status: HashMap::new(),
             remote_trackers: HashMap::new(),
             credential_status: HashMap::new(),
             credentials_visible_since: None,
             credential_check_generation: 0,
             credential_retry_at: None,
+            tracker_conflict: None,
+            conflict_choice: 0,
+            taking_over: HashSet::new(),
+            conflict_declined: HashSet::new(),
+            watched: HashMap::new(),
+            watch_events,
             remote_synced: HashMap::new(),
             configuration_digest: None,
             remote_config_inflight: HashSet::new(),
-            remote_checks_due: HashSet::new(),
             discovered_remotes: HashMap::new(),
             remote_tasks: Vec::new(),
             pending_remote: None,
@@ -534,6 +662,20 @@ impl App {
             capacity: None,
         }
     }
+    /// Says something the operator has to read: the answer to what they pressed.
+    pub(in crate::tui) fn say(&mut self, message: impl Into<String>) {
+        self.alert = Some(Alert::note(message));
+    }
+
+    /// Says that what the operator pressed did not work.
+    pub(in crate::tui) fn problem(&mut self, message: impl Into<String>) {
+        self.alert = Some(Alert::problem(message));
+    }
+
+    pub(in crate::tui) fn dismiss_alert(&mut self) {
+        self.alert = None;
+    }
+
     pub(in crate::tui) fn replace_task(&mut self, task: Task) {
         if let Some(current) = self.tasks.iter_mut().find(|current| current.id == task.id) {
             *current = task;
@@ -577,7 +719,7 @@ impl App {
     pub(in crate::tui) fn default_environment_name(&self) -> &str {
         self.settings_file
             .as_ref()
-            .map(|file| file.settings().default_environment.as_str())
+            .map(|file| file.settings().default_environment())
             .unwrap_or_default()
     }
 
@@ -597,7 +739,7 @@ impl App {
         match self.config.load_or_create_settings() {
             Ok(file) => {
                 self.settings_file = Some(file);
-                self.notice = None;
+                self.alert = None;
                 true
             }
             Err(error) => {
@@ -606,7 +748,7 @@ impl App {
                     self.config.settings_path().display()
                 );
                 self.settings_file = None;
-                self.notice = Some(message);
+                self.say(message);
                 false
             }
         }
@@ -622,14 +764,39 @@ impl App {
     /// Choose the coding agent, and keep it.
     pub(in crate::tui) fn set_agent(&mut self, agent: AgentKind) {
         let Some(file) = self.settings_file.as_mut() else {
-            self.notice = Some("settings are unavailable; fix the file and reopen".to_owned());
+            self.problem("Settings are unavailable; fix the file and reopen");
             return;
         };
         let mut proposed = file.settings().clone();
         proposed.set_agent(agent);
         match file.save(proposed) {
-            Ok(()) => self.notice = None,
-            Err(error) => self.notice = Some(error.to_string()),
+            Ok(()) => self.alert = None,
+            Err(error) => self.problem(error.to_string()),
+        }
+    }
+
+    /// Where the last task was founded, when it was not this machine: the answer
+    /// the next creation question opens on.
+    pub(in crate::tui) fn default_task_host(&self) -> Option<String> {
+        self.settings_file
+            .as_ref()?
+            .settings()
+            .default_task_host()
+            .map(str::to_owned)
+    }
+
+    /// Remember where a task was founded, so the next one starts there.
+    fn set_default_task_host(&mut self, address: Option<&str>) {
+        let Some(file) = self.settings_file.as_mut() else {
+            return;
+        };
+        if file.settings().default_task_host() == address {
+            return;
+        }
+        let mut proposed = file.settings().clone();
+        proposed.set_default_task_host(address);
+        if let Err(error) = file.save(proposed) {
+            self.problem(error.to_string());
         }
     }
 
@@ -657,8 +824,17 @@ impl App {
 
     /// The few actions worth keeping visible below the current screen.
     pub(in crate::tui) fn hints(&self) -> Vec<Hint> {
-        if self.landing.is_some() {
-            return vec![Hint::new("esc / q", "stop waiting")];
+        // A message in front of the work is what the keys are about until it is
+        // read, and a transfer under it keeps the one key it has.
+        if self.alert.is_some() || self.transfer.is_some() {
+            let mut hints = Vec::new();
+            if self.alert.is_some() {
+                hints.push(Hint::new("enter", "dismiss"));
+            }
+            if self.transfer.is_some() {
+                hints.push(Hint::new("esc", "stop the transfer"));
+            }
+            return hints;
         }
         let mut hints = self.hints_for(&self.foreground);
         hints.retain(|hint| {
@@ -765,7 +941,7 @@ impl App {
             ],
             // A shell takes every key there is, so it has no `?` to offer.
             Foreground::Shell(ShellId::Task(_)) => {
-                vec![Hint::new("ctrl-a", "hand back to autopilot")]
+                vec![Hint::new("ctrl-a", "hand it back")]
             }
             // Nothing to hand back to: the sandbox goes with the shell.
             Foreground::Shell(ShellId::Credentials(_)) => vec![Hint::new("ctrl-a", "close")],
@@ -782,14 +958,15 @@ impl App {
                 if !self.tasks.is_empty() || !self.remote_tasks.is_empty() {
                     hints.extend([
                         Hint::new("enter", "signals"),
-                        Hint::new("o", "take over"),
+                        Hint::new("ctrl-enter", "take over"),
                         Hint::new("arrows · j/k", "select"),
                     ]);
                 }
-                // Removing a task is this machine's act on its own capsule; a
-                // remote's task is not here to remove, and neither is it this
-                // machine's to send anywhere.
+                // Drawn from different places, but acted on the same way: a task is
+                // moved across with one key, and dropped by the machine holding it.
                 if self.selected_is_remote() {
+                    hints.push(Hint::new("p", "pull here"));
+                    hints.push(Hint::new("d", "drop"));
                     if self
                         .selected_held()
                         .is_some_and(|held| held.summary.tracker_issue.is_some())
@@ -798,8 +975,8 @@ impl App {
                     }
                 } else {
                     if !self.tasks.is_empty() {
-                        hints.push(Hint::new("d", "remove"));
-                        hints.push(Hint::new("r", "send to remote"));
+                        hints.push(Hint::new("d", "drop"));
+                        hints.push(Hint::new("p", "push to remote"));
                     }
                     if self
                         .selected_task()
@@ -841,8 +1018,10 @@ impl App {
     /// Whether a modal is in front: a pop-up or the panel, rather than the work
     /// itself or a terminal. What the transition animates.
     pub(in crate::tui) fn has_modal(&self) -> bool {
-        // A task on its way here is a wait over the list, and leaves like one.
-        self.landing.is_some()
+        // A transfer on its way, or a message, is a modal over the list and
+        // leaves like one.
+        self.transfer.is_some()
+            || self.alert.is_some()
             || matches!(
                 self.foreground,
                 Foreground::Keys(_)
@@ -970,7 +1149,7 @@ impl App {
                     profile,
                     summary.sign_in,
                 )));
-                self.notice = None;
+                self.alert = None;
             }
             _ => self.open_credential_shell(display, profile, task_service, events),
         }
@@ -1014,7 +1193,7 @@ impl App {
         E: IsolationEngine + Clone + 'static,
     {
         if !matches!(self.credential_shell, CredentialShellState::Idle) {
-            self.notice = Some("a shell is already open".to_owned());
+            self.say("A shell is already open");
             return;
         }
         let cancel = CredentialShellCancel::new();
@@ -1032,7 +1211,7 @@ impl App {
             progress,
             cancel: cancel.clone(),
         };
-        self.notice = None;
+        self.alert = None;
         let service = task_service.clone();
         let events = events.clone();
         tokio::spawn(async move {
@@ -1093,7 +1272,7 @@ impl App {
                 };
                 let id = ShellId::Credentials(shell.id().to_owned());
                 self.foreground = Foreground::Shell(id.clone());
-                self.notice = None;
+                self.alert = None;
                 let Some((rows, cols)) = self.shell_size(terminal) else {
                     let service = task_service.clone();
                     tokio::spawn(async move {
@@ -1109,7 +1288,7 @@ impl App {
                 shell.resize(rows, cols);
                 self.credential_shell = CredentialShellState::Open(shell);
                 self.foreground = Foreground::Shell(id);
-                self.notice = None;
+                self.alert = None;
             }
             CredentialShellEvent::Output { id, bytes } => {
                 self.process_shell_output(&ShellId::Credentials(id), bytes)
@@ -1122,12 +1301,12 @@ impl App {
                 self.close_credential_shell(task_service).await;
             }
             CredentialShellEvent::Failed { error, .. } => {
-                self.notice = Some(format!("the shell ended: {error}"));
+                self.problem(format!("The shell ended: {error}"));
                 self.close_credential_shell(task_service).await;
             }
             CredentialShellEvent::Unavailable { reason, .. } => {
                 self.credential_shell = CredentialShellState::Idle;
-                self.notice = Some(format!("no shell: {reason}"));
+                self.problem(format!("No shell: {reason}"));
             }
         }
     }
@@ -1238,9 +1417,6 @@ impl App {
                 self.refresh_git_identity().await;
             }
             self.credentials_visible_since = None;
-            if self.panel.section == Section::Remotes {
-                self.refresh_remote_connections();
-            }
         }
     }
 
@@ -1257,7 +1433,25 @@ impl App {
         E: IsolationEngine + Clone + 'static,
     {
         match self.selected_row().map(|row| row.kind) {
-            Some(RowKind::Remote { address, .. }) => self.check_remote(&address).await,
+            // A machine that answered with another identity is asking to be told
+            // which machine it is: connecting again would get the same answer.
+            Some(RowKind::Remote {
+                address, status, ..
+            }) => {
+                if status == RemoteStatus::Changed {
+                    self.foreground = Foreground::Confirm(PendingConfirm::replacing_key(
+                        address.clone(),
+                        format!(
+                            "The machine at {} is not the one this client knew: it answered \
+                             with a different identity, as one that was reinstalled or replaced \
+                             would. Accept it?",
+                            self.remote_name(&address)
+                        ),
+                    ));
+                    return;
+                }
+                self.check_remote(&address).await
+            }
             Some(RowKind::Discovered(remote)) => {
                 if let Some(file) = self.settings_file.as_mut() {
                     let mut proposed = file.settings().clone();
@@ -1267,7 +1461,7 @@ impl App {
                             self.remote_status.remove(&remote.address);
                             self.check_remote(&remote.address).await;
                         }
-                        Err(error) => self.notice = Some(error.to_string()),
+                        Err(error) => self.problem(error.to_string()),
                     }
                 }
             }
@@ -1293,7 +1487,7 @@ impl App {
                 if self.tracker_state != TrackerState::Connected {
                     self.connect_tracker(task_service, tracker_connects);
                 }
-                self.notice = None;
+                self.alert = None;
             }
             Some(RowKind::Agent { credential, .. }) => {
                 if let CredentialKind::Profile { profile, .. } = credential.kind {
@@ -1317,6 +1511,16 @@ impl App {
         }
     }
 
+    /// How a remote reads to a human: the name it gave itself, or its address
+    /// until it has said one. The same name its picker shows, so a message about
+    /// a machine and the list of machines agree.
+    fn remote_name(&self, address: &str) -> String {
+        self.remembered_keys
+            .iter()
+            .find(|key| key.address.eq_ignore_ascii_case(address))
+            .map_or_else(|| address.to_owned(), |key| key.label.clone())
+    }
+
     /// The machines a task could run on: this one, then the remotes, each saying
     /// whether it can be given work.
     fn task_hosts(&self) -> Vec<Host> {
@@ -1326,11 +1530,7 @@ impl App {
             ready: true,
         }];
         for address in self.configured_remotes() {
-            let name = self
-                .remembered_keys
-                .iter()
-                .find(|key| key.address.eq_ignore_ascii_case(&address))
-                .map_or_else(|| address.clone(), |key| key.label.clone());
+            let name = self.remote_name(&address);
             // A remote that answers but does not hold this configuration cannot
             // build the environment a task names, so it is not a machine that can
             // be given work yet. Saying why points at the settings that fix it.
@@ -1341,7 +1541,7 @@ impl App {
                 Some(RemoteStatus::Reached) => (name, true),
                 Some(RemoteStatus::Syncing) => (format!("{name} (syncing)"), false),
                 Some(RemoteStatus::Asking) => (format!("{name} (asking)"), false),
-                Some(RemoteStatus::Changed) => (format!("{name} (key changed)"), false),
+                Some(RemoteStatus::Changed) => (format!("{name} (identity changed)"), false),
                 Some(RemoteStatus::Unknown) | Some(RemoteStatus::Silent(_)) | None => {
                     (format!("{name} (unreachable)"), false)
                 }
@@ -1382,40 +1582,281 @@ impl App {
         }
     }
 
-    /// Ask each remote that answered what it is holding, off the event loop: reading one
-    /// is a dial, and a dial does not belong between two frames.
+    /// Watch a machine's tasks, for as long as the interface runs.
     ///
-    /// A remote that does not answer contributes nothing. Its tasks are its own, and
-    /// there is no copy here to fall back on.
-    pub(in crate::tui) fn read_remote_tasks(&self, reads: &mpsc::UnboundedSender<Vec<HeldTask>>) {
-        let addresses: Vec<String> = self
-            .configured_remotes()
-            .into_iter()
-            .filter(|address| {
-                matches!(self.remote_status.get(address), Some(RemoteStatus::Reached))
-            })
-            .collect();
-        if addresses.is_empty() {
+    /// The one thing that dials a remote. What the watch finds on the way in is
+    /// what the interface shows about the machine, so nothing else has to ask it
+    /// the same question on a clock of its own.
+    pub(in crate::tui) fn watch_remote(&mut self, address: &str) {
+        if self.watched.contains_key(address) {
             return;
         }
+        let address = address.to_owned();
         let keys = self.remote_keys.clone();
         let client = self.link.clone();
-        let reads = reads.clone();
-        tokio::spawn(async move {
-            let mut held = Vec::new();
-            for address in addresses {
-                match Self::read_tasks(&address, &keys, &client).await {
-                    Ok(tasks) => held.extend(tasks.into_iter().map(|summary| HeldTask {
-                        address: address.clone(),
-                        summary,
-                    })),
-                    Err(error) => {
-                        tracing::debug!(%error, address, "could not read a remote's tasks")
+        let events = self.watch_events.clone();
+        let watching = address.clone();
+        let handle = tokio::spawn(async move {
+            let mut wait = WATCH_RETRY;
+            loop {
+                let began = Instant::now();
+                match Self::watch_once(&watching, &keys, &client, &events).await {
+                    // Nothing is reading any more, which is the interface ending.
+                    WatchEnd::Closed => break,
+                    // Dialling again will get the same answer until the operator
+                    // says which key this machine is.
+                    WatchEnd::UnapprovedKey => break,
+                    WatchEnd::Lost => {
+                        // A watch that ran for a while was working, and its retry
+                        // should be quick; one that failed at once backs off.
+                        if began.elapsed() > WATCH_SETTLED {
+                            wait = WATCH_RETRY;
+                        }
+                        sleep(wait).await;
+                        wait = (wait * 2).min(WATCH_RETRY_MAX);
                     }
                 }
             }
-            let _ = reads.send(held);
         });
+        self.watched.insert(address, handle);
+    }
+
+    /// Stop watching a machine, which is what forgetting one means.
+    pub(in crate::tui) fn unwatch_remote(&mut self, address: &str) {
+        if let Some(handle) = self.watched.remove(address) {
+            handle.abort();
+        }
+    }
+
+    /// Watch every machine this client is configured to use.
+    pub(in crate::tui) fn watch_remotes(&mut self) {
+        for address in self.configured_remotes() {
+            self.watch_remote(&address);
+        }
+    }
+
+    /// Dial one machine, say what it answered, and carry its changes until the
+    /// stream ends.
+    async fn watch_once(
+        address: &str,
+        keys: &RemoteKeys,
+        client: &LinkClient,
+        events: &mpsc::UnboundedSender<WatchedTasks>,
+    ) -> WatchEnd {
+        let _ = events.send(WatchedTasks::Dialling {
+            address: address.to_owned(),
+        });
+        let remembered = keys.remembered(address).await.ok().flatten();
+        let sighting = match meet(address, DEFAULT_PORT, remembered.as_deref()).await {
+            Ok(sighting) => sighting,
+            Err(error) => {
+                let _ = events.send(WatchedTasks::Ended {
+                    address: address.to_owned(),
+                    reason: error.to_string(),
+                });
+                return WatchEnd::Lost;
+            }
+        };
+        // What it said is reported before the key is judged, so a machine that
+        // answered with a different one can be seen and decided about.
+        let key_status = sighting.key_status;
+        let _ = events.send(WatchedTasks::Reached {
+            address: address.to_owned(),
+            announcement: Box::new(sighting.announcement.clone()),
+            key_status: key_status.clone(),
+        });
+        if key_status == RemoteKeyStatus::Changed {
+            return WatchEnd::UnapprovedKey;
+        }
+        let (said, mut receiving) = mpsc::unbounded_channel();
+        let watching = client.watch_tasks(sighting.ticket, said);
+        tokio::pin!(watching);
+        loop {
+            tokio::select! {
+                ended = &mut watching => match ended {
+                    Ok(()) => return WatchEnd::Closed,
+                    Err(error) => {
+                        let _ = events.send(WatchedTasks::Ended {
+                            address: address.to_owned(),
+                            reason: error.to_string(),
+                        });
+                        return WatchEnd::Lost;
+                    }
+                },
+                said = receiving.recv() => {
+                    let Some(said) = said else { return WatchEnd::Lost };
+                    let address = address.to_owned();
+                    let event = match said {
+                        WatchEvent::Snapshot(summaries) => WatchedTasks::Snapshot { address, summaries },
+                        WatchEvent::Changed(summary) => WatchedTasks::Changed { address, summary },
+                        WatchEvent::Removed(id) => WatchedTasks::Removed { address, id },
+                        WatchEvent::Ready => WatchedTasks::Ready { address },
+                    };
+                    if events.send(event).is_err() {
+                        return WatchEnd::Closed;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Take what a watch reported about a machine.
+    pub(in crate::tui) async fn tasks_watched(&mut self, event: WatchedTasks) {
+        let address = match &event {
+            WatchedTasks::Dialling { address }
+            | WatchedTasks::Reached { address, .. }
+            | WatchedTasks::Ready { address }
+            | WatchedTasks::Snapshot { address, .. }
+            | WatchedTasks::Changed { address, .. }
+            | WatchedTasks::Removed { address, .. }
+            | WatchedTasks::Ended { address, .. } => address.clone(),
+        };
+        // A machine that is no longer configured keeps a watch alive but not a
+        // card: forgetting it is what makes its tasks go away.
+        if !self.configured_remotes().contains(&address) {
+            return;
+        }
+        match event {
+            WatchedTasks::Dialling { address } => {
+                self.remote_status.insert(address, RemoteStatus::Asking);
+            }
+            // It answered, so this is what the interface knows about it: the key,
+            // the name it gave, and whether it can be given work.
+            WatchedTasks::Reached {
+                address,
+                announcement,
+                key_status,
+            } => match key_status {
+                RemoteKeyStatus::New | RemoteKeyStatus::Known => {
+                    self.remember(&address, &announcement).await;
+                    self.note_remote_trackers(&address, &announcement);
+                    let status = match announcement.state {
+                        RemoteState::Preparing => RemoteStatus::Syncing,
+                        RemoteState::Ready => RemoteStatus::Reached,
+                    };
+                    self.remote_status.insert(address, status);
+                    self.reload_remembered_keys().await;
+                }
+                // Reported, and not written: accepting a changed key means
+                // forgetting the address first, which is a second act. Nothing the
+                // unaccepted answer said is shown either, and nothing it holds is
+                // listened to.
+                RemoteKeyStatus::Changed => {
+                    self.clear_remote_trackers(&address);
+                    self.remote_tasks.retain(|held| held.address != address);
+                    self.remote_status.insert(address, RemoteStatus::Changed);
+                }
+            },
+            WatchedTasks::Ready { address } => {
+                self.remote_status.insert(address, RemoteStatus::Reached);
+            }
+            WatchedTasks::Snapshot { address, summaries } => self.holding(address, summaries),
+            WatchedTasks::Changed { address, summary } => {
+                let held = HeldTask {
+                    address: address.clone(),
+                    summary: *summary,
+                };
+                match self.remote_tasks.iter_mut().find(|existing| {
+                    existing.address == address && existing.summary.id == held.summary.id
+                }) {
+                    Some(existing) => *existing = held,
+                    None => self.remote_tasks.push(held),
+                }
+                self.reveal_pending();
+            }
+            WatchedTasks::Removed { address, id } => {
+                self.remote_tasks
+                    .retain(|held| !(held.address == address && held.summary.id == id));
+                self.settle_selection();
+            }
+            // Its tasks are its own, and there is no copy here to fall back on.
+            WatchedTasks::Ended { address, reason } => {
+                self.clear_remote_trackers(&address);
+                self.remote_synced.remove(&address);
+                self.remote_tasks.retain(|held| held.address != address);
+                self.remote_status
+                    .insert(address, RemoteStatus::Silent(reason));
+                self.settle_selection();
+            }
+        }
+        // A creation question may be open over the list, and a machine that just
+        // answered may now be one it can offer.
+        self.refresh_task_hosts();
+    }
+
+    /// Put one machine's tasks where the others are not, in the order it sent them.
+    fn holding(&mut self, address: String, summaries: Vec<TaskSummary>) {
+        let at = self
+            .remote_tasks
+            .iter()
+            .position(|held| held.address == address)
+            .unwrap_or(self.remote_tasks.len());
+        self.remote_tasks.retain(|held| held.address != address);
+        let arrived: Vec<HeldTask> = summaries
+            .into_iter()
+            .map(|summary| HeldTask {
+                address: address.clone(),
+                summary,
+            })
+            .collect();
+        self.remote_tasks.splice(at..at, arrived);
+        self.reveal_pending();
+        self.settle_selection();
+    }
+
+    /// Select the card a machine just said it holds, when one was asked for.
+    fn reveal_pending(&mut self) {
+        if let Some((address, id)) = self.pending_remote.take()
+            && let Some(index) = self
+                .remote_tasks
+                .iter()
+                .position(|held| held.address == address && held.summary.id == id)
+        {
+            self.selected = self.tasks.len() + index;
+        }
+    }
+
+    fn settle_selection(&mut self) {
+        self.selected = self
+            .selected
+            .min((self.tasks.len() + self.remote_tasks.len()).saturating_sub(1));
+    }
+
+    /// Ask before taking a task over, naming where it is now when it is not here.
+    fn ask_to_take_over(&mut self, id: &str, title: &str, from: Option<String>) {
+        let question = match from {
+            Some(name) => {
+                format!("Take over \"{title}\"? It stops on {name} and moves here first.")
+            }
+            None => format!(
+                "Take over \"{title}\"? The agent stops and the terminal is yours; \
+                 ctrl-a hands it back."
+            ),
+        };
+        self.foreground = Foreground::Confirm(PendingConfirm::taking_over(id.to_owned(), question));
+    }
+
+    /// Move a task here without taking its terminal over.
+    ///
+    /// The same transfer as taking it over, with the one difference an operator
+    /// chooses: the task keeps running where it lands rather than handing the
+    /// terminal over with it.
+    pub(in crate::tui) fn pull_task<E>(
+        &mut self,
+        id: &str,
+        event_loop: &TaskEventLoop<E>,
+        landings: &mpsc::UnboundedSender<Result<String, String>>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        if let Some(held) = self
+            .remote_tasks
+            .iter()
+            .find(|held| held.summary.id == id)
+            .cloned()
+        {
+            self.ask_for_task(&held, event_loop, landings, false);
+        }
     }
 
     /// Bring a task home from the machine that owns it.
@@ -1429,6 +1870,7 @@ impl App {
         held: &HeldTask,
         event_loop: &TaskEventLoop<E>,
         landings: &mpsc::UnboundedSender<Result<String, String>>,
+        opens_terminal: bool,
     ) where
         E: IsolationEngine + Clone + 'static,
     {
@@ -1438,15 +1880,18 @@ impl App {
         let client = self.link.clone();
         let event_loop = event_loop.clone();
         let landings = landings.clone();
-        self.notice = None;
-        self.landing = Some(Landing {
-            message: format!("bringing the task home from {address}…"),
-            open_terminal: true,
-        });
+        self.alert = None;
+        let transfer = self.begin_transfer(
+            &format!("Pulling task from {}", self.remote_name(&address)),
+            &summary.title,
+            "packaging…",
+            opens_terminal,
+        );
         tokio::spawn(async move {
-            let outcome = bring_home(&address, &summary, &keys, &client, &event_loop).await;
+            let outcome =
+                bring_home(&address, &summary, &keys, &client, &event_loop, &transfer).await;
             // A take-over runs away from the interface, so where it stopped is a log
-            // line rather than only a notice that has already been replaced.
+            // line rather than only a message that has already been replaced.
             match &outcome {
                 Ok(id) => tracing::info!(task = %id, address, "brought a task home"),
                 Err(error) => tracing::warn!(%error, address, "could not bring a task home"),
@@ -1455,8 +1900,51 @@ impl App {
         });
     }
 
-    /// Take a task that has arrived, and open the terminal that was asked for
-    /// unless the wait was left in the meantime.
+    /// Start watching a transfer, and answer with the moving end of it.
+    fn begin_transfer(
+        &mut self,
+        title: &str,
+        label: &str,
+        stage: &str,
+        opens_terminal: bool,
+    ) -> transfer::Transfer {
+        let (moving, watching) = transfer::Transfer::start(stage);
+        let update = watching.updates.borrow().clone();
+        self.transfer = Some(TransferView {
+            title: title.to_owned(),
+            label: label.to_owned(),
+            watching,
+            update,
+            measured: None,
+            rate: None,
+            is_stopping: false,
+            opens_terminal,
+        });
+        moving
+    }
+
+    /// Read what the transfer in front has to say, saying whether anything moved.
+    pub(in crate::tui) fn observe_transfer(&mut self) -> bool {
+        self.transfer.as_mut().is_some_and(TransferView::observe)
+    }
+
+    /// Ask the transfer in front to stop. It stops between pieces, and what it
+    /// has already moved stays where it is.
+    pub(in crate::tui) fn stop_transfer(&mut self) {
+        if let Some(transfer) = &mut self.transfer {
+            transfer.watching.stop();
+            transfer.is_stopping = true;
+        }
+    }
+
+    pub(in crate::tui) fn transfer_progress(
+        &self,
+    ) -> Option<super::widgets::progress::Progress<'_>> {
+        self.transfer.as_ref().map(TransferView::progress)
+    }
+
+    /// A task that has arrived is the operator's. Taking it over ends in its
+    /// terminal; pulling it here only moves it.
     pub(in crate::tui) fn task_landed<E>(
         &mut self,
         id: &str,
@@ -1466,21 +1954,21 @@ impl App {
     ) where
         E: IsolationEngine + Clone + 'static,
     {
-        let open_terminal = self
-            .landing
+        let opens_terminal = self
+            .transfer
             .take()
-            .is_none_or(|landing| landing.open_terminal);
-        if open_terminal {
+            .is_none_or(|transfer| transfer.opens_terminal);
+        if opens_terminal {
             self.take_over(id, terminal, event_loop, landings);
         } else {
-            self.notice = Some("the task arrived".to_owned());
+            self.say("The task is here");
         }
     }
 
     /// Ask a remote to run a task of its own, off the event loop.
     ///
     /// Nothing is copied and nothing is kept here: the remote founds the task, and it
-    /// is the only machine that can say what the task is doing. The notice that it
+    /// is the only machine that can say what the task is doing. The message that it
     /// took the task arrives when the remote says so, not before.
     pub(in crate::tui) fn begin_delegation(
         &mut self,
@@ -1493,13 +1981,12 @@ impl App {
         let identity = match self.config.identity() {
             Ok(identity) => identity,
             Err(error) => {
-                self.notice = Some(error.to_string());
+                self.problem(error.to_string());
                 return;
             }
         };
         let address = address.to_owned();
         let environment = environment.to_owned();
-        self.notice = Some(format!("sending the task to {address}…"));
         let keys = self.remote_keys.clone();
         let client = self.link.clone();
         let replies = replies.clone();
@@ -1534,7 +2021,8 @@ impl App {
             .map_err(|error| error.to_string())?;
         if sighting.key_status == RemoteKeyStatus::Changed {
             return Err(format!(
-                "{address} answered with a different key; approve its identity first"
+                "{address} is not the machine this client knew; accept its identity \
+                 in Settings → Remotes first"
             ));
         }
         // Whose work this is travels as a label. The machine it came from is the
@@ -1554,18 +2042,76 @@ impl App {
     }
 
     /// Take what a remote answered when it was asked to run a task.
-    pub(in crate::tui) fn task_delegation_resolved(
+    pub(in crate::tui) fn task_delegation_resolved(&mut self, reply: TaskDelegationReply) {
+        match reply.result {
+            Ok(()) => self.say(format!(
+                "{} took the task",
+                self.remote_name(&reply.address)
+            )),
+            Err(error) => self.problem(format!(
+                "{} did not take it: {error}",
+                self.remote_name(&reply.address)
+            )),
+        }
+    }
+
+    /// Ask the machine that holds a task to remove it and dispose of its capsule.
+    ///
+    /// The same act as removing a task here, done by the machine it belongs to,
+    /// so there is nothing to say about it being elsewhere.
+    pub(in crate::tui) fn begin_remove_remote(
         &mut self,
-        reply: TaskDelegationReply,
-        reads: &mpsc::UnboundedSender<Vec<HeldTask>>,
+        address: &str,
+        task_id: &str,
+        replies: &mpsc::Sender<RemoveTaskReply>,
     ) {
-        self.notice = Some(match reply.result {
-            Ok(()) => format!("{} took the task", reply.address),
-            Err(error) => format!("{} did not take it: {error}", reply.address),
+        let address = address.to_owned();
+        let task_id = task_id.to_owned();
+        let keys = self.remote_keys.clone();
+        let client = self.link.clone();
+        let replies = replies.clone();
+        tokio::spawn(async move {
+            let result = Self::remove_remote_task(&address, &task_id, &keys, &client).await;
+            let _ = replies
+                .send(RemoveTaskReply {
+                    address,
+                    task_id,
+                    result,
+                })
+                .await;
         });
-        // The machine holds a task this client did not have, so its cards are read
-        // again rather than guessed at.
-        self.read_remote_tasks(reads);
+    }
+
+    async fn remove_remote_task(
+        address: &str,
+        task_id: &str,
+        keys: &RemoteKeys,
+        client: &LinkClient,
+    ) -> Result<(), String> {
+        let peer = Self::remote_peer(address, keys).await?;
+        client
+            .remove_task(peer, task_id)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// Take what a machine answered when asked to remove a task of its own.
+    pub(in crate::tui) fn remove_remote_resolved(&mut self, reply: RemoveTaskReply) {
+        match reply.result {
+            Ok(()) => {
+                self.remote_tasks.retain(|held| {
+                    !(held.address == reply.address && held.summary.id == reply.task_id)
+                });
+                self.selected = self
+                    .selected
+                    .min((self.tasks.len() + self.remote_tasks.len()).saturating_sub(1));
+                self.say(format!(
+                    "Task dropped from {}",
+                    self.remote_name(&reply.address)
+                ));
+            }
+            Err(error) => self.problem(format!("Could not drop the task: {error}")),
+        }
     }
 
     /// Send a task that is already here to a machine that will continue it, off
@@ -1578,20 +2124,35 @@ impl App {
         &mut self,
         address: String,
         task_id: String,
+        title: String,
         event_loop: &TaskEventLoop<E>,
         replies: &mpsc::Sender<SendTaskReply>,
     ) where
         E: IsolationEngine + Clone + 'static,
     {
-        self.notice = Some(format!("sending the task to {address}…"));
+        self.alert = None;
+        let transfer = self.begin_transfer(
+            &format!("Sending task to {}", self.remote_name(&address)),
+            &title,
+            "packaging…",
+            false,
+        );
         let config = self.config.clone();
         let keys = self.remote_keys.clone();
         let client = self.link.clone();
         let event_loop = event_loop.clone();
         let replies = replies.clone();
         tokio::spawn(async move {
-            let result =
-                send_to_remote(&address, &task_id, &config, &keys, &client, &event_loop).await;
+            let result = send_to_remote(
+                &address,
+                &task_id,
+                &config,
+                &keys,
+                &client,
+                &event_loop,
+                &transfer,
+            )
+            .await;
             match &result {
                 Ok(id) => tracing::info!(task = %id, %address, "sent a task to a remote"),
                 Err(error) => tracing::warn!(%error, %address, "could not send a task"),
@@ -1604,14 +2165,14 @@ impl App {
     ///
     /// The source stays in the list until it is really relinquished, so a failure
     /// leaves the stopped task visible rather than pretending it moved.
-    pub(in crate::tui) fn send_task_resolved(
-        &mut self,
-        reply: SendTaskReply,
-        reads: &mpsc::UnboundedSender<Vec<HeldTask>>,
-    ) {
+    pub(in crate::tui) fn send_task_resolved(&mut self, reply: SendTaskReply) {
+        self.transfer = None;
         match reply.result {
             Ok(task_id) => {
-                self.notice = Some(format!("{} took the task", reply.address));
+                self.say(format!(
+                    "{} took the task",
+                    self.remote_name(&reply.address)
+                ));
                 // It just answered, so it is reachable; recording that lets the
                 // read below dial it rather than skip an address the panel had
                 // never checked.
@@ -1619,35 +2180,20 @@ impl App {
                     .insert(reply.address.clone(), RemoteStatus::Reached);
                 self.pending_remote = Some((reply.address, task_id));
             }
+            Err(error) if error == transfer::STOPPED => {
+                self.say("Transfer stopped; the task is still here")
+            }
             Err(error) => {
                 // Not "did not take it": the remote may hold the task while the
                 // final acknowledgement was lost, in which case a restart finishes
                 // the transfer. What is true here is that it did not finish.
-                self.notice = Some(format!(
-                    "sending to {} did not finish: {error}",
-                    reply.address
-                ));
+                self.problem(format!("Could not send the task: {error}"));
             }
         }
-        // The machine holds a task this client may not have, so its cards are read
-        // again rather than guessed at.
-        self.read_remote_tasks(reads);
     }
 
     /// Take a fresh read of what the remotes hold, and put the highlight on a task
     /// that has just been sent when it appears.
-    pub(in crate::tui) fn remote_tasks_read(&mut self, tasks: Vec<HeldTask>) {
-        self.remote_tasks = tasks;
-        if let Some((address, task_id)) = self.pending_remote.take()
-            && let Some(index) = self
-                .remote_tasks
-                .iter()
-                .position(|held| held.address == address && held.summary.id == task_id)
-        {
-            self.selected = self.tasks.len() + index;
-        }
-    }
-
     /// The keys of the send chooser: choose a machine, or leave without sending.
     pub(in crate::tui) async fn send_task_key<E>(
         &mut self,
@@ -1673,6 +2219,7 @@ impl App {
                 self.begin_send_to_remote(
                     address,
                     sending.task_id().to_owned(),
+                    sending.title().to_owned(),
                     event_loop,
                     replies,
                 );
@@ -1722,9 +2269,18 @@ impl App {
     }
 
     pub(in crate::tui) fn remote_needs_config(&self, address: &str) -> bool {
-        self.configuration_digest
-            .as_ref()
-            .is_none_or(|digest| self.remote_synced.get(address) != Some(digest))
+        // An account someone chose to leave alone, or one being decided about, is
+        // not something to keep pushing at.
+        let waiting = self.conflict_declined.contains(address)
+            || self
+                .tracker_conflict
+                .as_ref()
+                .is_some_and(|conflict| conflict.address == address);
+        !waiting
+            && self
+                .configuration_digest
+                .as_ref()
+                .is_none_or(|digest| self.remote_synced.get(address) != Some(digest))
     }
 
     pub(in crate::tui) fn configuration_read(
@@ -1746,6 +2302,11 @@ impl App {
                 return;
             }
         };
+        // A configuration that changed may carry a different login, so a question
+        // already answered about an account is worth asking again.
+        if self.configuration_digest.as_deref() != Some(digest.as_str()) {
+            self.conflict_declined.clear();
+        }
         self.configuration_digest = Some(digest.clone());
         let bundle = Arc::new(bundle);
         for address in self.configured_remotes() {
@@ -1764,8 +2325,11 @@ impl App {
                 let keys = self.remote_keys.clone();
                 let client = self.link.clone();
                 let replies = replies.clone();
+                let take_tracker = self.taking_over.contains(&address);
                 tokio::spawn(async move {
-                    let result = deliver_config(&address, (*bundle).clone(), &keys, &client).await;
+                    let result =
+                        deliver_config(&address, (*bundle).clone(), &keys, &client, take_tracker)
+                            .await;
                     let _ = replies
                         .send(ConfigPushReply {
                             address,
@@ -1789,11 +2353,29 @@ impl App {
             return;
         }
         match reply.result {
-            Ok(()) => {
+            Ok(ConfigPush::Stored) => {
+                self.taking_over.remove(&reply.address);
+                self.conflict_declined.remove(&reply.address);
                 self.remote_synced
                     .insert(reply.address.clone(), reply.digest);
                 self.remote_status
                     .insert(reply.address, RemoteStatus::Reached);
+            }
+            // Nothing was written, and the remote is waiting to be told whose the
+            // account is.
+            Ok(ConfigPush::TrackerLinkedElsewhere {
+                provider,
+                display_name,
+            }) => {
+                self.taking_over.remove(&reply.address);
+                self.remote_status
+                    .insert(reply.address.clone(), RemoteStatus::Reached);
+                self.tracker_conflict = Some(TrackerConflict {
+                    address: reply.address,
+                    provider,
+                    display_name,
+                });
+                self.conflict_choice = 0;
             }
             Err(error) => {
                 tracing::warn!(address=%reply.address, %error, "remote configuration sync failed");
@@ -1802,17 +2384,6 @@ impl App {
             }
         }
         self.refresh_task_hosts();
-    }
-
-    pub(in crate::tui) fn refresh_remote_connections(&mut self) {
-        for address in self.configured_remotes() {
-            if !matches!(
-                self.remote_status.get(&address),
-                Some(RemoteStatus::Changed | RemoteStatus::Asking)
-            ) {
-                self.remote_checks_due.insert(address);
-            }
-        }
     }
 
     /// Note whether the credentials list is showing, and start its clock when it
@@ -1948,7 +2519,7 @@ impl App {
         }
     }
 
-    /// Whether any address is being asked about right now, which is what keeps the
+    /// Whether any address is being dialled right now, which is what keeps the
     /// dot moving while it waits.
     pub(in crate::tui) fn is_asking_remotes(&self) -> bool {
         self.remote_status
@@ -1956,131 +2527,90 @@ impl App {
             .any(RemoteStatus::is_in_progress)
     }
 
-    pub(in crate::tui) fn wants_remote_check(&self) -> bool {
-        !self
-            .remote_status
-            .values()
-            .any(|status| *status == RemoteStatus::Asking)
-            && self.next_unasked_remote().is_some()
-    }
-
-    /// The first address in the list that has not been asked about.
-    fn next_unasked_remote(&self) -> Option<String> {
-        self.configured_remotes().into_iter().find(|address| {
-            !self.remote_config_inflight.contains(address)
-                && (!self.remote_status.contains_key(address)
-                    || self.remote_checks_due.contains(address))
-        })
-    }
-
-    /// Dial the next address in the list, and let it report back when it answers.
-    pub(in crate::tui) async fn ask_next_remote(
-        &mut self,
-        answers: &mpsc::UnboundedSender<RemoteAnswer>,
-    ) {
-        let Some(address) = self.next_unasked_remote() else {
-            return;
-        };
-        self.remote_checks_due.remove(&address);
-        self.remote_status
-            .insert(address.clone(), RemoteStatus::Asking);
-        let remembered = self.remote_keys.remembered(&address).await.ok().flatten();
-        let answers = answers.clone();
-        tokio::spawn(async move {
-            let answer = match meet(&address, DEFAULT_PORT, remembered.as_deref()).await {
-                Ok(sighting) => RemoteAnswer::Reached {
-                    address,
-                    announcement: sighting.announcement,
-                    key_status: sighting.key_status,
-                },
-                Err(error) => RemoteAnswer::Silent {
-                    address,
-                    reason: error.to_string(),
-                },
-            };
-            let _ = answers.send(answer);
-        });
-    }
-
-    /// Take an answer from the dial, and write down what it said.
-    pub(in crate::tui) async fn remote_answered(&mut self, answer: RemoteAnswer) {
-        match answer {
-            RemoteAnswer::Reached {
-                address,
-                announcement,
-                key_status,
-            } => {
-                let status = match key_status {
-                    RemoteKeyStatus::New | RemoteKeyStatus::Known => {
-                        self.remember(&address, &announcement).await;
-                        self.note_remote_trackers(&address, &announcement);
-                        // It answered, but a machine still building what it needs
-                        // cannot be given work, and that is worth knowing before you
-                        // delegate to it.
-                        match announcement.state {
-                            RemoteState::Preparing => RemoteStatus::Syncing,
-                            RemoteState::Ready => RemoteStatus::Reached,
-                        }
-                    }
-                    // Reported, and not written: accepting a changed key means
-                    // forgetting the address first, which is a second act. Nothing
-                    // the unaccepted answer said is shown either.
-                    RemoteKeyStatus::Changed => {
-                        self.clear_remote_trackers(&address);
-                        RemoteStatus::Changed
-                    }
-                };
-                self.remote_status.insert(address, status);
-                self.reload_remembered_keys().await;
-            }
-            RemoteAnswer::Silent { address, reason } => {
-                self.clear_remote_trackers(&address);
-                self.remote_synced.remove(&address);
-                self.remote_status
-                    .insert(address, RemoteStatus::Silent(reason));
-            }
-        }
-        // A creation question may be open over the list, and a remote that just
-        // answered may now be a machine it can offer.
-        self.refresh_task_hosts();
-    }
-
-    /// Reach a remote at this address, and write down what it answers with.
+    /// The keys of the question about a tracker account that is already claimed.
     ///
-    /// The first key an address gives is unauthenticated, so meeting it is the
-    /// operator's decision, and this is the gesture that makes it. A key that
-    /// differs from the one remembered is reported and *not* written: accepting a
-    /// change means forgetting the address first, which is a second, deliberate
-    /// act rather than something that happens because someone pressed enter.
-    pub(in crate::tui) async fn check_remote(&mut self, address: &str) {
-        self.notice = Some(format!("reaching {address}…"));
-        let remembered = self.remote_keys.remembered(address).await.ok().flatten();
-        self.notice = match meet(address, DEFAULT_PORT, remembered.as_deref()).await {
-            Ok(sighting) => {
-                let said = &sighting.announcement;
-                match sighting.key_status {
-                    // Reaching a remote already shows in its row and in the third
-                    // column, so an answer that changed nothing says nothing here.
-                    RemoteKeyStatus::New | RemoteKeyStatus::Known => {
-                        self.remember(address, said).await;
-                        self.note_remote_trackers(address, said);
-                        None
-                    }
-                    RemoteKeyStatus::Changed => {
-                        self.clear_remote_trackers(address);
-                        Some(format!(
-                            "{address} answered with a different key. d forgets the one you have, \
-                             then enter accepts this one."
-                        ))
-                    }
+    /// It holds every key while it is up: nothing behind it acts on a keystroke
+    /// meant for it, and there are two answers rather than a way to slip past.
+    pub(in crate::tui) fn tracker_conflict_key(&mut self, key: KeyEvent) -> bool {
+        let Some(conflict) = &self.tracker_conflict else {
+            return false;
+        };
+        let address = conflict.address.clone();
+        match key.code {
+            KeyCode::Left | KeyCode::Up | KeyCode::BackTab => self.conflict_choice = 0,
+            KeyCode::Right | KeyCode::Down | KeyCode::Tab => self.conflict_choice = 1,
+            KeyCode::Enter => {
+                if self.conflict_choice == 1 {
+                    self.take_over_tracker(&address);
+                } else {
+                    self.leave_tracker_conflict(&address);
                 }
             }
-            Err(error) => {
-                self.clear_remote_trackers(address);
-                Some(format!("{address} did not answer: {error}"))
-            }
-        };
-        self.reload_remembered_keys().await;
+            _ if is_dismiss(key) => self.leave_tracker_conflict(&address),
+            _ => {}
+        }
+        true
+    }
+
+    /// Say yes: the next push carries the consent, and the remote stops attributing
+    /// the account to whoever had it.
+    fn take_over_tracker(&mut self, address: &str) {
+        self.tracker_conflict = None;
+        self.conflict_declined.remove(address);
+        self.taking_over.insert(address.to_owned());
+    }
+
+    /// Say no: the account stays with the client that had it, and this machine
+    /// stops asking until its configuration changes.
+    fn leave_tracker_conflict(&mut self, address: &str) {
+        self.tracker_conflict = None;
+        self.taking_over.remove(address);
+        self.conflict_declined.insert(address.to_owned());
+    }
+
+    /// What the question says, in the words of the thing that happened.
+    pub(in crate::tui) fn tracker_conflict_question(
+        &self,
+    ) -> Option<(String, String, Vec<&'static str>)> {
+        let conflict = self.tracker_conflict.as_ref()?;
+        Some((
+            "Tracker account in use".to_owned(),
+            format!(
+                "Your {} account {} is already linked for another client on {}. Taking it \
+                 over makes that machine attribute its work to your access from now on; \
+                 leaving it alone sends nothing.",
+                conflict.provider.label(),
+                conflict.display_name,
+                self.remote_name(&conflict.address)
+            ),
+            vec!["leave it", "take it over"],
+        ))
+    }
+
+    /// Forget the key remembered for an address, so the key that answered is the
+    /// one it is, and start watching it again.
+    pub(in crate::tui) async fn accept_remote_key(&mut self, address: &str) {
+        if let Err(error) = self.remote_keys.forget(address).await {
+            self.problem(format!("Could not accept the new identity: {error}"));
+            return;
+        }
+        self.unwatch_remote(address);
+        self.remote_status
+            .insert(address.to_owned(), RemoteStatus::Asking);
+        self.watch_remote(address);
+    }
+
+    /// Ask a machine about itself again, now.
+    ///
+    /// The watch is what asks a machine anything, so asking again is starting a
+    /// fresh one rather than waiting out the backoff. This is also how a changed
+    /// key is accepted: forget the one remembered, then ask.
+    pub(in crate::tui) async fn check_remote(&mut self, address: &str) {
+        self.unwatch_remote(address);
+        self.remote_status
+            .insert(address.to_owned(), RemoteStatus::Asking);
+        self.watch_remote(address);
+        self.refresh_task_hosts();
     }
 
     /// Note what an announcement said about the trackers a remote runs. Called
@@ -2106,8 +2636,9 @@ impl App {
         }
     }
 
-    /// Read back what each address has answered with, which is what the panel shows.
-    async fn reload_remembered_keys(&mut self) {
+    /// Read back what each address has answered with, which is what the panel and
+    /// every host picker show in place of the address.
+    pub(in crate::tui) async fn reload_remembered_keys(&mut self) {
         match self.remote_keys.list().await {
             Ok(keys) => self.remembered_keys = keys,
             Err(error) => tracing::error!(%error, "could not read the remembered remotes"),
@@ -2121,7 +2652,7 @@ impl App {
         self.panel.form = Some(match row.kind {
             // The base has no form: it is described instead.
             RowKind::Base => {
-                self.notice = Some("the base environment is built in".to_owned());
+                self.say("The base environment is built in");
                 return;
             }
             RowKind::Switch { setting, on } => {
@@ -2135,17 +2666,17 @@ impl App {
             // The installation's key is made, not signed in to, so there is no
             // terminal to open for it.
             RowKind::GitIdentity(_) => {
-                self.notice = Some("press enter to configure Git identity and signing".to_owned());
+                self.say("Press enter to configure Git identity and signing");
                 return;
             }
             RowKind::Credential(_) => {
-                self.notice = Some("the key names this machine and is not edited here".to_owned());
+                self.say("This is how remotes recognise this machine, and it is not edited here");
                 return;
             }
             // A tracker is signed in to with enter, which starts a browser
             // sign-in rather than a form here.
             RowKind::Tracker { .. } => {
-                self.notice = Some("press enter to sign in to Linear".to_owned());
+                self.say("Press enter to sign in to Linear");
                 return;
             }
             RowKind::Environment { name, setup, .. } => Form::new(
@@ -2235,11 +2766,9 @@ impl App {
                     Some(tracker) if tracker.is_connected() => TrackerState::Connected,
                     _ => TrackerState::NotConnected,
                 };
-                self.notice = Some("Saved sign-in deleted".to_owned());
+                self.say("Saved sign-in deleted");
             }
-            Err(error) => {
-                self.notice = Some(format!("Could not delete the saved sign-in: {error}"))
-            }
+            Err(error) => self.problem(format!("Could not delete the saved sign-in: {error}")),
         }
     }
 
@@ -2263,7 +2792,10 @@ impl App {
                 Target::Environment { original: name },
             ),
             RowKind::Remote { address, .. } => (
-                format!("Delete {address}, and the key remembered for it?"),
+                format!(
+                    "Delete {address}? This machine forgets it, and the identity it \\
+                         answered with."
+                ),
                 Target::Remote { original: address },
             ),
         };
@@ -2273,7 +2805,7 @@ impl App {
     /// Turn a preference on or off, and keep it.
     pub(in crate::tui) fn toggle(&mut self, setting: Setting, on: bool) {
         let Some(file) = self.settings_file.as_mut() else {
-            self.notice = Some("settings are unavailable; fix the file and reopen".to_owned());
+            self.problem("Settings are unavailable; fix the file and reopen");
             return;
         };
         let mut proposed = file.settings().clone();
@@ -2282,8 +2814,8 @@ impl App {
             Setting::Animations => proposed.set_animations(on),
         }
         match file.save(proposed) {
-            Ok(()) => self.notice = None,
-            Err(error) => self.notice = Some(error.to_string()),
+            Ok(()) => self.alert = None,
+            Err(error) => self.problem(error.to_string()),
         }
     }
 
@@ -2335,11 +2867,11 @@ impl App {
         // Refused before the file is touched, so the reason is the form's rather
         // than a validation message about a name that was never given.
         if let Some(refusal) = form.refusal() {
-            self.notice = Some(refusal.to_owned());
+            self.say(refusal.to_owned());
             return false;
         }
         let Some(file) = self.settings_file.as_mut() else {
-            self.notice = Some("settings are unavailable; fix the file and reopen".to_owned());
+            self.problem("Settings are unavailable; fix the file and reopen");
             return false;
         };
         let mut proposed = file.settings().clone();
@@ -2349,7 +2881,9 @@ impl App {
                 if let Some(original) = form.target.original() {
                     // Renaming the default must not quietly hand the default
                     // back to the base, so it is carried across the change.
-                    let was_default = proposed.default_environment.eq_ignore_ascii_case(original);
+                    let was_default = proposed
+                        .default_environment()
+                        .eq_ignore_ascii_case(original);
                     proposed.remove_environment(original);
                     if was_default {
                         proposed.set_default_environment(&name);
@@ -2370,11 +2904,11 @@ impl App {
         match file.save(proposed) {
             Ok(()) => {
                 self.panel.form = None;
-                self.notice = None;
+                self.alert = None;
                 true
             }
             Err(error) => {
-                self.notice = Some(error.to_string());
+                self.problem(error.to_string());
                 false
             }
         }
@@ -2382,10 +2916,16 @@ impl App {
 
     /// Destroy what a confirmation was about.
     pub(in crate::tui) async fn delete(&mut self, target: Target) {
+        // Stopping the watch is not the settings file's business, so it happens
+        // before the file is borrowed.
+        if let Target::Remote { original } = &target {
+            self.unwatch_remote(original);
+        }
         let Some(file) = self.settings_file.as_mut() else {
             return;
         };
         let mut proposed = file.settings().clone();
+        let mut forget_error = None;
         match &target {
             Target::Environment { original } => proposed.remove_environment(original),
             Target::Remote { original } => {
@@ -2393,23 +2933,28 @@ impl App {
                 self.remote_synced.remove(original);
                 self.remote_status.remove(original);
                 self.remote_config_inflight.remove(original);
-                self.remote_checks_due.remove(original);
                 self.remote_trackers.remove(original);
+                self.remote_tasks
+                    .retain(|held| !held.address.eq_ignore_ascii_case(original));
                 // A forgotten remote's key is forgotten with it: the next
                 // sighting is a first sighting again, which is what forgetting
                 // means.
-                if let Err(error) = self.remote_keys.forget(original).await {
-                    self.notice = Some(format!("could not forget the key for {original}: {error}"));
-                }
+                forget_error =
+                    self.remote_keys.forget(original).await.err().map(|error| {
+                        format!("could not forget the identity for {original}: {error}")
+                    });
             }
             _ => {}
         }
         match file.save(proposed) {
             Ok(()) => {
                 self.panel.selected = self.panel.selected.saturating_sub(1);
-                self.notice = None;
+                self.alert = None;
             }
-            Err(error) => self.notice = Some(error.to_string()),
+            Err(error) => self.problem(error.to_string()),
+        }
+        if let Some(message) = forget_error {
+            self.problem(message);
         }
     }
 
@@ -2530,7 +3075,7 @@ impl App {
             };
             if !stays {
                 self.foreground = Foreground::Panel;
-                self.notice = None;
+                self.alert = None;
             }
         } else if let Foreground::Setup(setup) = &mut self.foreground {
             match key.code {
@@ -2633,9 +3178,7 @@ impl App {
             match &id {
                 ShellId::Task(task_id) => {
                     if !event_loop.return_to_autopilot(task_id) {
-                        self.notice = Some(
-                            "this task is no longer running; control stayed with autopilot".into(),
-                        );
+                        self.say("This task is no longer running; control stayed with autopilot");
                     }
                     self.hide_shell();
                 }
@@ -2735,6 +3278,8 @@ impl App {
                 if let Some(agent) = remember {
                     self.set_agent(agent);
                 }
+                // Where this one was founded is where the next one starts.
+                self.set_default_task_host(host.as_deref());
                 match host {
                     // A task for a remote is founded there, off this loop. Nothing is
                     // copied: the machine that runs it is the machine that owns it.
@@ -2870,6 +3415,7 @@ impl App {
                 if let Some(agent) = submission.remember {
                     self.set_agent(agent);
                 }
+                self.set_default_task_host(submission.host.as_deref());
                 match submission.host {
                     Some(address) => self.begin_delegation(
                         &address,
@@ -2912,23 +3458,24 @@ impl App {
             handle.abort();
             self.tracker_connect_attempt = self.tracker_connect_attempt.wrapping_add(1);
             self.tracker_state = TrackerState::NotConnected;
-            self.clear_sign_in_notice();
-            self.notice = Some("Linear sign-in cancelled".to_owned());
+            self.say("Linear sign-in cancelled");
             return;
         }
         let Some(tracker) = task_service.tracker() else {
-            self.notice = Some("Linear is not available in this build".to_owned());
+            self.problem("Linear is not available in this build");
             return;
         };
         if tracker.is_connected() {
             self.tracker_state = TrackerState::Connected;
-            self.notice = Some("Linear is already connected".to_owned());
+            self.say("Linear is already connected");
             return;
         }
         self.tracker_state = TrackerState::Connecting;
         self.tracker_connect_attempt = self.tracker_connect_attempt.wrapping_add(1);
         let attempt = self.tracker_connect_attempt;
-        self.notice = Some(SIGN_IN_NOTICE.to_owned());
+        // Nothing is said while the browser is open: the row already reads as
+        // connecting, and a message in front would have to be dismissed before
+        // the operator could carry on.
         let replies = replies.clone();
         self.tracker_connect = Some(tokio::spawn(async move {
             let result = match tracker.connect().await {
@@ -2940,9 +3487,6 @@ impl App {
     }
 
     /// Take what a sign-in ended in, and update the row without a restart.
-    ///
-    /// Only this attempt's own notice is cleared: an unrelated error that arrived
-    /// while the browser was open is not this reply's to erase.
     pub(in crate::tui) fn tracker_connect_resolved(&mut self, reply: TrackerConnectReply) {
         // A reply that lands after this attempt was given up on is not the
         // attempt the operator is watching, so it changes nothing.
@@ -2956,29 +3500,20 @@ impl App {
         if setup_open {
             self.foreground = Foreground::Panel;
         }
-        // The result replaces the sign-in notice it set, and nothing else: an
-        // unrelated error that arrived while the browser was open stays put.
-        let sign_in = self.clear_sign_in_notice() || setup_open;
         match reply.result {
             Ok(true) => {
                 self.tracker_state = TrackerState::Connected;
-                if sign_in {
-                    self.notice = Some("Linear is connected".to_owned());
-                }
+                self.say("Linear is connected");
             }
             // The provider answered but reports no live session, which is not a
             // connection whatever else it may have kept.
             Ok(false) => {
                 self.tracker_state = TrackerState::NotConnected;
-                if sign_in {
-                    self.notice = Some("Linear did not report a session".to_owned());
-                }
+                self.say("Linear did not report a session");
             }
             Err(error) => {
                 self.tracker_state = TrackerState::NotConnected;
-                if sign_in {
-                    self.notice = Some(format!("Linear sign-in did not finish: {error}"));
-                }
+                self.problem(format!("Linear sign-in did not finish: {error}"));
             }
         }
     }
@@ -2986,18 +3521,6 @@ impl App {
     /// Whether a sign-in is out, which is what keeps its dot moving.
     pub(in crate::tui) fn is_connecting_tracker(&self) -> bool {
         self.tracker_state == TrackerState::Connecting
-    }
-
-    /// Drop the sign-in notice, and only it, saying whether it was the one that
-    /// was showing: anything else in the band belongs to another action and is
-    /// not this reply's to clear.
-    fn clear_sign_in_notice(&mut self) -> bool {
-        if self.notice.as_deref() == Some(SIGN_IN_NOTICE) {
-            self.notice = None;
-            true
-        } else {
-            false
-        }
     }
 
     /// Whether the issue page is waiting on a search or a read, which is what
@@ -3085,7 +3608,7 @@ impl App {
                                 answering: signal.id,
                             });
                         } else {
-                            self.notice = Some("this task is no longer in the list".into());
+                            self.say("This task is no longer in the list");
                         }
                     }
                     popups::signals::SignalAction::Acknowledge => {
@@ -3102,7 +3625,7 @@ impl App {
                                     self.replace_task(task);
                                     self.resolved_operator_signal(self.selected_operator_signal);
                                 }
-                                Err(error) => self.notice = Some(error.to_string()),
+                                Err(error) => self.problem(error.to_string()),
                             }
                         }
                     }
@@ -3119,10 +3642,9 @@ impl App {
                                 Ok(task) => {
                                     self.replace_task(task);
                                     self.resolved_operator_signal(self.selected_operator_signal);
-                                    self.notice =
-                                        Some("task closed; its capsule was disposed of".into());
+                                    self.say("Task completed");
                                 }
-                                Err(error) => self.notice = Some(error.to_string()),
+                                Err(error) => self.problem(error.to_string()),
                             }
                         }
                     }
@@ -3142,23 +3664,40 @@ impl App {
     where
         E: IsolationEngine + Clone + 'static,
     {
-        // A task on another machine belongs to that machine. `o` asks for it, which is a
-        // transfer rather than a keystroke, and removing is this machine's act on its
-        // own capsule. Its signals are read and answered where it is, over the link.
+        // A task belongs to the machine running it, so a key does the same thing
+        // wherever the card is drawn and only the trip differs: a task on another
+        // machine is reached over the link rather than called directly. Taking one
+        // over has to move it here first, and its question says so.
+        if is_proceed(key) {
+            let asked = self.selected_held().map(|held| {
+                (
+                    held.summary.id.clone(),
+                    held.summary.title.clone(),
+                    Some(self.remote_name(&held.address)),
+                )
+            });
+            let asked = asked.or_else(|| {
+                self.selected_task()
+                    .map(|task| (task.id.clone(), task.title().to_owned(), None))
+            });
+            if let Some((id, title, from)) = asked {
+                self.ask_to_take_over(&id, &title, from);
+            }
+            return Ok(false);
+        }
+
         if self.selected_is_remote() {
-            if key.code == KeyCode::Char('o')
+            // Moving a task here without its terminal is the one action a card on
+            // another machine has that this machine's cards do not.
+            if key.code == KeyCode::Char('p')
                 && let Some(held) = self.selected_held()
             {
-                self.foreground = Foreground::Confirm(PendingConfirm::taking_over(
+                self.foreground = Foreground::Confirm(PendingConfirm::pulling(
                     held.summary.id.clone(),
                     format!(
-                        "Take over \"{}\" from {}? It stops running there, its capsule \
-                         travels here, and it becomes this machine's.",
-                        held.summary
-                            .title
-                            .as_deref()
-                            .unwrap_or(&held.summary.intent),
-                        held.address
+                        "Pull \"{}\" here? It stops on {} and keeps running here.",
+                        held.summary.title,
+                        self.remote_name(&held.address)
                     ),
                 ));
                 return Ok(false);
@@ -3180,14 +3719,10 @@ impl App {
                     match open_in_browser(&issue.url) {
                         Ok(()) => tracing::info!(%issue.url, "opened a remote task's issue"),
                         Err(error) => {
-                            self.notice = Some(format!("could not open {}: {error}", issue.url))
+                            self.problem(format!("Could not open {}: {error}", issue.url))
                         }
                     }
                 }
-                return Ok(false);
-            }
-            if is_remove(key) {
-                self.notice = Some("that task is on another machine".to_owned());
                 return Ok(false);
             }
         }
@@ -3202,6 +3737,7 @@ impl App {
                         self.default_environment_name(),
                         self.agent(),
                         self.task_hosts(),
+                        self.default_task_host().as_deref(),
                     )));
                 }
             }
@@ -3215,6 +3751,7 @@ impl App {
                             self.default_environment_name(),
                             self.agent(),
                             self.task_hosts(),
+                            self.default_task_host().as_deref(),
                         )
                         .linking(),
                     ));
@@ -3241,9 +3778,21 @@ impl App {
                 self.select_adjacent(-1, columns);
             }
             _ if is_remove(key) => {
-                if let Some(task) = self.selected_task() {
-                    let question =
-                        format!("Remove \"{}\" and dispose of its capsule?", task.title());
+                // A remote's task is removed the same way. Which machine holds it
+                // is where the act happens, not what the act is.
+                if let Some(held) = self.selected_held() {
+                    let question = format!(
+                        "Drop \"{}\" from {}?",
+                        held.summary.title,
+                        self.remote_name(&held.address)
+                    );
+                    self.foreground = Foreground::Confirm(PendingConfirm::removing_remote(
+                        held.address.clone(),
+                        held.summary.id.clone(),
+                        question,
+                    ));
+                } else if let Some(task) = self.selected_task() {
+                    let question = format!("Drop \"{}\"?", task.title());
                     self.foreground =
                         Foreground::Confirm(PendingConfirm::removing(task.id, question));
                 }
@@ -3251,20 +3800,9 @@ impl App {
             // Enter reads what the task is asking. Taking over has a key of its
             // own, and asks first, because it ends the agent's autonomy.
             KeyCode::Enter => self.open_signals(task_service, remote_signals).await,
-            KeyCode::Char('o') => {
-                if let Some(task) = self.selected_task() {
-                    let question = format!(
-                        "Take over \"{}\"? The agent stops and the terminal is yours; \
-                         ctrl-a hands it back.",
-                        task.title()
-                    );
-                    self.foreground =
-                        Foreground::Confirm(PendingConfirm::taking_over(task.id, question));
-                }
-            }
-            // Sending an existing task asks which machine first, and nothing
-            // leaves until that answer is given.
-            KeyCode::Char('r') => {
+            // Moving a task across is one key: which way it goes is decided by
+            // where the task already is, so there is nothing to remember.
+            KeyCode::Char('p') => {
                 if let Some(task) = self.selected_task() {
                     let hosts = self.send_hosts();
                     let title = task.title().to_owned();
@@ -3290,7 +3828,7 @@ impl App {
                     match open_in_browser(&issue.url) {
                         Ok(()) => tracing::info!(%issue.url, "opened a task's issue"),
                         Err(error) => {
-                            self.notice = Some(format!("could not open {}: {error}", issue.url))
+                            self.problem(format!("Could not open {}: {error}", issue.url))
                         }
                     }
                 }
@@ -3323,14 +3861,14 @@ impl App {
             .find(|held| held.summary.id == id)
             .cloned()
         {
-            self.ask_for_task(&held, event_loop, landings);
+            self.ask_for_task(&held, event_loop, landings, true);
             return;
         }
         let Some(task) = self.tasks.iter().find(|task| task.id == id).cloned() else {
             return;
         };
         if task.facts.execution_pause_reason == Some(TaskExecutionPauseReason::Transfer) {
-            self.notice = Some("this task is awaiting transfer confirmation".into());
+            self.say("This task is being moved");
             return;
         }
         if matches!(
@@ -3338,32 +3876,29 @@ impl App {
             TaskExecutionStatus::Paused | TaskExecutionStatus::Failed
         ) {
             event_loop.start_operator_control(task);
-            self.notice = Some("restoring the agent in the terminal…".into());
             return;
         }
         if !matches!(task.facts.execution_status, TaskExecutionStatus::Running) {
-            self.notice = Some("this task is not running".into());
+            self.say("This task is not running");
             return;
         }
         if matches!(
             task.facts.execution_mode,
             TaskExecutionMode::Autopilot | TaskExecutionMode::AutopilotReport
         ) {
-            self.notice = Some(if event_loop.take_control(&task.id) {
-                "bringing the agent to the terminal…".into()
-            } else {
-                "this task has no run to take over".into()
-            });
+            if !event_loop.take_control(&task.id) {
+                self.say("This task is not running, so there is nothing to take over");
+            }
             return;
         }
         // Already the operator's: put its terminal back in front.
         let shell_id = ShellId::Task(task.id.clone());
         if !self.shells.contains_key(&shell_id) && !event_loop.has_active_run(&task.id) {
-            self.notice = Some("this task has no run to attach to".into());
+            self.say("This task has no run to attach to");
             return;
         }
         self.foreground = Foreground::Shell(shell_id.clone());
-        self.notice = None;
+        self.alert = None;
         if self.shells.contains_key(&shell_id) {
             let Some((rows, cols)) = self.shell_size(terminal) else {
                 return;
@@ -3395,7 +3930,7 @@ impl App {
         match terminal.size() {
             Ok(size) => Some(screens::shell::size(self.shell_area(size.into()))),
             Err(error) => {
-                self.notice = Some(error.to_string());
+                self.problem(error.to_string());
                 None
             }
         }
@@ -3437,28 +3972,7 @@ impl App {
     }
 
     pub(in crate::tui) fn shell_area(&self, area: Rect) -> Rect {
-        super::widgets::chrome::content_area(
-            area,
-            &self.hints(),
-            self.keyboard_hints(),
-            self.notice.as_deref(),
-        )
-    }
-
-    /// Asks one machine what it is holding, which is where those tasks live.
-    async fn read_tasks(
-        address: &str,
-        keys: &RemoteKeys,
-        client: &LinkClient,
-    ) -> Result<Vec<TaskSummary>, String> {
-        let remembered = keys.remembered(address).await.ok().flatten();
-        let sighting = meet(address, DEFAULT_PORT, remembered.as_deref())
-            .await
-            .map_err(|error| error.to_string())?;
-        client
-            .list_tasks(sighting.ticket)
-            .await
-            .map_err(|error| error.to_string())
+        super::widgets::chrome::content_area(area, &self.hints(), self.keyboard_hints())
     }
 
     /// Read what a task is asking, and show it.
@@ -3493,14 +4007,14 @@ impl App {
         let signals = match task_service.operator_signals(&task.id).await {
             Ok(signals) => signals,
             Err(error) => {
-                self.notice = Some(error.to_string());
+                self.problem(error.to_string());
                 return;
             }
         };
         let read = match task_service.read_operator_signals(&task.id).await {
             Ok(task) => task,
             Err(error) => {
-                self.notice = Some(error.to_string());
+                self.problem(error.to_string());
                 return;
             }
         };
@@ -3588,7 +4102,8 @@ impl App {
             .map_err(|error| error.to_string())?;
         if sighting.key_status == RemoteKeyStatus::Changed {
             return Err(format!(
-                "{address} answered with a different key; approve its identity first"
+                "{address} is not the machine this client knew; accept its identity \
+                 in Settings → Remotes first"
             ));
         }
         Ok(sighting.ticket.into())
@@ -3680,11 +4195,7 @@ impl App {
     /// Take what came back from a remote task's signals. A reply that belongs to
     /// a pop-up the operator has left changes nothing; one that succeeds drops the
     /// resolved signal and re-reads the machine's cards.
-    pub(in crate::tui) fn remote_signals_resolved(
-        &mut self,
-        reply: RemoteSignalsReply,
-        reads: &mpsc::UnboundedSender<Vec<HeldTask>>,
-    ) {
+    pub(in crate::tui) fn remote_signals_resolved(&mut self, reply: RemoteSignalsReply) {
         match reply {
             RemoteSignalsReply::Opened { remote, signals } => {
                 if !self.is_current_remote_signals(&remote) {
@@ -3700,7 +4211,7 @@ impl App {
                     }
                     // The pop-up stays open with what it has, which is nothing
                     // new: the operator can retry by opening it again.
-                    Err(error) => self.notice = Some(error),
+                    Err(error) => self.say(error),
                 }
             }
             RemoteSignalsReply::Resolved {
@@ -3722,13 +4233,12 @@ impl App {
                             self.resolved_operator_signal(index);
                         }
                         if action == RemoteSignalAction::Confirm {
-                            self.notice = Some("task closed; its capsule was disposed of".into());
+                            self.say("Task completed");
                         }
-                        // The card's unread count comes from the machine, so it
-                        // is read again rather than guessed at.
-                        self.read_remote_tasks(reads);
+                        // The card's unread count is the machine's to say, and its
+                        // watch says it.
                     }
-                    Err(error) => self.notice = Some(error),
+                    Err(error) => self.say(error),
                 }
             }
         }
@@ -3759,9 +4269,9 @@ impl App {
                     self.selected = index;
                 }
             }
-            TaskExecutionUpdate::Created(Err(error)) => self.notice = Some(error.to_string()),
+            TaskExecutionUpdate::Created(Err(error)) => self.problem(error.to_string()),
             TaskExecutionUpdate::Started(Ok(task)) => self.replace_task(task),
-            TaskExecutionUpdate::Started(Err(error)) => self.notice = Some(error.to_string()),
+            TaskExecutionUpdate::Started(Err(error)) => self.problem(error.to_string()),
             TaskExecutionUpdate::Finished(id, Ok(task)) if !self.is_removing(&id) => {
                 self.remove_shell(&id);
                 self.replace_task(task);
@@ -3790,7 +4300,7 @@ impl App {
                 self.replace_task(task);
                 let shell_id = ShellId::Task(id.clone());
                 self.foreground = Foreground::Shell(shell_id.clone());
-                self.notice = None;
+                self.alert = None;
                 let (rows, cols) = screens::shell::size(self.shell_area(terminal.size()?.into()));
                 let history = event_loop.cached_terminal_output(&id);
                 event_loop.resize_terminal(&id, rows, cols);
@@ -3866,7 +4376,7 @@ impl App {
                 self.foreground = Foreground::Shell(shell);
                 match open_in_browser(&url) {
                     Ok(()) => tracing::info!(%url, "opened a sandbox's link"),
-                    Err(error) => self.notice = Some(format!("could not open {url}: {error}")),
+                    Err(error) => self.say(format!("Could not open {url}: {error}")),
                 }
             }
         }
@@ -3942,14 +4452,16 @@ async fn deliver_config(
     mut bundle: ConfigBundle,
     keys: &RemoteKeys,
     client: &LinkClient,
-) -> Result<(), String> {
+    take_tracker: bool,
+) -> Result<ConfigPush, String> {
     let remembered = keys.remembered(address).await.ok().flatten();
     let sighting = meet(address, DEFAULT_PORT, remembered.as_deref())
         .await
         .map_err(|error| error.to_string())?;
     if sighting.key_status == RemoteKeyStatus::Changed {
         return Err(format!(
-            "{address} answered with a different key; approve its identity first"
+            "{address} is not the machine this client knew; accept its identity in \
+             Settings → Remotes first"
         ));
     }
     let peer: EndpointAddr = sighting.ticket.into();
@@ -3963,7 +4475,7 @@ async fn deliver_config(
     bundle.retain_changed_profiles(&held);
     let bytes = serde_json::to_vec(&bundle).map_err(|error| error.to_string())?;
     client
-        .put_config(peer, &bytes)
+        .put_config(peer, &bytes, take_tracker)
         .await
         .map_err(|error| error.to_string())
 }
@@ -3988,7 +4500,7 @@ where
     };
     match app.remote_keys.list().await {
         Ok(keys) => app.remembered_keys = keys,
-        Err(error) => app.notice = Some(format!("could not read remembered remotes: {error}")),
+        Err(error) => app.problem(format!("could not read remembered remotes: {error}")),
     }
 }
 
@@ -3998,5 +4510,5 @@ fn show_task_error(app: &mut App, id: &str, error: TaskServiceError) {
         .iter()
         .find(|task| task.id == id)
         .map_or(id, |task| task.title());
-    app.notice = Some(format!("{title}: {error}"));
+    app.problem(format!("{title}: {error}"));
 }

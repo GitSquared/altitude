@@ -12,7 +12,7 @@ use std::{
 };
 
 use cap_std::fs::{Dir, OpenOptions, OpenOptionsExt, Permissions, PermissionsExt};
-use tokio::sync::{Mutex as AsyncMutex, watch};
+use tokio::sync::{Mutex as AsyncMutex, mpsc::UnboundedReceiver, watch};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 
@@ -35,12 +35,45 @@ use super::{
     identity::InstallationKey,
     protocol::{
         BlobHash, Handover, LINK_ALPN, LinkRequest, LinkResponse, MAX_BLOB_BYTES, RemoteTicket,
-        TRANSFER_PIECE_BYTES, TaskRequest, TaskSummary, builder, read_body, read_frame,
+        TRANSFER_PIECE_BYTES, TaskRequest, TaskSummary, WatchEvent, builder, read_body, read_frame,
         write_frame,
     },
 };
 
 use crate::tracker::{ACCOUNT_FILE, TrackerAccount, TrackerKind};
+
+/// What a pushed configuration did with the tracker account it carries.
+enum ConfigWrite {
+    Written,
+    /// Another client already claims that account, so nothing was written.
+    LinkedElsewhere {
+        provider: TrackerKind,
+        display_name: String,
+    },
+}
+
+/// The tracker account each tracker profile in a configuration names.
+///
+/// Read from the files that arrived rather than asked of the client: the account
+/// is whatever the pushed login says it is, and the check that follows has to
+/// happen before anything is written.
+fn arriving_accounts(decoded: &[(PathBuf, Vec<u8>)]) -> Vec<(TrackerKind, Option<TrackerAccount>)> {
+    TrackerKind::ALL
+        .iter()
+        .map(|provider| {
+            let account = decoded
+                .iter()
+                .find(|(path, _)| {
+                    path == &Path::new(provider.profile())
+                        .join("profile")
+                        .join(ACCOUNT_FILE)
+                })
+                .and_then(|(_, bytes)| serde_json::from_slice::<TrackerAccount>(bytes).ok())
+                .filter(|account| account.provider == *provider);
+            (*provider, account)
+        })
+        .collect()
+}
 
 /// Whether a pushed configuration may carry this profile.
 ///
@@ -143,7 +176,12 @@ impl LinkHandler {
     /// A profile's files are credentials, so they are written for this user alone and
     /// moved into place rather than written in place: nothing should read half a
     /// login.
-    fn write_config(&self, peer: EndpointId, bytes: &[u8]) -> io::Result<()> {
+    fn write_config(
+        &self,
+        peer: EndpointId,
+        bytes: &[u8],
+        take_tracker: bool,
+    ) -> io::Result<ConfigWrite> {
         let bundle: ConfigBundle = serde_json::from_slice(bytes)
             .map_err(|error| io::Error::other(format!("not a configuration: {error}")))?;
         // Parsed before anything is written: a configuration that cannot be read
@@ -170,6 +208,16 @@ impl LinkHandler {
                     BASE64.decode(&file.contents).map_err(io::Error::other)?,
                 ));
             }
+        }
+        // What the arrival names, before anything is on disk to read back, because
+        // a refusal must leave nothing behind.
+        let arriving = arriving_accounts(&decoded);
+        let holders = self.tracker_holders(peer, &arriving);
+        if !take_tracker && let Some((_, provider, display_name)) = holders.first() {
+            return Ok(ConfigWrite::LinkedElsewhere {
+                provider: *provider,
+                display_name: display_name.clone(),
+            });
         }
         let operator_dir = self.operator_dir(peer);
         fs::create_dir_all(&operator_dir)?;
@@ -241,7 +289,55 @@ impl LinkHandler {
                 .filter(|account| account.provider == provider);
             pushed.push((provider, account));
         }
-        super::tracker::record_accounts(&operator_dir, &pushed)
+        // Taking an account over says whose it is now, so the clients it was
+        // linked to stop claiming it. What they pushed stays: their login is the
+        // same account, and deleting another client's credentials is not what a
+        // question about attribution should be able to authorise.
+        for (other, provider, _) in &holders {
+            if let Err(error) = super::tracker::forget_account(other, *provider) {
+                tracing::warn!(%error, operator = %other.display(), "could not unlink a taken-over tracker account");
+            }
+        }
+        super::tracker::record_accounts(&operator_dir, &pushed)?;
+        Ok(ConfigWrite::Written)
+    }
+
+    /// Other clients that already claim a tracker account this configuration
+    /// carries: the operator directory, the provider, and the name it goes by.
+    fn tracker_holders(
+        &self,
+        peer: EndpointId,
+        pushed: &[(TrackerKind, Option<TrackerAccount>)],
+    ) -> Vec<(PathBuf, TrackerKind, String)> {
+        let mut holders = Vec::new();
+        let operators = self.data_dir.join("operators");
+        let Ok(entries) = fs::read_dir(&operators) else {
+            return holders;
+        };
+        for entry in entries.flatten() {
+            let directory = entry.path();
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            if entry.file_name().to_string_lossy() == peer.to_string() {
+                continue;
+            }
+            let held: Vec<super::tracker::AccountRecord> =
+                fs::read_to_string(super::tracker::accounts_path(&directory))
+                    .ok()
+                    .and_then(|text| serde_json::from_str(&text).ok())
+                    .unwrap_or_default();
+            for (provider, account) in pushed {
+                let Some(account) = account else { continue };
+                if held.iter().any(|record| {
+                    record.account.provider == *provider
+                        && record.account.user_id == account.user_id
+                }) {
+                    holders.push((directory.clone(), *provider, account.display_name.clone()));
+                }
+            }
+        }
+        holders
     }
 
     /// Where one peer's pushed configuration and logins live.
@@ -311,6 +407,10 @@ pub trait TaskHost: Send + Sync + 'static {
     fn configure(&self, peer: EndpointId) -> BoxFuture<Result<(), String>>;
     fn run(&self, peer: EndpointId, request: TaskRequest) -> BoxFuture<Result<(), String>>;
     fn list(&self, peer: EndpointId) -> BoxFuture<Result<Vec<TaskSummary>, String>>;
+    /// What this peer may see now, and the changes that follow.
+    fn watch(&self, peer: EndpointId) -> BoxFuture<Result<Watching, String>>;
+    /// Remove a task and dispose of its capsule, as the owning machine would.
+    fn remove(&self, peer: EndpointId, task_id: String) -> BoxFuture<Result<(), String>>;
     /// Stop a task and bundle it for another machine to continue.
     fn hand_over(&self, peer: EndpointId, task_id: String) -> BoxFuture<Result<Handover, String>>;
     fn transfer_piece(
@@ -321,6 +421,14 @@ pub trait TaskHost: Send + Sync + 'static {
         offset: u64,
         len: u64,
     ) -> BoxFuture<Result<Vec<u8>, String>>;
+    /// Give up a prepared transfer, running the task here again.
+    fn abandon_take(&self, peer: EndpointId, transfer_id: String) -> BoxFuture<Result<(), String>>;
+    /// Give up a staged import the source stopped sending.
+    fn abandon_import(
+        &self,
+        peer: EndpointId,
+        transfer_id: String,
+    ) -> BoxFuture<Result<(), String>>;
     /// Commit source removal after the prepared recipient verifies its arrival.
     fn handed_over(&self, peer: EndpointId, transfer_id: String) -> BoxFuture<Result<(), String>>;
     /// Accept a pushed task and say whether the base environment must follow.
@@ -347,6 +455,16 @@ pub trait TaskHost: Send + Sync + 'static {
     /// The source relinquished ownership; begin the landed task.
     fn commit_import(&self, peer: EndpointId, transfer_id: String)
     -> BoxFuture<Result<(), String>>;
+}
+
+/// A peer's view of the tasks it may see: what the machine holds now, and the
+/// changes after that.
+///
+/// The snapshot is taken after the listener is registered, so a change made while
+/// it is being read is queued behind it rather than lost.
+pub struct Watching {
+    pub snapshot: Vec<TaskSummary>,
+    pub changes: UnboundedReceiver<WatchEvent>,
 }
 
 /// A future a trait object can hold, which an `async fn` in a trait cannot be.
@@ -414,6 +532,35 @@ async fn answer(
             };
             write_frame(&mut send, &response).await?;
         }
+        LinkRequest::WatchTasks => {
+            let watching = match handler.tasks.watch(peer).await {
+                Ok(watching) => watching,
+                Err(reason) => {
+                    write_frame(&mut send, &LinkResponse::Rejected { reason }).await?;
+                    return Ok(());
+                }
+            };
+            // The snapshot is written before the changes queued behind it are
+            // drained, so what a watch opens with is never older than what follows.
+            write_frame(
+                &mut send,
+                &LinkResponse::Tasks {
+                    summaries: watching.snapshot,
+                },
+            )
+            .await?;
+            let mut changes = watching.changes;
+            while let Some(change) = changes.recv().await {
+                let response = match change {
+                    WatchEvent::Changed(summary) => LinkResponse::TaskChanged { summary },
+                    WatchEvent::Removed(id) => LinkResponse::TaskRemoved { id },
+                    WatchEvent::Ready => LinkResponse::Ready,
+                    WatchEvent::Snapshot(_) => continue,
+                };
+                write_frame(&mut send, &response).await?;
+            }
+            return Ok(());
+        }
         LinkRequest::ListSignals { task_id } => {
             let response = match handler.tasks.signals(peer, task_id).await {
                 Ok(signals) => LinkResponse::Signals { signals },
@@ -424,6 +571,27 @@ async fn answer(
         LinkRequest::Signal { command } => {
             let response = match handler.tasks.signal(peer, command).await {
                 Ok(()) => LinkResponse::Accepted,
+                Err(reason) => LinkResponse::Rejected { reason },
+            };
+            write_frame(&mut send, &response).await?;
+        }
+        LinkRequest::AbandonTake { transfer_id } => {
+            let response = match handler.tasks.abandon_take(peer, transfer_id).await {
+                Ok(()) => LinkResponse::Accepted,
+                Err(reason) => LinkResponse::Rejected { reason },
+            };
+            write_frame(&mut send, &response).await?;
+        }
+        LinkRequest::AbandonImport { transfer_id } => {
+            let response = match handler.tasks.abandon_import(peer, transfer_id).await {
+                Ok(()) => LinkResponse::Accepted,
+                Err(reason) => LinkResponse::Rejected { reason },
+            };
+            write_frame(&mut send, &response).await?;
+        }
+        LinkRequest::RemoveTask { task_id } => {
+            let response = match handler.tasks.remove(peer, task_id).await {
+                Ok(()) => LinkResponse::Removed,
                 Err(reason) => LinkResponse::Rejected { reason },
             };
             write_frame(&mut send, &response).await?;
@@ -527,7 +695,11 @@ async fn answer(
             };
             write_frame(&mut send, &response).await?;
         }
-        LinkRequest::PutConfig { hash, len } => {
+        LinkRequest::PutConfig {
+            hash,
+            len,
+            take_tracker,
+        } => {
             let bytes = read_body(&mut recv, len, MAX_BLOB_BYTES).await?;
             let actual = BlobHash::of(&bytes);
             let response = if actual != hash {
@@ -536,10 +708,17 @@ async fn answer(
                 }
             } else {
                 let _writing = handler.config_lock.lock().await;
-                match handler.write_config(peer, &bytes) {
-                    Ok(()) => match handler.tasks.configure(peer).await {
+                match handler.write_config(peer, &bytes, take_tracker) {
+                    Ok(ConfigWrite::Written) => match handler.tasks.configure(peer).await {
                         Ok(()) => LinkResponse::Configured,
                         Err(reason) => LinkResponse::Rejected { reason },
+                    },
+                    Ok(ConfigWrite::LinkedElsewhere {
+                        provider,
+                        display_name,
+                    }) => LinkResponse::TrackerLinkedElsewhere {
+                        provider,
+                        display_name,
                     },
                     Err(error) => LinkResponse::Rejected {
                         reason: format!("could not take the configuration: {error}"),

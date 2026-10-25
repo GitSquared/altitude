@@ -805,6 +805,38 @@ where
             .await
     }
 
+    /// Put a task back after a transfer was stopped before ownership moved.
+    ///
+    /// The capsule was suspended to a snapshot when the transfer began, so the
+    /// task is not lost: it is waiting to be admitted again, which is what makes a
+    /// cancelled transfer a cancelled transfer rather than a stuck task.
+    pub async fn abandon_transfer(
+        &self,
+        task_id: &str,
+        transfer_id: &str,
+    ) -> Result<(), TaskServiceError> {
+        let task = self
+            .list()
+            .await?
+            .into_iter()
+            .find(|task| task.id == task_id)
+            .ok_or(TaskServiceError::Task(super::TaskError::MissingSandbox))?;
+        self.service
+            .record(
+                task_id,
+                &[TaskHistoryEvent::TransferAbandoned {
+                    transfer_id: transfer_id.to_owned(),
+                    execution_status: TaskExecutionStatus::Pending,
+                    execution_pause_reason: None,
+                    snapshot_available: task.facts.snapshot_available,
+                    snapshot_path: task.facts.snapshot_path.clone(),
+                }],
+            )
+            .await?;
+        self.admit();
+        Ok(())
+    }
+
     pub async fn verify_landing(&self, task: Task) -> Result<(), TaskServiceError> {
         let task = if task.facts.sandbox_available {
             task

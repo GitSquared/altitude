@@ -10,7 +10,11 @@ use ratatui::{
 };
 use tokio::{signal::unix::Signal, sync::watch};
 
-use crate::tui::{background::terrain, widgets::palette};
+use crate::tui::{
+    background::terrain,
+    keys,
+    widgets::{palette, question},
+};
 use crate::{
     isolation::IsolationStatus,
     tui::widgets::utils::{shimmer, shimmer_clock},
@@ -33,7 +37,7 @@ where
         terminate,
         interrupt,
         animations,
-        || "migrating database...",
+        || "migrating the database…",
         async { initialize.await.map_err(io::Error::other) },
     )
     .await
@@ -87,7 +91,7 @@ pub async fn task_resume<T>(
         terminate,
         interrupt,
         animations,
-        || "resuming tasks...",
+        || "resuming tasks…",
         async { Ok(resume.await) },
     )
     .await
@@ -128,14 +132,79 @@ async fn wait_for<T>(
     }
 }
 
+/// Ask one question before the interface is up, and answer which answer was chosen.
+///
+/// Two answers and nothing else: a boot that has found something wrong stops until
+/// somebody decides. Escape and `q` are the way out, which is the first answer.
+pub async fn confirm(
+    terminal: &mut DefaultTerminal,
+    terminate: &mut Signal,
+    interrupt: &mut Signal,
+    animations: bool,
+    title: &str,
+    question: &str,
+    answers: &[&str],
+) -> io::Result<Option<usize>> {
+    let mut events = EventStream::new();
+    let mut shimmer = 0;
+    let mut animation = shimmer_clock();
+    let mut chosen = 0;
+    loop {
+        terminal.draw(|frame| {
+            draw_question(
+                frame,
+                title,
+                question,
+                answers,
+                chosen,
+                animations.then_some(shimmer),
+            );
+        })?;
+        tokio::select! {
+            _ = terminate.recv() => return Ok(None),
+            _ = interrupt.recv() => return Ok(None),
+            _ = animation.tick(), if animations => shimmer = shimmer.wrapping_add(1),
+            event = events.next() => {
+                let Some(event) = event else { return Ok(None) };
+                let Some(key) = event?.as_key_press_event() else { continue };
+                if keys::is_dismiss(key) {
+                    return Ok(None);
+                }
+                match key.code {
+                    KeyCode::Left | KeyCode::Up | KeyCode::BackTab => {
+                        chosen = chosen.saturating_sub(1);
+                    }
+                    KeyCode::Right | KeyCode::Down | KeyCode::Tab => {
+                        chosen = (chosen + 1).min(answers.len().saturating_sub(1));
+                    }
+                    KeyCode::Enter => return Ok(Some(chosen)),
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+fn draw_question(
+    frame: &mut Frame,
+    title: &str,
+    question: &str,
+    answers: &[&str],
+    chosen: usize,
+    tick: Option<usize>,
+) {
+    if let Some(tick) = tick {
+        terrain::draw(frame, frame.area(), tick);
+    }
+    question::draw(frame, frame.area(), title, question, answers, chosen);
+}
+
 fn isolation_label(status: &IsolationStatus) -> &'static str {
     match status {
-        IsolationStatus::Starting | IsolationStatus::InstallingRuntime => {
-            "setting up isolation runtime..."
-        }
-        IsolationStatus::PreparingBaseImage => "fetching base sandbox image...",
-        IsolationStatus::PreparingWorkspacePackages => "preparing workspace packages...",
-        IsolationStatus::Ready | IsolationStatus::Failed(_) => "setting up isolation runtime...",
+        IsolationStatus::Starting | IsolationStatus::InstallingRuntime => "starting up…",
+        IsolationStatus::PreparingBaseImage => "fetching the sandbox image…",
+        IsolationStatus::PreparingWorkspacePackages => "installing workspace packages…",
+        IsolationStatus::Ready | IsolationStatus::Failed(_) => "starting up…",
     }
 }
 

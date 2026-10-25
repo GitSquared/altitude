@@ -13,9 +13,6 @@ use std::{
 };
 use toml::{de::Error as ParseError, ser::Error as SerializeError};
 
-const DEFAULT_SETTINGS: &str = r#"default_environment = "base"
-"#;
-
 /// What is configured, as `config.toml` holds it.
 ///
 /// The built-in base environment is deliberately absent: it cannot be edited or
@@ -26,28 +23,62 @@ const DEFAULT_SETTINGS: &str = r#"default_environment = "base"
 /// that go with each list — the base cannot be configured, a default never
 /// points at nothing, an address appears once — live in one place instead of at
 /// every call site.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Settings {
-    pub default_environment: String,
-    #[serde(rename = "environments", default)]
-    configured: Vec<Environment>,
     /// The addresses of the machines this host delegates to.
     ///
     /// An address, not a name: what a remote is *called* is what it told you,
-    /// which is state rather than configuration.
-    #[serde(default)]
+    /// which is state rather than configuration. An address may be a hostname,
+    /// and one the tailnet gave is better than an IP that will move.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     remotes: Vec<String>,
+    /// What a task is given when nobody says otherwise.
+    #[serde(default)]
+    defaults: Defaults,
     /// How the interface behaves, as opposed to what it configures.
     #[serde(default)]
     interface: Interface,
-    /// The coding agent Altitude drives, until one has been chosen.
+    /// The environments a task can run in, besides the built-in base.
+    #[serde(
+        rename = "environments",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    configured: Vec<Environment>,
+}
+
+/// What a new task gets when nobody says otherwise.
+///
+/// Gathered rather than scattered: these three are the answers an operator gives
+/// once and then stops thinking about, and reading them in one place is what makes
+/// the file say what it means.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Defaults {
+    /// The environment a new task runs in.
+    pub environment: String,
+    /// The coding agent Altitude drives.
     ///
-    /// Independent of environments: an environment is what is installed, an
-    /// agent is what works in it, and the same environment is useful with
-    /// either. Absent means nobody has chosen yet, which is the one thing an
-    /// interface cannot guess on someone's behalf.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    agent: Option<AgentKind>,
+    /// Independent of environments: an environment is what is installed, an agent
+    /// is what works in it, and the same environment is useful with either. Absent
+    /// means nobody has chosen yet, which is the one thing an interface cannot
+    /// guess on someone's behalf.
+    pub agent: Option<AgentKind>,
+    /// The machine a new task is founded on, when it is not this one.
+    ///
+    /// It records a choice rather than promising anything: a machine that has since
+    /// been removed, or that is not answering, is not preselected.
+    pub host: Option<String>,
+}
+
+impl Default for Defaults {
+    fn default() -> Self {
+        Self {
+            environment: BASE_NAME.to_owned(),
+            agent: None,
+            host: None,
+        }
+    }
 }
 
 /// Preferences about the interface itself.
@@ -89,8 +120,12 @@ impl SettingsFile {
         let source = match fs::read_to_string(&path) {
             Ok(source) => source,
             Err(error) if error.kind() == ErrorKind::NotFound => {
-                write_settings(&path, DEFAULT_SETTINGS)?;
-                DEFAULT_SETTINGS.to_owned()
+                // A file the operator can read: the defaults, written out, rather
+                // than a shape they have to infer from the program's behaviour.
+                let source = toml::to_string_pretty(&Settings::default())
+                    .map_err(SettingsError::Serialize)?;
+                write_settings(&path, &source)?;
+                source
             }
             Err(error) => return Err(SettingsError::Io(error)),
         };
@@ -175,14 +210,45 @@ impl Settings {
         &self.remotes
     }
 
+    /// The configuration a remote is sent, which is the part it can act on.
+    ///
+    /// A remote builds this machine's environments, so it needs those and the
+    /// agent. It has no screen, and what this one shows — the keys, the
+    /// animations, the machine the last task went to — is not configuration it
+    /// could use. Sending it anyway would make a preference look like a change
+    /// worth syncing, and every task created would push a new configuration to
+    /// every remote.
+    pub fn shared(&self) -> Self {
+        let mut shared = self.clone();
+        shared.remotes.clear();
+        shared.interface = Interface::default();
+        shared.defaults.host = None;
+        shared
+    }
+
     /// The coding agent Altitude drives, if one has been chosen.
     pub fn agent(&self) -> Option<AgentKind> {
-        self.agent
+        self.defaults.agent
     }
 
     /// Choose the coding agent Altitude drives.
     pub fn set_agent(&mut self, agent: AgentKind) {
-        self.agent = Some(agent);
+        self.defaults.agent = Some(agent);
+    }
+
+    /// The machine a task is founded on unless one is picked.
+    pub fn default_task_host(&self) -> Option<&str> {
+        self.defaults.host.as_deref()
+    }
+
+    /// Remember where a task was founded, so the next one starts there.
+    pub fn set_default_task_host(&mut self, address: Option<&str>) {
+        self.defaults.host = address.map(str::to_owned);
+    }
+
+    /// The environment a new task runs in unless one is picked.
+    pub fn default_environment(&self) -> &str {
+        &self.defaults.environment
     }
 
     /// How the interface behaves.
@@ -216,14 +282,14 @@ impl Settings {
     pub fn remove_environment(&mut self, name: &str) {
         self.configured
             .retain(|existing| !existing.name.eq_ignore_ascii_case(name));
-        if self.default_environment.eq_ignore_ascii_case(name) {
-            self.default_environment = BASE_NAME.to_owned();
+        if self.defaults.environment.eq_ignore_ascii_case(name) {
+            self.defaults.environment = BASE_NAME.to_owned();
         }
     }
 
     /// Choose the environment a new task runs in unless one is picked.
     pub fn set_default_environment(&mut self, name: &str) {
-        self.default_environment = name.to_owned();
+        self.defaults.environment = name.to_owned();
     }
 
     /// Add a remote address, replacing any entry for the same address.
@@ -234,10 +300,18 @@ impl Settings {
         self.remotes.push(address.to_owned());
     }
 
-    /// Forget a remote address.
+    /// Forget a remote address, and stop defaulting to it.
     pub fn remove_remote(&mut self, address: &str) {
         self.remotes
             .retain(|existing| !existing.eq_ignore_ascii_case(address));
+        if self
+            .defaults
+            .host
+            .as_deref()
+            .is_some_and(|host| host.eq_ignore_ascii_case(address))
+        {
+            self.defaults.host = None;
+        }
     }
 
     fn validate(&self) -> Result<(), SettingsError> {
@@ -260,12 +334,12 @@ impl Settings {
         }
         // The base is always available, so a default that resolves to nothing is
         // a mistake to report rather than a condition to fall back from.
-        if !is_base_name(&self.default_environment)
-            && !names.contains(&self.default_environment.to_ascii_lowercase())
+        if !is_base_name(&self.defaults.environment)
+            && !names.contains(&self.defaults.environment.to_ascii_lowercase())
         {
             return Err(SettingsError::Invalid(format!(
                 "default environment {:?} is not configured",
-                self.default_environment
+                self.defaults.environment
             )));
         }
         let mut addresses = HashSet::new();

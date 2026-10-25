@@ -16,6 +16,8 @@ mod widgets;
 
 pub use app::App;
 pub use boot::{
-    database as boot_database, isolation as boot_isolation, task_resume as boot_task_resume,
+    confirm as boot_confirm, database as boot_database, isolation as boot_isolation,
+    task_resume as boot_task_resume,
 };
+pub use run::Feeds;
 pub use run::run;

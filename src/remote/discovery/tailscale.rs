@@ -38,6 +38,20 @@ struct Peer {
     is_online: bool,
     #[serde(rename = "TailscaleIPs", default)]
     addresses: Vec<IpAddr>,
+    /// The name this peer is known by on the tailnet, e.g. `studio.tailnet.ts.net.`
+    ///
+    /// Preferred over its address: a MagicDNS name keeps working when the address
+    /// does not, and the client's own resolver is what turns it back into one.
+    #[serde(rename = "DNSName", default)]
+    name: Option<String>,
+}
+
+/// One peer worth probing, and what to write down if it turns out to be a remote.
+struct Candidate {
+    address: SocketAddr,
+    /// What to reach it by once it is known to be one: the name where the tailnet
+    /// gave one, and its address otherwise.
+    wrote: String,
 }
 
 #[derive(Deserialize)]
@@ -81,7 +95,7 @@ pub(super) async fn scan(
         return;
     };
     let remotes = stream::iter(addresses)
-        .map(|address| discover_remote(address, own_id))
+        .map(|candidate| discover_remote(candidate, own_id))
         .buffer_unordered(MAX_CONCURRENT_PROBES)
         .filter_map(future::ready);
     tokio::pin!(remotes);
@@ -96,7 +110,7 @@ pub(super) async fn scan(
     }
 }
 
-async fn peer_addresses(executable: &Path) -> Option<Vec<SocketAddr>> {
+async fn peer_addresses(executable: &Path) -> Option<Vec<Candidate>> {
     let mut command = Command::new(executable);
     command
         .arg("status")
@@ -136,10 +150,33 @@ async fn peer_addresses(executable: &Path) -> Option<Vec<SocketAddr>> {
             .unwrap_or_default()
             .into_values()
             .filter(|peer| peer.is_online)
-            .filter_map(|peer| preferred_address(&peer.addresses))
-            .map(|ip| SocketAddr::new(ip, DEFAULT_PORT))
+            .filter_map(|peer| {
+                let address = SocketAddr::new(preferred_address(&peer.addresses)?, DEFAULT_PORT);
+                Some(match tailnet_name(peer.name.as_deref()) {
+                    Some(name) => Candidate {
+                        address,
+                        wrote: if address.port() == DEFAULT_PORT {
+                            name
+                        } else {
+                            format!("{name}:{}", address.port())
+                        },
+                    },
+                    None => Candidate {
+                        address,
+                        wrote: format_address(address),
+                    },
+                })
+            })
             .collect(),
     )
+}
+
+/// The name a tailnet peer is known by, without the trailing dot a DNS name
+/// carries and without anything that could not be typed into a settings file.
+fn tailnet_name(name: Option<&str>) -> Option<String> {
+    let name = name?.trim().trim_end_matches('.');
+    let name = clean(name, 253);
+    (!name.is_empty()).then_some(name)
 }
 
 fn preferred_address(addresses: &[IpAddr]) -> Option<IpAddr> {
@@ -150,7 +187,10 @@ fn preferred_address(addresses: &[IpAddr]) -> Option<IpAddr> {
         .or_else(|| addresses.first().copied())
 }
 
-async fn discover_remote(address: SocketAddr, own_id: EndpointId) -> Option<DiscoveredRemote> {
+async fn discover_remote(candidate: Candidate, own_id: EndpointId) -> Option<DiscoveredRemote> {
+    // Probed at its address, which is what is certainly reachable from here; the
+    // name is what gets written down, and the resolver takes it from there.
+    let address = candidate.address;
     let host = address.ip().to_string();
     // The announce exchange has its own limit; this one caps the whole probe,
     // including the connect, so a stalled address cannot hold a slot.
@@ -169,6 +209,6 @@ async fn discover_remote(address: SocketAddr, own_id: EndpointId) -> Option<Disc
         id,
         label: clean(&announcement.label, 64),
         version: clean(&announcement.version, 32),
-        address: format_address(address),
+        address: candidate.wrote,
     })
 }

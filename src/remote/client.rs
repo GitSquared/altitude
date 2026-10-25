@@ -3,6 +3,7 @@
 use std::{fmt, fs, io::Write, path::Path};
 
 use iroh::{Endpoint, EndpointAddr, EndpointId, endpoint::Connection};
+use tokio::sync::mpsc;
 
 use crate::task::TaskOperatorSignal;
 
@@ -11,8 +12,8 @@ use super::{
     bundle::ProfileDigest,
     discovery::{self, Scan},
     protocol::{
-        BlobHash, CHUNK_BYTES, Handover, LINK_ALPN, LinkRequest, LinkResponse, TaskRequest,
-        TaskSummary, TransferArchive, builder, read_body, read_frame, write_frame,
+        BlobHash, CHUNK_BYTES, ConfigPush, Handover, LINK_ALPN, LinkRequest, LinkResponse,
+        TaskRequest, TransferArchive, WatchEvent, builder, read_body, read_frame, write_frame,
     },
 };
 
@@ -165,10 +166,57 @@ impl LinkClient {
         }
     }
 
-    /// Asks what tasks a remote owns.
-    pub async fn list_tasks(&self, peer: impl Into<EndpointAddr>) -> LinkResult<Vec<TaskSummary>> {
-        match self.say(peer, &LinkRequest::ListTasks).await? {
-            LinkResponse::Tasks { summaries } => Ok(summaries),
+    /// Watches a machine's tasks: what it holds now, and every change after.
+    ///
+    /// The first frame is the snapshot and the rest are changes, so a watch that
+    /// reconnects re-syncs itself and nobody has to track a gap. Returning means
+    /// the watch ended, either because the machine stopped answering or because
+    /// the reader went away.
+    pub async fn watch_tasks(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        events: mpsc::UnboundedSender<WatchEvent>,
+    ) -> LinkResult<()> {
+        let dial = self.dial(peer).await?;
+        let (mut send, mut recv) = dial.0.open_bi().await?;
+        write_frame(&mut send, &LinkRequest::WatchTasks).await?;
+        send.finish()?;
+        loop {
+            let answer: LinkResponse = read_frame(&mut recv).await?;
+            let event = match answer {
+                LinkResponse::Tasks { summaries } => WatchEvent::Snapshot(summaries),
+                LinkResponse::TaskChanged { summary } => WatchEvent::Changed(summary),
+                LinkResponse::TaskRemoved { id } => WatchEvent::Removed(id),
+                LinkResponse::Ready => WatchEvent::Ready,
+                LinkResponse::Rejected { reason } => return Err(reason.into()),
+                other => return Err(format!("unexpected answer: {other:?}").into()),
+            };
+            if events.send(event).is_err() {
+                // Nobody is reading: the watch ends with its reader.
+                return Ok(());
+            }
+        }
+    }
+
+    /// Removes a task from the machine that holds it, disposing of its capsule.
+    ///
+    /// The same act as removing a task here, performed by the machine it belongs
+    /// to: a remote is compute, not a different kind of task.
+    pub async fn remove_task(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        task_id: &str,
+    ) -> LinkResult<()> {
+        match self
+            .say(
+                peer,
+                &LinkRequest::RemoveTask {
+                    task_id: task_id.to_owned(),
+                },
+            )
+            .await?
+        {
+            LinkResponse::Removed => Ok(()),
             LinkResponse::Rejected { reason } => Err(reason.into()),
             other => Err(format!("unexpected answer: {other:?}").into()),
         }
@@ -176,8 +224,8 @@ impl LinkClient {
 
     /// Asks which profiles a remote already holds for this client.
     ///
-    /// Answered from the authenticated peer, so it is this client's stamps and
-    /// not whatever the remote holds for everyone else.
+    /// Answered from the authenticated peer, so it is this client's stamps and not
+    /// whatever the remote holds for everyone else.
     pub async fn held_profiles(
         &self,
         peer: impl Into<EndpointAddr>,
@@ -205,6 +253,7 @@ impl LinkClient {
         }
     }
 
+    /// Fetches one archive, counting as it lands and stopping when asked.
     pub async fn fetch_part(
         &self,
         peer: &EndpointAddr,
@@ -212,6 +261,7 @@ impl LinkClient {
         part: super::TransferPart,
         archive: &TransferArchive,
         landing: &Path,
+        transfer: &super::Transfer,
     ) -> LinkResult<()> {
         if let Some(parent) = landing.parent() {
             fs::create_dir_all(parent)?;
@@ -220,6 +270,9 @@ impl LinkClient {
         let mut hasher = blake3::Hasher::new();
         let mut offset = 0;
         while offset < archive.len {
+            if transfer.is_stopped() {
+                return Err(super::transfer::STOPPED.into());
+            }
             let len = super::protocol::TRANSFER_PIECE_BYTES.min(archive.len - offset);
             let bytes = self
                 .ask_for_body(
@@ -238,6 +291,7 @@ impl LinkClient {
             hasher.update(&bytes);
             file.write_all(&bytes)?;
             offset += len;
+            transfer.advanced(len);
         }
         file.sync_all()?;
         let arrived = hasher.finalize().to_hex().to_string();
@@ -246,6 +300,41 @@ impl LinkClient {
         }
         tracing::info!(%transfer_id, ?part, bytes = offset, "fetched a transfer archive");
         Ok(())
+    }
+
+    /// Gives up a prepared transfer, so the machine that owns the task takes it
+    /// back rather than holding it stopped.
+    pub async fn abandon_take(&self, peer: &EndpointAddr, transfer_id: &str) -> LinkResult<()> {
+        match self
+            .say(
+                peer.clone(),
+                &LinkRequest::AbandonTake {
+                    transfer_id: transfer_id.to_owned(),
+                },
+            )
+            .await?
+        {
+            LinkResponse::Accepted => Ok(()),
+            LinkResponse::Rejected { reason } => Err(reason.into()),
+            other => Err(format!("unexpected answer: {other:?}").into()),
+        }
+    }
+
+    /// Gives up a staged import, so a stopped send leaves nothing half-written.
+    pub async fn abandon_import(&self, peer: &EndpointAddr, transfer_id: &str) -> LinkResult<()> {
+        match self
+            .say(
+                peer.clone(),
+                &LinkRequest::AbandonImport {
+                    transfer_id: transfer_id.to_owned(),
+                },
+            )
+            .await?
+        {
+            LinkResponse::Accepted => Ok(()),
+            LinkResponse::Rejected { reason } => Err(reason.into()),
+            other => Err(format!("unexpected answer: {other:?}").into()),
+        }
     }
 
     pub async fn confirm_take(&self, peer: &EndpointAddr, transfer_id: &str) -> LinkResult<()> {
@@ -453,13 +542,30 @@ impl LinkClient {
         .await
     }
     /// Sends this machine's configuration for a remote to build from.
-    pub async fn put_config(&self, peer: impl Into<EndpointAddr>, bytes: &[u8]) -> LinkResult<()> {
+    ///
+    /// `take_tracker` is consent to take over a task tracker account that is
+    /// already linked for another client, and it is false until somebody has been
+    /// asked.
+    pub async fn put_config(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        bytes: &[u8],
+        take_tracker: bool,
+    ) -> LinkResult<ConfigPush> {
         let request = LinkRequest::PutConfig {
             hash: BlobHash::of(bytes),
             len: bytes.len() as u64,
+            take_tracker,
         };
         match self.say_with_body(peer, &request, bytes).await? {
-            LinkResponse::Configured => Ok(()),
+            LinkResponse::Configured => Ok(ConfigPush::Stored),
+            LinkResponse::TrackerLinkedElsewhere {
+                provider,
+                display_name,
+            } => Ok(ConfigPush::TrackerLinkedElsewhere {
+                provider,
+                display_name,
+            }),
             LinkResponse::Rejected { reason } => Err(reason.into()),
             other => Err(format!("unexpected answer: {other:?}").into()),
         }

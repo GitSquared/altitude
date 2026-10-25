@@ -28,8 +28,8 @@ use crate::{
     config::{Config, DEFAULT_PORT},
     isolation::{IsolationEngine, MicrosandboxIsolation, capsule::verify_environment},
     remote::{
-        ConfigBundle, Handover, HandoverRecord, LinkClient, RemoteKeyStatus, RemoteKeys,
-        TransferArchive, TransferPart, meet,
+        ConfigBundle, ConfigPush, Handover, HandoverRecord, LinkClient, RemoteKeyStatus,
+        RemoteKeys, Transfer, TransferArchive, TransferPart, meet,
         protocol::{MAX_BLOB_BYTES, TRANSFER_PIECE_BYTES},
     },
     task::{Task, TaskArrival, TaskEventLoop, TaskHistoryEvent},
@@ -78,6 +78,7 @@ pub async fn send_to_remote<E>(
     keys: &RemoteKeys,
     client: &LinkClient,
     event_loop: &TaskEventLoop<E>,
+    transfer: &Transfer,
 ) -> Result<String, String>
 where
     E: IsolationEngine + Clone + 'static,
@@ -101,13 +102,28 @@ where
         .map(|p| p.profile)
         .collect();
     let bundle =
-        ConfigBundle::of(settings, config.data_dir(), &profiles, &held).map_err(message)?;
+        ConfigBundle::of(&settings, config.data_dir(), &profiles, &held).map_err(message)?;
     let config_bytes = serde_json::to_vec(&bundle).map_err(message)?;
-    client
-        .put_config(peer.clone(), &config_bytes)
+    // Sending a task is not where an account is taken over: the background sync
+    // asks, and until it has an answer this machine cannot build the task there.
+    if let ConfigPush::TrackerLinkedElsewhere {
+        provider,
+        display_name,
+    } = client
+        .put_config(peer.clone(), &config_bytes, false)
         .await
-        .map_err(message)?;
+        .map_err(message)?
+    {
+        return Err(format!(
+            "the {} account {display_name} is already linked for another client there; \
+             take it over from Settings → Remotes first",
+            provider.label()
+        ));
+    }
 
+    // Packing is the first wait, and it has nothing to count: the archives do not
+    // exist until it finishes.
+    transfer.waiting("packaging…");
     let handover =
         super::serve::export_task(config, event_loop, task_id, &peer.id.to_string()).await?;
     let directory = transfer_directory(config, &handover.transfer_id)?;
@@ -127,7 +143,26 @@ where
         .prepare_import(&peer, &handover)
         .await
         .map_err(message)?;
-    upload_handover(client, &peer, &directory, &handover, needs_environment).await?;
+    if let Err(error) = upload_handover(
+        client,
+        &peer,
+        &directory,
+        &handover,
+        needs_environment,
+        transfer,
+    )
+    .await
+    {
+        if transfer.is_stopped() {
+            // Nothing has landed there, so dropping the staging is all it takes
+            // for that machine to be as it was.
+            if let Err(error) = client.abandon_import(&peer, &handover.transfer_id).await {
+                tracing::warn!(%error, "could not drop a stopped import at the recipient");
+            }
+        }
+        return Err(error);
+    }
+    transfer.waiting("starting it…");
     let destination_task = client
         .stage_import(&peer, &handover.transfer_id)
         .await
@@ -162,6 +197,7 @@ async fn upload_handover(
     directory: &Path,
     handover: &Handover,
     needs_environment: bool,
+    transfer: &Transfer,
 ) -> Result<(), String> {
     let mut parts = vec![TransferPart::History];
     if needs_environment && handover.environment.is_some() {
@@ -170,14 +206,22 @@ async fn upload_handover(
     if handover.capsule.len > 0 {
         parts.push(TransferPart::Capsule);
     }
+    let mut whole = 0;
+    for part in &parts {
+        whole += part_details(handover, *part)?.2.len;
+    }
     for part in parts {
         let (name, filename, archive) = part_details(handover, part)?;
         let path = directory.join(filename);
         verify_file(&path, archive, name)?;
+        transfer.counting(whole);
         let mut file = fs::File::open(&path).map_err(message)?;
         let mut piece = vec![0u8; TRANSFER_PIECE_BYTES as usize];
         let mut offset = 0u64;
         while offset < archive.len {
+            if transfer.is_stopped() {
+                return Err(super::transfer::STOPPED.to_owned());
+            }
             let length = TRANSFER_PIECE_BYTES.min(archive.len - offset) as usize;
             file.read_exact(&mut piece[..length]).map_err(message)?;
             client
@@ -185,6 +229,7 @@ async fn upload_handover(
                 .await
                 .map_err(message)?;
             offset += length as u64;
+            transfer.advanced(length as u64);
         }
     }
     Ok(())
@@ -345,6 +390,21 @@ impl IncomingTransfers {
             offset,
             bytes,
         )
+    }
+
+    /// Drop a staged import the source stopped sending.
+    ///
+    /// Nothing here has been landed, so there is nothing to undo: the staging
+    /// directory goes and the source keeps its task.
+    pub async fn abandon(&self, peer: EndpointId, transfer_id: &str) -> Result<(), String> {
+        let _serialized = self.lock.lock().await;
+        let transfer_id = validated_transfer_id(transfer_id)?;
+        self.metadata(&transfer_id, peer)?;
+        match fs::remove_dir_all(self.incoming_directory(&transfer_id)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(message(error)),
+        }
     }
 
     /// Verify the arriving archives, land the task on the exact environment, and

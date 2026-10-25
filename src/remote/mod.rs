@@ -5,6 +5,7 @@
 //! run work until the source commits relinquishment. Prepared transfers bind all
 //! downloads and acknowledgements to one recipient and survive process restarts.
 
+mod admin;
 mod announce;
 mod bundle;
 mod clients;
@@ -16,6 +17,7 @@ pub mod serve;
 mod server;
 mod takeover;
 mod tracker;
+pub mod transfer;
 
 mod client;
 mod known;
@@ -33,11 +35,12 @@ pub use {
     keys::{RemoteKey, RemoteKeys},
     known::{RemoteKeyStatus, meet},
     protocol::{
-        EnvironmentArchive, Handover, HandoverDraft, HandoverRecord, RecordedEvent, TaskOrigin,
-        TaskRequest, TaskSummary, TransferArchive, TransferPart,
+        ConfigPush, EnvironmentArchive, Handover, HandoverDraft, HandoverRecord, RecordedEvent,
+        TaskOrigin, TaskRequest, TaskSummary, TransferArchive, TransferPart, WatchEvent,
     },
     server::LinkServer,
     takeover::bring_home,
+    transfer::Transfer,
 };
 
 /// Boxed errors: a typed error enum would be speculation until a caller exists.

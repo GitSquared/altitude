@@ -19,6 +19,7 @@ use std::{
 use crate::{
     isolation::capsule::{ENVIRONMENT_LABEL, EnvironmentBase},
     task::TaskExecutionPauseReason,
+    vcs::now_ms,
 };
 use iroh::EndpointId;
 use microsandbox::{SaveOpts, Snapshot};
@@ -28,18 +29,18 @@ use tokio::{
 };
 
 use super::send::IncomingTransfers;
-use super::{Handover, HandoverDraft, RecordedEvent, TransferArchive};
+use super::{Handover, HandoverDraft, RecordedEvent, TransferArchive, WatchEvent};
 
 use tokio::{
     net::TcpListener,
     signal::unix::{SignalKind, signal},
-    sync::watch,
+    sync::{mpsc, watch},
     time::{MissedTickBehavior, interval},
 };
 
 use crate::{
     agent::AgentEngines,
-    cli::ServeArgs,
+    cli::{ServeArgs, ServeCommand},
     config::{Config, DEFAULT_PORT, InstallationIdentity, LinearSettings, ServeSettings},
     db::Database,
     isolation::{self, IsolationEngine, IsolationStatus, MicrosandboxIsolation},
@@ -50,7 +51,7 @@ use crate::{
         announce::RemoteState,
         server::{BoxFuture, ServerParts, TaskHost},
     },
-    task::{Task, TaskEventLoop, TaskService, TaskStore},
+    task::{Task, TaskEventLoop, TaskExecutionUpdate, TaskService, TaskStore},
     task::{TaskHistoryEvent, TaskOperatorSignal, TrackerHost},
     tracker::{
         IssueReader, IssueSnapshot, Linear, TrackerKind, TrackerProvider,
@@ -64,18 +65,170 @@ struct PreparedTransfer {
     handover: Handover,
 }
 
+/// How long a prepared transfer may sit still before the task is taken back.
+///
+/// Long enough that a slow link is not mistaken for an abandoned one, because
+/// what arrives is the only sign that a recipient is still there.
+const TRANSFER_IDLE_MS: i64 = 120_000;
+
 struct OwnTasks {
     config: Arc<Config>,
     tasks: Arc<TaskEventLoop<MicrosandboxIsolation>>,
     incoming: IncomingTransfers,
     preparation_lock: Arc<AsyncMutex<()>>,
+    /// When each prepared transfer was last read from, by its id. A transfer is
+    /// alive while pieces are being fetched; the history says when it was staged,
+    /// which is the floor a restart starts from.
+    activity: Arc<Mutex<HashMap<String, i64>>>,
+    /// Who is watching this machine's tasks, and where each one's changes go.
+    watchers: Arc<Watchers>,
     read_slots: Arc<Semaphore>,
     readiness: watch::Sender<RemoteState>,
     runtime: watch::Receiver<IsolationStatus>,
     tracker: Option<Arc<super::tracker::RemoteTracker>>,
 }
 
+/// Who is watching this machine's tasks, one entry per open watch.
+///
+/// A watch is a peer that asked what this machine holds and is still listening;
+/// what it may see is its own work, which is the whole reason the filter is here
+/// and not in the task list.
+#[derive(Default)]
+struct Watchers {
+    peers: Mutex<Vec<WatchingPeer>>,
+}
+
+struct WatchingPeer {
+    peer: EndpointId,
+    changes: mpsc::UnboundedSender<WatchEvent>,
+}
+
+impl Watchers {
+    fn subscribe(&self, peer: EndpointId) -> mpsc::UnboundedReceiver<WatchEvent> {
+        let (changes, receiving) = mpsc::unbounded_channel();
+        let mut peers = self.peers.lock().expect("watchers lock poisoned");
+        peers.retain(|watching| !watching.changes.is_closed());
+        peers.push(WatchingPeer { peer, changes });
+        receiving
+    }
+
+    /// A task changed, and this is who it belongs to.
+    fn changed(&self, operator: &str, summary: TaskSummary) {
+        let mut peers = self.peers.lock().expect("watchers lock poisoned");
+        peers.retain(|watching| {
+            if watching.changes.is_closed() {
+                return false;
+            }
+            if watching.peer.to_string() == operator {
+                let _ = watching
+                    .changes
+                    .send(WatchEvent::Changed(Box::new(summary.clone())));
+            }
+            true
+        });
+    }
+
+    /// The machine can be given work, which nothing about a task says.
+    fn ready(&self) {
+        let mut peers = self.peers.lock().expect("watchers lock poisoned");
+        peers.retain(|watching| {
+            if watching.changes.is_closed() {
+                return false;
+            }
+            let _ = watching.changes.send(WatchEvent::Ready);
+            true
+        });
+    }
+
+    /// A task is gone. Every watcher is told: an id that is not one of a peer's
+    /// tasks changes nothing there, and the id says nothing about whose it was.
+    fn removed(&self, id: String) {
+        let mut peers = self.peers.lock().expect("watchers lock poisoned");
+        peers.retain(|watching| {
+            if watching.changes.is_closed() {
+                return false;
+            }
+            let _ = watching.changes.send(WatchEvent::Removed(id.clone()));
+            true
+        });
+    }
+
+    fn publish(&self, task: &Task) {
+        if let Some(operator) = task.operator_id() {
+            self.changed(operator, TaskSummary::of(task));
+        }
+    }
+}
+
 impl OwnTasks {
+    /// Take back tasks whose transfer stopped moving.
+    ///
+    /// A recipient that goes away mid-transfer leaves the task stopped here,
+    /// owned and run by nobody. Nothing on the other side will ever say so, so the
+    /// machine that owns the task decides: after a while with no piece read, the
+    /// task waits to run here again.
+    async fn release_stalled_transfers(&self) {
+        // Packaging holds this lock, and a transfer being packaged is not stalled.
+        let Ok(_packaging) = self.preparation_lock.try_lock() else {
+            return;
+        };
+        let tasks = match self.tasks.list().await {
+            Ok(tasks) => tasks,
+            Err(error) => {
+                tracing::warn!(%error, "could not read tasks to release a stalled transfer");
+                return;
+            }
+        };
+        for task in tasks {
+            if task.facts.execution_pause_reason != Some(TaskExecutionPauseReason::Transfer) {
+                continue;
+            }
+            let Some((transfer_id, staged_at)) = self.staged_transfer(&task.id).await else {
+                continue;
+            };
+            let last = self
+                .activity
+                .lock()
+                .expect("transfer activity lock poisoned")
+                .get(&transfer_id)
+                .copied()
+                .unwrap_or(staged_at);
+            if now_ms() - last < TRANSFER_IDLE_MS {
+                continue;
+            }
+            if let Err(error) = self.tasks.abandon_transfer(&task.id, &transfer_id).await {
+                tracing::warn!(task = %task.id, %transfer_id, %error, "could not take a stalled transfer back");
+                continue;
+            }
+            tracing::info!(task = %task.id, %transfer_id, "a transfer stopped moving; the task stays here");
+            self.activity
+                .lock()
+                .expect("transfer activity lock poisoned")
+                .remove(&transfer_id);
+            if let Ok(directory) = self.transfer_directory(&transfer_id) {
+                for name in ["environment.tar.zst", "capsule.tar.zst", "history.json"] {
+                    let _ = fs::remove_file(directory.join(name));
+                }
+            }
+        }
+    }
+
+    /// The transfer a task is staged for, and when it was staged.
+    async fn staged_transfer(&self, task_id: &str) -> Option<(String, i64)> {
+        self.tasks
+            .events(task_id)
+            .await
+            .ok()?
+            .into_iter()
+            .rev()
+            .find_map(|(recorded_at_ms, event)| match event {
+                TaskHistoryEvent::TransferStaged { transfer_id, .. } => {
+                    Some((transfer_id, recorded_at_ms))
+                }
+                _ => None,
+            })
+    }
+
     fn transfer_directory(&self, id: &str) -> Result<PathBuf, String> {
         let id = uuid::Uuid::parse_str(id).map_err(|_| "invalid transfer identifier".to_owned())?;
         Ok(self
@@ -182,6 +335,7 @@ impl TaskHost for OwnTasks {
         let tasks = self.tasks.clone();
         let config = self.config.clone();
         let lock = self.preparation_lock.clone();
+        let activity = Arc::clone(&self.activity);
         Box::pin(async move {
             let _preparing = lock.lock().await;
             if let Some(task) = tasks
@@ -194,7 +348,14 @@ impl TaskHost for OwnTasks {
             {
                 return Err("that task belongs to another operator".into());
             }
-            export_task(&config, &tasks, &task_id, &peer.to_string()).await
+            let handover = export_task(&config, &tasks, &task_id, &peer.to_string()).await?;
+            // Packaging is done, so the wait for the first piece starts now rather
+            // than from when the task was staged.
+            activity
+                .lock()
+                .expect("transfer activity lock poisoned")
+                .insert(handover.transfer_id.clone(), now_ms());
+            Ok(handover)
         })
     }
 
@@ -208,6 +369,7 @@ impl TaskHost for OwnTasks {
     ) -> BoxFuture<Result<Vec<u8>, String>> {
         let directory = self.transfer_directory(&transfer_id);
         let read_slots = Arc::clone(&self.read_slots);
+        let activity = Arc::clone(&self.activity);
         Box::pin(async move {
             if len == 0 || len > super::protocol::TRANSFER_PIECE_BYTES {
                 return Err("invalid transfer piece length".into());
@@ -224,6 +386,10 @@ impl TaskHost for OwnTasks {
             if prepared.recipient != peer.to_string() {
                 return Err("this transfer belongs to another recipient".into());
             }
+            activity
+                .lock()
+                .expect("transfer activity lock poisoned")
+                .insert(transfer_id.clone(), now_ms());
             let filename = match part {
                 super::TransferPart::Environment => "environment.tar.zst",
                 super::TransferPart::History => "history.json",
@@ -266,6 +432,50 @@ impl TaskHost for OwnTasks {
     ) -> BoxFuture<Result<(), String>> {
         let incoming = self.incoming.clone();
         Box::pin(async move { incoming.put(peer, &transfer_id, part, offset, &bytes).await })
+    }
+
+    fn abandon_import(
+        &self,
+        peer: EndpointId,
+        transfer_id: String,
+    ) -> BoxFuture<Result<(), String>> {
+        let incoming = self.incoming.clone();
+        Box::pin(async move { incoming.abandon(peer, &transfer_id).await })
+    }
+
+    fn abandon_take(&self, peer: EndpointId, transfer_id: String) -> BoxFuture<Result<(), String>> {
+        let tasks = Arc::clone(&self.tasks);
+        let root = self.config.data_dir().join("transfers");
+        Box::pin(async move {
+            let mut staged = None;
+            for task in tasks.list().await.map_err(|error| error.to_string())? {
+                let history = tasks
+                    .events(&task.id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let matches = history.iter().rev().find_map(|(_, event)| match event {
+                    TaskHistoryEvent::TransferStaged {
+                        transfer_id: current,
+                        peer: recipient,
+                        ..
+                    } => Some(current == &transfer_id && recipient == &peer.to_string()),
+                    _ => None,
+                });
+                if matches == Some(true) {
+                    staged = Some(task);
+                    break;
+                }
+            }
+            let task = staged.ok_or("that transfer is no longer staged")?;
+            tasks
+                .abandon_transfer(&task.id, &transfer_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            for name in ["environment.tar.zst", "capsule.tar.zst", "history.json"] {
+                let _ = fs::remove_file(root.join(&transfer_id).join(name));
+            }
+            Ok(())
+        })
     }
 
     fn stage_import(
@@ -453,8 +663,49 @@ impl TaskHost for OwnTasks {
                 .map_err(|e| e.to_string())?
                 .iter()
                 .filter(|task| task.operator_id() == Some(owner.as_str()))
-                .map(summarise)
+                .map(TaskSummary::of)
                 .collect())
+        })
+    }
+
+    fn watch(&self, peer: EndpointId) -> BoxFuture<Result<super::server::Watching, String>> {
+        let tasks = Arc::clone(&self.tasks);
+        let watchers = Arc::clone(&self.watchers);
+        Box::pin(async move {
+            // Registered before the snapshot is read, so a change made while it is
+            // being read is queued behind it rather than lost.
+            let changes = watchers.subscribe(peer);
+            let owner = peer.to_string();
+            let snapshot = tasks
+                .list()
+                .await
+                .map_err(|error| error.to_string())?
+                .iter()
+                .filter(|task| task.operator_id() == Some(owner.as_str()))
+                .map(TaskSummary::of)
+                .collect();
+            Ok(super::server::Watching { snapshot, changes })
+        })
+    }
+
+    fn remove(&self, peer: EndpointId, task_id: String) -> BoxFuture<Result<(), String>> {
+        let tasks = Arc::clone(&self.tasks);
+        Box::pin(async move {
+            let owner = peer.to_string();
+            let task = tasks
+                .list()
+                .await
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .find(|task| task.id == task_id)
+                .ok_or("that task is no longer here")?;
+            if task.operator_id() != Some(owner.as_str()) {
+                return Err("that task belongs to another operator".into());
+            }
+            tasks
+                .remove_and_wait(task)
+                .await
+                .map_err(|error| error.to_string())
         })
     }
 }
@@ -489,7 +740,7 @@ impl super::tracker::Host for OwnTasks {
                 .find(|environment| {
                     environment
                         .name
-                        .eq_ignore_ascii_case(&settings.settings().default_environment)
+                        .eq_ignore_ascii_case(settings.settings().default_environment())
                 })
                 .ok_or("The pushed default environment is missing; push your setup again")?;
             let task = self
@@ -629,6 +880,7 @@ fn is_machine_local_event(event: &TaskHistoryEvent) -> bool {
             | TaskHistoryEvent::TransferStaged { .. }
             | TaskHistoryEvent::TransferCommitted { .. }
             | TaskHistoryEvent::TransferLanded { .. }
+            | TaskHistoryEvent::TransferAbandoned { .. }
             | TaskHistoryEvent::SandboxProvisioned { .. }
             | TaskHistoryEvent::SandboxRemoved { .. }
             | TaskHistoryEvent::SnapshotRemoved { .. }
@@ -716,44 +968,27 @@ fn file_digest(path: &Path) -> Result<String, String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
-fn summarise(task: &Task) -> TaskSummary {
-    let mut extras = Vec::new();
-    if task.facts.unread_operator_signal_count > 0 {
-        extras.push(format!(
-            "{} unread",
-            task.facts.unread_operator_signal_count
-        ));
-    }
-    TaskSummary {
-        id: task.id.clone(),
-        host: task.host.clone(),
-        title: task.facts.title.clone(),
-        intent: task
-            .facts
-            .intent
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .to_owned(),
-        environment: task.facts.environment_name.clone(),
-        agent: task.agent_kind,
-        status: task.facts.execution_status.clone(),
-        mode: task.facts.execution_mode,
-        tracker_issue: task.facts.tracker_issue.clone(),
-        operator_label: task.facts.operator_label.clone(),
-        latest_turn_summary: task.facts.latest_turn_summary.clone(),
-        extras,
-    }
-}
-
 pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
-    logging::init_service();
-    tracing::info!("⛰  altitude v{} · remote", env!("CARGO_PKG_VERSION"));
-
     let config = match args.data_dir {
         Some(dir) => Config::load()?.with_data_dir(dir).serve(),
         None => Config::load()?.serve(),
     };
+    // Housekeeping happens instead of serving, and before the log is pointed at
+    // stdout: what it prints is the answer, not a report about it.
+    if let Some(command) = args.command {
+        match command {
+            ServeCommand::Clients => super::admin::list(&config)
+                .await
+                .map_err(|error| error.to_string())?,
+            ServeCommand::Evict { key } => super::admin::evict(&config, &key)
+                .await
+                .map_err(|error| error.to_string())?,
+        }
+        return Ok(());
+    }
+
+    logging::init_service();
+    tracing::info!("⛰  altitude v{} · remote", env!("CARGO_PKG_VERSION"));
     let settings_path = args.config.unwrap_or_else(|| config.serve_settings_path());
     let settings = ServeSettings::load_or_create(&settings_path)?;
     let credentials_path = config.data_dir().join("trackers/linear/oauth.json");
@@ -836,12 +1071,53 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         tasks = tasks.with_trackers(Arc::new(PushedTrackers::new(config.clone())));
     }
     let (task_loop, mut updates) = TaskEventLoop::waiting_for_runtime(tasks);
-    tokio::spawn(async move {
-        while updates.recv().await.is_some() {
-            tracing::debug!("a task changed");
-        }
-    });
     let task_loop = Arc::new(task_loop);
+    let watchers = Arc::new(Watchers::default());
+    {
+        // A machine that finishes preparing says so, rather than leaving the
+        // clients that asked before it was ready believing it never got there.
+        let watchers = Arc::clone(&watchers);
+        let mut state = state.subscribe();
+        tokio::spawn(async move {
+            while state.changed().await.is_ok() {
+                if *state.borrow_and_update() == RemoteState::Ready {
+                    watchers.ready();
+                }
+            }
+        });
+    }
+    {
+        let watchers = Arc::clone(&watchers);
+        let tasks = Arc::clone(&task_loop);
+        tokio::spawn(async move {
+            while let Some(update) = updates.recv().await {
+                match update {
+                    // Bytes for a terminal are not a card: what a watcher reads is
+                    // the task, and only the events that carry one change it.
+                    TaskExecutionUpdate::Output { .. } => {}
+                    TaskExecutionUpdate::Created(Ok(task))
+                    | TaskExecutionUpdate::Started(Ok(task))
+                    | TaskExecutionUpdate::Finished(_, Ok(task))
+                    | TaskExecutionUpdate::OperatorReady(task)
+                    | TaskExecutionUpdate::Report { task, .. } => watchers.publish(&task),
+                    TaskExecutionUpdate::Removed(id, _) => watchers.removed(id),
+                    // A failure that came before a task existed carries no task
+                    // with it, so what changed is read from the store rather than
+                    // guessed at. Errors are rare; a card left saying the wrong
+                    // thing is not.
+                    TaskExecutionUpdate::Created(Err(_))
+                    | TaskExecutionUpdate::Started(Err(_))
+                    | TaskExecutionUpdate::Finished(_, Err(_)) => {
+                        if let Ok(all) = tasks.list().await {
+                            for task in &all {
+                                watchers.publish(task);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
     // What this machine can mount is what a pushed configuration may carry,
     // besides the tracker profiles that only travel.
     let mounted_profiles: Vec<&'static str> = task_loop
@@ -870,6 +1146,8 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         tasks: task_loop,
         incoming,
         preparation_lock: Arc::new(AsyncMutex::new(())),
+        activity: Arc::new(Mutex::new(HashMap::new())),
+        watchers,
         read_slots: Arc::new(Semaphore::new(4)),
         readiness: state,
         runtime: prepared,
@@ -968,9 +1246,14 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
 
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
+    // A transfer nobody is reading is a task nobody is running, and the only
+    // thing that can tell is the machine holding it.
+    let mut transfers = interval(Duration::from_secs(30));
+    transfers.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut is_ready = false;
     let result = loop {
         tokio::select! {
+            _ = transfers.tick(), if is_ready => host.release_stalled_transfers().await,
             result = &mut preparation, if !is_ready => match result {
                 Ok(()) => is_ready = true,
                 Err(error) => {

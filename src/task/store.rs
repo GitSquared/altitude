@@ -753,6 +753,19 @@ impl TaskStore {
     ///
     /// The capsule is the caller's to dispose of; this is the row, and it stays so
     /// that the signals raised on the task and the answers given to them outlive it.
+    /// Delete a task and its history outright, rather than marking it removed.
+    ///
+    /// For a machine clearing up after a client that is not coming back: a row
+    /// nobody can see is still a row, and so is the history behind it.
+    pub async fn forget(&self, task_id: &str) -> Result<(), TaskError> {
+        sqlx::query("DELETE FROM tasks WHERE id = ?")
+            .bind(task_id)
+            .execute(&self.pool)
+            .await
+            .map_err(TaskError::Database)?;
+        Ok(())
+    }
+
     pub async fn remove(&self, task_id: &str) -> Result<(), TaskError> {
         sqlx::query("UPDATE tasks SET removed_at_ms = ? WHERE id = ?")
             .bind(now_ms())

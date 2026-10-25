@@ -68,6 +68,10 @@ impl SendTask {
         &self.task_id
     }
 
+    pub(in crate::tui) fn title(&self) -> &str {
+        &self.title
+    }
+
     /// Put the machines back in step with what the remotes have answered, keeping
     /// the one the operator chose where it is still offered.
     pub(in crate::tui) fn refresh_hosts(&mut self, hosts: Vec<Host>) {
@@ -221,7 +225,7 @@ pub(in crate::tui) fn draw(frame: &mut Frame, area: Rect, sending: &SendTask) ->
     );
 
     frame.render_widget(
-        Paragraph::new("The task stops here, travels, and continues there.")
+        Paragraph::new("It stops on this machine and continues on the remote.")
             .style(palette::muted())
             .wrap(Wrap { trim: true }),
         note_area,

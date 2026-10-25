@@ -31,7 +31,7 @@ impl SignalAction {
     pub fn label(self) -> &'static str {
         match self {
             Self::Reply => "reply",
-            Self::Acknowledge => "acknowledge",
+            Self::Acknowledge => "dismiss",
             Self::Confirm => "confirm",
         }
     }

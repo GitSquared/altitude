@@ -19,7 +19,13 @@ use ratatui::{
 use crate::{
     isolation::IsolationEngine,
     task::TaskEventLoop,
-    tui::{App, app::Foreground, keys, screens::settings::Target, widgets::chrome},
+    tui::{
+        App,
+        app::{Foreground, RemoveTaskReply},
+        keys,
+        screens::settings::Target,
+        widgets::chrome,
+    },
 };
 
 /// A question with two answers, one of which cannot be undone.
@@ -135,7 +141,7 @@ impl PendingConfirm {
         }
     }
 
-    /// Confirming stops the agent and gives the operator its terminal.
+    /// Confirming stops the agent and gives the operator the terminal.
     pub(in crate::tui) fn taking_over(task_id: String, question: String) -> Self {
         Self {
             dialog: Confirm::new(question, "take over"),
@@ -143,10 +149,41 @@ impl PendingConfirm {
         }
     }
 
+    /// Confirming drops a task another machine holds, which is that machine's to
+    /// dispose of.
+    pub(in crate::tui) fn removing_remote(
+        address: String,
+        task_id: String,
+        question: String,
+    ) -> Self {
+        Self {
+            dialog: Confirm::new(question, "drop"),
+            action: ConfirmAction::RemoveRemoteTask { address, task_id },
+        }
+    }
+
+    /// Confirming replaces the key remembered for an address with the one that
+    /// answered.
+    pub(in crate::tui) fn replacing_key(address: String, question: String) -> Self {
+        Self {
+            dialog: Confirm::new(question, "accept"),
+            action: ConfirmAction::ReplaceKey { address },
+        }
+    }
+
+    /// Confirming unhooks a task from the machine running it: the same transfer as
+    /// taking it over, with one answer different.
+    pub(in crate::tui) fn pulling(task_id: String, question: String) -> Self {
+        Self {
+            dialog: Confirm::new(question, "unhook"),
+            action: ConfirmAction::PullTask { id: task_id },
+        }
+    }
+
     /// Confirming removes a task from the overview and disposes of its capsule.
     pub(in crate::tui) fn removing(task_id: String, question: String) -> Self {
         Self {
-            dialog: Confirm::new(question, "remove"),
+            dialog: Confirm::new(question, "drop"),
             action: ConfirmAction::RemoveTask { id: task_id },
         }
     }
@@ -171,6 +208,9 @@ impl PendingConfirm {
 /// the consequences.
 enum ConfirmAction {
     RemoveTask { id: String },
+    RemoveRemoteTask { address: String, task_id: String },
+    PullTask { id: String },
+    ReplaceKey { address: String },
     TakeOver { id: String },
     DeleteSetting(Target),
     ForgetCredentials(CredentialTarget),
@@ -183,6 +223,7 @@ pub(in crate::tui) async fn handle_confirm_key<E>(
     event_loop: &TaskEventLoop<E>,
     key: KeyEvent,
     landings: &mpsc::UnboundedSender<Result<String, String>>,
+    removals: &mpsc::Sender<RemoveTaskReply>,
 ) where
     E: IsolationEngine + Clone + 'static,
 {
@@ -205,6 +246,11 @@ pub(in crate::tui) async fn handle_confirm_key<E>(
                     event_loop.remove(task);
                 }
             }
+            ConfirmAction::RemoveRemoteTask { address, task_id } => {
+                app.begin_remove_remote(&address, &task_id, removals);
+            }
+            ConfirmAction::PullTask { id } => app.pull_task(&id, event_loop, landings),
+            ConfirmAction::ReplaceKey { address } => app.accept_remote_key(&address).await,
             ConfirmAction::TakeOver { id } => app.take_over(&id, terminal, event_loop, landings),
             ConfirmAction::DeleteSetting(target) => {
                 app.foreground = Foreground::Panel;

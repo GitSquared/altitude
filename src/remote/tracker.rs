@@ -1310,6 +1310,28 @@ pub fn accounts_path(operator_dir: &Path) -> PathBuf {
     operator_dir.join("accounts.json")
 }
 
+/// Stop a peer's record naming a provider, because another client took it over.
+///
+/// What that peer pushed stays where it is: the login is the same account, and
+/// which client a task is attributed to is the question here, not who holds the
+/// credentials.
+pub fn forget_account(operator_dir: &Path, provider: TrackerKind) -> io::Result<()> {
+    let path = accounts_path(operator_dir);
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let held: Vec<AccountRecord> = serde_json::from_str(&text).unwrap_or_default();
+    let kept: Vec<&AccountRecord> = held
+        .iter()
+        .filter(|record| record.account.provider != provider)
+        .collect();
+    if kept.len() == held.len() {
+        return Ok(());
+    }
+    let text = serde_json::to_string_pretty(&kept).map_err(io::Error::other)?;
+    super::identity::write_private(&path, &text).map_err(io::Error::other)
+}
+
 /// Note the tracker accounts a peer's profiles now name.
 ///
 /// `pushed` carries one entry per tracker profile in the configuration that just
