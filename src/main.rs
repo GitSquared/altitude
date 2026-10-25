@@ -24,6 +24,7 @@ mod config;
 mod credentials;
 mod db;
 mod id;
+mod instance;
 mod isolation;
 mod logging;
 mod mounts;
@@ -53,6 +54,9 @@ async fn client() -> Result<(), Box<dyn Error>> {
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
     let config = Config::load()?;
+    // Before anything reads the task database: a second client would see the same
+    // pending tasks and drive them, which is not a thing two processes can do.
+    let _instance = instance::Instance::claim(&config.database_path())?;
     let settings = config.load_or_create_settings();
     // Boot happens before the interface does, so the preference is read here
     // rather than reached for from inside it. Unreadable settings animate, which
