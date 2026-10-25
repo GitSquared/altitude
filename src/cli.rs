@@ -80,6 +80,18 @@ pub struct ServeArgs {
     #[arg(long, value_name = "PATH", display_order = 3)]
     pub data_dir: Option<PathBuf>,
 
+    /// Install Altitude as a service on this machine, then exit.
+    ///
+    /// Asks whether it should run for this user or for the whole machine, shows
+    /// the unit or launch job it will write and the commands it will run, then
+    /// starts it. Needs a terminal, and writes nothing before you agree.
+    #[arg(
+        long,
+        help_heading = "Run it as a service",
+        conflicts_with = "connect_linear"
+    )]
+    pub service: bool,
+
     /// Install the shared Linear app on this machine, then exit.
     ///
     /// Prints the URLs the application must register, what this machine's settings

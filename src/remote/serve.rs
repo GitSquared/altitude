@@ -969,10 +969,15 @@ fn file_digest(path: &Path) -> Result<String, String> {
 }
 
 pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
-    let config = match args.data_dir {
-        Some(dir) => Config::load()?.with_data_dir(dir).serve(),
-        None => Config::load()?.serve(),
+    let base = match &args.data_dir {
+        Some(dir) => Config::load()?.with_data_dir(dir.clone()),
+        None => Config::load()?,
     };
+    let config = base.serve();
+    let settings_path = args
+        .config
+        .clone()
+        .unwrap_or_else(|| config.serve_settings_path());
     // Housekeeping happens instead of serving, and before the log is pointed at
     // stdout: what it prints is the answer, not a report about it.
     if let Some(command) = args.command {
@@ -986,10 +991,11 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         }
         return Ok(());
     }
-
-    logging::init_service();
-    tracing::info!("⛰  altitude v{} · remote", env!("CARGO_PKG_VERSION"));
-    let settings_path = args.config.unwrap_or_else(|| config.serve_settings_path());
+    // A service definition carries this machine's own paths, so it is written by
+    // the process that has them rather than from a template somebody downloaded.
+    if args.service {
+        return super::service::install(&args, &base).await;
+    }
     let settings = ServeSettings::load_or_create(&settings_path)?;
     let credentials_path = config.data_dir().join("trackers/linear/oauth.json");
     // Installing a tracker is an interactive report rather than a service start:

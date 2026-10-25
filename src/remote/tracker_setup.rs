@@ -5,22 +5,14 @@
 //! with the client, where none of those facts are present, so nothing this host
 //! has is ever rendered on a host that is not this one.
 
-use std::{
-    error::Error,
-    fmt,
-    io::{self, IsTerminal, Write},
-    mem,
-    path::Path,
-    time::SystemTime,
-};
+use std::{error::Error, io, path::Path, time::SystemTime};
 
 use crate::{
     config::{LinearSettings, ServeSettings},
     tracker::{TrackerKind, oauth, setup::Guide, setup::Step},
 };
 
-/// The width the rest of the serve output reads at.
-const WIDTH: usize = 78;
+use super::console::{ask, field, has_terminal, prose};
 
 pub async fn connect_linear(
     settings: &ServeSettings,
@@ -124,7 +116,7 @@ async fn replace(
     println!("Already installed on this machine:");
     field("workspace", workspace(&installed.credentials));
     field("on", when(installed.installed_at));
-    if !io::stdin().is_terminal() {
+    if !has_terminal() {
         println!("\nRun this from a terminal to replace the login.");
         return Ok(());
     }
@@ -193,57 +185,4 @@ fn print_step(number: usize, step: &Step) {
         println!("{indent}  {line}");
     }
     println!();
-}
-
-/// One paragraph, wrapped to what the rest of this output assumes, with the first
-/// line led by `lead` and the rest by `indent`.
-fn prose(text: &str, lead: &str, indent: &str) {
-    let mut lines = wrap(text, WIDTH.saturating_sub(lead.len())).into_iter();
-    if let Some(first) = lines.next() {
-        println!("{lead}{first}");
-    }
-    for line in lines {
-        println!("{indent}{line}");
-    }
-}
-
-fn wrap(text: &str, width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut line = String::new();
-    for word in text.split_whitespace() {
-        if !line.is_empty() && line.len() + 1 + word.len() > width {
-            lines.push(mem::take(&mut line));
-        }
-        if !line.is_empty() {
-            line.push(' ');
-        }
-        line.push_str(word);
-    }
-    if !line.is_empty() {
-        lines.push(line);
-    }
-    lines
-}
-
-fn field(label: &str, value: impl fmt::Display) {
-    println!("  {label:<10}{value}");
-}
-
-/// A question with an answer the operator can give by pressing enter.
-///
-/// A run with no terminal answers with `default` instead of waiting for a
-/// keypress nobody is there to make: the browser round trip is what actually
-/// gates an install.
-fn ask(prompt: &str, default: bool) -> io::Result<bool> {
-    if !io::stdin().is_terminal() {
-        return Ok(default);
-    }
-    print!("\n{prompt}  › ");
-    io::stdout().flush()?;
-    let mut answer = String::new();
-    io::stdin().read_line(&mut answer)?;
-    Ok(match answer.trim() {
-        "" => default,
-        answer => matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes"),
-    })
 }

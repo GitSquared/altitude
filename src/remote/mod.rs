@@ -9,6 +9,7 @@ mod admin;
 mod announce;
 mod bundle;
 mod clients;
+mod console;
 mod discovery;
 mod identity;
 mod keys;
@@ -23,6 +24,7 @@ pub mod transfer;
 mod client;
 mod known;
 mod protocol;
+mod service;
 
 use std::error::Error;
 
