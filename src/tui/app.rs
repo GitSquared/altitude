@@ -1433,8 +1433,8 @@ impl App {
         E: IsolationEngine + Clone + 'static,
     {
         match self.selected_row().map(|row| row.kind) {
-            // A machine that answered with another key is asking to be told which
-            // key it is: connecting again would get the same answer.
+            // A machine that answered with another identity is asking to be told
+            // which machine it is: connecting again would get the same answer.
             Some(RowKind::Remote {
                 address, status, ..
             }) => {
@@ -1442,9 +1442,10 @@ impl App {
                     self.foreground = Foreground::Confirm(PendingConfirm::replacing_key(
                         address.clone(),
                         format!(
-                            "Accept the key {} answered with? It is not the one remembered for \
-                             that address, so this is the last moment to check you are talking \
-                             to the machine you think you are.",
+                            "The machine at {} is not the one this client knew: it answered \
+                             with a different identity, as one that was reinstalled or replaced \
+                             would. Accept it? Everything sent there from now on goes to \
+                             whatever answered.",
                             self.remote_name(&address)
                         ),
                     ));
@@ -1541,7 +1542,7 @@ impl App {
                 Some(RemoteStatus::Reached) => (name, true),
                 Some(RemoteStatus::Syncing) => (format!("{name} (syncing)"), false),
                 Some(RemoteStatus::Asking) => (format!("{name} (asking)"), false),
-                Some(RemoteStatus::Changed) => (format!("{name} (key changed)"), false),
+                Some(RemoteStatus::Changed) => (format!("{name} (identity changed)"), false),
                 Some(RemoteStatus::Unknown) | Some(RemoteStatus::Silent(_)) | None => {
                     (format!("{name} (unreachable)"), false)
                 }
@@ -2021,7 +2022,8 @@ impl App {
             .map_err(|error| error.to_string())?;
         if sighting.key_status == RemoteKeyStatus::Changed {
             return Err(format!(
-                "{address} answered with a different key; approve its identity first"
+                "{address} is not the machine this client knew; accept its identity \
+                 in Settings → Remotes first"
             ));
         }
         // Whose work this is travels as a label. The machine it came from is the
@@ -2590,7 +2592,7 @@ impl App {
     /// one it is, and start watching it again.
     pub(in crate::tui) async fn accept_remote_key(&mut self, address: &str) {
         if let Err(error) = self.remote_keys.forget(address).await {
-            self.problem(format!("Could not forget the old key: {error}"));
+            self.problem(format!("Could not accept the new identity: {error}"));
             return;
         }
         self.unwatch_remote(address);
@@ -2669,7 +2671,7 @@ impl App {
                 return;
             }
             RowKind::Credential(_) => {
-                self.say("The key names this machine and is not edited here");
+                self.say("This is how remotes recognise this machine, and it is not edited here");
                 return;
             }
             // A tracker is signed in to with enter, which starts a browser
@@ -2791,7 +2793,10 @@ impl App {
                 Target::Environment { original: name },
             ),
             RowKind::Remote { address, .. } => (
-                format!("Delete {address}, and the key remembered for it?"),
+                format!(
+                    "Delete {address}? This machine forgets it, and the identity it \\
+                         answered with."
+                ),
                 Target::Remote { original: address },
             ),
         };
@@ -2935,12 +2940,10 @@ impl App {
                 // A forgotten remote's key is forgotten with it: the next
                 // sighting is a first sighting again, which is what forgetting
                 // means.
-                forget_error = self
-                    .remote_keys
-                    .forget(original)
-                    .await
-                    .err()
-                    .map(|error| format!("could not forget the key for {original}: {error}"));
+                forget_error =
+                    self.remote_keys.forget(original).await.err().map(|error| {
+                        format!("could not forget the identity for {original}: {error}")
+                    });
             }
             _ => {}
         }
@@ -4100,7 +4103,8 @@ impl App {
             .map_err(|error| error.to_string())?;
         if sighting.key_status == RemoteKeyStatus::Changed {
             return Err(format!(
-                "{address} answered with a different key; approve its identity first"
+                "{address} is not the machine this client knew; accept its identity \
+                 in Settings → Remotes first"
             ));
         }
         Ok(sighting.ticket.into())
@@ -4457,7 +4461,8 @@ async fn deliver_config(
         .map_err(|error| error.to_string())?;
     if sighting.key_status == RemoteKeyStatus::Changed {
         return Err(format!(
-            "{address} answered with a different key; approve its identity first"
+            "{address} is not the machine this client knew; accept its identity in \
+             Settings → Remotes first"
         ));
     }
     let peer: EndpointAddr = sighting.ticket.into();

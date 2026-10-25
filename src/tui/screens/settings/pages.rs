@@ -373,16 +373,16 @@ pub(super) fn credential_connector(credential: &Credential) -> Connector {
         } => Connector {
             title: format!("{hostname} (this machine)"),
             reach: Reach::On,
-            status: "registered as key".to_owned(),
+            status: "identity".to_owned(),
             status_value: Some(short_key(key)),
             identity: None,
             note: None,
             action: Some("Press enter to learn more about altitude remotes."),
-            purpose: "The key that names this installation to a remote, so a remote \
-                      knows whose work it holds.",
+            purpose: "How a remote recognises this installation. It travels with \
+                      every task you delegate, and a remote you have used remembers it.",
             fields: vec![
                 ("name", label.clone()),
-                ("key", key.clone()),
+                ("identity", short_key(key)),
                 ("state", tilde(data_dir)),
             ],
         },
@@ -500,8 +500,8 @@ pub(super) fn remote_connector(
         RemoteStatus::Changed => (
             Reach::Off,
             "disconnected",
-            Some("It answered with a different key than the one you have.".to_owned()),
-            Some("Press enter to review its identity."),
+            Some("It is not the machine this client knew.".to_owned()),
+            Some("Press enter to accept its identity."),
         ),
         RemoteStatus::Silent(reason) => (
             Reach::Off,
@@ -519,11 +519,11 @@ pub(super) fn remote_connector(
     let mut fields = vec![("address", address.to_owned())];
     match remembered {
         Some(key) => {
-            fields.push(("key", key.key.clone()));
+            fields.push(("identity", short_key(&key.key)));
             fields.push(("version", key.version.clone()));
             fields.push(("met", met_ago(key.seen_at_ms)));
         }
-        None => fields.push(("key", "never met".to_owned())),
+        None => fields.push(("identity", "never met".to_owned())),
     }
     Connector {
         title,

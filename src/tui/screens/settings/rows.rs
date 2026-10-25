@@ -185,7 +185,7 @@ impl Row {
                 chrome::Hint::new(
                     "enter",
                     if *status == RemoteStatus::Changed {
-                        "accept its key"
+                        "accept identity"
                     } else {
                         "connect"
                     },
