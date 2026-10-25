@@ -85,6 +85,7 @@ pub async fn evict(config: &Config, key: &str) -> LinkResult<()> {
     if !directory.is_dir() {
         return Err(format!("{parsed} has never used this remote").into());
     }
+    println!("Stop the remote before evicting: a running one keeps its own state.");
     let database = Database::open(config).await?;
     let store = TaskStore::new(&database);
     let owned: Vec<String> = store

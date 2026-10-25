@@ -460,6 +460,11 @@ where
                     app.animation_tick(),
                 ));
             }
+            // A message is read over whatever asked for it, including a wait.
+            if let Some(alert) = &app.alert {
+                widgets::chrome::dim(frame, content);
+                modal = Some(widgets::alert::draw(frame, content, alert));
+            }
             // A question about an account holds the screen until it is answered.
             if let Some((title, question, answers)) = app.tracker_conflict_question() {
                 widgets::chrome::dim(frame, content);
@@ -472,11 +477,6 @@ where
                     &answers,
                     app.conflict_choice,
                 ));
-            }
-            // A message is read over whatever asked for it, including a wait.
-            if let Some(alert) = &app.alert {
-                widgets::chrome::dim(frame, content);
-                modal = Some(widgets::alert::draw(frame, content, alert));
             }
             // Keep the modal's last frame, ready to draw once more when it
             // leaves. Modals arrive at once; only the panel is drawn in.

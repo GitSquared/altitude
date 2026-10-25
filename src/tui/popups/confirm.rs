@@ -162,6 +162,15 @@ impl PendingConfirm {
         }
     }
 
+    /// Confirming replaces the key remembered for an address with the one that
+    /// answered.
+    pub(in crate::tui) fn replacing_key(address: String, question: String) -> Self {
+        Self {
+            dialog: Confirm::new(question, "accept"),
+            action: ConfirmAction::ReplaceKey { address },
+        }
+    }
+
     /// Confirming unhooks a task from the machine running it: the same transfer as
     /// taking it over, with one answer different.
     pub(in crate::tui) fn pulling(task_id: String, question: String) -> Self {
@@ -201,6 +210,7 @@ enum ConfirmAction {
     RemoveTask { id: String },
     RemoveRemoteTask { address: String, task_id: String },
     PullTask { id: String },
+    ReplaceKey { address: String },
     TakeOver { id: String },
     DeleteSetting(Target),
     ForgetCredentials(CredentialTarget),
@@ -240,6 +250,7 @@ pub(in crate::tui) async fn handle_confirm_key<E>(
                 app.begin_remove_remote(&address, &task_id, removals);
             }
             ConfirmAction::PullTask { id } => app.pull_task(&id, event_loop, landings),
+            ConfirmAction::ReplaceKey { address } => app.accept_remote_key(&address).await,
             ConfirmAction::TakeOver { id } => app.take_over(&id, terminal, event_loop, landings),
             ConfirmAction::DeleteSetting(target) => {
                 app.foreground = Foreground::Panel;

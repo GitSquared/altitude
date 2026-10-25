@@ -181,8 +181,15 @@ impl Row {
                     vec![chrome::Hint::new("enter", "sign in")]
                 }
             },
-            RowKind::Remote { .. } => vec![
-                chrome::Hint::new("enter", "connect"),
+            RowKind::Remote { status, .. } => vec![
+                chrome::Hint::new(
+                    "enter",
+                    if *status == RemoteStatus::Changed {
+                        "accept its key"
+                    } else {
+                        "connect"
+                    },
+                ),
                 chrome::Hint::new("t", "task trackers"),
                 chrome::Hint::new("e", "edit"),
             ],

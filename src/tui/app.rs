@@ -1433,7 +1433,25 @@ impl App {
         E: IsolationEngine + Clone + 'static,
     {
         match self.selected_row().map(|row| row.kind) {
-            Some(RowKind::Remote { address, .. }) => self.check_remote(&address).await,
+            // A machine that answered with another key is asking to be told which
+            // key it is: connecting again would get the same answer.
+            Some(RowKind::Remote {
+                address, status, ..
+            }) => {
+                if status == RemoteStatus::Changed {
+                    self.foreground = Foreground::Confirm(PendingConfirm::replacing_key(
+                        address.clone(),
+                        format!(
+                            "Accept the key {} answered with? It is not the one remembered for \
+                             that address, so this is the last moment to check you are talking \
+                             to the machine you think you are.",
+                            self.remote_name(&address)
+                        ),
+                    ));
+                    return;
+                }
+                self.check_remote(&address).await
+            }
             Some(RowKind::Discovered(remote)) => {
                 if let Some(file) = self.settings_file.as_mut() {
                     let mut proposed = file.settings().clone();
@@ -2566,6 +2584,19 @@ impl App {
             ),
             vec!["leave it", "take it over"],
         ))
+    }
+
+    /// Forget the key remembered for an address, so the key that answered is the
+    /// one it is, and start watching it again.
+    pub(in crate::tui) async fn accept_remote_key(&mut self, address: &str) {
+        if let Err(error) = self.remote_keys.forget(address).await {
+            self.problem(format!("Could not forget the old key: {error}"));
+            return;
+        }
+        self.unwatch_remote(address);
+        self.remote_status
+            .insert(address.to_owned(), RemoteStatus::Asking);
+        self.watch_remote(address);
     }
 
     /// Ask a machine about itself again, now.

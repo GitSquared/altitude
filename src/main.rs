@@ -100,6 +100,7 @@ async fn client() -> Result<(), Box<dyn Error>> {
             .await?;
             if answer == Some(1) {
                 let aside = config.forget_installation()?;
+                tracing::info!(moved_to = %aside.display(), "installation forgotten");
                 farewell = Some(format!(
                     "Everything Altitude had recorded was moved to {}. Start it again to begin \
                      from a clean slate.",
