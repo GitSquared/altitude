@@ -2,7 +2,7 @@ use super::{
     AUTOPILOT_SYSTEM_PROMPT, AgentEngine, REPORT_SCHEMA, REPORT_SYSTEM_PROMPT, TaskReportDecoder,
 };
 use crate::isolation::{
-    DefaultFile, EnvironmentRecipe, GuestPath, PersistentDirectory, SignInCommand, shell_quote,
+    DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand, shell_quote,
 };
 use crate::task::{TaskAgentTurnContext, TaskAgentTurnReport};
 use serde_json::Value;
@@ -255,8 +255,8 @@ impl AgentEngine for PiCode {
         false
     }
 
-    fn environment_recipe(&self) -> EnvironmentRecipe {
-        EnvironmentRecipe {
+    fn profile_recipe(&self) -> ProfileRecipe {
+        ProfileRecipe {
             profile: "agents/pi",
             display: "Pi",
             sign_in: "Use /login in Pi to connect your provider.",

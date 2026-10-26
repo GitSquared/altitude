@@ -2,7 +2,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 use crate::{
-    isolation::{EnvironmentRecipe, GuestPath, PersistentDirectory, SignInCommand, shell_quote},
+    isolation::{GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand, shell_quote},
     vcs::{
         CodeContribution, ContributionObservation, ContributionState, MergeStanding, VcsProvider,
         VcsProviderKind,
@@ -24,8 +24,8 @@ const SETUP_COMMAND: &str = concat!(
 pub struct GitHub;
 
 impl VcsProvider for GitHub {
-    fn environment_recipe(&self) -> EnvironmentRecipe {
-        EnvironmentRecipe {
+    fn profile_recipe(&self) -> ProfileRecipe {
+        ProfileRecipe {
             profile: "vcs/github",
             display: "GitHub",
             sign_in: "Follow the GitHub CLI's sign-in instructions.",

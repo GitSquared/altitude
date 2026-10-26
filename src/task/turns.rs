@@ -426,7 +426,7 @@ where
 
     /// Make the sandbox that observes a provider for one credential owner.
     ///
-    /// The base environment plus what the providers install is the least that can
+    /// The base image plus what the providers install is the least that can
     /// read them, and the shell shape mounts the owner's own profile without
     /// making a task of it. It is left running for the next observation to reuse.
     pub(super) async fn open_watcher(&self, id: String) -> Result<(), TaskServiceError> {
@@ -434,7 +434,7 @@ where
             .watcher(
                 id,
                 Project::profile_only("vcs-observer"),
-                vcs::environment_recipes(),
+                vcs::profile_recipes(),
                 &Unwatched,
             )
             .await

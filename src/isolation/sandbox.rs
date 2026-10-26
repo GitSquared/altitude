@@ -1,3 +1,9 @@
+//! Composing a project into a sandbox: the profiles it mounts, the caches it shares,
+//! and the brief and checkout a task starts with.
+//!
+//! The isolation engine calls this for every sandbox it makes. Nothing here talks to a
+//! runtime, and nothing here decides when a sandbox exists.
+
 use std::{
     collections::HashSet,
     fs::{self, OpenOptions},
@@ -53,7 +59,7 @@ impl SignInCommand {
 
 /// Knowledge supplied by an agent or VCS module. No host I/O or lifecycle hooks.
 #[derive(Clone)]
-pub struct EnvironmentRecipe {
+pub struct ProfileRecipe {
     /// Stable relative profile identity, e.g. `agents/claude` or `vcs/github`.
     pub profile: &'static str,
     /// What this profile is called where an operator reads it, which is the name
@@ -142,7 +148,7 @@ pub struct DefaultFile {
     pub contents: &'static str,
 }
 
-struct EnvironmentPlan {
+struct SandboxPlan {
     project: Project,
     recipe: BaseSandboxRecipe,
     options: SandboxOptions,
@@ -154,11 +160,11 @@ struct EnvironmentPlan {
     local_mounts: Vec<(String, String)>,
 }
 
-impl EnvironmentPlan {
+impl SandboxPlan {
     fn compose(
         config: &Config,
         project: Project,
-        recipes: Vec<EnvironmentRecipe>,
+        recipes: Vec<ProfileRecipe>,
     ) -> Result<Self, IsolationError> {
         project
             .validate()
@@ -431,10 +437,10 @@ pub async fn ensure_project(
     engine: &impl IsolationEngine,
     config: &Config,
     project: Project,
-    recipes: Vec<EnvironmentRecipe>,
+    recipes: Vec<ProfileRecipe>,
     progress: &dyn EnvironmentProgressSink,
 ) -> Result<BaseSandboxSnapshot, IsolationError> {
-    let mut plan = EnvironmentPlan::compose(config, project, recipes)?;
+    let mut plan = SandboxPlan::compose(config, project, recipes)?;
     plan.initialize(config)?;
     engine.ensure_base(plan.recipe, progress).await
 }
@@ -483,7 +489,7 @@ pub(super) struct ProvisionRequest {
     pub id: String,
     pub snapshot: Option<String>,
     pub project: Project,
-    pub recipes: Vec<EnvironmentRecipe>,
+    pub recipes: Vec<ProfileRecipe>,
     pub vsock: Vec<VsockRoute>,
 }
 
@@ -500,7 +506,7 @@ pub(super) async fn provision(
         recipes,
         vsock,
     } = request;
-    let mut plan = EnvironmentPlan::compose(config, project, recipes)?;
+    let mut plan = SandboxPlan::compose(config, project, recipes)?;
     plan.options.vsock = vsock;
     create(
         engine,
@@ -521,9 +527,9 @@ pub(super) async fn provision(
 pub(super) fn composed_recipe(
     config: &Config,
     project: Project,
-    recipes: Vec<EnvironmentRecipe>,
+    recipes: Vec<ProfileRecipe>,
 ) -> Result<BaseSandboxRecipe, IsolationError> {
-    EnvironmentPlan::compose(config, project, recipes).map(|plan| plan.recipe)
+    SandboxPlan::compose(config, project, recipes).map(|plan| plan.recipe)
 }
 
 /// What profiles' own checks say about them, run in one sandbox that is thrown away
@@ -549,7 +555,7 @@ pub(super) async fn credential_reports(
     let Some(snapshot) = snapshot else {
         return Ok(None);
     };
-    let plan = EnvironmentPlan::compose(config, Project::profile_only("credentials"), recipes)?;
+    let plan = SandboxPlan::compose(config, Project::profile_only("credentials"), recipes)?;
     create(
         engine,
         config,
@@ -610,7 +616,7 @@ pub(super) async fn credential_shell(
         .find(|recipe| recipe.profile == profile)
         .map(|recipe| recipe.sign_in_command.command())
         .ok_or_else(|| IsolationError::new(format!("no recipe for the {profile} profile")))?;
-    let plan = EnvironmentPlan::compose(config, Project::profile_only("credentials"), recipes)?;
+    let plan = SandboxPlan::compose(config, Project::profile_only("credentials"), recipes)?;
     create(
         engine,
         config,
@@ -636,10 +642,10 @@ pub(super) async fn watcher(
     config: &Config,
     id: String,
     project: Project,
-    recipes: Vec<EnvironmentRecipe>,
+    recipes: Vec<ProfileRecipe>,
     progress: &dyn EnvironmentProgressSink,
 ) -> Result<(), IsolationError> {
-    let mut plan = EnvironmentPlan::compose(config, project, recipes)?;
+    let mut plan = SandboxPlan::compose(config, project, recipes)?;
     // This sandbox runs a provider's read command and nothing else, so it is
     // sized for one command rather than for an agent.
     plan.options.size = SandboxSize::COMMAND;
@@ -652,7 +658,7 @@ async fn create(
     engine: &impl IsolationEngine,
     config: &Config,
     id: String,
-    mut plan: EnvironmentPlan,
+    mut plan: SandboxPlan,
     kind: SandboxKind,
     snapshot: Option<SnapshotSource>,
     progress: &dyn EnvironmentProgressSink,

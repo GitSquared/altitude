@@ -9,23 +9,19 @@ use std::{
 
 use tokio::sync::{mpsc, watch};
 
+use crate::project::Project;
+
 pub(crate) mod capsule;
-mod environment;
 mod git_cache;
 mod microsandbox;
 pub(crate) mod mounts;
+mod sandbox;
 
-/// How long a built environment is kept before it is rebuilt, for the interface
-/// that has to tell an operator when their base was last refreshed.
-pub(crate) use environment::private_directory;
-/// Shared with the VCS providers so capsule commands are quoted one way.
-pub(crate) use environment::shell_quote;
-pub use environment::{
-    DefaultFile, EnvironmentRecipe, GuestPath, PersistentDirectory, SignInCommand,
-};
 pub use microsandbox::MicrosandboxIsolation;
-
-use crate::project::Project;
+pub(crate) use sandbox::private_directory;
+/// Shared with the VCS providers so capsule commands are quoted one way.
+pub(crate) use sandbox::shell_quote;
+pub use sandbox::{DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand};
 
 #[derive(Clone, Debug)]
 pub enum IsolationStatus {
@@ -92,12 +88,12 @@ pub struct SetupStep {
 /// A sandbox made for a profile's login: where it runs, and what it is made from.
 ///
 /// The pieces travel together because a sign-in and a check are the same sandbox
-/// with a different command, and because a sandbox id plus an environment plus its
-/// recipes plus an optional snapshot is one thing rather than four.
+/// with a different command, and because a sandbox id, the profiles it mounts, and
+/// an optional snapshot is one thing rather than three.
 #[derive(Clone)]
 pub struct CredentialSandbox {
     pub id: String,
-    pub recipes: Vec<EnvironmentRecipe>,
+    pub recipes: Vec<ProfileRecipe>,
     /// The built environment to make it from, if there is one to reuse.
     pub snapshot: Option<String>,
 }
@@ -422,7 +418,7 @@ pub trait IsolationEngine: Send + Sync {
         id: String,
         task_snapshot: Option<String>,
         project: Project,
-        recipes: Vec<EnvironmentRecipe>,
+        recipes: Vec<ProfileRecipe>,
         vsock: Vec<VsockRoute>,
         progress: &dyn EnvironmentProgressSink,
     ) -> impl Future<Output = Result<(), IsolationError>> + Send;
@@ -464,7 +460,7 @@ pub trait IsolationEngine: Send + Sync {
         &self,
         id: String,
         project: Project,
-        recipes: Vec<EnvironmentRecipe>,
+        recipes: Vec<ProfileRecipe>,
         progress: &dyn EnvironmentProgressSink,
     ) -> impl Future<Output = Result<(), IsolationError>> + Send;
 
@@ -489,7 +485,7 @@ pub trait IsolationEngine: Send + Sync {
     fn ensure_project(
         &self,
         project: Project,
-        recipes: Vec<EnvironmentRecipe>,
+        recipes: Vec<ProfileRecipe>,
         progress: &dyn EnvironmentProgressSink,
     ) -> impl Future<Output = Result<BaseSandboxSnapshot, IsolationError>> + Send;
 
@@ -518,8 +514,7 @@ pub trait IsolationEngine: Send + Sync {
     /// able to answer "not built here" rather than start a build, because looking at
     /// a page is not the place for minutes of work. A snapshot past its refresh is
     /// still answered with: it runs, and the check only reads a login.
-    fn project_snapshot(&self, project: Project, recipes: Vec<EnvironmentRecipe>)
-    -> Option<String>;
+    fn project_snapshot(&self, project: Project, recipes: Vec<ProfileRecipe>) -> Option<String>;
 
     /// Run profiles' own check commands in one sandbox that is thrown away after
     /// them.

@@ -1,15 +1,15 @@
 //! The settings panel: what the interface shows, which agent drives a task and
-//! how it signs in, the git identity tasks commit with, the environments a task
-//! runs in, and the remotes it can be delegated to.
+//! how it signs in, the git identity tasks commit with, the projects work happens
+//! in, and the remotes it can be delegated to.
 //!
 //! Fullscreen, and three columns. The rail picks a list and the list picks a
 //! row. The third column is not a place the focus goes: it only says what is
 //! known about the row the list has selected, and stays readable while the list
 //! is being used.
 //!
-//! The base environment is built in and therefore has no form: selecting it
-//! describes it instead, which is the only place an operator can see what a
-//! sandbox is actually made of.
+//! A project is a row like any other, and its page is the whole of what Altitude
+//! knows about it. There is no built-in entry to describe instead: a project with
+//! no setup is a project.
 
 mod draw;
 mod form;

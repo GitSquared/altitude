@@ -27,9 +27,9 @@ use tokio::{
 };
 
 use super::{
-    ACCOUNT_FILE, IssueComment, IssueReader, IssueReference, IssueSnapshot, IssueSummary,
-    TrackerAccount, TrackerError, TrackerFuture, TrackerKind, TrackerProvider, TrackerStatus,
-    issue_scope, linear_auth,
+    ACCOUNT_FILE, IssueComment, IssueReader, IssueReference, IssueScope, IssueSnapshot,
+    IssueSummary, TrackerAccount, TrackerError, TrackerFuture, TrackerKind, TrackerProvider,
+    TrackerStatus, linear_auth,
 };
 
 const LIST_ISSUES: &str = "list_issues";
@@ -567,7 +567,7 @@ fn summary_of(issue: &Value) -> Result<IssueSummary, TrackerError> {
         },
         title: string_field(issue, "title")?,
         project,
-        scope: issue_scope(issue)?,
+        scope: scope_of(issue)?,
     })
 }
 
@@ -837,4 +837,28 @@ fn is_not_found(error: &TrackerError) -> bool {
     message.contains("not found")
         || message.contains("could not find")
         || message.contains("does not exist")
+}
+
+/// The scope a Linear issue belongs to: its team.
+///
+/// Absent rather than an error: an issue with no team is one no route can claim.
+pub(super) fn scope_of(issue: &Value) -> Result<Option<IssueScope>, TrackerError> {
+    let Some(team) = issue.get("team").filter(|team| !team.is_null()) else {
+        return Ok(None);
+    };
+    let id = team
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| TrackerError::new("the tracker returned a scope without an id"))?;
+    let key = team.get("key").and_then(Value::as_str).map(str::to_owned);
+    let name = team.get("name").and_then(Value::as_str).map(str::to_owned);
+    let label = format!(
+        "Linear team {}",
+        key.as_deref().or(name.as_deref()).unwrap_or(id)
+    );
+    Ok(Some(IssueScope {
+        id: id.to_owned(),
+        aliases: key.into_iter().collect(),
+        label,
+    }))
 }

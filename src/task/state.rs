@@ -226,11 +226,16 @@ pub struct TaskFacts {
     /// The short name the agent chose for the task, when it has chosen one.
     pub title: Option<String>,
     /// The key of the operator whose work this is, from the earliest recorded
-    /// intent. It scopes their settings, logins and environments on a machine
-    /// that serves several peers.
+    /// intent. It scopes their settings, logins and builds on a machine that
+    /// serves several peers.
     pub operator_id: Option<String>,
     /// How that operator reads to a human. Presentation only.
     pub operator_label: Option<String>,
+    /// The project this task was founded in, as it was recorded then.
+    ///
+    /// Recorded rather than looked up: a task carries the setup, repository,
+    /// caches and instructions it started with, so it keeps them when the project
+    /// is edited or when the task is transferred.
     #[sqlx(json(nullable))]
     pub project: Option<Project>,
     pub agent_conversation_id: Option<String>,

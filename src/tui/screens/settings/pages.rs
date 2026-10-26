@@ -285,7 +285,7 @@ pub(super) fn project_lines(
     lines.push(Line::styled("work arrives from", palette::muted()));
     match &project.tracker {
         Some(route) => {
-            let kind = TrackerKind::ALL[0];
+            let kind = TrackerKind::sole();
             let mut spans = vec![Span::styled(kind.label(), palette::accent())];
             match &route.scope {
                 Some(scope) => {

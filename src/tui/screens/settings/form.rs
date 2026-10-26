@@ -27,11 +27,10 @@ use crate::{
 #[derive(Clone, PartialEq, Eq)]
 pub enum Target {
     NewProject,
-    /// An id when an existing project is being edited, so the fields this form
-    /// does not show survive the save.
+    /// The project being edited, so the fields this form does not show survive
+    /// the save.
     Project {
-        id: Option<String>,
-        name: String,
+        id: String,
     },
     NewRemote,
     Remote {
@@ -64,7 +63,7 @@ impl Target {
     /// The project this form edits, when it edits one.
     pub fn project_id(&self) -> Option<&str> {
         match self {
-            Self::Project { id: Some(id), .. } => Some(id),
+            Self::Project { id } => Some(id),
             _ => None,
         }
     }

@@ -1,15 +1,16 @@
-//! Creating a task: what to do, where it runs, and what drives it.
+//! Creating a task: what to do, what drives it, and which project it is for.
 //!
 //! One question rather than three, asked with the configured defaults already in
 //! place. The prompt is the question, so it gets the room: an intent is prose,
-//! and it is the only thing here that is written rather than chosen. The three
-//! decisions below it are named, because three values on a line say nothing
-//! about which is which.
+//! and it is the only thing here that is written rather than chosen. The choices
+//! below it are named, because two values on a line say nothing about which is
+//! which. Where the task runs is not one of them: its project names a machine, and
+//! a task does not choose.
 //!
 //! The same page can also bind a Linear issue instead of writing an intent. The
 //! prompt becomes the search box, the results take the room the prompt had, and
-//! the three decisions stay exactly where they were. `ctrl-k` moves between the
-//! two, so a free prompt is never a mode you have to remember how to leave.
+//! the choices stay exactly where they were. It opens that way from `ctrl-l`, or
+//! by typing an issue identifier rather than a sentence.
 //!
 //! Searching is a network call, so this page never makes one. It says when a
 //! query is due and what came back, and the loop in `run` does the waiting.
@@ -17,8 +18,8 @@
 //! that arrives after the query changed, or after this page closed, is dropped
 //! rather than shown under the wrong question.
 //!
-//! The three decisions are pills rather than rows: what is chosen is the thing
-//! you press, and enter opens it into a list you can narrow by typing. They sit
+//! The choices are pills rather than rows: what is chosen is the thing you press,
+//! and enter opens it into a list you can narrow by typing. They sit
 //! under the prompt, so the list opens up over what has been written rather than
 //! down over the actions. Each has a chord of its own, so reaching one does not
 //! mean tabbing past the prompt.
@@ -111,7 +112,7 @@ const ORDER: [Focus; 5] = [
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::tui) enum Hit {
     Prompt,
-    /// One of the three decisions, by the control it belongs to.
+    /// One of the choices, by the control it belongs to.
     Pill(Focus),
     /// One offer of the open list, by its place among the offers.
     Offer(usize),
@@ -119,7 +120,10 @@ pub(in crate::tui) enum Hit {
     Create,
 }
 
-/// A machine a task could run on.
+/// A machine a task could be sent to.
+///
+/// The creation page no longer chooses one, because a task runs where its project
+/// runs; the send chooser still does, for the one move a task has.
 pub struct Host {
     /// Where it is reached, or nothing for this machine.
     pub address: Option<String>,
@@ -217,9 +221,8 @@ pub enum Answer {
 impl NewTask {
     /// Ask, with the configured defaults already chosen.
     ///
-    /// `default_host` is where the last task was founded. It is only a default:
-    /// a machine that cannot be given work is not preselected, because a question
-    /// whose answer would not run is worse than the plain one.
+    /// `default_project` is the project in front: the tabs are the context a task
+    /// is created in, so the question opens on the one being looked at.
     pub fn new(
         projects: Vec<Project>,
         default_project: &str,
@@ -492,8 +495,8 @@ impl NewTask {
             self.queued_submit = false;
             return Some(Answer::Cancel);
         }
-        // The three decisions have chords of their own: reaching for a pill with
-        // the keys should not mean tabbing past the prompt to get to it. A chord
+        // The choices have chords of their own: reaching for a pill with the keys
+        // should not mean tabbing past the prompt to get to it. A chord
         // is a detour rather than a move, so closing the list puts the keys back
         // where they were.
         if key.modifiers.contains(KeyModifiers::CONTROL) {

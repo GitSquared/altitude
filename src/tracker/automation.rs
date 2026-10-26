@@ -25,7 +25,7 @@ use sha2::Sha256;
 
 use super::{
     IssueComment, IssueReader, IssueReference, IssueSnapshot, IssueSummary, TrackerError,
-    TrackerKind, TrackerStatus, issue_scope,
+    TrackerKind, TrackerStatus, linear,
 };
 
 const LINEAR_GRAPHQL_URL: &str = "https://api.linear.app/graphql";
@@ -603,7 +603,7 @@ fn summary_of(issue: &Value) -> Result<IssueSummary, TrackerError> {
             .pointer("/project/name")
             .and_then(Value::as_str)
             .map(str::to_owned),
-        scope: issue_scope(issue)?,
+        scope: linear::scope_of(issue)?,
     })
 }
 

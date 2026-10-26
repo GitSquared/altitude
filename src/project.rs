@@ -35,7 +35,7 @@ pub struct Project {
     /// Stable across renames, and what storage and tasks are keyed by.
     pub id: String,
     pub name: String,
-    /// What a task's environment installs on top of the base image.
+    /// What a task's machine installs on top of the base image.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub setup_command: String,
     /// The repository a task starts from, when the project has one.
@@ -51,10 +51,13 @@ pub struct Project {
     /// The harness a task here runs unless one is picked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentKind>,
-    /// The machine a task here runs on unless one is picked.
+    /// The machine this project's tasks run on. Absent is this machine.
+    ///
+    /// A task does not choose: work goes where its project runs, so moving a
+    /// project is moving its work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
-    /// The tracker team whose work this project claims.
+    /// The tracker work this project claims.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracker: Option<TrackerRoute>,
 }
@@ -162,7 +165,7 @@ impl Project {
     }
 
     /// The repository's last path segment, which names its directory.
-    pub fn repository_name(&self) -> Option<String> {
+    fn repository_name(&self) -> Option<String> {
         let repository = self.repository.as_deref()?;
         repository
             .rsplit(['/', ':'])

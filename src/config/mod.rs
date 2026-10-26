@@ -131,11 +131,10 @@ impl Config {
 
     /// A view scoped to one operator.
     ///
-    /// A machine that runs work for several peers must not let one peer's
-    /// logins or environment builds stand in for another's, so everything that
-    /// is theirs moves under their own directory. Everything shared — the
-    /// database, the runtime, the git cache, the workspace base — stays where it
-    /// was.
+    /// A machine that runs work for several peers must not let one peer's logins
+    /// or project builds stand in for another's, so everything that is theirs
+    /// moves under their own directory. Everything shared — the database, the
+    /// runtime, the git cache, the base image — stays where it was.
     pub fn for_operator(&self, owner: &str) -> io::Result<Self> {
         if !is_safe_operator_key(owner) {
             return Err(io::Error::new(

@@ -214,8 +214,8 @@ where
                             .cloned()
                             .ok_or(TaskServiceError::Task(TaskError::MissingProject))?,
                         [
-                            vec![self.agents.engine(kind).environment_recipe()],
-                            vcs::environment_recipes(),
+                            vec![self.agents.engine(kind).profile_recipe()],
+                            vcs::profile_recipes(),
                         ]
                         .concat(),
                         vsock,

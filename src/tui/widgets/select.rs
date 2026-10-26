@@ -12,8 +12,8 @@
 //! operator was reading.
 //!
 //! The offers are the page's; this widget only knows what each one is called and
-//! whether it can be chosen, so one control serves a machine, an agent and an
-//! environment alike. A page whose offers are rebuilt from the network keeps its
+//! whether it can be chosen, so one control serves a project, an agent and a
+//! machine alike. A page whose offers are rebuilt from the network keeps its
 //! choice by value rather than by position, so a remote that dropped out of the
 //! list cannot quietly become a different one.
 

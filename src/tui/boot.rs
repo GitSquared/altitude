@@ -219,7 +219,7 @@ fn isolation_label(status: &IsolationStatus) -> &'static str {
     match status {
         IsolationStatus::Starting | IsolationStatus::InstallingRuntime => "starting up…",
         IsolationStatus::PreparingBaseImage => "fetching the sandbox image…",
-        IsolationStatus::PreparingBasePackages => "installing workspace packages…",
+        IsolationStatus::PreparingBasePackages => "installing base packages…",
         IsolationStatus::Ready | IsolationStatus::Failed(_) => "starting up…",
     }
 }

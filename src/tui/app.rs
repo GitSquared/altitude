@@ -89,7 +89,7 @@ pub(in crate::tui) enum Foreground {
     SendTask(Box<SendTask>),
     /// The creation question, holding the prompt until it is answered.
     NewTask(Box<NewTask>),
-    /// The settings panel: environments, remotes, the interface, the identity.
+    /// The settings panel: projects, remotes, the interface, and the identity.
     Panel,
     Setup(Setup),
     /// What a tool's own sign-in asks, before its terminal opens.
@@ -596,7 +596,7 @@ pub struct App {
     pub(in crate::tui) settings_file: Option<SettingsFile>,
     /// The one link to remotes, shared by every exchange rather than bound per dial.
     pub(in crate::tui) link: Arc<LinkClient>,
-    /// The settings panel: environments, remotes, the interface, and the identity.
+    /// The settings panel: projects, remotes, the interface, and the identity.
     pub(in crate::tui) panel: Panel,
     /// What the keyboard is answering to.
     pub(in crate::tui) foreground: Foreground,
@@ -649,7 +649,7 @@ pub struct App {
     pub(in crate::tui) remote_keys: RemoteKeys,
     /// What those addresses answered with, as of the panel being opened.
     pub(in crate::tui) remembered_keys: Vec<RemoteKey>,
-    /// What the built base environment is made of, as of the panel being opened.
+    /// What the built base image is made of, as of the panel being opened.
     pub(in crate::tui) base_description: Option<EnvironmentDescription>,
     /// The profiles a task mounts, read when the panel opens.
     pub(in crate::tui) profiles: Vec<ProfileSummary>,
@@ -951,9 +951,7 @@ impl App {
     /// How a project's tracker scope is named in its form: the provider's own
     /// word, so the setting does not ask a Linear operator for a "scope".
     fn scope_label(&self) -> String {
-        // One tracker today. A project will name its connection when there is more
-        // than one, and the word comes from that connection's provider.
-        let kind = TrackerKind::ALL[0];
+        let kind = TrackerKind::sole();
         format!(
             "{} {} (optional; empty claims the whole account)",
             kind.label(),
@@ -1580,7 +1578,7 @@ impl App {
         let id = credential_shell_id();
         // A built environment is a wait of a moment, so it gets no wait to look at:
         // the box appears only when there is an install to watch.
-        let progress = (!task_service.credentials().environment_built(profile))
+        let progress = (!task_service.credentials().build_ready(profile))
             .then(|| "Preparing your sign-in…".to_owned());
         self.credential_shell = CredentialShellState::Opening {
             id: id.clone(),
@@ -3059,8 +3057,7 @@ impl App {
             }
             RowKind::Project { project } => Form::for_project(
                 Target::Project {
-                    id: Some(project.id.clone()),
-                    name: project.name.clone(),
+                    id: project.id.clone(),
                 },
                 &project,
                 &self.scope_label(),
@@ -3168,8 +3165,7 @@ impl App {
             RowKind::Project { project } => (
                 format!("Delete the {} project?", project.name),
                 Target::Project {
-                    id: Some(project.id.clone()),
-                    name: project.name.clone(),
+                    id: project.id.clone(),
                 },
             ),
             RowKind::Remote { address, .. } => (
@@ -3366,7 +3362,7 @@ impl App {
         }
         // A project that a task in play belongs to stays: removing it would leave
         // that task with no tab to be found in, which is not a tidy-up.
-        if let Target::Project { id: Some(id), .. } = &target {
+        if let Target::Project { id } = &target {
             if self.projects().len() == 1 {
                 self.say("A project is required; make another one first");
                 return;
@@ -3390,8 +3386,7 @@ impl App {
         let mut proposed = file.settings().clone();
         let mut forget_error = None;
         match &target {
-            Target::Project { id: Some(id), .. } => proposed.remove_project(id),
-            Target::Project { id: None, .. } => {}
+            Target::Project { id } => proposed.remove_project(id),
             Target::Remote { original } => {
                 proposed.remove_remote(original);
                 self.remote_synced.remove(original);
@@ -3412,7 +3407,7 @@ impl App {
             _ => {}
         }
         let removed_project = match &target {
-            Target::Project { id: Some(id), .. } => Some(id.clone()),
+            Target::Project { id } => Some(id.clone()),
             _ => None,
         };
         match file.save(proposed) {
@@ -4632,7 +4627,7 @@ impl App {
                     return;
                 }
                 let question = "Accept this work and close the task?\n\
-                    The agent will be shut down and its workspace cleared up."
+                    The agent will be shut down and its capsule cleared up."
                     .to_owned();
                 self.foreground = Foreground::Confirm(PendingConfirm::confirming_signal(
                     thread.task_id,
@@ -4823,12 +4818,12 @@ impl App {
                     }
                 };
                 let title = task.title().to_owned();
-                let environment = project.name.clone();
+                let project_name = project.name.clone();
                 let agent = task.agent_kind;
                 self.foreground = Foreground::SendTask(Box::new(SendTask::new(
                     task.id,
                     title,
-                    environment,
+                    project_name,
                     agent,
                     hosts,
                 )));
@@ -5587,8 +5582,8 @@ async fn deliver_config(
 }
 
 /// Open the settings panel, reading back the two things it cannot see for
-/// itself: what each address last answered with, and what the built base
-/// environment is made of.
+/// itself: what each address last answered with, and what the built base image is
+/// made of.
 async fn open_panel<E>(app: &mut App, task_service: &TaskService<E>)
 where
     E: IsolationEngine + Clone + 'static,

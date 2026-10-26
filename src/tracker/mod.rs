@@ -48,6 +48,15 @@ impl TrackerKind {
         }
     }
 
+    /// The tracker a route speaks for while a build knows only one.
+    ///
+    /// A route will name its connection when a machine can hold more than one
+    /// tracker. Until then every route is this one's, and saying so here keeps the
+    /// assumption in the tracker module rather than in a caller indexing a list.
+    pub fn sole() -> Self {
+        Self::ALL[0]
+    }
+
     /// The synced profile that carries this tracker's login and account.
     ///
     /// It travels with the rest of a client's profiles and is never mounted:
@@ -111,39 +120,6 @@ pub struct IssueScope {
     pub aliases: Vec<String>,
     /// How this reads in a sentence, e.g. `Linear team ALT`.
     pub label: String,
-}
-
-/// The scope an issue belongs to, read from whichever shape the provider answered
-/// with. Absent rather than an error: a provider may not say, and an issue with no
-/// scope is one no route can claim.
-///
-/// Linear's scope is a team, which is why this knows about `team`; another adapter
-/// fills the same type from its own shape.
-pub(crate) fn issue_scope(issue: &serde_json::Value) -> Result<Option<IssueScope>, TrackerError> {
-    let Some(team) = issue.get("team").filter(|team| !team.is_null()) else {
-        return Ok(None);
-    };
-    let id = team
-        .get("id")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| TrackerError::new("the tracker returned a scope without an id"))?;
-    let key = team
-        .get("key")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned);
-    let name = team
-        .get("name")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned);
-    let label = format!(
-        "Linear team {}",
-        key.as_deref().or(name.as_deref()).unwrap_or(id)
-    );
-    Ok(Some(IssueScope {
-        id: id.to_owned(),
-        aliases: key.into_iter().collect(),
-        label,
-    }))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

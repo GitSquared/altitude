@@ -30,11 +30,11 @@ use crate::project::Project;
 use super::{
     BaseSandboxRecipe, BaseSandboxSnapshot, CREDENTIAL_PREFIX, Command, CommandEvent,
     CommandSession, CredentialCheck, CredentialReport, CredentialSandbox, EnvironmentDescription,
-    EnvironmentProgress, EnvironmentProgressSink, EnvironmentRecipe, IsolationEngine,
-    IsolationError, IsolationStatus, OutputStream, SandboxOptions, SetupStep, VsockRoute,
-    WATCHER_PREFIX,
-    environment::{self, REFRESH_AFTER, private_directory},
-    mount_git_cache, trust_host_roots,
+    EnvironmentProgress, EnvironmentProgressSink, IsolationEngine, IsolationError, IsolationStatus,
+    OutputStream, ProfileRecipe, SandboxOptions, SetupStep, VsockRoute, WATCHER_PREFIX,
+    mount_git_cache,
+    sandbox::{self, REFRESH_AFTER, private_directory},
+    trust_host_roots,
 };
 
 const BASE_IMAGE: &str = "alpine";
@@ -42,7 +42,7 @@ const BASE_IMAGE: &str = "alpine";
 /// How large a capsule's writable layer may grow.
 ///
 /// A ceiling rather than a reservation, like the rest of a sandbox's size. It
-/// stays out of [`SandboxSize`] because it applies only when a sandbox is made
+/// stays out of [`super::SandboxSize`] because it applies only when a sandbox is made
 /// from the image: one restored from a snapshot keeps what the snapshot was
 /// built with.
 const CAPSULE_DISK_MIB: u32 = 15 * 1_024;
@@ -116,7 +116,8 @@ pub struct MicrosandboxIsolation {
 /// One environment build at a time on this machine.
 ///
 /// A setup sandbox is named after the store it builds into, so a second build of
-/// one environment would tear down the first one's sandbox: [`Self::remove_leftover`]
+/// one environment would tear down the first one's sandbox:
+/// [`MicrosandboxIsolation::remove_leftover`]
 /// cannot tell a leftover from a build that is running beside it. A mutex would
 /// only hold within one process, while the sandbox names and the snapshot store
 /// belong to the machine, so the lock is the file itself. Holding it is what
@@ -766,10 +767,10 @@ impl IsolationEngine for MicrosandboxIsolation {
     async fn ensure_project(
         &self,
         project: Project,
-        recipes: Vec<EnvironmentRecipe>,
+        recipes: Vec<ProfileRecipe>,
         progress: &dyn EnvironmentProgressSink,
     ) -> Result<BaseSandboxSnapshot, IsolationError> {
-        environment::ensure_project(self, &self.config, project, recipes, progress).await
+        sandbox::ensure_project(self, &self.config, project, recipes, progress).await
     }
 
     async fn provision(
@@ -777,14 +778,14 @@ impl IsolationEngine for MicrosandboxIsolation {
         id: String,
         task_snapshot: Option<String>,
         project: Project,
-        recipes: Vec<EnvironmentRecipe>,
+        recipes: Vec<ProfileRecipe>,
         vsock: Vec<VsockRoute>,
         progress: &dyn EnvironmentProgressSink,
     ) -> Result<(), IsolationError> {
-        environment::provision(
+        sandbox::provision(
             self,
             &self.config,
-            environment::ProvisionRequest {
+            sandbox::ProvisionRequest {
                 id,
                 snapshot: task_snapshot,
                 project,
@@ -802,25 +803,21 @@ impl IsolationEngine for MicrosandboxIsolation {
         profile: &'static str,
         progress: &dyn EnvironmentProgressSink,
     ) -> Result<String, IsolationError> {
-        environment::credential_shell(self, &self.config, sandbox, profile, progress).await
+        sandbox::credential_shell(self, &self.config, sandbox, profile, progress).await
     }
 
     async fn watcher(
         &self,
         id: String,
         project: Project,
-        recipes: Vec<EnvironmentRecipe>,
+        recipes: Vec<ProfileRecipe>,
         progress: &dyn EnvironmentProgressSink,
     ) -> Result<(), IsolationError> {
-        environment::watcher(self, &self.config, id, project, recipes, progress).await
+        sandbox::watcher(self, &self.config, id, project, recipes, progress).await
     }
 
-    fn project_snapshot(
-        &self,
-        project: Project,
-        recipes: Vec<EnvironmentRecipe>,
-    ) -> Option<String> {
-        let recipe = environment::composed_recipe(&self.config, project, recipes).ok()?;
+    fn project_snapshot(&self, project: Project, recipes: Vec<ProfileRecipe>) -> Option<String> {
+        let recipe = sandbox::composed_recipe(&self.config, project, recipes).ok()?;
         let snapshot = BaseSandboxSnapshotStore::new(&recipe)
             .current()
             .ok()
@@ -834,7 +831,7 @@ impl IsolationEngine for MicrosandboxIsolation {
         checks: Vec<CredentialCheck>,
         progress: &dyn EnvironmentProgressSink,
     ) -> Result<Option<Vec<(&'static str, CredentialReport)>>, IsolationError> {
-        environment::credential_reports(self, &self.config, sandbox, checks, progress).await
+        sandbox::credential_reports(self, &self.config, sandbox, checks, progress).await
     }
 
     async fn remove_leftover_sandboxes(&self) {
@@ -926,9 +923,8 @@ impl IsolationEngine for MicrosandboxIsolation {
     }
 
     fn base_description(&self) -> Option<EnvironmentDescription> {
-        // The base environment is the workspace base: the same snapshot every
-        // other environment is built on top of, so it describes itself from
-        // there rather than from a `coding-base` snapshot of its own.
+        // The base is what every project's build sits on, so it describes itself
+        // from there rather than from a snapshot of its own.
         let store = BaseSandboxSnapshotStore::at(self.config.base_snapshots_dir(), REFRESH_AFTER);
         let snapshot = store.current().ok().flatten()?;
         Some(EnvironmentDescription {
@@ -1113,7 +1109,7 @@ impl IsolationEngine for MicrosandboxIsolation {
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
         let output = sandbox
-            .shell(format!("test -f {}", environment::shell_quote(&path)))
+            .shell(format!("test -f {}", sandbox::shell_quote(&path)))
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
         match output.status().code {

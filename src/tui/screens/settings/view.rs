@@ -1,6 +1,6 @@
 //! The panel's rows, assembled from the application's own state: what the
-//! settings file holds, what each remote last answered, and what the built
-//! environments are made of.
+//! settings file holds, what each remote last answered, and what the built base
+//! image is made of.
 
 use crate::{
     agent::AgentKind,
@@ -20,7 +20,7 @@ use super::{
 
 impl App {
     /// Everything the panel draws, assembled from the settings file and from
-    /// what was read back about each remote and about the base environment.
+    /// what was read back about each remote and about the built base image.
     pub(in crate::tui) fn settings_view(&self) -> View {
         let rows = match self.panel.section {
             Section::Interface => vec![

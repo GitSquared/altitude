@@ -143,10 +143,7 @@ pub fn help_sections() -> Vec<HelpSection> {
                     "Letters (five choices or more)",
                     "Narrow the open list instead of moving in it",
                 ),
-                (
-                    "Ctrl-E · Ctrl-A · Ctrl-H",
-                    "Open the project, agent or machine list",
-                ),
+                ("Ctrl-E · Ctrl-A", "Open the project or agent list"),
                 (
                     "An issue ID or URL",
                     "Switch the prompt to linking that issue",

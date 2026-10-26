@@ -203,7 +203,7 @@ impl Row {
 }
 
 /// Everything the panel draws, assembled by the caller from settings, the
-/// remembered keys, and the built environments.
+/// remembered keys, and what the built base image is made of.
 pub struct View {
     pub rows: Vec<Row>,
     /// What the base image is made of, once it has been built here.

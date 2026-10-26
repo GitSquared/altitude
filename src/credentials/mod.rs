@@ -20,8 +20,8 @@ use crate::{
     agent::{AgentChannels, AgentEngines},
     config::Config,
     isolation::{
-        CREDENTIAL_PREFIX, CredentialCheck, CredentialSandbox, EnvironmentRecipe, IsolationEngine,
-        IsolationError, ProfileSummary, Unwatched, mounts,
+        CREDENTIAL_PREFIX, CredentialCheck, CredentialSandbox, IsolationEngine, IsolationError,
+        ProfileRecipe, ProfileSummary, Unwatched, mounts,
     },
     project::Project,
 };
@@ -108,7 +108,7 @@ where
     /// Asked before a shell is opened, so a wait is only shown when there is one. The
     /// answer is the same lookup the shell makes, so a box that flashes for nothing
     /// cannot happen.
-    pub fn environment_built(&self, profile: &str) -> bool {
+    pub fn build_ready(&self, profile: &str) -> bool {
         self.credential_build(profile)
             .is_ok_and(|(_, snapshot)| snapshot.is_some())
     }
@@ -194,7 +194,7 @@ where
     fn credential_build(
         &self,
         profile: &str,
-    ) -> Result<(Vec<EnvironmentRecipe>, Option<String>), CredentialsError> {
+    ) -> Result<(Vec<ProfileRecipe>, Option<String>), CredentialsError> {
         let recipes = vec![self.recipe(profile)?];
         let snapshot = self
             .isolation
@@ -207,7 +207,7 @@ where
     /// One rather than the set a task gets: a login is written by the CLI that owns it,
     /// so the environment is that CLI's and the wait is its install rather than somebody
     /// else's.
-    fn recipe(&self, profile: &str) -> Result<EnvironmentRecipe, CredentialsError> {
+    fn recipe(&self, profile: &str) -> Result<ProfileRecipe, CredentialsError> {
         mounts::every(&self.agents)
             .into_iter()
             .find(|recipe| recipe.profile == profile)

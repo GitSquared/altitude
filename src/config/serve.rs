@@ -1,9 +1,8 @@
 //! What the serve role reads.
 //!
-//! Its own file rather than the client's. The serve role has no default environment
-//! and
-//! no task prompt; a client has no listening address. Sharing one file would
-//! mean each role carrying fields it cannot interpret.
+//! Its own file rather than the client's. The serve role has no projects of its own
+//! and no task prompt; a client has no listening address. Sharing one file would mean
+//! each role carrying fields it cannot interpret.
 
 use std::{
     env, fmt, fs,

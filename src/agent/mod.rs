@@ -1,4 +1,4 @@
-use crate::isolation::EnvironmentRecipe;
+use crate::isolation::ProfileRecipe;
 use crate::task::{TaskAgentTurnContext, TaskAgentTurnReport};
 pub use channel::AgentChannels;
 use serde::{Deserialize, Serialize};
@@ -153,7 +153,7 @@ const REPORT_SCHEMA: &str = r#"{
 /// owns how its own command line, session storage, and output encoding express
 /// them. Nothing outside this module knows which harness is running.
 pub trait AgentEngine: Send + Sync {
-    fn environment_recipe(&self) -> EnvironmentRecipe;
+    fn profile_recipe(&self) -> ProfileRecipe;
     fn new_conversation_id(&self) -> String;
     fn conversation_transcript_path(&self, conversation_id: &str) -> String;
     /// A work turn: the harness continues the conversation autonomously.
@@ -188,7 +188,7 @@ pub trait TaskReportDecoder: Send {
     fn failure_message(&mut self) -> Option<&str>;
 }
 
-/// The harnesses Altitude can drive, chosen per environment.
+/// The harnesses Altitude can drive, chosen per project.
 #[derive(Clone)]
 pub struct AgentEngines {
     claude: ClaudeCode,

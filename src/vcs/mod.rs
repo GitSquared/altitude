@@ -10,7 +10,7 @@ pub mod tools;
 
 pub use github::GitHub;
 
-use crate::isolation::EnvironmentRecipe;
+use crate::isolation::ProfileRecipe;
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -62,7 +62,7 @@ pub trait VcsProvider {
     ) -> Option<Vec<ContributionObservation>>;
 
     /// What a sandbox has to install before this provider's commands can run.
-    fn environment_recipe(&self) -> EnvironmentRecipe;
+    fn profile_recipe(&self) -> ProfileRecipe;
 }
 
 /// What stands between a contribution and its merge.
@@ -309,10 +309,10 @@ impl ProviderBatch {
 /// A provider is read through its own command, so the sandbox the read runs in has
 /// to have it: this is what a capsule and a watcher both need before either can
 /// watch anything.
-pub fn environment_recipes() -> Vec<EnvironmentRecipe> {
+pub fn profile_recipes() -> Vec<ProfileRecipe> {
     VcsProviderKind::ALL
         .iter()
-        .map(|kind| answering(*kind).environment_recipe())
+        .map(|kind| answering(*kind).profile_recipe())
         .collect()
 }
 
