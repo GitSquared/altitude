@@ -74,6 +74,19 @@ impl HeldConfig {
     }
 }
 
+/// Whether a machine is sent the logins as well as the configuration.
+///
+/// A machine that is about to run a task needs them. One that is merely paired
+/// and holds no project has no reason to keep a copy of an operator's keys: it is
+/// a machine they may have added a week ago and never given work.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Logins {
+    /// The machine is about to run work, so it needs to be able to.
+    Always,
+    /// Send them only when the machine holds a project of its own.
+    WithWork,
+}
+
 impl ConfigBundle {
     pub fn digest(&self) -> io::Result<String> {
         let profiles = self
@@ -112,6 +125,7 @@ impl ConfigBundle {
         mounted: &[&str],
         held: &[ProfileDigest],
         host: Option<&str>,
+        logins: Logins,
     ) -> Result<Self, io::Error> {
         let mut parsed: Settings = toml::from_str(settings).map_err(io::Error::other)?;
         // Filtered before `shared()`, which clears the preference: the machine a
@@ -120,13 +134,22 @@ impl ConfigBundle {
         if let Some(host) = host {
             parsed.retain_projects_for(host);
         }
+        let holds_work = !parsed.projects().is_empty();
         let settings = toml::to_string(&parsed.shared()).map_err(io::Error::other)?;
-        let profiles = mounted
-            .iter()
-            .copied()
-            .chain(TrackerKind::ALL.iter().map(|kind| kind.profile()))
-            .map(|profile| ProfileBundle::of(data_dir, profile))
-            .collect::<io::Result<Vec<_>>>()?;
+        let profiles = match logins {
+            Logins::Always => true,
+            Logins::WithWork => holds_work,
+        };
+        let profiles = if profiles {
+            mounted
+                .iter()
+                .copied()
+                .chain(TrackerKind::ALL.iter().map(|kind| kind.profile()))
+                .map(|profile| ProfileBundle::of(data_dir, profile))
+                .collect::<io::Result<Vec<_>>>()?
+        } else {
+            Vec::new()
+        };
         let mut bundle = Self { settings, profiles };
         bundle.retain_changed_profiles(held);
         Ok(bundle)

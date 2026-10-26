@@ -32,7 +32,7 @@ use tokio::{
 
 use crate::{
     isolation::IsolationEngine,
-    remote::{ConfigBundle, transfer},
+    remote::{ConfigBundle, Logins, transfer},
     task::{TaskEventLoop, TaskExecutionUpdate, TaskService},
 };
 
@@ -637,6 +637,7 @@ where
                                     &profiles,
                                     &[],
                                     Some(&address),
+                                    Logins::WithWork,
                                 )?;
                                 Ok((address, bundle))
                             })

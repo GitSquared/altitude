@@ -107,6 +107,7 @@ where
         &profiles,
         &held,
         Some(address),
+        super::Logins::Always,
     )
     .map_err(message)?;
     let config_bytes = serde_json::to_vec(&bundle).map_err(message)?;
