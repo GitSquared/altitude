@@ -34,6 +34,14 @@ pub struct ServeSettings {
     /// `address:port`, UDP.
     pub listen: String,
     pub linear: Option<LinearSettings>,
+    /// Whether this machine may start work that arrives from a tracker.
+    ///
+    /// Off until the operator says so, and a second lock beside the project's own:
+    /// a project says which team it is for and whether it accepts delegated work,
+    /// and this says whether the machine runs any of it at all. It is the lock that
+    /// still works when the client is asleep and a teammate delegates something.
+    #[serde(default)]
+    pub accept_delegated_work: bool,
 }
 
 impl Default for ServeSettings {
@@ -41,6 +49,7 @@ impl Default for ServeSettings {
         Self {
             listen: default_listen(),
             linear: None,
+            accept_delegated_work: false,
         }
     }
 }
@@ -74,6 +83,10 @@ fn template() -> String {
     format!(
         "# Where clients reach this remote: discovery over TCP, tasks over UDP.\n\
          listen = \"{}\"\n\
+         \n\
+         # Whether this machine may start work delegated from a task tracker. A project\n\
+         # still has to claim the team and accept delegated work itself; both must be on.\n\
+         # accept_delegated_work = true\n\
          \n\
          # A shared app for work delegated from a task tracker. Install it with\n\
          # `altitude serve connect linear`, which prints the exact addresses to register.\n\

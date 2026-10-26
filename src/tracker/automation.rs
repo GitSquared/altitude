@@ -25,7 +25,7 @@ use sha2::Sha256;
 
 use super::{
     IssueComment, IssueReader, IssueReference, IssueSnapshot, IssueSummary, TrackerError,
-    TrackerKind, TrackerStatus,
+    TrackerKind, TrackerStatus, team_of,
 };
 
 const LINEAR_GRAPHQL_URL: &str = "https://api.linear.app/graphql";
@@ -35,7 +35,8 @@ const AGENT_SESSION_EVENT: &str = "AgentSessionEvent";
 const VIEWER_QUERY: &str = "query Viewer { viewer { id app organization { id } } }";
 
 const ISSUE_QUERY: &str = "query Issue($id: String!) { issue(id: $id) { \
-    id identifier title description url project { name } team { id organization { id } } } }";
+    id identifier title description url project { name } \
+    team { id key name organization { id } } } }";
 
 const ISSUE_COMMENTS_QUERY: &str = "query IssueComments($id: String!, $after: String) { \
     issue(id: $id) { comments(first: 100, after: $after, orderBy: createdAt) { \
@@ -602,6 +603,7 @@ fn summary_of(issue: &Value) -> Result<IssueSummary, TrackerError> {
             .pointer("/project/name")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        team: team_of(issue)?,
     })
 }
 

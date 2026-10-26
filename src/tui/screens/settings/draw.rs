@@ -50,7 +50,7 @@ pub fn draw(
         Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
     header::draw(frame, header_area, "SETTINGS", None, None);
     draw_columns(frame, body, panel, view, tick, is_discovering, targets);
-    if let Some(form) = &panel.form {
+    if let Some(form) = &mut panel.form {
         chrome::dim(frame, area);
         draw_form(frame, area, form);
     }

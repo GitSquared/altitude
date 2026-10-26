@@ -263,6 +263,33 @@ pub(super) fn project_lines(
                 .map(|cache| Line::styled(cache.clone(), palette::accent())),
         );
     }
+    lines.push(Line::from(""));
+    lines.push(Line::styled("work arrives from", palette::muted()));
+    match &project.tracker {
+        Some(route) => {
+            let mut spans = vec![
+                Span::styled("Linear", palette::accent()),
+                Span::raw(" · team "),
+                Span::styled(route.team.clone(), palette::accent()),
+            ];
+            if route.accepts_delegated_work {
+                spans.push(Span::styled(
+                    " · accepting delegated work",
+                    palette::primary(),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    " · not accepting delegated work",
+                    palette::muted(),
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
+        None => lines.push(Line::styled(
+            "nothing. A team on a project is what lets work arrive from it.",
+            palette::muted(),
+        )),
+    }
     if let Some(instructions) = &project.instructions {
         lines.push(Line::from(""));
         lines.push(Line::styled("instructions", palette::muted()));

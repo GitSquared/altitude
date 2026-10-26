@@ -86,6 +86,9 @@ struct OwnTasks {
     readiness: watch::Sender<RemoteState>,
     runtime: watch::Receiver<IsolationStatus>,
     tracker: Option<Arc<super::tracker::RemoteTracker>>,
+    /// Whether this machine may start work that arrives from a tracker, whatever
+    /// the project says about itself.
+    accept_delegated_work: bool,
 }
 
 /// Who is watching this machine's tasks, one entry per open watch.
@@ -714,6 +717,11 @@ impl super::tracker::Host for OwnTasks {
         label: String,
     ) -> super::tracker::HostFuture<'_, String> {
         Box::pin(async move {
+            if !self.accept_delegated_work {
+                return Err("This machine is not accepting delegated work. Turn on \
+                     `accept_delegated_work` in its serve.toml and restart it."
+                    .into());
+            }
             let owner = peer.to_string();
             let scoped = self
                 .config
@@ -725,16 +733,46 @@ impl super::tracker::Host for OwnTasks {
             let settings = scoped
                 .load_or_create_settings()
                 .map_err(|error| error.to_string())?;
-            let agent = settings
-                .settings()
-                .agent()
-                .ok_or("Choose an agent in Altitude, then push your setup to this remote")?;
-            let project = settings
+            let Some(team) = issue.issue.team.as_ref() else {
+                return Err(
+                    "This issue names no tracker team, so no project on this machine can claim it."
+                        .into(),
+                );
+            };
+            let Some(project) = settings
                 .settings()
                 .projects()
-                .first()
+                .iter()
+                .find(|project| {
+                    project
+                        .tracker
+                        .as_ref()
+                        .is_some_and(|route| route.claims(&team.id, team.key.as_deref()))
+                })
                 .cloned()
-                .ok_or("No project has been pushed to this remote; push your setup again")?;
+            else {
+                return Err(format!(
+                    "No project on this machine claims Linear team {}. Add the team to a \
+                     project's tracker route in Settings → Projects, then push your setup here.",
+                    team.label()
+                ));
+            };
+            if !project
+                .tracker
+                .as_ref()
+                .is_some_and(|route| route.accepts_delegated_work)
+            {
+                return Err(format!(
+                    "Project {:?} claims this team but is not authorized to accept delegated \
+                     work. Turn on \"Accept delegated work\" for it in Settings → Projects, then \
+                     push your setup here.",
+                    project.name
+                ));
+            }
+            let agent = project
+                .agent
+                .or_else(|| settings.settings().agent())
+                .ok_or("Choose an agent in Altitude, then push your setup to this remote")?;
             let task = self
                 .tasks
                 .create_issue_for_operator(
@@ -1202,6 +1240,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         tracker: linear_runtime
             .as_ref()
             .map(|runtime| runtime.tracker.clone()),
+        accept_delegated_work: settings.accept_delegated_work,
     });
     if let Some(runtime) = linear_runtime {
         let tracker = runtime.tracker.clone();

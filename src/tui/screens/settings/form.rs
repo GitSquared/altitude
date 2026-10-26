@@ -1,5 +1,10 @@
 //! The page that edits one project or remote, and the fields behind it.
+//!
+//! A project has more to say than fits a modal on a short terminal, so the fields
+//! scroll with the caret: the block being edited is always on screen, and the ones
+//! above it are one shift-tab away.
 
+use crossterm::event::KeyEvent;
 use ratatui::{
     Frame,
     layout::Rect,
@@ -7,9 +12,12 @@ use ratatui::{
     widgets::{Block, BorderType, Clear, Padding, Paragraph},
 };
 
-use crate::tui::widgets::{
-    chrome, palette,
-    text::{Field, FieldStyle, TextBox},
+use crate::{
+    project::Project,
+    tui::widgets::{
+        chrome, palette,
+        text::{Field, FieldStyle, TextBox},
+    },
 };
 
 /// What an action applies to: the list it saves into, and what it replaces.
@@ -45,11 +53,6 @@ impl Target {
         }
     }
 
-    /// The first field's label: what it asks for.
-    pub fn primary_label(&self) -> &'static str {
-        if self.is_remote() { "Address" } else { "Name" }
-    }
-
     /// What the form replaces, if anything.
     pub fn original(&self) -> Option<&str> {
         match self {
@@ -65,22 +68,18 @@ impl Target {
             _ => None,
         }
     }
-
-    /// The fields tab walks, in order.
-    pub fn fields(&self) -> &'static [Focus] {
-        if self.is_remote() {
-            &[Focus::Primary, Focus::Cancel, Focus::Save]
-        } else {
-            &[Focus::Primary, Focus::Setup, Focus::Cancel, Focus::Save]
-        }
-    }
 }
 
 /// Which part of the form holds the caret.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Primary,
+    Repository,
     Setup,
+    Caches,
+    Instructions,
+    Team,
+    Accept,
     Cancel,
     Save,
 }
@@ -88,32 +87,180 @@ pub enum Focus {
 impl Focus {
     /// Whether this part takes typed text, and so owns enter and escape.
     pub fn takes_text(self) -> bool {
-        matches!(self, Self::Primary | Self::Setup)
+        matches!(
+            self,
+            Self::Primary
+                | Self::Repository
+                | Self::Setup
+                | Self::Caches
+                | Self::Instructions
+                | Self::Team
+        )
     }
+
+    /// Whether enter is a newline here rather than a move to the next field.
+    fn is_multiline(self) -> bool {
+        matches!(self, Self::Setup | Self::Caches | Self::Instructions)
+    }
+}
+
+/// What one block of the form is, which decides how tall it is and what it draws.
+#[derive(Clone, Copy)]
+enum Kind {
+    Single,
+    Multi,
+    Toggle,
+}
+
+impl Kind {
+    /// The rows a block needs, its label included.
+    fn rows(self) -> u16 {
+        match self {
+            Self::Single => 4,
+            Self::Multi => 6,
+            Self::Toggle => 1,
+        }
+    }
+}
+
+struct Group {
+    focus: Focus,
+    label: &'static str,
+    kind: Kind,
+}
+
+fn groups(project: bool) -> Vec<Group> {
+    if !project {
+        return vec![Group {
+            focus: Focus::Primary,
+            label: "Address",
+            kind: Kind::Single,
+        }];
+    }
+    vec![
+        Group {
+            focus: Focus::Primary,
+            label: "Name",
+            kind: Kind::Single,
+        },
+        Group {
+            focus: Focus::Repository,
+            label: "Repository",
+            kind: Kind::Single,
+        },
+        Group {
+            focus: Focus::Setup,
+            label: "Setup command",
+            kind: Kind::Multi,
+        },
+        Group {
+            focus: Focus::Caches,
+            label: "Caches, one path per line",
+            kind: Kind::Multi,
+        },
+        Group {
+            focus: Focus::Instructions,
+            label: "Instructions for the agent",
+            kind: Kind::Multi,
+        },
+        Group {
+            focus: Focus::Team,
+            label: "Tracker team",
+            kind: Kind::Single,
+        },
+        Group {
+            focus: Focus::Accept,
+            label: "Accept delegated work",
+            kind: Kind::Toggle,
+        },
+    ]
 }
 
 /// A page over the panel, holding one project or one remote.
 pub struct Form {
     pub target: Target,
-    /// The project's name, or the remote's address.
+    /// The name, or the remote's address.
     pub primary: Field,
+    pub repository: Field,
     pub setup: TextBox,
+    pub caches: TextBox,
+    pub instructions: TextBox,
+    pub team: Field,
+    pub accepts_delegated_work: bool,
     pub focus: Focus,
+    /// The first group drawn, so the caret's group is always on screen.
+    first_group: usize,
 }
 
+/// Every focus a project form walks, in order.
+const PROJECT_FIELDS: [Focus; 9] = [
+    Focus::Primary,
+    Focus::Repository,
+    Focus::Setup,
+    Focus::Caches,
+    Focus::Instructions,
+    Focus::Team,
+    Focus::Accept,
+    Focus::Cancel,
+    Focus::Save,
+];
+
+const REMOTE_FIELDS: [Focus; 3] = [Focus::Primary, Focus::Cancel, Focus::Save];
+
 impl Form {
-    pub fn new(target: Target, primary: &str, setup: &str) -> Self {
+    /// The form for a project that does not exist yet, with the caches a new
+    /// project starts with already filled in.
+    pub fn new_project() -> Self {
+        let project = Project::new("");
+        Self::for_project(Target::NewProject, &project)
+    }
+
+    pub fn for_project(target: Target, project: &Project) -> Self {
         Self {
             target,
-            primary: Field::with(primary),
-            setup: TextBox::new(setup),
+            primary: Field::with(&project.name),
+            repository: Field::with(project.repository.as_deref().unwrap_or_default()),
+            setup: TextBox::new(&project.setup_command),
+            caches: TextBox::new(&project.caches.join("\n")),
+            instructions: TextBox::new(project.instructions.as_deref().unwrap_or_default()),
+            team: Field::with(
+                project
+                    .tracker
+                    .as_ref()
+                    .map(|route| route.team.as_str())
+                    .unwrap_or_default(),
+            ),
+            accepts_delegated_work: project
+                .tracker
+                .as_ref()
+                .is_some_and(|route| route.accepts_delegated_work),
             focus: Focus::Primary,
+            first_group: 0,
+        }
+    }
+
+    pub fn for_remote(target: Target, address: &str) -> Self {
+        Self {
+            target,
+            primary: Field::with(address),
+            repository: Field::with(""),
+            setup: TextBox::new(""),
+            caches: TextBox::new(""),
+            instructions: TextBox::new(""),
+            team: Field::with(""),
+            accepts_delegated_work: false,
+            focus: Focus::Primary,
+            first_group: 0,
         }
     }
 
     /// Move the caret to the next or previous field, wrapping.
     pub fn move_focus(&mut self, forward: bool) {
-        let fields = self.target.fields();
+        let fields: &[Focus] = if self.target.is_remote() {
+            &REMOTE_FIELDS
+        } else {
+            &PROJECT_FIELDS
+        };
         let at = fields
             .iter()
             .position(|focus| *focus == self.focus)
@@ -124,6 +271,24 @@ impl Form {
             (at + fields.len() - 1) % fields.len()
         };
         self.focus = fields[next];
+    }
+
+    /// Whether enter means a newline rather than the next field.
+    pub fn enters_newline(&self) -> bool {
+        self.focus.is_multiline()
+    }
+
+    /// Give a key to the box that has the caret.
+    pub fn handle_text(&mut self, key: KeyEvent) {
+        match self.focus {
+            Focus::Primary => self.primary.handle_key(key),
+            Focus::Repository => self.repository.handle_key(key),
+            Focus::Setup => self.setup.handle_key(key),
+            Focus::Caches => self.caches.handle_key(key),
+            Focus::Instructions => self.instructions.handle_key(key),
+            Focus::Team => self.team.handle_key(key),
+            _ => {}
+        }
     }
 
     /// Whether the form is ready to save, and why not when it is not.
@@ -137,13 +302,31 @@ impl Form {
         }
         None
     }
+
+    /// The caches the form lists, one per line, without blanks.
+    pub fn cache_paths(&self) -> Vec<String> {
+        self.caches
+            .value()
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// What the instructions box says, when it says anything.
+    pub fn instruction_text(&self) -> Option<String> {
+        let text = self.instructions.value();
+        (!text.trim().is_empty()).then(|| text.trim_end().to_owned())
+    }
 }
 
-pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &Form) {
-    let area = if form.target.is_remote() {
-        chrome::centered(area, 45, chrome::modal_height(5))
+pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &mut Form) {
+    let project = !form.target.is_remote();
+    let area = if project {
+        chrome::centered_at_most(area, 80, 84, area.height.saturating_sub(2).clamp(10, 40))
     } else {
-        chrome::centered(area, 65, chrome::modal_height(14))
+        chrome::centered_at_most(area, 60, 60, chrome::modal_height(5))
     };
     let block = Block::bordered()
         .title(format!(" {} ", form.target.title()))
@@ -158,34 +341,39 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &Form) {
 
     let body = chrome::body(inner);
     let fields = body.content;
-    // Four rows hold the first field and its label; whatever a short window
-    // leaves the rest takes, so a small terminal loses the setup box rather than
-    // the whole page.
-    let named = Rect {
-        height: fields.height.min(4),
-        ..fields
-    };
+    let groups = groups(project);
+    // The caret's group must be on screen, so the window of drawn groups starts
+    // at the first one that lets it fit.
+    let focused = groups
+        .iter()
+        .position(|candidate| candidate.focus == form.focus)
+        .unwrap_or(0);
+    form.first_group = form.first_group.min(focused);
+    loop {
+        let used: u16 = groups
+            .iter()
+            .skip(form.first_group)
+            .map(|candidate| candidate.kind.rows() + 1)
+            .sum();
+        if used <= fields.height || form.first_group == focused {
+            break;
+        }
+        form.first_group += 1;
+    }
 
-    draw_label(frame, named, form.target.primary_label());
-    form.primary.draw(
-        frame,
-        field_box(named),
-        &FieldStyle {
-            focused: form.focus == Focus::Primary,
-            title: None,
-            prefix: "",
-        },
-    );
-
-    if !form.target.is_remote() {
-        let setup = Rect {
-            y: named.bottom(),
-            height: fields.height.saturating_sub(named.height),
+    let mut y = fields.y;
+    for candidate in groups.iter().skip(form.first_group) {
+        let height = candidate.kind.rows();
+        if y + height > fields.bottom() {
+            break;
+        }
+        let rect = Rect {
+            y,
+            height,
             ..fields
         };
-        draw_label(frame, setup, "Setup command");
-        form.setup
-            .draw(frame, field_box(setup), form.focus == Focus::Setup);
+        draw_group(frame, rect, form, candidate);
+        y += height + 1;
     }
 
     // The actions sit at the bottom right, where the eye ends up.
@@ -200,6 +388,56 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &Form) {
     );
 }
 
+fn draw_group(frame: &mut Frame, area: Rect, form: &Form, group: &Group) {
+    let focused = form.focus == group.focus;
+    match group.kind {
+        Kind::Single => {
+            draw_label(frame, area, group.label);
+            let field = match group.focus {
+                Focus::Primary => &form.primary,
+                Focus::Repository => &form.repository,
+                Focus::Team => &form.team,
+                _ => return,
+            };
+            field.draw(
+                frame,
+                below_label(area),
+                &FieldStyle {
+                    focused,
+                    title: None,
+                    prefix: "",
+                },
+            );
+        }
+        Kind::Multi => {
+            draw_label(frame, area, group.label);
+            let text = match group.focus {
+                Focus::Setup => &form.setup,
+                Focus::Caches => &form.caches,
+                Focus::Instructions => &form.instructions,
+                _ => return,
+            };
+            text.draw(frame, below_label(area), focused);
+        }
+        Kind::Toggle => {
+            let mark = if form.accepts_delegated_work {
+                "[x]"
+            } else {
+                "[ ]"
+            };
+            let style = if focused {
+                palette::primary().bold()
+            } else {
+                palette::muted()
+            };
+            frame.render_widget(
+                Paragraph::new(Line::styled(format!("{mark} {}", group.label), style)),
+                area,
+            );
+        }
+    }
+}
+
 fn draw_label(frame: &mut Frame, area: Rect, text: &str) {
     frame.render_widget(
         Paragraph::new(Line::styled(text, palette::muted())),
@@ -211,7 +449,7 @@ fn draw_label(frame: &mut Frame, area: Rect, text: &str) {
 }
 
 /// The box a field's input is drawn in, one row below its label.
-fn field_box(area: Rect) -> Rect {
+fn below_label(area: Rect) -> Rect {
     Rect {
         y: area.y.saturating_add(1),
         height: area.height.saturating_sub(1),

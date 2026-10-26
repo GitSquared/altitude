@@ -27,7 +27,7 @@ use crate::{
         credential_shell_id,
     },
     isolation::{EnvironmentDescription, EnvironmentProgress, IsolationEngine, ProfileSummary},
-    project::Project,
+    project::{Project, TrackerRoute, normalize_repository},
     remote::{
         Announcement, ConfigBundle, ConfigPush, DiscoveredRemote, DiscoveryEvent, LinkClient,
         RemoteKey, RemoteKeyStatus, RemoteKeys, RemoteState, TaskOrigin, TaskRequest, TaskSummary,
@@ -1650,8 +1650,8 @@ impl App {
             }
             KeyCode::Char('n') if self.panel.section.grows() => {
                 self.panel.form = Some(match self.panel.section {
-                    Section::Remotes => Form::new(Target::NewRemote, "", ""),
-                    _ => Form::new(Target::NewProject, "", ""),
+                    Section::Remotes => Form::for_remote(Target::NewRemote, ""),
+                    _ => Form::new_project(),
                 });
             }
             _ if is_remove(key) && self.selected_row().is_some_and(|row| row.is_removable()) => {
@@ -2927,21 +2927,19 @@ impl App {
                 self.say("Press enter to sign in to Linear");
                 return;
             }
-            RowKind::Project { project } => Form::new(
+            RowKind::Project { project } => Form::for_project(
                 Target::Project {
                     id: Some(project.id.clone()),
                     name: project.name.clone(),
                 },
-                &project.name,
-                &project.setup_command,
+                &project,
             ),
             RowKind::Discovered(_) => return,
-            RowKind::Remote { address, .. } => Form::new(
+            RowKind::Remote { address, .. } => Form::for_remote(
                 Target::Remote {
                     original: address.clone(),
                 },
                 &address,
-                "",
             ),
         });
     }
@@ -3088,17 +3086,16 @@ impl App {
             _ if is_secondary(key) => save = true,
             KeyCode::BackTab => form.move_focus(false),
             KeyCode::Tab => form.move_focus(true),
-            KeyCode::Enter if form.focus == Focus::Setup => form.setup.handle_key(key),
+            KeyCode::Enter | KeyCode::Char(' ') if form.focus == Focus::Accept => {
+                form.accepts_delegated_work = !form.accepts_delegated_work;
+            }
+            KeyCode::Enter if form.enters_newline() => form.handle_text(key),
             KeyCode::Enter => match form.focus {
                 Focus::Cancel => keep = false,
                 Focus::Save => save = true,
                 _ => form.move_focus(true),
             },
-            _ => match form.focus {
-                Focus::Primary => form.primary.handle_key(key),
-                Focus::Setup => form.setup.handle_key(key),
-                _ => {}
-            },
+            _ => form.handle_text(key),
         }
         if save {
             let added = match form.target {
@@ -3125,6 +3122,22 @@ impl App {
             self.say(refusal.to_owned());
             return false;
         }
+        // Canonical before the file is borrowed, because a bad URL is the form's
+        // answer to give rather than the file's.
+        let repository = {
+            let value = form.repository.value().trim();
+            if value.is_empty() {
+                None
+            } else {
+                match normalize_repository(value) {
+                    Ok(repository) => Some(repository),
+                    Err(error) => {
+                        self.say(error.to_string());
+                        return false;
+                    }
+                }
+            }
+        };
         let Some(file) = self.settings_file.as_mut() else {
             self.problem("Settings are unavailable; fix the file and reopen");
             return false;
@@ -3133,15 +3146,23 @@ impl App {
         match &form.target {
             Target::NewProject | Target::Project { .. } => {
                 let name = form.primary.value().trim().to_owned();
-                // The page edits a name and a setup; everything else on the
-                // project is carried across so a rename is not a reset.
+                // The page edits some fields; everything else on the project is
+                // carried across so a rename is not a reset.
                 let mut project = form
                     .target
                     .project_id()
                     .and_then(|id| proposed.project(id).cloned())
                     .unwrap_or_else(|| Project::new(name.clone()));
                 project.name = name;
+                project.repository = repository;
                 project.setup_command = form.setup.value();
+                project.caches = form.cache_paths();
+                project.instructions = form.instruction_text();
+                let team = form.team.value().trim();
+                project.tracker = (!team.is_empty()).then(|| TrackerRoute {
+                    team: team.to_owned(),
+                    accepts_delegated_work: form.accepts_delegated_work,
+                });
                 proposed.add_project(project);
             }
             Target::NewRemote | Target::Remote { .. } => {

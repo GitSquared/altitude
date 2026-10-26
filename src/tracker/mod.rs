@@ -85,11 +85,62 @@ pub struct IssueReference {
     pub url: String,
 }
 
+/// The team an issue belongs to, read from whichever shape the provider answered
+/// with. Absent rather than an error: a provider may not say, and an issue without
+/// a team is one no route can claim.
+pub(crate) fn team_of(issue: &serde_json::Value) -> Result<Option<TrackerTeam>, TrackerError> {
+    let Some(team) = issue.get("team").filter(|team| !team.is_null()) else {
+        return Ok(None);
+    };
+    let id = team
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| TrackerError::new("the tracker returned a team without an id"))?;
+    Ok(Some(TrackerTeam {
+        id: id.to_owned(),
+        key: team
+            .get("key")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        name: team
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+    }))
+}
+
+/// The team an issue belongs to, which is what a project's tracker route claims.
+///
+/// The id is what a tracker guarantees, the key is what a person types, and the
+/// name is what a page reads. A route may name either of the first two.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TrackerTeam {
+    pub id: String,
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+impl TrackerTeam {
+    /// What to call this team when telling an operator which one a route missed.
+    pub fn label(&self) -> &str {
+        self.key
+            .as_deref()
+            .or(self.name.as_deref())
+            .unwrap_or(&self.id)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IssueSummary {
     pub reference: IssueReference,
     pub title: String,
     pub project: Option<String>,
+    /// The team that owns the issue, when the provider says. A route is a claim on
+    /// a team, so an issue without one cannot be routed.
+    #[serde(default)]
+    pub team: Option<TrackerTeam>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

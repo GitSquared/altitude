@@ -54,6 +54,35 @@ pub struct Project {
     /// The machine a task here runs on unless one is picked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
+    /// The tracker team whose work this project claims.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracker: Option<TrackerRoute>,
+}
+
+/// Work arriving from a task tracker, and what it may do here.
+///
+/// A route is a claim: this project, and only this one, is what issues from that
+/// team become. Without one, a delegated issue starts nothing and says so.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TrackerRoute {
+    /// The team, by key (`ALT`) or id. Either is accepted, so an operator can type
+    /// what Linear shows and a route can be made exact by pasting an id.
+    pub team: String,
+    /// Whether a delegated issue may start work without an operator at the
+    /// keyboard.
+    ///
+    /// Off until the operator says otherwise. The route alone says which team the
+    /// project is for; this says whether Altitude may act on it unattended.
+    #[serde(default)]
+    pub accepts_delegated_work: bool,
+}
+
+impl TrackerRoute {
+    /// Whether this route claims the team an issue named.
+    pub fn claims(&self, id: &str, key: Option<&str>) -> bool {
+        self.team.eq_ignore_ascii_case(id)
+            || key.is_some_and(|key| self.team.eq_ignore_ascii_case(key))
+    }
 }
 
 impl Project {
@@ -71,6 +100,7 @@ impl Project {
             instructions: None,
             agent: None,
             host: None,
+            tracker: None,
         }
     }
 
@@ -89,6 +119,7 @@ impl Project {
             instructions: None,
             agent: None,
             host: None,
+            tracker: None,
         }
     }
 
@@ -185,6 +216,21 @@ impl Project {
         }
         if let Some(repository) = &self.repository {
             normalize_repository(repository)?;
+        }
+        if let Some(route) = &self.tracker {
+            let team = route.team.trim();
+            if team.is_empty()
+                || team.len() > 64
+                || team != route.team
+                || !team.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+                })
+            {
+                return Err(ProjectError(format!(
+                    "tracker team {:?} must be a team key or id: 1-64 letters, numbers, hyphens, or underscores",
+                    route.team
+                )));
+            }
         }
         for cache in &self.caches {
             validate_cache(cache)?;

@@ -1002,9 +1002,11 @@ impl RemoteTracker {
     /// A remote could not start the work; say what to fix instead of retrying
     /// forever.
     async fn post_start_guidance(&self, session_id: &str, reason: &str) -> Result<(), String> {
+        // The reason is written where it was refused, so it can name the machine,
+        // the project, or the team it is about; this only frames it.
         let body = format!(
-            "Altitude could not start this work on the machine that owns it.\n\n{reason}\n\n\
-             Connect that machine in Altitude, sync your setup, then reply here to try again."
+            "Altitude did not start this work.\n\n{reason}\n\n\
+             Reply here to try again once it is resolved."
         );
         self.config
             .automation
