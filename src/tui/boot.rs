@@ -8,7 +8,7 @@ use ratatui::{
     text::Line,
     widgets::Paragraph,
 };
-use tokio::{signal::unix::Signal, sync::watch};
+use tokio::{signal::unix::Signal, sync::watch, time};
 
 use crate::tui::{
     background::terrain,
@@ -109,16 +109,27 @@ async fn wait_for<T>(
 ) -> io::Result<Option<T>> {
     let mut events = EventStream::new();
     let mut animation = shimmer_clock();
+    let mut backdrop = time::interval(terrain::CLOCK);
+    backdrop.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+    let mut terrain = terrain::Terrain::default();
     let mut shimmer = 0;
     tokio::pin!(operation);
 
     loop {
-        terminal.draw(|frame| draw(frame, label(), animations.then_some(shimmer)))?;
+        terminal.draw(|frame| {
+            draw(
+                frame,
+                label(),
+                animations.then_some(shimmer),
+                animations.then_some(&mut terrain),
+            )
+        })?;
         tokio::select! {
             _ = terminate.recv() => return Ok(None),
             _ = interrupt.recv() => return Ok(None),
             result = &mut operation => return result.map(Some),
             _ = animation.tick(), if animations => shimmer = shimmer.wrapping_add(1),
+            _ = backdrop.tick(), if animations => terrain.advance(),
             event = events.next() => {
                 let Some(event) = event else { return Ok(None) };
                 if let Some(key) = event?.as_key_press_event()
@@ -146,8 +157,9 @@ pub async fn confirm(
     answers: &[&str],
 ) -> io::Result<Option<usize>> {
     let mut events = EventStream::new();
-    let mut shimmer = 0;
-    let mut animation = shimmer_clock();
+    let mut backdrop = time::interval(terrain::CLOCK);
+    backdrop.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+    let mut terrain = terrain::Terrain::default();
     let mut chosen = 0;
     loop {
         terminal.draw(|frame| {
@@ -157,13 +169,13 @@ pub async fn confirm(
                 question,
                 answers,
                 chosen,
-                animations.then_some(shimmer),
+                animations.then_some(&mut terrain),
             );
         })?;
         tokio::select! {
             _ = terminate.recv() => return Ok(None),
             _ = interrupt.recv() => return Ok(None),
-            _ = animation.tick(), if animations => shimmer = shimmer.wrapping_add(1),
+            _ = backdrop.tick(), if animations => terrain.advance(),
             event = events.next() => {
                 let Some(event) = event else { return Ok(None) };
                 let Some(key) = event?.as_key_press_event() else { continue };
@@ -191,12 +203,16 @@ fn draw_question(
     question: &str,
     answers: &[&str],
     chosen: usize,
-    tick: Option<usize>,
+    mut terrain: Option<&mut terrain::Terrain>,
 ) {
-    if let Some(tick) = tick {
-        terrain::draw(frame, frame.area(), tick);
+    let area = frame.area();
+    if let Some(terrain) = &mut terrain {
+        terrain.mark(frame.buffer_mut(), area);
     }
-    question::draw(frame, frame.area(), title, question, answers, chosen);
+    question::draw(frame, area, title, question, answers, chosen);
+    if let Some(terrain) = &mut terrain {
+        terrain.draw(frame.buffer_mut(), area);
+    }
 }
 
 fn isolation_label(status: &IsolationStatus) -> &'static str {
@@ -208,9 +224,15 @@ fn isolation_label(status: &IsolationStatus) -> &'static str {
     }
 }
 
-fn draw(frame: &mut Frame, label: &str, tick: Option<usize>) {
-    if let Some(tick) = tick {
-        terrain::draw(frame, frame.area(), tick);
+fn draw(
+    frame: &mut Frame,
+    label: &str,
+    tick: Option<usize>,
+    terrain: Option<&mut terrain::Terrain>,
+) {
+    let area = frame.area();
+    if let Some(terrain) = terrain.as_ref() {
+        terrain.mark(frame.buffer_mut(), area);
     }
     let [_, title_area, _, status, _] = Layout::vertical([
         Constraint::Fill(1),
@@ -230,4 +252,7 @@ fn draw(frame: &mut Frame, label: &str, tick: Option<usize>) {
         Paragraph::new(Line::from_iter(shimmer(label, tick))).centered(),
         status,
     );
+    if let Some(terrain) = terrain {
+        terrain.draw(frame.buffer_mut(), area);
+    }
 }

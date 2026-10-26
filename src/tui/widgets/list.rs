@@ -9,6 +9,8 @@
 //! A row can start a group with a section heading. Rows may then differ in
 //! height, so the cursor measures the list when it decides how many fit.
 
+use std::time::Duration;
+
 use ratatui::{
     Frame,
     layout::Rect,
@@ -262,14 +264,23 @@ impl Cursor {
         }
     }
 
+    /// Whether the view is still catching up with where it should be.
+    pub fn is_gliding(&self) -> bool {
+        self.offset != self.target
+    }
+
     /// Move the view toward where it should be, easing out so a long jump does
     /// not crawl. Answers whether anything moved, which is what asks for a frame.
-    pub fn glide(&mut self) -> bool {
+    ///
+    /// The step is measured in elapsed time, not in frames, so the faster loop
+    /// eases toward the target instead of jumping there.
+    pub fn glide(&mut self, elapsed: Duration) -> bool {
         if self.offset == self.target {
             return false;
         }
         let gap = self.offset.abs_diff(self.target);
-        let step = (gap / 2).max(1);
+        let fraction = 1.0 - 0.5_f64.powf(elapsed.as_secs_f64() / 0.08);
+        let step = ((gap as f64 * fraction) as usize).max(1);
         self.offset = if self.offset < self.target {
             (self.offset + step).min(self.target)
         } else {

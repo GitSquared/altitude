@@ -120,6 +120,28 @@ fn draw_when(
     Ok(())
 }
 
+/// Move only the field, against the frame the last full draw left.
+///
+/// The interface above the field has not changed, so its cells can be replayed
+/// rather than laid out again. Returns whether it could: a resize or a missing
+/// snapshot needs the full draw.
+fn draw_backdrop(
+    terminal: &mut DefaultTerminal,
+    snapshot: &mut Option<Buffer>,
+    terrain: &mut terrain::Terrain,
+) -> io::Result<bool> {
+    terminal.autoresize()?;
+    let area = terminal.get_frame().area();
+    let Some(previous) = snapshot.as_ref().filter(|buffer| buffer.area == area) else {
+        return Ok(false);
+    };
+    let mut next = previous.clone();
+    terrain.repaint(&mut next);
+    mem::swap(terminal.current_buffer_mut(), &mut next);
+    terminal.apply_buffer()?;
+    Ok(true)
+}
+
 struct EventReplies<'a> {
     landings: &'a mpsc::UnboundedSender<Result<String, String>>,
     credentials: &'a mpsc::UnboundedSender<CredentialShellEvent>,
@@ -205,6 +227,10 @@ where
     let mut refresh = time::interval(Duration::from_secs(2));
     let mut shell_notice = time::interval(Duration::from_millis(100));
     let mut shimmer = shimmer_clock();
+    // The field drifts on its own, slower clock. It is not a reason for the
+    // foreground to redraw, and the foreground is not a reason for it to.
+    let mut backdrop = time::interval(terrain::CLOCK);
+    backdrop.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     // A wait still has progress to report with animations off, so the clock that
     // reads it is not the one that moves the screen. Skip, so a long wait with
     // nothing to report does not come back as a burst of catch-up ticks.
@@ -277,6 +303,10 @@ where
     // its select and the terminal is left alone. While an effect runs, the clock
     // wakes it fast enough for the animation to move smoothly.
     let mut redraw = true;
+    let mut backdrop_moved = false;
+    // The frame a full draw left, so a frame where only the field moved does not
+    // lay out the interface again.
+    let mut snapshot: Option<Buffer> = None;
     // Comments on a signal thread come from the agent's tools, not from this
     // loop, so the service tells whoever is showing the thread instead of the
     // screen asking on a clock.
@@ -374,19 +404,34 @@ where
         }
         was_modal = is_modal;
         was_panel = is_panel;
+        let can_patch = app.animations()
+            && app.open_shell().is_none()
+            && !app.needs_shimmer()
+            && !effects.is_running()
+            && leaving.is_none();
+        if backdrop_moved {
+            if !redraw && can_patch && draw_backdrop(terminal, &mut snapshot, &mut app.terrain)? {
+                backdrop_moved = false;
+            } else {
+                redraw = true;
+                backdrop_moved = false;
+            }
+        }
+        let keep_snapshot = can_patch;
         draw_when(&mut redraw, terminal, |frame| {
             let hints = app.hints();
             let content = widgets::chrome::draw(frame, &hints, app.keyboard_hints());
             // A screen replaces the grid rather than lying over it, so the grid is
-            // not drawn underneath one. The field is one layer under every screen:
-            // drawn once, on the shared clock, so moving between screens does not
-            // restart it or give it a new origin.
+            // not drawn underneath one. The field is one layer under every screen,
+            // so moving between screens does not restart it or give it a new
+            // origin. Each screen marks the cells it has not covered, and the
+            // field is painted into what is left once everything above it is drawn.
             let screen = app.foreground.shows_settings() || app.foreground.shows_signals();
             if screen {
                 frame.render_widget(Clear, content);
             }
             if app.animations() {
-                terrain::draw(frame, content, app.shimmer);
+                app.terrain.mark(frame.buffer_mut(), content);
             }
             if !screen {
                 screens::tasks::draw(frame, content, &mut app);
@@ -505,6 +550,18 @@ where
                     app.conflict_choice,
                 ));
             }
+            // Keep what the interface looks like before the field goes in. That
+            // is the frame a later field-only tick starts from, so it never has to
+            // lay the interface out again just to move the contours.
+            if keep_snapshot {
+                snapshot = Some(frame.buffer_mut().clone());
+            }
+            // Paint the field into whatever every screen and modal left open.
+            // Nothing has to tell it where those cells are: a widget that means to
+            // be opaque writes them, and one that means to show the field does not.
+            if app.animations() {
+                app.terrain.draw(frame.buffer_mut(), content);
+            }
             // Keep the modal's last frame, ready to draw once more when it
             // leaves. Modals arrive at once; only the panel is drawn in.
             if app.animations()
@@ -618,15 +675,22 @@ where
                 app.expire_signal_linger();
                 redraw = true;
             }
-            _ = shimmer.tick(), if app.animations() && app.open_shell().is_none() => {
+            _ = backdrop.tick(), if app.animations() && app.open_shell().is_none() => {
+                app.terrain.advance();
+                backdrop_moved = true;
+            }
+            _ = shimmer.tick(), if app.animations()
+                && app.open_shell().is_none()
+                && app.needs_shimmer() =>
+            {
                 app.shimmer = app.shimmer.wrapping_add(1);
                 redraw = true;
-                // The cursor moves on the same clock as the rest of the motion,
-                // so a list can catch up with a jump between two keys.
-                redraw |= app.glide_lists();
             }
-            _ = motion.tick(), if effects.is_running() => {
+            // Lists and effects are the parts of the interface that move in less
+            // than a character cell, so they run on the fast clock.
+            _ = motion.tick(), if effects.is_running() || app.is_gliding() => {
                 redraw = true;
+                redraw |= app.glide_lists(elapsed);
             }
             // The two waits with something to report: a build's place in its
             // queue, and a transfer's bytes. One clock, because neither is worth

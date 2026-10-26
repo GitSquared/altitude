@@ -51,6 +51,7 @@ use crate::{
     },
 };
 
+use super::background::terrain::Terrain;
 use super::widgets::{alert::Alert, list};
 use popups::confirm::{CredentialTarget, PendingConfirm};
 use popups::new_task::{Answer, Hit as NewTaskHit, Host, NewTask, SearchToken};
@@ -529,6 +530,8 @@ pub struct App {
     pub(in crate::tui) environment_builds: HashMap<String, EnvironmentProgress>,
     /// Advances the highlight on that waiting text.
     pub(in crate::tui) shimmer: usize,
+    /// The backdrop, on its own clock and with the glyphs it last found.
+    pub(in crate::tui) terrain: Terrain,
     pub(in crate::tui) help_scroll: u16,
     /// What the host will run at once, so a wait can say whether there is room.
     /// Absent until the first refresh, and never stale by more than one interval.
@@ -781,6 +784,7 @@ impl App {
             tracker_connect_attempt: 0,
             environment_builds: HashMap::new(),
             shimmer: 0,
+            terrain: Terrain::default(),
             help_scroll: 0,
             capacity: None,
         }
@@ -1012,6 +1016,21 @@ impl App {
     /// there is one place that decides whether anything moves at all.
     pub(in crate::tui) fn animation_tick(&self) -> Option<usize> {
         self.animations().then_some(self.shimmer)
+    }
+
+    /// Whether the faster foreground clock has anything to move.
+    ///
+    /// The backdrop is not included: it has its own clock. This is the question
+    /// that decides whether an idle list wakes up twelve times a second for text
+    /// nobody is waiting on.
+    pub(in crate::tui) fn needs_shimmer(&self) -> bool {
+        self.has_modal()
+            || self.is_awaiting_progress()
+            || !self.environment_builds.is_empty()
+            || self
+                .remote_tasks
+                .iter()
+                .any(|held| held.summary.status == TaskExecutionStatus::Pending)
     }
 
     /// The few actions worth keeping visible below the current screen.
@@ -1253,11 +1272,16 @@ impl App {
         }
     }
 
+    /// Whether a list is still catching up with its cursor.
+    pub(in crate::tui) fn is_gliding(&self) -> bool {
+        self.signals_cursor.is_gliding() || self.panel.cursor.is_gliding()
+    }
+
     /// Move the lists that are still catching up with their cursors, which is
     /// what makes a jump read as the list moving. Answers whether anything
     /// moved, so the loop knows to draw.
-    pub(in crate::tui) fn glide_lists(&mut self) -> bool {
-        self.signals_cursor.glide() | self.panel.cursor.glide()
+    pub(in crate::tui) fn glide_lists(&mut self, elapsed: Duration) -> bool {
+        self.signals_cursor.glide(elapsed) | self.panel.cursor.glide(elapsed)
     }
 
     /// Whether a modal is in front: a pop-up or the panel, rather than the work
