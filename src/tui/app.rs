@@ -4030,6 +4030,9 @@ impl App {
                 host,
                 remember,
             }) => {
+                // The tab follows the answer, so the task is where the operator
+                // is looking. The project pill can name another one.
+                self.set_active_project(&project.id);
                 // The first answer becomes the default, because there was nothing
                 // to default to and guessing is not Altitude's to do.
                 if let Some(agent) = remember {
@@ -4173,6 +4176,7 @@ impl App {
                     self.set_agent(agent);
                 }
                 self.set_default_task_host(submission.host.as_deref());
+                self.set_active_project(&submission.project.id);
                 match submission.host {
                     Some(address) => self.begin_delegation(
                         &address,

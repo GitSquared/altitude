@@ -113,12 +113,14 @@ impl ConfigBundle {
         held: &[ProfileDigest],
         host: Option<&str>,
     ) -> Result<Self, io::Error> {
-        let parsed: Settings = toml::from_str(settings).map_err(io::Error::other)?;
-        let mut shared = parsed.shared();
+        let mut parsed: Settings = toml::from_str(settings).map_err(io::Error::other)?;
+        // Filtered before `shared()`, which clears the preference: the machine a
+        // project runs on is how this decides what to send, then it is no longer
+        // the remote's business.
         if let Some(host) = host {
-            shared.retain_projects_for(host);
+            parsed.retain_projects_for(host);
         }
-        let settings = toml::to_string(&shared).map_err(io::Error::other)?;
+        let settings = toml::to_string(&parsed.shared()).map_err(io::Error::other)?;
         let profiles = mounted
             .iter()
             .copied()

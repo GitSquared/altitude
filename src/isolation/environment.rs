@@ -767,7 +767,9 @@ fn project_scripts(project: &Project) -> Result<String, IsolationError> {
             .map(|parent| parent.to_string_lossy().into_owned())
             .unwrap_or_else(|| GUEST_HOME.to_owned());
         script.push_str(&format!(
-            "if [ ! -d {}/.git ]; then\n  mkdir -p {}\n  git clone {} {}\nfi\n",
+            "if [ ! -d {}/.git ]; then\n  mkdir -p {}\n  \
+             if ! git clone {} {}; then\n    \
+             echo \"altitude: the project's repository could not be cloned\" >&2\n    exit 1\n  fi\nfi\n",
             shell_quote(checkout),
             shell_quote(&parent),
             shell_quote(repository),
