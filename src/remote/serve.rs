@@ -733,28 +733,39 @@ impl super::tracker::Host for OwnTasks {
             let settings = scoped
                 .load_or_create_settings()
                 .map_err(|error| error.to_string())?;
-            let Some(team) = issue.issue.team.as_ref() else {
+            let Some(scope) = issue.issue.scope.as_ref() else {
                 return Err(
-                    "This issue names no tracker team, so no project on this machine can claim it."
+                    "This issue cannot be routed: the tracker did not say which group it \
+                     belongs to."
                         .into(),
                 );
             };
-            let Some(project) = settings
-                .settings()
-                .projects()
+            // An exact claim beats a project that claims its whole account, so a
+            // workspace that grows a second team does not start sending both to
+            // whichever project was there first.
+            let projects = settings.settings().projects();
+            let project = projects
                 .iter()
                 .find(|project| {
                     project
                         .tracker
                         .as_ref()
-                        .is_some_and(|route| route.claims(&team.id, team.key.as_deref()))
+                        .is_some_and(|route| route.claims(&scope.id, &scope.aliases))
                 })
-                .cloned()
-            else {
+                .or_else(|| {
+                    projects.iter().find(|project| {
+                        project
+                            .tracker
+                            .as_ref()
+                            .is_some_and(|route| route.claims_anything())
+                    })
+                })
+                .cloned();
+            let Some(project) = project else {
                 return Err(format!(
-                    "No project on this machine claims Linear team {}. Add the team to a \
-                     project's tracker route in Settings → Projects, then push your setup here.",
-                    team.label()
+                    "No project on this machine claims {}. Add it to a project's tracker route \
+                     in Settings → Projects, then push your setup here.",
+                    scope.label
                 ));
             };
             if !project

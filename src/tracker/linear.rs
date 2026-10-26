@@ -29,7 +29,7 @@ use tokio::{
 use super::{
     ACCOUNT_FILE, IssueComment, IssueReader, IssueReference, IssueSnapshot, IssueSummary,
     TrackerAccount, TrackerError, TrackerFuture, TrackerKind, TrackerProvider, TrackerStatus,
-    linear_auth, team_of,
+    issue_scope, linear_auth,
 };
 
 const LIST_ISSUES: &str = "list_issues";
@@ -567,7 +567,7 @@ fn summary_of(issue: &Value) -> Result<IssueSummary, TrackerError> {
         },
         title: string_field(issue, "title")?,
         project,
-        team: team_of(issue)?,
+        scope: issue_scope(issue)?,
     })
 }
 

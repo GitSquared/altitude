@@ -37,6 +37,17 @@ impl TrackerKind {
         }
     }
 
+    /// What this provider calls the container an issue lives in, for an operator
+    /// reading a setting: a team, a project, a repository.
+    ///
+    /// Altitude routes on the container, not on any provider's word for it, so the
+    /// word belongs to the adapter rather than to the route.
+    pub fn scope_noun(self) -> &'static str {
+        match self {
+            Self::Linear => "team",
+        }
+    }
+
     /// The synced profile that carries this tracker's login and account.
     ///
     /// It travels with the rest of a client's profiles and is never mounted:
@@ -85,51 +96,54 @@ pub struct IssueReference {
     pub url: String,
 }
 
-/// The team an issue belongs to, read from whichever shape the provider answered
-/// with. Absent rather than an error: a provider may not say, and an issue without
-/// a team is one no route can claim.
-pub(crate) fn team_of(issue: &serde_json::Value) -> Result<Option<TrackerTeam>, TrackerError> {
+/// The container an issue belongs to, in the provider's own terms.
+///
+/// A Linear team, a Jira project, a GitHub repository. Altitude routes on this and
+/// never on the provider's vocabulary: the adapter says what an issue's container
+/// is, what a person might type for it, and what to call it when no project claims
+/// it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IssueScope {
+    /// What the provider guarantees, and what matching prefers.
+    pub id: String,
+    /// The names a person might type, such as a team key or a repository name.
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    /// How this reads in a sentence, e.g. `Linear team ALT`.
+    pub label: String,
+}
+
+/// The scope an issue belongs to, read from whichever shape the provider answered
+/// with. Absent rather than an error: a provider may not say, and an issue with no
+/// scope is one no route can claim.
+///
+/// Linear's scope is a team, which is why this knows about `team`; another adapter
+/// fills the same type from its own shape.
+pub(crate) fn issue_scope(issue: &serde_json::Value) -> Result<Option<IssueScope>, TrackerError> {
     let Some(team) = issue.get("team").filter(|team| !team.is_null()) else {
         return Ok(None);
     };
     let id = team
         .get("id")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| TrackerError::new("the tracker returned a team without an id"))?;
-    Ok(Some(TrackerTeam {
+        .ok_or_else(|| TrackerError::new("the tracker returned a scope without an id"))?;
+    let key = team
+        .get("key")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let name = team
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let label = format!(
+        "Linear team {}",
+        key.as_deref().or(name.as_deref()).unwrap_or(id)
+    );
+    Ok(Some(IssueScope {
         id: id.to_owned(),
-        key: team
-            .get("key")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
-        name: team
-            .get("name")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
+        aliases: key.into_iter().collect(),
+        label,
     }))
-}
-
-/// The team an issue belongs to, which is what a project's tracker route claims.
-///
-/// The id is what a tracker guarantees, the key is what a person types, and the
-/// name is what a page reads. A route may name either of the first two.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TrackerTeam {
-    pub id: String,
-    #[serde(default)]
-    pub key: Option<String>,
-    #[serde(default)]
-    pub name: Option<String>,
-}
-
-impl TrackerTeam {
-    /// What to call this team when telling an operator which one a route missed.
-    pub fn label(&self) -> &str {
-        self.key
-            .as_deref()
-            .or(self.name.as_deref())
-            .unwrap_or(&self.id)
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -137,10 +151,10 @@ pub struct IssueSummary {
     pub reference: IssueReference,
     pub title: String,
     pub project: Option<String>,
-    /// The team that owns the issue, when the provider says. A route is a claim on
-    /// a team, so an issue without one cannot be routed.
+    /// The container that owns the issue, when the provider says. A route is a
+    /// claim on one, so an issue without a scope cannot be routed.
     #[serde(default)]
-    pub team: Option<TrackerTeam>,
+    pub scope: Option<IssueScope>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -911,6 +911,19 @@ impl App {
         self.grid_columns.max(1)
     }
 
+    /// How a project's tracker scope is named in its form: the provider's own
+    /// word, so the setting does not ask a Linear operator for a "scope".
+    fn scope_label(&self) -> String {
+        // One tracker today. A project will name its connection when there is more
+        // than one, and the word comes from that connection's provider.
+        let kind = TrackerKind::ALL[0];
+        format!(
+            "{} {} (optional; empty claims the whole account)",
+            kind.label(),
+            kind.scope_noun()
+        )
+    }
+
     /// The id of the project the grid is showing.
     ///
     /// A tab that names a project which is gone falls back to the first one, so a
@@ -1752,7 +1765,7 @@ impl App {
             KeyCode::Char('n') if self.panel.section.grows() => {
                 self.panel.form = Some(match self.panel.section {
                     Section::Remotes => Form::for_remote(Target::NewRemote, ""),
-                    _ => Form::new_project(),
+                    _ => Form::new_project(&self.scope_label()),
                 });
             }
             _ if is_remove(key) && self.selected_row().is_some_and(|row| row.is_removable()) => {
@@ -3046,6 +3059,7 @@ impl App {
                     name: project.name.clone(),
                 },
                 &project,
+                &self.scope_label(),
             ),
             RowKind::Discovered(_) => return,
             RowKind::Remote { address, .. } => Form::for_remote(
@@ -3271,11 +3285,14 @@ impl App {
                 project.setup_command = form.setup.value();
                 project.caches = form.cache_paths();
                 project.instructions = form.instruction_text();
-                let team = form.team.value().trim();
-                project.tracker = (!team.is_empty()).then(|| TrackerRoute {
-                    team: team.to_owned(),
-                    accepts_delegated_work: form.accepts_delegated_work,
-                });
+                let scope = form.scope.value().trim();
+                // A project that accepts the whole account is a route too, and
+                // says so; one that claims nothing is not.
+                project.tracker =
+                    (!scope.is_empty() || form.accepts_delegated_work).then(|| TrackerRoute {
+                        scope: (!scope.is_empty()).then(|| scope.to_owned()),
+                        accepts_delegated_work: form.accepts_delegated_work,
+                    });
                 proposed.add_project(project);
             }
             Target::NewRemote | Target::Remote { .. } => {

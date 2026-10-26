@@ -78,7 +78,7 @@ pub enum Focus {
     Setup,
     Caches,
     Instructions,
-    Team,
+    Scope,
     Accept,
     Cancel,
     Save,
@@ -94,7 +94,7 @@ impl Focus {
                 | Self::Setup
                 | Self::Caches
                 | Self::Instructions
-                | Self::Team
+                | Self::Scope
         )
     }
 
@@ -164,8 +164,9 @@ fn groups(project: bool) -> Vec<Group> {
             kind: Kind::Multi,
         },
         Group {
-            focus: Focus::Team,
-            label: "Tracker team",
+            focus: Focus::Scope,
+            // Overridden with the provider's own word when the form is drawn.
+            label: "Tracker scope",
             kind: Kind::Single,
         },
         Group {
@@ -185,11 +186,14 @@ pub struct Form {
     pub setup: TextBox,
     pub caches: TextBox,
     pub instructions: TextBox,
-    pub team: Field,
+    pub scope: Field,
     pub accepts_delegated_work: bool,
     pub focus: Focus,
     /// The first group drawn, so the caret's group is always on screen.
     first_group: usize,
+    /// How the tracker's scope is named in this form: a Linear team, a Jira
+    /// project, a GitHub repository.
+    scope_label: String,
 }
 
 /// Every focus a project form walks, in order.
@@ -199,7 +203,7 @@ const PROJECT_FIELDS: [Focus; 9] = [
     Focus::Setup,
     Focus::Caches,
     Focus::Instructions,
-    Focus::Team,
+    Focus::Scope,
     Focus::Accept,
     Focus::Cancel,
     Focus::Save,
@@ -210,12 +214,12 @@ const REMOTE_FIELDS: [Focus; 3] = [Focus::Primary, Focus::Cancel, Focus::Save];
 impl Form {
     /// The form for a project that does not exist yet, with the caches a new
     /// project starts with already filled in.
-    pub fn new_project() -> Self {
+    pub fn new_project(scope_label: &str) -> Self {
         let project = Project::new("");
-        Self::for_project(Target::NewProject, &project)
+        Self::for_project(Target::NewProject, &project, scope_label)
     }
 
-    pub fn for_project(target: Target, project: &Project) -> Self {
+    pub fn for_project(target: Target, project: &Project, scope_label: &str) -> Self {
         Self {
             target,
             primary: Field::with(&project.name),
@@ -223,11 +227,11 @@ impl Form {
             setup: TextBox::new(&project.setup_command),
             caches: TextBox::new(&project.caches.join("\n")),
             instructions: TextBox::new(project.instructions.as_deref().unwrap_or_default()),
-            team: Field::with(
+            scope: Field::with(
                 project
                     .tracker
                     .as_ref()
-                    .map(|route| route.team.as_str())
+                    .and_then(|route| route.scope.as_deref())
                     .unwrap_or_default(),
             ),
             accepts_delegated_work: project
@@ -236,6 +240,7 @@ impl Form {
                 .is_some_and(|route| route.accepts_delegated_work),
             focus: Focus::Primary,
             first_group: 0,
+            scope_label: scope_label.to_owned(),
         }
     }
 
@@ -247,10 +252,11 @@ impl Form {
             setup: TextBox::new(""),
             caches: TextBox::new(""),
             instructions: TextBox::new(""),
-            team: Field::with(""),
+            scope: Field::with(""),
             accepts_delegated_work: false,
             focus: Focus::Primary,
             first_group: 0,
+            scope_label: String::new(),
         }
     }
 
@@ -286,7 +292,7 @@ impl Form {
             Focus::Setup => self.setup.handle_key(key),
             Focus::Caches => self.caches.handle_key(key),
             Focus::Instructions => self.instructions.handle_key(key),
-            Focus::Team => self.team.handle_key(key),
+            Focus::Scope => self.scope.handle_key(key),
             _ => {}
         }
     }
@@ -392,11 +398,16 @@ fn draw_group(frame: &mut Frame, area: Rect, form: &Form, group: &Group) {
     let focused = form.focus == group.focus;
     match group.kind {
         Kind::Single => {
-            draw_label(frame, area, group.label);
+            let label = if group.focus == Focus::Scope {
+                form.scope_label.as_str()
+            } else {
+                group.label
+            };
+            draw_label(frame, area, label);
             let field = match group.focus {
                 Focus::Primary => &form.primary,
                 Focus::Repository => &form.repository,
-                Focus::Team => &form.team,
+                Focus::Scope => &form.scope,
                 _ => return,
             };
             field.draw(

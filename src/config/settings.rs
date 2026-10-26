@@ -320,6 +320,24 @@ impl Settings {
                 )));
             }
         }
+        // Two projects claiming one scope is a question nobody can answer at
+        // routing time, so it is refused while the file is being written. A
+        // route with no scope claims its whole account, and only one project may.
+        let mut claims: Vec<(String, &str)> = Vec::new();
+        for project in &self.projects {
+            let Some(route) = &project.tracker else {
+                continue;
+            };
+            let key = route.claim_key();
+            let what = route.scope.as_deref().unwrap_or("the whole account");
+            if let Some((_, other)) = claims.iter().find(|(claimed, _)| *claimed == key) {
+                return Err(SettingsError::Invalid(format!(
+                    "{other} and {} both claim {what}",
+                    project.name
+                )));
+            }
+            claims.push((key, &project.name));
+        }
         let mut addresses = HashSet::new();
         for address in &self.remotes {
             validate_remote_address(address)?;

@@ -267,11 +267,15 @@ pub(super) fn project_lines(
     lines.push(Line::styled("work arrives from", palette::muted()));
     match &project.tracker {
         Some(route) => {
-            let mut spans = vec![
-                Span::styled("Linear", palette::accent()),
-                Span::raw(" · team "),
-                Span::styled(route.team.clone(), palette::accent()),
-            ];
+            let kind = TrackerKind::ALL[0];
+            let mut spans = vec![Span::styled(kind.label(), palette::accent())];
+            match &route.scope {
+                Some(scope) => {
+                    spans.push(Span::raw(format!(" · {} ", kind.scope_noun())));
+                    spans.push(Span::styled(scope.clone(), palette::accent()));
+                }
+                None => spans.push(Span::styled(" · the whole account", palette::accent())),
+            }
             if route.accepts_delegated_work {
                 spans.push(Span::styled(
                     " · accepting delegated work",

@@ -62,26 +62,48 @@ pub struct Project {
 /// Work arriving from a task tracker, and what it may do here.
 ///
 /// A route is a claim: this project, and only this one, is what issues from that
-/// team become. Without one, a delegated issue starts nothing and says so.
+/// scope become. Without one, a delegated issue starts nothing and says so.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct TrackerRoute {
-    /// The team, by key (`ALT`) or id. Either is accepted, so an operator can type
-    /// what Linear shows and a route can be made exact by pasting an id.
-    pub team: String,
+    /// The provider's scope, by id or by the name a person types: a Linear team, a
+    /// Jira project, a GitHub repository.
+    ///
+    /// Absent claims the whole account, which is what a workspace with one team
+    /// needs and what keeps this from being a field about Linear.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
     /// Whether a delegated issue may start work without an operator at the
     /// keyboard.
     ///
-    /// Off until the operator says otherwise. The route alone says which team the
+    /// Off until the operator says otherwise. The route alone says which scope the
     /// project is for; this says whether Altitude may act on it unattended.
     #[serde(default)]
     pub accepts_delegated_work: bool,
 }
 
 impl TrackerRoute {
-    /// Whether this route claims the team an issue named.
-    pub fn claims(&self, id: &str, key: Option<&str>) -> bool {
-        self.team.eq_ignore_ascii_case(id)
-            || key.is_some_and(|key| self.team.eq_ignore_ascii_case(key))
+    /// Whether this route claims exactly the scope an issue named.
+    pub fn claims(&self, id: &str, aliases: &[String]) -> bool {
+        let Some(scope) = &self.scope else {
+            return false;
+        };
+        scope.eq_ignore_ascii_case(id)
+            || aliases
+                .iter()
+                .any(|alias| scope.eq_ignore_ascii_case(alias))
+    }
+
+    /// Whether this route claims every scope of its account.
+    pub fn claims_anything(&self) -> bool {
+        self.scope.is_none()
+    }
+
+    /// The key two routes are compared by, for refusing an ambiguous pair.
+    pub fn claim_key(&self) -> String {
+        self.scope
+            .as_ref()
+            .map(|scope| scope.to_ascii_lowercase())
+            .unwrap_or_default()
     }
 }
 
@@ -217,18 +239,24 @@ impl Project {
         if let Some(repository) = &self.repository {
             normalize_repository(repository)?;
         }
-        if let Some(route) = &self.tracker {
-            let team = route.team.trim();
-            if team.is_empty()
-                || team.len() > 64
-                || team != route.team
-                || !team.chars().all(|character| {
-                    character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
-                })
+        if let Some(route) = &self.tracker
+            && let Some(scope) = &route.scope
+        {
+            // Provider-neutral: a team key, a project key, or `owner/repo`. What a
+            // scope may look like belongs to the adapter; what breaks matching is
+            // whitespace, so that is what this refuses.
+            let scope = scope.trim();
+            if scope.is_empty()
+                || scope.len() > 128
+                || scope != route.scope.as_deref().unwrap_or_default()
+                || scope.starts_with('-')
+                || scope
+                    .chars()
+                    .any(|character| character.is_whitespace() || character.is_control())
             {
                 return Err(ProjectError(format!(
-                    "tracker team {:?} must be a team key or id: 1-64 letters, numbers, hyphens, or underscores",
-                    route.team
+                    "tracker scope {:?} must be 1-128 printable characters with no spaces, as the tracker names it",
+                    route.scope.as_deref().unwrap_or_default()
                 )));
             }
         }
