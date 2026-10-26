@@ -26,7 +26,7 @@ use crate::{
 pub(in crate::tui) struct SendTask {
     task_id: String,
     title: String,
-    environment: String,
+    project: String,
     agent: Option<AgentKind>,
     /// The remotes only: this machine is where the task already is.
     hosts: Vec<Host>,
@@ -47,7 +47,7 @@ impl SendTask {
     pub(in crate::tui) fn new(
         task_id: String,
         title: String,
-        environment: String,
+        project: String,
         agent: Option<AgentKind>,
         hosts: Vec<Host>,
     ) -> Self {
@@ -57,7 +57,7 @@ impl SendTask {
         Self {
             task_id,
             title,
-            environment,
+            project,
             agent,
             hosts,
             selected,
@@ -180,10 +180,7 @@ pub(in crate::tui) fn draw(frame: &mut Frame, area: Rect, sending: &SendTask) ->
                 truncate(&sending.title, usize::from(summary_area.width)),
                 palette::heading(),
             ),
-            Line::styled(
-                format!("{} · {agent}", sending.environment),
-                palette::muted(),
-            ),
+            Line::styled(format!("{} · {agent}", sending.project), palette::muted()),
         ])
         .wrap(Wrap { trim: true }),
         summary_area,

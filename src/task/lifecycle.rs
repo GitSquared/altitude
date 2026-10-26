@@ -4,9 +4,9 @@ use crate::{
     agent::{AgentKind, mcp},
     config::InstallationIdentity,
     isolation::{
-        CommandEvent, CommandSession, Environment, IsolationEngine, SandboxOptions, VsockRoute,
-        mounts,
+        CommandEvent, CommandSession, IsolationEngine, SandboxOptions, VsockRoute, mounts,
     },
+    project::Project,
     vcs,
 };
 use futures_util::future::join_all;
@@ -29,7 +29,7 @@ where
     pub(super) fn draft(
         &self,
         intent: String,
-        environment: Environment,
+        project: Project,
         agent: AgentKind,
         conversation: Option<String>,
         requester: Option<InstallationIdentity>,
@@ -37,7 +37,7 @@ where
         let requester = requester.unwrap_or_else(|| self.identity.clone());
         TaskDraft {
             intent,
-            environment,
+            project,
             identity_id: requester.id,
             identity_label: requester.label,
             host: self.identity.label.clone(),
@@ -62,12 +62,12 @@ where
     pub async fn create(
         &self,
         intent: String,
-        environment: Environment,
+        project: Project,
         agent: AgentKind,
         requester: Option<InstallationIdentity>,
     ) -> Result<Task, TaskServiceError> {
         self.adopt(
-            self.draft(intent, environment, agent, None, requester),
+            self.draft(intent, project, agent, None, requester),
             None,
             &[],
         )
@@ -89,18 +89,18 @@ where
         })
     }
 
-    /// Build what a task's environment needs, and say where its snapshot is.
+    /// Build what a task's project needs, and say where its snapshot is.
     ///
     /// Local tools and profile mounts must be ready before a task arrives. Physical
     /// disk dependencies are synchronized separately against their exact snapshot.
-    pub async fn prepare_environment(
+    pub async fn prepare_project(
         &self,
-        environment: &Environment,
+        project: &Project,
         agent: AgentKind,
     ) -> Result<PathBuf, TaskServiceError> {
         self.isolation
-            .ensure_environment(
-                environment.clone(),
+            .ensure_project(
+                project.clone(),
                 mounts::task(&self.agents, agent),
                 &Unwatched,
             )
@@ -109,15 +109,15 @@ where
             .map_err(TaskServiceError::Isolation)
     }
 
-    /// Build what a task's environment needs for one operator.
-    pub async fn prepare_environment_as_operator(
+    /// Build what a task's project needs for one operator.
+    pub async fn prepare_project_as_operator(
         &self,
         owner: &str,
-        environment: &Environment,
+        project: &Project,
         agent: AgentKind,
     ) -> Result<PathBuf, TaskServiceError> {
         self.as_operator(owner)?
-            .prepare_environment(environment, agent)
+            .prepare_project(project, agent)
             .await
     }
 
@@ -210,7 +210,9 @@ where
                     .provision(
                         sandbox_id.clone(),
                         snapshot_path.clone(),
-                        task.environment(),
+                        task.project()
+                            .cloned()
+                            .ok_or(TaskServiceError::Task(TaskError::MissingProject))?,
                         [
                             vec![self.agents.engine(kind).environment_recipe()],
                             vcs::environment_recipes(),

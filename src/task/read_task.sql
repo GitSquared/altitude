@@ -22,16 +22,11 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      WHERE task_id = tasks.id
        AND event_type = 'intent_expressed'
      ORDER BY sequence ASC LIMIT 1) AS operator_label,
-    (SELECT payload ->> '$.data.environment.name'
+    (SELECT payload -> '$.data.project'
      FROM task_event_logs
      WHERE task_id = tasks.id
-       AND json_type(payload, '$.data.environment.name') IS NOT NULL
-     ORDER BY sequence DESC LIMIT 1) AS environment_name,
-    (SELECT payload ->> '$.data.environment.setup_command'
-     FROM task_event_logs
-     WHERE task_id = tasks.id
-       AND json_type(payload, '$.data.environment.setup_command') IS NOT NULL
-     ORDER BY sequence DESC LIMIT 1) AS environment_setup_command,
+       AND json_type(payload, '$.data.project') IS NOT NULL
+     ORDER BY sequence DESC LIMIT 1) AS project,
     (SELECT payload ->> '$.data.agent_conversation_id'
      FROM task_event_logs
      WHERE task_id = tasks.id

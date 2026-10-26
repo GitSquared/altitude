@@ -17,22 +17,22 @@ pub(crate) mod mounts;
 
 /// How long a built environment is kept before it is rebuilt, for the interface
 /// that has to tell an operator when their base was last refreshed.
-pub use environment::REFRESH_AFTER;
 pub(crate) use environment::private_directory;
 /// Shared with the VCS providers so capsule commands are quoted one way.
 pub(crate) use environment::shell_quote;
 pub use environment::{
-    BASE_NAME, DefaultFile, Environment, EnvironmentRecipe, GuestPath, PersistentDirectory,
-    SignInCommand, is_base_name,
+    DefaultFile, EnvironmentRecipe, GuestPath, PersistentDirectory, SignInCommand,
 };
 pub use microsandbox::MicrosandboxIsolation;
+
+use crate::project::Project;
 
 #[derive(Clone, Debug)]
 pub enum IsolationStatus {
     Starting,
     InstallingRuntime,
     PreparingBaseImage,
-    PreparingWorkspacePackages,
+    PreparingBasePackages,
     Ready,
     Failed(String),
 }
@@ -97,7 +97,6 @@ pub struct SetupStep {
 #[derive(Clone)]
 pub struct CredentialSandbox {
     pub id: String,
-    pub environment: Environment,
     pub recipes: Vec<EnvironmentRecipe>,
     /// The built environment to make it from, if there is one to reuse.
     pub snapshot: Option<String>,
@@ -422,7 +421,7 @@ pub trait IsolationEngine: Send + Sync {
         &self,
         id: String,
         task_snapshot: Option<String>,
-        environment: Environment,
+        project: Project,
         recipes: Vec<EnvironmentRecipe>,
         vsock: Vec<VsockRoute>,
         progress: &dyn EnvironmentProgressSink,
@@ -464,7 +463,7 @@ pub trait IsolationEngine: Send + Sync {
     fn watcher(
         &self,
         id: String,
-        environment: Environment,
+        project: Project,
         recipes: Vec<EnvironmentRecipe>,
         progress: &dyn EnvironmentProgressSink,
     ) -> impl Future<Output = Result<(), IsolationError>> + Send;
@@ -480,16 +479,16 @@ pub trait IsolationEngine: Send + Sync {
         options: SandboxOptions,
     ) -> impl Future<Output = Result<(), IsolationError>> + Send;
 
-    /// Build an environment's snapshot if it is not already here, and say where it is.
+    /// Build a project's snapshot if it is not already here, and say where it is.
     ///
     /// A capsule travelling from another machine leaves out the environment it was
     /// built on, because every machine builds that environment for itself from the same
     /// configuration. Landing one therefore needs the environment here first — the work
     /// a task would do on its first run, done ahead of the capsule rather than by it —
     /// and the snapshot it lands on is what resolves the layers that stayed behind.
-    fn ensure_environment(
+    fn ensure_project(
         &self,
-        environment: Environment,
+        project: Project,
         recipes: Vec<EnvironmentRecipe>,
         progress: &dyn EnvironmentProgressSink,
     ) -> impl Future<Output = Result<BaseSandboxSnapshot, IsolationError>> + Send;
@@ -513,17 +512,14 @@ pub trait IsolationEngine: Send + Sync {
         command: String,
     ) -> impl Future<Output = Result<CommandSession, IsolationError>> + Send;
 
-    /// The environment's snapshot path, if one is built here.
+    /// The project's snapshot path, if one is built here.
     ///
     /// Asked instead of building one: a check that a profile can be read has to be
     /// able to answer "not built here" rather than start a build, because looking at
     /// a page is not the place for minutes of work. A snapshot past its refresh is
     /// still answered with: it runs, and the check only reads a login.
-    fn environment_snapshot(
-        &self,
-        environment: Environment,
-        recipes: Vec<EnvironmentRecipe>,
-    ) -> Option<String>;
+    fn project_snapshot(&self, project: Project, recipes: Vec<EnvironmentRecipe>)
+    -> Option<String>;
 
     /// Run profiles' own check commands in one sandbox that is thrown away after
     /// them.

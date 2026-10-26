@@ -1,7 +1,4 @@
-use crate::{
-    agent::AgentKind,
-    isolation::{BASE_NAME, Environment, is_base_name},
-};
+use crate::{agent::AgentKind, project::Project};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
@@ -15,15 +12,10 @@ use toml::{de::Error as ParseError, ser::Error as SerializeError};
 
 /// What is configured, as `config.toml` holds it.
 ///
-/// The built-in base environment is deliberately absent: it cannot be edited or
-/// deleted, so writing it down would record a preference nobody has. Everything
-/// that lists environments uses [`Settings::environments`], which adds it.
-///
 /// Fields are private and edited through the methods below, so that the rules
-/// that go with each list — the base cannot be configured, a default never
-/// points at nothing, an address appears once — live in one place instead of at
-/// every call site.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+/// that go with each list — there is always a project, a name appears once, an
+/// address appears once — live in one place instead of at every call site.
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Settings {
     /// The addresses of the machines this host delegates to.
     ///
@@ -38,47 +30,44 @@ pub struct Settings {
     /// How the interface behaves, as opposed to what it configures.
     #[serde(default)]
     interface: Interface,
-    /// The environments a task can run in, besides the built-in base.
-    #[serde(
-        rename = "environments",
-        default,
-        skip_serializing_if = "Vec::is_empty"
-    )]
-    configured: Vec<Environment>,
+    /// The projects this installation can work on.
+    #[serde(default)]
+    projects: Vec<Project>,
+}
+
+impl Default for Settings {
+    /// A first start has one project, because every task belongs to one and an
+    /// interface with nothing to work in is not a first step.
+    fn default() -> Self {
+        Self {
+            remotes: Vec::new(),
+            defaults: Defaults::default(),
+            interface: Interface::default(),
+            projects: vec![Project::new("Project 1")],
+        }
+    }
 }
 
 /// What a new task gets when nobody says otherwise.
 ///
-/// Gathered rather than scattered: these three are the answers an operator gives
-/// once and then stops thinking about, and reading them in one place is what makes
-/// the file say what it means.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// What the work is — its setup, repository, caches, and instructions — belongs to
+/// the project. This is what is left that is not about a project: the harness an
+/// operator has chosen, and the machine the last task went to.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Defaults {
-    /// The environment a new task runs in.
-    pub environment: String,
     /// The coding agent Altitude drives.
     ///
-    /// Independent of environments: an environment is what is installed, an agent
-    /// is what works in it, and the same environment is useful with either. Absent
-    /// means nobody has chosen yet, which is the one thing an interface cannot
-    /// guess on someone's behalf.
+    /// Independent of projects: what is installed and what works in it are
+    /// different questions, and either harness is useful in the same project.
+    /// Absent means nobody has chosen yet, which is the one thing an interface
+    /// cannot guess on someone's behalf.
     pub agent: Option<AgentKind>,
     /// The machine a new task is founded on, when it is not this one.
     ///
     /// It records a choice rather than promising anything: a machine that has since
     /// been removed, or that is not answering, is not preselected.
     pub host: Option<String>,
-}
-
-impl Default for Defaults {
-    fn default() -> Self {
-        Self {
-            environment: BASE_NAME.to_owned(),
-            agent: None,
-            host: None,
-        }
-    }
 }
 
 /// Preferences about the interface itself.
@@ -198,11 +187,13 @@ fn write_settings(path: &Path, contents: &str) -> Result<(), SettingsError> {
 }
 
 impl Settings {
-    /// Everything a task can run in: the built-in base, then what is configured.
-    pub fn environments(&self) -> Vec<Environment> {
-        let mut all = vec![Environment::base()];
-        all.extend(self.configured.iter().cloned());
-        all
+    /// The projects this installation works on, oldest first.
+    pub fn projects(&self) -> &[Project] {
+        &self.projects
+    }
+
+    pub fn project(&self, id: &str) -> Option<&Project> {
+        self.projects.iter().find(|project| project.id == id)
     }
 
     /// The addresses this host delegates to.
@@ -223,6 +214,11 @@ impl Settings {
         shared.remotes.clear();
         shared.interface = Interface::default();
         shared.defaults.host = None;
+        // Where a project prefers to run is this client's choice; the machine it
+        // is sent to can only run it.
+        for project in &mut shared.projects {
+            project.host = None;
+        }
         shared
     }
 
@@ -246,11 +242,6 @@ impl Settings {
         self.defaults.host = address.map(str::to_owned);
     }
 
-    /// The environment a new task runs in unless one is picked.
-    pub fn default_environment(&self) -> &str {
-        &self.defaults.environment
-    }
-
     /// How the interface behaves.
     pub fn interface(&self) -> &Interface {
         &self.interface
@@ -266,30 +257,20 @@ impl Settings {
         self.interface.animations = on;
     }
 
-    /// Add a configured environment, replacing one of the same name.
-    pub fn add_environment(&mut self, environment: Environment) {
-        self.configured
-            .retain(|existing| !existing.same_name(&environment));
-        self.configured.push(environment);
+    /// Add a project, replacing one with the same id.
+    pub fn add_project(&mut self, project: Project) {
+        self.projects.retain(|existing| existing.id != project.id);
+        self.projects.push(project);
     }
 
-    /// Remove a configured environment.
-    // (the attribute sits on the item below)
+    /// Remove a project.
     ///
-    ///
-    /// The default is never left pointing at nothing: removing the default hands
-    /// it back to the base, which always exists.
-    pub fn remove_environment(&mut self, name: &str) {
-        self.configured
-            .retain(|existing| !existing.name.eq_ignore_ascii_case(name));
-        if self.defaults.environment.eq_ignore_ascii_case(name) {
-            self.defaults.environment = BASE_NAME.to_owned();
-        }
-    }
-
-    /// Choose the environment a new task runs in unless one is picked.
-    pub fn set_default_environment(&mut self, name: &str) {
-        self.defaults.environment = name.to_owned();
+    /// The last one stays: every task belongs to a project, and settings with
+    /// none cannot found one. Validation refuses the empty list, so an operator
+    /// who deletes the last project is told rather than left with a file the next
+    /// start would have to invent a project for.
+    pub fn remove_project(&mut self, id: &str) {
+        self.projects.retain(|existing| existing.id != id);
     }
 
     /// Add a remote address, replacing any entry for the same address.
@@ -315,32 +296,29 @@ impl Settings {
     }
 
     fn validate(&self) -> Result<(), SettingsError> {
+        if self.projects.is_empty() {
+            return Err(SettingsError::Invalid(
+                "at least one project is required".to_owned(),
+            ));
+        }
+        let mut ids = HashSet::new();
         let mut names = HashSet::new();
-        for environment in &self.configured {
-            environment
+        for project in &self.projects {
+            project
                 .validate()
                 .map_err(|error| SettingsError::Invalid(error.to_string()))?;
-            if environment.is_base() {
+            if !ids.insert(project.id.clone()) {
                 return Err(SettingsError::Invalid(format!(
-                    "{BASE_NAME} is built in and cannot be configured"
+                    "duplicate project id: {}",
+                    project.id
                 )));
             }
-            if !names.insert(environment.key()) {
+            if !names.insert(project.key()) {
                 return Err(SettingsError::Invalid(format!(
-                    "duplicate environment name: {}",
-                    environment.name
+                    "duplicate project name: {}",
+                    project.name
                 )));
             }
-        }
-        // The base is always available, so a default that resolves to nothing is
-        // a mistake to report rather than a condition to fall back from.
-        if !is_base_name(&self.defaults.environment)
-            && !names.contains(&self.defaults.environment.to_ascii_lowercase())
-        {
-            return Err(SettingsError::Invalid(format!(
-                "default environment {:?} is not configured",
-                self.defaults.environment
-            )));
         }
         let mut addresses = HashSet::new();
         for address in &self.remotes {

@@ -12,7 +12,8 @@ use std::sync::Arc;
 use crate::{
     agent::AgentKind,
     config::InstallationIdentity,
-    isolation::{Environment, IsolationEngine},
+    isolation::IsolationEngine,
+    project::Project,
     tracker::{IssueSnapshot, TrackerError, TrackerProvider, TrackerStatus},
 };
 
@@ -43,17 +44,17 @@ where
     pub async fn create_from_issue(
         &self,
         issue: IssueSnapshot,
-        environment: Environment,
+        project: Project,
         agent: AgentKind,
     ) -> Result<Task, TaskServiceError> {
-        self.create_from_issue_as_operator(issue, environment, agent, None)
+        self.create_from_issue_as_operator(issue, project, agent, None)
             .await
     }
 
     pub async fn create_from_issue_as_operator(
         &self,
         issue: IssueSnapshot,
-        environment: Environment,
+        project: Project,
         agent: AgentKind,
         requester: Option<InstallationIdentity>,
     ) -> Result<Task, TaskServiceError> {
@@ -61,7 +62,7 @@ where
         let operator = requester.unwrap_or_else(|| self.identity.clone());
         let task = self
             .adopt(
-                self.draft(intent, environment, agent, None, Some(operator.clone())),
+                self.draft(intent, project, agent, None, Some(operator.clone())),
                 None,
                 &[TaskHistoryEvent::TrackerIssueBound { issue }],
             )

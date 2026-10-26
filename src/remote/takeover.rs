@@ -115,12 +115,12 @@ where
     let record: HandoverRecord =
         serde_json::from_reader(fs::File::open(history_path).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
-    let environment = record.draft.environment;
+    let project = record.draft.project;
     // Building the base here is a wait with nothing to count, so the bar gives
     // way to the words until there are bytes again.
     transfer.waiting("building environment…");
     event_loop
-        .prepare_environment(&environment, record.draft.agent)
+        .prepare_project(&project, record.draft.agent)
         .await
         .map_err(|e| e.to_string())?;
     let base = match &handover.environment {
@@ -209,7 +209,7 @@ where
     let task = event_loop
         .land(TaskArrival {
             intent: record.draft.intent,
-            environment,
+            project,
             agent: record.draft.agent,
             conversation: record.draft.agent_conversation_id,
             history,

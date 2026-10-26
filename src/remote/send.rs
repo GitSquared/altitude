@@ -445,11 +445,7 @@ impl IncomingTransfers {
             .collect::<Vec<_>>();
         refuse_foreign_founder(&history, &metadata.peer)?;
         self.tasks
-            .prepare_environment_as_operator(
-                &metadata.peer,
-                &record.draft.environment,
-                record.draft.agent,
-            )
+            .prepare_project_as_operator(&metadata.peer, &record.draft.project, record.draft.agent)
             .await
             .map_err(message)?;
         let capsule = import_snapshots(&directory, handover).await?;
@@ -457,7 +453,7 @@ impl IncomingTransfers {
             .tasks
             .land(TaskArrival {
                 intent: record.draft.intent,
-                environment: record.draft.environment,
+                project: record.draft.project,
                 agent: record.draft.agent,
                 conversation: record.draft.agent_conversation_id,
                 history,

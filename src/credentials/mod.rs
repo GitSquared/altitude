@@ -17,12 +17,13 @@ pub use shell::{
 };
 
 use crate::{
-    agent::{AgentChannels, AgentEngines, AgentKind},
+    agent::{AgentChannels, AgentEngines},
     config::Config,
     isolation::{
-        CREDENTIAL_PREFIX, CredentialCheck, CredentialSandbox, Environment, EnvironmentRecipe,
-        IsolationEngine, IsolationError, ProfileSummary, Unwatched, mounts,
+        CREDENTIAL_PREFIX, CredentialCheck, CredentialSandbox, EnvironmentRecipe, IsolationEngine,
+        IsolationError, ProfileSummary, Unwatched, mounts,
     },
+    project::Project,
 };
 
 /// What one profile's login came to, and how that was found.
@@ -102,70 +103,67 @@ where
             .collect()
     }
 
-    /// Whether a sign-in for this profile would find its environment ready.
+    /// Whether a sign-in for this profile would find its build ready.
     ///
     /// Asked before a shell is opened, so a wait is only shown when there is one. The
     /// answer is the same lookup the shell makes, so a box that flashes for nothing
     /// cannot happen.
-    pub fn environment_built(&self, environment: Environment, profile: &str) -> bool {
-        self.environment_for(&environment, profile)
+    pub fn environment_built(&self, profile: &str) -> bool {
+        self.credential_build(profile)
             .is_ok_and(|(_, snapshot)| snapshot.is_some())
     }
 
     /// What profiles' own checks say about them.
     ///
-    /// The checks run in the environment their credential shells would use, so an
-    /// answer is what pressing enter would find, and they read a login from the profile
-    /// rather than a task's state. A built snapshot can answer; only with none is
-    /// building necessary, and a page is not the place for minutes of work, so the login
-    /// files answer instead. A page that said "not signed in" because nothing had been
-    /// built yet sent the operator into a build to fix a sign-in they already had.
+    /// The checks run in the build a credential shell would use, so an answer is what
+    /// pressing enter would find, and they read a login from the profile rather than a
+    /// task's state. A built snapshot can answer; only with none is building necessary,
+    /// and a page is not the place for minutes of work, so the login files answer
+    /// instead. A page that said "not signed in" because nothing had been built yet
+    /// sent the operator into a build to fix a sign-in they already had.
     ///
-    /// Making a sandbox is the expensive part of asking, so profiles that can be read in
-    /// the same environment share one. A profile whose environment is not built does
-    /// not pull another sandbox into being for it: it is answered from disk.
+    /// Every profile asked joins one composition, so the page costs one build and one
+    /// sandbox rather than one each.
     pub async fn answers(
         &self,
-        environment: Environment,
-        profiles: Vec<&'static str>,
+        mut profiles: Vec<&'static str>,
     ) -> Result<Vec<(&'static str, CredentialAnswer)>, CredentialsError> {
-        // A batch per environment, keyed by the snapshot that would answer it.
-        let mut batches: Vec<(String, Vec<EnvironmentRecipe>, Vec<CredentialCheck>)> = Vec::new();
-        let mut answers = Vec::new();
-        for profile in profiles {
+        // The composition is the build's identity, so the order must be the
+        // same for the same set of profiles or every page would build twice.
+        profiles.sort_unstable();
+        let mut recipes = Vec::new();
+        let mut checks = Vec::new();
+        for profile in &profiles {
             let recipe = self.recipe(profile)?;
-            let (recipes, snapshot) = self.environment_for(&environment, profile)?;
-            let Some(snapshot) = snapshot else {
-                answers.push((profile, self.saved_login(profile)));
-                continue;
-            };
-            let check = CredentialCheck {
+            checks.push(CredentialCheck {
                 profile,
                 command: recipe.status_command.to_owned(),
-            };
-            match batches
-                .iter_mut()
-                .find(|(answering, _, _)| *answering == snapshot)
-            {
-                Some((_, _, checks)) => checks.push(check),
-                None => batches.push((snapshot, recipes, vec![check])),
-            }
+            });
+            recipes.push(recipe);
         }
-        for (snapshot, recipes, checks) in batches {
-            let profiles: Vec<&'static str> = checks.iter().map(|check| check.profile).collect();
-            let sandbox = CredentialSandbox {
-                id: check_id(&profiles),
-                environment: environment.clone(),
-                recipes,
-                snapshot: Some(snapshot),
-            };
-            let reports = self
-                .isolation
-                .credential_reports(sandbox, checks, &Unwatched)
-                .await
-                .map_err(CredentialsError::Isolation)?
-                .unwrap_or_default();
-            answers.extend(reports.into_iter().map(|(profile, report)| {
+        let Some(snapshot) = self
+            .isolation
+            .project_snapshot(Project::profile_only("credentials"), recipes.clone())
+        else {
+            return Ok(profiles
+                .into_iter()
+                .map(|profile| (profile, self.saved_login(profile)))
+                .collect());
+        };
+        let sandbox = CredentialSandbox {
+            id: check_id(&profiles),
+            recipes,
+            snapshot: Some(snapshot),
+        };
+        let reports = self
+            .isolation
+            .credential_reports(sandbox, checks, &Unwatched)
+            .await
+            .map_err(CredentialsError::Isolation)?
+            .unwrap_or_default();
+        Ok(reports
+            .into_iter()
+            .map(|(profile, report)| {
                 (
                     profile,
                     CredentialAnswer {
@@ -174,9 +172,8 @@ where
                         is_verified: true,
                     },
                 )
-            }));
-        }
-        Ok(answers)
+            })
+            .collect())
     }
 
     /// Forget a mounted profile's saved login, leaving everything else in it.
@@ -189,48 +186,20 @@ where
         files::forget(&self.profile_directory(profile), profile).map_err(CredentialsError::Refused)
     }
 
-    /// The recipes a sign-in or check mounts, and the snapshot it can run in.
+    /// The recipes a sign-in mounts, and the snapshot it can run in.
     ///
-    /// A login is read or written in the profile, and the CLI that owns it is the only
-    /// thing needed to do that, so the profile's own environment is preferred. The
-    /// environment a task driven by either agent runs in answers too, because it has the
-    /// same CLI installed — which is what lets a sign-in skip an install a task has
-    /// already paid for, and what keeps the two from building the same thing twice. With
-    /// nothing built to reuse, only the profile's own is built: a sign-in waits on its
-    /// own tool, not on everything a task runs on.
-    fn environment_for(
+    /// Only the CLI that owns the login is needed to write it, so this is the
+    /// profile's own build and never the project a task happens to run in: a sign-in
+    /// waits on its own tool rather than on everything a project installs.
+    fn credential_build(
         &self,
-        environment: &Environment,
         profile: &str,
     ) -> Result<(Vec<EnvironmentRecipe>, Option<String>), CredentialsError> {
-        for recipes in self.readable_environments(profile)? {
-            if let Some(snapshot) = self
-                .isolation
-                .environment_snapshot(environment.clone(), recipes.clone())
-            {
-                return Ok((recipes, Some(snapshot)));
-            }
-        }
-        Ok((vec![self.recipe(profile)?], None))
-    }
-
-    /// The compositions a profile's login can be read in, best first.
-    ///
-    /// Its own, which a sign-in builds, then each agent's task environment that has the
-    /// profile mounted. A task runs one agent, so there are two such environments rather
-    /// than one; either can answer for the profiles they share.
-    fn readable_environments(
-        &self,
-        profile: &str,
-    ) -> Result<Vec<Vec<EnvironmentRecipe>>, CredentialsError> {
-        let mut environments = vec![vec![self.recipe(profile)?]];
-        for agent in [AgentKind::Pi, AgentKind::Claude] {
-            let recipes = mounts::task(&self.agents, agent);
-            if recipes.iter().any(|recipe| recipe.profile == profile) {
-                environments.push(recipes);
-            }
-        }
-        Ok(environments)
+        let recipes = vec![self.recipe(profile)?];
+        let snapshot = self
+            .isolation
+            .project_snapshot(Project::profile_only("credentials"), recipes.clone());
+        Ok((recipes, snapshot))
     }
 
     /// The one recipe a profile's sign-in needs.

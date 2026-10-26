@@ -12,7 +12,7 @@ pub enum Section {
     Agents,
     VersionControl,
     Trackers,
-    Environments,
+    Projects,
     Remotes,
 }
 
@@ -22,7 +22,7 @@ impl Section {
         Self::Agents,
         Self::VersionControl,
         Self::Trackers,
-        Self::Environments,
+        Self::Projects,
         Self::Remotes,
     ];
 
@@ -32,7 +32,7 @@ impl Section {
             Self::Agents => "Agents",
             Self::VersionControl => "Version control",
             Self::Trackers => "Task tracker",
-            Self::Environments => "Environments",
+            Self::Projects => "Projects",
             Self::Remotes => "Remotes",
         }
     }
@@ -44,17 +44,17 @@ impl Section {
             Self::Agents => "Connect your favorite",
             Self::VersionControl => "Git and commit signing",
             Self::Trackers => "Keep your team in the loop",
-            Self::Environments => "Give agents more tools",
+            Self::Projects => "What your agents work on",
             Self::Remotes => "Automate and keep work going",
         }
     }
 
     /// Whether this list can grow and shrink.
     ///
-    /// Only the environments and the remotes are the operator's to add and
+    /// Only the projects and the remotes are the operator's to add and
     /// remove: the other lists are what the installation already holds.
     pub fn grows(self) -> bool {
-        matches!(self, Self::Environments | Self::Remotes)
+        matches!(self, Self::Projects | Self::Remotes)
     }
 
     /// The credential profiles this section asks about, when it asks about any.

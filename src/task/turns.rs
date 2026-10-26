@@ -1,9 +1,8 @@
 //! Driving a task: one turn at a time, by autopilot or by an operator.
 
 use crate::{
-    isolation::{
-        CommandEvent, CommandSession, Environment, IsolationEngine, OutputStream, Unwatched,
-    },
+    isolation::{CommandEvent, CommandSession, IsolationEngine, OutputStream, Unwatched},
+    project::Project,
     vcs::{self, ContributionObservation, ProviderBatch},
 };
 use uuid::Uuid;
@@ -434,7 +433,7 @@ where
         self.isolation
             .watcher(
                 id,
-                Environment::base(),
+                Project::profile_only("vcs-observer"),
                 vcs::environment_recipes(),
                 &Unwatched,
             )

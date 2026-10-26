@@ -4,7 +4,7 @@ use std::fmt;
 
 use crate::agent::AgentKind;
 use crate::id;
-use crate::isolation::Environment;
+use crate::project::Project;
 use crate::tracker::{IssueReference, IssueSnapshot};
 use crate::vcs::{CodeContribution, ContributionObservation};
 
@@ -231,8 +231,8 @@ pub struct TaskFacts {
     pub operator_id: Option<String>,
     /// How that operator reads to a human. Presentation only.
     pub operator_label: Option<String>,
-    pub environment_name: String,
-    pub environment_setup_command: String,
+    #[sqlx(json(nullable))]
+    pub project: Option<Project>,
     pub agent_conversation_id: Option<String>,
     pub execution_status: TaskExecutionStatus,
     pub execution_pause_reason: Option<TaskExecutionPauseReason>,
@@ -284,7 +284,7 @@ pub enum TaskHistoryEvent {
         sandbox_available: bool,
         snapshot_available: bool,
         intent: String,
-        environment: Environment,
+        project: Project,
         /// The identity this task was delegated under.
         ///
         /// Recorded with the intent because it cannot be inferred later: a machine
@@ -487,7 +487,7 @@ pub struct TaskAgentTurnContext {
     pub title: String,
     /// The machine this task's capsule runs on.
     pub host: String,
-    pub environment: String,
+    pub project: Option<Project>,
     pub agent: Option<AgentKind>,
     pub execution_status: TaskExecutionStatus,
     pub execution_mode: TaskExecutionMode,
@@ -505,15 +505,27 @@ impl fmt::Display for TaskAgentTurnContext {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(
             formatter,
-            "task_id={}; title={:?}; harness={}; host={}; environment={}",
+            "task_id={}; title={:?}; harness={}; host={}; project={}",
             self.task_id,
             self.title,
             self.agent
                 .map(|kind| kind.to_string())
                 .unwrap_or_else(|| "none".into()),
             self.host,
-            self.environment,
+            self.project
+                .as_ref()
+                .map(|project| project.name.as_str())
+                .unwrap_or("none"),
         )?;
+        if let Some(project) = &self.project {
+            if let Some(repository) = &project.repository {
+                write!(formatter, "repository={repository}; ")?;
+            }
+            if let Some(checkout) = project.checkout_path() {
+                write!(formatter, "checkout={checkout}; ")?;
+            }
+            writeln!(formatter, "project_brief=/altitude/project.md")?;
+        }
         writeln!(
             formatter,
             "execution_status={:?}; execution_mode={:?}; attention={:?}; \
@@ -606,14 +618,14 @@ impl Task {
             .unwrap_or_else(|| id::name(&self.id))
     }
 
-    /// The environment this task runs in.
+    /// The project this task belongs to, as it was recorded when the task was
+    /// founded.
     ///
-    /// The agent it runs under is recorded separately, as the task's agent kind.
-    pub fn environment(&self) -> Environment {
-        Environment {
-            name: self.facts.environment_name.clone(),
-            setup_command: self.facts.environment_setup_command.clone(),
-        }
+    /// Recorded rather than looked up: a task carries the setup, repository, and
+    /// caches it started with, so a task that travels or outlives an edit keeps
+    /// the machine state it was asked for.
+    pub fn project(&self) -> Option<&Project> {
+        self.facts.project.as_ref()
     }
 
     pub fn turn_context(&self, execution_mode: TaskExecutionMode) -> TaskAgentTurnContext {
@@ -621,7 +633,7 @@ impl Task {
             task_id: self.id.clone(),
             title: self.title().to_owned(),
             host: self.host.clone(),
-            environment: self.facts.environment_name.clone(),
+            project: self.facts.project.clone(),
             agent: self.agent_kind,
             execution_status: TaskExecutionStatus::Running,
             execution_mode,

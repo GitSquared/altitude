@@ -10,7 +10,7 @@ use super::{
     TaskOperatorSignalMessage, TaskOperatorSignalThread,
 };
 use crate::id;
-use crate::isolation::Environment;
+use crate::project::Project;
 use crate::{
     agent::AgentKind,
     db::Database,
@@ -48,7 +48,7 @@ impl From<TaskRow> for Task {
 #[derive(Clone, Debug)]
 pub struct TaskDraft {
     pub intent: String,
-    pub environment: Environment,
+    pub project: Project,
     /// The installation this task is delegated under, which is what a tracker's actor
     /// is mapped to.
     pub identity_id: String,
@@ -178,7 +178,7 @@ impl TaskStore {
         }
         let TaskDraft {
             intent,
-            environment,
+            project,
             identity_id,
             identity_label,
             host,
@@ -224,7 +224,7 @@ impl TaskStore {
                         sandbox_available: false,
                         snapshot_available: false,
                         intent,
-                        environment,
+                        project,
                         identity_id,
                         identity_label,
                         agent_conversation_id,

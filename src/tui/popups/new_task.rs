@@ -60,7 +60,7 @@ use crate::tui::widgets::{
 };
 use crate::{
     agent::AgentKind,
-    isolation::Environment,
+    project::Project,
     tracker::{IssueReference, IssueSummary},
 };
 
@@ -93,7 +93,7 @@ static NEXT_SUBMISSION: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Task,
-    Environment,
+    Project,
     Agent,
     Host,
     Cancel,
@@ -102,7 +102,7 @@ pub enum Focus {
 
 const ORDER: [Focus; 6] = [
     Focus::Task,
-    Focus::Environment,
+    Focus::Project,
     Focus::Agent,
     Focus::Host,
     Focus::Cancel,
@@ -155,7 +155,7 @@ enum IssuePhase {
 pub(in crate::tui) struct Submission {
     pub(in crate::tui) token: u64,
     reference: IssueReference,
-    pub(in crate::tui) environment: Environment,
+    pub(in crate::tui) project: Project,
     pub(in crate::tui) agent: AgentKind,
     pub(in crate::tui) host: Option<String>,
     pub(in crate::tui) remember: Option<AgentKind>,
@@ -164,7 +164,7 @@ pub(in crate::tui) struct Submission {
 /// The question, and the answers so far.
 pub struct NewTask {
     task: TextBox,
-    environment: Select<Environment>,
+    project: Select<Project>,
     agent: Select<AgentKind>,
     /// This machine first, then the remotes, by where each is reached.
     host: Select<Option<String>>,
@@ -207,7 +207,7 @@ pub enum Answer {
     Cancel,
     Create {
         task: String,
-        environment: Environment,
+        project: Box<Project>,
         agent: AgentKind,
         /// Where to run it: a remote's address, or nothing for this machine.
         host: Option<String>,
@@ -228,8 +228,8 @@ impl NewTask {
     /// a machine that cannot be given work is not preselected, because a question
     /// whose answer would not run is worse than the plain one.
     pub fn new(
-        environments: Vec<Environment>,
-        default_environment: &str,
+        projects: Vec<Project>,
+        default_project: &str,
         default_agent: Option<AgentKind>,
         hosts: Vec<Host>,
         default_host: Option<&str>,
@@ -241,17 +241,17 @@ impl NewTask {
                     .position(|host| host.ready && host.address.as_deref() == Some(address))
             })
             .unwrap_or(0);
-        let chosen = environments
+        let chosen = projects
             .iter()
-            .position(|candidate| candidate.name.eq_ignore_ascii_case(default_environment))
+            .position(|candidate| candidate.id == default_project)
             .unwrap_or(0);
-        let environment = Select::new(
-            "env",
-            environments
+        let project = Select::new(
+            "project",
+            projects
                 .into_iter()
-                .map(|environment| {
-                    let label = environment.name.clone();
-                    Offer::new(environment, label)
+                .map(|project| {
+                    let label = project.name.clone();
+                    Offer::new(project, label)
                 })
                 .collect(),
             chosen,
@@ -269,7 +269,7 @@ impl NewTask {
         );
         Self {
             task: TextBox::new(""),
-            environment,
+            project,
             agent,
             host: Select::new("host", host_offers(hosts), chosen_host),
             agent_unchosen: default_agent.is_none(),
@@ -323,7 +323,7 @@ impl NewTask {
     /// Whether the focused pill has its list open.
     fn list_open(&self) -> bool {
         match self.focus {
-            Focus::Environment => self.environment.is_open(),
+            Focus::Project => self.project.is_open(),
             Focus::Agent => self.agent.is_open(),
             Focus::Host => self.host.is_open(),
             _ => false,
@@ -334,7 +334,7 @@ impl NewTask {
     /// through it.
     fn list_searching(&self) -> bool {
         match self.focus {
-            Focus::Environment => self.environment.is_searching(),
+            Focus::Project => self.project.is_searching(),
             Focus::Agent => self.agent.is_searching(),
             Focus::Host => self.host.is_searching(),
             _ => false,
@@ -403,7 +403,7 @@ impl NewTask {
 
     fn paste_into_list(&mut self, text: &str) {
         match self.focus {
-            Focus::Environment => self.environment.paste(text),
+            Focus::Project => self.project.paste(text),
             Focus::Agent => self.agent.paste(text),
             Focus::Host => self.host.paste(text),
             _ => {}
@@ -469,7 +469,7 @@ impl NewTask {
 
     fn choose(&mut self, index: usize) {
         match self.focus {
-            Focus::Environment => self.environment.choose(index),
+            Focus::Project => self.project.choose(index),
             Focus::Agent => self.agent.choose(index),
             Focus::Host => self.host.choose(index),
             _ => {}
@@ -479,7 +479,7 @@ impl NewTask {
 
     fn scroll_list(&mut self, forward: bool) {
         match self.focus {
-            Focus::Environment => self.environment.scroll(forward),
+            Focus::Project => self.project.scroll(forward),
             Focus::Agent => self.agent.scroll(forward),
             Focus::Host => self.host.scroll(forward),
             _ => {}
@@ -487,7 +487,7 @@ impl NewTask {
     }
 
     fn close_lists(&mut self) {
-        self.environment.close();
+        self.project.close();
         self.agent.close();
         self.host.close();
     }
@@ -537,7 +537,7 @@ impl NewTask {
         // where they were.
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             let pill = match key.code {
-                KeyCode::Char('e') => Some(Focus::Environment),
+                KeyCode::Char('e') => Some(Focus::Project),
                 KeyCode::Char('a') => Some(Focus::Agent),
                 KeyCode::Char('h') => Some(Focus::Host),
                 _ => None,
@@ -591,7 +591,7 @@ impl NewTask {
     /// Give the key to the pill whose list is open, answering whether one was.
     fn list_key(&mut self, key: KeyEvent) -> bool {
         match self.focus {
-            Focus::Environment => self.environment.handle_key(key),
+            Focus::Project => self.project.handle_key(key),
             Focus::Agent => self.agent.handle_key(key),
             Focus::Host => self.host.handle_key(key),
             _ => false,
@@ -601,7 +601,7 @@ impl NewTask {
     fn open_list(&mut self) {
         self.close_lists();
         match self.focus {
-            Focus::Environment => self.environment.open(),
+            Focus::Project => self.project.open(),
             Focus::Agent => self.agent.open(),
             Focus::Host => self.host.open(),
             _ => {}
@@ -834,7 +834,7 @@ impl NewTask {
         if self.issue {
             // A search that is still resting or out is not a lost answer: the
             // submission waits for the first result, keeping the choices made
-            // for the environment, the agent and the machine.
+            // for the project, the agent and the machine.
             if self.queued_submit {
                 return None;
             }
@@ -854,10 +854,10 @@ impl NewTask {
             let token = self.begin_submission()?;
             return Some(Answer::ReadIssue { token });
         }
-        let (environment, agent, host, remember) = self.selections()?;
+        let (project, agent, host, remember) = self.selections()?;
         Some(Answer::Create {
             task: self.task.value().trim().to_owned(),
-            environment,
+            project: Box::new(project),
             agent,
             host,
             remember,
@@ -870,13 +870,13 @@ impl NewTask {
             return None;
         }
         let summary = self.results.get(self.selected_result)?.clone();
-        let (environment, agent, host, remember) = self.selections()?;
+        let (project, agent, host, remember) = self.selections()?;
         let token = NEXT_SUBMISSION.fetch_add(1, Ordering::Relaxed);
         self.read_error = None;
         self.submission = Some(Submission {
             token,
             reference: summary.reference,
-            environment,
+            project,
             agent,
             host,
             remember,
@@ -884,16 +884,11 @@ impl NewTask {
         Some(token)
     }
 
-    fn selections(&self) -> Option<(Environment, AgentKind, Option<String>, Option<AgentKind>)> {
-        let environment = self.environment.chosen_value()?.clone();
+    fn selections(&self) -> Option<(Project, AgentKind, Option<String>, Option<AgentKind>)> {
+        let project = self.project.chosen_value()?.clone();
         let agent = *self.agent.chosen_value()?;
         let host = self.host.chosen_value()?.clone();
-        Some((
-            environment,
-            agent,
-            host,
-            self.agent_unchosen.then_some(agent),
-        ))
+        Some((project, agent, host, self.agent_unchosen.then_some(agent)))
     }
 
     /// The open list, over the prompt above the pill it belongs to, and where
@@ -905,8 +900,8 @@ impl NewTask {
         anchors: [Rect; 3],
     ) -> Vec<(Rect, usize)> {
         match self.focus {
-            Focus::Environment if self.environment.is_open() => {
-                self.environment.draw_list(frame, area, anchors[0])
+            Focus::Project if self.project.is_open() => {
+                self.project.draw_list(frame, area, anchors[0])
             }
             Focus::Agent if self.agent.is_open() => self.agent.draw_list(frame, area, anchors[1]),
             Focus::Host if self.host.is_open() => self.host.draw_list(frame, area, anchors[2]),
@@ -967,7 +962,7 @@ pub fn draw(
     );
 
     let anchors = draw_choices(frame, pills, new_task);
-    for (pill, anchor) in [Focus::Environment, Focus::Agent, Focus::Host]
+    for (pill, anchor) in [Focus::Project, Focus::Agent, Focus::Host]
         .into_iter()
         .zip(anchors)
     {
@@ -1112,12 +1107,12 @@ fn result_line(summary: &IssueSummary, width: usize, focused: bool) -> Line<'sta
 /// The three decisions, as pills: what is chosen is what you press.
 fn draw_choices(frame: &mut Frame, area: Rect, new_task: &NewTask) -> [Rect; 3] {
     let named = [
-        new_task.environment.pill_width(true),
+        new_task.project.pill_width(true),
         new_task.agent.pill_width(true),
         new_task.host.pill_width(true),
     ];
     let valued = [
-        new_task.environment.pill_width(false),
+        new_task.project.pill_width(false),
         new_task.agent.pill_width(false),
         new_task.host.pill_width(false),
     ];
@@ -1131,7 +1126,7 @@ fn draw_choices(frame: &mut Frame, area: Rect, new_task: &NewTask) -> [Rect; 3] 
     } else {
         ([available / 3; 3], false)
     };
-    let [environment, agent, host] = Layout::horizontal([
+    let [project, agent, host] = Layout::horizontal([
         Constraint::Length(widths[0]),
         Constraint::Length(widths[1]),
         Constraint::Length(widths[2]),
@@ -1141,15 +1136,15 @@ fn draw_choices(frame: &mut Frame, area: Rect, new_task: &NewTask) -> [Rect; 3] 
     .areas(area);
     let focused = new_task.focus;
     new_task
-        .environment
-        .draw_pill(frame, environment, focused == Focus::Environment, with_name);
+        .project
+        .draw_pill(frame, project, focused == Focus::Project, with_name);
     new_task
         .agent
         .draw_pill(frame, agent, focused == Focus::Agent, with_name);
     new_task
         .host
         .draw_pill(frame, host, focused == Focus::Host, with_name);
-    [environment, agent, host]
+    [project, agent, host]
 }
 
 /// Whether text is shaped like something Linear can be asked about directly: an

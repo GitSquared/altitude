@@ -23,7 +23,7 @@ use crate::task::{
 };
 use crate::tracker::{IssueReference, IssueSnapshot, TrackerKind};
 use crate::vcs::ContributionState;
-use crate::{agent::AgentKind, isolation::Environment};
+use crate::{agent::AgentKind, project::Project};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::{
@@ -302,9 +302,10 @@ pub enum LinkResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskRequest {
     pub origin: TaskOrigin,
-    /// Which environment, by name. The remote holds the recipe, because that is what
-    /// it was sent; it has no need of the client's copy of it.
-    pub environment: String,
+    /// Which project, by id. The remote holds the project, because that is what it
+    /// was sent; it has no need of the client's copy of it, and an id survives a
+    /// rename on the machine that asked.
+    pub project_id: String,
     pub agent: AgentKind,
     /// How the requesting operator reads to a human, so the remote's record says
     /// what the client's would have. Presentation only: whose work this is comes
@@ -354,7 +355,7 @@ pub struct TaskSummary {
     /// Resolved by the machine that owns the task, because that is where the
     /// intent is and a card is not where a sentence gets cut.
     pub title: String,
-    pub environment: String,
+    pub project: String,
     pub agent: Option<AgentKind>,
     pub status: TaskExecutionStatus,
     pub mode: TaskExecutionMode,
@@ -412,7 +413,12 @@ impl TaskSummary {
             id: task.id.clone(),
             host: task.host.clone(),
             title: task.title().to_owned(),
-            environment: task.facts.environment_name.clone(),
+            project: task
+                .facts
+                .project
+                .as_ref()
+                .map(|project| project.name.clone())
+                .unwrap_or_default(),
             agent: task.agent_kind,
             status: task.facts.execution_status.clone(),
             mode: task.facts.execution_mode,
@@ -486,7 +492,7 @@ pub struct RecordedEvent {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HandoverDraft {
     pub intent: String,
-    pub environment: Environment,
+    pub project: Project,
     pub agent: AgentKind,
     /// The conversation to continue, so the agent picks up where it left off.
     pub agent_conversation_id: Option<String>,

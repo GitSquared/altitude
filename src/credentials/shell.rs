@@ -17,8 +17,8 @@ use crate::{
     agent::tools::AgentToolRegistry,
     credentials::{Credentials, CredentialsError},
     isolation::{
-        CREDENTIAL_PREFIX, Command, CommandEvent, CredentialSandbox, Environment,
-        EnvironmentProgress, EnvironmentProgressSink, IsolationEngine, IsolationError,
+        CREDENTIAL_PREFIX, Command, CommandEvent, CredentialSandbox, EnvironmentProgress,
+        EnvironmentProgressSink, IsolationEngine, IsolationError,
     },
 };
 
@@ -160,7 +160,6 @@ where
     pub async fn open_shell(
         &self,
         id: String,
-        environment: Environment,
         profile: &'static str,
         cancel: CredentialShellCancel,
         events: &mpsc::UnboundedSender<CredentialShellEvent>,
@@ -168,11 +167,10 @@ where
         if cancel.is_cancelled() {
             return Ok(());
         }
-        let (recipes, snapshot) = self.environment_for(&environment, profile)?;
+        let (recipes, snapshot) = self.credential_build(profile)?;
         self.bind_channel(&id)?;
         let sandbox = CredentialSandbox {
             id: id.clone(),
-            environment,
             recipes,
             snapshot,
         };

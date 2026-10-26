@@ -10,8 +10,8 @@ use tokio::{sync::mpsc, time};
 use crate::{
     agent::{AgentKind, TaskReportDecoder},
     config::InstallationIdentity,
-    isolation::Environment,
     isolation::{Command, CommandEvent, CommandSession, IsolationEngine, OutputStream},
+    project::Project,
     task::capacity::{HostCapacity, HostSampler, SAMPLE_INTERVAL},
     task::review::{
         Look, OBSERVATION_ATTEMPTS, REVIEW_POLL_INTERVAL, ReviewWaits, Watchers, unreadable,
@@ -324,7 +324,10 @@ where
                         "{}\n\nThe operator added these instructions:\n{}",
                         task.facts.intent, instruction
                     ),
-                    environment: task.environment(),
+                    project: task
+                        .project()
+                        .cloned()
+                        .ok_or(TaskServiceError::Task(super::TaskError::MissingProject))?,
                     identity_id: task
                         .facts
                         .operator_id
@@ -374,13 +377,13 @@ where
     pub async fn create_issue_for_operator(
         &self,
         issue: IssueSnapshot,
-        environment: Environment,
+        project: Project,
         agent: AgentKind,
         operator: InstallationIdentity,
     ) -> Result<Task, TaskServiceError> {
         let task = self
             .service
-            .create_from_issue_as_operator(issue, environment, agent, Some(operator))
+            .create_from_issue_as_operator(issue, project, agent, Some(operator))
             .await?;
         let _ = self
             .events
@@ -555,16 +558,16 @@ where
     pub fn create(
         &self,
         prompt: String,
-        environment: Environment,
+        project: Project,
         agent: AgentKind,
         requester: Option<InstallationIdentity>,
     ) {
-        tracing::info!(agent = %agent, environment = %environment.name, "creating task");
+        tracing::info!(agent = %agent, project = %project.name, "creating task");
         let event_loop = self.clone();
         tokio::spawn(async move {
             let task = match event_loop
                 .service
-                .create(prompt, environment, agent, requester)
+                .create(prompt, project, agent, requester)
                 .await
             {
                 Ok(task) => task,
@@ -590,18 +593,13 @@ where
     /// If an active task already holds the issue, creation returns that task, and
     /// admitting it changes nothing: only a pending task starts, so a paused one
     /// is left where the operator put it.
-    pub fn create_from_issue(
-        &self,
-        issue: IssueSnapshot,
-        environment: Environment,
-        agent: AgentKind,
-    ) {
+    pub fn create_from_issue(&self, issue: IssueSnapshot, project: Project, agent: AgentKind) {
         tracing::info!(issue = %issue.issue.reference.identifier, "creating task from issue");
         let event_loop = self.clone();
         tokio::spawn(async move {
             let task = match event_loop
                 .service
-                .create_from_issue(issue, environment, agent)
+                .create_from_issue(issue, project, agent)
                 .await
             {
                 Ok(task) => task,
@@ -778,24 +776,24 @@ where
         Ok(())
     }
 
-    /// Build what a task's environment needs, and say where its snapshot is.
-    pub async fn prepare_environment(
+    /// Build what a task's project needs, and say where its snapshot is.
+    pub async fn prepare_project(
         &self,
-        environment: &Environment,
+        project: &Project,
         agent: AgentKind,
     ) -> Result<PathBuf, TaskServiceError> {
-        self.service.prepare_environment(environment, agent).await
+        self.service.prepare_project(project, agent).await
     }
 
-    /// Build what a task's environment needs for one operator.
-    pub async fn prepare_environment_as_operator(
+    /// Build what a task's project needs for one operator.
+    pub async fn prepare_project_as_operator(
         &self,
         owner: &str,
-        environment: &Environment,
+        project: &Project,
         agent: AgentKind,
     ) -> Result<PathBuf, TaskServiceError> {
         self.service
-            .prepare_environment_as_operator(owner, environment, agent)
+            .prepare_project_as_operator(owner, project, agent)
             .await
     }
 
@@ -804,7 +802,7 @@ where
     pub async fn land(&self, arrival: super::TaskArrival) -> Result<Task, TaskServiceError> {
         let super::TaskArrival {
             intent,
-            environment,
+            project,
             agent,
             conversation,
             history,
@@ -815,7 +813,7 @@ where
         self.service
             .adopt(
                 self.service
-                    .draft(intent, environment, agent, conversation, None),
+                    .draft(intent, project, agent, conversation, None),
                 Some(&history),
                 &[TaskHistoryEvent::TransferStaged {
                     transfer_id: transfer_id.to_owned(),

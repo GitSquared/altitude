@@ -119,7 +119,7 @@ fn draw_tasks(
 /// another about the same kind of task on another machine.
 struct Card {
     title: String,
-    environment: String,
+    project: String,
     agent: Option<AgentKind>,
     host: String,
     /// The tracker issue this task is bound to, when it is bound to one.
@@ -146,7 +146,7 @@ impl Card {
     ) -> Self {
         Self {
             title: summary.title.clone(),
-            environment: summary.environment.clone(),
+            project: summary.project.clone(),
             agent: summary.agent,
             host: summary.host.clone(),
             issue: summary
@@ -234,7 +234,7 @@ fn draw_card(frame: &mut Frame, area: Rect, card: &Card, focused: bool) {
     if let Some(issue) = &card.issue {
         lines.push(Line::styled(issue.clone(), palette::accent()));
     }
-    lines.push(Line::styled(card.environment.clone(), palette::muted()));
+    lines.push(Line::styled(card.project.clone(), palette::muted()));
     lines.push(Line::styled(
         format!("{agent} on {}", card.host),
         palette::muted(),

@@ -22,7 +22,7 @@ use crate::tui::widgets::{
 use super::{
     form::draw_form,
     pages::{
-        agent_purpose, base_lines, credential_connector, git_connector, profile_connector,
+        agent_purpose, credential_connector, git_connector, profile_connector, project_lines,
         remote_connector, section_heading, tracker_connector, tracker_summary,
     },
     panel::{Depth, Panel, Section},
@@ -193,30 +193,7 @@ fn detail(panel: &Panel, view: &View, tick: Option<usize>) -> Paragraph<'static>
     };
     let label = row.label.clone();
     let lines = match &row.kind {
-        RowKind::Base => base_lines(view.base.as_ref(), heading),
-        RowKind::Environment {
-            setup, is_default, ..
-        } => {
-            let mut lines = vec![heading(label)];
-            if *is_default {
-                lines.push(Line::from(""));
-                lines.push(Line::styled(
-                    "New tasks use this environment by default.",
-                    palette::primary(),
-                ));
-            }
-            lines.push(Line::from(""));
-            lines.push(Line::styled("setup command", palette::muted()));
-            if setup.trim().is_empty() {
-                lines.push(Line::styled(
-                    "Nothing on top of the base. This environment is the base, by another name.",
-                    palette::muted(),
-                ));
-            } else {
-                lines.push(Line::from(setup.clone()));
-            }
-            lines
-        }
+        RowKind::Project { project } => project_lines(project, view.base.as_ref(), heading),
         RowKind::Agent { kind, credential } => match &credential.kind {
             CredentialKind::Profile {
                 profile,

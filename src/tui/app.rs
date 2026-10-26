@@ -26,9 +26,8 @@ use crate::{
         CredentialAnswer, CredentialShell, CredentialShellCancel, CredentialShellEvent,
         credential_shell_id,
     },
-    isolation::{
-        Environment, EnvironmentDescription, EnvironmentProgress, IsolationEngine, ProfileSummary,
-    },
+    isolation::{EnvironmentDescription, EnvironmentProgress, IsolationEngine, ProfileSummary},
+    project::Project,
     remote::{
         Announcement, ConfigBundle, ConfigPush, DiscoveredRemote, DiscoveryEvent, LinkClient,
         RemoteKey, RemoteKeyStatus, RemoteKeys, RemoteState, TaskOrigin, TaskRequest, TaskSummary,
@@ -900,36 +899,23 @@ impl App {
         self.grid_columns.max(1)
     }
 
-    /// Everything a task can run in, base first.
-    ///
-    /// Built from the settings rather than stored on the app: the list is two or
-    /// three entries, and a copy kept here would be one more thing to keep in
-    /// step with the file.
-    pub(in crate::tui) fn environments(&self) -> Vec<Environment> {
-        self.settings_file
-            .as_ref()
-            .map(|file| file.settings().environments())
-            .unwrap_or_else(|| vec![Environment::base()])
-    }
-
-    /// The name of the environment a new task would get.
-    pub(in crate::tui) fn default_environment_name(&self) -> &str {
-        self.settings_file
-            .as_ref()
-            .map(|file| file.settings().default_environment())
+    /// The project a new task starts in: the first, until tabs choose one.
+    pub(in crate::tui) fn active_project_id(&self) -> String {
+        self.projects()
+            .first()
+            .map(|project| project.id.clone())
             .unwrap_or_default()
     }
 
-    /// The environment a new task would get.
+    /// The projects a task can be founded in.
     ///
-    /// A credential shell is opened in it, because the credentials being set up are
-    /// the ones tasks read.
-    pub(in crate::tui) fn default_environment_value(&self) -> Environment {
-        let default = self.default_environment_name();
-        self.environments()
-            .into_iter()
-            .find(|environment| environment.name.eq_ignore_ascii_case(default))
-            .unwrap_or_else(Environment::base)
+    /// Built from the settings rather than stored on the app: the list is small,
+    /// and a copy kept here would be one more thing to keep in step with the file.
+    pub(in crate::tui) fn projects(&self) -> Vec<Project> {
+        self.settings_file
+            .as_ref()
+            .map(|file| file.settings().projects().to_vec())
+            .unwrap_or_default()
     }
 
     pub(in crate::tui) fn reload_settings(&mut self) -> bool {
@@ -1466,13 +1452,10 @@ impl App {
         }
         let cancel = CredentialShellCancel::new();
         let id = credential_shell_id();
-        let environment = self.default_environment_value();
         // A built environment is a wait of a moment, so it gets no wait to look at:
         // the box appears only when there is an install to watch.
-        let progress = (!task_service
-            .credentials()
-            .environment_built(environment.clone(), profile))
-        .then(|| "Preparing your sign-in environment…".to_owned());
+        let progress = (!task_service.credentials().environment_built(profile))
+            .then(|| "Preparing your sign-in…".to_owned());
         self.credential_shell = CredentialShellState::Opening {
             id: id.clone(),
             display: display.to_owned(),
@@ -1485,7 +1468,7 @@ impl App {
         tokio::spawn(async move {
             match service
                 .credentials()
-                .open_shell(id.clone(), environment, profile, cancel, &events)
+                .open_shell(id.clone(), profile, cancel, &events)
                 .await
             {
                 Ok(()) => {}
@@ -1668,7 +1651,7 @@ impl App {
             KeyCode::Char('n') if self.panel.section.grows() => {
                 self.panel.form = Some(match self.panel.section {
                     Section::Remotes => Form::new(Target::NewRemote, "", ""),
-                    _ => Form::new(Target::NewEnvironment, "", ""),
+                    _ => Form::new(Target::NewProject, "", ""),
                 });
             }
             _ if is_remove(key) && self.selected_row().is_some_and(|row| row.is_removable()) => {
@@ -2248,7 +2231,7 @@ impl App {
         &mut self,
         address: &str,
         origin: TaskOrigin,
-        environment: &str,
+        project_id: &str,
         agent: AgentKind,
         replies: &mpsc::Sender<TaskDelegationReply>,
     ) {
@@ -2260,7 +2243,7 @@ impl App {
             }
         };
         let address = address.to_owned();
-        let environment = environment.to_owned();
+        let project_id = project_id.to_owned();
         let keys = self.remote_keys.clone();
         let client = self.link.clone();
         let replies = replies.clone();
@@ -2268,7 +2251,7 @@ impl App {
             let result = Self::send_task(
                 &address,
                 origin,
-                &environment,
+                &project_id,
                 agent,
                 identity.label,
                 &keys,
@@ -2283,7 +2266,7 @@ impl App {
     async fn send_task(
         address: &str,
         origin: TaskOrigin,
-        environment: &str,
+        project_id: &str,
         agent: AgentKind,
         identity_label: String,
         keys: &RemoteKeys,
@@ -2306,7 +2289,7 @@ impl App {
                 sighting.ticket,
                 TaskRequest {
                     origin,
-                    environment: environment.to_owned(),
+                    project_id: project_id.to_owned(),
                     agent,
                     identity_label,
                 },
@@ -2751,16 +2734,11 @@ impl App {
                 .insert(*profile, CredentialStatus::Checking);
         }
         self.credential_retry_at = None;
-        let environment = self.default_environment_value();
         let service = task_service.clone();
         let reports = reports.clone();
         let generation = self.credential_check_generation;
         tokio::spawn(async move {
-            let answers = match service
-                .credentials()
-                .answers(environment, profiles.clone())
-                .await
-            {
+            let answers = match service.credentials().answers(profiles.clone()).await {
                 Ok(answers) => answers
                     .into_iter()
                     .map(|(profile, answer)| (profile, credential_status(answer)))
@@ -2925,11 +2903,6 @@ impl App {
             return;
         };
         self.panel.form = Some(match row.kind {
-            // The base has no form: it is described instead.
-            RowKind::Base => {
-                self.say("The base environment is built in");
-                return;
-            }
             RowKind::Switch { setting, on } => {
                 self.toggle(setting, !on);
                 return;
@@ -2954,12 +2927,13 @@ impl App {
                 self.say("Press enter to sign in to Linear");
                 return;
             }
-            RowKind::Environment { name, setup, .. } => Form::new(
-                Target::Environment {
-                    original: name.clone(),
+            RowKind::Project { project } => Form::new(
+                Target::Project {
+                    id: Some(project.id.clone()),
+                    name: project.name.clone(),
                 },
-                &name,
-                &setup,
+                &project.name,
+                &project.setup_command,
             ),
             RowKind::Discovered(_) => return,
             RowKind::Remote { address, .. } => Form::new(
@@ -3053,8 +3027,7 @@ impl App {
         };
         // The question is built first: it borrows the name the target then moves.
         let (question, target) = match row.kind {
-            RowKind::Base
-            | RowKind::Switch { .. }
+            RowKind::Switch { .. }
             | RowKind::Agent { .. }
             | RowKind::GitIdentity(_)
             | RowKind::Credential(_)
@@ -3062,9 +3035,12 @@ impl App {
             | RowKind::Discovered(_) => {
                 return;
             }
-            RowKind::Environment { name, .. } => (
-                format!("Delete the {name} environment?"),
-                Target::Environment { original: name },
+            RowKind::Project { project } => (
+                format!("Delete the {} project?", project.name),
+                Target::Project {
+                    id: Some(project.id.clone()),
+                    name: project.name.clone(),
+                },
             ),
             RowKind::Remote { address, .. } => (
                 format!(
@@ -3155,23 +3131,18 @@ impl App {
         };
         let mut proposed = file.settings().clone();
         match &form.target {
-            Target::NewEnvironment | Target::Environment { .. } => {
+            Target::NewProject | Target::Project { .. } => {
                 let name = form.primary.value().trim().to_owned();
-                if let Some(original) = form.target.original() {
-                    // Renaming the default must not quietly hand the default
-                    // back to the base, so it is carried across the change.
-                    let was_default = proposed
-                        .default_environment()
-                        .eq_ignore_ascii_case(original);
-                    proposed.remove_environment(original);
-                    if was_default {
-                        proposed.set_default_environment(&name);
-                    }
-                }
-                proposed.add_environment(Environment {
-                    name,
-                    setup_command: form.setup.value(),
-                });
+                // The page edits a name and a setup; everything else on the
+                // project is carried across so a rename is not a reset.
+                let mut project = form
+                    .target
+                    .project_id()
+                    .and_then(|id| proposed.project(id).cloned())
+                    .unwrap_or_else(|| Project::new(name.clone()));
+                project.name = name;
+                project.setup_command = form.setup.value();
+                proposed.add_project(project);
             }
             Target::NewRemote | Target::Remote { .. } => {
                 if let Some(original) = form.target.original() {
@@ -3206,7 +3177,8 @@ impl App {
         let mut proposed = file.settings().clone();
         let mut forget_error = None;
         match &target {
-            Target::Environment { original } => proposed.remove_environment(original),
+            Target::Project { id: Some(id), .. } => proposed.remove_project(id),
+            Target::Project { id: None, .. } => {}
             Target::Remote { original } => {
                 proposed.remove_remote(original);
                 self.remote_synced.remove(original);
@@ -3828,7 +3800,7 @@ impl App {
             Some(Answer::Cancel) => {}
             Some(Answer::Create {
                 task,
-                environment,
+                project,
                 agent,
                 host,
                 remember,
@@ -3846,12 +3818,12 @@ impl App {
                     Some(address) => self.begin_delegation(
                         &address,
                         TaskOrigin::Intent(task),
-                        &environment.name,
+                        &project.id,
                         agent,
                         delegations,
                     ),
                     // Founded here, so whose work it is needs no saying.
-                    None => event_loop.create(task, environment, agent, None),
+                    None => event_loop.create(task, *project, agent, None),
                 }
             }
             // The prompt stays in front, reading the issue: the operator sees the
@@ -3980,14 +3952,14 @@ impl App {
                     Some(address) => self.begin_delegation(
                         &address,
                         TaskOrigin::Issue(Box::new(snapshot)),
-                        &submission.environment.name,
+                        &submission.project.id,
                         submission.agent,
                         delegations,
                     ),
                     None => {
                         event_loop.create_from_issue(
                             snapshot,
-                            submission.environment,
+                            submission.project,
                             submission.agent,
                         );
                     }
@@ -4511,8 +4483,8 @@ impl App {
             KeyCode::Char('c') => {
                 if self.reload_settings() {
                     self.foreground = Foreground::NewTask(Box::new(NewTask::new(
-                        self.environments(),
-                        self.default_environment_name(),
+                        self.projects(),
+                        &self.active_project_id(),
                         self.agent(),
                         self.task_hosts(),
                         self.default_task_host().as_deref(),
@@ -4526,8 +4498,8 @@ impl App {
                 if self.reload_settings() {
                     self.foreground = Foreground::NewTask(Box::new(
                         NewTask::new(
-                            self.environments(),
-                            self.default_environment_name(),
+                            self.projects(),
+                            &self.active_project_id(),
                             self.agent(),
                             self.task_hosts(),
                             self.default_task_host().as_deref(),
@@ -4585,7 +4557,10 @@ impl App {
                 if let Some(task) = self.selected_task() {
                     let hosts = self.send_hosts();
                     let title = task.title().to_owned();
-                    let environment = task.facts.environment_name.clone();
+                    let environment = task
+                        .project()
+                        .map(|project| project.name.clone())
+                        .unwrap_or_default();
                     let agent = task.agent_kind;
                     self.foreground = Foreground::SendTask(Box::new(SendTask::new(
                         task.id,

@@ -308,26 +308,40 @@ impl Config {
         self.scoped_data_dir().join(profile).join("profile")
     }
 
-    /// Where the workspace base is kept: the snapshot every environment is
-    /// built on top of.
-    pub fn workspace_snapshots_dir(&self) -> PathBuf {
+    /// Where the base image's snapshots are kept: what every project is built on
+    /// top of.
+    ///
+    /// The directory still says `workspace` because it is storage, not
+    /// vocabulary, and moving it would throw away a base build for a rename.
+    pub fn base_snapshots_dir(&self) -> PathBuf {
         self.data_dir
             .join("environments")
             .join("workspace")
             .join("snapshots")
     }
 
-    /// Where one environment's snapshots are kept, one directory per build.
+    /// Where a project's built snapshots are kept, one directory per build.
     ///
-    /// An environment name is not a build: a sign-in builds only the CLI it signs
-    /// in to, and tasks build all of it. The caller adds the directory that names
-    /// the build, so the two cannot replace each other's snapshot.
-    pub fn environment_snapshots_dir(&self, name: &str) -> PathBuf {
+    /// Keyed by the project's id rather than its name, so renaming a project
+    /// leaves the build it is already running on where it is. A project's name is
+    /// not a build either: a sign-in builds only the CLI it signs in to, and tasks
+    /// build all of it, so the caller adds the directory that names the build.
+    pub fn project_snapshots_dir(&self, project_id: &str) -> PathBuf {
         self.scoped_data_dir()
-            .join("environments")
-            .join("coding")
-            .join(name)
+            .join("projects")
+            .join(project_id)
             .join("snapshots")
+    }
+
+    /// Where a project's shared caches live on this machine.
+    ///
+    /// Disposable by design, like the git object cache: what is here is the
+    /// machine's convenience, and losing it costs a build rather than any work.
+    pub fn project_cache_dir(&self, project_id: &str) -> PathBuf {
+        self.scoped_data_dir()
+            .join("projects")
+            .join(project_id)
+            .join("cache")
     }
 }
 

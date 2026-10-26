@@ -111,11 +111,11 @@ pub fn help_sections() -> Vec<HelpSection> {
                     "Delete / Backspace",
                     "Remove saved credentials, after confirmation",
                 ),
-                ("n", "Add an environment or remote"),
-                ("e", "Edit an environment or remote"),
+                ("n", "Add a project or remote"),
+                ("e", "Edit a project or remote"),
                 (
                     "d / Delete / Backspace",
-                    "Remove an environment or remote, after confirmation",
+                    "Remove a project or remote, after confirmation",
                 ),
                 ("t (Remotes)", "Choose the remote's task tracker"),
                 (
@@ -141,7 +141,7 @@ pub fn help_sections() -> Vec<HelpSection> {
                 ),
                 (
                     "Ctrl-E · Ctrl-A · Ctrl-H",
-                    "Open the environment, agent or machine list",
+                    "Open the project, agent or machine list",
                 ),
                 (
                     "An issue ID or URL",
@@ -189,7 +189,7 @@ pub fn help_sections() -> Vec<HelpSection> {
                 ("Tab / Shift-Tab", "Move between fields or buttons"),
                 (
                     "Ctrl-Enter",
-                    "Save an environment or remote from wherever the caret is",
+                    "Save a project or remote from wherever the caret is",
                 ),
                 ("← / → (confirmation)", "Switch between cancel and confirm"),
                 ("j/k · ↓/↑ (send task)", "Choose a remote"),

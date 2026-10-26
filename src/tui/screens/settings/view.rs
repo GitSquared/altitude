@@ -22,7 +22,6 @@ impl App {
     /// Everything the panel draws, assembled from the settings file and from
     /// what was read back about each remote and about the base environment.
     pub(in crate::tui) fn settings_view(&self) -> View {
-        let default_environment = self.default_environment_name().to_owned();
         let rows = match self.panel.section {
             Section::Interface => vec![
                 switch_row(Setting::KeyboardHints, self.keyboard_hints()),
@@ -73,35 +72,18 @@ impl App {
                     state: self.tracker_state,
                 },
             }],
-            Section::Environments => self
-                .environments()
+            Section::Projects => self
+                .projects()
                 .into_iter()
-                .map(|environment| {
-                    let built_in = environment.is_base();
-                    let is_default = environment.name.eq_ignore_ascii_case(&default_environment);
+                .map(|project| {
+                    let detail = project
+                        .repository
+                        .clone()
+                        .unwrap_or_else(|| "no repository".to_owned());
                     Row {
-                        label: environment.name.clone(),
-                        // The built-in one says what it is rather than what it is
-                        // used for: there is nothing to choose about it.
-                        detail: Some(
-                            if built_in {
-                                "built in"
-                            } else if is_default {
-                                "default"
-                            } else {
-                                "custom"
-                            }
-                            .to_owned(),
-                        ),
-                        kind: if built_in {
-                            RowKind::Base
-                        } else {
-                            RowKind::Environment {
-                                name: environment.name,
-                                setup: environment.setup_command,
-                                is_default,
-                            }
-                        },
+                        label: project.name.clone(),
+                        detail: Some(detail),
+                        kind: RowKind::Project { project },
                     }
                 })
                 .collect(),

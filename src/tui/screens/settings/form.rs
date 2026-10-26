@@ -1,4 +1,4 @@
-//! The page that edits one environment or remote, and the fields behind it.
+//! The page that edits one project or remote, and the fields behind it.
 
 use ratatui::{
     Frame,
@@ -18,10 +18,17 @@ use crate::tui::widgets::{
 /// which list they are about and which row they are about.
 #[derive(Clone, PartialEq, Eq)]
 pub enum Target {
-    NewEnvironment,
-    Environment { original: String },
+    NewProject,
+    /// An id when an existing project is being edited, so the fields this form
+    /// does not show survive the save.
+    Project {
+        id: Option<String>,
+        name: String,
+    },
     NewRemote,
-    Remote { original: String },
+    Remote {
+        original: String,
+    },
 }
 
 impl Target {
@@ -31,8 +38,8 @@ impl Target {
 
     pub fn title(&self) -> &'static str {
         match self {
-            Self::NewEnvironment => "New environment",
-            Self::Environment { .. } => "Edit environment",
+            Self::NewProject => "New project",
+            Self::Project { .. } => "Edit project",
             Self::NewRemote => "Add remote",
             Self::Remote { .. } => "Edit remote",
         }
@@ -46,7 +53,15 @@ impl Target {
     /// What the form replaces, if anything.
     pub fn original(&self) -> Option<&str> {
         match self {
-            Self::Environment { original } | Self::Remote { original } => Some(original),
+            Self::Remote { original } => Some(original),
+            _ => None,
+        }
+    }
+
+    /// The project this form edits, when it edits one.
+    pub fn project_id(&self) -> Option<&str> {
+        match self {
+            Self::Project { id: Some(id), .. } => Some(id),
             _ => None,
         }
     }
@@ -77,10 +92,10 @@ impl Focus {
     }
 }
 
-/// A page over the panel, holding one environment or one remote.
+/// A page over the panel, holding one project or one remote.
 pub struct Form {
     pub target: Target,
-    /// The environment's name, or the remote's address.
+    /// The project's name, or the remote's address.
     pub primary: Field,
     pub setup: TextBox,
     pub focus: Focus,

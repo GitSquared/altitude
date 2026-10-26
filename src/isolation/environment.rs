@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use crate::config::Config;
+use crate::{config::Config, project::Project};
 
 use super::{
     BaseSandboxRecipe, BaseSandboxSnapshot, CommandEvent, CredentialCheck, CredentialReport,
@@ -143,6 +143,7 @@ pub struct DefaultFile {
 }
 
 struct EnvironmentPlan {
+    project: Project,
     recipe: BaseSandboxRecipe,
     options: SandboxOptions,
     defaults: Vec<(PathBuf, &'static str)>,
@@ -156,19 +157,21 @@ struct EnvironmentPlan {
 impl EnvironmentPlan {
     fn compose(
         config: &Config,
-        environment: Environment,
+        project: Project,
         recipes: Vec<EnvironmentRecipe>,
     ) -> Result<Self, IsolationError> {
-        environment
+        project
             .validate()
             .map_err(|error| IsolationError::new(error.to_string()))?;
-        let environment_name = environment.name;
+        let project_name = project.name.clone();
+        let project_id = project.id.clone();
+        let project_setup = project.setup_command.clone();
         // Each contributor to the build is its own step, so a task waiting on a cold
         // environment can say what it is waiting for. The commands are also what the
         // build is, and so what names its snapshot.
         let mut steps = vec![SetupStep::new(
-            format!("preparing the {environment_name} environment"),
-            environment.setup_command,
+            format!("preparing the {project_name} environment"),
+            project_setup,
         )];
         for recipe in &recipes {
             steps.push(SetupStep::new(recipe.label, recipe.setup_command));
@@ -180,15 +183,13 @@ impl EnvironmentPlan {
             .join("\n");
         let tag = blake3::hash(identity.as_bytes()).to_hex()[..12].to_owned();
         let mut plan = Self {
+            project,
             recipe: BaseSandboxRecipe::new(
-                format!("coding-{environment_name}"),
-                // Two compositions of the same environment name are two different
-                // builds — a sign-in's narrower one and the one tasks run on — and a
-                // store shared between them would have each replace the other's
-                // snapshot.
-                config
-                    .environment_snapshots_dir(&environment_name)
-                    .join(tag),
+                format!("coding-{project_name}"),
+                // A project id is not a build: a sign-in's narrower composition and
+                // the one tasks run on are two builds, and a store shared between
+                // them would have each replace the other's snapshot.
+                config.project_snapshots_dir(&project_id).join(tag),
                 REFRESH_AFTER,
                 steps,
             ),
@@ -291,6 +292,40 @@ impl EnvironmentPlan {
                 plan.options.environment.push((name.into(), value.into()));
             }
         }
+        // Caches are mounts, not build steps: adding or removing one changes what
+        // a task finds warm without invalidating a single built snapshot.
+        for cache in &plan.project.caches {
+            let guest_path = expand_guest_path(cache)?;
+            let host_path = config
+                .project_cache_dir(&plan.project.id)
+                .join(cache_storage_path(cache));
+            for existing in &plan.options.mounts {
+                let existing_guest = Path::new(&existing.guest_path);
+                if guest_path.starts_with(existing_guest)
+                    || existing_guest.starts_with(&guest_path)
+                    || host_path.starts_with(&existing.host_path)
+                    || existing.host_path.starts_with(&host_path)
+                {
+                    return Err(IsolationError::new(format!(
+                        "cache {cache:?} overlaps another mount"
+                    )));
+                }
+            }
+            let readme = include_str!("assets/cache.md")
+                .replace("{{guest_path}}", &guest_path.to_string_lossy())
+                .replace("{{host_path}}", &host_path.to_string_lossy())
+                .replace(
+                    "{{instructions}}",
+                    "Altitude created it for this project and will not put anything \
+                     else here.",
+                );
+            plan.managed_files
+                .push((host_path.join("README.md"), readme));
+            plan.options.mounts.push(SandboxMount {
+                host_path,
+                guest_path: guest_path.to_string_lossy().into_owned(),
+            });
+        }
         Ok(plan)
     }
 
@@ -386,20 +421,20 @@ fn io_error(error: io::Error) -> IsolationError {
     IsolationError::new(error.to_string())
 }
 
-/// Builds an environment's snapshot without making a sandbox for a task.
+/// Builds a project's snapshot without making a sandbox for a task.
 ///
 /// A machine that has just been sent a configuration builds what that configuration
 /// asks for before it can be given work, and this is that build: the same one a task
-/// would wait for, done ahead of the task. The snapshot is the environment's, shared
-/// by every task that runs in it and refreshed on the same clock.
-pub async fn ensure_environment(
+/// would wait for, done ahead of the task. The snapshot is the project's, shared by
+/// every task that runs in it and refreshed on the same clock.
+pub async fn ensure_project(
     engine: &impl IsolationEngine,
     config: &Config,
-    environment: Environment,
+    project: Project,
     recipes: Vec<EnvironmentRecipe>,
     progress: &dyn EnvironmentProgressSink,
 ) -> Result<BaseSandboxSnapshot, IsolationError> {
-    let mut plan = EnvironmentPlan::compose(config, environment, recipes)?;
+    let mut plan = EnvironmentPlan::compose(config, project, recipes)?;
     plan.initialize(config)?;
     engine.ensure_base(plan.recipe, progress).await
 }
@@ -447,7 +482,7 @@ impl SandboxKind {
 pub(super) struct ProvisionRequest {
     pub id: String,
     pub snapshot: Option<String>,
-    pub environment: Environment,
+    pub project: Project,
     pub recipes: Vec<EnvironmentRecipe>,
     pub vsock: Vec<VsockRoute>,
 }
@@ -461,11 +496,11 @@ pub(super) async fn provision(
     let ProvisionRequest {
         id,
         snapshot,
-        environment,
+        project,
         recipes,
         vsock,
     } = request;
-    let mut plan = EnvironmentPlan::compose(config, environment, recipes)?;
+    let mut plan = EnvironmentPlan::compose(config, project, recipes)?;
     plan.options.vsock = vsock;
     create(
         engine,
@@ -481,14 +516,14 @@ pub(super) async fn provision(
 
 /// The build a set of recipes describes.
 ///
-/// What an environment *is*: its setup steps are its identity, so this is what says
+/// What a project *is*: its setup steps are its identity, so this is what says
 /// whether one is already built here, and it is also what a sandbox is made from.
 pub(super) fn composed_recipe(
     config: &Config,
-    environment: Environment,
+    project: Project,
     recipes: Vec<EnvironmentRecipe>,
 ) -> Result<BaseSandboxRecipe, IsolationError> {
-    EnvironmentPlan::compose(config, environment, recipes).map(|plan| plan.recipe)
+    EnvironmentPlan::compose(config, project, recipes).map(|plan| plan.recipe)
 }
 
 /// What profiles' own checks say about them, run in one sandbox that is thrown away
@@ -508,14 +543,13 @@ pub(super) async fn credential_reports(
 ) -> Result<Option<Vec<(&'static str, CredentialReport)>>, IsolationError> {
     let CredentialSandbox {
         id,
-        environment,
         recipes,
         snapshot,
     } = sandbox;
     let Some(snapshot) = snapshot else {
         return Ok(None);
     };
-    let plan = EnvironmentPlan::compose(config, environment, recipes)?;
+    let plan = EnvironmentPlan::compose(config, Project::profile_only("credentials"), recipes)?;
     create(
         engine,
         config,
@@ -568,7 +602,6 @@ pub(super) async fn credential_shell(
 ) -> Result<String, IsolationError> {
     let CredentialSandbox {
         id,
-        environment,
         recipes,
         snapshot,
     } = sandbox;
@@ -577,7 +610,7 @@ pub(super) async fn credential_shell(
         .find(|recipe| recipe.profile == profile)
         .map(|recipe| recipe.sign_in_command.command())
         .ok_or_else(|| IsolationError::new(format!("no recipe for the {profile} profile")))?;
-    let plan = EnvironmentPlan::compose(config, environment, recipes)?;
+    let plan = EnvironmentPlan::compose(config, Project::profile_only("credentials"), recipes)?;
     create(
         engine,
         config,
@@ -602,11 +635,11 @@ pub(super) async fn watcher(
     engine: &impl IsolationEngine,
     config: &Config,
     id: String,
-    environment: Environment,
+    project: Project,
     recipes: Vec<EnvironmentRecipe>,
     progress: &dyn EnvironmentProgressSink,
 ) -> Result<(), IsolationError> {
-    let mut plan = EnvironmentPlan::compose(config, environment, recipes)?;
+    let mut plan = EnvironmentPlan::compose(config, project, recipes)?;
     // This sandbox runs a provider's read command and nothing else, so it is
     // sized for one command rather than for an agent.
     plan.options.size = SandboxSize::COMMAND;
@@ -664,6 +697,9 @@ async fn create(
             "mkdir -p {source} {target}\nmount --bind {source} {target}\n"
         ));
     }
+    if kind == SandboxKind::Task {
+        command.push_str(&project_scripts(&plan.project)?);
+    }
     if let Err(error) = run_setup(engine, id.clone(), command).await {
         if let Err(cleanup_error) = engine.remove(id).await {
             tracing::warn!(%cleanup_error, "could not remove sandbox after its directory setup failed");
@@ -675,6 +711,70 @@ async fn create(
 
 pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Where a project's paths are inside the sandbox.
+///
+/// A project writes `~/` because that is how it reads on the host; the sandbox's
+/// home is the guest home, and an absolute path is already the guest's.
+fn expand_guest_path(path: &str) -> Result<PathBuf, IsolationError> {
+    let path = path.trim().trim_end_matches('/');
+    let expanded = match path.strip_prefix("~/") {
+        Some(rest) => Path::new(GUEST_HOME).join(rest),
+        None if path.starts_with('/') => PathBuf::from(path),
+        None => {
+            return Err(IsolationError::new(format!(
+                "project path {path:?} must be absolute or start with `~/`"
+            )));
+        }
+    };
+    relative_path(expanded.to_string_lossy().trim_start_matches('/'), false)?;
+    Ok(expanded)
+}
+
+/// Where a cache's host directory lives under the project's cache root.
+///
+/// The path is mirrored rather than hashed so a directory listing says what it
+/// holds: `home/.cargo` is the sandbox's `~/.cargo`.
+fn cache_storage_path(cache: &str) -> PathBuf {
+    let cache = cache.trim().trim_end_matches('/');
+    match cache.strip_prefix("~/") {
+        Some(rest) => Path::new("home").join(rest),
+        None => Path::new("abs").join(cache.trim_start_matches('/')),
+    }
+}
+
+/// What a task's sandbox is told about its project, and the checkout it starts from.
+///
+/// The brief is written into the capsule rather than mounted, because it is
+/// Altitude's note to the agent and not the operator's file. The clone is
+/// guarded on the checkout, so resuming a paused capsule or landing a transferred
+/// one leaves the work already there alone.
+fn project_scripts(project: &Project) -> Result<String, IsolationError> {
+    let checkout = project
+        .checkout_path()
+        .map(|path| expand_guest_path(&path))
+        .transpose()?
+        .map(|path| path.to_string_lossy().into_owned());
+    let mut script = String::from("mkdir -p /altitude\n");
+    script.push_str(&format!(
+        "printf '%s' {} > /altitude/project.md\n",
+        shell_quote(&project.brief(checkout.as_deref()))
+    ));
+    if let (Some(repository), Some(checkout)) = (&project.repository, &checkout) {
+        let parent = Path::new(checkout)
+            .parent()
+            .map(|parent| parent.to_string_lossy().into_owned())
+            .unwrap_or_else(|| GUEST_HOME.to_owned());
+        script.push_str(&format!(
+            "if [ ! -d {}/.git ]; then\n  mkdir -p {}\n  git clone {} {}\nfi\n",
+            shell_quote(checkout),
+            shell_quote(&parent),
+            shell_quote(repository),
+            shell_quote(checkout),
+        ));
+    }
+    Ok(script)
 }
 
 /// Runs a command to completion, answering with its exit status and everything it
@@ -721,90 +821,3 @@ async fn run_setup(
         "task directory setup closed without an exit status",
     ))
 }
-
-use serde::{Deserialize, Serialize};
-use std::{error::Error, fmt};
-
-/// The built-in environment's name.
-///
-/// Reserved: it cannot be configured, because the built-in environment is always
-/// present. See [`Environment::base`].
-pub const BASE_NAME: &str = "base";
-
-/// A named environment a task runs in, as configured in `config.toml`.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct Environment {
-    pub name: String,
-    pub setup_command: String,
-}
-
-impl Environment {
-    /// The built-in environment every other one is built on top of.
-    ///
-    /// Not stored in the settings file, because a name that cannot be edited or
-    /// deleted is not a preference. Its setup command is empty, and empty means
-    /// the snapshot is the base image plus the workspace packages plus the
-    /// profile recipes, with nothing added: a bare environment costs one build
-    /// and no packages of its own.
-    pub fn base() -> Self {
-        Self {
-            name: BASE_NAME.to_owned(),
-            setup_command: String::new(),
-        }
-    }
-
-    /// Whether this is the built-in environment.
-    pub fn is_base(&self) -> bool {
-        is_base_name(&self.name)
-    }
-
-    /// The key two environment names are compared by.
-    ///
-    /// An environment name becomes a snapshot directory name (`coding-{name}`),
-    /// and macOS filesystems are case-insensitive by default. Treating `rust`
-    /// and `Rust` as distinct would let both pass validation and then share one
-    /// snapshot directory, so distinct setup commands would silently reuse each
-    /// other's environment. Comparison is case-insensitive to keep one
-    /// environment per directory; the configured spelling is preserved
-    /// everywhere it is stored, so a task still records the name as written.
-    pub fn key(&self) -> String {
-        self.name.to_ascii_lowercase()
-    }
-
-    /// Whether two environments are the same one, by that rule.
-    pub fn same_name(&self, other: &Self) -> bool {
-        self.key() == other.key()
-    }
-
-    pub fn validate(&self) -> Result<(), EnvironmentError> {
-        let mut characters = self.name.chars();
-        let valid_first = characters
-            .next()
-            .is_some_and(|character| character.is_ascii_alphanumeric());
-        let valid_rest = characters
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'));
-        if !valid_first || !valid_rest || self.name.len() > 64 {
-            return Err(EnvironmentError(format!(
-                "environment name {:?} must be 1-64 ASCII letters, numbers, hyphens, or underscores, and start with a letter or number",
-                self.name
-            )));
-        }
-        Ok(())
-    }
-}
-
-/// Whether a name is the reserved one.
-pub fn is_base_name(name: &str) -> bool {
-    name.eq_ignore_ascii_case(BASE_NAME)
-}
-
-#[derive(Debug)]
-pub struct EnvironmentError(String);
-
-impl fmt::Display for EnvironmentError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl Error for EnvironmentError {}

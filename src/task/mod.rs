@@ -2,9 +2,8 @@ use crate::{
     agent::{AgentChannels, AgentEngines, AgentError, AgentKind, tools::AgentToolRegistry},
     config::{Config, InstallationIdentity},
     credentials::Credentials,
-    isolation::{
-        Environment, EnvironmentDescription, EnvironmentProgress, IsolationEngine, IsolationError,
-    },
+    isolation::{EnvironmentDescription, EnvironmentProgress, IsolationEngine, IsolationError},
+    project::Project,
     tracker::{IssueReader, TrackerProvider},
     vcs::tools::VcsAgentTools,
 };
@@ -35,7 +34,7 @@ use progress::EnvironmentProgressRegistry;
 
 pub struct TaskArrival {
     pub intent: String,
-    pub environment: Environment,
+    pub project: Project,
     pub agent: AgentKind,
     pub conversation: Option<String>,
     pub history: Vec<(i64, TaskHistoryEvent)>,
@@ -108,6 +107,7 @@ pub enum TaskError {
     OperationRejected(&'static str),
     MissingSandbox,
     MissingAgent,
+    MissingProject,
 }
 impl fmt::Display for TaskError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -117,6 +117,7 @@ impl fmt::Display for TaskError {
             Self::OperationRejected(reason) => formatter.write_str(reason),
             Self::MissingSandbox => formatter.write_str("task has no running sandbox"),
             Self::MissingAgent => formatter.write_str("task has no agent harness"),
+            Self::MissingProject => formatter.write_str("task has no recorded project"),
         }
     }
 }

@@ -584,9 +584,9 @@ impl TaskHost for OwnTasks {
                 .load_or_create_settings()
                 .map_err(|e| e.to_string())?;
             let agent = settings.settings().agent().unwrap_or_default();
-            for environment in settings.settings().environments() {
+            for project in settings.settings().projects() {
                 tasks
-                    .prepare_environment_as_operator(&owner, &environment, agent)
+                    .prepare_project_as_operator(&owner, project, agent)
                     .await
                     .map_err(|e| e.to_string())?;
             }
@@ -605,16 +605,13 @@ impl TaskHost for OwnTasks {
                 .map_err(|e| e.to_string())?
                 .load_or_create_settings()
                 .map_err(|e| e.to_string())?;
-            let environment = settings
+            let project = settings
                 .settings()
-                .environments()
-                .into_iter()
-                .find(|environment| environment.name == request.environment)
-                .ok_or_else(|| {
-                    format!("this machine has no {} environment", request.environment)
-                })?;
+                .project(&request.project_id)
+                .cloned()
+                .ok_or_else(|| format!("this machine has no project {}", request.project_id))?;
             tasks
-                .prepare_environment_as_operator(&owner, &environment, request.agent)
+                .prepare_project_as_operator(&owner, &project, request.agent)
                 .await
                 .map_err(|e| e.to_string())?;
             let operator = InstallationIdentity {
@@ -625,14 +622,14 @@ impl TaskHost for OwnTasks {
                 super::protocol::TaskOrigin::Intent(intent) => {
                     tasks
                         .service()
-                        .create(intent, environment, request.agent, Some(operator))
+                        .create(intent, project, request.agent, Some(operator))
                         .await
                         .map_err(|error| error.to_string())?;
                     tasks.admit();
                 }
                 super::protocol::TaskOrigin::Issue(issue) => {
                     let task = tasks
-                        .create_issue_for_operator(*issue, environment, request.agent, operator)
+                        .create_issue_for_operator(*issue, project, request.agent, operator)
                         .await
                         .map_err(|error| error.to_string())?;
                     // A session can only be piloted for a peer that has synced a
@@ -732,21 +729,17 @@ impl super::tracker::Host for OwnTasks {
                 .settings()
                 .agent()
                 .ok_or("Choose an agent in Altitude, then push your setup to this remote")?;
-            let environment = settings
+            let project = settings
                 .settings()
-                .environments()
-                .into_iter()
-                .find(|environment| {
-                    environment
-                        .name
-                        .eq_ignore_ascii_case(settings.settings().default_environment())
-                })
-                .ok_or("The pushed default environment is missing; push your setup again")?;
+                .projects()
+                .first()
+                .cloned()
+                .ok_or("No project has been pushed to this remote; push your setup again")?;
             let task = self
                 .tasks
                 .create_issue_for_operator(
                     issue,
-                    environment,
+                    project,
                     agent,
                     InstallationIdentity {
                         id: owner.clone(),
@@ -1270,8 +1263,8 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
                 IsolationStatus::PreparingBaseImage => {
                     tracing::info!("Preparing base sandbox image")
                 }
-                IsolationStatus::PreparingWorkspacePackages => {
-                    tracing::info!("Installing workspace tools")
+                IsolationStatus::PreparingBasePackages => {
+                    tracing::info!("Installing base tools")
                 }
                 IsolationStatus::Failed(error) => return Err(io::Error::other(error)),
                 IsolationStatus::Ready => break,
@@ -1539,7 +1532,10 @@ where
     let record = super::HandoverRecord {
         draft: HandoverDraft {
             intent: stopped.facts.intent.clone(),
-            environment: stopped.environment(),
+            project: stopped
+                .project()
+                .cloned()
+                .ok_or("the task has no recorded project")?,
             agent: stopped.agent_kind.unwrap_or_default(),
             agent_conversation_id: stopped.facts.agent_conversation_id.clone(),
         },

@@ -320,15 +320,16 @@ where
     let mut scroll_pending = false;
     let mut paint = time::interval(Duration::from_millis(16));
     paint.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
-    // A task's environment is built before a task asks for it, so the first task is
-    // not a cold start. Off the loop, and only once an agent has been chosen, because
-    // only then is there a task that could run.
-    if let Some(agent) = app.agent() {
-        let environment = app.default_environment_value();
+    // The project a new task starts in is built before a task asks for it, so the
+    // first task is not a cold start. Off the loop, and only once an agent has been
+    // chosen, because only then is there a task that could run.
+    if let Some(agent) = app.agent()
+        && let Some(project) = app.projects().into_iter().next()
+    {
         let service = task_service.clone();
         tokio::spawn(async move {
-            if let Err(error) = service.prepare_environment(&environment, agent).await {
-                tracing::debug!(%error, "could not prepare the default environment");
+            if let Err(error) = service.prepare_project(&project, agent).await {
+                tracing::debug!(%error, "could not prepare the first project");
             }
         });
     }

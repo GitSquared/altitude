@@ -25,7 +25,7 @@ use tokio::{
 
 use crate::agent::mcp::AGENT_CHANNEL_PORT;
 use crate::config::Config;
-use crate::isolation::Environment;
+use crate::project::Project;
 
 use super::{
     BaseSandboxRecipe, BaseSandboxSnapshot, CREDENTIAL_PREFIX, Command, CommandEvent,
@@ -381,12 +381,9 @@ impl MicrosandboxIsolation {
         self.ensure_snapshot(
             BaseSandboxRecipe::new(
                 "workspace",
-                self.config.workspace_snapshots_dir(),
+                self.config.base_snapshots_dir(),
                 Duration::from_secs(72 * 60 * 60),
-                vec![SetupStep::new(
-                    "preparing workspace packages",
-                    workspace_setup(),
-                )],
+                vec![SetupStep::new("preparing base packages", workspace_setup())],
             ),
             None,
             None,
@@ -741,20 +738,20 @@ impl IsolationEngine for MicrosandboxIsolation {
         })
     }
 
-    async fn ensure_environment(
+    async fn ensure_project(
         &self,
-        environment: Environment,
+        project: Project,
         recipes: Vec<EnvironmentRecipe>,
         progress: &dyn EnvironmentProgressSink,
     ) -> Result<BaseSandboxSnapshot, IsolationError> {
-        environment::ensure_environment(self, &self.config, environment, recipes, progress).await
+        environment::ensure_project(self, &self.config, project, recipes, progress).await
     }
 
     async fn provision(
         &self,
         id: String,
         task_snapshot: Option<String>,
-        environment: Environment,
+        project: Project,
         recipes: Vec<EnvironmentRecipe>,
         vsock: Vec<VsockRoute>,
         progress: &dyn EnvironmentProgressSink,
@@ -765,7 +762,7 @@ impl IsolationEngine for MicrosandboxIsolation {
             environment::ProvisionRequest {
                 id,
                 snapshot: task_snapshot,
-                environment,
+                project,
                 recipes,
                 vsock,
             },
@@ -786,19 +783,19 @@ impl IsolationEngine for MicrosandboxIsolation {
     async fn watcher(
         &self,
         id: String,
-        environment: Environment,
+        project: Project,
         recipes: Vec<EnvironmentRecipe>,
         progress: &dyn EnvironmentProgressSink,
     ) -> Result<(), IsolationError> {
-        environment::watcher(self, &self.config, id, environment, recipes, progress).await
+        environment::watcher(self, &self.config, id, project, recipes, progress).await
     }
 
-    fn environment_snapshot(
+    fn project_snapshot(
         &self,
-        environment: Environment,
+        project: Project,
         recipes: Vec<EnvironmentRecipe>,
     ) -> Option<String> {
-        let recipe = environment::composed_recipe(&self.config, environment, recipes).ok()?;
+        let recipe = environment::composed_recipe(&self.config, project, recipes).ok()?;
         let snapshot = BaseSandboxSnapshotStore::new(&recipe)
             .current()
             .ok()
@@ -889,7 +886,7 @@ impl IsolationEngine for MicrosandboxIsolation {
 
         tracing::debug!("base sandbox image ready");
 
-        status.send_replace(IsolationStatus::PreparingWorkspacePackages);
+        status.send_replace(IsolationStatus::PreparingBasePackages);
         let _build = self.build_lock.acquire().await?;
         self.ensure_workspace().await?;
 
@@ -907,8 +904,7 @@ impl IsolationEngine for MicrosandboxIsolation {
         // The base environment is the workspace base: the same snapshot every
         // other environment is built on top of, so it describes itself from
         // there rather than from a `coding-base` snapshot of its own.
-        let store =
-            BaseSandboxSnapshotStore::at(self.config.workspace_snapshots_dir(), REFRESH_AFTER);
+        let store = BaseSandboxSnapshotStore::at(self.config.base_snapshots_dir(), REFRESH_AFTER);
         let snapshot = store.current().ok().flatten()?;
         Some(EnvironmentDescription {
             alpine_release: snapshot.alpine_release,

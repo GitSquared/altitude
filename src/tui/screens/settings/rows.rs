@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use crate::{
     agent::AgentKind,
     isolation::EnvironmentDescription,
+    project::Project,
     remote::{DiscoveredRemote, RemoteKey, TrackerConnection},
     tui::{
         app::{CredentialStatus, RemoteStatus, TrackerState},
@@ -32,13 +33,8 @@ pub struct Row {
 }
 
 pub enum RowKind {
-    /// The built-in environment: described, never edited.
-    Base,
-    Environment {
-        /// The name as configured, which is what an edit replaces.
-        name: String,
-        setup: String,
-        is_default: bool,
+    Project {
+        project: Project,
     },
     /// A coding agent, which may be the one new tasks use, and the login a task
     /// drives it with.
@@ -123,13 +119,11 @@ impl Row {
 
     /// Whether this row can be taken out of its list.
     ///
-    /// The base environment and a discovered remote cannot: one is built in,
-    /// and the other is not this client's to remove until it is adopted.
+    /// A discovered remote cannot: it is not this client's to remove until it is
+    /// adopted. The last project cannot either, which the panel decides because
+    /// that is a fact about the list rather than about the row.
     pub fn is_removable(&self) -> bool {
-        matches!(
-            self.kind,
-            RowKind::Environment { .. } | RowKind::Remote { .. }
-        )
+        matches!(self.kind, RowKind::Project { .. } | RowKind::Remote { .. })
     }
 
     /// Whether delete here removes a saved sign-in rather than the row itself.
@@ -163,7 +157,7 @@ impl Row {
     /// work and the keys that are shown are described in one place.
     pub fn hints(&self, connecting_tracker: bool) -> Vec<chrome::Hint> {
         match &self.kind {
-            RowKind::Base | RowKind::Environment { .. } => vec![chrome::Hint::new("enter", "edit")],
+            RowKind::Project { .. } => vec![chrome::Hint::new("enter", "edit")],
             RowKind::Agent { credential, .. } => {
                 let mut hints = Vec::new();
                 if !credential.is_pending() {
@@ -212,7 +206,7 @@ impl Row {
 /// remembered keys, and the built environments.
 pub struct View {
     pub rows: Vec<Row>,
-    /// What the base environment is made of, once it has been built here.
+    /// What the base image is made of, once it has been built here.
     pub base: Option<EnvironmentDescription>,
     /// Where Linear keeps its sign-in profile, for the Trackers page.
     pub tracker_profile_dir: PathBuf,

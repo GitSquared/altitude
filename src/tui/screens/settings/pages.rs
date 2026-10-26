@@ -12,7 +12,8 @@ use ratatui::text::{Line, Span};
 
 use crate::{
     agent::AgentKind,
-    isolation::{EnvironmentDescription, REFRESH_AFTER},
+    isolation::EnvironmentDescription,
+    project::Project,
     remote::{RemoteKey, TrackerConnection, TrackerReadiness},
     tracker::TrackerKind,
     tui::{
@@ -200,70 +201,72 @@ fn step_line(number: &str, text: &str) -> Line<'static> {
 fn sample(text: &str) -> Line<'static> {
     Line::styled(text.to_owned(), palette::accent())
 }
-/// The built-in environment, described rather than configured.
+/// A project's page: what the work is, and the machine state it runs in.
 ///
-/// The version and the packages are read back from the built snapshot, because
-/// that is the only place that knows them: the image is a rolling tag and the
-/// setup commands name no versions. A machine that has not built it yet says so
-/// rather than guessing.
-pub(super) fn base_lines(
-    description: Option<&EnvironmentDescription>,
+/// Read here and edited in the form, so the page always says what the file says
+/// rather than what a form remembers.
+pub(super) fn project_lines(
+    project: &Project,
+    base: Option<&EnvironmentDescription>,
     heading: impl Fn(String) -> Line<'static>,
 ) -> Vec<Line<'static>> {
-    let mut lines = vec![
-        heading("Base environment".to_owned()),
-        // The subtitle rather than a postscript: it is true of the whole page.
-        Line::styled("built in · cannot be edited or deleted", palette::muted()),
-        Line::from(""),
-        Line::from(
-            "Altitude runs your tasks in sandboxes that move between machines as you delegate \
-             work.",
-        ),
-        Line::from(""),
-    ];
-    match description.filter(|description| !description.alpine_release.is_empty()) {
-        Some(description) => {
-            // What was read back from the build is accented, so the page says at
-            // a glance which parts of it are about this machine rather than about
-            // Altitude.
-            lines.push(Line::from(vec![
-                Span::raw("New tasks are built from Alpine Linux "),
-                Span::styled(description.alpine_release.clone(), palette::accent()),
-                Span::raw(", with these packages installed:"),
-            ]));
-            lines.push(Line::from(""));
-            // One package a line: a list of versions is read, not scanned.
-            if description.packages.is_empty() {
-                lines.push(Line::styled(
-                    "nothing beyond the base image",
-                    palette::muted(),
-                ));
-            } else {
-                lines.extend(
-                    description
-                        .packages
-                        .iter()
-                        .map(|package| Line::styled(package.clone(), palette::accent())),
-                );
-            }
-            lines.push(Line::from(""));
-            lines.push(Line::from(vec![
-                Span::raw("Built "),
-                Span::styled(met_ago(description.built_at_ms), palette::accent()),
-                Span::raw(", and refreshed automatically every "),
-                Span::styled(
-                    counted(REFRESH_AFTER.as_secs() as i64 / 3_600, "hour"),
-                    palette::accent(),
-                ),
-                Span::raw(", so security patches arrive without you doing anything."),
-            ]));
-        }
-        None => {
-            lines.push(Line::from(
-                "It has not been built on this machine yet. The first task that uses it builds \
-                 it, and this page then says what it was built from.",
-            ));
-        }
+    let mut lines = vec![heading(project.name.clone()), Line::from("")];
+    match &project.repository {
+        Some(repository) => lines.push(Line::from(vec![
+            Span::styled("repository  ", palette::muted()),
+            Span::styled(repository.clone(), palette::accent()),
+        ])),
+        None => lines.push(Line::styled(
+            "No repository. Tasks find their own code.",
+            palette::muted(),
+        )),
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::styled("setup", palette::muted()));
+    if project.setup_command.trim().is_empty() {
+        lines.push(Line::styled(
+            "Nothing on top of the base image.",
+            palette::muted(),
+        ));
+    } else {
+        lines.push(Line::from(project.setup_command.trim_end().to_owned()));
+    }
+    if let Some(description) = base.filter(|description| !description.alpine_release.is_empty()) {
+        lines.push(Line::from(""));
+        lines.push(Line::styled("base image", palette::muted()));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("Alpine Linux {}", description.alpine_release),
+                palette::accent(),
+            ),
+            Span::raw(" · "),
+            Span::styled(
+                format!("{} packages", description.packages.len()),
+                palette::accent(),
+            ),
+            Span::raw(" · built "),
+            Span::styled(met_ago(description.built_at_ms), palette::accent()),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::styled(
+        "caches shared by every task here on this machine",
+        palette::muted(),
+    ));
+    if project.caches.is_empty() {
+        lines.push(Line::styled("none", palette::muted()));
+    } else {
+        lines.extend(
+            project
+                .caches
+                .iter()
+                .map(|cache| Line::styled(cache.clone(), palette::accent())),
+        );
+    }
+    if let Some(instructions) = &project.instructions {
+        lines.push(Line::from(""));
+        lines.push(Line::styled("instructions", palette::muted()));
+        lines.push(Line::from(instructions.clone()));
     }
     lines
 }
@@ -292,8 +295,8 @@ pub(super) fn profile_connector(
     };
     let word = status.summary();
     let note = matches!(status, CredentialStatus::Saved).then(|| {
-        "A login is saved on this machine. No environment has been built here to ask \
-         the tool whether it still works."
+        "A login is saved on this machine. Nothing has been built here to ask the \
+         tool whether it still works."
             .to_owned()
     });
     let identity = match status {
@@ -442,7 +445,7 @@ pub(super) fn remote_connector(
         RemoteStatus::Reached if needs_config => (
             Reach::Asking,
             "synchronizing…",
-            Some("Sending this machine's environments and logins.".to_owned()),
+            Some("Sending this machine's projects and logins.".to_owned()),
             None,
         ),
         RemoteStatus::Reached => (Reach::On, "synced", None, None),
