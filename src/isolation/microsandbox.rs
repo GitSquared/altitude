@@ -417,7 +417,7 @@ impl MicrosandboxIsolation {
         let sandbox_id = format!(
             "altitude-{}-{}-setup",
             build_namespace(&recipe.snapshots_dir),
-            recipe.name
+            artifact_name(&recipe.name)
         );
         let created_at_ms = now_ms();
         tracing::debug!(environment = %recipe.name, steps = steps.len(), "building environment base sandbox snapshot");
@@ -706,6 +706,31 @@ impl BaseSandboxSnapshotStore {
 /// operators' same-named environments cannot collide on one setup sandbox.
 fn build_namespace(snapshots_dir: &Path) -> String {
     blake3::hash(snapshots_dir.to_string_lossy().as_bytes()).to_hex()[..12].to_owned()
+}
+
+/// A name the runtime accepts for a sandbox.
+///
+/// A project's name is written for a person and may hold spaces; an id a runtime
+/// keys machines by may not. The readable part stays, because a sandbox left
+/// behind is looked for by name.
+fn artifact_name(name: &str) -> String {
+    let mut slug = String::with_capacity(name.len());
+    let mut last_dash = false;
+    for character in name.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '.' | '_') {
+            slug.push(character);
+            last_dash = false;
+        } else if !last_dash {
+            slug.push('-');
+            last_dash = true;
+        }
+    }
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        "project".to_owned()
+    } else {
+        slug.to_owned()
+    }
 }
 
 fn now_ms() -> i64 {

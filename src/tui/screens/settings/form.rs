@@ -79,6 +79,7 @@ pub enum Focus {
     Caches,
     Instructions,
     Scope,
+    Machine,
     Accept,
     Cancel,
     Save,
@@ -109,6 +110,7 @@ impl Focus {
 enum Kind {
     Single,
     Multi,
+    Choice,
     Toggle,
 }
 
@@ -119,6 +121,7 @@ impl Kind {
             Self::Single => 4,
             Self::Multi => 6,
             Self::Toggle => 1,
+            Self::Choice => 3,
         }
     }
 }
@@ -145,7 +148,7 @@ fn groups(project: bool) -> Vec<Group> {
         },
         Group {
             focus: Focus::Repository,
-            label: "Repository",
+            label: "Repository (host/owner/repo)",
             kind: Kind::Single,
         },
         Group {
@@ -170,6 +173,11 @@ fn groups(project: bool) -> Vec<Group> {
             kind: Kind::Single,
         },
         Group {
+            focus: Focus::Machine,
+            label: "Machine",
+            kind: Kind::Choice,
+        },
+        Group {
             focus: Focus::Accept,
             label: "Accept delegated work",
             kind: Kind::Toggle,
@@ -187,6 +195,11 @@ pub struct Form {
     pub caches: TextBox,
     pub instructions: TextBox,
     pub scope: Field,
+    /// Where this project's tasks run, or nothing for this machine.
+    pub host: Option<String>,
+    /// The machines offered, besides this one. A stale address already on the
+    /// project is kept, so editing does not silently move the work.
+    host_choices: Vec<String>,
     pub accepts_delegated_work: bool,
     pub focus: Focus,
     /// The first group drawn, so the caret's group is always on screen.
@@ -197,13 +210,14 @@ pub struct Form {
 }
 
 /// Every focus a project form walks, in order.
-const PROJECT_FIELDS: [Focus; 9] = [
+const PROJECT_FIELDS: [Focus; 10] = [
     Focus::Primary,
     Focus::Repository,
     Focus::Setup,
     Focus::Caches,
     Focus::Instructions,
     Focus::Scope,
+    Focus::Machine,
     Focus::Accept,
     Focus::Cancel,
     Focus::Save,
@@ -214,12 +228,23 @@ const REMOTE_FIELDS: [Focus; 3] = [Focus::Primary, Focus::Cancel, Focus::Save];
 impl Form {
     /// The form for a project that does not exist yet, with the caches a new
     /// project starts with already filled in.
-    pub fn new_project(scope_label: &str) -> Self {
+    pub fn new_project(scope_label: &str, remotes: &[String]) -> Self {
         let project = Project::new("");
-        Self::for_project(Target::NewProject, &project, scope_label)
+        Self::for_project(Target::NewProject, &project, scope_label, remotes)
     }
 
-    pub fn for_project(target: Target, project: &Project, scope_label: &str) -> Self {
+    pub fn for_project(
+        target: Target,
+        project: &Project,
+        scope_label: &str,
+        remotes: &[String],
+    ) -> Self {
+        let mut host_choices = remotes.to_vec();
+        if let Some(host) = &project.host
+            && !host_choices.contains(host)
+        {
+            host_choices.push(host.clone());
+        }
         Self {
             target,
             primary: Field::with(&project.name),
@@ -234,6 +259,8 @@ impl Form {
                     .and_then(|route| route.scope.as_deref())
                     .unwrap_or_default(),
             ),
+            host: project.host.clone(),
+            host_choices,
             accepts_delegated_work: project
                 .tracker
                 .as_ref()
@@ -253,6 +280,8 @@ impl Form {
             caches: TextBox::new(""),
             instructions: TextBox::new(""),
             scope: Field::with(""),
+            host: None,
+            host_choices: Vec::new(),
             accepts_delegated_work: false,
             focus: Focus::Primary,
             first_group: 0,
@@ -309,6 +338,22 @@ impl Form {
         None
     }
 
+    /// Where the project runs, or nothing for this machine.
+    pub fn host_value(&self) -> Option<String> {
+        self.host.clone()
+    }
+
+    /// Move to the next machine on offer, wrapping.
+    pub fn cycle_host(&mut self) {
+        let mut options = vec![None];
+        options.extend(self.host_choices.iter().cloned().map(Some));
+        let at = options
+            .iter()
+            .position(|option| *option == self.host)
+            .unwrap_or(0);
+        self.host = options[(at + 1) % options.len()].clone();
+    }
+
     /// The caches the form lists, one per line, without blanks.
     pub fn cache_paths(&self) -> Vec<String> {
         self.caches
@@ -350,10 +395,12 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &mut Form) {
     let groups = groups(project);
     // The caret's group must be on screen, so the window of drawn groups starts
     // at the first one that lets it fit.
+    // The actions are not groups, so being on one keeps the last group in view
+    // rather than jumping the form back to its top.
     let focused = groups
         .iter()
         .position(|candidate| candidate.focus == form.focus)
-        .unwrap_or(0);
+        .unwrap_or(groups.len().saturating_sub(1));
     form.first_group = form.first_group.min(focused);
     loop {
         let used: u16 = groups
@@ -429,6 +476,19 @@ fn draw_group(frame: &mut Frame, area: Rect, form: &Form, group: &Group) {
                 _ => return,
             };
             text.draw(frame, below_label(area), focused);
+        }
+        Kind::Choice => {
+            draw_label(frame, area, group.label);
+            let value = form.host.as_deref().unwrap_or("this machine");
+            let style = if focused {
+                palette::primary().bold()
+            } else {
+                palette::muted()
+            };
+            frame.render_widget(
+                Paragraph::new(Line::styled(format!("‹ {value} ›"), style)),
+                below_label(area),
+            );
         }
         Kind::Toggle => {
             let mark = if form.accepts_delegated_work {

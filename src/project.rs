@@ -207,18 +207,6 @@ impl Project {
     }
 
     pub fn validate(&self) -> Result<(), ProjectError> {
-        if self.id.is_empty()
-            || self.id.len() > 64
-            || !self
-                .id
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || character == '-')
-        {
-            return Err(ProjectError(format!(
-                "project id {:?} must be 1-64 ASCII letters, numbers, or hyphens",
-                self.id
-            )));
-        }
         // A name is read in a tab and in a sandbox label, never used as a path, so
         // it can be the words an operator would write. Only what would break a
         // line or split a path is refused.
@@ -304,7 +292,22 @@ pub fn normalize_repository(value: &str) -> Result<String, ProjectError> {
     if trimmed.contains("..") {
         return invalid("contains `..`");
     }
-    let name = trimmed
+    // A host is part of the answer, so a clone never depends on this machine's git
+    // configuration guessing one. What is typed without a scheme gets https.
+    let repository = if trimmed.contains("://") || trimmed.starts_with("git@") {
+        trimmed.to_owned()
+    } else {
+        let host = trimmed.split('/').next().unwrap_or_default();
+        let segments = trimmed
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .count();
+        if segments < 3 || (!host.contains('.') && host != "localhost") {
+            return invalid("must name a host, as in https://github.com/owner/repo");
+        }
+        format!("https://{trimmed}")
+    };
+    let name = repository
         .rsplit(['/', ':'])
         .find(|segment| !segment.is_empty())
         .unwrap_or("");
@@ -317,7 +320,7 @@ pub fn normalize_repository(value: &str) -> Result<String, ProjectError> {
     {
         return invalid("ends in a repository name that is not usable as a directory");
     }
-    Ok(trimmed.to_owned())
+    Ok(repository)
 }
 
 /// A cache path is a place inside the sandbox, written the way it is reached.

@@ -212,15 +212,33 @@ pub(super) fn project_lines(
 ) -> Vec<Line<'static>> {
     let mut lines = vec![heading(project.name.clone()), Line::from("")];
     match &project.repository {
-        Some(repository) => lines.push(Line::from(vec![
-            Span::styled("repository  ", palette::muted()),
-            Span::styled(repository.clone(), palette::accent()),
-        ])),
+        Some(repository) => {
+            lines.push(Line::from(vec![
+                Span::styled("repository  ", palette::muted()),
+                Span::styled(repository.clone(), palette::accent()),
+            ]));
+            if let Some(checkout) = project.checkout_path() {
+                lines.push(Line::from(vec![
+                    Span::styled("checkout    ", palette::muted()),
+                    Span::styled(checkout, palette::accent()),
+                ]));
+            }
+        }
         None => lines.push(Line::styled(
             "No repository. Tasks find their own code.",
             palette::muted(),
         )),
     }
+    lines.push(Line::from(vec![
+        Span::styled("machine     ", palette::muted()),
+        Span::styled(
+            project
+                .host
+                .clone()
+                .unwrap_or_else(|| "this machine".to_owned()),
+            palette::accent(),
+        ),
+    ]));
     lines.push(Line::from(""));
     lines.push(Line::styled("setup", palette::muted()));
     if project.setup_command.trim().is_empty() {

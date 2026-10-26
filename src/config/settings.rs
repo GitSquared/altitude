@@ -307,6 +307,14 @@ impl Settings {
             project
                 .validate()
                 .map_err(|error| SettingsError::Invalid(error.to_string()))?;
+            // A project id is a uuid, because storage is keyed by it and because
+            // Altitude builds a few sandboxes under ids of its own.
+            if project.id.parse::<uuid::Uuid>().is_err() {
+                return Err(SettingsError::Invalid(format!(
+                    "project id {:?} must be a uuid",
+                    project.id
+                )));
+            }
             if !ids.insert(project.id.clone()) {
                 return Err(SettingsError::Invalid(format!(
                     "duplicate project id: {}",

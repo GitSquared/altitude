@@ -911,6 +911,28 @@ impl App {
         self.grid_columns.max(1)
     }
 
+    /// Where a new task starts: the project's machine, then the last one used.
+    ///
+    /// A project that names a machine is saying where its work belongs, so that
+    /// answer comes before the memory of the last task.
+    fn new_task_default_host(&self) -> Option<String> {
+        let active = self.active_project_id();
+        self.projects()
+            .into_iter()
+            .find(|project| project.id == active)
+            .and_then(|project| project.host)
+            .or_else(|| self.default_task_host().map(|host| host.to_owned()))
+    }
+
+    /// The machines this installation delegates to, as the project form offers
+    /// them.
+    fn remotes(&self) -> Vec<String> {
+        self.settings_file
+            .as_ref()
+            .map(|file| file.settings().remotes().to_vec())
+            .unwrap_or_default()
+    }
+
     /// How a project's tracker scope is named in its form: the provider's own
     /// word, so the setting does not ask a Linear operator for a "scope".
     fn scope_label(&self) -> String {
@@ -1765,7 +1787,7 @@ impl App {
             KeyCode::Char('n') if self.panel.section.grows() => {
                 self.panel.form = Some(match self.panel.section {
                     Section::Remotes => Form::for_remote(Target::NewRemote, ""),
-                    _ => Form::new_project(&self.scope_label()),
+                    _ => Form::new_project(&self.scope_label(), &self.remotes()),
                 });
             }
             _ if is_remove(key) && self.selected_row().is_some_and(|row| row.is_removable()) => {
@@ -3060,6 +3082,7 @@ impl App {
                 },
                 &project,
                 &self.scope_label(),
+                &self.remotes(),
             ),
             RowKind::Discovered(_) => return,
             RowKind::Remote { address, .. } => Form::for_remote(
@@ -3216,6 +3239,9 @@ impl App {
             KeyCode::Enter | KeyCode::Char(' ') if form.focus == Focus::Accept => {
                 form.accepts_delegated_work = !form.accepts_delegated_work;
             }
+            KeyCode::Enter | KeyCode::Char(' ') if form.focus == Focus::Machine => {
+                form.cycle_host();
+            }
             KeyCode::Enter if form.enters_newline() => form.handle_text(key),
             KeyCode::Enter => match form.focus {
                 Focus::Cancel => keep = false,
@@ -3282,6 +3308,7 @@ impl App {
                     .unwrap_or_else(|| Project::new(name.clone()));
                 project.name = name;
                 project.repository = repository;
+                project.host = form.host_value();
                 project.setup_command = form.setup.value();
                 project.caches = form.cache_paths();
                 project.instructions = form.instruction_text();
@@ -3368,11 +3395,22 @@ impl App {
             }
             _ => {}
         }
+        let removed_project = match &target {
+            Target::Project { id: Some(id), .. } => Some(id.clone()),
+            _ => None,
+        };
         match file.save(proposed) {
             Ok(()) => {
                 let index = self.panel.selected().saturating_sub(1);
                 self.panel.select_row(index);
                 self.alert = None;
+                // The project is gone from the file, so its builds and caches are
+                // state nothing will name again. Losing them costs a rebuild.
+                if let Some(id) = removed_project
+                    && let Err(error) = self.config.forget_project(&id)
+                {
+                    tracing::warn!(%error, project = %id, "could not remove a deleted project's state");
+                }
             }
             Err(error) => self.problem(error.to_string()),
         }
@@ -4666,7 +4704,7 @@ impl App {
                         &self.active_project_id(),
                         self.agent(),
                         self.task_hosts(),
-                        self.default_task_host().as_deref(),
+                        self.new_task_default_host().as_deref(),
                     )));
                 }
             }
@@ -4681,7 +4719,7 @@ impl App {
                             &self.active_project_id(),
                             self.agent(),
                             self.task_hosts(),
-                            self.default_task_host().as_deref(),
+                            self.new_task_default_host().as_deref(),
                         )
                         .linking(),
                     ));

@@ -333,6 +333,24 @@ impl Config {
             .join("snapshots")
     }
 
+    /// Forget a project's machine state: the builds and caches kept under its id.
+    ///
+    /// Both are derived and disposable, so this removes nothing a task's history
+    /// records. It is only ever called for a project no task in play belongs to.
+    pub fn forget_project(&self, id: &str) -> io::Result<()> {
+        if !is_safe_project_id(id) {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("{id:?} is not a project id"),
+            ));
+        }
+        match fs::remove_dir_all(self.scoped_data_dir().join("projects").join(id)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Where a project's shared caches live on this machine.
     ///
     /// Disposable by design, like the git object cache: what is here is the
@@ -343,6 +361,14 @@ impl Config {
             .join(project_id)
             .join("cache")
     }
+}
+
+fn is_safe_project_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-')
 }
 
 fn is_safe_operator_key(owner: &str) -> bool {
