@@ -95,16 +95,14 @@ pub enum Focus {
     Task,
     Project,
     Agent,
-    Host,
     Cancel,
     Create,
 }
 
-const ORDER: [Focus; 6] = [
+const ORDER: [Focus; 5] = [
     Focus::Task,
     Focus::Project,
     Focus::Agent,
-    Focus::Host,
     Focus::Cancel,
     Focus::Create,
 ];
@@ -157,7 +155,6 @@ pub(in crate::tui) struct Submission {
     reference: IssueReference,
     pub(in crate::tui) project: Project,
     pub(in crate::tui) agent: AgentKind,
-    pub(in crate::tui) host: Option<String>,
     pub(in crate::tui) remember: Option<AgentKind>,
 }
 
@@ -166,8 +163,6 @@ pub struct NewTask {
     task: TextBox,
     project: Select<Project>,
     agent: Select<AgentKind>,
-    /// This machine first, then the remotes, by where each is reached.
-    host: Select<Option<String>>,
     /// Whether the agent had never been chosen, in which case this answer is the
     /// one to keep.
     agent_unchosen: bool,
@@ -209,8 +204,6 @@ pub enum Answer {
         task: String,
         project: Box<Project>,
         agent: AgentKind,
-        /// Where to run it: a remote's address, or nothing for this machine.
-        host: Option<String>,
         /// The agent to remember, when this was the first answer.
         remember: Option<AgentKind>,
     },
@@ -231,16 +224,7 @@ impl NewTask {
         projects: Vec<Project>,
         default_project: &str,
         default_agent: Option<AgentKind>,
-        hosts: Vec<Host>,
-        default_host: Option<&str>,
     ) -> Self {
-        let chosen_host = default_host
-            .and_then(|address| {
-                hosts
-                    .iter()
-                    .position(|host| host.ready && host.address.as_deref() == Some(address))
-            })
-            .unwrap_or(0);
         let chosen = projects
             .iter()
             .position(|candidate| candidate.id == default_project)
@@ -271,7 +255,6 @@ impl NewTask {
             task: TextBox::new(""),
             project,
             agent,
-            host: Select::new("host", host_offers(hosts), chosen_host),
             agent_unchosen: default_agent.is_none(),
             refused: false,
             focus: Focus::Task,
@@ -299,21 +282,6 @@ impl NewTask {
 
     /// Put the machines back in step with what the remotes have answered, keeping
     /// the one the operator chose where it is still offered.
-    pub(in crate::tui) fn refresh_hosts(&mut self, hosts: Vec<Host>) {
-        let chosen = self.host.chosen_value().cloned().flatten();
-        self.host.set_offers(host_offers(hosts));
-        // A machine that stopped being ready is not kept chosen: the question
-        // would otherwise be answered into a delegation that cannot run.
-        let kept = chosen.is_some_and(|address| {
-            self.host.choose_offer(|offer| {
-                offer.ready && offer.value.as_deref() == Some(address.as_str())
-            })
-        });
-        if !kept {
-            self.host.choose(0);
-        }
-    }
-
     /// Whether something here is taking characters, in which case `?` and `q`
     /// are characters too.
     pub(in crate::tui) fn is_typing(&self) -> bool {
@@ -325,7 +293,6 @@ impl NewTask {
         match self.focus {
             Focus::Project => self.project.is_open(),
             Focus::Agent => self.agent.is_open(),
-            Focus::Host => self.host.is_open(),
             _ => false,
         }
     }
@@ -336,7 +303,6 @@ impl NewTask {
         match self.focus {
             Focus::Project => self.project.is_searching(),
             Focus::Agent => self.agent.is_searching(),
-            Focus::Host => self.host.is_searching(),
             _ => false,
         }
     }
@@ -371,9 +337,8 @@ impl NewTask {
         // Only what this page adds. Tab and enter are the same here as anywhere,
         // and a line that repeats them costs a line that could say something the
         // page alone knows.
-        let mut hints = vec![chrome::Hint::new("ctrl-e", "env")];
+        let mut hints = vec![chrome::Hint::new("ctrl-e", "project")];
         hints.push(chrome::Hint::new("ctrl-a", "agent"));
-        hints.push(chrome::Hint::new("ctrl-h", "host"));
         if self.issue {
             hints.push(chrome::Hint::new("↑/↓", "result"));
         }
@@ -405,7 +370,6 @@ impl NewTask {
         match self.focus {
             Focus::Project => self.project.paste(text),
             Focus::Agent => self.agent.paste(text),
-            Focus::Host => self.host.paste(text),
             _ => {}
         }
     }
@@ -471,7 +435,6 @@ impl NewTask {
         match self.focus {
             Focus::Project => self.project.choose(index),
             Focus::Agent => self.agent.choose(index),
-            Focus::Host => self.host.choose(index),
             _ => {}
         }
         self.close_lists();
@@ -481,7 +444,6 @@ impl NewTask {
         match self.focus {
             Focus::Project => self.project.scroll(forward),
             Focus::Agent => self.agent.scroll(forward),
-            Focus::Host => self.host.scroll(forward),
             _ => {}
         }
     }
@@ -489,7 +451,6 @@ impl NewTask {
     fn close_lists(&mut self) {
         self.project.close();
         self.agent.close();
-        self.host.close();
     }
 
     /// Whether the question can be answered, and what is missing when it cannot.
@@ -539,7 +500,6 @@ impl NewTask {
             let pill = match key.code {
                 KeyCode::Char('e') => Some(Focus::Project),
                 KeyCode::Char('a') => Some(Focus::Agent),
-                KeyCode::Char('h') => Some(Focus::Host),
                 _ => None,
             };
             if let Some(pill) = pill {
@@ -593,7 +553,6 @@ impl NewTask {
         match self.focus {
             Focus::Project => self.project.handle_key(key),
             Focus::Agent => self.agent.handle_key(key),
-            Focus::Host => self.host.handle_key(key),
             _ => false,
         }
     }
@@ -603,7 +562,6 @@ impl NewTask {
         match self.focus {
             Focus::Project => self.project.open(),
             Focus::Agent => self.agent.open(),
-            Focus::Host => self.host.open(),
             _ => {}
         }
     }
@@ -854,12 +812,11 @@ impl NewTask {
             let token = self.begin_submission()?;
             return Some(Answer::ReadIssue { token });
         }
-        let (project, agent, host, remember) = self.selections()?;
+        let (project, agent, remember) = self.selections()?;
         Some(Answer::Create {
             task: self.task.value().trim().to_owned(),
             project: Box::new(project),
             agent,
-            host,
             remember,
         })
     }
@@ -870,7 +827,7 @@ impl NewTask {
             return None;
         }
         let summary = self.results.get(self.selected_result)?.clone();
-        let (project, agent, host, remember) = self.selections()?;
+        let (project, agent, remember) = self.selections()?;
         let token = NEXT_SUBMISSION.fetch_add(1, Ordering::Relaxed);
         self.read_error = None;
         self.submission = Some(Submission {
@@ -878,17 +835,15 @@ impl NewTask {
             reference: summary.reference,
             project,
             agent,
-            host,
             remember,
         });
         Some(token)
     }
 
-    fn selections(&self) -> Option<(Project, AgentKind, Option<String>, Option<AgentKind>)> {
+    fn selections(&self) -> Option<(Project, AgentKind, Option<AgentKind>)> {
         let project = self.project.chosen_value()?.clone();
         let agent = *self.agent.chosen_value()?;
-        let host = self.host.chosen_value()?.clone();
-        Some((project, agent, host, self.agent_unchosen.then_some(agent)))
+        Some((project, agent, self.agent_unchosen.then_some(agent)))
     }
 
     /// The open list, over the prompt above the pill it belongs to, and where
@@ -897,30 +852,16 @@ impl NewTask {
         &self,
         frame: &mut Frame,
         area: Rect,
-        anchors: [Rect; 3],
+        anchors: [Rect; 2],
     ) -> Vec<(Rect, usize)> {
         match self.focus {
             Focus::Project if self.project.is_open() => {
                 self.project.draw_list(frame, area, anchors[0])
             }
             Focus::Agent if self.agent.is_open() => self.agent.draw_list(frame, area, anchors[1]),
-            Focus::Host if self.host.is_open() => self.host.draw_list(frame, area, anchors[2]),
             _ => Vec::new(),
         }
     }
-}
-
-/// The machines, as offers: one that cannot be given work is listed all the
-/// same, because the reason it cannot is worth reading on its own pill.
-fn host_offers(hosts: Vec<Host>) -> Vec<Offer<Option<String>>> {
-    hosts
-        .into_iter()
-        .map(|host| Offer {
-            value: host.address,
-            label: host.label,
-            ready: host.ready,
-        })
-        .collect()
 }
 
 pub fn draw(
@@ -962,10 +903,7 @@ pub fn draw(
     );
 
     let anchors = draw_choices(frame, pills, new_task);
-    for (pill, anchor) in [Focus::Project, Focus::Agent, Focus::Host]
-        .into_iter()
-        .zip(anchors)
-    {
+    for (pill, anchor) in [Focus::Project, Focus::Agent].into_iter().zip(anchors) {
         targets.add(anchor, Hit::Pill(pill));
     }
 
@@ -1104,19 +1042,17 @@ fn result_line(summary: &IssueSummary, width: usize, focused: bool) -> Line<'sta
     Line::from(spans)
 }
 
-/// The three decisions, as pills: what is chosen is what you press.
-fn draw_choices(frame: &mut Frame, area: Rect, new_task: &NewTask) -> [Rect; 3] {
+/// What is chosen, as pills: what is chosen is what you press.
+fn draw_choices(frame: &mut Frame, area: Rect, new_task: &NewTask) -> [Rect; 2] {
     let named = [
         new_task.project.pill_width(true),
         new_task.agent.pill_width(true),
-        new_task.host.pill_width(true),
     ];
     let valued = [
         new_task.project.pill_width(false),
         new_task.agent.pill_width(false),
-        new_task.host.pill_width(false),
     ];
-    let available = area.width.saturating_sub(PILL_GAP * 2);
+    let available = area.width.saturating_sub(PILL_GAP);
     // A pill is its value first: a row too narrow for the names keeps what each
     // one is set to, and the open list says which decision it belongs to.
     let (widths, with_name) = if named.iter().sum::<u16>() <= available {
@@ -1124,16 +1060,13 @@ fn draw_choices(frame: &mut Frame, area: Rect, new_task: &NewTask) -> [Rect; 3] 
     } else if valued.iter().sum::<u16>() <= available {
         (valued, false)
     } else {
-        ([available / 3; 3], false)
+        ([available / 2; 2], false)
     };
-    let [project, agent, host] = Layout::horizontal([
-        Constraint::Length(widths[0]),
-        Constraint::Length(widths[1]),
-        Constraint::Length(widths[2]),
-    ])
-    .flex(Flex::End)
-    .spacing(PILL_GAP)
-    .areas(area);
+    let [project, agent] =
+        Layout::horizontal([Constraint::Length(widths[0]), Constraint::Length(widths[1])])
+            .flex(Flex::End)
+            .spacing(PILL_GAP)
+            .areas(area);
     let focused = new_task.focus;
     new_task
         .project
@@ -1141,10 +1074,7 @@ fn draw_choices(frame: &mut Frame, area: Rect, new_task: &NewTask) -> [Rect; 3] 
     new_task
         .agent
         .draw_pill(frame, agent, focused == Focus::Agent, with_name);
-    new_task
-        .host
-        .draw_pill(frame, host, focused == Focus::Host, with_name);
-    [project, agent, host]
+    [project, agent]
 }
 
 /// Whether text is shaped like something Linear can be asked about directly: an

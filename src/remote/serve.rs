@@ -6,7 +6,7 @@
 //! file rather than the client's.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     error::Error,
     fs, io,
     io::{Read, Seek, SeekFrom},
@@ -574,7 +574,7 @@ impl TaskHost for OwnTasks {
         })
     }
 
-    fn configure(&self, peer: EndpointId) -> BoxFuture<Result<(), String>> {
+    fn configure(&self, peer: EndpointId, forget_logins: bool) -> BoxFuture<Result<(), String>> {
         let config = Arc::clone(&self.config);
         let tasks = Arc::clone(&self.tasks);
         let mut runtime = self.runtime.clone();
@@ -592,6 +592,67 @@ impl TaskHost for OwnTasks {
                     .prepare_project_as_operator(&owner, project, agent)
                     .await
                     .map_err(|e| e.to_string())?;
+            }
+            // What was pushed is the complete set of projects this machine runs
+            // for the operator, so anything else under its store is work that
+            // moved away. A project with a task in play keeps its builds until the
+            // task is no longer here.
+            let configured: HashSet<String> = settings
+                .settings()
+                .projects()
+                .iter()
+                .map(|project| project.id.clone())
+                .collect();
+            let mut keep = configured.clone();
+            for task in tasks.list().await.map_err(|e| e.to_string())? {
+                if task.operator_id() == Some(owner.as_str())
+                    && let Some(project) = task.project()
+                {
+                    keep.insert(project.id.clone());
+                }
+            }
+            let nothing_theirs = configured.is_empty() && keep.is_empty();
+            let scoped = config.for_operator(&owner).map_err(|e| e.to_string())?;
+            let pruned = scoped.clone();
+            let removed = spawn_blocking(move || pruned.prune_projects(&keep))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
+            if !removed.is_empty() {
+                tracing::info!(
+                    count = removed.len(),
+                    "forgot projects this machine no longer runs"
+                );
+            }
+            // A machine that runs none of an operator's projects keeps none of
+            // their logins. A task still in play needs them, so its presence
+            // postpones this until the task is no longer here.
+            if forget_logins && nothing_theirs {
+                let profiles: Vec<&str> = tasks
+                    .service()
+                    .credentials()
+                    .profiles()
+                    .iter()
+                    .map(|profile| profile.profile)
+                    .collect();
+                let directory = scoped.scoped_data_dir().to_path_buf();
+                spawn_blocking(move || {
+                    scoped.forget_profiles(&profiles)?;
+                    // What this machine said it held is gone with the files, or a
+                    // later push would think they were still here and skip them.
+                    let held_path = directory.join("profiles.json");
+                    let mut held = super::HeldConfig::load(&held_path);
+                    held.profiles.clear();
+                    held.save(&held_path)?;
+                    for provider in TrackerKind::ALL {
+                        super::tracker::forget_account(&directory, provider)?;
+                    }
+                    Ok::<(), io::Error>(())
+                })
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
+                tracing::info!(operator = %owner, "forgot logins for a machine with no projects");
             }
             Ok(())
         })

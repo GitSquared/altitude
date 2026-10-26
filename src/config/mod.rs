@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashSet,
     env, fs,
     io::{self, ErrorKind, Write},
     os::unix::fs::OpenOptionsExt,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use directories::ProjectDirs;
@@ -149,14 +150,6 @@ impl Config {
             cache_dir: self.cache_dir.clone(),
             scope: ConfigScope::Operator(operator_dir),
         })
-    }
-
-    /// The directory an operator's own state lives under, or the machine's own.
-    fn scoped_data_dir(&self) -> &Path {
-        match &self.scope {
-            ConfigScope::Operator(directory) => directory,
-            ConfigScope::Personal | ConfigScope::Remote => &self.data_dir,
-        }
     }
 
     pub(crate) fn serves_operators(&self) -> bool {
@@ -331,6 +324,68 @@ impl Config {
             .join("projects")
             .join(project_id)
             .join("snapshots")
+    }
+
+    /// Remove this scope's copies of the named profiles.
+    ///
+    /// A machine that runs none of an operator's projects keeps none of their
+    /// logins. Lookups by profile name are confined the same way every other
+    /// profile path is.
+    pub fn forget_profiles(&self, profiles: &[&str]) -> io::Result<()> {
+        for profile in profiles {
+            if Path::new(profile)
+                .components()
+                .any(|part| !matches!(part, Component::Normal(_)))
+            {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("{profile:?} is not a profile name"),
+                ));
+            }
+            match fs::remove_dir_all(self.scoped_data_dir().join(profile)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    /// The directory this scope's own state lives under.
+    pub(crate) fn scoped_data_dir(&self) -> &Path {
+        match &self.scope {
+            ConfigScope::Operator(directory) => directory,
+            ConfigScope::Personal | ConfigScope::Remote => &self.data_dir,
+        }
+    }
+
+    /// Remove the machine state of every project not in `keep`, answering which
+    /// were removed.
+    ///
+    /// A remote's pushed settings are the complete set of projects it runs, so
+    /// anything else under its store is work that moved away. Both builds and
+    /// caches are derived, so nothing a task's history records goes with them.
+    pub fn prune_projects(&self, keep: &HashSet<String>) -> io::Result<Vec<String>> {
+        let directory = self.scoped_data_dir().join("projects");
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut removed = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let id = entry.file_name().to_string_lossy().into_owned();
+            if keep.contains(&id) || !is_safe_project_id(&id) {
+                continue;
+            }
+            fs::remove_dir_all(entry.path())?;
+            removed.push(id);
+        }
+        Ok(removed)
     }
 
     /// Forget a project's machine state: the builds and caches kept under its id.

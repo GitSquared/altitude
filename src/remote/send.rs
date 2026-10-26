@@ -92,6 +92,24 @@ where
     }
     let peer: EndpointAddr = sighting.ticket.into();
 
+    // A project names the machine its work belongs to, and a task does not choose
+    // another. The interface only offers that machine, so this is the check that
+    // keeps a stale question or a caller from moving work somewhere it does not run.
+    let task = event_loop
+        .service()
+        .task(task_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "that task is no longer here".to_owned())?;
+    let project = task
+        .project()
+        .ok_or_else(|| "that task has no recorded project".to_owned())?;
+    if project.host.as_deref() != Some(address) {
+        return Err(format!(
+            "{address} is not this project's machine; set it in Settings → Projects to send work there"
+        ));
+    }
+
     let settings = fs::read_to_string(config.settings_path()).map_err(message)?;
     let held = client.held_profiles(peer.clone()).await.map_err(message)?;
     let profiles: Vec<&str> = event_loop

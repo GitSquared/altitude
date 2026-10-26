@@ -21,6 +21,12 @@ pub struct ConfigBundle {
     pub settings: String,
     /// The logins, one entry per profile, and only the ones being sent.
     pub profiles: Vec<ProfileBundle>,
+    /// Whether this machine should forget the operator's logins.
+    ///
+    /// True when the operator keeps no project here. A machine is a copy of where
+    /// the work is, so when it is none of it, it holds none of the keys either.
+    #[serde(default)]
+    pub remove_logins: bool,
 }
 
 /// A profile snapshot, including an empty snapshot when its files were removed.
@@ -150,7 +156,12 @@ impl ConfigBundle {
         } else {
             Vec::new()
         };
-        let mut bundle = Self { settings, profiles };
+        let remove_logins = logins == Logins::WithWork && !holds_work;
+        let mut bundle = Self {
+            settings,
+            profiles,
+            remove_logins,
+        };
         bundle.retain_changed_profiles(held);
         Ok(bundle)
     }

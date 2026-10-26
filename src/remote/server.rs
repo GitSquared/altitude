@@ -44,7 +44,11 @@ use crate::tracker::{ACCOUNT_FILE, TrackerAccount, TrackerKind};
 
 /// What a pushed configuration did with the tracker account it carries.
 enum ConfigWrite {
-    Written,
+    Written {
+        /// The operator keeps no project here, so the logins that arrived with
+        /// this configuration are no longer this machine's to hold.
+        forget_logins: bool,
+    },
     /// Another client already claims that account, so nothing was written.
     LinkedElsewhere {
         provider: TrackerKind,
@@ -299,7 +303,9 @@ impl LinkHandler {
             }
         }
         super::tracker::record_accounts(&operator_dir, &pushed)?;
-        Ok(ConfigWrite::Written)
+        Ok(ConfigWrite::Written {
+            forget_logins: bundle.remove_logins,
+        })
     }
 
     /// Other clients that already claim a tracker account this configuration
@@ -405,7 +411,9 @@ pub trait TaskHost: Send + Sync + 'static {
         peer: EndpointId,
         command: super::protocol::SignalCommand,
     ) -> BoxFuture<Result<(), String>>;
-    fn configure(&self, peer: EndpointId) -> BoxFuture<Result<(), String>>;
+    /// Build what a peer's pushed configuration asks for, and forget what it no
+    /// longer runs. `forget_logins` says the peer keeps no project here.
+    fn configure(&self, peer: EndpointId, forget_logins: bool) -> BoxFuture<Result<(), String>>;
     fn run(&self, peer: EndpointId, request: TaskRequest) -> BoxFuture<Result<(), String>>;
     fn list(&self, peer: EndpointId) -> BoxFuture<Result<Vec<TaskSummary>, String>>;
     /// What this peer may see now, and the changes that follow.
@@ -710,10 +718,12 @@ async fn answer(
             } else {
                 let _writing = handler.config_lock.lock().await;
                 match handler.write_config(peer, &bytes, take_tracker) {
-                    Ok(ConfigWrite::Written) => match handler.tasks.configure(peer).await {
-                        Ok(()) => LinkResponse::Configured,
-                        Err(reason) => LinkResponse::Rejected { reason },
-                    },
+                    Ok(ConfigWrite::Written { forget_logins }) => {
+                        match handler.tasks.configure(peer, forget_logins).await {
+                            Ok(()) => LinkResponse::Configured,
+                            Err(reason) => LinkResponse::Rejected { reason },
+                        }
+                    }
                     Ok(ConfigWrite::LinkedElsewhere {
                         provider,
                         display_name,

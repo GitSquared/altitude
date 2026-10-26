@@ -50,9 +50,9 @@ impl Default for Settings {
 
 /// What a new task gets when nobody says otherwise.
 ///
-/// What the work is — its setup, repository, caches, and instructions — belongs to
-/// the project. This is what is left that is not about a project: the harness an
-/// operator has chosen, and the machine the last task went to.
+/// What the work is — its setup, repository, caches, instructions, and the machine
+/// it runs on — belongs to the project. This is what is left that is not about a
+/// project.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Defaults {
@@ -63,11 +63,6 @@ pub struct Defaults {
     /// Absent means nobody has chosen yet, which is the one thing an interface
     /// cannot guess on someone's behalf.
     pub agent: Option<AgentKind>,
-    /// The machine a new task is founded on, when it is not this one.
-    ///
-    /// It records a choice rather than promising anything: a machine that has since
-    /// been removed, or that is not answering, is not preselected.
-    pub host: Option<String>,
 }
 
 /// Preferences about the interface itself.
@@ -223,9 +218,8 @@ impl Settings {
         let mut shared = self.clone();
         shared.remotes.clear();
         shared.interface = Interface::default();
-        shared.defaults.host = None;
-        // Where a project prefers to run is this client's choice; the machine it
-        // is sent to can only run it.
+        // Where a project runs is this client's choice; the machine it is sent to
+        // can only run it.
         for project in &mut shared.projects {
             project.host = None;
         }
@@ -240,16 +234,6 @@ impl Settings {
     /// Choose the coding agent Altitude drives.
     pub fn set_agent(&mut self, agent: AgentKind) {
         self.defaults.agent = Some(agent);
-    }
-
-    /// The machine a task is founded on unless one is picked.
-    pub fn default_task_host(&self) -> Option<&str> {
-        self.defaults.host.as_deref()
-    }
-
-    /// Remember where a task was founded, so the next one starts there.
-    pub fn set_default_task_host(&mut self, address: Option<&str>) {
-        self.defaults.host = address.map(str::to_owned);
     }
 
     /// How the interface behaves.
@@ -291,18 +275,10 @@ impl Settings {
         self.remotes.push(address.to_owned());
     }
 
-    /// Forget a remote address, and stop defaulting to it.
+    /// Forget a remote address.
     pub fn remove_remote(&mut self, address: &str) {
         self.remotes
             .retain(|existing| !existing.eq_ignore_ascii_case(address));
-        if self
-            .defaults
-            .host
-            .as_deref()
-            .is_some_and(|host| host.eq_ignore_ascii_case(address))
-        {
-            self.defaults.host = None;
-        }
     }
 
     fn validate(&self) -> Result<(), SettingsError> {

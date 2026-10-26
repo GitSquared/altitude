@@ -114,25 +114,6 @@ impl<T> Select<T> {
     }
 
     /// Choose the first offer `test` accepts, answering whether there was one.
-    pub fn choose_offer(&mut self, test: impl Fn(&Offer<T>) -> bool) -> bool {
-        match self.offers.iter().position(test) {
-            Some(index) => {
-                self.chosen = index;
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// Replace the offers, keeping the chosen position in range. What was chosen
-    /// is the page's to keep: it is the one that knows what still exists.
-    pub fn set_offers(&mut self, offers: Vec<Offer<T>>) {
-        self.offers = offers;
-        self.chosen = self.chosen.min(self.offers.len().saturating_sub(1));
-        self.at = 0;
-        self.query.clear();
-    }
-
     pub fn is_open(&self) -> bool {
         self.open
     }

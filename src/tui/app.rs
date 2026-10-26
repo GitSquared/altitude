@@ -913,17 +913,30 @@ impl App {
         self.grid_columns.max(1)
     }
 
-    /// Where a new task starts: the project's machine, then the last one used.
+    /// Where a project's tasks run, if that machine can take one now.
     ///
-    /// A project that names a machine is saying where its work belongs, so that
-    /// answer comes before the memory of the last task.
-    fn new_task_default_host(&self) -> Option<String> {
-        let active = self.active_project_id();
-        self.projects()
+    /// A project names one machine and a task does not choose, so this is the one
+    /// place that answers where work goes. A machine that is configured but not
+    /// answering is a reason to say so, not to fall back to this one.
+    fn project_machine(&self, project: &Project) -> Result<Option<String>, String> {
+        let Some(address) = &project.host else {
+            return Ok(None);
+        };
+        match self
+            .task_hosts()
             .into_iter()
-            .find(|project| project.id == active)
-            .and_then(|project| project.host)
-            .or_else(|| self.default_task_host().map(|host| host.to_owned()))
+            .find(|host| host.address.as_deref() == Some(address.as_str()))
+        {
+            Some(host) if host.ready => Ok(Some(address.clone())),
+            Some(host) => Err(format!(
+                "This project runs on {}. It cannot take work yet.",
+                host.label
+            )),
+            None => Err(format!(
+                "This project runs on {address}, which is not a configured remote. Add it in \
+                 Settings → Remotes, or change the project's machine."
+            )),
+        }
     }
 
     /// The machines this installation delegates to, as the project form offers
@@ -1086,31 +1099,6 @@ impl App {
         match file.save(proposed) {
             Ok(()) => self.alert = None,
             Err(error) => self.problem(error.to_string()),
-        }
-    }
-
-    /// Where the last task was founded, when it was not this machine: the answer
-    /// the next creation question opens on.
-    pub(in crate::tui) fn default_task_host(&self) -> Option<String> {
-        self.settings_file
-            .as_ref()?
-            .settings()
-            .default_task_host()
-            .map(str::to_owned)
-    }
-
-    /// Remember where a task was founded, so the next one starts there.
-    fn set_default_task_host(&mut self, address: Option<&str>) {
-        let Some(file) = self.settings_file.as_mut() else {
-            return;
-        };
-        if file.settings().default_task_host() == address {
-            return;
-        }
-        let mut proposed = file.settings().clone();
-        proposed.set_default_task_host(address);
-        if let Err(error) = file.save(proposed) {
-            self.problem(error.to_string());
         }
     }
 
@@ -1944,33 +1932,6 @@ impl App {
         hosts
     }
 
-    /// The machines a task that is already here could be sent to: this machine is
-    /// where it already is, so it is not one of them.
-    fn send_hosts(&self) -> Vec<Host> {
-        self.task_hosts()
-            .into_iter()
-            .filter(|host| host.address.is_some())
-            .collect()
-    }
-
-    /// Put the machines the creation question and the send chooser offer back in
-    /// step with what the remotes have answered, keeping the one the operator chose
-    /// where it is still offered.
-    pub(in crate::tui) fn refresh_task_hosts(&mut self) {
-        let hosts = self.task_hosts();
-        match &mut self.foreground {
-            Foreground::NewTask(question) => question.refresh_hosts(hosts),
-            Foreground::SendTask(sending) => {
-                let remotes = hosts
-                    .into_iter()
-                    .filter(|host| host.address.is_some())
-                    .collect();
-                sending.refresh_hosts(remotes);
-            }
-            _ => {}
-        }
-    }
-
     /// Watch a machine's tasks, for as long as the interface runs.
     ///
     /// The one thing that dials a remote. What the watch finds on the way in is
@@ -2175,7 +2136,6 @@ impl App {
         }
         // A creation question may be open over the list, and a machine that just
         // answered may now be one it can offer.
-        self.refresh_task_hosts();
     }
 
     /// Put one machine's tasks where the others are not, in the order it sent them.
@@ -2735,6 +2695,13 @@ impl App {
             ) else {
                 continue;
             };
+            // A machine that still has a task of ours keeps its copy until the task
+            // is no longer there: its logins are what the task runs with, and the
+            // bundle that would take them away is not sent yet.
+            if bundle.remove_logins && self.remote_tasks.iter().any(|held| held.address == address)
+            {
+                continue;
+            }
             if self.remote_needs_config(&address)
                 && !self.remote_config_inflight.contains(&address)
                 && matches!(
@@ -2806,7 +2773,6 @@ impl App {
                     .insert(reply.address, RemoteStatus::Silent(error));
             }
         }
-        self.refresh_task_hosts();
     }
 
     /// Note whether the credentials list is showing, and start its clock when it
@@ -3028,7 +2994,6 @@ impl App {
         self.remote_status
             .insert(address.to_owned(), RemoteStatus::Asking);
         self.watch_remote(address);
-        self.refresh_task_hosts();
     }
 
     /// Note what an announcement said about the trackers a remote runs. Called
@@ -3284,6 +3249,17 @@ impl App {
         }
     }
 
+    /// Whether a project has a task in play, here or on the machine it runs on.
+    fn project_has_tasks(&self, id: &str) -> bool {
+        self.tasks
+            .iter()
+            .any(|task| task.project().map(|project| project.id.as_str()) == Some(id))
+            || self
+                .remote_tasks
+                .iter()
+                .any(|held| held.summary.project_id.as_deref() == Some(id))
+    }
+
     /// Save what a form holds, answering whether it was saved.
     pub(in crate::tui) fn save_form(&mut self, form: &Form) -> bool {
         // Refused before the file is touched, so the reason is the form's rather
@@ -3291,6 +3267,20 @@ impl App {
         if let Some(refusal) = form.refusal() {
             self.say(refusal.to_owned());
             return false;
+        }
+        // A project's machine is where its work is. Moving it while tasks are in
+        // play would leave them running somewhere the project no longer points,
+        // and their builds on a machine that is about to forget them.
+        if let Some(id) = form.target.project_id() {
+            let current = self
+                .settings_file
+                .as_ref()
+                .and_then(|file| file.settings().project(id))
+                .and_then(|project| project.host.clone());
+            if current != form.host_value() && self.project_has_tasks(id) {
+                self.say("That project has tasks in play; accept or delete them before moving it");
+                return false;
+            }
         }
         // Canonical before the file is borrowed, because a bad URL is the form's
         // answer to give rather than the file's.
@@ -3364,6 +3354,14 @@ impl App {
         // Stopping the watch is not the settings file's business, so it happens
         // before the file is borrowed.
         if let Target::Remote { original } = &target {
+            if self
+                .projects()
+                .iter()
+                .any(|project| project.host.as_deref() == Some(original.as_str()))
+            {
+                self.say("That remote runs a project; move the project to another machine first");
+                return;
+            }
             self.unwatch_remote(original);
         }
         // A project that a task in play belongs to stays: removing it would leave
@@ -4027,7 +4025,6 @@ impl App {
                 task,
                 project,
                 agent,
-                host,
                 remember,
             }) => {
                 // The tab follows the answer, so the task is where the operator
@@ -4038,20 +4035,28 @@ impl App {
                 if let Some(agent) = remember {
                     self.set_agent(agent);
                 }
-                // Where this one was founded is where the next one starts.
-                self.set_default_task_host(host.as_deref());
-                match host {
-                    // A task for a remote is founded there, off this loop. Nothing is
-                    // copied: the machine that runs it is the machine that owns it.
-                    Some(address) => self.begin_delegation(
-                        &address,
-                        TaskOrigin::Intent(task),
-                        &project.id,
-                        agent,
-                        delegations,
-                    ),
+                match self.project_machine(&project) {
+                    // A task for a remote is founded there, off this loop. Nothing
+                    // is copied: the machine that runs it owns it.
+                    Ok(Some(address)) => {
+                        self.begin_delegation(
+                            &address,
+                            TaskOrigin::Intent(task),
+                            &project.id,
+                            agent,
+                            delegations,
+                        );
+                    }
                     // Founded here, so whose work it is needs no saying.
-                    None => event_loop.create(task, *project, agent, None),
+                    Ok(None) => {
+                        event_loop.create(task, *project, agent, None);
+                    }
+                    // The answer was fine; the machine is not. The question stays
+                    // in front so the operator can fix it or answer differently.
+                    Err(reason) => {
+                        self.foreground = Foreground::NewTask(question);
+                        self.say(reason);
+                    }
                 }
             }
             // The prompt stays in front, reading the issue: the operator sees the
@@ -4175,25 +4180,30 @@ impl App {
                 if let Some(agent) = submission.remember {
                     self.set_agent(agent);
                 }
-                self.set_default_task_host(submission.host.as_deref());
                 self.set_active_project(&submission.project.id);
-                match submission.host {
-                    Some(address) => self.begin_delegation(
-                        &address,
-                        TaskOrigin::Issue(Box::new(snapshot)),
-                        &submission.project.id,
-                        submission.agent,
-                        delegations,
-                    ),
-                    None => {
+                match self.project_machine(&submission.project) {
+                    Ok(Some(address)) => {
+                        self.begin_delegation(
+                            &address,
+                            TaskOrigin::Issue(Box::new(snapshot)),
+                            &submission.project.id,
+                            submission.agent,
+                            delegations,
+                        );
+                        self.foreground = Foreground::Tasks;
+                    }
+                    Ok(None) => {
                         event_loop.create_from_issue(
                             snapshot,
                             submission.project,
                             submission.agent,
                         );
+                        self.foreground = Foreground::Tasks;
+                    }
+                    Err(reason) => {
+                        self.say(reason);
                     }
                 }
-                self.foreground = Foreground::Tasks;
             }
             Err(error) => {
                 if let Foreground::NewTask(question) = &mut self.foreground {
@@ -4725,8 +4735,6 @@ impl App {
                         self.projects(),
                         &self.active_project_id(),
                         self.agent(),
-                        self.task_hosts(),
-                        self.new_task_default_host().as_deref(),
                     )));
                 }
             }
@@ -4736,14 +4744,8 @@ impl App {
             KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if self.reload_settings() {
                     self.foreground = Foreground::NewTask(Box::new(
-                        NewTask::new(
-                            self.projects(),
-                            &self.active_project_id(),
-                            self.agent(),
-                            self.task_hosts(),
-                            self.new_task_default_host().as_deref(),
-                        )
-                        .linking(),
+                        NewTask::new(self.projects(), &self.active_project_id(), self.agent())
+                            .linking(),
                     ));
                 }
             }
@@ -4793,22 +4795,43 @@ impl App {
             // Moving a task across is one key: which way it goes is decided by
             // where the task already is, so there is nothing to remember.
             KeyCode::Char('p') => {
-                if let Some(task) = self.selected_task() {
-                    let hosts = self.send_hosts();
-                    let title = task.title().to_owned();
-                    let environment = task
-                        .project()
-                        .map(|project| project.name.clone())
-                        .unwrap_or_default();
-                    let agent = task.agent_kind;
-                    self.foreground = Foreground::SendTask(Box::new(SendTask::new(
-                        task.id,
-                        title,
-                        environment,
-                        agent,
-                        hosts,
-                    )));
-                }
+                let Some(task) = self.selected_task() else {
+                    return Ok(false);
+                };
+                // A task goes where its project runs, and nowhere else. So this
+                // either offers that one machine or says why there is no move.
+                let Some(project) = task.project().cloned() else {
+                    self.say("This task has no recorded project");
+                    return Ok(false);
+                };
+                let hosts = match self.project_machine(&project) {
+                    Ok(Some(address)) => self
+                        .task_hosts()
+                        .into_iter()
+                        .filter(|host| host.address.as_deref() == Some(address.as_str()))
+                        .collect::<Vec<_>>(),
+                    Ok(None) => {
+                        self.say(
+                            "This project runs on this machine. Set its machine in Settings → \
+                             Projects to delegate it.",
+                        );
+                        return Ok(false);
+                    }
+                    Err(reason) => {
+                        self.say(reason);
+                        return Ok(false);
+                    }
+                };
+                let title = task.title().to_owned();
+                let environment = project.name.clone();
+                let agent = task.agent_kind;
+                self.foreground = Foreground::SendTask(Box::new(SendTask::new(
+                    task.id,
+                    title,
+                    environment,
+                    agent,
+                    hosts,
+                )));
             }
             // The issue a task is bound to is a page, so it opens the same way a
             // sandbox's link does: through this machine's browser, by the

@@ -8,7 +8,7 @@
 mod admin;
 mod announce;
 mod bundle;
-pub(crate) use bundle::Logins;
+pub(crate) use bundle::{HeldConfig, Logins};
 mod clients;
 mod console;
 mod discovery;

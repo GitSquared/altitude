@@ -72,25 +72,6 @@ impl SendTask {
         &self.title
     }
 
-    /// Put the machines back in step with what the remotes have answered, keeping
-    /// the one the operator chose where it is still offered.
-    pub(in crate::tui) fn refresh_hosts(&mut self, hosts: Vec<Host>) {
-        let chosen = self
-            .hosts
-            .get(self.selected)
-            .and_then(|host| host.address.clone());
-        self.hosts = hosts;
-        let kept = chosen.and_then(|address| {
-            self.hosts
-                .iter()
-                .position(|host| host.address.as_deref() == Some(address.as_str()))
-        });
-        self.selected = match kept {
-            Some(index) if self.hosts[index].ready => index,
-            _ => self.hosts.iter().position(|host| host.ready).unwrap_or(0),
-        };
-    }
-
     pub(in crate::tui) fn hints(&self) -> Vec<chrome::Hint> {
         let mut hints = Vec::new();
         if self.any_ready() {
