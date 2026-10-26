@@ -3,9 +3,11 @@
 use crate::{
     agent::{AgentKind, mcp},
     config::InstallationIdentity,
-    isolation::Environment,
-    isolation::{CommandEvent, CommandSession, IsolationEngine, SandboxOptions, VsockRoute},
-    mounts, vcs,
+    isolation::{
+        CommandEvent, CommandSession, Environment, IsolationEngine, SandboxOptions, VsockRoute,
+        mounts,
+    },
+    vcs,
 };
 use futures_util::future::join_all;
 

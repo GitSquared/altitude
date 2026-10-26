@@ -21,9 +21,8 @@ use crate::{
     config::Config,
     isolation::{
         CREDENTIAL_PREFIX, CredentialCheck, CredentialSandbox, Environment, EnvironmentRecipe,
-        IsolationEngine, IsolationError, ProfileSummary, Unwatched,
+        IsolationEngine, IsolationError, ProfileSummary, Unwatched, mounts,
     },
-    mounts,
 };
 
 /// What one profile's login came to, and how that was found.

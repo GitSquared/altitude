@@ -13,6 +13,8 @@ pub(crate) mod capsule;
 mod environment;
 mod git_cache;
 mod microsandbox;
+pub(crate) mod mounts;
+
 /// How long a built environment is kept before it is rebuilt, for the interface
 /// that has to tell an operator when their base was last refreshed.
 pub use environment::REFRESH_AFTER;

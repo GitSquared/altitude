@@ -27,7 +27,6 @@ mod id;
 mod instance;
 mod isolation;
 mod logging;
-mod mounts;
 mod remote;
 mod task;
 mod tracker;
