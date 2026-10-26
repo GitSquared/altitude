@@ -520,6 +520,9 @@ pub(in crate::tui) struct TrackerConflict {
 
 pub struct App {
     pub(in crate::tui) tasks: Vec<Task>,
+    /// The project whose tasks the grid shows, by id. Absent until a tab is
+    /// chosen, which reads as the first project.
+    active_project: Option<String>,
     /// How many cards fit across, from the last drawing. Written by the
     /// drawing, read by the keys, because a step within the grid is one card or
     /// one whole row of them.
@@ -573,6 +576,8 @@ pub struct App {
     pub(in crate::tui) signal_targets: Targets<SignalHit>,
     /// What the last task-grid frame drew, by card.
     pub(in crate::tui) task_targets: Targets<usize>,
+    /// Which project each drawn tab is, so a click chooses one.
+    pub(in crate::tui) project_targets: Targets<usize>,
     /// What the last settings frame drew, by section or row.
     pub(in crate::tui) settings_targets: Targets<SettingsHit>,
     /// Threads whose conversation changed since the last frame, with when it was
@@ -703,6 +708,7 @@ impl App {
         };
         Self {
             tasks: listed(tasks),
+            active_project: None,
             grid_columns: 1,
             alert: settings_error.map(Alert::problem),
             removing: HashSet::new(),
@@ -710,6 +716,7 @@ impl App {
             first_visible_task: 0,
             shells: HashMap::new(),
             new_task_targets: Targets::default(),
+            project_targets: Targets::default(),
             credential_shell: CredentialShellState::Idle,
             git_identity: GitIdentity::default(),
             signal_task_id: None,
@@ -825,9 +832,8 @@ impl App {
     }
 
     fn clamp_selection(&mut self) {
-        self.selected = self
-            .selected
-            .min((self.tasks.len() + self.remote_tasks.len()).saturating_sub(1));
+        let (local, remote) = self.visible_counts();
+        self.selected = self.selected.min((local + remote).saturating_sub(1));
     }
 
     /// Move within the grid: one card across, or one row of cards.
@@ -835,7 +841,8 @@ impl App {
     /// The grid does not wrap, because a card's neighbours are where it is and
     /// wrapping from the last column to the first is a jump, not a step.
     pub(in crate::tui) fn select_adjacent(&mut self, step: isize, columns: usize) {
-        let count = self.tasks.len() + self.remote_tasks.len();
+        let (local, remote) = self.visible_counts();
+        let count = local + remote;
         if count == 0 {
             return;
         }
@@ -848,7 +855,12 @@ impl App {
     pub(in crate::tui) fn task_mouse(&mut self, mouse: MouseEvent) {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(index) = self.task_targets.at(mouse.column, mouse.row).copied() {
+                if let Some(index) = self.project_targets.at(mouse.column, mouse.row).copied() {
+                    let id = self.projects().get(index).map(|project| project.id.clone());
+                    if let Some(id) = id {
+                        self.set_active_project(&id);
+                    }
+                } else if let Some(index) = self.task_targets.at(mouse.column, mouse.row).copied() {
                     self.selected = index;
                 }
             }
@@ -899,12 +911,95 @@ impl App {
         self.grid_columns.max(1)
     }
 
-    /// The project a new task starts in: the first, until tabs choose one.
+    /// The id of the project the grid is showing.
+    ///
+    /// A tab that names a project which is gone falls back to the first one, so a
+    /// deleted project cannot leave the grid looking at nothing.
     pub(in crate::tui) fn active_project_id(&self) -> String {
-        self.projects()
-            .first()
-            .map(|project| project.id.clone())
+        let projects = self.projects();
+        self.active_project
+            .as_ref()
+            .filter(|id| projects.iter().any(|project| &project.id == *id))
+            .cloned()
+            .or_else(|| projects.first().map(|project| project.id.clone()))
             .unwrap_or_default()
+    }
+
+    pub(in crate::tui) fn set_active_project(&mut self, id: &str) {
+        if self.active_project.as_deref() != Some(id) {
+            self.active_project = Some(id.to_owned());
+            self.selected = 0;
+        }
+    }
+
+    /// Move to the next or previous project, skipping when there is only one.
+    pub(in crate::tui) fn switch_project(&mut self, forward: bool) {
+        let projects = self.projects();
+        if projects.len() < 2 {
+            return;
+        }
+        let active = self.active_project_id();
+        let at = projects
+            .iter()
+            .position(|project| project.id == active)
+            .unwrap_or(0);
+        let next = if forward {
+            (at + 1) % projects.len()
+        } else {
+            (at + projects.len() - 1) % projects.len()
+        };
+        self.set_active_project(&projects[next].id);
+    }
+
+    /// Whether a task with this recorded project belongs in the active tab.
+    ///
+    /// A task that records no project cannot say which tab it belongs to, and
+    /// hiding it would be worse than showing it beside every one.
+    fn in_active_tab(&self, project_id: Option<&str>) -> bool {
+        match project_id {
+            Some(id) => id == self.active_project_id(),
+            None => true,
+        }
+    }
+
+    pub(in crate::tui) fn visible_tasks(&self) -> impl Iterator<Item = &Task> {
+        self.tasks
+            .iter()
+            .filter(|task| self.in_active_tab(task.project().map(|project| project.id.as_str())))
+    }
+
+    pub(in crate::tui) fn visible_remote_tasks(&self) -> impl Iterator<Item = &HeldTask> {
+        self.remote_tasks
+            .iter()
+            .filter(|held| self.in_active_tab(held.summary.project_id.as_deref()))
+    }
+
+    fn visible_counts(&self) -> (usize, usize) {
+        (
+            self.visible_tasks().count(),
+            self.visible_remote_tasks().count(),
+        )
+    }
+
+    /// How many tasks in a project are blocking on the operator, for its tab.
+    pub(in crate::tui) fn attention_in_project(&self, id: &str) -> usize {
+        let local = self
+            .tasks
+            .iter()
+            .filter(|task| {
+                task.project().map(|project| project.id.as_str()) == Some(id)
+                    && task.facts.blocking_signal_kind.is_some()
+            })
+            .count();
+        let remote = self
+            .remote_tasks
+            .iter()
+            .filter(|held| {
+                held.summary.project_id.as_deref() == Some(id)
+                    && held.summary.blocking_signal_kind.is_some()
+            })
+            .count();
+        local + remote
     }
 
     /// The projects a task can be founded in.
@@ -1197,7 +1292,13 @@ impl App {
                     Hint::new("ctrl-l", "link issue"),
                     Hint::new("s", "settings"),
                 ];
-                if !self.tasks.is_empty() || !self.remote_tasks.is_empty() {
+                // The tabs are always there; the key is worth showing only when
+                // there is more than one to move between.
+                if self.projects().len() > 1 {
+                    hints.push(Hint::new("[ ]", "projects"));
+                }
+                let (local, remote) = self.visible_counts();
+                if local + remote > 0 {
                     hints.extend([
                         Hint::new("enter", "signals"),
                         Hint::new("ctrl-enter", "take over"),
@@ -2062,21 +2163,33 @@ impl App {
     }
 
     /// Select the card a machine just said it holds, when one was asked for.
+    ///
+    /// A task arriving from a project other than the one in front brings its tab
+    /// with it: the operator asked for it, so it is what they should be looking at.
     fn reveal_pending(&mut self) {
-        if let Some((address, id)) = self.pending_remote.take()
-            && let Some(index) = self
-                .remote_tasks
-                .iter()
-                .position(|held| held.address == address && held.summary.id == id)
-        {
-            self.selected = self.tasks.len() + index;
+        let Some((address, id)) = self.pending_remote.take() else {
+            return;
+        };
+        let project_id = self
+            .remote_tasks
+            .iter()
+            .find(|held| held.address == address && held.summary.id == id)
+            .and_then(|held| held.summary.project_id.clone());
+        if let Some(project_id) = project_id {
+            self.set_active_project(&project_id);
+        }
+        let (local, _) = self.visible_counts();
+        let index = self
+            .visible_remote_tasks()
+            .position(|held| held.address == address && held.summary.id == id);
+        if let Some(index) = index {
+            self.selected = local + index;
         }
     }
 
     fn settle_selection(&mut self) {
-        self.selected = self
-            .selected
-            .min((self.tasks.len() + self.remote_tasks.len()).saturating_sub(1));
+        let (local, remote) = self.visible_counts();
+        self.selected = self.selected.min((local + remote).saturating_sub(1));
     }
 
     /// Ask before taking a task over, naming where it is now when it is not here.
@@ -2359,9 +2472,8 @@ impl App {
                 self.remote_tasks.retain(|held| {
                     !(held.address == reply.address && held.summary.id == reply.task_id)
                 });
-                self.selected = self
-                    .selected
-                    .min((self.tasks.len() + self.remote_tasks.len()).saturating_sub(1));
+                let (local, remote) = self.visible_counts();
+                self.selected = self.selected.min((local + remote).saturating_sub(1));
                 self.say(format!(
                     "Task dropped from {}",
                     self.remote_name(&reply.address)
@@ -2488,14 +2600,15 @@ impl App {
     ///
     /// The list shows them after this machine's own, so the index says which it is.
     fn selected_held(&self) -> Option<&HeldTask> {
-        self.remote_tasks
-            .get(self.selected.checked_sub(self.tasks.len())?)
+        let (local, _) = self.visible_counts();
+        self.visible_remote_tasks()
+            .nth(self.selected.checked_sub(local)?)
     }
 
     /// Whether the selection is a task another machine owns.
     fn selected_is_remote(&self) -> bool {
-        self.selected >= self.tasks.len()
-            && self.selected < self.tasks.len() + self.remote_tasks.len()
+        let (local, remote) = self.visible_counts();
+        self.selected >= local && self.selected < local + remote
     }
 
     pub(in crate::tui) fn discovery_observed(&mut self, event: DiscoveryEvent) {
@@ -3192,6 +3305,26 @@ impl App {
         if let Target::Remote { original } = &target {
             self.unwatch_remote(original);
         }
+        // A project that a task in play belongs to stays: removing it would leave
+        // that task with no tab to be found in, which is not a tidy-up.
+        if let Target::Project { id: Some(id), .. } = &target {
+            if self.projects().len() == 1 {
+                self.say("A project is required; make another one first");
+                return;
+            }
+            let in_use = self
+                .tasks
+                .iter()
+                .any(|task| task.project().map(|project| &project.id == id) == Some(true))
+                || self
+                    .remote_tasks
+                    .iter()
+                    .any(|held| held.summary.project_id.as_ref() == Some(id));
+            if in_use {
+                self.say("That project still has tasks; accept or delete them first");
+                return;
+            }
+        }
         let Some(file) = self.settings_file.as_mut() else {
             return;
         };
@@ -3232,16 +3365,14 @@ impl App {
     }
 
     pub(in crate::tui) fn selected_task(&self) -> Option<Task> {
-        self.tasks.get(self.selected).cloned()
+        self.visible_tasks().nth(self.selected).cloned()
     }
 
     pub(in crate::tui) fn remove_task(&mut self, id: &str) {
         self.removing.remove(id);
         if let Some(index) = self.tasks.iter().position(|task| task.id == id) {
             self.tasks.remove(index);
-            self.selected = self
-                .selected
-                .min((self.tasks.len() + self.remote_tasks.len()).saturating_sub(1));
+            self.clamp_selection();
         }
     }
 
@@ -4501,6 +4632,16 @@ impl App {
         match key.code {
             KeyCode::Char('q') => return Ok(true),
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
+            // The tabs are one keystroke away in either direction, and they are
+            // the context every other key works in.
+            KeyCode::Char('[') => {
+                self.switch_project(false);
+                return Ok(false);
+            }
+            KeyCode::Char(']') => {
+                self.switch_project(true);
+                return Ok(false);
+            }
             KeyCode::Char('c') => {
                 if self.reload_settings() {
                     self.foreground = Foreground::NewTask(Box::new(NewTask::new(

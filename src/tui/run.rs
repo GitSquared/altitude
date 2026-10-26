@@ -324,7 +324,10 @@ where
     // first task is not a cold start. Off the loop, and only once an agent has been
     // chosen, because only then is there a task that could run.
     if let Some(agent) = app.agent()
-        && let Some(project) = app.projects().into_iter().next()
+        && let Some(project) = app
+            .projects()
+            .into_iter()
+            .find(|project| project.id == app.active_project_id())
     {
         let service = task_service.clone();
         tokio::spawn(async move {

@@ -356,6 +356,10 @@ pub struct TaskSummary {
     /// intent is and a card is not where a sentence gets cut.
     pub title: String,
     pub project: String,
+    /// The project's id, which is what a tab is chosen by. Absent for a task
+    /// founded before projects were recorded.
+    #[serde(default)]
+    pub project_id: Option<String>,
     pub agent: Option<AgentKind>,
     pub status: TaskExecutionStatus,
     pub mode: TaskExecutionMode,
@@ -419,6 +423,11 @@ impl TaskSummary {
                 .as_ref()
                 .map(|project| project.name.clone())
                 .unwrap_or_default(),
+            project_id: task
+                .facts
+                .project
+                .as_ref()
+                .map(|project| project.id.clone()),
             agent: task.agent_kind,
             status: task.facts.execution_status.clone(),
             mode: task.facts.execution_mode,

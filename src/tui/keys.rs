@@ -78,6 +78,10 @@ pub fn help_sections() -> Vec<HelpSection> {
             bindings: &[
                 ("c", "Create a task"),
                 ("Ctrl-L", "Link a Linear issue and start work on it"),
+                (
+                    "[ / ]",
+                    "Move to the previous or next project; the grid and a new task follow it",
+                ),
                 ("s", "Open Settings"),
                 ("Enter / i", "Read and answer the selected task's signals"),
                 (

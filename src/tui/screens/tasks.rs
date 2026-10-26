@@ -9,7 +9,7 @@ use crate::{
 
 use ratatui::{
     Frame,
-    layout::Rect,
+    layout::{Constraint, Layout, Rect},
     text::{Line, Span},
     widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap},
 };
@@ -41,15 +41,66 @@ fn grid(area: Rect) -> (usize, u16, u16) {
 
 pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     app.task_targets.clear();
+    app.project_targets.clear();
     // The list sits in a surface like every other screen, and the grid is laid out
     // in what the border leaves. The field under it is drawn by the runner, so
     // every screen shows the same one.
     let content = Surface::new()
         .padding(Padding::uniform(1))
         .draw(frame, area);
-    let (columns, card_width, height) = grid(content);
+    // The projects are tabs over the whole list, so the tab bar keeps its row even
+    // when there is one project: it is where the work is, not an extra.
+    let [tabs, body] = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(content);
+    draw_tabs(frame, tabs, app);
+    let (columns, card_width, height) = grid(body);
     app.grid_columns = columns;
-    draw_tasks(frame, content, app, columns, card_width, height);
+    draw_tasks(frame, body, app, columns, card_width, height);
+}
+
+/// The projects, as tabs over the task list.
+///
+/// The one in front is underlined and the others are quiet, and a project whose
+/// tasks are blocking on the operator says how many. Choosing a project narrows
+/// everything under the bar, including where a new task is founded.
+fn draw_tabs(frame: &mut Frame, area: Rect, app: &mut App) {
+    let projects = app.projects();
+    if projects.is_empty() {
+        return;
+    }
+    let active = app.active_project_id();
+    let mut spans = Vec::new();
+    let mut x = area.x;
+    for (index, project) in projects.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw("    "));
+            x = x.saturating_add(4);
+        }
+        let attention = app.attention_in_project(&project.id);
+        let style = if project.id == active {
+            palette::primary().bold().underlined()
+        } else {
+            palette::muted()
+        };
+        let label = project.name.clone();
+        let mut width = u16::try_from(label.chars().count()).unwrap_or(0);
+        spans.push(Span::styled(label, style));
+        if attention > 0 {
+            let marker = format!(" {attention}");
+            width = width.saturating_add(u16::try_from(marker.chars().count()).unwrap_or(0));
+            spans.push(Span::styled(marker, palette::accent()));
+        }
+        app.project_targets.add(
+            Rect {
+                x,
+                y: area.y,
+                width,
+                height: 1,
+            },
+            index,
+        );
+        x = x.saturating_add(width);
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_tasks(
@@ -60,7 +111,8 @@ fn draw_tasks(
     card_width: u16,
     height: u16,
 ) {
-    let total = app.tasks.len() + app.remote_tasks.len();
+    let cards = cards(app);
+    let total = cards.len();
     if total == 0 {
         frame.render_widget(
             Paragraph::new(Span::styled("No tasks yet", palette::muted())),
@@ -78,7 +130,6 @@ fn draw_tasks(
     let first = selected_page.min(page_count.saturating_sub(1)) * page;
     app.first_visible_task = first;
 
-    let cards = cards(app);
     for (offset, card) in cards.iter().skip(first).take(page).enumerate() {
         let row = offset / columns;
         let column = offset % columns;
@@ -175,8 +226,7 @@ fn cards(app: &App) -> Vec<Card> {
     let tick = app.animation_tick();
     let now = now_ms();
     let mut cards: Vec<Card> = app
-        .tasks
-        .iter()
+        .visible_tasks()
         .map(|task| {
             let summary = TaskSummary::of(task);
             Card::of(
@@ -189,8 +239,7 @@ fn cards(app: &App) -> Vec<Card> {
         })
         .collect();
     cards.extend(
-        app.remote_tasks
-            .iter()
+        app.visible_remote_tasks()
             .map(|held| Card::of(&held.summary, false, tick, None, now)),
     );
     cards
