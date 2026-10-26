@@ -638,7 +638,9 @@ pub struct App {
     watch_events: mpsc::UnboundedSender<WatchedTasks>,
     /// Acknowledged digests stay in memory; reconnecting rechecks the remote.
     remote_synced: HashMap<String, String>,
-    configuration_digest: Option<String>,
+    /// What was last sent to each machine, so each is only sent a change of its
+    /// own.
+    configuration_digests: HashMap<String, String>,
     remote_config_inflight: HashSet<String>,
     pub(in crate::tui) discovered_remotes: HashMap<EndpointId, DiscoveredRemote>,
 
@@ -775,7 +777,7 @@ impl App {
             watched: HashMap::new(),
             watch_events,
             remote_synced: HashMap::new(),
-            configuration_digest: None,
+            configuration_digests: HashMap::new(),
             remote_config_inflight: HashSet::new(),
             discovered_remotes: HashMap::new(),
             remote_tasks: Vec::new(),
@@ -2684,38 +2686,55 @@ impl App {
                 .is_some_and(|conflict| conflict.address == address);
         !waiting
             && self
-                .configuration_digest
-                .as_ref()
+                .configuration_digests
+                .get(address)
                 .is_none_or(|digest| self.remote_synced.get(address) != Some(digest))
     }
 
     pub(in crate::tui) fn configuration_read(
         &mut self,
-        result: Result<ConfigBundle, String>,
+        result: Result<Vec<(String, ConfigBundle)>, String>,
         replies: &mpsc::Sender<ConfigPushReply>,
     ) {
-        let bundle = match result {
-            Ok(bundle) => bundle,
+        let bundles = match result {
+            Ok(bundles) => bundles,
             Err(error) => {
                 tracing::warn!(%error, "could not read configuration for remote sync");
                 return;
             }
         };
-        let digest = match bundle.digest() {
-            Ok(digest) => digest,
-            Err(error) => {
-                tracing::warn!(%error, "could not fingerprint remote configuration");
-                return;
+        let mut digests = HashMap::new();
+        for (address, bundle) in &bundles {
+            match bundle.digest() {
+                Ok(digest) => {
+                    digests.insert(address.clone(), digest);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "could not fingerprint remote configuration");
+                    return;
+                }
             }
-        };
-        // A configuration that changed may carry a different login, so a question
-        // already answered about an account is worth asking again.
-        if self.configuration_digest.as_deref() != Some(digest.as_str()) {
-            self.conflict_declined.clear();
         }
-        self.configuration_digest = Some(digest.clone());
-        let bundle = Arc::new(bundle);
+        // A configuration that changed may carry a different login, so a question
+        // already answered about an account is worth asking again. Only the
+        // machines whose own configuration changed are asked.
+        for (address, digest) in &digests {
+            if self.configuration_digests.get(address) != Some(digest) {
+                self.conflict_declined.remove(address);
+            }
+        }
+        self.configuration_digests = digests;
+        let bundles: HashMap<String, Arc<ConfigBundle>> = bundles
+            .into_iter()
+            .map(|(address, bundle)| (address, Arc::new(bundle)))
+            .collect();
         for address in self.configured_remotes() {
+            let (Some(bundle), Some(digest)) = (
+                bundles.get(&address).cloned(),
+                self.configuration_digests.get(&address).cloned(),
+            ) else {
+                continue;
+            };
             if self.remote_needs_config(&address)
                 && !self.remote_config_inflight.contains(&address)
                 && matches!(
@@ -2726,8 +2745,6 @@ impl App {
                 self.remote_config_inflight.insert(address.clone());
                 self.remote_status
                     .insert(address.clone(), RemoteStatus::Syncing);
-                let bundle = bundle.clone();
-                let digest = digest.clone();
                 let keys = self.remote_keys.clone();
                 let client = self.link.clone();
                 let replies = replies.clone();
@@ -3380,6 +3397,7 @@ impl App {
             Target::Remote { original } => {
                 proposed.remove_remote(original);
                 self.remote_synced.remove(original);
+                self.configuration_digests.remove(original);
                 self.remote_status.remove(original);
                 self.remote_config_inflight.remove(original);
                 self.remote_trackers.remove(original);

@@ -621,11 +621,26 @@ where
                 reading_configuration = true;
                 let config = app.config.clone();
                 let profiles: Vec<_> = task_service.credentials().profiles().iter().map(|profile| profile.profile).collect();
+                let addresses = app.configured_remotes();
                 let reports = configuration_reads.clone();
                 tokio::spawn(async move {
                     let result = spawn_blocking(move || {
                         let settings = fs::read_to_string(config.settings_path())?;
-                        ConfigBundle::of(&settings, config.data_dir(), &profiles, &[])
+                        // One bundle per machine, because each is sent the projects
+                        // it runs and nothing else.
+                        addresses
+                            .into_iter()
+                            .map(|address| {
+                                let bundle = ConfigBundle::of(
+                                    &settings,
+                                    config.data_dir(),
+                                    &profiles,
+                                    &[],
+                                    Some(&address),
+                                )?;
+                                Ok((address, bundle))
+                            })
+                            .collect::<Result<Vec<_>, io::Error>>()
                     }).await.map_err(|error| error.to_string())
                         .and_then(|result| result.map_err(|error| error.to_string()));
                     let _ = reports.send(result);

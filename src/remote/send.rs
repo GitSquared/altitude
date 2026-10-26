@@ -101,8 +101,14 @@ where
         .iter()
         .map(|p| p.profile)
         .collect();
-    let bundle =
-        ConfigBundle::of(&settings, config.data_dir(), &profiles, &held).map_err(message)?;
+    let bundle = ConfigBundle::of(
+        &settings,
+        config.data_dir(),
+        &profiles,
+        &held,
+        Some(address),
+    )
+    .map_err(message)?;
     let config_bytes = serde_json::to_vec(&bundle).map_err(message)?;
     // Sending a task is not where an account is taken over: the background sync
     // asks, and until it has an answer this machine cannot build the task there.

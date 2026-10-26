@@ -104,14 +104,21 @@ impl ConfigBundle {
     ///
     /// `held` is what the remote said it has. A profile is sent when it is not there
     /// at all, or when its contents differ.
+    /// `host` is the machine this bundle is for: only the projects it runs travel,
+    /// so a remote never learns about work that belongs somewhere else.
     pub fn of(
         settings: &str,
         data_dir: &Path,
         mounted: &[&str],
         held: &[ProfileDigest],
+        host: Option<&str>,
     ) -> Result<Self, io::Error> {
         let parsed: Settings = toml::from_str(settings).map_err(io::Error::other)?;
-        let settings = toml::to_string(&parsed.shared()).map_err(io::Error::other)?;
+        let mut shared = parsed.shared();
+        if let Some(host) = host {
+            shared.retain_projects_for(host);
+        }
+        let settings = toml::to_string(&shared).map_err(io::Error::other)?;
         let profiles = mounted
             .iter()
             .copied()

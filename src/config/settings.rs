@@ -201,6 +201,16 @@ impl Settings {
         &self.remotes
     }
 
+    /// Keep only the projects a machine is the one that runs.
+    ///
+    /// A remote is sent what it is for: its own projects' setup, repository, and
+    /// route. Everything else stays on the machine the work belongs to, which is
+    /// what keeps a day-job project's settings off a personal machine.
+    pub fn retain_projects_for(&mut self, host: &str) {
+        self.projects
+            .retain(|project| project.host.as_deref() == Some(host));
+    }
+
     /// The configuration a remote is sent, which is the part it can act on.
     ///
     /// A remote builds this machine's environments, so it needs those and the
@@ -296,11 +306,6 @@ impl Settings {
     }
 
     fn validate(&self) -> Result<(), SettingsError> {
-        if self.projects.is_empty() {
-            return Err(SettingsError::Invalid(
-                "at least one project is required".to_owned(),
-            ));
-        }
         let mut ids = HashSet::new();
         let mut names = HashSet::new();
         for project in &self.projects {
