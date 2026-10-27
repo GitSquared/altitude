@@ -352,6 +352,7 @@ where
     }
     loop {
         let showing_remotes = app.foreground.shows_settings()
+            && !app.credentials_over_card()
             && app.panel.section == screens::settings::Section::Remotes;
         if showing_remotes != remotes_visible {
             remotes_visible = showing_remotes;
@@ -444,9 +445,11 @@ where
             // so moving between screens does not restart it or give it a new
             // origin. Each screen marks the cells it has not covered, and the
             // field is painted into what is left once everything above it is drawn.
-            let screen = app.foreground.shows_settings()
-                || app.foreground.shows_signals()
-                || app.foreground.shows_get_started();
+            // A credential terminal opened from the card sits on the card, not on
+            // the settings list: the card is what asked for it.
+            let first_run = app.foreground.shows_get_started() || app.credentials_over_card();
+            let settings = app.foreground.shows_settings() && !first_run;
+            let screen = settings || app.foreground.shows_signals() || first_run;
             if screen {
                 frame.render_widget(Clear, content);
             }
@@ -459,7 +462,7 @@ where
             // What the modal in front occupied, so the transition animates what
             // was actually drawn rather than a size written down a second time.
             let mut modal: Option<Rect> = None;
-            if app.foreground.shows_settings() {
+            if settings {
                 // Fullscreen: it is the screen, not something over it.
                 let view = app.settings_view();
                 let tick = app.animation_tick();
@@ -491,7 +494,7 @@ where
                 // drawn over it, so the thread it is about stays in view.
                 screens::signals::draw(frame, content, &mut app);
                 modal = Some(content);
-            } else if app.foreground.shows_get_started() {
+            } else if first_run {
                 let setup = app.setup();
                 if let Foreground::GetStarted(panel) = &mut app.foreground {
                     screens::get_started::draw(frame, content, panel, &setup);

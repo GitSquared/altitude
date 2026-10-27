@@ -637,6 +637,10 @@ pub struct App {
     pub(in crate::tui) panel: Panel,
     /// What the keyboard is answering to.
     pub(in crate::tui) foreground: Foreground,
+    /// The screen a credential terminal was opened over, kept so the terminal can
+    /// be closed to the very thing that asked for it: the card with the same row
+    /// focused, or the settings list.
+    shell_behind: Option<Foreground>,
     /// A task travelling here from a remote, while it travels.
     pub(in crate::tui) transfer: Option<TransferView>,
     /// What each address last answered, for the list to show.
@@ -808,6 +812,7 @@ impl App {
             settings_file,
             panel: Panel::new(),
             foreground: Foreground::default(),
+            shell_behind: None,
             transfer: None,
             remote_status: HashMap::new(),
             remote_trackers: HashMap::new(),
@@ -1452,6 +1457,17 @@ impl App {
 
     /// The terminal in front, if one is. A question a sandbox asked is asked over
     /// the terminal it asked from, which goes on running behind it.
+    /// Whether the terminal in front was opened from the first screen, which is
+    /// the screen that has to be behind it. `setup_sign_in` is set for exactly
+    /// that: the sign-in a card row asked for.
+    pub(in crate::tui) fn credentials_over_card(&self) -> bool {
+        matches!(self.foreground, Foreground::Shell(ShellId::Credentials(_)))
+            && self
+                .shell_behind
+                .as_ref()
+                .is_some_and(Foreground::shows_get_started)
+    }
+
     pub(in crate::tui) fn open_shell(&self) -> Option<&ShellId> {
         match &self.foreground {
             Foreground::Shell(id) => Some(id),
@@ -1725,7 +1741,12 @@ impl App {
                     return;
                 };
                 let id = ShellId::Credentials(shell.id().to_owned());
-                self.foreground = Foreground::Shell(id.clone());
+                // What was in front stays, so closing the terminal returns to it
+                // rather than to whatever the shell happened to cover.
+                self.shell_behind = Some(mem::replace(
+                    &mut self.foreground,
+                    Foreground::Shell(id.clone()),
+                ));
                 self.alert = None;
                 let Some((rows, cols)) = self.shell_size(terminal) else {
                     let service = task_service.clone();
@@ -1786,17 +1807,11 @@ impl App {
         let id = ShellId::Credentials(shell.id().to_owned());
         self.shells.remove(&id);
         if self.open_shell() == Some(&id) {
-            // Back to where the sign-in was asked for, so what changed is in front.
-            // The panel is left as it was, which is what keeps the caret on the row
-            // that asked: a rebuilt card would start again at the first missing row.
             if let Some(profile) = mem::take(&mut self.setup_sign_in) {
                 self.credential_status.remove(profile);
-                if !matches!(self.foreground, Foreground::GetStarted(_)) {
-                    self.foreground = Foreground::GetStarted(self.get_started_panel());
-                }
-            } else {
-                self.foreground = Foreground::Panel;
             }
+            // Back to the screen that asked, with the row that asked still on it.
+            self.foreground = self.shell_behind.take().unwrap_or(Foreground::Panel);
         }
         let service = task_service.clone();
         tokio::spawn(async move {
@@ -3718,25 +3733,18 @@ impl App {
         // caret between rows until enter says otherwise.
         if panel.name_editing {
             match key.code {
-                KeyCode::Enter => {
-                    self.commit_name(&panel);
-                    panel.name_editing = false;
-                }
+                KeyCode::Enter => self.finish_name(&mut panel),
                 KeyCode::Tab | KeyCode::Down => {
-                    self.commit_name(&panel);
-                    panel.name_editing = false;
+                    self.finish_name(&mut panel);
                     panel.move_focus(true);
                 }
                 KeyCode::BackTab | KeyCode::Up => {
-                    self.commit_name(&panel);
-                    panel.name_editing = false;
+                    self.finish_name(&mut panel);
                     panel.move_focus(false);
                 }
-                KeyCode::Esc => {
-                    let saved = self.active_project_name();
-                    panel.reset_name(&saved);
-                    panel.name_editing = false;
-                }
+                // Escape leaves too, and leaving is saving: a field that throws
+                // away what was typed is a field nobody trusts to hold it.
+                KeyCode::Esc => self.finish_name(&mut panel),
                 _ => panel.name.handle_key(key),
             }
             self.foreground = Foreground::GetStarted(panel);
@@ -4065,13 +4073,27 @@ impl App {
         );
     }
 
-    /// Write the name that is in the field, when it is one the project could keep.
-    fn commit_name(&mut self, panel: &GetStarted) {
+    /// Write the name that is in the field, when it is one the project could
+    /// keep. Answers whether the saved name is what the field now says.
+    fn commit_name(&mut self, panel: &GetStarted) -> bool {
         let name = panel.name.value().trim();
-        if name.is_empty() || name == self.active_project_name() {
-            return;
+        if name.is_empty() {
+            return false;
         }
-        self.rename_project(&self.active_project_id(), name);
+        if name == self.active_project_name() {
+            return true;
+        }
+        self.rename_project(&self.active_project_id(), name)
+    }
+
+    /// Leave the name field, saving what it holds. A field left empty goes back
+    /// to the saved name rather than making the project unnamed by accident.
+    fn finish_name(&mut self, panel: &mut GetStarted) {
+        if !self.commit_name(panel) {
+            let saved = self.active_project_name();
+            panel.reset_name(&saved);
+        }
+        panel.name_editing = false;
     }
 
     /// Open the repository list over the first screen, and ask for a fresh one.
@@ -4272,12 +4294,8 @@ impl App {
     fn leave_credentials(&mut self) {
         if let Some(profile) = mem::take(&mut self.setup_sign_in) {
             self.credential_status.remove(profile);
-            if !matches!(self.foreground, Foreground::GetStarted(_)) {
-                self.foreground = Foreground::GetStarted(self.get_started_panel());
-            }
-        } else {
-            self.foreground = Foreground::Panel;
         }
+        self.foreground = self.shell_behind.take().unwrap_or(Foreground::Panel);
     }
 
     /// Whether a project has a task in play, here or on the machine it runs on.

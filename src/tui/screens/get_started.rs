@@ -343,7 +343,7 @@ impl GetStarted {
             return vec![
                 Hint::new("type", "the name"),
                 Hint::new("enter", "save"),
-                Hint::new("esc", "leave it as it was"),
+                Hint::new("esc", "save and leave"),
             ];
         }
         if self.focus == Focus::Name {
