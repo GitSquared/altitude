@@ -61,7 +61,7 @@ use popups::send_task::{Decision as SendDecision, SendTask};
 use popups::setup::{Setup, SetupKind};
 use popups::sign_in::{Decision as SignInDecision, SignIn};
 use screens::get_started::{
-    Focus as SetupFocus, GetStarted, NameKey, RemoteOffer, SetupState, name_key, signed_in,
+    Focus as SetupFocus, GetStarted, RemoteOffer, SetupState, ready as setup_ready, signed_in,
 };
 use screens::settings::{
     CredentialKind, Depth, Focus, Form, GitIdentity, Panel, RowKind, Section, Setting, SettingsHit,
@@ -1373,9 +1373,6 @@ impl App {
                 if self.projects().len() > 1 {
                     hints.push(Hint::new("[ ]", "projects"));
                 }
-                if self.setup_incomplete() {
-                    hints.push(Hint::new("g", "set up"));
-                }
                 let (local, remote) = self.visible_counts();
                 if local + remote > 0 {
                     hints.extend([
@@ -1765,9 +1762,13 @@ impl App {
         self.shells.remove(&id);
         if self.open_shell() == Some(&id) {
             // Back to where the sign-in was asked for, so what changed is in front.
+            // The panel is left as it was, which is what keeps the caret on the row
+            // that asked: a rebuilt card would start again at the first missing row.
             if let Some(profile) = mem::take(&mut self.setup_sign_in) {
                 self.credential_status.remove(profile);
-                self.foreground = Foreground::GetStarted(self.get_started_panel());
+                if !matches!(self.foreground, Foreground::GetStarted(_)) {
+                    self.foreground = Foreground::GetStarted(self.get_started_panel());
+                }
             } else {
                 self.foreground = Foreground::Panel;
             }
@@ -1806,7 +1807,14 @@ impl App {
             }
             KeyCode::Home => self.panel.detail_scroll = 0,
             _ if is_dismiss(key) || key.code == KeyCode::Char('s') => {
-                self.foreground = Foreground::Tasks;
+                // A machine that cannot run a task is not offered the task list:
+                // the first screen is what has to be finished, and Settings was
+                // opened from it.
+                if self.setup_incomplete() {
+                    self.open_get_started();
+                } else {
+                    self.foreground = Foreground::Tasks;
+                }
             }
             KeyCode::Tab | KeyCode::BackTab => {
                 self.panel.depth = match self.panel.depth {
@@ -3473,17 +3481,18 @@ impl App {
         }
     }
 
-    /// Whether the first screen still has something to settle.
-    ///
-    /// Missing an agent, or one the CLI says is signed out, is the same answer: a
-    /// task started now would stop. Unknown is not a reason to keep offering it.
+    /// Whether the first screen still has something to settle: a name, an agent,
+    /// a repository, or a login the CLI has said is not there. Unknown is not a
+    /// reason to keep someone on the card.
     pub(in crate::tui) fn setup_incomplete(&self) -> bool {
         self.setup_next_step().is_some()
     }
 
     /// The one thing the first screen would ask for next, in the order it asks.
     pub(in crate::tui) fn setup_next_step(&self) -> Option<&'static str> {
-        if self.active_agent().is_none() {
+        if self.active_project_name().trim().is_empty() {
+            Some("name the project")
+        } else if self.active_agent().is_none() {
             Some("choose an agent")
         } else if self.active_repository().is_none() {
             Some("choose a repository")
@@ -3496,11 +3505,6 @@ impl App {
         }
     }
 
-    /// Whether this installation still has the one thing a task needs.
-    pub(in crate::tui) fn should_offer_setup(&self) -> bool {
-        self.active_agent().is_none() && self.tasks.is_empty() && self.remote_tasks.is_empty()
-    }
-
     pub(in crate::tui) fn open_get_started(&mut self) {
         self.foreground = Foreground::GetStarted(self.get_started_panel());
     }
@@ -3509,6 +3513,7 @@ impl App {
         Box::new(GetStarted::new(
             &self.active_project_name(),
             self.active_agent(),
+            self.active_repository().as_deref(),
             &AGENTS,
         ))
     }
@@ -3562,8 +3567,9 @@ impl App {
 
     /// The keys of the first-run screen.
     ///
-    /// It owns every key while it is in front, including the one that dismisses it:
-    /// a first question that can be answered by accident is not a question.
+    /// It owns every key while it is in front: the name is a field the moment
+    /// the caret is on it, and the only ways off the card are finishing it or
+    /// opening Settings from it. Answers whether the operator asked to quit.
     pub(in crate::tui) async fn get_started_key<E>(
         &mut self,
         key: KeyEvent,
@@ -3571,11 +3577,12 @@ impl App {
         events: &mpsc::UnboundedSender<CredentialShellEvent>,
         repository_lists: &mpsc::UnboundedSender<RepositoryListReply>,
         tracker_connects: &mpsc::UnboundedSender<TrackerConnectReply>,
-    ) where
+    ) -> bool
+    where
         E: IsolationEngine + Clone + 'static,
     {
         let Foreground::GetStarted(mut panel) = mem::take(&mut self.foreground) else {
-            return;
+            return false;
         };
         // A shell being prepared is a wait; leaving it is the only key it has.
         if matches!(self.credential_shell, CredentialShellState::Opening { .. }) {
@@ -3583,28 +3590,21 @@ impl App {
                 self.close_credential_shell(task_service).await;
             }
             self.foreground = Foreground::GetStarted(panel);
-            return;
+            return false;
         }
-        if panel.editing_name {
-            match name_key(key) {
-                NameKey::Save => {
-                    let name = panel.name.value().trim().to_owned();
-                    if name.is_empty() {
-                        self.say("A project needs a name");
-                    } else if self.rename_project(&self.active_project_id(), &name) {
-                        panel.editing_name = false;
-                        panel.focus = SetupFocus::Agent;
-                    }
+        if let Some(browser) = panel.repositories.as_mut() {
+            match browser.key(key) {
+                RepositoriesKey::Still => {}
+                RepositoriesKey::Closed => panel.repositories = None,
+                RepositoriesKey::Save => panel.repositories = None,
+                RepositoriesKey::Chosen(repository) => {
+                    panel.repositories = None;
+                    self.set_project_repository(&repository.url);
+                    panel.focus = SetupFocus::Ready;
                 }
-                NameKey::Cancel => {
-                    panel.editing_name = false;
-                    let saved = self.active_project_name();
-                    panel.reset_name(&saved);
-                }
-                NameKey::Typing(key) => panel.name.handle_key(key),
             }
             self.foreground = Foreground::GetStarted(panel);
-            return;
+            return false;
         }
         if panel.agent.is_open() {
             let before = panel.agent.chosen_value().copied();
@@ -3616,42 +3616,83 @@ impl App {
                 self.set_active_agent(chosen);
             }
             self.foreground = Foreground::GetStarted(panel);
-            return;
+            return false;
         }
-        if let Some(browser) = panel.repositories.as_mut() {
-            match browser.key(key) {
-                RepositoriesKey::Still => {}
-                RepositoriesKey::Closed => panel.repositories = None,
-                RepositoriesKey::Save => panel.repositories = None,
-                RepositoriesKey::Chosen(repository) => {
-                    panel.repositories = None;
-                    self.set_project_repository(&repository.url);
-                    panel.focus = SetupFocus::Create;
+        if panel.vcs.is_open() {
+            // Enter is what closes the list by taking its offer; escape and q
+            // close it empty. A list of one is still a list: the choice is the
+            // key press, not a different value from the one already shown.
+            panel.vcs.handle_key(key);
+            if !panel.vcs.is_open()
+                && key.code == KeyCode::Enter
+                && let Some(chosen) = panel.vcs.chosen_value().copied()
+            {
+                // Choosing a provider is choosing the sign-in that makes it
+                // usable: the repository list comes after it, never before.
+                self.foreground = Foreground::GetStarted(panel);
+                self.setup_sign_in = Some(chosen.profile());
+                self.open_credential_shell(chosen.label(), chosen.profile(), task_service, events);
+                return false;
+            }
+            self.foreground = Foreground::GetStarted(panel);
+            return false;
+        }
+        if panel.tracker.is_open() {
+            panel.tracker.handle_key(key);
+            if !panel.tracker.is_open()
+                && key.code == KeyCode::Enter
+                && panel.tracker.chosen_value().is_some()
+            {
+                // The only provider this build knows, so choosing it is the
+                // sign-in. A second enter while one is out is ignored rather
+                // than cancelling: the card does not show a wait, and a key that
+                // silently reverses what the browser is doing is a trap.
+                if self.tracker_state != TrackerState::Connecting
+                    && self.tracker_state != TrackerState::Connected
+                {
+                    self.connect_tracker(task_service, tracker_connects);
                 }
             }
             self.foreground = Foreground::GetStarted(panel);
-            return;
+            return false;
+        }
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return true;
+        }
+        // The name is a field, so letters are letters: tab and enter are how the
+        // caret leaves it, and escape puts back what is saved.
+        if panel.focus == SetupFocus::Name {
+            match key.code {
+                KeyCode::Tab | KeyCode::Down => {
+                    self.commit_name(&panel);
+                    panel.move_focus(true);
+                }
+                KeyCode::BackTab | KeyCode::Up => {
+                    self.commit_name(&panel);
+                    panel.move_focus(false);
+                }
+                KeyCode::Enter => {
+                    self.commit_name(&panel);
+                    panel.focus = SetupFocus::Agent;
+                }
+                KeyCode::Esc => {
+                    let saved = self.active_project_name();
+                    panel.reset_name(&saved);
+                }
+                _ => panel.name.handle_key(key),
+            }
+            self.foreground = Foreground::GetStarted(panel);
+            return false;
         }
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                self.foreground = Foreground::Tasks;
-                return;
-            }
             KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => panel.move_focus(true),
             KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => panel.move_focus(false),
             KeyCode::Char(' ') if panel.focus == SetupFocus::Agent => panel.agent.open(),
-            // Space is the shortcut into the list whatever the login state: the
-            // listing says for itself when it cannot answer.
-            KeyCode::Char(' ') if panel.focus == SetupFocus::Code => {
-                self.open_setup_repositories(&mut panel, task_service, repository_lists);
-                self.foreground = Foreground::GetStarted(panel);
-                return;
-            }
             KeyCode::Enter => match panel.focus {
-                SetupFocus::Name => panel.editing_name = true,
+                SetupFocus::Name => {}
                 SetupFocus::Agent => match self.active_agent() {
                     Some(kind) => {
-                        // The panel waits behind the shell, and comes back when it
+                        // The card waits behind the shell, and comes back when it
                         // closes: this is the one sign-in that does not start at
                         // Settings.
                         self.foreground = Foreground::GetStarted(panel);
@@ -3662,77 +3703,79 @@ impl App {
                             task_service,
                             events,
                         );
-                        return;
+                        return false;
                     }
                     None => panel.agent.open(),
                 },
-                SetupFocus::Code => {
-                    let vcs = self.active_vcs();
+                SetupFocus::VersionControl => {
                     if self
                         .credential_status
-                        .get(vcs.profile())
+                        .get(self.active_vcs().profile())
                         .is_some_and(signed_in)
                     {
                         self.open_setup_repositories(&mut panel, task_service, repository_lists);
-                        self.foreground = Foreground::GetStarted(panel);
-                        return;
+                        return false;
                     }
-                    self.foreground = Foreground::GetStarted(panel);
-                    self.setup_sign_in = Some(vcs.profile());
-                    self.open_credential_shell(vcs.label(), vcs.profile(), task_service, events);
-                    return;
+                    // The provider list first, even with one provider in it: it
+                    // is where a second one will appear, and the row already
+                    // says which one is signed in.
+                    panel.vcs.open();
                 }
-                SetupFocus::Remote => {
-                    // Only a machine on this network is actionable: what the project
-                    // runs on is otherwise Settings' business.
-                    if let Some(offer) = self.setup().offer
-                        && self.adopt_remote(&offer)
-                    {
-                        self.set_project_remote(&offer.address);
-                        let address = offer.address.clone();
-                        self.check_remote(&address).await;
-                        self.watch_remote(&address);
-                    }
+                SetupFocus::Commits => {
+                    open_panel_at(self, task_service, Section::VersionControl).await;
+                    return false;
                 }
                 SetupFocus::Tracker => {
-                    match self.tracker_state {
-                        TrackerState::Connected => {
-                            open_panel(self, task_service).await;
-                            self.panel.section = Section::Trackers;
-                            self.panel.cursor.reset();
-                            return;
-                        }
-                        _ => {
-                            // Connecting and cancelling are the same key, as they
-                            // are in Settings.
-                            self.connect_tracker(task_service, tracker_connects);
-                        }
+                    if self.tracker_state == TrackerState::Connected {
+                        open_panel_at(self, task_service, Section::Trackers).await;
+                        return false;
+                    }
+                    if self.tracker_state != TrackerState::Connecting {
+                        panel.tracker.open();
                     }
                 }
-                SetupFocus::Create => {
-                    if self.active_agent().is_none() {
-                        self.say("Choose an agent first");
-                    } else if self.active_repository().is_none() {
-                        self.say(
-                            "Choose a repository: a task's work has nowhere to go without one",
-                        );
-                    } else if self.signed_out_agent() {
-                        self.say("Sign in to the agent first");
-                    } else if self.signed_out_vcs() {
-                        self.say("Sign in to your version control first");
+                SetupFocus::Remote => match self.setup().offer {
+                    Some(offer) if self.setup().host.is_none() => {
+                        if self.adopt_remote(&offer) {
+                            self.set_project_remote(&offer.address);
+                            let address = offer.address.clone();
+                            self.check_remote(&address).await;
+                            self.watch_remote(&address);
+                        }
+                    }
+                    _ => {
+                        open_panel_at(self, task_service, Section::Remotes).await;
+                        return false;
+                    }
+                },
+                SetupFocus::Ready => {
+                    self.commit_name(&panel);
+                    let setup = self.setup();
+                    if !setup_ready(&setup, &panel.name) {
+                        self.say(self.setup_next_step().unwrap_or("Finish setup first"));
                     } else {
                         self.open_new_task(false);
-                        return;
+                        return false;
                     }
                 }
                 SetupFocus::Settings => {
                     open_panel(self, task_service).await;
-                    return;
+                    return false;
                 }
             },
             _ => {}
         }
         self.foreground = Foreground::GetStarted(panel);
+        false
+    }
+
+    /// Write the name that is in the field, when it is one the project could keep.
+    fn commit_name(&mut self, panel: &GetStarted) {
+        let name = panel.name.value().trim();
+        if name.is_empty() || name == self.active_project_name() {
+            return;
+        }
+        self.rename_project(&self.active_project_id(), name);
     }
 
     /// Open the repository list over the first screen, and ask for a fresh one.
@@ -3816,6 +3859,7 @@ impl App {
                 .and_then(|project| project.host),
             offer,
             tracker: self.tracker_state,
+            commits: self.git_identity.clone(),
         }
     }
 
@@ -3931,7 +3975,9 @@ impl App {
     fn leave_credentials(&mut self) {
         if let Some(profile) = mem::take(&mut self.setup_sign_in) {
             self.credential_status.remove(profile);
-            self.foreground = Foreground::GetStarted(self.get_started_panel());
+            if !matches!(self.foreground, Foreground::GetStarted(_)) {
+                self.foreground = Foreground::GetStarted(self.get_started_panel());
+            }
         } else {
             self.foreground = Foreground::Panel;
         }
@@ -5421,10 +5467,6 @@ impl App {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
             // The tabs are one keystroke away in either direction, and they are
             // the context every other key works in.
-            KeyCode::Char('g') if self.setup_incomplete() => {
-                self.open_get_started();
-                return Ok(false);
-            }
             KeyCode::Char('[') => {
                 self.switch_project(false);
                 return Ok(false);
@@ -5652,7 +5694,7 @@ impl App {
         self.git_identity.clone()
     }
 
-    async fn refresh_git_identity(&mut self) {
+    pub(in crate::tui) async fn refresh_git_identity(&mut self) {
         let path = self.config.profile_dir("vcs/github").join("git/config");
         let output = HostCommand::new("git")
             .args(["config", "--no-includes", "--file"])
@@ -6301,6 +6343,17 @@ where
         Ok(keys) => app.remembered_keys = keys,
         Err(error) => app.problem(format!("could not read remembered remotes: {error}")),
     }
+}
+
+/// Open Settings on one of its pages, for a card row that manages rather than
+/// edits what it shows.
+async fn open_panel_at<E>(app: &mut App, task_service: &TaskService<E>, section: Section)
+where
+    E: IsolationEngine + Clone + 'static,
+{
+    open_panel(app, task_service).await;
+    app.panel.section = section;
+    app.panel.cursor.reset();
 }
 
 fn show_task_error(app: &mut App, id: &str, error: TaskServiceError) {

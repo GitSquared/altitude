@@ -61,7 +61,7 @@ pub fn help_sections() -> Vec<HelpSection> {
                 ),
                 ("Enter", "Activate the selected item or action"),
                 ("Esc / q", "Close a panel; q quits from the task list"),
-                ("Ctrl-C (task list)", "Quit Altitude"),
+                ("Ctrl-C", "Quit Altitude"),
                 ("?", "Open or close this keyboard guide"),
                 (
                     "PgUp / PgDn · Home / End",
@@ -77,7 +77,6 @@ pub fn help_sections() -> Vec<HelpSection> {
             title: "Tasks",
             bindings: &[
                 ("c", "Create a task"),
-                ("g", "Set up this installation while it has no agent"),
                 ("Ctrl-L", "Link a Linear issue and start work on it"),
                 (
                     "[ / ]",

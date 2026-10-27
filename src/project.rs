@@ -234,11 +234,11 @@ impl Project {
 
     pub fn validate(&self) -> Result<(), ProjectError> {
         // A name is read in a tab and in a sandbox label, never used as a path, so
-        // it can be the words an operator would write. Only what would break a
-        // line or split a path is refused.
+        // it can be the words an operator would write. It may be empty on a first
+        // run, before the card has asked; only what would break a line or split a
+        // path is refused.
         let trimmed = self.name.trim();
-        if trimmed.is_empty()
-            || trimmed.len() > 64
+        if trimmed.len() > 64
             || trimmed != self.name
             || self
                 .name
@@ -246,7 +246,7 @@ impl Project {
                 .any(|character| character.is_control() || matches!(character, '/' | '\\'))
         {
             return Err(ProjectError(format!(
-                "project name {:?} must be 1-64 printable characters with no leading or trailing space and no slashes",
+                "project name {:?} must be at most 64 printable characters with no leading or trailing space and no slashes",
                 self.name
             )));
         }

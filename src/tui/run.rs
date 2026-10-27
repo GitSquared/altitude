@@ -224,7 +224,10 @@ where
     // new installation is shown.
     app.profiles = task_service.credentials().profiles();
     app.refresh_tracker_state(&task_service);
-    if app.should_offer_setup() {
+    app.refresh_git_identity().await;
+    // A task cannot run without these, so the list is not behind the card: the
+    // card is what there is until they are settled.
+    if app.setup_incomplete() {
         app.open_get_started();
     }
     let Feeds {
@@ -939,9 +942,12 @@ where
         } else if let Foreground::NewTask(new_task) = &mut app.foreground {
             new_task.paste(&text);
         } else if let Foreground::GetStarted(panel) = &mut app.foreground {
-            if panel.editing_name {
+            if panel.focus == super::screens::get_started::Focus::Name {
                 panel.name.paste(&text);
             }
+            panel.agent.paste(&text);
+            panel.vcs.paste(&text);
+            panel.tracker.paste(&text);
         } else if let Some(form) = &mut app.panel.form {
             // A list that is open is narrowed by what is pasted; otherwise the
             // text goes to the field the caret is in.
@@ -1064,14 +1070,18 @@ where
                 .await
         }
         Foreground::GetStarted(_) => {
-            app.get_started_key(
-                key,
-                task_service,
-                credential_events,
-                repositories,
-                tracker_connects,
-            )
-            .await
+            if app
+                .get_started_key(
+                    key,
+                    task_service,
+                    credential_events,
+                    repositories,
+                    tracker_connects,
+                )
+                .await
+            {
+                return Ok(true);
+            }
         }
         Foreground::Panel => {
             app.panel_keys(

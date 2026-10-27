@@ -23,7 +23,7 @@ pub enum VcsProviderKind {
 
 impl VcsProviderKind {
     /// Every kind this build knows, in the order a URL is offered to them.
-    const ALL: &[Self] = &[Self::GitHub];
+    pub const ALL: &[Self] = &[Self::GitHub];
 
     /// The provider a repository field lists from while a build knows one.
     ///

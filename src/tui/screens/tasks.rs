@@ -114,17 +114,10 @@ fn draw_tasks(
     let cards = cards(app);
     let total = cards.len();
     if total == 0 {
-        let mut lines = vec![Line::styled("No tasks yet", palette::muted())];
-        // Setup is only pointed at while something a task needs is missing: a
-        // working installation is not nagged about the first run.
-        if let Some(step) = app.setup_next_step() {
-            lines.push(Line::from(""));
-            lines.push(Line::styled(
-                format!("finish setting up: {step} — g"),
-                palette::attention(),
-            ));
-        }
-        frame.render_widget(Paragraph::new(lines), area);
+        frame.render_widget(
+            Paragraph::new(Line::styled("No tasks yet", palette::muted())),
+            area,
+        );
         return;
     }
     let rows = (area.height / (height + 1)).max(1) as usize;

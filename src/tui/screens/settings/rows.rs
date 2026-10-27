@@ -284,7 +284,7 @@ pub struct GitIdentity {
 }
 
 impl GitIdentity {
-    pub(super) fn is_set(&self) -> bool {
+    pub(in crate::tui) fn is_set(&self) -> bool {
         self.name.is_some() && self.email.is_some()
     }
 }

@@ -43,7 +43,7 @@ impl Default for Settings {
             remotes: Vec::new(),
             defaults: Defaults::default(),
             interface: Interface::default(),
-            projects: vec![Project::new("Project 1")],
+            projects: vec![Project::new(String::new())],
         }
     }
 }

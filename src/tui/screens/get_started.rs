@@ -1,18 +1,16 @@
-//! The first thing a new installation shows: what a task cannot run without, and
-//! where the rest of it lives.
+//! The first thing a new installation shows, and the only thing it shows until
+//! the work could actually start.
 //!
-//! A screen rather than a wizard. Each row is the action itself, so an operator
-//! whose login already works is two keys from work, and an operator who wants to
-//! look around first can leave and come back while the one required choice is
-//! still missing. Once an agent is chosen the panel is not offered again: Settings
-//! is where these live afterwards.
+//! A card rather than a wizard: every row is the thing itself, edited where it
+//! is read, so naming the project, choosing the agent, and picking a repository
+//! are one gesture each. The card is not dismissible while a task would not run:
+//! a first question that can be answered by accident is not a question.
 
-use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    text::{Line, Span},
-    widgets::{Padding, Paragraph, Wrap},
+    text::{Line, Span, Text},
+    widgets::{Paragraph, Wrap},
 };
 
 use crate::{
@@ -25,33 +23,74 @@ use crate::{
             chrome::Hint,
             palette,
             select::{Offer, Select},
-            surface::Surface,
-            text::{Field, FieldStyle},
+            text::Field,
             utils::truncate,
         },
     },
     vcs::VcsProviderKind,
 };
 
+use super::settings::GitIdentity;
+
+/// How wide the card is allowed to get. Content, not a panel: at this width the
+/// eye has a column to read, and the task list behind it keeps its own.
+const CARD_WIDTH: u16 = 80;
+
+/// The label column, wide enough for "Version control" and a space after it.
+const LABEL_WIDTH: usize = 15;
+
+/// The action column, on the right of every row.
+const ACTION_WIDTH: usize = 16;
+
+/// What a row's mark says about it.
+///
+/// Focus is the bold value, not the mark: a mark that changed when the caret
+/// moved would say one thing about a row and then another without anything
+/// having happened.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Marker {
+    /// Settled: answered, chosen, or deliberately none.
+    Done,
+    /// Not settled, and nothing runs until it is.
+    Blocking,
+    /// Not settled, and nothing depends on it.
+    Optional,
+    /// There is an answer to give here that has not been given.
+    Question,
+}
+
+impl Marker {
+    fn glyph(self) -> &'static str {
+        match self {
+            Self::Done => "✓",
+            Self::Blocking => "●",
+            Self::Optional => "○",
+            Self::Question => "?",
+        }
+    }
+}
+
 /// What the keys are on.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Name,
     Agent,
-    Code,
-    Remote,
+    VersionControl,
+    Commits,
     Tracker,
-    Create,
+    Remote,
+    Ready,
     Settings,
 }
 
-const ROWS: [Focus; 7] = [
+const ROWS: [Focus; 8] = [
     Focus::Name,
     Focus::Agent,
-    Focus::Code,
-    Focus::Remote,
+    Focus::VersionControl,
+    Focus::Commits,
     Focus::Tracker,
-    Focus::Create,
+    Focus::Remote,
+    Focus::Ready,
     Focus::Settings,
 ];
 
@@ -78,30 +117,43 @@ pub struct SetupState {
     /// A remote announcing here that this installation has not adopted.
     pub offer: Option<RemoteOffer>,
     pub tracker: TrackerState,
+    /// The identity and signing the commits made in a task carry.
+    pub commits: GitIdentity,
 }
 
 pub struct GetStarted {
     pub focus: Focus,
     pub name: Field,
-    pub editing_name: bool,
     pub agent: Select<AgentKind>,
+    pub vcs: Select<VcsProviderKind>,
+    pub tracker: Select<TrackerKind>,
     pub repositories: Option<Repositories>,
 }
 
 impl GetStarted {
-    /// Open on the project's name, and on the first thing still missing.
-    pub fn new(project_name: &str, agent: Option<AgentKind>, agents: &[AgentKind]) -> Self {
+    /// Open on the first thing still missing, so the card starts where the work
+    /// is rather than at the top of a list.
+    pub fn new(
+        name: &str,
+        agent: Option<AgentKind>,
+        repository: Option<&str>,
+        agents: &[AgentKind],
+    ) -> Self {
         let chosen = agent
             .and_then(|chosen| agents.iter().position(|candidate| *candidate == chosen))
             .unwrap_or(0);
+        let focus = if name.trim().is_empty() {
+            Focus::Name
+        } else if agent.is_none() {
+            Focus::Agent
+        } else if repository.is_none() {
+            Focus::VersionControl
+        } else {
+            Focus::Ready
+        };
         Self {
-            focus: if agent.is_some() {
-                Focus::Create
-            } else {
-                Focus::Name
-            },
-            name: Field::with(project_name),
-            editing_name: false,
+            focus,
+            name: Field::with(name),
             repositories: None,
             agent: Select::new(
                 "agent",
@@ -111,7 +163,28 @@ impl GetStarted {
                     .map(|kind| Offer::new(kind, kind.to_string()))
                     .collect(),
                 chosen,
-            ),
+            )
+            .without_search(),
+            vcs: Select::new(
+                "version control",
+                VcsProviderKind::ALL
+                    .iter()
+                    .copied()
+                    .map(|kind| Offer::new(kind, kind.label()))
+                    .collect(),
+                0,
+            )
+            .without_search(),
+            tracker: Select::new(
+                "task tracker",
+                TrackerKind::ALL
+                    .iter()
+                    .copied()
+                    .map(|kind| Offer::new(kind, kind.label()))
+                    .collect(),
+                0,
+            )
+            .without_search(),
         }
     }
 
@@ -125,37 +198,48 @@ impl GetStarted {
         self.focus = ROWS[next];
     }
 
-    /// Whether the keys are characters here: an edit, or a list long enough that
-    /// typing narrows it.
+    /// Whether the keys are characters here: the name, or a list long enough
+    /// that typing narrows it.
     pub fn is_typing(&self) -> bool {
-        self.editing_name
+        self.focus == Focus::Name
+            || self.agent.is_searching()
+            || self.vcs.is_searching()
+            || self.tracker.is_searching()
             || self
                 .repositories
                 .as_ref()
                 .is_some_and(|browser| browser.select.is_searching())
     }
 
-    /// Put the name back to what is saved, when an edit is left.
+    /// Put the name back to what is saved, when a draft is abandoned.
     pub fn reset_name(&mut self, name: &str) {
         self.name = Field::with(name);
     }
 
     pub fn hints(&self, setup: &SetupState) -> Vec<Hint> {
-        if self.editing_name {
-            return vec![
-                Hint::new("enter", "save the name"),
-                Hint::new("esc", "leave it as it was"),
-            ];
-        }
         if let Some(browser) = &self.repositories {
             return browser.select.hints();
         }
         if self.agent.is_open() {
             return self.agent.hints();
         }
-        let mut hints = vec![Hint::new("j/k", "move"), Hint::new("esc", "look around")];
+        if self.vcs.is_open() {
+            return self.vcs.hints();
+        }
+        if self.tracker.is_open() {
+            return self.tracker.hints();
+        }
+        // A field takes letters, so the keys for moving are the ones that are
+        // not letters: tab and enter.
+        if self.focus == Focus::Name {
+            return vec![
+                Hint::new("type", "name the project"),
+                Hint::new("tab", "next"),
+                Hint::new("enter", "next"),
+            ];
+        }
+        let mut hints = vec![Hint::new("j/k", "move")];
         match self.focus {
-            Focus::Name => hints.insert(0, Hint::new("enter", "rename")),
             Focus::Agent => match setup.agent {
                 Some(_) => {
                     hints.insert(0, Hint::new("enter", "sign in"));
@@ -163,44 +247,61 @@ impl GetStarted {
                 }
                 None => hints.insert(0, Hint::new("enter", "choose")),
             },
-            Focus::Code => {
-                if signed_in(&setup.vcs_status) {
-                    hints.insert(
-                        0,
-                        Hint::new(
-                            "enter",
-                            if setup.repository.is_some() {
-                                "change repository"
-                            } else {
-                                "choose repository"
-                            },
-                        ),
-                    );
-                } else {
-                    hints.insert(0, Hint::new("enter", "sign in"));
-                }
+            Focus::VersionControl => {
+                hints.insert(
+                    0,
+                    Hint::new(
+                        "enter",
+                        if signed_in(&setup.vcs_status) {
+                            "choose repository"
+                        } else {
+                            "sign in"
+                        },
+                    ),
+                );
             }
+            Focus::Commits => hints.insert(0, Hint::new("enter", "open settings")),
+            Focus::Tracker => hints.insert(
+                0,
+                Hint::new(
+                    "enter",
+                    if setup.tracker == TrackerState::Connected {
+                        "manage"
+                    } else {
+                        "connect"
+                    },
+                ),
+            ),
             Focus::Remote => {
                 if setup.host.is_none() && setup.offer.is_some() {
                     hints.insert(0, Hint::new("enter", "add it"));
                 }
             }
-            Focus::Tracker => hints.insert(
+            Focus::Ready => hints.insert(
                 0,
                 Hint::new(
                     "enter",
-                    match setup.tracker {
-                        TrackerState::NotConnected => "connect",
-                        TrackerState::Connecting => "cancel",
-                        TrackerState::Connected => "manage",
+                    if ready(setup, &self.name) {
+                        "start"
+                    } else {
+                        "not yet"
                     },
                 ),
             ),
-            Focus::Create => hints.insert(0, Hint::new("enter", "create a task")),
             Focus::Settings => hints.insert(0, Hint::new("enter", "open settings")),
+            Focus::Name => {}
         }
         hints
     }
+}
+
+/// Whether every required answer is in, and the name has been written down.
+pub fn ready(setup: &SetupState, name: &Field) -> bool {
+    !name.is_blank()
+        && setup.agent.is_some()
+        && signed_in(&setup.agent_status)
+        && setup.repository.is_some()
+        && signed_in(&setup.vcs_status)
 }
 
 /// Whether a profile's login is known to work. A file on disk counts until a
@@ -216,37 +317,125 @@ pub fn signed_in(status: &CredentialStatus) -> bool {
 }
 
 pub fn draw(frame: &mut Frame, area: Rect, panel: &mut GetStarted, setup: &SetupState) {
-    let body = Surface::new()
-        .padding(Padding::uniform(2))
-        .draw(frame, area);
-    let [title, rows, actions_area, detail, note] = Layout::vertical([
+    let width = area.width.min(CARD_WIDTH);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+
+    let subtitle = subtitle();
+    let subtitle_height = wrapped_height(subtitle_plain(), width);
+    let rows = checklist(panel, setup, width);
+    let rows_height = rows.len() as u16;
+    let detail = detail_text(panel.focus, setup);
+    let detail_height = if detail.is_empty() {
+        0
+    } else {
+        wrapped_height(&detail, width).min(area.height)
+    };
+
+    // The card is as tall as it has to be and sits in the middle of what is
+    // left. The action buttons have nothing to explain, so their help line is
+    // not reserved: the card closes up instead of leaving a hole where a
+    // paragraph would be.
+    let has_detail = detail_height > 0;
+    let height = (if has_detail {
+        6 + subtitle_height + rows_height + detail_height
+    } else {
+        5 + subtitle_height + rows_height
+    })
+    .min(area.height);
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let card = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    let mut constraints = vec![
         Constraint::Length(1),
-        Constraint::Length(5),
         Constraint::Length(1),
-        Constraint::Min(4),
+        Constraint::Length(subtitle_height),
         Constraint::Length(1),
-    ])
-    .areas(body);
+        Constraint::Length(rows_height),
+        Constraint::Length(1),
+    ];
+    if has_detail {
+        constraints.push(Constraint::Min(0));
+        constraints.push(Constraint::Length(1));
+    }
+    constraints.push(Constraint::Length(1));
+    let areas = Layout::vertical(constraints).split(card);
 
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("GET STARTED", palette::heading()),
-            Span::raw("  "),
-            Span::styled("what a task needs before it can run", palette::muted()),
-        ])),
-        title,
+        Paragraph::new(Line::styled("GET STARTED", palette::heading())),
+        areas[0],
     );
+    frame.render_widget(
+        Paragraph::new(subtitle)
+            .wrap(Wrap { trim: true })
+            .style(palette::primary()),
+        areas[2],
+    );
+    frame.render_widget(Paragraph::new(rows), areas[4]);
+    if has_detail {
+        frame.render_widget(
+            Paragraph::new(detail)
+                .wrap(Wrap { trim: true })
+                .style(palette::muted()),
+            areas[6],
+        );
+    }
+    draw_footer(frame, *areas.last().expect("a footer"), panel, setup);
 
-    let width = rows.width;
-    let name = row(
-        true,
-        "Project",
-        panel.name.value(),
-        "enter rename",
-        panel.focus == Focus::Name,
+    // The repository list is a pop-up over the card rather than a row of it: it
+    // is long and searchable, and growing the card around it would bury the row
+    // that opened it.
+    if let Some(browser) = panel.repositories.as_mut() {
+        browser.draw(frame, area, row_anchor(areas[4], 2));
+    }
+}
+
+fn subtitle() -> Text<'static> {
+    Text::from(vec![
+        Line::from(vec![
+            Span::styled("welcome to ", palette::primary()),
+            Span::styled("⛰  altitude", palette::heading()),
+            Span::styled(
+                ", a tool to pilot agents efficiently and keep your focus on the decisions that matter.",
+                palette::primary(),
+            ),
+        ]),
+        Line::styled("let's get you set up:", palette::primary()),
+    ])
+}
+
+/// The welcome without its styling, for measuring how tall it will be.
+fn subtitle_plain() -> &'static str {
+    "welcome to ⛰  altitude, a tool to pilot agents efficiently and keep your focus on the \
+     decisions that matter.\nlet's get you set up:"
+}
+
+fn checklist(panel: &GetStarted, setup: &SetupState, width: u16) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let focused = panel.focus;
+
+    let name_value = if focused == Focus::Name {
+        panel.name.marked()
+    } else {
+        panel.name.value().to_owned()
+    };
+    lines.push(row(
+        if panel.name.is_blank() {
+            Marker::Blocking
+        } else {
+            Marker::Done
+        },
+        "Project name",
+        &name_value,
+        "",
+        focused == Focus::Name,
         width,
-    );
-    let agent_status = match setup.agent {
+    ));
+
+    let agent_value = match setup.agent {
         None => "not chosen".to_owned(),
         Some(kind) if matches!(setup.agent_status, CredentialStatus::Checking) => {
             format!("{kind} · checking…")
@@ -254,18 +443,26 @@ pub fn draw(frame: &mut Frame, area: Rect, panel: &mut GetStarted, setup: &Setup
         Some(kind) if signed_in(&setup.agent_status) => format!("{kind} · signed in"),
         Some(kind) => format!("{kind} · not signed in"),
     };
-    let agent_row = row(
-        signed_in(&setup.agent_status),
-        "Agent",
-        &agent_status,
+    lines.push(row(
+        if setup.agent.is_some() && signed_in(&setup.agent_status) {
+            Marker::Done
+        } else {
+            Marker::Blocking
+        },
+        "Coding agent",
+        &agent_value,
         if setup.agent.is_some() {
             "enter sign in"
         } else {
             "enter choose"
         },
-        panel.focus == Focus::Agent,
+        focused == Focus::Agent,
         width,
-    );
+    ));
+    if panel.agent.is_open() {
+        lines.extend(options(&panel.agent, width));
+    }
+
     let vcs = setup.vcs.label();
     let vcs_signed_in = signed_in(&setup.vcs_status);
     let code_value = match (&setup.repository, vcs_signed_in) {
@@ -274,25 +471,89 @@ pub fn draw(frame: &mut Frame, area: Rect, panel: &mut GetStarted, setup: &Setup
         (None, true) => format!("no repository · {vcs} connected"),
         (None, false) => format!("no repository · {vcs} not connected"),
     };
-    let code_row = row(
-        setup.repository.is_some() && vcs_signed_in,
-        "Code",
+    lines.push(row(
+        if setup.repository.is_some() && vcs_signed_in {
+            Marker::Done
+        } else {
+            Marker::Blocking
+        },
+        "Version control",
         &code_value,
         if vcs_signed_in {
             "enter choose"
         } else {
             "enter sign in"
         },
-        panel.focus == Focus::Code,
+        focused == Focus::VersionControl,
         width,
-    );
+    ));
+    if panel.vcs.is_open() {
+        lines.extend(options(&panel.vcs, width));
+    }
+
+    // Shown, not gated: the identity is installation-wide and usually already
+    // set, and this card has no editor for it. A gate would trap an operator
+    // whose profile has no name on a screen that cannot give it one.
+    let commits_value = if setup.commits.is_set() {
+        let name = setup.commits.name.as_deref().unwrap_or_default();
+        if setup.commits.signs_commits {
+            format!("{name} · signed")
+        } else {
+            format!("{name} · not signed")
+        }
+    } else {
+        "not set".to_owned()
+    };
+    lines.push(row(
+        if setup.commits.is_set() {
+            Marker::Done
+        } else {
+            Marker::Optional
+        },
+        "Commits",
+        &commits_value,
+        "enter settings",
+        focused == Focus::Commits,
+        width,
+    ));
+
+    let tracker = setup.tracker;
+    let tracker_value = if tracker == TrackerState::Connected {
+        format!("{} · connected", TrackerKind::sole().label())
+    } else {
+        "none · optional".to_owned()
+    };
+    lines.push(row(
+        if tracker == TrackerState::Connected {
+            Marker::Done
+        } else {
+            Marker::Optional
+        },
+        "Task tracker",
+        &tracker_value,
+        if tracker == TrackerState::Connected {
+            "enter manage"
+        } else {
+            "enter connect"
+        },
+        focused == Focus::Tracker,
+        width,
+    ));
+    if panel.tracker.is_open() {
+        lines.extend(options(&panel.tracker, width));
+    }
+
     let remote_value = match (&setup.host, &setup.offer) {
         (Some(host), _) => host.clone(),
         (None, Some(offer)) => format!("{} · found on this network", offer.label),
         (None, None) => "none · runs here".to_owned(),
     };
-    let remote_row = row(
-        true,
+    lines.push(row(
+        if setup.host.is_none() && setup.offer.is_some() {
+            Marker::Question
+        } else {
+            Marker::Done
+        },
         "Remote",
         &remote_value,
         if setup.host.is_none() && setup.offer.is_some() {
@@ -300,210 +561,60 @@ pub fn draw(frame: &mut Frame, area: Rect, panel: &mut GetStarted, setup: &Setup
         } else {
             ""
         },
-        panel.focus == Focus::Remote,
+        focused == Focus::Remote,
         width,
-    );
-    let tracker = TrackerKind::sole().label();
-    let tracker_value = match setup.tracker {
-        TrackerState::NotConnected => "none · optional".to_owned(),
-        TrackerState::Connecting => format!("{tracker} · connecting…"),
-        TrackerState::Connected => format!("{tracker} · connected"),
-    };
-    let tracker_row = row(
-        setup.tracker == TrackerState::Connected,
-        "Tracker",
-        &tracker_value,
-        match setup.tracker {
-            TrackerState::NotConnected => "enter connect",
-            TrackerState::Connecting => "enter cancel",
-            TrackerState::Connected => "enter manage",
-        },
-        panel.focus == Focus::Tracker,
-        width,
-    );
-    let actions = Line::from(vec![
-        action("Create the first task", panel.focus == Focus::Create),
-        Span::raw("      "),
-        action("Open Settings", panel.focus == Focus::Settings),
-    ]);
-    frame.render_widget(
-        Paragraph::new(vec![name, agent_row, code_row, remote_row, tracker_row]),
-        rows,
-    );
-    frame.render_widget(Paragraph::new(actions), actions_area);
+    ));
 
-    let code_anchor = Rect {
-        y: rows.y + 2,
-        height: 1,
-        ..rows
-    };
-    let agent_anchor = Rect {
-        y: rows.y + 1,
-        height: 1,
-        ..rows
-    };
-    if panel.agent.is_open() {
-        panel.agent.draw_list_below(frame, body, agent_anchor);
-    } else if let Some(browser) = panel.repositories.as_mut() {
-        browser.draw(frame, body, code_anchor);
-    } else if panel.editing_name {
-        draw_name_editor(frame, detail, panel);
-    } else {
-        frame.render_widget(
-            Paragraph::new(detail_text(panel.focus, setup))
-                .wrap(Wrap { trim: true })
-                .style(palette::muted()),
-            detail,
-        );
-    }
+    lines
+}
 
+fn draw_footer(frame: &mut Frame, area: Rect, panel: &GetStarted, setup: &SetupState) {
+    let [note_area, buttons_area] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(33)]).areas(area);
     frame.render_widget(
         Paragraph::new(Line::styled(
             "You can tweak these options in Settings later.",
             palette::muted(),
         )),
-        note,
+        note_area,
     );
-}
-
-fn draw_name_editor(frame: &mut Frame, area: Rect, panel: &mut GetStarted) {
-    let [label, field] =
-        Layout::vertical([Constraint::Length(1), Constraint::Length(3)]).areas(area);
-    frame.render_widget(
-        Paragraph::new(Line::styled(
-            "What is this project called?",
-            palette::muted(),
-        )),
-        label,
-    );
-    panel.name.draw(
-        frame,
-        field,
-        &FieldStyle {
-            focused: true,
-            title: None,
-            prefix: "",
-        },
-    );
-}
-
-fn detail_text(focus: Focus, setup: &SetupState) -> String {
-    let vcs = setup.vcs.label();
-    match focus {
-        Focus::Name => {
-            "The project is the work: its repository, its caches, what the agent is told, and the \
-             machine it runs on. A name you recognise is enough."
-                .to_owned()
-        }
-        Focus::Agent if setup.agent.is_none() => {
-            "The agent is what does the work, in a sandbox of its own. Choose one you can sign in \
-             to; either works with any project."
-                .to_owned()
-        }
-        Focus::Agent => {
-            "Signing in happens in the agent's own interface, in a throwaway sandbox. What it \
-             writes is kept here and mounted into every task."
-                .to_owned()
-        }
-        Focus::Code if !signed_in(&setup.vcs_status) => {
-            format!(
-                "Sign in to {vcs} so a task can push its work out of the sandbox. Nothing a task \
-                 does survives its sandbox; the repository is where it goes."
-            )
-        }
-        Focus::Code if setup.repository.is_none() => {
-            "Choose the repository tasks start from. It is cloned into each sandbox before the \
-             first turn, and it is where finished work is pushed."
-                .to_owned()
-        }
-        Focus::Code => {
-            "The repository a task starts from and pushes back to. Changing it changes where the \
-             next task's work goes."
-                .to_owned()
-        }
-        Focus::Create if setup.agent.is_none() => {
-            "A task needs an agent. Choose one and sign in, and this is where work starts."
-                .to_owned()
-        }
-        Focus::Create if setup.repository.is_none() => {
-            "A task needs a repository to put its work in. Choose one above, and this is where \
-             work starts."
-                .to_owned()
-        }
-        Focus::Remote if setup.host.is_some() => format!(
-            "A remote is another machine you have paired with Altitude, on a network or a tailnet. \
-             A project runs where its remote is, and each machine keeps its own checkouts and \
-             caches. This project runs on {}; Settings → Remotes is where that changes.",
-            setup.host.as_deref().unwrap_or_default()
+    let ready_here = ready(setup, &panel.name);
+    let buttons = Line::from(vec![
+        button("Open Settings", panel.focus == Focus::Settings, true, false),
+        Span::raw("  "),
+        button(
+            "Ready, set, go",
+            panel.focus == Focus::Ready,
+            ready_here,
+            true,
         ),
-        Focus::Remote if setup.offer.is_some() => {
-            let label = setup
-                .offer
-                .as_ref()
-                .map(|offer| offer.label.as_str())
-                .unwrap_or_default();
-            format!(
-                "A remote is another machine you have paired with Altitude, on a network or a \
-                 tailnet. A project runs where its remote is, and each machine keeps its own \
-                 checkouts and caches. {label} is announcing on this network: enter adds it, and \
-                 runs this project there."
-            )
-        }
-        Focus::Remote => {
-            "A remote is another machine you have paired with Altitude, on a network or a tailnet. \
-             A project runs where its remote is, and each machine keeps its own checkouts and \
-             caches. None is paired here yet, so this project runs on this machine; one on your \
-             network would appear above."
-                .to_owned()
-        }
-        Focus::Tracker if setup.tracker == TrackerState::Connected => {
-            "The tracker is connected. Link an issue to a task from the task list with ctrl-l, \
-             and Altitude reports progress back as the work moves. Settings → Trackers manages \
-             the connection."
-                .to_owned()
-        }
-        Focus::Tracker if setup.tracker == TrackerState::Connecting => {
-            "Waiting on the browser and the callback. This screen updates when the sign-in lands, \
-             and nothing else here depends on it."
-                .to_owned()
-        }
-        Focus::Tracker => {
-            "A task tracker is where issues live, and connecting one links an issue to a task and \
-             reports progress back as work moves. It is optional: a task can start from an idea. \
-             Letting a tracker start work on its own is a later step, once a project claims a team \
-             on a remote that accepts it."
-                .to_owned()
-        }
-        Focus::Create => {
-            "Say what you want done. Altitude starts an agent on it, and carries its questions \
-             back to you from the task list."
-                .to_owned()
-        }
-        Focus::Settings => {
-            "Caches, instructions, the machine a project runs on, and any task tracker are all in \
-             Settings."
-                .to_owned()
-        }
-    }
+    ]);
+    frame.render_widget(Paragraph::new(buttons), buttons_area);
+}
+
+fn button(label: &str, focused: bool, enabled: bool, primary: bool) -> Span<'static> {
+    let style = match (focused, enabled, primary) {
+        // A disabled button still shows where the focus is, in grey rather than
+        // in the accent: the keys are there, and there is nothing to do yet.
+        (true, false, _) => palette::inactive_selection(),
+        (true, true, _) => palette::focus(),
+        (false, false, _) => palette::muted(),
+        (false, true, true) => palette::primary(),
+        (false, true, false) => palette::muted(),
+    };
+    Span::styled(format!(" {label} "), style)
 }
 
 fn row(
-    done: bool,
+    marker: Marker,
     label: &str,
     value: &str,
     action: &str,
     focused: bool,
     width: u16,
 ) -> Line<'static> {
-    let marker = if done {
-        "✓"
-    } else if focused {
-        "●"
-    } else {
-        "○"
-    };
-    let prefix = format!("{marker}  {label:<10}");
-    let trailing = format!("{action:<16}");
+    let prefix = format!("{}  {label:<LABEL_WIDTH$} ", marker.glyph());
+    let trailing = format!("{action:<ACTION_WIDTH$}");
     let available = usize::from(width)
         .saturating_sub(prefix.chars().count())
         .saturating_sub(trailing.chars().count());
@@ -527,25 +638,131 @@ fn row(
     ])
 }
 
-fn action(label: &str, focused: bool) -> Span<'static> {
-    if focused {
-        Span::styled(format!(" {label} "), palette::focus())
-    } else {
-        Span::styled(format!(" {label} "), palette::muted())
+/// The open list, written as rows of the card rather than as a box over it.
+fn options<T>(select: &Select<T>, width: u16) -> Vec<Line<'static>> {
+    let chosen = select.chosen_index();
+    let indent = " ".repeat(LABEL_WIDTH + 4);
+    select
+        .shown_offers()
+        .into_iter()
+        .map(|offer| {
+            let mark = if offer.under_keys {
+                "▸"
+            } else if offer.index == chosen {
+                "●"
+            } else {
+                "○"
+            };
+            let mark_style = if offer.under_keys {
+                palette::accent()
+            } else {
+                palette::muted()
+            };
+            let label_style = if offer.under_keys {
+                palette::primary().bold()
+            } else if offer.ready {
+                palette::primary()
+            } else {
+                palette::muted()
+            };
+            let room = usize::from(width)
+                .saturating_sub(indent.chars().count())
+                .saturating_sub(2);
+            Line::from(vec![
+                Span::raw(indent.clone()),
+                Span::styled(format!("{mark} "), mark_style),
+                Span::styled(truncate(offer.label, room), label_style),
+            ])
+        })
+        .collect()
+}
+
+fn row_anchor(rows: Rect, index: u16) -> Rect {
+    Rect {
+        y: rows.y.saturating_add(index),
+        height: 1,
+        ..rows
     }
 }
 
-/// The keys a name edit owns, so the screen's own keys can stand aside.
-pub fn name_key(key: KeyEvent) -> NameKey {
-    match key.code {
-        KeyCode::Enter => NameKey::Save,
-        KeyCode::Esc => NameKey::Cancel,
-        _ => NameKey::Typing(key),
+fn detail_text(focus: Focus, setup: &SetupState) -> String {
+    let vcs = setup.vcs.label();
+    match focus {
+        Focus::Name => {
+            "Projects bind together agents, code and task trackers into a single setup. You can \
+             have multiple projects set up in altitude, for instance one for your day job and one \
+             for your weekend side-project. Let's name your first project now."
+                .to_owned()
+        }
+        Focus::Agent if setup.agent.is_none() => {
+            "altitude spins up your usual coding agent and drives it autonomously to complete \
+             work for you. You can always take back manual control and interact with the agent's \
+             own interface directly when needed."
+                .to_owned()
+        }
+        Focus::Agent => {
+            format!(
+                "Signing in happens through {}, in a sandbox of its own. What it writes is kept \
+                 here and mounted into every task, so the agent is signed in once.",
+                setup
+                    .agent
+                    .map(|agent| agent.to_string())
+                    .unwrap_or_else(|| "the agent".to_owned())
+            )
+        }
+        Focus::VersionControl if !signed_in(&setup.vcs_status) => {
+            format!(
+                "altitude runs your agents in isolated sandboxes. Pick a repository so they can \
+                 pull your project's code and send back change suggestions. This needs a {vcs} \
+                 sign-in first."
+            )
+        }
+        Focus::VersionControl if setup.repository.is_none() => {
+            "altitude runs your agents in isolated sandboxes. Pick a repository so they can pull \
+             your project's code and send back change suggestions."
+                .to_owned()
+        }
+        Focus::VersionControl => {
+            "The repository a task starts from and pushes back to. Changing it changes where the \
+             next task's work goes."
+                .to_owned()
+        }
+        Focus::Commits if setup.commits.is_set() => {
+            "Commits carry your name and email, and a signature proves they came from you. This \
+             is installation-wide, read from your version-control profile; Settings → Version \
+             control shows what a task would commit under."
+                .to_owned()
+        }
+        Focus::Commits => {
+            "Commits carry your name and email, and a signature proves they came from you. It is \
+             installation-wide, and Settings → Version control shows what a task would commit \
+             under."
+                .to_owned()
+        }
+        Focus::Tracker => {
+            "Optional: connect your task tracker to link issues directly to altitude agents and \
+             sync status back automatically."
+                .to_owned()
+        }
+        Focus::Remote => {
+            "Optional: unlock better workflows, like running tasks when you're away and piloting \
+             them entirely from your task tracker, by setting up an altitude remote server and \
+             sharing it with your team.\n\
+             If a remote is accessible on your network, it will show up here. Learn more about \
+             setting up a remote for your team in Settings."
+                .to_owned()
+        }
+        Focus::Ready | Focus::Settings => String::new(),
     }
 }
 
-pub enum NameKey {
-    Save,
-    Cancel,
-    Typing(KeyEvent),
+/// How many rows a paragraph takes at this width, so the card can be as tall as
+/// its content and no taller.
+fn wrapped_height(text: &str, width: u16) -> u16 {
+    if width == 0 {
+        return 0;
+    }
+    Paragraph::new(text.to_owned())
+        .wrap(Wrap { trim: true })
+        .line_count(width) as u16
 }

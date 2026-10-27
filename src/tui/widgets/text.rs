@@ -46,6 +46,14 @@ impl Field {
         &self.value
     }
 
+    /// The value with a caret where the keys would write, for a field drawn as
+    /// one line of a form rather than in a box of its own.
+    pub fn marked(&self) -> String {
+        let mut value: Vec<char> = self.value.chars().collect();
+        value.insert(self.cursor.min(value.len()), '▏');
+        value.into_iter().collect()
+    }
+
     /// Whether there is nothing but whitespace.
     pub fn is_blank(&self) -> bool {
         self.value.trim().is_empty()
