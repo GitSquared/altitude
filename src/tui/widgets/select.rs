@@ -26,7 +26,7 @@ use ratatui::{
     widgets::{Block, BorderType, Clear, Padding, Paragraph},
 };
 
-use crate::tui::widgets::{palette, utils::truncate};
+use crate::tui::widgets::{chrome, palette, utils::truncate};
 
 /// How many offers a list needs before typing narrows it. Under that, j/k and
 /// the arrows are worth more than a query: the list is already short enough to
@@ -127,6 +127,27 @@ impl<T> Select<T> {
     /// Whether there is anything to choose, which a page that is waiting says.
     pub fn is_empty(&self) -> bool {
         self.offers.is_empty()
+    }
+
+    /// What the keys do while this list is open.
+    ///
+    /// The widget's own rule, because only it knows whether this list is long
+    /// enough that letters narrow it. A page that showed its own version would be
+    /// guessing, and would drift the day the threshold changed.
+    pub fn hints(&self) -> Vec<chrome::Hint> {
+        if !self.open {
+            return Vec::new();
+        }
+        let mut hints = Vec::new();
+        if self.is_searching() {
+            hints.push(chrome::Hint::new("type", "narrow"));
+            hints.push(chrome::Hint::new("↑/↓", "choose"));
+        } else {
+            hints.push(chrome::Hint::new("j/k · ↑/↓", "choose"));
+        }
+        hints.push(chrome::Hint::new("enter", "take it"));
+        hints.push(chrome::Hint::new("esc", "close"));
+        hints
     }
 
     /// Choose the first offer `test` accepts, answering whether there was one.

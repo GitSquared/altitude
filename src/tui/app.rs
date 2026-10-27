@@ -1235,20 +1235,7 @@ impl App {
                 }
                 if let Some(form) = &self.panel.form {
                     if let Some(browser) = &form.repositories {
-                        return if browser.select.is_searching() {
-                            vec![
-                                Hint::new("type", "narrow"),
-                                Hint::new("↑/↓", "choose"),
-                                Hint::new("enter", "take it"),
-                                Hint::new("esc", "close"),
-                            ]
-                        } else {
-                            vec![
-                                Hint::new("j/k", "choose"),
-                                Hint::new("enter", "take it"),
-                                Hint::new("esc", "close"),
-                            ]
-                        };
+                        return browser.select.hints();
                     }
                     let mut hints = vec![
                         Hint::new("tab", "next"),

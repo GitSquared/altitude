@@ -300,16 +300,6 @@ impl NewTask {
         }
     }
 
-    /// Whether that list takes a query, rather than only the keys that move
-    /// through it.
-    fn list_searching(&self) -> bool {
-        match self.focus {
-            Focus::Project => self.project.is_searching(),
-            Focus::Agent => self.agent.is_searching(),
-            _ => false,
-        }
-    }
-
     /// Whether a search or a snapshot read is still out, which is what keeps the
     /// wait visible.
     pub(in crate::tui) fn is_awaiting(&self) -> bool {
@@ -319,22 +309,9 @@ impl NewTask {
     /// The keys that work here, for the guidance line. They follow the focus,
     /// because enter is only a new line while the prompt has the caret.
     pub fn hints(&self) -> Vec<chrome::Hint> {
-        // An open list explains itself, because its keys are not the page's.
-        if self.list_open() {
-            let mut hints = Vec::new();
-            if self.list_searching() {
-                hints.push(chrome::Hint::new("type", "narrow"));
-            }
-            hints.push(chrome::Hint::new(
-                if self.list_searching() {
-                    "↑/↓"
-                } else {
-                    "j/k · ↑/↓"
-                },
-                "choose",
-            ));
-            hints.push(chrome::Hint::new("enter", "take it"));
-            hints.push(chrome::Hint::new("esc", "close"));
+        // An open list explains itself, and the widget is the one that knows
+        // whether its keys are a query or a way through.
+        if let Some(hints) = self.open_list_hints() {
             return hints;
         }
         // Only what this page adds. Tab and enter are the same here as anywhere,
@@ -366,6 +343,14 @@ impl NewTask {
         self.task.paste(text);
         if self.task.value() != before {
             self.after_edit();
+        }
+    }
+
+    fn open_list_hints(&self) -> Option<Vec<chrome::Hint>> {
+        match self.focus {
+            Focus::Project if self.project.is_open() => Some(self.project.hints()),
+            Focus::Agent if self.agent.is_open() => Some(self.agent.hints()),
+            _ => None,
         }
     }
 
