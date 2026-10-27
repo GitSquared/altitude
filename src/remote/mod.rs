@@ -18,6 +18,7 @@ mod keys;
 pub mod send;
 pub mod serve;
 mod server;
+mod start;
 mod takeover;
 mod tracker;
 mod tracker_setup;
@@ -52,3 +53,5 @@ pub use {
 pub type LinkError = Box<dyn Error + Send + Sync>;
 
 pub type LinkResult<T> = Result<T, LinkError>;
+
+pub(crate) use start::{StartFuture, StartRefusal};

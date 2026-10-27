@@ -117,7 +117,7 @@ pub trait Host: Send + Sync + 'static {
         peer: EndpointId,
         issue: IssueSnapshot,
         label: String,
-    ) -> HostFuture<'_, String>;
+    ) -> super::StartFuture<'_, String>;
     /// Cancel a task and dispose of its capsule. Never an acceptance.
     fn stop(&self, task_id: String) -> HostFuture<'_, ()>;
     /// The task's currently unresolved operator signals.
@@ -569,10 +569,10 @@ impl RemoteTracker {
             .map_err(|error| error.to_string())?;
         let task_id = match host.start_issue(peer, snapshot, label.to_owned()).await {
             Ok(task_id) => task_id,
-            Err(reason) => {
+            Err(refusal) => {
                 // A remote that cannot start the work needs its operator to push
                 // a setup. Retrying forever would wedge every later delivery.
-                self.post_start_guidance(session_id, &reason).await?;
+                self.post_start_guidance(session_id, &refusal).await?;
                 return Ok(());
             }
         };
@@ -1352,11 +1352,13 @@ impl RemoteTracker {
 
     /// A remote could not start the work; say what to fix instead of retrying
     /// forever.
-    async fn post_start_guidance(&self, session_id: &str, reason: &str) -> Result<(), String> {
-        // The reason is written where it was refused, so it can name the machine,
-        // the project, or the team it is about; this only frames it.
+    async fn post_start_guidance(
+        &self,
+        session_id: &str,
+        refusal: &super::StartRefusal,
+    ) -> Result<(), String> {
         let body = format!(
-            "Altitude did not start this work.\n\n{reason}\n\n\
+            "Altitude did not start this work.\n\n{refusal}\n\n\
              Reply here to try again once it is resolved."
         );
         self.config

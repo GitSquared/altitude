@@ -803,35 +803,30 @@ impl super::tracker::Host for OwnTasks {
         peer: EndpointId,
         issue: IssueSnapshot,
         label: String,
-    ) -> super::tracker::HostFuture<'_, String> {
+    ) -> super::StartFuture<'_, String> {
         Box::pin(async move {
             if self.delegation_paused {
-                return Err(
-                    "This machine has paused delegated work. Its operator has to \
-                     turn off `pause_delegated_work` in its serve.toml and restart it."
-                        .into(),
-                );
+                return Err(super::StartRefusal::Paused);
             }
             let owner = peer.to_string();
-            let scoped = self
-                .config
-                .for_operator(&owner)
-                .map_err(|error| error.to_string())?;
+            let scoped = self.config.for_operator(&owner).map_err(|error| {
+                super::StartRefusal::Unavailable {
+                    reason: error.to_string(),
+                }
+            })?;
             if !scoped.settings_path().is_file() {
-                return Err("Connect this remote in Altitude Settings and push your setup before delegating work".into());
+                return Err(super::StartRefusal::NoSetup);
             }
-            let settings = scoped
-                .load_or_create_settings()
-                .map_err(|error| error.to_string())?;
+            let settings = scoped.load_or_create_settings().map_err(|error| {
+                super::StartRefusal::Unavailable {
+                    reason: error.to_string(),
+                }
+            })?;
             let Some(scope) = issue.issue.scope.as_ref() else {
-                return Err(
-                    "This issue cannot be routed: the tracker did not say which group it \
-                     belongs to."
-                        .into(),
-                );
+                return Err(super::StartRefusal::NoScope);
             };
             // An exact claim beats a project that claims its whole account, so a
-            // workspace that grows a second team does not start sending both to
+            // workspace that grows a second scope does not start sending both to
             // whichever project was there first.
             let projects = settings.settings().projects();
             let project = projects
@@ -852,28 +847,24 @@ impl super::tracker::Host for OwnTasks {
                 })
                 .cloned();
             let Some(project) = project else {
-                return Err(format!(
-                    "No project on this machine claims {}. Add it to a project's tracker route \
-                     in Settings → Projects, then push your setup here.",
-                    scope.label
-                ));
+                return Err(super::StartRefusal::NoProject {
+                    scope: scope.label.clone(),
+                });
             };
             if !project
                 .tracker
                 .as_ref()
                 .is_some_and(|route| route.accepts_delegated_work)
             {
-                return Err(format!(
-                    "Project {:?} claims this team but has not accepted delegated work. Its \
-                     operator has to turn on \"Accept delegated work\" for it in Settings → \
-                     Projects, then push their setup here.",
-                    project.name
-                ));
+                return Err(super::StartRefusal::NotAccepting {
+                    project: project.name.clone(),
+                    scope: scope.label.clone(),
+                });
             }
             let agent = project
                 .agent
                 .or_else(|| settings.settings().agent())
-                .ok_or("Choose an agent in Altitude, then push your setup to this remote")?;
+                .ok_or(super::StartRefusal::NoAgent)?;
             let task = self
                 .tasks
                 .create_issue_for_operator(
@@ -886,7 +877,9 @@ impl super::tracker::Host for OwnTasks {
                     },
                 )
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| super::StartRefusal::Unavailable {
+                    reason: error.to_string(),
+                })?;
             Ok(task.id)
         })
     }
