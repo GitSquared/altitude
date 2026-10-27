@@ -3517,10 +3517,12 @@ impl App {
     }
 
     fn get_started_panel(&self) -> Box<GetStarted> {
+        let repositories = self.repositories.clone().unwrap_or_default();
         Box::new(GetStarted::new(
             &self.active_project_name(),
             self.active_agent(),
             self.active_repository().as_deref(),
+            &repositories,
             &self.git_identity,
             &AGENTS,
         ))
@@ -3615,6 +3617,7 @@ impl App {
                 RepositoriesKey::Chosen(repository) => {
                     panel.repositories = None;
                     self.set_project_repository(&repository.url);
+                    panel.set_repository(&repository);
                     panel.focus = SetupFocus::Ready;
                 }
             }

@@ -21,7 +21,7 @@ use ratatui::{
 use crate::tui::{
     app::ShellId,
     keys,
-    widgets::{chrome, palette},
+    widgets::{button, chrome, palette},
 };
 
 /// The longest address this will carry, which is longer than any login page and
@@ -139,13 +139,13 @@ pub fn draw(frame: &mut Frame, area: Rect, asking: &OpenLink) -> Rect {
         .wrap(Wrap { trim: true }),
         body.content,
     );
-    chrome::actions(
+    button::actions(
         frame,
         popup,
         body.actions,
         &[
-            chrome::Action::secondary("cancel").focused(asking.button == 0),
-            chrome::Action::primary("open").focused(asking.button == 1),
+            button::Action::secondary("cancel").focused(asking.button == 0),
+            button::Action::primary("open").focused(asking.button == 1),
         ],
     );
     popup

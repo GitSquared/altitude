@@ -53,7 +53,7 @@ use ratatui::{
 
 use crate::tui::keys;
 use crate::tui::widgets::{
-    chrome, palette,
+    button, chrome, palette,
     pointer::Targets,
     select::{Offer, Select},
     text::TextBox,
@@ -924,13 +924,13 @@ pub fn draw(
         );
     }
 
-    let buttons = chrome::actions(
+    let buttons = button::actions(
         frame,
         popup,
         body.actions,
         &[
-            chrome::Action::secondary("cancel").focused(new_task.focus == Focus::Cancel),
-            chrome::Action::primary(if new_task.issue { "link" } else { "create" })
+            button::Action::secondary("cancel").focused(new_task.focus == Focus::Cancel),
+            button::Action::primary(if new_task.issue { "link" } else { "create" })
                 .focused(new_task.focus == Focus::Create),
         ],
     );

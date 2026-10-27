@@ -9,7 +9,7 @@ use ratatui::{
     widgets::{Clear, Paragraph, Wrap},
 };
 
-use crate::tui::widgets::{chrome, palette};
+use crate::tui::widgets::{button, chrome, palette};
 
 /// Draw the question, and answer with the box it occupies.
 pub fn draw(
@@ -38,7 +38,7 @@ pub fn draw(
             .wrap(Wrap { trim: true }),
         body,
     );
-    chrome::actions(
+    button::actions(
         frame,
         popup,
         actions,
@@ -47,9 +47,9 @@ pub fn draw(
             .enumerate()
             .map(|(index, answer)| {
                 let action = if index == 0 {
-                    chrome::Action::secondary(answer)
+                    button::Action::secondary(answer)
                 } else {
-                    chrome::Action::primary(answer)
+                    button::Action::primary(answer)
                 };
                 action.focused(index == chosen)
             })

@@ -357,6 +357,27 @@ impl<T> Select<T> {
         if area.height == 0 || area.width == 0 {
             return;
         }
+        // The fill covers the spaces as well as the words, because the pill is
+        // the whole of what the fill is for.
+        frame.render_widget(
+            Paragraph::new(Line::from(self.pill_spans(
+                focused,
+                with_name,
+                usize::from(area.width),
+            )))
+            .style(if focused {
+                palette::focus()
+            } else {
+                Style::default()
+            }),
+            area,
+        );
+    }
+
+    /// The pill as spans, for a page that composes a line of its own: the same
+    /// value, the same name, and the same mark that says it opens, without
+    /// copying the character that happens to be the mark.
+    pub fn pill_spans(&self, focused: bool, with_name: bool, room: usize) -> Vec<Span<'static>> {
         let chosen = self.chosen_offer();
         let (value_style, quiet) = if focused {
             (palette::focus(), palette::focus())
@@ -367,7 +388,7 @@ impl<T> Select<T> {
         };
         let value = truncate(
             self.label(),
-            usize::from(area.width).saturating_sub(self.name_width(with_name) + 3),
+            room.saturating_sub(self.name_width(with_name) + 3),
         );
         let mut spans = Vec::new();
         if with_name {
@@ -377,16 +398,7 @@ impl<T> Select<T> {
         }
         spans.push(Span::styled(value, value_style));
         spans.push(Span::styled(format!(" {OPENS} "), quiet));
-        // The fill covers the spaces as well as the words, because the pill is
-        // the whole of what the fill is for.
-        frame.render_widget(
-            Paragraph::new(Line::from(spans)).style(if focused {
-                palette::focus()
-            } else {
-                Style::default()
-            }),
-            area,
-        );
+        spans
     }
 
     /// Add pasted text to the query, as one line: a list is narrowed by words,

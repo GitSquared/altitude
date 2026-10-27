@@ -16,7 +16,7 @@ use ratatui::{
 
 use crate::tui::{
     keys,
-    widgets::{chrome, palette},
+    widgets::{button, chrome, palette},
 };
 
 /// A sign-in the operator drives, described before its terminal opens.
@@ -81,11 +81,11 @@ impl SignIn {
             Paragraph::new(self.lines.clone()).wrap(Wrap { trim: true }),
             body.content,
         );
-        chrome::actions(
+        button::actions(
             frame,
             popup,
             body.actions,
-            &[chrome::Action::primary("sign in").focused(true)],
+            &[button::Action::primary("sign in").focused(true)],
         );
         popup
     }

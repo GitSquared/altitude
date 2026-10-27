@@ -24,7 +24,7 @@ use crate::{
         app::{Foreground, RemoteSignalAction, RemoteSignalsReply, RemoveTaskReply},
         keys,
         screens::settings::Target,
-        widgets::chrome,
+        widgets::{button, chrome},
     },
 };
 
@@ -106,13 +106,13 @@ pub fn draw(frame: &mut Frame, area: Rect, confirm: &Confirm) -> Rect {
         Paragraph::new(confirm.question.clone()).wrap(Wrap { trim: true }),
         body.content,
     );
-    chrome::actions(
+    button::actions(
         frame,
         popup,
         body.actions,
         &[
-            chrome::Action::secondary("cancel").focused(confirm.button == 0),
-            chrome::Action::primary(confirm.destructive).focused(confirm.button == 1),
+            button::Action::secondary("cancel").focused(confirm.button == 0),
+            button::Action::primary(confirm.destructive).focused(confirm.button == 1),
         ],
     );
     popup

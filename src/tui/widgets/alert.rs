@@ -11,7 +11,7 @@ use ratatui::{
     widgets::{Clear, Paragraph, Wrap},
 };
 
-use crate::tui::widgets::{chrome, palette};
+use crate::tui::widgets::{button, chrome, palette};
 
 /// How wide a message box is willing to get. A sentence is readable across a
 /// third of a wide terminal and does not stretch to its edge.
@@ -81,11 +81,11 @@ pub fn draw(frame: &mut Frame, area: Rect, alert: &Alert) -> Rect {
             .wrap(Wrap { trim: true }),
         body.content,
     );
-    chrome::actions(
+    button::actions(
         frame,
         popup,
         body.actions,
-        &[chrome::Action::primary("dismiss").focused(true)],
+        &[button::Action::primary("dismiss").focused(true)],
     );
     popup
 }

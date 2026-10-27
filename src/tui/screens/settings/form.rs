@@ -17,7 +17,7 @@ use crate::{
     tui::{
         popups::repositories::Repositories,
         widgets::{
-            chrome, palette,
+            button, chrome, palette,
             text::{Field, FieldStyle, TextBox},
         },
     },
@@ -471,13 +471,13 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &mut Form) {
     }
 
     // The actions sit at the bottom right, where the eye ends up.
-    chrome::actions(
+    button::actions(
         frame,
         area,
         body.actions,
         &[
-            chrome::Action::secondary("cancel").focused(form.focus == Focus::Cancel),
-            chrome::Action::primary("save").focused(form.focus == Focus::Save),
+            button::Action::secondary("cancel").focused(form.focus == Focus::Cancel),
+            button::Action::primary("save").focused(form.focus == Focus::Save),
         ],
     );
 }

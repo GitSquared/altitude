@@ -27,7 +27,7 @@ use crate::{
     tui::{
         App,
         widgets::{
-            card, chrome,
+            button, card,
             columns::Columns,
             header,
             list::{self, Row},
@@ -546,8 +546,8 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
             area,
             actions_area,
             &[
-                chrome::Action::primary("send").focused(true),
-                chrome::Action::secondary("cancel"),
+                button::Action::primary("send").focused(true),
+                button::Action::secondary("cancel"),
             ],
             None,
         );
@@ -566,9 +566,9 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
                 let label = action.label(thread.kind, thread.is_resolved());
                 let focused = app.signal_focus == SignalFocus::Action(index);
                 if index == 0 {
-                    chrome::Action::primary(label).focused(focused)
+                    button::Action::primary(label).focused(focused)
                 } else {
-                    chrome::Action::secondary(label).focused(focused)
+                    button::Action::secondary(label).focused(focused)
                 }
             })
             .collect();
@@ -679,7 +679,7 @@ fn draw_buttons(
     frame: &mut Frame,
     pane: Rect,
     area: Rect,
-    actions: &[chrome::Action<'_>],
+    actions: &[button::Action<'_>],
     status: Option<&str>,
 ) -> Vec<Rect> {
     surface::cover(frame, area);
@@ -690,7 +690,7 @@ fn draw_buttons(
         width: pane.width.saturating_add(2),
         ..pane
     };
-    let rects = chrome::actions(frame, frame_rect, area, actions);
+    let rects = button::actions(frame, frame_rect, area, actions);
     if let Some(status) = status {
         // With no buttons the whole footer is the status, so it sits at the
         // right edge. With buttons it gets the room to their left.

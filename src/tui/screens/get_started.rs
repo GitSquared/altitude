@@ -6,6 +6,8 @@
 //! are one gesture each. The card is not dismissible while a task would not run:
 //! a first question that can be answered by accident is not a question.
 
+use std::slice;
+
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -28,7 +30,7 @@ use crate::{
             utils::truncate,
         },
     },
-    vcs::VcsProviderKind,
+    vcs::{Repository, VcsProviderKind},
 };
 
 use super::settings::GitIdentity;
@@ -42,6 +44,14 @@ const LABEL_WIDTH: usize = 15;
 
 /// The action column, on the right of every row.
 const ACTION_WIDTH: usize = 16;
+
+/// The rows the help under the steps keeps, whatever it says.
+///
+/// The longest help is the remote one, five lines at the card's width; the sixth
+/// is spare so a slightly narrower terminal does not clip it. It is a constant,
+/// not measured per draw, because its whole job is to stop the footer moving
+/// when the words change.
+const HELP_ROWS: u16 = 6;
 
 /// What a row's mark says about it.
 ///
@@ -188,6 +198,9 @@ pub struct GetStarted {
     pub agent: Select<AgentKind>,
     pub vcs: Select<VcsProviderKind>,
     pub tracker: Select<TrackerKind>,
+    /// The repository this project works in, shown as the pill it is rather than
+    /// as text with a copied mark.
+    pub repository: Select<Repository>,
     pub commits: Commits,
     pub repositories: Option<Repositories>,
 }
@@ -199,6 +212,7 @@ impl GetStarted {
         name: &str,
         agent: Option<AgentKind>,
         repository: Option<&str>,
+        cached_repositories: &[Repository],
         identity: &GitIdentity,
         agents: &[AgentKind],
     ) -> Self {
@@ -249,6 +263,7 @@ impl GetStarted {
                 0,
             )
             .without_search(),
+            repository: repository_select(cached_repositories, repository),
         }
     }
 
@@ -274,6 +289,11 @@ impl GetStarted {
                 .repositories
                 .as_ref()
                 .is_some_and(|browser| browser.select.is_searching())
+    }
+
+    /// Take the repository the list just returned, and show it.
+    pub fn set_repository(&mut self, repository: &Repository) {
+        self.repository = repository_select(slice::from_ref(repository), Some(&repository.url));
     }
 
     /// Put the name back to what is saved, when a draft is abandoned.
@@ -415,17 +435,7 @@ pub fn draw(frame: &mut Frame, area: Rect, panel: &mut GetStarted, setup: &Setup
     } else {
         detail_text(panel.focus, setup)
     };
-    // As tall as the longest help line any row can show, so moving between rows
-    // changes the words and not the card: the footer stays where it is.
-    let detail_height = if panel.commits.open {
-        wrapped_height(&detail, width)
-    } else {
-        ROWS.iter()
-            .map(|focus| wrapped_height(&detail_text(*focus, setup), width))
-            .max()
-            .unwrap_or(0)
-    }
-    .min(area.height);
+    let detail_height = HELP_ROWS.min(area.height);
     let height = (6 + subtitle_height + rows_height + detail_height).min(area.height);
     let y = area.y + area.height.saturating_sub(height) / 2;
     let card = Rect {
@@ -546,30 +556,34 @@ fn checklist(panel: &GetStarted, setup: &SetupState, width: u16) -> Vec<Line<'st
     }
 
     let vcs_signed_in = signed_in(&setup.vcs_status);
-    let code_value = if !vcs_signed_in {
-        "VCS not connected".to_owned()
+    if vcs_signed_in {
+        let prefix = 1 + 2 + LABEL_WIDTH + 2;
+        let room = usize::from(width).saturating_sub(prefix + ACTION_WIDTH);
+        let pill = panel
+            .repository
+            .pill_spans(focused == Focus::VersionControl, false, room);
+        lines.push(row_spans(
+            if setup.repository.is_some() {
+                Marker::Done
+            } else {
+                Marker::Blocking
+            },
+            "Version control",
+            pill,
+            "enter choose",
+            focused == Focus::VersionControl,
+            width,
+        ));
     } else {
-        match &setup.repository {
-            Some(repository) => format!("{repository} ▼"),
-            None => "repository not picked ▼".to_owned(),
-        }
-    };
-    lines.push(row(
-        if setup.repository.is_some() && vcs_signed_in {
-            Marker::Done
-        } else {
-            Marker::Blocking
-        },
-        "Version control",
-        &code_value,
-        if vcs_signed_in {
-            "enter choose"
-        } else {
-            "enter sign in"
-        },
-        focused == Focus::VersionControl,
-        width,
-    ));
+        lines.push(row(
+            Marker::Blocking,
+            "Version control",
+            "VCS not connected",
+            "enter sign in",
+            focused == Focus::VersionControl,
+            width,
+        ));
+    }
     if panel.vcs.is_open() {
         lines.extend(options(&panel.vcs, width));
     }
@@ -677,6 +691,80 @@ fn draw_footer(frame: &mut Frame, area: Rect, panel: &GetStarted, setup: &SetupS
         ])),
         buttons_area,
     );
+}
+
+/// A row whose value is already spans, so a widget can print its own pill.
+fn row_spans(
+    marker: Marker,
+    label: &str,
+    value: Vec<Span<'static>>,
+    action: &str,
+    focused: bool,
+    width: u16,
+) -> Line<'static> {
+    let prefix = format!("{}  {label:<LABEL_WIDTH$}  ", marker.glyph());
+    let trailing = format!("{action:<ACTION_WIDTH$}");
+    let available = usize::from(width)
+        .saturating_sub(prefix.chars().count())
+        .saturating_sub(trailing.chars().count());
+    let used: usize = value.iter().map(Span::width).sum();
+    let pad = available.saturating_sub(used);
+    let mut spans = vec![Span::styled(
+        prefix,
+        if focused {
+            palette::primary().bold()
+        } else {
+            palette::muted()
+        },
+    )];
+    spans.extend(value);
+    spans.push(Span::raw(" ".repeat(pad)));
+    spans.push(Span::styled(trailing, palette::muted()));
+    Line::from(spans)
+}
+
+/// The repository pill's offers: what the cache knows, plus whatever the project
+/// already names when the cache has not caught up.
+fn repository_select(cached: &[Repository], current: Option<&str>) -> Select<Repository> {
+    let mut offers: Vec<Offer<Repository>> = cached
+        .iter()
+        .map(|repository| Offer::new(repository.clone(), repository.name.clone()))
+        .collect();
+    match current {
+        Some(url) => {
+            if !offers.iter().any(|offer| offer.value.url == url) {
+                offers.insert(
+                    0,
+                    Offer::new(
+                        Repository {
+                            name: url.to_owned(),
+                            url: url.to_owned(),
+                            is_private: false,
+                        },
+                        url,
+                    ),
+                );
+            }
+        }
+        None => {
+            // Not ready, so the pill draws it as the question it is: the mark
+            // says it opens, the value says it has not been picked.
+            let mut offer = Offer::new(
+                Repository {
+                    name: "repository not picked".to_owned(),
+                    url: String::new(),
+                    is_private: false,
+                },
+                "repository not picked",
+            );
+            offer.ready = false;
+            offers.insert(0, offer);
+        }
+    }
+    let chosen = current
+        .and_then(|url| offers.iter().position(|offer| offer.value.url == url))
+        .unwrap_or(0);
+    Select::new("repository", offers, chosen).without_search()
 }
 
 fn row(
