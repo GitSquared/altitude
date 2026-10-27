@@ -4499,10 +4499,34 @@ impl App {
     /// The name the agent is known by here, which is its harness rather than the
     /// word "agent": the operator is reading a conversation, not a category.
     pub(in crate::tui) fn signal_agent_label(&self) -> String {
-        self.signal_task()
+        let local = self.signal_task();
+        let agent = local
             .and_then(|task| task.agent_kind)
-            .or_else(|| self.signal_held().and_then(|held| held.summary.agent))
-            .map_or_else(|| "the agent".to_owned(), |kind| kind.to_string())
+            .or_else(|| self.signal_held().and_then(|held| held.summary.agent));
+        let model = local
+            .and_then(|task| task.facts.model.as_deref())
+            .or_else(|| {
+                self.signal_held()
+                    .and_then(|held| held.summary.model.as_deref())
+            });
+        match (agent, model) {
+            (Some(agent), Some(model)) => format!(
+                "{}-{}",
+                agent.to_string().to_ascii_lowercase(),
+                model
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(model)
+                    .to_ascii_lowercase()
+            ),
+            (Some(agent), None) => agent.to_string(),
+            (None, Some(model)) => model
+                .rsplit('/')
+                .next()
+                .unwrap_or(model)
+                .to_ascii_lowercase(),
+            (None, None) => "the agent".to_owned(),
+        }
     }
 
     /// The plan the selected task is working to, local or remote.
