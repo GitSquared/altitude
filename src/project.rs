@@ -6,7 +6,7 @@
 //! was started with. Storage is keyed by the id; the name is what an operator
 //! reads, and renaming one changes nothing about the work in flight.
 
-use crate::agent::AgentKind;
+use crate::{agent::AgentKind, vcs::VcsProviderKind};
 use serde::{Deserialize, Serialize};
 use std::{
     error::Error,
@@ -57,6 +57,13 @@ pub struct Project {
     /// project is moving its work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
+    /// The version-control login this project's repositories come from.
+    ///
+    /// Absent is the only one this build knows, which is what a machine with one
+    /// GitHub login needs. A project names its connection when a machine can hold
+    /// more than one, the same way it names its agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcs: Option<VcsProviderKind>,
     /// The tracker work this project claims.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracker: Option<TrackerRoute>,
@@ -125,6 +132,7 @@ impl Project {
             instructions: None,
             agent: None,
             host: None,
+            vcs: None,
             tracker: None,
         }
     }
@@ -144,8 +152,14 @@ impl Project {
             instructions: None,
             agent: None,
             host: None,
+            vcs: None,
             tracker: None,
         }
+    }
+
+    /// The version-control provider this project's repositories come from.
+    pub fn vcs_provider(&self) -> VcsProviderKind {
+        self.vcs.unwrap_or_else(VcsProviderKind::sole)
     }
 
     /// The key two names are compared by.

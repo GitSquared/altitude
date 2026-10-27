@@ -4,13 +4,14 @@
 //! scroll with the caret: the block being edited is always on screen, and the ones
 //! above it are one shift-tab away.
 
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::{
     Frame,
     layout::Rect,
     text::Line,
     widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap},
 };
+use std::mem;
 
 use crate::{
     project::Project,
@@ -219,6 +220,8 @@ pub struct Form {
 /// an operator can name.
 pub struct Repositories {
     pub select: Select<Repository>,
+    /// Where each offer was drawn, so a click can find it.
+    pub rows: Vec<(Rect, usize)>,
     /// Why there is nothing to choose, when it is not still on its way.
     pub error: Option<String>,
 }
@@ -234,6 +237,7 @@ impl Repositories {
         select.open();
         Self {
             select,
+            rows: Vec::new(),
             error: None,
         }
     }
@@ -440,6 +444,25 @@ impl Form {
         self.repository = Field::with(url);
     }
 
+    /// Take a mouse event for the repository list, answering the repository a
+    /// click chose. The wheel only moves the keys.
+    pub fn repository_mouse(&mut self, mouse: MouseEvent) -> Option<Repository> {
+        let browser = self.repositories.as_mut()?;
+        let rows = mem::take(&mut browser.rows);
+        let took = browser.select.mouse(mouse, &rows);
+        if !took {
+            browser.rows = rows;
+            return None;
+        }
+        if browser.select.is_open() {
+            browser.rows = rows;
+            return None;
+        }
+        let chosen = browser.select.chosen_value().cloned();
+        self.repositories = None;
+        chosen
+    }
+
     /// The caches the form lists, one per line, without blanks.
     pub fn cache_paths(&self) -> Vec<String> {
         self.caches
@@ -534,14 +557,15 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &mut Form) {
 }
 
 /// The repository list, or why it has not arrived, under the field it fills.
-fn draw_repositories(frame: &mut Frame, area: Rect, form: &Form, anchor: Rect) {
-    let Some(browser) = &form.repositories else {
+fn draw_repositories(frame: &mut Frame, area: Rect, form: &mut Form, anchor: Rect) {
+    let Some(browser) = form.repositories.as_mut() else {
         return;
     };
     if !browser.select.is_empty() {
-        browser.select.draw_list_below(frame, area, anchor);
+        browser.rows = browser.select.draw_list_below(frame, area, anchor);
         return;
     }
+    browser.rows.clear();
     let height = 4;
     let popup = Rect {
         y: anchor

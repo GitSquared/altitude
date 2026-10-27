@@ -17,7 +17,7 @@
 //! choice by value rather than by position, so a remote that dropped out of the
 //! list cannot quietly become a different one.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -127,6 +127,42 @@ impl<T> Select<T> {
     /// Whether there is anything to choose, which a page that is waiting says.
     pub fn is_empty(&self) -> bool {
         self.offers.is_empty()
+    }
+
+    /// Take a mouse event against the rows the last draw returned.
+    ///
+    /// A click on a row is a choice, because a list that wants a click and then a
+    /// key is a list that lies about what it is. The wheel moves the keys. Answers
+    /// whether the event was the list's, so a page can fall through to what is
+    /// behind it.
+    pub fn mouse(&mut self, mouse: MouseEvent, rows: &[(Rect, usize)]) -> bool {
+        if !self.open {
+            return false;
+        }
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.scroll(true);
+                true
+            }
+            MouseEventKind::ScrollDown => {
+                self.scroll(false);
+                true
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                let Some((_, index)) = rows.iter().find(|(area, _)| {
+                    mouse.column >= area.x
+                        && mouse.column < area.right()
+                        && mouse.row >= area.y
+                        && mouse.row < area.bottom()
+                }) else {
+                    return false;
+                };
+                self.choose(*index);
+                self.close();
+                true
+            }
+            _ => false,
+        }
     }
 
     /// What the keys do while this list is open.

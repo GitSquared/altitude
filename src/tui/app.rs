@@ -922,6 +922,16 @@ impl App {
     /// Read a mouse event against the last settings frame.
     pub(in crate::tui) fn panel_mouse(&mut self, mouse: MouseEvent) {
         if self.panel.form.is_some() {
+            let chosen = self
+                .panel
+                .form
+                .as_mut()
+                .and_then(|form| form.repository_mouse(mouse));
+            if let Some(repository) = chosen
+                && let Some(form) = self.panel.form.as_mut()
+            {
+                form.set_repository(&repository.url);
+            }
             return;
         }
         match mouse.kind {
@@ -3314,6 +3324,19 @@ impl App {
     ) where
         E: IsolationEngine + Clone + 'static,
     {
+        // The project says which login its repositories come from, the way it
+        // says which agent drives it. Until a machine can hold more than one,
+        // every project answers with the same one.
+        let kind = {
+            let Some(form) = self.panel.form.as_ref() else {
+                return;
+            };
+            form.target
+                .project_id()
+                .and_then(|id| self.settings_file.as_ref()?.settings().project(id))
+                .map(Project::vcs_provider)
+                .unwrap_or_else(VcsProviderKind::sole)
+        };
         let cached = self.repositories.clone().unwrap_or_default();
         let Some(form) = self.panel.form.as_mut() else {
             return;
@@ -3323,7 +3346,7 @@ impl App {
         let replies = replies.clone();
         tokio::spawn(async move {
             let result = service
-                .repositories(VcsProviderKind::sole())
+                .repositories(kind)
                 .await
                 .map_err(|error| error.to_string());
             let _ = replies.send(RepositoryListReply { result });
