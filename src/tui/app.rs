@@ -7,7 +7,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    env, io, mem,
+    env, fs, io, mem,
     path::PathBuf,
     process,
     sync::Arc,
@@ -43,6 +43,7 @@ use crate::{
     tui::keys::{is_dismiss, is_remove, is_secondary},
     tui::popups,
     tui::screens,
+    tui::widgets::palette,
     tui::widgets::{
         chrome::Hint,
         pointer::Targets,
@@ -61,7 +62,8 @@ use popups::send_task::{Decision as SendDecision, SendTask};
 use popups::setup::{Setup, SetupKind};
 use popups::sign_in::{Decision as SignInDecision, SignIn};
 use screens::get_started::{
-    Focus as SetupFocus, GetStarted, RemoteOffer, SetupState, ready as setup_ready, signed_in,
+    CommitsField, Focus as SetupFocus, GetStarted, RemoteOffer, SetupState, ready as setup_ready,
+    signed_in,
 };
 use screens::settings::{
     CredentialKind, Depth, Focus, Form, GitIdentity, Panel, RowKind, Section, Setting, SettingsHit,
@@ -1291,6 +1293,9 @@ impl App {
                     Hint::new("j/k · pgup/pgdn", "scroll"),
                     Hint::new("esc / q", "back"),
                 ],
+                SetupKind::SigningKey => {
+                    vec![Hint::new("c", "copy"), Hint::new("esc / q", "close")]
+                }
                 _ => vec![
                     Hint::new("j/k · pgup/pgdn", "scroll"),
                     Hint::new("esc / q", "close"),
@@ -3496,6 +3501,8 @@ impl App {
             Some("choose an agent")
         } else if self.active_repository().is_none() {
             Some("choose a repository")
+        } else if !self.git_identity.is_set() {
+            Some("set the commit identity")
         } else if self.signed_out_agent() {
             Some("sign in to the agent")
         } else if self.signed_out_vcs() {
@@ -3514,6 +3521,7 @@ impl App {
             &self.active_project_name(),
             self.active_agent(),
             self.active_repository().as_deref(),
+            &self.git_identity,
             &AGENTS,
         ))
     }
@@ -3590,6 +3598,13 @@ impl App {
                 self.close_credential_shell(task_service).await;
             }
             self.foreground = Foreground::GetStarted(panel);
+            return false;
+        }
+        if panel.commits.open {
+            let left = self.commits_key(&mut panel, key).await;
+            if !left {
+                self.foreground = Foreground::GetStarted(panel);
+            }
             return false;
         }
         if let Some(browser) = panel.repositories.as_mut() {
@@ -3722,8 +3737,8 @@ impl App {
                     panel.vcs.open();
                 }
                 SetupFocus::Commits => {
-                    open_panel_at(self, task_service, Section::VersionControl).await;
-                    return false;
+                    panel.commits.open = true;
+                    panel.commits.field = CommitsField::Name;
                 }
                 SetupFocus::Tracker => {
                     if self.tracker_state == TrackerState::Connected {
@@ -3767,6 +3782,243 @@ impl App {
         }
         self.foreground = Foreground::GetStarted(panel);
         false
+    }
+
+    /// The keys while the identity editor is open. Answers whether it left
+    /// something else in front, which is the signing-key page.
+    async fn commits_key(&mut self, panel: &mut GetStarted, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                panel.commits.reload(&self.git_identity);
+                false
+            }
+            KeyCode::Tab | KeyCode::Down => {
+                panel.commits.move_focus(true);
+                false
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                panel.commits.move_focus(false);
+                false
+            }
+            KeyCode::Enter => match panel.commits.field {
+                CommitsField::Name | CommitsField::Email => {
+                    if self.save_commits(panel).await {
+                        panel.commits.reload(&self.git_identity);
+                    }
+                    false
+                }
+                CommitsField::Sign => {
+                    if panel.commits.signs {
+                        panel.commits.signs = false;
+                        self.save_commits(panel).await;
+                        return false;
+                    }
+                    let email = panel.commits.email.value().trim().to_owned();
+                    if email.is_empty() || panel.commits.name.value().trim().is_empty() {
+                        self.say("A commit needs a name and an email");
+                        return false;
+                    }
+                    match self.make_signing_key(&email).await {
+                        Ok(pubkey) => {
+                            panel.commits.signs = true;
+                            if self.save_commits(panel).await {
+                                self.open_signing_key(pubkey);
+                                return true;
+                            }
+                        }
+                        Err(error) => self.problem(error),
+                    }
+                    false
+                }
+                CommitsField::Key => {
+                    // Seeing the key is never refused for want of a name: the
+                    // reason to look at it is often that the identity is not
+                    // written yet. What is typed is saved on the way out.
+                    if let Some(pubkey) = self.signing_key() {
+                        if !panel.commits.name.value().trim().is_empty()
+                            && !panel.commits.email.value().trim().is_empty()
+                        {
+                            self.save_commits(panel).await;
+                        }
+                        self.open_signing_key(pubkey);
+                        return true;
+                    }
+                    let email = panel.commits.email.value().trim().to_owned();
+                    if email.is_empty() {
+                        self.say("Add an email first");
+                        return false;
+                    }
+                    if !self.save_commits(panel).await {
+                        return false;
+                    }
+                    match self.make_signing_key(&email).await {
+                        Ok(pubkey) => {
+                            if self.save_commits(panel).await {
+                                self.open_signing_key(pubkey);
+                                return true;
+                            }
+                            false
+                        }
+                        Err(error) => {
+                            self.problem(error);
+                            false
+                        }
+                    }
+                }
+            },
+            _ => {
+                match panel.commits.field {
+                    CommitsField::Name => panel.commits.name.handle_key(key),
+                    CommitsField::Email => panel.commits.email.handle_key(key),
+                    _ => {}
+                }
+                false
+            }
+        }
+    }
+
+    /// Write the identity the editor holds into the profile's git config, making
+    /// a signing key first when signing was asked for and none is there.
+    async fn save_commits(&mut self, panel: &mut GetStarted) -> bool {
+        let name = panel.commits.name.value().trim().to_owned();
+        let email = panel.commits.email.value().trim().to_owned();
+        if name.is_empty() || email.is_empty() {
+            self.say("A commit needs a name and an email");
+            return false;
+        }
+        let signs = panel.commits.signs;
+        // Read or make the key, and rewrite the signers with the email as it is
+        // now: a rename must not leave signatures that verify against a name the
+        // commit no longer carries.
+        if signs && let Err(error) = self.make_signing_key(&email).await {
+            self.problem(error);
+            return false;
+        }
+        if let Err(error) = self.write_commits(&name, &email, signs).await {
+            self.problem(error);
+            return false;
+        }
+        self.refresh_git_identity().await;
+        true
+    }
+
+    async fn write_commits(&self, name: &str, email: &str, signs: bool) -> Result<(), String> {
+        let directory = self
+            .config
+            .profile_dir(self.active_vcs().profile())
+            .join("git");
+        fs::create_dir_all(&directory)
+            .map_err(|error| format!("could not make {}: {error}", directory.display()))?;
+        let path = directory.join("config");
+        let mut values = vec![
+            ("user.name", name.to_owned()),
+            ("user.email", email.to_owned()),
+        ];
+        if signs {
+            values.extend([
+                ("gpg.format", "ssh".to_owned()),
+                (
+                    "user.signingkey",
+                    "/root/.ssh/id_ed25519_signing.pub".to_owned(),
+                ),
+                (
+                    "gpg.ssh.allowedSignersFile",
+                    "/root/.ssh/allowed_signers".to_owned(),
+                ),
+                ("commit.gpgsign", "true".to_owned()),
+            ]);
+        } else {
+            values.push(("commit.gpgsign", "false".to_owned()));
+        }
+        for (key, value) in values {
+            let output = HostCommand::new("git")
+                .args(["config", "--file"])
+                .arg(&path)
+                .arg(key)
+                .arg(value)
+                .output()
+                .await
+                .map_err(|error| format!("could not run git: {error}"))?;
+            if !output.status.success() {
+                let reason = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+                return Err(format!("git config {key} failed: {reason}"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Make the SSH key commits are signed with, in the profile every task mounts.
+    async fn make_signing_key(&self, email: &str) -> Result<String, String> {
+        let directory = self
+            .config
+            .profile_dir(self.active_vcs().profile())
+            .join("ssh");
+        fs::create_dir_all(&directory)
+            .map_err(|error| format!("could not make {}: {error}", directory.display()))?;
+        let key = directory.join("id_ed25519_signing");
+        let public = directory.join("id_ed25519_signing.pub");
+        if !public.is_file() {
+            // No passphrase: this key signs from inside a sandbox where nothing
+            // can answer a prompt, so a key that asked for one would fail at the
+            // first commit.
+            let output = HostCommand::new("ssh-keygen")
+                .args(["-q", "-t", "ed25519", "-N", "", "-C", email, "-f"])
+                .arg(&key)
+                .output()
+                .await
+                .map_err(|error| format!("could not run ssh-keygen: {error}"))?;
+            if !output.status.success() {
+                let reason = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+                return Err(format!("ssh-keygen failed: {reason}"));
+            }
+        }
+        let text = fs::read_to_string(&public)
+            .map_err(|error| format!("could not read {}: {error}", public.display()))?;
+        let text = text.trim().to_owned();
+        // The signer file is what makes a signature verifiable here; it names the
+        // email the commit carries, so it follows the email as it is edited.
+        fs::write(
+            directory.join("allowed_signers"),
+            format!("{email} {text}\n"),
+        )
+        .map_err(|error| format!("could not write the allowed signers: {error}"))?;
+        Ok(text)
+    }
+
+    fn signing_key_path(&self) -> Option<PathBuf> {
+        let path = self
+            .config
+            .profile_dir(self.active_vcs().profile())
+            .join("ssh/id_ed25519_signing.pub");
+        path.is_file().then_some(path)
+    }
+
+    fn signing_key(&self) -> Option<String> {
+        let path = self.signing_key_path()?;
+        fs::read_to_string(path)
+            .ok()
+            .map(|text| text.trim().to_owned())
+    }
+
+    fn open_signing_key(&mut self, public: String) {
+        let lines = vec![
+            Line::styled(
+                "Add this key to GitHub as a signing key, so commits made here show as verified.",
+                palette::muted(),
+            ),
+            Line::from(""),
+            Line::styled(public.clone(), palette::primary()),
+            Line::from(""),
+            Line::styled(
+                "GitHub → Settings → SSH and GPG keys → New SSH key → Key type: Signing Key",
+                palette::muted(),
+            ),
+        ];
+        self.foreground = Foreground::Setup(
+            Setup::new(SetupKind::SigningKey, lines)
+                .with_copy(public)
+                .returning_to_card(),
+        );
     }
 
     /// Write the name that is in the field, when it is one the project could keep.
@@ -3860,6 +4112,7 @@ impl App {
             offer,
             tracker: self.tracker_state,
             commits: self.git_identity.clone(),
+            has_key: self.signing_key_path().is_some(),
         }
     }
 
@@ -4556,8 +4809,26 @@ impl App {
                 _ => false,
             };
             if !stays {
-                self.foreground = Foreground::Panel;
+                let to_card = matches!(
+                    &self.foreground,
+                    Foreground::Setup(setup) if setup.returns_to_card()
+                );
+                if to_card {
+                    self.foreground = Foreground::GetStarted(self.get_started_panel());
+                } else {
+                    self.foreground = Foreground::Panel;
+                }
                 self.alert = None;
+            }
+        } else if let Some(text) = match &self.foreground {
+            Foreground::Setup(setup) if key.code == KeyCode::Char('c') => {
+                setup.copy_text().map(str::to_owned)
+            }
+            _ => None,
+        } {
+            match copy_to_clipboard(text) {
+                Ok(()) => self.say("Public key copied"),
+                Err(error) => self.problem(format!("Could not copy the key: {error}")),
             }
         } else if let Foreground::Setup(setup) = &mut self.foreground {
             match key.code {

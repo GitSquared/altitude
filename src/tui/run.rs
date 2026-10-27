@@ -942,7 +942,17 @@ where
         } else if let Foreground::NewTask(new_task) = &mut app.foreground {
             new_task.paste(&text);
         } else if let Foreground::GetStarted(panel) = &mut app.foreground {
-            if panel.focus == super::screens::get_started::Focus::Name {
+            if panel.commits.open {
+                match panel.commits.field {
+                    super::screens::get_started::CommitsField::Name => {
+                        panel.commits.name.paste(&text)
+                    }
+                    super::screens::get_started::CommitsField::Email => {
+                        panel.commits.email.paste(&text)
+                    }
+                    _ => {}
+                }
+            } else if panel.focus == super::screens::get_started::Focus::Name {
                 panel.name.paste(&text);
             }
             panel.agent.paste(&text);

@@ -20,6 +20,7 @@ pub enum SetupKind {
     RemoteTrackers,
     RemoteTrackerGuide(TrackerKind),
     Linear,
+    SigningKey,
 }
 
 struct TrackerOption {
@@ -62,6 +63,11 @@ pub struct Setup {
     /// The provider list a guide was opened from, so dismissing the guide returns
     /// to it rather than all the way out.
     picker: Option<Picker>,
+    /// What `c` puts on the clipboard, when the page is showing something to take
+    /// away rather than something to read.
+    copy: Option<String>,
+    /// Whether closing goes back to the first-run card rather than the panel.
+    returns_to_card: bool,
 }
 
 struct Picker {
@@ -76,6 +82,8 @@ impl Setup {
             lines,
             scroll: 0,
             picker: None,
+            copy: None,
+            returns_to_card: false,
         }
     }
 
@@ -88,7 +96,29 @@ impl Setup {
                 address,
                 selected: 0,
             }),
+            copy: None,
+            returns_to_card: false,
         }
+    }
+
+    /// Make `c` copy this text, and say so in the hints.
+    pub fn with_copy(mut self, text: String) -> Self {
+        self.copy = Some(text);
+        self
+    }
+
+    pub fn copy_text(&self) -> Option<&str> {
+        self.copy.as_deref()
+    }
+
+    /// Close back to the first-run card, which is what opened this page.
+    pub fn returning_to_card(mut self) -> Self {
+        self.returns_to_card = true;
+        self
+    }
+
+    pub fn returns_to_card(&self) -> bool {
+        self.returns_to_card
     }
 
     pub fn remote_address(&self) -> Option<&str> {
@@ -224,6 +254,7 @@ impl Setup {
                 format!("Set up {} on the remote", kind.label())
             }
             SetupKind::Linear => "Sign in to Linear".to_owned(),
+            SetupKind::SigningKey => "Signing key".to_owned(),
         }
     }
 }

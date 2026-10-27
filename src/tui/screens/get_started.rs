@@ -119,6 +119,66 @@ pub struct SetupState {
     pub tracker: TrackerState,
     /// The identity and signing the commits made in a task carry.
     pub commits: GitIdentity,
+    /// Whether the version-control profile holds a signing key.
+    pub has_key: bool,
+}
+
+/// The identity and signing as the card edits them.
+pub struct Commits {
+    pub open: bool,
+    pub name: Field,
+    pub email: Field,
+    pub signs: bool,
+    pub field: CommitsField,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CommitsField {
+    Name,
+    Email,
+    Sign,
+    Key,
+}
+
+const COMMITS_ROWS: [CommitsField; 4] = [
+    CommitsField::Name,
+    CommitsField::Email,
+    CommitsField::Sign,
+    CommitsField::Key,
+];
+
+impl Commits {
+    fn from(identity: &GitIdentity) -> Self {
+        Self {
+            open: false,
+            name: Field::with(identity.name.as_deref().unwrap_or_default()),
+            email: Field::with(identity.email.as_deref().unwrap_or_default()),
+            signs: identity.signs_commits,
+            field: CommitsField::Name,
+        }
+    }
+
+    /// Put back what is saved, and close.
+    pub fn reload(&mut self, identity: &GitIdentity) {
+        *self = Self::from(identity);
+    }
+
+    pub fn move_focus(&mut self, forward: bool) {
+        let at = COMMITS_ROWS
+            .iter()
+            .position(|field| *field == self.field)
+            .unwrap_or(0);
+        let next = if forward {
+            (at + 1) % COMMITS_ROWS.len()
+        } else {
+            (at + COMMITS_ROWS.len() - 1) % COMMITS_ROWS.len()
+        };
+        self.field = COMMITS_ROWS[next];
+    }
+
+    pub fn takes_text(&self) -> bool {
+        matches!(self.field, CommitsField::Name | CommitsField::Email)
+    }
 }
 
 pub struct GetStarted {
@@ -127,6 +187,7 @@ pub struct GetStarted {
     pub agent: Select<AgentKind>,
     pub vcs: Select<VcsProviderKind>,
     pub tracker: Select<TrackerKind>,
+    pub commits: Commits,
     pub repositories: Option<Repositories>,
 }
 
@@ -137,6 +198,7 @@ impl GetStarted {
         name: &str,
         agent: Option<AgentKind>,
         repository: Option<&str>,
+        identity: &GitIdentity,
         agents: &[AgentKind],
     ) -> Self {
         let chosen = agent
@@ -154,6 +216,7 @@ impl GetStarted {
         Self {
             focus,
             name: Field::with(name),
+            commits: Commits::from(identity),
             repositories: None,
             agent: Select::new(
                 "agent",
@@ -202,6 +265,7 @@ impl GetStarted {
     /// that typing narrows it.
     pub fn is_typing(&self) -> bool {
         self.focus == Focus::Name
+            || (self.commits.open && self.commits.takes_text())
             || self.agent.is_searching()
             || self.vcs.is_searching()
             || self.tracker.is_searching()
@@ -217,6 +281,24 @@ impl GetStarted {
     }
 
     pub fn hints(&self, setup: &SetupState) -> Vec<Hint> {
+        if self.commits.open {
+            return match self.commits.field {
+                CommitsField::Name | CommitsField::Email => vec![
+                    Hint::new("type", "the value"),
+                    Hint::new("tab", "next"),
+                    Hint::new("enter", "save"),
+                    Hint::new("esc", "leave it as it was"),
+                ],
+                CommitsField::Sign => vec![
+                    Hint::new("enter", "turn it on or off"),
+                    Hint::new("tab", "next"),
+                ],
+                CommitsField::Key => vec![
+                    Hint::new("enter", "show or make the key"),
+                    Hint::new("tab", "next"),
+                ],
+            };
+        }
         if let Some(browser) = &self.repositories {
             return browser.select.hints();
         }
@@ -260,7 +342,7 @@ impl GetStarted {
                     ),
                 );
             }
-            Focus::Commits => hints.insert(0, Hint::new("enter", "open settings")),
+            Focus::Commits => hints.insert(0, Hint::new("enter", "edit")),
             Focus::Tracker => hints.insert(
                 0,
                 Hint::new(
@@ -302,6 +384,7 @@ pub fn ready(setup: &SetupState, name: &Field) -> bool {
         && signed_in(&setup.agent_status)
         && setup.repository.is_some()
         && signed_in(&setup.vcs_status)
+        && setup.commits.is_set()
 }
 
 /// Whether a profile's login is known to work. A file on disk counts until a
@@ -324,7 +407,13 @@ pub fn draw(frame: &mut Frame, area: Rect, panel: &mut GetStarted, setup: &Setup
     let subtitle_height = wrapped_height(subtitle_plain(), width);
     let rows = checklist(panel, setup, width);
     let rows_height = rows.len() as u16;
-    let detail = detail_text(panel.focus, setup);
+    let detail = if panel.commits.open {
+        "Commits carry this name and email, and signing marks them as yours. The key lives in \
+         your version-control profile, not in a task. Enter saves; Esc puts back what is saved."
+            .to_owned()
+    } else {
+        detail_text(panel.focus, setup)
+    };
     let detail_height = if detail.is_empty() {
         0
     } else {
@@ -508,14 +597,17 @@ fn checklist(panel: &GetStarted, setup: &SetupState, width: u16) -> Vec<Line<'st
         if setup.commits.is_set() {
             Marker::Done
         } else {
-            Marker::Optional
+            Marker::Blocking
         },
         "Commits",
         &commits_value,
-        "enter settings",
+        "enter edit",
         focused == Focus::Commits,
         width,
     ));
+    if panel.commits.open {
+        lines.extend(commits_editor(&panel.commits, setup, width));
+    }
 
     let tracker = setup.tracker;
     let tracker_value = if tracker == TrackerState::Connected {
@@ -677,6 +769,83 @@ fn options<T>(select: &Select<T>, width: u16) -> Vec<Line<'static>> {
         .collect()
 }
 
+/// The identity, as four rows under the one that opens it.
+fn commits_editor(commits: &Commits, setup: &SetupState, width: u16) -> Vec<Line<'static>> {
+    let indent = " ".repeat(LABEL_WIDTH + 6);
+    let name = if commits.field == CommitsField::Name {
+        commits.name.marked()
+    } else {
+        commits.name.value().to_owned()
+    };
+    let email = if commits.field == CommitsField::Email {
+        commits.email.marked()
+    } else {
+        commits.email.value().to_owned()
+    };
+    let sign = if commits.signs {
+        "● on".to_owned()
+    } else {
+        "○ off".to_owned()
+    };
+    let key = if setup.has_key {
+        "present · enter show".to_owned()
+    } else {
+        "none · enter generate".to_owned()
+    };
+    vec![
+        editor_line(
+            &indent,
+            "Name",
+            &name,
+            commits.field == CommitsField::Name,
+            width,
+        ),
+        editor_line(
+            &indent,
+            "Email",
+            &email,
+            commits.field == CommitsField::Email,
+            width,
+        ),
+        editor_line(
+            &indent,
+            "Sign commits",
+            &sign,
+            commits.field == CommitsField::Sign,
+            width,
+        ),
+        editor_line(
+            &indent,
+            "Key",
+            &key,
+            commits.field == CommitsField::Key,
+            width,
+        ),
+    ]
+}
+
+fn editor_line(indent: &str, label: &str, value: &str, focused: bool, width: u16) -> Line<'static> {
+    let prefix = format!("{indent}{label:<12} ");
+    let available = usize::from(width).saturating_sub(prefix.chars().count());
+    let value = truncate(value, available);
+    let style = if focused {
+        palette::primary().bold()
+    } else {
+        palette::primary()
+    };
+    Line::from(vec![
+        Span::styled(
+            prefix,
+            if focused {
+                palette::primary().bold()
+            } else {
+                palette::muted()
+            },
+        ),
+        Span::styled(format!("{value:<available$}"), style),
+    ])
+}
+
 fn row_anchor(rows: Rect, index: u16) -> Rect {
     Rect {
         y: rows.y.saturating_add(index),
@@ -728,15 +897,15 @@ fn detail_text(focus: Focus, setup: &SetupState) -> String {
                 .to_owned()
         }
         Focus::Commits if setup.commits.is_set() => {
-            "Commits carry your name and email, and a signature proves they came from you. This \
-             is installation-wide, read from your version-control profile; Settings → Version \
-             control shows what a task would commit under."
+            "Commits carry your name and email, and a signature proves they came from you. Enter \
+             edits them here; the key is made once and stays in your version-control profile, so \
+             every task commits the same way."
                 .to_owned()
         }
         Focus::Commits => {
-            "Commits carry your name and email, and a signature proves they came from you. It is \
-             installation-wide, and Settings → Version control shows what a task would commit \
-             under."
+            "A commit needs a name and an email before a task can deliver its work. Enter edits \
+             them here; signing is set up from the same place, with a key that stays in your \
+             version-control profile."
                 .to_owned()
         }
         Focus::Tracker => {
