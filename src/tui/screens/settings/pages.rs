@@ -230,7 +230,7 @@ pub(super) fn project_lines(
         )),
     }
     lines.push(Line::from(vec![
-        Span::styled("machine     ", palette::muted()),
+        Span::styled("runs on     ", palette::muted()),
         Span::styled(
             project
                 .host

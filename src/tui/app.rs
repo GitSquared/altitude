@@ -61,7 +61,7 @@ use popups::send_task::{Decision as SendDecision, SendTask};
 use popups::setup::{Setup, SetupKind};
 use popups::sign_in::{Decision as SignInDecision, SignIn};
 use screens::get_started::{
-    Focus as SetupFocus, GetStarted, MachineOffer, NameKey, SetupState, name_key, signed_in,
+    Focus as SetupFocus, GetStarted, NameKey, RemoteOffer, SetupState, name_key, signed_in,
 };
 use screens::settings::{
     CredentialKind, Depth, Focus, Form, GitIdentity, Panel, RowKind, Section, Setting, SettingsHit,
@@ -3316,7 +3316,7 @@ impl App {
                 KeyCode::Enter | KeyCode::Char(' ') if form.focus == Focus::Accept => {
                     form.accepts_delegated_work = !form.accepts_delegated_work;
                 }
-                KeyCode::Enter | KeyCode::Char(' ') if form.focus == Focus::Machine => {
+                KeyCode::Enter | KeyCode::Char(' ') if form.focus == Focus::Host => {
                     form.cycle_host();
                 }
                 KeyCode::Enter if form.enters_newline() => form.handle_text(key),
@@ -3681,13 +3681,13 @@ impl App {
                     self.open_credential_shell(vcs.label(), vcs.profile(), task_service, events);
                     return;
                 }
-                SetupFocus::Machine => {
+                SetupFocus::Remote => {
                     // Only a machine on this network is actionable: what the project
                     // runs on is otherwise Settings' business.
                     if let Some(offer) = self.setup().offer
                         && self.adopt_remote(&offer)
                     {
-                        self.set_project_machine(&offer.address);
+                        self.set_project_remote(&offer.address);
                         let address = offer.address.clone();
                         self.check_remote(&address).await;
                         self.watch_remote(&address);
@@ -3764,7 +3764,7 @@ impl App {
             .values()
             .filter(|remote| !configured.contains(&remote.address))
             .min_by(|left, right| left.label.cmp(&right.label))
-            .map(|remote| MachineOffer {
+            .map(|remote| RemoteOffer {
                 label: remote.label.clone(),
                 address: remote.address.clone(),
             });
@@ -3792,7 +3792,7 @@ impl App {
     }
 
     /// Adopt a machine that announced itself here, answering whether it was saved.
-    fn adopt_remote(&mut self, offer: &MachineOffer) -> bool {
+    fn adopt_remote(&mut self, offer: &RemoteOffer) -> bool {
         let Some(file) = self.settings_file.as_mut() else {
             return false;
         };
@@ -3812,7 +3812,7 @@ impl App {
     }
 
     /// Run the project in front on a machine, here or elsewhere.
-    fn set_project_machine(&mut self, address: &str) {
+    fn set_project_remote(&mut self, address: &str) {
         let active = self.active_project_id();
         let Some(file) = self.settings_file.as_mut() else {
             return;

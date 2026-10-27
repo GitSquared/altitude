@@ -38,7 +38,7 @@ pub enum Focus {
     Name,
     Agent,
     Code,
-    Machine,
+    Remote,
     Create,
     Settings,
 }
@@ -47,14 +47,14 @@ const ROWS: [Focus; 6] = [
     Focus::Name,
     Focus::Agent,
     Focus::Code,
-    Focus::Machine,
+    Focus::Remote,
     Focus::Create,
     Focus::Settings,
 ];
 
-/// A machine on this network that this installation does not know yet.
+/// A remote announcing on this network that this installation does not know yet.
 #[derive(Clone)]
-pub struct MachineOffer {
+pub struct RemoteOffer {
     pub label: String,
     pub address: String,
 }
@@ -73,7 +73,7 @@ pub struct SetupState {
     /// The machine this project runs on, when it is not this one.
     pub host: Option<String>,
     /// A remote announcing here that this installation has not adopted.
-    pub offer: Option<MachineOffer>,
+    pub offer: Option<RemoteOffer>,
 }
 
 pub struct GetStarted {
@@ -176,7 +176,7 @@ impl GetStarted {
                     hints.insert(0, Hint::new("enter", "sign in"));
                 }
             }
-            Focus::Machine => {
+            Focus::Remote => {
                 if setup.host.is_none() && setup.offer.is_some() {
                     hints.insert(0, Hint::new("enter", "add it"));
                 }
@@ -271,21 +271,21 @@ pub fn draw(frame: &mut Frame, area: Rect, panel: &mut GetStarted, setup: &Setup
         panel.focus == Focus::Code,
         width,
     );
-    let machine_value = match (&setup.host, &setup.offer) {
+    let remote_value = match (&setup.host, &setup.offer) {
         (Some(host), _) => host.clone(),
         (None, Some(offer)) => format!("{} · found on this network", offer.label),
-        (None, None) => "this machine".to_owned(),
+        (None, None) => "none · runs here".to_owned(),
     };
-    let machine_row = row(
+    let remote_row = row(
         true,
-        "Machine",
-        &machine_value,
+        "Remote",
+        &remote_value,
         if setup.host.is_none() && setup.offer.is_some() {
             "enter add"
         } else {
             ""
         },
-        panel.focus == Focus::Machine,
+        panel.focus == Focus::Remote,
         width,
     );
     let actions = Line::from(vec![
@@ -294,7 +294,7 @@ pub fn draw(frame: &mut Frame, area: Rect, panel: &mut GetStarted, setup: &Setup
         action("Open Settings", panel.focus == Focus::Settings),
     ]);
     frame.render_widget(
-        Paragraph::new(vec![name, agent_row, code_row, machine_row]),
+        Paragraph::new(vec![name, agent_row, code_row, remote_row]),
         rows,
     );
     frame.render_widget(Paragraph::new(actions), actions_area);
@@ -397,19 +397,30 @@ fn detail_text(focus: Focus, setup: &SetupState) -> String {
              work starts."
                 .to_owned()
         }
-        Focus::Machine if setup.host.is_some() => format!(
-            "This project's tasks run on {}. That machine keeps the code it clones and the caches \
-             it builds, so moving the project moves where its work lives.",
+        Focus::Remote if setup.host.is_some() => format!(
+            "A remote is another machine you have paired with Altitude, on a network or a tailnet. \
+             A project runs where its remote is, and each machine keeps its own checkouts and \
+             caches. This project runs on {}; Settings → Remotes is where that changes.",
             setup.host.as_deref().unwrap_or_default()
         ),
-        Focus::Machine if setup.offer.is_some() => {
-            "A remote on this network. Adding it lets this project run there, with its own caches, \
-             and leaves everything else here. Other machines live in Settings → Remotes."
-                .to_owned()
+        Focus::Remote if setup.offer.is_some() => {
+            let label = setup
+                .offer
+                .as_ref()
+                .map(|offer| offer.label.as_str())
+                .unwrap_or_default();
+            format!(
+                "A remote is another machine you have paired with Altitude, on a network or a \
+                 tailnet. A project runs where its remote is, and each machine keeps its own \
+                 checkouts and caches. {label} is announcing on this network: enter adds it, and \
+                 runs this project there."
+            )
         }
-        Focus::Machine => {
-            "Tasks run on this machine, in sandboxes thrown away after them. A remote is another \
-             machine that can run a project; one on this network would appear here."
+        Focus::Remote => {
+            "A remote is another machine you have paired with Altitude, on a network or a tailnet. \
+             A project runs where its remote is, and each machine keeps its own checkouts and \
+             caches. None is paired here yet, so this project runs on this machine; one on your \
+             network would appear above."
                 .to_owned()
         }
         Focus::Create => {

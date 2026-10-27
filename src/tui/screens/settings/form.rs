@@ -82,7 +82,7 @@ pub enum Focus {
     Caches,
     Instructions,
     Scope,
-    Machine,
+    Host,
     Accept,
     Cancel,
     Save,
@@ -176,8 +176,8 @@ fn groups(project: bool) -> Vec<Group> {
             kind: Kind::Single,
         },
         Group {
-            focus: Focus::Machine,
-            label: "Machine",
+            focus: Focus::Host,
+            label: "Runs on",
             kind: Kind::Choice,
         },
         Group {
@@ -222,7 +222,7 @@ const PROJECT_FIELDS: [Focus; 10] = [
     Focus::Caches,
     Focus::Instructions,
     Focus::Scope,
-    Focus::Machine,
+    Focus::Host,
     Focus::Accept,
     Focus::Cancel,
     Focus::Save,
