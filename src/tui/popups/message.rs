@@ -14,7 +14,7 @@ use ratatui::{
 
 use crate::tui::{
     keys,
-    widgets::{chrome, palette, text::TextBox},
+    widgets::{button, chrome, palette, text::TextBox},
 };
 
 pub struct MessagePrompt {
@@ -83,13 +83,13 @@ pub fn draw(frame: &mut Frame, area: Rect, prompt: &MessagePrompt) -> Rect {
         hint,
     );
     prompt.body.draw_titled(frame, field, true, None);
-    chrome::actions(
+    button::actions(
         frame,
         popup,
         actions,
         &[
-            chrome::Action::primary("send").focused(true),
-            chrome::Action::secondary("cancel"),
+            button::Action::primary("send").focused(true),
+            button::Action::secondary("cancel"),
         ],
     );
     popup
