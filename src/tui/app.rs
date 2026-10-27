@@ -55,11 +55,11 @@ use crate::{
 };
 
 use super::background::terrain::Terrain;
+use super::links::Link;
 use super::widgets::{alert::Alert, list};
 use popups::confirm::{CredentialTarget, PendingConfirm};
 use popups::message::{Decision as MessageDecision, MessagePrompt};
 use popups::new_task::{AGENTS, Answer, Hit as NewTaskHit, Host, NewTask, SearchToken};
-use popups::open_link::{self, Link, OpenLink};
 use popups::repositories::{Key as RepositoriesKey, Repositories};
 use popups::send_task::{Decision as SendDecision, SendTask};
 use popups::setup::{Setup, SetupKind};
@@ -112,8 +112,6 @@ pub(in crate::tui) enum Foreground {
     Signals,
     /// A terminal, taking every key there is.
     Shell(ShellId),
-    /// A sandbox asking to open a link, over the terminal that asked.
-    OpenLink(OpenLink),
     #[default]
     Tasks,
 }
@@ -1387,7 +1385,6 @@ impl App {
             }
             // Nothing to hand back to: the sandbox goes with the shell.
             Foreground::Shell(ShellId::Credentials(_)) => vec![Hint::new("ctrl-a", "close")],
-            Foreground::OpenLink(asking) => asking.hints(),
             Foreground::Tasks => {
                 // Only what there is something to do it to. A remote's tasks sit
                 // beside this machine's, so a list holding only theirs still has
@@ -1472,7 +1469,6 @@ impl App {
     pub(in crate::tui) fn open_shell(&self) -> Option<&ShellId> {
         match &self.foreground {
             Foreground::Shell(id) => Some(id),
-            Foreground::OpenLink(asking) => Some(asking.shell()),
             _ => None,
         }
     }
@@ -1507,7 +1503,6 @@ impl App {
                     | Foreground::SignIn(_)
                     | Foreground::Signals
                     | Foreground::Message(_)
-                    | Foreground::OpenLink(_)
             )
     }
 
@@ -6679,30 +6674,18 @@ impl App {
             return;
         };
         match Link::parse(&url) {
-            // A question rather than an act: a sandbox runs what it likes, and this
-            // machine opens what its operator says it opens.
-            Some(link) => self.foreground = Foreground::OpenLink(OpenLink::new(id.clone(), link)),
-            None => tracing::debug!(%url, "a sandbox asked to open something that is not a page"),
-        }
-    }
-
-    /// Take the answer to a sandbox's link.
-    pub(in crate::tui) fn open_link_key(&mut self, key: KeyEvent) {
-        let Foreground::OpenLink(mut asking) = mem::take(&mut self.foreground) else {
-            return;
-        };
-        let shell = asking.shell().clone();
-        match asking.handle_key(key) {
-            None => self.foreground = Foreground::OpenLink(asking),
-            Some(open_link::Decision::No) => self.foreground = Foreground::Shell(shell),
-            Some(open_link::Decision::Open) => {
-                let url = asking.url().to_owned();
-                self.foreground = Foreground::Shell(shell);
-                match open_in_browser(&url) {
+            Some(link) => {
+                // The address is checked into a page; opening it is not a
+                // question the operator asked to be interrupted for.
+                match open_in_browser(link.url()) {
                     Ok(()) => tracing::info!(%url, "opened a sandbox's link"),
-                    Err(error) => self.say(format!("Could not open {url}: {error}")),
+                    Err(error) => {
+                        tracing::warn!(%error, "could not open a sandbox's link");
+                        self.say(format!("Could not open {url}: {error}"));
+                    }
                 }
             }
+            None => tracing::debug!(%url, "a sandbox asked to open something that is not a page"),
         }
     }
 

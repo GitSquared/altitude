@@ -9,6 +9,7 @@ mod app;
 mod background;
 mod boot;
 mod keys;
+mod links;
 mod popups;
 mod run;
 mod screens;

@@ -520,11 +520,6 @@ where
             if let Some(shell) = app.open_shell().and_then(|id| app.shells.get(id)) {
                 shell.draw(frame, content);
             }
-            // Over the terminal that asked, which goes on running behind it.
-            if let Foreground::OpenLink(asking) = &app.foreground {
-                widgets::chrome::dim(frame, content);
-                modal = Some(popups::open_link::draw(frame, content, asking));
-            }
             if let Foreground::Setup(setup) = &mut app.foreground {
                 widgets::chrome::dim(frame, content);
                 let report = setup
@@ -1118,7 +1113,6 @@ where
                 .await
         }
         Foreground::Shell(_) => app.shell_key(key, event_loop, task_service).await,
-        Foreground::OpenLink(_) => app.open_link_key(key),
         Foreground::Tasks => {
             if app.list_key(key, task_service, remote_signals).await? {
                 return Ok(true);
