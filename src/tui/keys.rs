@@ -53,8 +53,8 @@ pub fn help_sections() -> Vec<HelpSection> {
         HelpSection {
             title: "Navigation",
             bindings: &[
-                ("← / → · h / l", "Move across columns or cards"),
-                ("j / k · ↓ / ↑", "Select the next or previous item"),
+                ("j / k · h / l", "Select the next or previous card"),
+                ("← / → · ↑ / ↓", "Move across the grid"),
                 (
                     "Tab / Shift-Tab",
                     "Switch screen tabs; in a form, move between fields",

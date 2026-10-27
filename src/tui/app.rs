@@ -5890,11 +5890,21 @@ impl App {
                 open_panel(self, task_service).await;
             }
             KeyCode::Char('i') => self.open_signals(task_service, remote_signals).await,
-            KeyCode::Char('j') | KeyCode::Down => {
+            // j and k walk the cards, the way a list does; the arrows keep the
+            // grid's shape, where up and down are a row rather than a card.
+            KeyCode::Char('j') => {
+                let columns = self.grid_columns();
+                self.select_adjacent(1, columns);
+            }
+            KeyCode::Char('k') => {
+                let columns = self.grid_columns();
+                self.select_adjacent(-1, columns);
+            }
+            KeyCode::Down => {
                 let columns = self.grid_columns();
                 self.select_adjacent(columns as isize, columns);
             }
-            KeyCode::Char('k') | KeyCode::Up => {
+            KeyCode::Up => {
                 let columns = self.grid_columns();
                 self.select_adjacent(-(columns as isize), columns);
             }
