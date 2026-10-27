@@ -39,14 +39,14 @@ use crate::{
 use super::App;
 use super::app::{
     ConfigPushReply, Foreground, IssueReadReply, IssueSearchReply, NO_LINEAR, RemoteSignalsReply,
-    RemoveTaskReply, SendTaskReply, TaskDelegationReply, TrackerConnectReply, WatchedTasks,
+    RemoveTaskReply, RepositoryListReply, SendTaskReply, TaskDelegationReply, TrackerConnectReply,
+    WatchedTasks,
 };
 use super::background::terrain;
 use super::keys::{is_dismiss, is_help};
 use super::popups;
 use super::popups::confirm::handle_confirm_key;
 use super::screens;
-use super::screens::settings::Focus;
 use super::widgets;
 use super::widgets::utils::shimmer_clock;
 use crate::credentials::CredentialShellEvent;
@@ -151,6 +151,7 @@ struct EventReplies<'a> {
     delegations: &'a mpsc::Sender<TaskDelegationReply>,
     sends: &'a mpsc::Sender<SendTaskReply>,
     removals: &'a mpsc::Sender<RemoveTaskReply>,
+    repositories: &'a mpsc::UnboundedSender<RepositoryListReply>,
 }
 
 /// What the loop hears from outside the terminal: the work changing, and what the
@@ -258,6 +259,9 @@ where
     // A profile's login is asked about off the loop too: the answer comes from a
     // sandbox, and one at a time, so the panel is never waiting on three.
     let (credential_reports, mut reported) = mpsc::unbounded_channel();
+    // Listing repositories runs in the login's own sandbox, which may have to be
+    // installed the first time, so it is off this loop like every other wait.
+    let (repository_lists, mut repositories_listed) = mpsc::unbounded_channel();
     // Searching Linear and reading one issue are network calls, so they happen on
     // their own clock and away from this loop. Each reply carries the popup and
     // query it answers, so a late one is dropped rather than shown under the
@@ -663,6 +667,10 @@ where
                 }
                 redraw |= changed;
             }
+            Some(reply) = repositories_listed.recv() => {
+                app.repositories_listed(reply);
+                redraw = true;
+            }
             Some(reply) = reported.recv() => {
                 app.credential_checked(reply);
                 redraw = true;
@@ -838,6 +846,7 @@ where
                         delegations: &delegations,
                         sends: &sends,
                         removals: &removals,
+                        repositories: &repository_lists,
                     },
                 )
                 .await?;
@@ -878,6 +887,7 @@ where
         delegations,
         sends,
         removals,
+        repositories,
     } = replies;
     if let Event::Resize(_, _) = event
         && app.open_shell().is_some()
@@ -897,10 +907,11 @@ where
         } else if let Foreground::NewTask(new_task) = &mut app.foreground {
             new_task.paste(&text);
         } else if let Some(form) = &mut app.panel.form {
-            match form.focus {
-                Focus::Primary => form.primary.paste(&text),
-                Focus::Setup => form.setup.paste(&text),
-                _ => {}
+            // A list that is open is narrowed by what is pasted; otherwise the
+            // text goes to the field the caret is in.
+            match &mut form.repositories {
+                Some(browser) => browser.select.paste(&text),
+                None => form.paste(&text),
             }
         } else if let Some(id) = app.open_shell().cloned()
             && let Some(bytes) = app
@@ -1017,8 +1028,14 @@ where
                 .await
         }
         Foreground::Panel => {
-            app.panel_keys(key, task_service, credential_events, tracker_connects)
-                .await
+            app.panel_keys(
+                key,
+                task_service,
+                credential_events,
+                tracker_connects,
+                repositories,
+            )
+            .await
         }
         Foreground::Setup(_) => app.setup_key(key),
         Foreground::SignIn(_) => app.sign_in_key(key, task_service, credential_events).await,

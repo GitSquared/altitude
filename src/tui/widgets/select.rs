@@ -113,6 +113,22 @@ impl<T> Select<T> {
         }
     }
 
+    /// Replace the offers, keeping the chosen position in range.
+    ///
+    /// What was chosen is the page's to keep: it is the one that knows what still
+    /// exists. A query is dropped with the offers it narrowed.
+    pub fn set_offers(&mut self, offers: Vec<Offer<T>>) {
+        self.offers = offers;
+        self.chosen = self.chosen.min(self.offers.len().saturating_sub(1));
+        self.at = 0;
+        self.query.clear();
+    }
+
+    /// Whether there is anything to choose, which a page that is waiting says.
+    pub fn is_empty(&self) -> bool {
+        self.offers.is_empty()
+    }
+
     /// Choose the first offer `test` accepts, answering whether there was one.
     pub fn is_open(&self) -> bool {
         self.open

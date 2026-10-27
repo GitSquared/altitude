@@ -6,6 +6,7 @@
 //! needs a normalization rather than a second rule.
 
 mod github;
+pub(crate) mod listing;
 pub mod tools;
 
 pub use github::GitHub;
@@ -23,6 +24,25 @@ pub enum VcsProviderKind {
 impl VcsProviderKind {
     /// Every kind this build knows, in the order a URL is offered to them.
     const ALL: &[Self] = &[Self::GitHub];
+
+    /// The provider a repository field lists from while a build knows one.
+    ///
+    /// A project will name its version-control connection when a machine can hold
+    /// more than one. Until then every repository is this one's, and saying so
+    /// here keeps the assumption out of a caller indexing a list.
+    pub fn sole() -> Self {
+        Self::ALL[0]
+    }
+}
+
+/// A repository a provider's login can reach, as a picker lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Repository {
+    /// `owner/name`, which is how the provider names it.
+    pub name: String,
+    /// What a clone takes.
+    pub url: String,
+    pub is_private: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -38,7 +58,7 @@ pub struct CodeContribution {
 
 /// Provider-specific discovery and normalization; task history stores only the
 /// provider-neutral contribution returned here.
-pub trait VcsProvider {
+pub trait VcsProvider: Send + Sync {
     fn contribution_from_url(&self, url: &str) -> Option<CodeContribution>;
 
     /// One shell command that reports the state of every contribution given.
@@ -63,6 +83,20 @@ pub trait VcsProvider {
 
     /// What a sandbox has to install before this provider's commands can run.
     fn profile_recipe(&self) -> ProfileRecipe;
+
+    /// What the provider's own CLI runs to list the repositories its login can
+    /// reach.
+    ///
+    /// A command rather than a request of Altitude's own: the login belongs to
+    /// the CLI, and the thing that can answer for it is the sandbox the CLI is
+    /// installed in.
+    fn repository_list_command(&self) -> String;
+
+    /// Read that command's output into the repositories it listed, newest first.
+    ///
+    /// `None` when the answer cannot be read, so a malformed listing is a picker
+    /// that says so rather than a list of half-read rows.
+    fn repositories(&self, output: &str) -> Option<Vec<Repository>>;
 }
 
 /// What stands between a contribution and its merge.

@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use crate::{
     isolation::{GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand, shell_quote},
     vcs::{
-        CodeContribution, ContributionObservation, ContributionState, MergeStanding, VcsProvider,
-        VcsProviderKind,
+        CodeContribution, ContributionObservation, ContributionState, MergeStanding, Repository,
+        VcsProvider, VcsProviderKind,
     },
 };
 
@@ -62,6 +62,38 @@ impl VcsProvider for GitHub {
             // A directory mount lets `git config --global` atomically replace its file.
             environment: vec![("GIT_CONFIG_GLOBAL", "/altitude/git/config")],
         }
+    }
+
+    fn repository_list_command(&self) -> String {
+        // One request for the set, with the fields a picker reads. `pushedAt` is
+        // asked for only to order the list: the repository an operator means is
+        // almost always one they touched recently.
+        "gh repo list --limit 200 --json nameWithOwner,url,isPrivate,pushedAt".to_owned()
+    }
+
+    fn repositories(&self, output: &str) -> Option<Vec<Repository>> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Row {
+            name_with_owner: String,
+            url: String,
+            is_private: bool,
+            #[serde(default)]
+            pushed_at: String,
+        }
+        let mut rows: Vec<Row> = serde_json::from_str(output).ok()?;
+        // ISO-8601 timestamps order as text, and the provider's own order is not
+        // promised.
+        rows.sort_by(|a, b| b.pushed_at.cmp(&a.pushed_at));
+        Some(
+            rows.into_iter()
+                .map(|row| Repository {
+                    name: row.name_with_owner,
+                    url: row.url,
+                    is_private: row.is_private,
+                })
+                .collect(),
+        )
     }
 
     fn contribution_from_url(&self, value: &str) -> Option<CodeContribution> {

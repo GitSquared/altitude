@@ -5,7 +5,7 @@ use crate::{
     isolation::{EnvironmentDescription, EnvironmentProgress, IsolationEngine, IsolationError},
     project::Project,
     tracker::{IssueReader, TrackerProvider},
-    vcs::tools::VcsAgentTools,
+    vcs::{self, Repository, VcsProviderKind, tools::VcsAgentTools},
 };
 use std::{collections::HashMap, error::Error, fmt, io, path::PathBuf, sync::Arc};
 use tokio::sync::broadcast;
@@ -130,6 +130,7 @@ pub enum TaskServiceError {
     Isolation(IsolationError),
     InvalidReport(String),
     AgentChannel(io::Error),
+    RepositoryListing(String),
 }
 impl fmt::Display for TaskServiceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -139,6 +140,7 @@ impl fmt::Display for TaskServiceError {
             Self::Isolation(error) => error.fmt(formatter),
             Self::InvalidReport(error) => write!(formatter, "invalid agent turn report: {error}"),
             Self::AgentChannel(error) => write!(formatter, "agent channel error: {error}"),
+            Self::RepositoryListing(error) => formatter.write_str(error),
         }
     }
 }
@@ -216,6 +218,20 @@ where
     /// The logins tasks run under.
     pub fn credentials(&self) -> &Credentials<E> {
         &self.credentials
+    }
+
+    /// The repositories this machine's version-control login can reach.
+    ///
+    /// Asked from a project's settings, so it runs in the login's own build and
+    /// never in a task's. Off the caller's loop: it may have to install the CLI
+    /// the first time.
+    pub async fn repositories(
+        &self,
+        kind: VcsProviderKind,
+    ) -> Result<Vec<Repository>, TaskServiceError> {
+        vcs::listing::repositories(&self.isolation, kind)
+            .await
+            .map_err(|error| TaskServiceError::RepositoryListing(error.to_string()))
     }
 
     pub fn with_tracker(mut self, tracker: Option<Arc<dyn TrackerProvider>>) -> Self {

@@ -9,15 +9,17 @@ use ratatui::{
     Frame,
     layout::Rect,
     text::Line,
-    widgets::{Block, BorderType, Clear, Padding, Paragraph},
+    widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap},
 };
 
 use crate::{
     project::Project,
     tui::widgets::{
         chrome, palette,
+        select::{Offer, Select},
         text::{Field, FieldStyle, TextBox},
     },
+    vcs::Repository,
 };
 
 /// What an action applies to: the list it saves into, and what it replaces.
@@ -206,6 +208,71 @@ pub struct Form {
     /// How the tracker's scope is named in this form: a Linear team, a Jira
     /// project, a GitHub repository.
     scope_label: String,
+    /// The repository list, while it is open over the form.
+    pub repositories: Option<Repositories>,
+}
+
+/// The repositories a login can reach, as a list over the form.
+///
+/// The form's repository is a text field as well, so the list is a shortcut rather
+/// than the only way in: a repository the login cannot list is still a repository
+/// an operator can name.
+pub struct Repositories {
+    pub select: Select<Repository>,
+    /// Why there is nothing to choose, when it is not still on its way.
+    pub error: Option<String>,
+}
+
+impl Repositories {
+    /// A list opened on the repository the form already holds, when it is in it.
+    pub fn new(repositories: &[Repository], current: &str) -> Self {
+        let chosen = repositories
+            .iter()
+            .position(|repository| repository.url == current)
+            .unwrap_or(0);
+        let mut select = Select::new("repository", offers(repositories), chosen);
+        select.open();
+        Self {
+            select,
+            error: None,
+        }
+    }
+
+    /// Take a fresh listing, keeping what was chosen where it is still there.
+    pub fn fill(&mut self, repositories: &[Repository]) {
+        let chosen = self
+            .select
+            .chosen_value()
+            .map(|repository| repository.url.clone());
+        self.select.set_offers(offers(repositories));
+        if let Some(url) = chosen
+            && let Some(index) = repositories
+                .iter()
+                .position(|repository| repository.url == url)
+        {
+            self.select.choose(index);
+        }
+        self.error = None;
+    }
+
+    pub fn failed(&mut self, error: String) {
+        self.error = Some(error);
+    }
+}
+
+fn offers(repositories: &[Repository]) -> Vec<Offer<Repository>> {
+    repositories
+        .iter()
+        .cloned()
+        .map(|repository| {
+            let label = if repository.is_private {
+                format!("{} · private", repository.name)
+            } else {
+                repository.name.clone()
+            };
+            Offer::new(repository, label)
+        })
+        .collect()
 }
 
 /// Every focus a project form walks, in order.
@@ -267,6 +334,7 @@ impl Form {
             focus: Focus::Primary,
             first_group: 0,
             scope_label: scope_label.to_owned(),
+            repositories: None,
         }
     }
 
@@ -285,6 +353,7 @@ impl Form {
             focus: Focus::Primary,
             first_group: 0,
             scope_label: String::new(),
+            repositories: None,
         }
     }
 
@@ -353,6 +422,24 @@ impl Form {
         self.host = options[(at + 1) % options.len()].clone();
     }
 
+    /// Give pasted text to the box that has the caret.
+    pub fn paste(&mut self, text: &str) {
+        match self.focus {
+            Focus::Primary => self.primary.paste(text),
+            Focus::Repository => self.repository.paste(text),
+            Focus::Setup => self.setup.paste(text),
+            Focus::Caches => self.caches.paste(text),
+            Focus::Instructions => self.instructions.paste(text),
+            Focus::Scope => self.scope.paste(text),
+            _ => {}
+        }
+    }
+
+    /// Take the repository a picker chose.
+    pub fn set_repository(&mut self, url: &str) {
+        self.repository = Field::with(url);
+    }
+
     /// The caches the form lists, one per line, without blanks.
     pub fn cache_paths(&self) -> Vec<String> {
         self.caches
@@ -393,9 +480,8 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &mut Form) {
     let fields = body.content;
     let groups = groups(project);
     // The caret's group must be on screen, so the window of drawn groups starts
-    // at the first one that lets it fit.
-    // The actions are not groups, so being on one keeps the last group in view
-    // rather than jumping the form back to its top.
+    // at the first one that lets it fit. The actions are not groups, so being on
+    // one keeps the last group in view rather than jumping back to the top.
     let focused = groups
         .iter()
         .position(|candidate| candidate.focus == form.focus)
@@ -414,6 +500,7 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &mut Form) {
     }
 
     let mut y = fields.y;
+    let mut repository_anchor = None;
     for candidate in groups.iter().skip(form.first_group) {
         let height = candidate.kind.rows();
         if y + height > fields.bottom() {
@@ -424,8 +511,14 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &mut Form) {
             height,
             ..fields
         };
+        if candidate.focus == Focus::Repository {
+            repository_anchor = Some(rect);
+        }
         draw_group(frame, rect, form, candidate);
         y += height + 1;
+    }
+    if let Some(anchor) = repository_anchor {
+        draw_repositories(frame, fields, form, anchor);
     }
 
     // The actions sit at the bottom right, where the eye ends up.
@@ -437,6 +530,41 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &mut Form) {
             chrome::Action::secondary("cancel").focused(form.focus == Focus::Cancel),
             chrome::Action::primary("save").focused(form.focus == Focus::Save),
         ],
+    );
+}
+
+/// The repository list, or why it has not arrived, under the field it fills.
+fn draw_repositories(frame: &mut Frame, area: Rect, form: &Form, anchor: Rect) {
+    let Some(browser) = &form.repositories else {
+        return;
+    };
+    if !browser.select.is_empty() {
+        browser.select.draw_list_below(frame, area, anchor);
+        return;
+    }
+    let height = 4;
+    let popup = Rect {
+        y: anchor
+            .bottom()
+            .min(area.bottom().saturating_sub(height))
+            .max(area.y),
+        height,
+        ..anchor
+    };
+    frame.render_widget(Clear, popup);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(palette::muted())
+        .padding(Padding::horizontal(1));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let (text, style) = match &browser.error {
+        Some(error) => (error.as_str(), palette::attention()),
+        None => ("listing repositories…", palette::muted()),
+    };
+    frame.render_widget(
+        Paragraph::new(Line::styled(text, style)).wrap(Wrap { trim: true }),
+        inner,
     );
 }
 

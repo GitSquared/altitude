@@ -48,6 +48,7 @@ use crate::{
         pointer::Targets,
         select::{Offer, Select},
     },
+    vcs::{Repository, VcsProviderKind},
 };
 
 use super::background::terrain::Terrain;
@@ -59,8 +60,8 @@ use popups::send_task::{Decision as SendDecision, SendTask};
 use popups::setup::{Setup, SetupKind};
 use popups::sign_in::{Decision as SignInDecision, SignIn};
 use screens::settings::{
-    CredentialKind, Depth, Focus, Form, GitIdentity, Panel, RowKind, Section, Setting, SettingsHit,
-    Target,
+    CredentialKind, Depth, Focus, Form, GitIdentity, Panel, Repositories, RowKind, Section,
+    Setting, SettingsHit, Target,
 };
 use screens::shell::{GuestRequest, Shell};
 use screens::signals::{
@@ -215,6 +216,42 @@ impl CredentialStatus {
 pub(in crate::tui) struct CredentialCheckReply {
     pub generation: u64,
     pub answers: Vec<(&'static str, CredentialStatus)>,
+}
+
+/// A repository listing that arrived while the interface was drawing.
+pub(in crate::tui) struct RepositoryListReply {
+    pub result: Result<Vec<Repository>, String>,
+}
+
+/// What a key did while the repository list was open.
+enum PickerKey {
+    Still,
+    Closed,
+    Save,
+}
+
+/// Take a key for the repository list, answering what the form should do next.
+///
+/// The list behaves like a dropdown: escape leaves the field as it was, and enter
+/// takes what is under the keys.
+fn picker_key(form: &mut Form, key: KeyEvent) -> PickerKey {
+    let Some(mut browser) = form.repositories.take() else {
+        return PickerKey::Closed;
+    };
+    if is_secondary(key) {
+        return PickerKey::Save;
+    }
+    browser.select.handle_key(key);
+    if browser.select.is_open() {
+        form.repositories = Some(browser);
+        return PickerKey::Still;
+    }
+    if key.code == KeyCode::Enter
+        && let Some(repository) = browser.select.chosen_value()
+    {
+        form.set_repository(&repository.url);
+    }
+    PickerKey::Closed
 }
 
 /// What is known about the Linear tracker's live session.
@@ -651,6 +688,9 @@ pub struct App {
     pub(in crate::tui) remembered_keys: Vec<RemoteKey>,
     /// What the built base image is made of, as of the panel being opened.
     pub(in crate::tui) base_description: Option<EnvironmentDescription>,
+    /// The last repository listing, so opening a picker shows something at once
+    /// and a fresh list replaces it when it lands.
+    repositories: Option<Vec<Repository>>,
     /// The profiles a task mounts, read when the panel opens.
     pub(in crate::tui) profiles: Vec<ProfileSummary>,
     /// What the Linear tracker's session is doing, read when the panel opens
@@ -786,6 +826,7 @@ impl App {
             remote_keys,
             remembered_keys: Vec::new(),
             base_description: None,
+            repositories: None,
             profiles: Vec::new(),
             tracker_state: TrackerState::NotConnected,
             tracker_connect: None,
@@ -1192,13 +1233,33 @@ impl App {
                 {
                     return vec![Hint::new("esc / q", "cancel")];
                 }
-                if self.panel.form.is_some() {
-                    return vec![
+                if let Some(form) = &self.panel.form {
+                    if let Some(browser) = &form.repositories {
+                        return if browser.select.is_searching() {
+                            vec![
+                                Hint::new("type", "narrow"),
+                                Hint::new("↑/↓", "choose"),
+                                Hint::new("enter", "take it"),
+                                Hint::new("esc", "close"),
+                            ]
+                        } else {
+                            vec![
+                                Hint::new("j/k", "choose"),
+                                Hint::new("enter", "take it"),
+                                Hint::new("esc", "close"),
+                            ]
+                        };
+                    }
+                    let mut hints = vec![
                         Hint::new("tab", "next"),
                         Hint::new("ctrl-enter", "save"),
                         Hint::new("enter", "next, or add a line"),
                         Hint::new("esc", "leave the box, then the page"),
                     ];
+                    if !form.target.is_remote() {
+                        hints.push(Hint::new("ctrl-r", "repositories"));
+                    }
+                    return hints;
                 }
                 if self.panel.depth == Depth::Rail {
                     return vec![
@@ -3202,31 +3263,41 @@ impl App {
         };
         let mut keep = true;
         let mut save = false;
-        match key.code {
-            // Escape leaves the text box first, and the page only on the second
-            // press, so a setup command can hold newlines without trapping the
-            // operator in it.
-            KeyCode::Esc if form.focus.takes_text() => form.focus = Focus::Cancel,
-            _ if is_dismiss(key) && !form.focus.takes_text() => keep = false,
-            // The chord that starts work on the creation page saves here, so a
-            // page with fields is finished the same way from wherever the caret
-            // is.
-            _ if is_secondary(key) => save = true,
-            KeyCode::BackTab => form.move_focus(false),
-            KeyCode::Tab => form.move_focus(true),
-            KeyCode::Enter | KeyCode::Char(' ') if form.focus == Focus::Accept => {
-                form.accepts_delegated_work = !form.accepts_delegated_work;
+        if form.repositories.is_some() {
+            match picker_key(&mut form, key) {
+                PickerKey::Still | PickerKey::Closed => {
+                    self.panel.form = Some(form);
+                    return;
+                }
+                PickerKey::Save => save = true,
             }
-            KeyCode::Enter | KeyCode::Char(' ') if form.focus == Focus::Machine => {
-                form.cycle_host();
+        } else {
+            match key.code {
+                // Escape leaves the text box first, and the page only on the second
+                // press, so a setup command can hold newlines without trapping the
+                // operator in it.
+                KeyCode::Esc if form.focus.takes_text() => form.focus = Focus::Cancel,
+                _ if is_dismiss(key) && !form.focus.takes_text() => keep = false,
+                // The chord that starts work on the creation page saves here, so a
+                // page with fields is finished the same way from wherever the caret
+                // is.
+                _ if is_secondary(key) => save = true,
+                KeyCode::BackTab => form.move_focus(false),
+                KeyCode::Tab => form.move_focus(true),
+                KeyCode::Enter | KeyCode::Char(' ') if form.focus == Focus::Accept => {
+                    form.accepts_delegated_work = !form.accepts_delegated_work;
+                }
+                KeyCode::Enter | KeyCode::Char(' ') if form.focus == Focus::Machine => {
+                    form.cycle_host();
+                }
+                KeyCode::Enter if form.enters_newline() => form.handle_text(key),
+                KeyCode::Enter => match form.focus {
+                    Focus::Cancel => keep = false,
+                    Focus::Save => save = true,
+                    _ => form.move_focus(true),
+                },
+                _ => form.handle_text(key),
             }
-            KeyCode::Enter if form.enters_newline() => form.handle_text(key),
-            KeyCode::Enter => match form.focus {
-                Focus::Cancel => keep = false,
-                Focus::Save => save = true,
-                _ => form.move_focus(true),
-            },
-            _ => form.handle_text(key),
         }
         if save {
             let added = match form.target {
@@ -3242,6 +3313,55 @@ impl App {
             }
         } else if keep {
             self.panel.form = Some(form);
+        }
+    }
+
+    /// Open the repository list on what is cached, and ask for a fresh one.
+    ///
+    /// The list is a shortcut into the field, not a replacement for it: a
+    /// repository the login cannot list is still one an operator can name.
+    pub(in crate::tui) fn begin_repository_listing<E>(
+        &mut self,
+        task_service: &TaskService<E>,
+        replies: &mpsc::UnboundedSender<RepositoryListReply>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let cached = self.repositories.clone().unwrap_or_default();
+        let Some(form) = self.panel.form.as_mut() else {
+            return;
+        };
+        form.repositories = Some(Repositories::new(&cached, form.repository.value()));
+        let service = task_service.clone();
+        let replies = replies.clone();
+        tokio::spawn(async move {
+            let result = service
+                .repositories(VcsProviderKind::sole())
+                .await
+                .map_err(|error| error.to_string());
+            let _ = replies.send(RepositoryListReply { result });
+        });
+    }
+
+    /// Take a listing that arrived: the cache always, the open list when there is
+    /// one.
+    pub(in crate::tui) fn repositories_listed(&mut self, reply: RepositoryListReply) {
+        match reply.result {
+            Ok(repositories) => {
+                if let Some(form) = self.panel.form.as_mut()
+                    && let Some(browser) = form.repositories.as_mut()
+                {
+                    browser.fill(&repositories);
+                }
+                self.repositories = Some(repositories);
+            }
+            Err(error) => {
+                if let Some(form) = self.panel.form.as_mut()
+                    && let Some(browser) = form.repositories.as_mut()
+                {
+                    browser.failed(error);
+                }
+            }
         }
     }
 
@@ -4305,6 +4425,7 @@ impl App {
         task_service: &TaskService<E>,
         events: &mpsc::UnboundedSender<CredentialShellEvent>,
         tracker_connects: &mpsc::UnboundedSender<TrackerConnectReply>,
+        repository_lists: &mpsc::UnboundedSender<RepositoryListReply>,
     ) where
         E: IsolationEngine + Clone + 'static,
     {
@@ -4315,6 +4436,18 @@ impl App {
             return;
         }
         if self.panel.form.is_some() {
+            // The list is a shortcut into the field, so it opens from the chord
+            // wherever the caret is, rather than making the field a special case.
+            let wants_repositories =
+                key.code == KeyCode::Char('r')
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.panel.form.as_ref().is_some_and(|form| {
+                        !form.target.is_remote() && form.repositories.is_none()
+                    });
+            if wants_repositories {
+                self.begin_repository_listing(task_service, repository_lists);
+                return;
+            }
             self.panel_form_key(key).await;
         } else {
             self.panel_key(key, task_service, events, tracker_connects)
