@@ -55,6 +55,7 @@ use crate::{
 use super::background::terrain::Terrain;
 use super::widgets::{alert::Alert, list};
 use popups::confirm::{CredentialTarget, PendingConfirm};
+use popups::message::{Decision as MessageDecision, MessagePrompt};
 use popups::new_task::{AGENTS, Answer, Hit as NewTaskHit, Host, NewTask, SearchToken};
 use popups::open_link::{self, Link, OpenLink};
 use popups::repositories::{Key as RepositoriesKey, Repositories};
@@ -96,6 +97,8 @@ pub(in crate::tui) enum Foreground {
     SendTask(Box<SendTask>),
     /// The creation question, holding the prompt until it is answered.
     NewTask(Box<NewTask>),
+    /// A message to the agent outside any signal thread.
+    Message(Box<MessagePrompt>),
     /// The settings panel: projects, remotes, the interface, and the identity.
     Panel,
     Setup(Setup),
@@ -129,6 +132,7 @@ impl Foreground {
     pub(in crate::tui) fn shows_signals(&self) -> bool {
         match self {
             Self::Signals => true,
+            Self::Message(_) => true,
             Self::Confirm(confirm) => confirm.is_signal(),
             Self::Keys(behind) => behind.shows_signals(),
             _ => false,
@@ -1231,6 +1235,7 @@ impl App {
                     panel.hints(&self.setup())
                 }
             }
+            Foreground::Message(message) => message.hints(),
             Foreground::Panel => {
                 // Only a wait with something to show offers leaving it; a shell that
                 // opens at once would otherwise flash a key that means nothing yet.
@@ -1330,6 +1335,9 @@ impl App {
                     Hint::new("f", "filter"),
                     Hint::new("s", "sort"),
                 ];
+                if self.remote_signals.is_none() {
+                    hints.push(Hint::new("n", "message agent"));
+                }
                 if matches!(self.signal_focus, SignalFocus::Filter | SignalFocus::Sort) {
                     hints.push(Hint::new("enter", "open"));
                 } else if let Some(thread) = self.signal_thread() {
@@ -1420,6 +1428,7 @@ impl App {
         match &self.foreground {
             Foreground::NewTask(new_task) => new_task.is_typing(),
             Foreground::GetStarted(panel) => panel.is_typing(),
+            Foreground::Message(_) => true,
             _ => {
                 self.signal_composer.is_some()
                     || self
@@ -1470,6 +1479,7 @@ impl App {
                     | Foreground::Setup(_)
                     | Foreground::SignIn(_)
                     | Foreground::Signals
+                    | Foreground::Message(_)
                     | Foreground::OpenLink(_)
             )
     }
@@ -5474,6 +5484,34 @@ impl App {
     }
 
     /// The keys of the signals screen.
+    pub(in crate::tui) async fn message_key<E>(
+        &mut self,
+        key: KeyEvent,
+        event_loop: &TaskEventLoop<E>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let (task_id, decision) = {
+            let Foreground::Message(prompt) = &mut self.foreground else {
+                return;
+            };
+            (prompt.task_id().to_owned(), prompt.handle_key(key))
+        };
+        match decision {
+            Some(MessageDecision::Cancel) => self.foreground = Foreground::Signals,
+            Some(MessageDecision::Send(body)) => {
+                match event_loop.express_input(&task_id, body).await {
+                    Ok(()) => {
+                        self.foreground = Foreground::Signals;
+                        self.alert = Some(Alert::note("Message sent to the agent."));
+                    }
+                    Err(error) => self.problem(error.to_string()),
+                }
+            }
+            None => {}
+        }
+    }
+
     pub(in crate::tui) async fn signals_key<E>(
         &mut self,
         key: KeyEvent,
@@ -5555,6 +5593,13 @@ impl App {
             KeyCode::Char('s') => {
                 self.signal_focus = SignalFocus::Sort;
                 self.signal_sort.open();
+            }
+            KeyCode::Char('n') if self.remote_signals.is_none() => {
+                if let Some(task_id) = self.signal_task_id.clone() {
+                    let agent = self.signal_agent_label();
+                    self.foreground =
+                        Foreground::Message(Box::new(MessagePrompt::new(task_id, agent)));
+                }
             }
             KeyCode::Enter if is_secondary(key) => {
                 if let Some(action) = self.signal_thread().and_then(secondary_action) {

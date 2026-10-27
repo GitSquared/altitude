@@ -374,6 +374,13 @@ where
         Ok(())
     }
 
+    pub async fn express_input(&self, task_id: &str, body: String) -> Result<(), TaskServiceError> {
+        if let Some(run) = self.service.express_input(task_id, body).await? {
+            self.watch_agent_run(Ok(run));
+        }
+        Ok(())
+    }
+
     pub async fn create_issue_for_operator(
         &self,
         issue: IssueSnapshot,

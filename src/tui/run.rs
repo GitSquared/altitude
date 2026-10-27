@@ -552,6 +552,10 @@ where
                     &mut app.new_task_targets,
                 ));
             }
+            if let Foreground::Message(message) = &app.foreground {
+                widgets::chrome::dim(frame, content);
+                modal = Some(popups::message::draw(frame, content, message));
+            }
             if matches!(app.foreground, Foreground::Keys(_)) {
                 widgets::chrome::dim(frame, content);
                 modal = Some(widgets::chrome::draw_help(
@@ -1093,6 +1097,7 @@ where
                 return Ok(true);
             }
         }
+        Foreground::Message(_) => app.message_key(key, event_loop).await,
         Foreground::Panel => {
             app.panel_keys(
                 key,

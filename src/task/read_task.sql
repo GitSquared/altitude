@@ -90,27 +90,19 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
        AND json_type(payload, '$.data.summary') IS NOT NULL
      ORDER BY sequence DESC LIMIT 1) AS latest_turn_summary,
     (SELECT json_object(
-         'id', 'm' || (
-             SELECT count(*)
-             FROM task_event_logs AS earlier
-             WHERE earlier.task_id = tasks.id
-               AND earlier.sequence <= e.sequence
-               AND (
-                   (earlier.event_type = 'operator_signal_raised'
-                    AND json_extract(earlier.payload, '$.data.signal.id')
-                        = json_extract(e.payload, '$.data.signal_id'))
-                   OR (earlier.event_type = 'operator_signal_message'
-                    AND json_extract(earlier.payload, '$.data.signal_id')
-                        = json_extract(e.payload, '$.data.signal_id'))
-               )
-         ),
+         'id', 'm' || e.sequence,
          'author', 'operator',
-         'body', json_extract(e.payload, '$.data.body'),
+         'body', COALESCE(
+             json_extract(e.payload, '$.data.input.body'),
+             json_extract(e.payload, '$.data.body')),
          'at_ms', e.recorded_at_ms)
      FROM task_event_logs AS e
      WHERE e.task_id = tasks.id
-       AND e.event_type = 'operator_signal_message'
-       AND json_extract(e.payload, '$.data.author') = 'operator'
+       AND (
+           e.event_type = 'task_input_expressed'
+           OR (e.event_type = 'operator_signal_message'
+               AND json_extract(e.payload, '$.data.author') = 'operator')
+       )
      ORDER BY e.sequence DESC LIMIT 1) AS latest_operator_message,
     (SELECT payload -> '$.data.issue.issue.reference'
      FROM task_event_logs

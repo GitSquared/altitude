@@ -177,6 +177,7 @@ pub fn help_sections() -> Vec<HelpSection> {
                     "Take the secondary action where the thread has one: reply to the agent. A reply reopens the thread it answers",
                 ),
                 ("f / s", "Filter or sort the thread list"),
+                ("n", "Write a new message to the agent"),
                 (
                     "PgUp / PgDn · Home / End",
                     "Scroll the conversation by a message",

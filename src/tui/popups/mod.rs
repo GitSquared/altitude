@@ -2,6 +2,7 @@
 //! them, and say which keys they take.
 
 pub mod confirm;
+pub mod message;
 pub mod new_task;
 pub mod open_link;
 pub mod repositories;

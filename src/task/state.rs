@@ -5,7 +5,7 @@ use std::fmt;
 use crate::agent::AgentKind;
 use crate::id;
 use crate::project::Project;
-use crate::tracker::{IssueReference, IssueSnapshot};
+use crate::tracker::{IssueReference, IssueSnapshot, TrackerKind};
 use crate::vcs::{CodeContribution, ContributionObservation};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -35,6 +35,47 @@ pub struct TaskOperatorSignalDraft {
     pub kind: TaskOperatorSignalKind,
     pub title: String,
     pub body: String,
+}
+
+/// One contribution to what the operator has asked for.
+///
+/// Inputs are the append-only record of expressed intent. The founding brief is
+/// the first one; a follow-up message or a signal reply is another. Signals
+/// remain the agent's attention requests; an operator's answer to one is an
+/// input with `responding_to` set.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskInput {
+    pub id: String,
+    pub at_ms: i64,
+    pub author: TaskInputAuthor,
+    pub source: TaskInputSource,
+    pub body: String,
+    /// The signal thread this input answers, when it was written in one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub responding_to: Option<String>,
+    /// The tracker's own id for the comment or document this came from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "role", rename_all = "snake_case")]
+pub enum TaskInputAuthor {
+    Operator { id: String, label: String },
+    Participant { id: String, label: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TaskInputSource {
+    TaskCreated,
+    Altitude,
+    TrackerComment {
+        provider: TrackerKind,
+        issue_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        document_id: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
@@ -347,6 +388,10 @@ pub enum TaskHistoryEvent {
     /// Observation only: Altitude records what ran, not what should have run.
     AgentModelObserved {
         model: String,
+    },
+    /// A new contribution to what the operator has asked for.
+    TaskInputExpressed {
+        input: TaskInput,
     },
     OperatorSignalRaised {
         signal: TaskOperatorSignal,

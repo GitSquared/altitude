@@ -5,9 +5,10 @@ use uuid::Uuid;
 
 use super::{
     Task, TaskAgentRun, TaskAgentTurnReport, TaskError, TaskExecutionMode, TaskExecutionStatus,
-    TaskFacts, TaskHistoryEvent, TaskOperatorAttentionLevel, TaskOperatorSignal,
-    TaskOperatorSignalAuthor, TaskOperatorSignalDraft, TaskOperatorSignalKind,
-    TaskOperatorSignalMessage, TaskOperatorSignalThread,
+    TaskFacts, TaskHistoryEvent, TaskInput, TaskInputAuthor, TaskInputSource,
+    TaskOperatorAttentionLevel, TaskOperatorSignal, TaskOperatorSignalAuthor,
+    TaskOperatorSignalDraft, TaskOperatorSignalKind, TaskOperatorSignalMessage,
+    TaskOperatorSignalThread,
 };
 use crate::id;
 use crate::project::Project;
@@ -600,6 +601,61 @@ impl TaskStore {
         Ok((task, moved))
     }
 
+    /// The inputs that express what the operator has asked for, oldest first.
+    ///
+    /// The founding brief is the first input; a follow-up message or a signal
+    /// reply is another. Signal replies written before inputs existed are
+    /// projected here too, so old history stays readable.
+    pub async fn inputs(&self, task_id: &str) -> Result<Vec<TaskInput>, TaskError> {
+        let mut inputs = Vec::new();
+        for (at_ms, event) in self.events(task_id).await? {
+            match event {
+                TaskHistoryEvent::IntentExpressed {
+                    intent,
+                    identity_id,
+                    identity_label,
+                    ..
+                } if inputs.is_empty() => {
+                    inputs.push(TaskInput {
+                        id: format!("founding:{task_id}"),
+                        at_ms,
+                        author: TaskInputAuthor::Operator {
+                            id: identity_id,
+                            label: identity_label,
+                        },
+                        source: TaskInputSource::TaskCreated,
+                        body: intent,
+                        responding_to: None,
+                        external_id: None,
+                    });
+                }
+                TaskHistoryEvent::TaskInputExpressed { input } => inputs.push(input),
+                TaskHistoryEvent::OperatorSignalMessage {
+                    signal_id,
+                    author: TaskOperatorSignalAuthor::Operator,
+                    body,
+                } => {
+                    let task = self.get(task_id).await?;
+                    let Some(task) = task else { continue };
+                    inputs.push(TaskInput {
+                        id: format!("legacy-signal:{task_id}:{signal_id}:{at_ms}"),
+                        at_ms,
+                        author: TaskInputAuthor::Operator {
+                            id: task.facts.operator_id.unwrap_or_default(),
+                            label: task.facts.operator_label.unwrap_or_default(),
+                        },
+                        source: TaskInputSource::Altitude,
+                        body,
+                        responding_to: Some(signal_id),
+                        external_id: None,
+                    });
+                }
+                _ => {}
+            }
+        }
+        Ok(inputs)
+    }
+
     /// The signal threads a task still has unresolved, with every message on
     /// them.
     pub async fn unresolved_signal_threads(
@@ -660,6 +716,29 @@ impl TaskStore {
                             resolved_by: None,
                             resolved_at_ms: None,
                         }),
+                    }
+                }
+                TaskHistoryEvent::TaskInputExpressed { input } => {
+                    let Some(signal_id) = input.responding_to.as_deref() else {
+                        continue;
+                    };
+                    if let Some(thread) = threads.iter_mut().find(|thread| thread.id == signal_id) {
+                        thread.resolved = false;
+                        thread.resolved_by = None;
+                        thread.resolved_at_ms = None;
+                        thread.messages.push(TaskOperatorSignalMessage {
+                            id: format!("m{}", thread.messages.len() + 1),
+                            author: match input.author {
+                                TaskInputAuthor::Operator { .. } => {
+                                    TaskOperatorSignalAuthor::Operator
+                                }
+                                TaskInputAuthor::Participant { .. } => {
+                                    TaskOperatorSignalAuthor::Operator
+                                }
+                            },
+                            body: input.body,
+                            at_ms,
+                        });
                     }
                 }
                 TaskHistoryEvent::OperatorSignalMessage {
@@ -756,7 +835,26 @@ impl TaskStore {
         signal_id: &str,
         body: &str,
     ) -> Result<Task, TaskError> {
-        self.message_signal_as(task_id, signal_id, TaskOperatorSignalAuthor::Operator, body)
+        self.thread_of(task_id, signal_id).await?;
+        let task = self
+            .get(task_id)
+            .await?
+            .ok_or(TaskError::OperationRejected(
+                "this task is no longer in play",
+            ))?;
+        let input = TaskInput {
+            id: Uuid::new_v4().to_string(),
+            at_ms: now_ms(),
+            author: TaskInputAuthor::Operator {
+                id: task.facts.operator_id.unwrap_or_default(),
+                label: task.facts.operator_label.unwrap_or_default(),
+            },
+            source: TaskInputSource::Altitude,
+            body: body.to_owned(),
+            responding_to: Some(signal_id.to_owned()),
+            external_id: None,
+        };
+        self.append_events(task_id, &[TaskHistoryEvent::TaskInputExpressed { input }])
             .await
     }
 
