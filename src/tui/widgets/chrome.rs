@@ -188,23 +188,14 @@ pub fn draw_help(
     popup
 }
 
-/// What an answer is for, which is what decides how loudly it is drawn.
-pub enum Emphasis {
-    /// The answer the page is asking for: the terminal's own text, at full
-    /// strength, so it is the one the eye lands on without being told. The
-    /// accent is for what is selected, and at rest nothing is.
-    Primary,
-    /// The way out, or the answer that is not the point: quiet, but still bold,
-    /// because it is still somewhere to press.
-    Secondary,
-}
-
 /// One answer at the foot of a modal.
 pub struct Action<'a> {
     pub label: &'a str,
     pub focused: bool,
     pub emphasis: Emphasis,
 }
+
+pub use super::button::{Button, Emphasis};
 
 impl<'a> Action<'a> {
     pub fn primary(label: &'a str) -> Self {
@@ -257,7 +248,7 @@ pub fn actions(frame: &mut Frame, modal: Rect, area: Rect, actions: &[Action]) -
     };
     let widths: Vec<Constraint> = actions
         .iter()
-        .map(|action| Constraint::Length(action.label.chars().count() as u16 + 2))
+        .map(|action| Constraint::Length(Button::new(action.label, action.emphasis).width()))
         .collect();
     let drawn = Layout::horizontal(widths)
         .flex(Flex::End)
@@ -267,21 +258,12 @@ pub fn actions(frame: &mut Frame, modal: Rect, area: Rect, actions: &[Action]) -
         .iter()
         .zip(drawn.iter())
         .map(|(action, area)| {
-            let style = if action.focused {
-                palette::focus()
-            } else {
-                match action.emphasis {
-                    Emphasis::Primary => palette::primary().bold(),
-                    Emphasis::Secondary => palette::muted().bold(),
-                }
-            };
             // The spaces belong to the label so the fill covers the whole button
             // and not just the letters, which is what makes it read as pressed
             // rather than as a highlighted word.
-            frame.render_widget(
-                Paragraph::new(Line::styled(format!(" {} ", action.label), style)),
-                *area,
-            );
+            Button::new(action.label, action.emphasis)
+                .focused(action.focused)
+                .draw(frame, *area);
             *area
         })
         .collect()

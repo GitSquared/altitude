@@ -20,6 +20,7 @@ use crate::{
         app::{CredentialStatus, TrackerState},
         popups::repositories::Repositories,
         widgets::{
+            button::Button,
             chrome::Hint,
             palette,
             select::{Offer, Select},
@@ -414,23 +415,18 @@ pub fn draw(frame: &mut Frame, area: Rect, panel: &mut GetStarted, setup: &Setup
     } else {
         detail_text(panel.focus, setup)
     };
-    let detail_height = if detail.is_empty() {
-        0
+    // As tall as the longest help line any row can show, so moving between rows
+    // changes the words and not the card: the footer stays where it is.
+    let detail_height = if panel.commits.open {
+        wrapped_height(&detail, width)
     } else {
-        wrapped_height(&detail, width).min(area.height)
-    };
-
-    // The card is as tall as it has to be and sits in the middle of what is
-    // left. The action buttons have nothing to explain, so their help line is
-    // not reserved: the card closes up instead of leaving a hole where a
-    // paragraph would be.
-    let has_detail = detail_height > 0;
-    let height = (if has_detail {
-        6 + subtitle_height + rows_height + detail_height
-    } else {
-        5 + subtitle_height + rows_height
-    })
+        ROWS.iter()
+            .map(|focus| wrapped_height(&detail_text(*focus, setup), width))
+            .max()
+            .unwrap_or(0)
+    }
     .min(area.height);
+    let height = (6 + subtitle_height + rows_height + detail_height).min(area.height);
     let y = area.y + area.height.saturating_sub(height) / 2;
     let card = Rect {
         x,
@@ -438,19 +434,17 @@ pub fn draw(frame: &mut Frame, area: Rect, panel: &mut GetStarted, setup: &Setup
         width,
         height,
     };
-    let mut constraints = vec![
+    let constraints = [
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(subtitle_height),
         Constraint::Length(1),
         Constraint::Length(rows_height),
         Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(1),
     ];
-    if has_detail {
-        constraints.push(Constraint::Min(0));
-        constraints.push(Constraint::Length(1));
-    }
-    constraints.push(Constraint::Length(1));
     let areas = Layout::vertical(constraints).split(card);
 
     frame.render_widget(
@@ -464,14 +458,12 @@ pub fn draw(frame: &mut Frame, area: Rect, panel: &mut GetStarted, setup: &Setup
         areas[2],
     );
     frame.render_widget(Paragraph::new(rows), areas[4]);
-    if has_detail {
-        frame.render_widget(
-            Paragraph::new(detail)
-                .wrap(Wrap { trim: true })
-                .style(palette::muted()),
-            areas[6],
-        );
-    }
+    frame.render_widget(
+        Paragraph::new(detail)
+            .wrap(Wrap { trim: true })
+            .style(palette::muted()),
+        areas[6],
+    );
     draw_footer(frame, *areas.last().expect("a footer"), panel, setup);
 
     // The repository list is a pop-up over the card rather than a row of it: it
@@ -492,6 +484,7 @@ fn subtitle() -> Text<'static> {
                 palette::primary(),
             ),
         ]),
+        Line::from(""),
         Line::styled("let's get you set up:", palette::primary()),
     ])
 }
@@ -499,7 +492,7 @@ fn subtitle() -> Text<'static> {
 /// The welcome without its styling, for measuring how tall it will be.
 fn subtitle_plain() -> &'static str {
     "welcome to ⛰  altitude, a tool to pilot agents efficiently and keep your focus on the \
-     decisions that matter.\nlet's get you set up:"
+     decisions that matter.\n\nlet's get you set up:"
 }
 
 fn checklist(panel: &GetStarted, setup: &SetupState, width: u16) -> Vec<Line<'static>> {
@@ -552,13 +545,14 @@ fn checklist(panel: &GetStarted, setup: &SetupState, width: u16) -> Vec<Line<'st
         lines.extend(options(&panel.agent, width));
     }
 
-    let vcs = setup.vcs.label();
     let vcs_signed_in = signed_in(&setup.vcs_status);
-    let code_value = match (&setup.repository, vcs_signed_in) {
-        (Some(repository), true) => repository.clone(),
-        (Some(repository), false) => format!("{repository} · {vcs} not signed in"),
-        (None, true) => format!("no repository · {vcs} connected"),
-        (None, false) => format!("no repository · {vcs} not connected"),
+    let code_value = if !vcs_signed_in {
+        "VCS not connected".to_owned()
+    } else {
+        match &setup.repository {
+            Some(repository) => format!("{repository} ▼"),
+            None => "repository not picked ▼".to_owned(),
+        }
     };
     lines.push(row(
         if setup.repository.is_some() && vcs_signed_in {
@@ -661,8 +655,13 @@ fn checklist(panel: &GetStarted, setup: &SetupState, width: u16) -> Vec<Line<'st
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, panel: &GetStarted, setup: &SetupState) {
+    let settings = Button::secondary("Open Settings").focused(panel.focus == Focus::Settings);
+    let go = Button::primary("Ready, set, go")
+        .focused(panel.focus == Focus::Ready)
+        .enabled(ready(setup, &panel.name));
+    let width = settings.width() + 2 + go.width();
     let [note_area, buttons_area] =
-        Layout::horizontal([Constraint::Min(0), Constraint::Length(33)]).areas(area);
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(width)]).areas(area);
     frame.render_widget(
         Paragraph::new(Line::styled(
             "You can tweak these options in Settings later.",
@@ -670,31 +669,14 @@ fn draw_footer(frame: &mut Frame, area: Rect, panel: &GetStarted, setup: &SetupS
         )),
         note_area,
     );
-    let ready_here = ready(setup, &panel.name);
-    let buttons = Line::from(vec![
-        button("Open Settings", panel.focus == Focus::Settings, true, false),
-        Span::raw("  "),
-        button(
-            "Ready, set, go",
-            panel.focus == Focus::Ready,
-            ready_here,
-            true,
-        ),
-    ]);
-    frame.render_widget(Paragraph::new(buttons), buttons_area);
-}
-
-fn button(label: &str, focused: bool, enabled: bool, primary: bool) -> Span<'static> {
-    let style = match (focused, enabled, primary) {
-        // A disabled button still shows where the focus is, in grey rather than
-        // in the accent: the keys are there, and there is nothing to do yet.
-        (true, false, _) => palette::inactive_selection(),
-        (true, true, _) => palette::focus(),
-        (false, false, _) => palette::muted(),
-        (false, true, true) => palette::primary(),
-        (false, true, false) => palette::muted(),
-    };
-    Span::styled(format!(" {label} "), style)
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            settings.span(),
+            Span::raw("  "),
+            go.span(),
+        ])),
+        buttons_area,
+    );
 }
 
 fn row(
@@ -705,7 +687,7 @@ fn row(
     focused: bool,
     width: u16,
 ) -> Line<'static> {
-    let prefix = format!("{}  {label:<LABEL_WIDTH$} ", marker.glyph());
+    let prefix = format!("{}  {label:<LABEL_WIDTH$}  ", marker.glyph());
     let trailing = format!("{action:<ACTION_WIDTH$}");
     let available = usize::from(width)
         .saturating_sub(prefix.chars().count())
@@ -733,7 +715,7 @@ fn row(
 /// The open list, written as rows of the card rather than as a box over it.
 fn options<T>(select: &Select<T>, width: u16) -> Vec<Line<'static>> {
     let chosen = select.chosen_index();
-    let indent = " ".repeat(LABEL_WIDTH + 4);
+    let indent = " ".repeat(LABEL_WIDTH + 5);
     select
         .shown_offers()
         .into_iter()
@@ -771,7 +753,7 @@ fn options<T>(select: &Select<T>, width: u16) -> Vec<Line<'static>> {
 
 /// The identity, as four rows under the one that opens it.
 fn commits_editor(commits: &Commits, setup: &SetupState, width: u16) -> Vec<Line<'static>> {
-    let indent = " ".repeat(LABEL_WIDTH + 6);
+    let indent = " ".repeat(LABEL_WIDTH + 7);
     let name = if commits.field == CommitsField::Name {
         commits.name.marked()
     } else {
