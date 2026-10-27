@@ -1060,6 +1060,13 @@ impl RemoteTracker {
                         tracing::warn!(task = %route.task_id, %error, "could not update the session model label");
                     }
                 }
+                TaskHistoryEvent::PlanUpdated { steps } => {
+                    self.config
+                        .automation
+                        .update_session_plan(&route.session_id, steps)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                }
                 TaskHistoryEvent::AgentRunStarted { agent_run_id, .. } => {
                     if events[..index].iter().any(|(_, event)| {
                         matches!(

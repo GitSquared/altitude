@@ -37,6 +37,11 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      WHERE task_id = tasks.id
        AND json_type(payload, '$.data.model') IS NOT NULL
      ORDER BY sequence DESC LIMIT 1) AS model,
+    (SELECT payload -> '$.data.steps'
+     FROM task_event_logs
+     WHERE task_id = tasks.id
+       AND event_type = 'plan_updated'
+     ORDER BY sequence DESC LIMIT 1) AS plan,
     CASE WHEN EXISTS (SELECT 1 FROM task_event_logs WHERE task_id = tasks.id AND event_type IN ('operator_signal_confirmed', 'task_completed'))
          THEN 'completed'
          ELSE (SELECT payload ->> '$.data.execution_status'

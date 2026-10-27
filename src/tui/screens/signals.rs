@@ -23,7 +23,9 @@ use ratatui::{
 };
 
 use crate::{
-    task::{TaskOperatorSignalAuthor, TaskOperatorSignalKind, TaskOperatorSignalThread},
+    task::{
+        TaskOperatorSignalAuthor, TaskOperatorSignalKind, TaskOperatorSignalThread, TaskPlanStatus,
+    },
     tui::{
         App,
         widgets::{
@@ -43,6 +45,10 @@ use crate::{
 /// for a title and a line of what was said, and no wider: the conversation is
 /// what the room is for.
 const LIST_WIDTH: u16 = 40;
+/// The plan column is narrower than the conversation, by design.
+const PLAN_WIDTH: u16 = 32;
+/// Below this the plan moves into the conversation pane as a tab.
+const PLAN_COLUMN_MIN: u16 = 112;
 /// The gutter between the list's rows and the frame, so the rows do not sit on
 /// the border.
 const LIST_PADDING: u16 = 1;
@@ -263,7 +269,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
             count => format!("{count} threads"),
         },
     };
-    header::draw(frame, header_area, "SIGNALS", Some(&task), Some(&count));
+    header::draw(frame, header_area, "TASK", Some(&task), Some(&count));
     // One frame, split by a single divider: the sections are two halves of the
     // same window rather than two windows that happen to touch.
     let inner = Surface::new().draw(frame, body);
@@ -276,15 +282,106 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         Constraint::Min(0),
     ])
     .areas(list);
-    // The conversation is opaque: it is a pane, not a window onto the field.
-    frame.render_widget(Clear, detail);
     draw_threads(frame, threads, app);
-    draw_conversation(frame, detail, app);
+    if inner.width >= PLAN_COLUMN_MIN {
+        let parts =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(PLAN_WIDTH)]).split(detail);
+        let conversation = parts[0];
+        let plan = parts[1];
+        surface::vertical_divider(frame, inner, conversation.right());
+        frame.render_widget(Clear, conversation);
+        draw_conversation(frame, conversation, app);
+        frame.render_widget(Clear, plan);
+        draw_plan(frame, plan, app);
+    } else {
+        let [tabs, pane] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(detail);
+        draw_plan_tabs(frame, tabs, app);
+        frame.render_widget(Clear, pane);
+        if app.signal_plan_open {
+            draw_plan(frame, pane, app);
+        } else {
+            draw_conversation(frame, pane, app);
+        }
+    }
     // The controls sit above the list they change in their own subdivision of the
     // panel; their open lists overlay the rows rather than pushing them.
     surface::cover(frame, toolbar);
     draw_controls(frame, toolbar, threads, app);
     surface::horizontal_divider(frame, list, divider.y);
+}
+
+/// The tab line on a narrow screen: the conversation, or the plan.
+fn draw_plan_tabs(frame: &mut Frame, area: Rect, app: &App) {
+    if area.height == 0 {
+        return;
+    }
+    frame.render_widget(Clear, area);
+    let (signals, plan) = if app.signal_plan_open {
+        (
+            Span::styled("  signals  ", palette::muted()),
+            Span::styled("[ plan ]", palette::accent().bold()),
+        )
+    } else {
+        (
+            Span::styled("[ signals ]", palette::accent().bold()),
+            Span::styled("  plan  ", palette::muted()),
+        )
+    };
+    frame.render_widget(Paragraph::new(Line::from(vec![signals, plan])), area);
+}
+
+/// The agent's plan, beside the conversation or in a narrow screen's tab.
+fn draw_plan(frame: &mut Frame, area: Rect, app: &App) {
+    let padded = Rect {
+        x: area.x.saturating_add(1),
+        width: area.width.saturating_sub(2),
+        ..area
+    };
+    let [title, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(padded);
+    let plan = app.signal_plan();
+    let done = plan
+        .iter()
+        .filter(|step| step.status == TaskPlanStatus::Completed)
+        .count();
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("PLAN", palette::heading()),
+            Span::styled(
+                if plan.is_empty() {
+                    String::new()
+                } else {
+                    format!("  {done}/{}", plan.len())
+                },
+                palette::muted(),
+            ),
+        ])),
+        title,
+    );
+    if plan.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::styled("No plan yet.", palette::muted())),
+            body,
+        );
+        return;
+    }
+    let width = usize::from(body.width);
+    let lines = plan
+        .iter()
+        .map(|step| {
+            let (symbol, tone) = match step.status {
+                TaskPlanStatus::Pending => ('○', palette::muted()),
+                TaskPlanStatus::InProgress => ('◐', palette::accent()),
+                TaskPlanStatus::Completed => ('●', palette::good()),
+                TaskPlanStatus::Canceled => ('✕', palette::bad()),
+            };
+            Line::from(vec![
+                Span::styled(format!("{symbol} "), tone),
+                Span::styled(truncate(&step.content, width.saturating_sub(2)), tone),
+            ])
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), body);
 }
 
 /// The filter and sort pills at the top of the list.

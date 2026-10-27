@@ -28,6 +28,7 @@ use super::{
     IssueComment, IssueReader, IssueReference, IssueSnapshot, IssueSummary, TrackerError,
     TrackerKind, TrackerStatus, linear,
 };
+use crate::task::{TaskPlanStatus, TaskPlanStep};
 
 const LINEAR_GRAPHQL_URL: &str = "https://api.linear.app/graphql";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -487,6 +488,35 @@ impl LinearAutomation {
             .graphql(
                 UPDATE_SESSION_SUMMARY_MUTATION,
                 json!({ "id": session_id, "input": { "summary": summary } }),
+            )
+            .await?;
+        mutation_succeeded(&data, "agentSessionUpdate").map(|_| ())
+    }
+
+    /// Mirror the agent's plan onto its Linear Agent Session.
+    pub async fn update_session_plan(
+        &self,
+        session_id: &str,
+        steps: &[TaskPlanStep],
+    ) -> Result<(), TrackerError> {
+        let plan = steps
+            .iter()
+            .map(|step| {
+                json!({
+                    "content": step.content,
+                    "status": match step.status {
+                        TaskPlanStatus::Pending => "pending",
+                        TaskPlanStatus::InProgress => "inProgress",
+                        TaskPlanStatus::Completed => "completed",
+                        TaskPlanStatus::Canceled => "canceled",
+                    },
+                })
+            })
+            .collect::<Vec<_>>();
+        let data = self
+            .graphql(
+                UPDATE_SESSION_SUMMARY_MUTATION,
+                json!({ "id": session_id, "input": { "plan": plan } }),
             )
             .await?;
         mutation_succeeded(&data, "agentSessionUpdate").map(|_| ())

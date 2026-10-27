@@ -285,6 +285,9 @@ pub struct TaskFacts {
     pub agent_conversation_id: Option<String>,
     /// The model the harness last reported using.
     pub model: Option<String>,
+    /// The agent's latest full plan, replaced as a whole.
+    #[sqlx(json(nullable))]
+    pub plan: Option<Vec<TaskPlanStep>>,
     pub execution_status: TaskExecutionStatus,
     pub execution_pause_reason: Option<TaskExecutionPauseReason>,
     pub execution_mode: TaskExecutionMode,
@@ -392,6 +395,10 @@ pub enum TaskHistoryEvent {
     /// A new contribution to what the operator has asked for.
     TaskInputExpressed {
         input: TaskInput,
+    },
+    /// The agent replaced its plan.
+    PlanUpdated {
+        steps: Vec<TaskPlanStep>,
     },
     OperatorSignalRaised {
         signal: TaskOperatorSignal,
@@ -533,6 +540,22 @@ pub enum TaskAgentRunOutcome {
     Failed,
 }
 
+/// One step in the agent's current plan.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskPlanStep {
+    pub content: String,
+    pub status: TaskPlanStatus,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskPlanStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Canceled,
+}
+
 /// What Altitude tells an agent about the task it is driving, at the start of a
 /// turn.
 ///
@@ -551,6 +574,8 @@ pub struct TaskAgentTurnContext {
     pub project: Option<Project>,
     pub agent: Option<AgentKind>,
     pub model: Option<String>,
+    /// The agent's latest full plan, replaced as a whole.
+    pub plan: Vec<TaskPlanStep>,
     pub execution_status: TaskExecutionStatus,
     pub execution_mode: TaskExecutionMode,
     pub operator_attention_level: TaskOperatorAttentionLevel,
@@ -601,6 +626,15 @@ impl fmt::Display for TaskAgentTurnContext {
             self.last_error.as_deref().unwrap_or("none"),
         )?;
         write!(formatter, "current_datetime={}", self.datetime)?;
+        if !self.plan.is_empty() {
+            write!(formatter, "\nplan=")?;
+            for (index, step) in self.plan.iter().enumerate() {
+                if index > 0 {
+                    write!(formatter, "; ")?;
+                }
+                write!(formatter, "{:?}: {}", step.status, step.content)?;
+            }
+        }
         if let Some(message) = &self.latest_operator_message {
             write!(
                 formatter,
@@ -699,6 +733,7 @@ impl Task {
             project: self.facts.project.clone(),
             agent: self.agent_kind,
             model: self.facts.model.clone(),
+            plan: self.facts.plan.clone().unwrap_or_default(),
             execution_status: TaskExecutionStatus::Running,
             execution_mode,
             operator_attention_level: self.facts.operator_attention_level.clone(),

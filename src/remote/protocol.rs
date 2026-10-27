@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::task::{
     Task, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent,
-    TaskOperatorAttentionLevel, TaskOperatorSignalKind, TaskOperatorSignalThread,
+    TaskOperatorAttentionLevel, TaskOperatorSignalKind, TaskOperatorSignalThread, TaskPlanStep,
 };
 use crate::tracker::{IssueReference, IssueSnapshot, TrackerKind};
 use crate::vcs::ContributionState;
@@ -364,6 +364,9 @@ pub struct TaskSummary {
     /// The model the harness last reported using.
     #[serde(default)]
     pub model: Option<String>,
+    /// The agent's latest plan, so a card and a task screen can show it.
+    #[serde(default)]
+    pub plan: Vec<TaskPlanStep>,
     pub status: TaskExecutionStatus,
     pub mode: TaskExecutionMode,
     /// Why it is not running, when it is not.
@@ -433,6 +436,7 @@ impl TaskSummary {
                 .map(|project| project.id.clone()),
             agent: task.agent_kind,
             model: task.facts.model.clone(),
+            plan: task.facts.plan.clone().unwrap_or_default(),
             status: task.facts.execution_status.clone(),
             mode: task.facts.execution_mode,
             pause_reason: task.facts.execution_pause_reason.clone(),

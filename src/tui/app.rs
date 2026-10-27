@@ -37,7 +37,8 @@ use crate::{
     task::{
         Task, TaskEventLoop, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
         TaskExecutionUpdate, TaskOperatorSignalAuthor, TaskOperatorSignalKind,
-        TaskOperatorSignalMessage, TaskOperatorSignalThread, TaskService, TaskServiceError,
+        TaskOperatorSignalMessage, TaskOperatorSignalThread, TaskPlanStep, TaskService,
+        TaskServiceError,
     },
     tracker::{IssueReference, IssueSnapshot, IssueSummary, TrackerKind},
     tui::keys::{is_dismiss, is_remove, is_secondary},
@@ -595,6 +596,8 @@ pub struct App {
     pub(in crate::tui) signal_scroll: u16,
     /// The reply being written, if one is.
     pub(in crate::tui) signal_composer: Option<Composer>,
+    /// Whether a narrow screen is showing the plan instead of the conversation.
+    pub(in crate::tui) signal_plan_open: bool,
     /// What the keys are on inside the signals screen, and which message of the
     /// selected thread they are on.
     pub(in crate::tui) signal_focus: SignalFocus,
@@ -782,6 +785,7 @@ impl App {
             signals_cursor: list::Cursor::default(),
             signal_scroll: 0,
             signal_composer: None,
+            signal_plan_open: false,
             signal_focus: SignalFocus::List,
             signal_message_cursor: 0,
             signal_targets: Targets::default(),
@@ -4499,6 +4503,14 @@ impl App {
             .map_or_else(|| "the agent".to_owned(), |kind| kind.to_string())
     }
 
+    /// The plan the selected task is working to, local or remote.
+    pub(in crate::tui) fn signal_plan(&self) -> Vec<TaskPlanStep> {
+        self.signal_task()
+            .map(|task| task.facts.plan.clone().unwrap_or_default())
+            .or_else(|| self.signal_held().map(|held| held.summary.plan.clone()))
+            .unwrap_or_default()
+    }
+
     pub(in crate::tui) fn signal_task_title(&self) -> String {
         if let Some(task) = self.signal_task() {
             return task.title().to_owned();
@@ -5594,6 +5606,7 @@ impl App {
                 self.signal_focus = SignalFocus::Sort;
                 self.signal_sort.open();
             }
+            KeyCode::Char('p') => self.signal_plan_open = !self.signal_plan_open,
             KeyCode::Char('n') if self.remote_signals.is_none() => {
                 if let Some(task_id) = self.signal_task_id.clone() {
                     let agent = self.signal_agent_label();
@@ -6094,6 +6107,7 @@ impl App {
         self.signal_focus = SignalFocus::List;
         self.signal_scroll = u16::MAX;
         self.signal_composer = None;
+        self.signal_plan_open = false;
         self.foreground = Foreground::Signals;
         self.reset_signal_message();
     }
@@ -6123,6 +6137,7 @@ impl App {
         self.signal_message_cursor = 0;
         self.signal_scroll = u16::MAX;
         self.signal_composer = None;
+        self.signal_plan_open = false;
         self.foreground = Foreground::Signals;
         let client = self.link.clone();
         let keys = self.remote_keys.clone();
@@ -6148,6 +6163,7 @@ impl App {
         self.signal_arrivals.clear();
         self.signal_targets.clear();
         self.signal_composer = None;
+        self.signal_plan_open = false;
         self.signal_focus = SignalFocus::List;
         self.signal_message_cursor = 0;
         self.signal_scroll = 0;

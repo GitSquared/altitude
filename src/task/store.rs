@@ -8,7 +8,7 @@ use super::{
     TaskFacts, TaskHistoryEvent, TaskInput, TaskInputAuthor, TaskInputSource,
     TaskOperatorAttentionLevel, TaskOperatorSignal, TaskOperatorSignalAuthor,
     TaskOperatorSignalDraft, TaskOperatorSignalKind, TaskOperatorSignalMessage,
-    TaskOperatorSignalThread,
+    TaskOperatorSignalThread, TaskPlanStep,
 };
 use crate::id;
 use crate::project::Project;
@@ -822,6 +822,16 @@ impl TaskStore {
         body: &str,
     ) -> Result<Task, TaskError> {
         self.message_signal_as(task_id, signal_id, TaskOperatorSignalAuthor::Agent, body)
+            .await
+    }
+
+    /// Replace the agent's plan as a whole.
+    pub async fn set_plan(
+        &self,
+        task_id: &str,
+        steps: Vec<TaskPlanStep>,
+    ) -> Result<Task, TaskError> {
+        self.append_events(task_id, &[TaskHistoryEvent::PlanUpdated { steps }])
             .await
     }
 

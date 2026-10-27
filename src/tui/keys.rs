@@ -178,6 +178,7 @@ pub fn help_sections() -> Vec<HelpSection> {
                 ),
                 ("f / s", "Filter or sort the thread list"),
                 ("n", "Write a new message to the agent"),
+                ("p", "Show the plan on a narrow screen"),
                 (
                     "PgUp / PgDn · Home / End",
                     "Scroll the conversation by a message",
