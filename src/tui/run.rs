@@ -488,12 +488,9 @@ where
                 screens::signals::draw(frame, content, &mut app);
                 modal = Some(content);
             } else if app.foreground.shows_get_started() {
-                let agent = app.active_agent();
-                let status = agent
-                    .and_then(|agent| app.credential_status.get(agent.profile()).cloned())
-                    .unwrap_or_default();
+                let setup = app.setup();
                 if let Foreground::GetStarted(panel) = &mut app.foreground {
-                    screens::get_started::draw(frame, content, panel, agent, &status);
+                    screens::get_started::draw(frame, content, panel, &setup);
                 }
                 if let super::app::CredentialShellState::Opening {
                     progress: Some(progress),
@@ -1066,7 +1063,7 @@ where
                 .await
         }
         Foreground::GetStarted(_) => {
-            app.get_started_key(key, task_service, credential_events)
+            app.get_started_key(key, task_service, credential_events, repositories)
                 .await
         }
         Foreground::Panel => {

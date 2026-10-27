@@ -115,12 +115,12 @@ fn draw_tasks(
     let total = cards.len();
     if total == 0 {
         let mut lines = vec![Line::styled("No tasks yet", palette::muted())];
-        // Setup is only pointed at while the one required choice is missing: a
+        // Setup is only pointed at while something a task needs is missing: a
         // working installation is not nagged about the first run.
-        if app.setup_incomplete() {
+        if let Some(step) = app.setup_next_step() {
             lines.push(Line::from(""));
             lines.push(Line::styled(
-                "choose an agent to run work — g",
+                format!("finish setting up: {step} — g"),
                 palette::attention(),
             ));
         }

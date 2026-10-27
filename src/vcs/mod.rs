@@ -33,6 +33,22 @@ impl VcsProviderKind {
     pub fn sole() -> Self {
         Self::ALL[0]
     }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::GitHub => "GitHub",
+        }
+    }
+
+    /// The profile this provider's login lives in.
+    ///
+    /// The recipe a provider contributes repeats the name for the build, which is
+    /// the one place it has to exist besides here.
+    pub fn profile(self) -> &'static str {
+        match self {
+            Self::GitHub => "vcs/github",
+        }
+    }
 }
 
 /// A repository a provider's login can reach, as a picker lists it.

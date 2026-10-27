@@ -56,13 +56,16 @@ use super::widgets::{alert::Alert, list};
 use popups::confirm::{CredentialTarget, PendingConfirm};
 use popups::new_task::{AGENTS, Answer, Hit as NewTaskHit, Host, NewTask, SearchToken};
 use popups::open_link::{self, Link, OpenLink};
+use popups::repositories::{Key as RepositoriesKey, Repositories};
 use popups::send_task::{Decision as SendDecision, SendTask};
 use popups::setup::{Setup, SetupKind};
 use popups::sign_in::{Decision as SignInDecision, SignIn};
-use screens::get_started::{Focus as SetupFocus, GetStarted, NameKey, name_key};
+use screens::get_started::{
+    Focus as SetupFocus, GetStarted, MachineOffer, NameKey, SetupState, name_key, signed_in,
+};
 use screens::settings::{
-    CredentialKind, Depth, Focus, Form, GitIdentity, Panel, Repositories, RowKind, Section,
-    Setting, SettingsHit, Target,
+    CredentialKind, Depth, Focus, Form, GitIdentity, Panel, RowKind, Section, Setting, SettingsHit,
+    Target,
 };
 use screens::shell::{GuestRequest, Shell};
 use screens::signals::{
@@ -233,37 +236,6 @@ pub(in crate::tui) struct CredentialCheckReply {
 /// A repository listing that arrived while the interface was drawing.
 pub(in crate::tui) struct RepositoryListReply {
     pub result: Result<Vec<Repository>, String>,
-}
-
-/// What a key did while the repository list was open.
-enum PickerKey {
-    Still,
-    Closed,
-    Save,
-}
-
-/// Take a key for the repository list, answering what the form should do next.
-///
-/// The list behaves like a dropdown: escape leaves the field as it was, and enter
-/// takes what is under the keys.
-fn picker_key(form: &mut Form, key: KeyEvent) -> PickerKey {
-    let Some(mut browser) = form.repositories.take() else {
-        return PickerKey::Closed;
-    };
-    if is_secondary(key) {
-        return PickerKey::Save;
-    }
-    browser.select.handle_key(key);
-    if browser.select.is_open() {
-        form.repositories = Some(browser);
-        return PickerKey::Still;
-    }
-    if key.code == KeyCode::Enter
-        && let Some(repository) = browser.select.chosen_value()
-    {
-        form.set_repository(&repository.url);
-    }
-    PickerKey::Closed
 }
 
 /// What is known about the Linear tracker's live session.
@@ -703,9 +675,9 @@ pub struct App {
     /// The last repository listing, so opening a picker shows something at once
     /// and a fresh list replaces it when it lands.
     repositories: Option<Vec<Repository>>,
-    /// Whether the credential shell that is opening was opened from the first-run
-    /// screen, so it comes back there instead of to Settings.
-    sign_in_from_setup: bool,
+    /// The profile a sign-in from the first screen was for, so it comes back
+    /// there instead of to Settings and asks about that login again.
+    setup_sign_in: Option<&'static str>,
     /// The profiles a task mounts, read when the panel opens.
     pub(in crate::tui) profiles: Vec<ProfileSummary>,
     /// What the Linear tracker's session is doing, read when the panel opens
@@ -842,7 +814,7 @@ impl App {
             remembered_keys: Vec::new(),
             base_description: None,
             repositories: None,
-            sign_in_from_setup: false,
+            setup_sign_in: None,
             profiles: Vec::new(),
             tracker_state: TrackerState::NotConnected,
             tracker_connect: None,
@@ -1254,7 +1226,7 @@ impl App {
                 if matches!(self.credential_shell, CredentialShellState::Opening { .. }) {
                     vec![Hint::new("esc / q", "cancel")]
                 } else {
-                    panel.hints(self.agent())
+                    panel.hints(&self.setup())
                 }
             }
             Foreground::Panel => {
@@ -1766,7 +1738,7 @@ impl App {
             }
             CredentialShellEvent::Unavailable { reason, .. } => {
                 self.credential_shell = CredentialShellState::Idle;
-                self.sign_in_from_setup = false;
+                self.setup_sign_in = None;
                 self.problem(format!("No shell: {reason}"));
             }
         }
@@ -1786,17 +1758,15 @@ impl App {
                 cancel.cancel();
             }
             self.credential_shell = CredentialShellState::Idle;
-            self.sign_in_from_setup = false;
+            self.setup_sign_in = None;
             return;
         };
         let id = ShellId::Credentials(shell.id().to_owned());
         self.shells.remove(&id);
         if self.open_shell() == Some(&id) {
             // Back to where the sign-in was asked for, so what changed is in front.
-            if mem::take(&mut self.sign_in_from_setup) {
-                if let Some(agent) = self.active_agent() {
-                    self.credential_status.remove(agent.profile());
-                }
+            if let Some(profile) = mem::take(&mut self.setup_sign_in) {
+                self.credential_status.remove(profile);
                 self.foreground = Foreground::GetStarted(self.get_started_panel());
             } else {
                 self.foreground = Foreground::Panel;
@@ -3308,13 +3278,27 @@ impl App {
         };
         let mut keep = true;
         let mut save = false;
-        if form.repositories.is_some() {
-            match picker_key(&mut form, key) {
-                PickerKey::Still | PickerKey::Closed => {
+        if let Some(browser) = form.repositories.as_mut() {
+            match browser.key(key) {
+                RepositoriesKey::Still => {
                     self.panel.form = Some(form);
                     return;
                 }
-                PickerKey::Save => save = true,
+                RepositoriesKey::Closed => {
+                    form.repositories = None;
+                    self.panel.form = Some(form);
+                    return;
+                }
+                RepositoriesKey::Chosen(repository) => {
+                    form.repositories = None;
+                    form.set_repository(&repository.url);
+                    self.panel.form = Some(form);
+                    return;
+                }
+                RepositoriesKey::Save => {
+                    form.repositories = None;
+                    save = true;
+                }
             }
         } else {
             match key.code {
@@ -3389,7 +3373,23 @@ impl App {
         let Some(form) = self.panel.form.as_mut() else {
             return;
         };
-        form.repositories = Some(Repositories::new(&cached, form.repository.value()));
+        let current = form.repository.value();
+        form.repositories = Some(Repositories::new(
+            &cached,
+            (!current.is_empty()).then_some(current),
+        ));
+        self.spawn_repository_list(kind, task_service, replies);
+    }
+
+    /// Ask for a listing; whoever has a browser open when it lands fills it.
+    fn spawn_repository_list<E>(
+        &self,
+        kind: VcsProviderKind,
+        task_service: &TaskService<E>,
+        replies: &mpsc::UnboundedSender<RepositoryListReply>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
         let service = task_service.clone();
         let replies = replies.clone();
         tokio::spawn(async move {
@@ -3410,12 +3410,20 @@ impl App {
                     && let Some(browser) = form.repositories.as_mut()
                 {
                     browser.fill(&repositories);
+                } else if let Foreground::GetStarted(panel) = &mut self.foreground
+                    && let Some(browser) = panel.repositories.as_mut()
+                {
+                    browser.fill(&repositories);
                 }
                 self.repositories = Some(repositories);
             }
             Err(error) => {
                 if let Some(form) = self.panel.form.as_mut()
                     && let Some(browser) = form.repositories.as_mut()
+                {
+                    browser.failed(error);
+                } else if let Foreground::GetStarted(panel) = &mut self.foreground
+                    && let Some(browser) = panel.repositories.as_mut()
                 {
                     browser.failed(error);
                 }
@@ -3470,15 +3478,21 @@ impl App {
     /// Missing an agent, or one the CLI says is signed out, is the same answer: a
     /// task started now would stop. Unknown is not a reason to keep offering it.
     pub(in crate::tui) fn setup_incomplete(&self) -> bool {
-        match self.active_agent() {
-            None => true,
-            Some(agent) => matches!(
-                self.credential_status.get(agent.profile()),
-                Some(CredentialStatus::Checked {
-                    signed_in: false,
-                    ..
-                })
-            ),
+        self.setup_next_step().is_some()
+    }
+
+    /// The one thing the first screen would ask for next, in the order it asks.
+    pub(in crate::tui) fn setup_next_step(&self) -> Option<&'static str> {
+        if self.active_agent().is_none() {
+            Some("choose an agent")
+        } else if self.active_repository().is_none() {
+            Some("choose a repository")
+        } else if self.signed_out_agent() {
+            Some("sign in to the agent")
+        } else if self.signed_out_vcs() {
+            Some("sign in to version control")
+        } else {
+            None
         }
     }
 
@@ -3555,6 +3569,7 @@ impl App {
         key: KeyEvent,
         task_service: &TaskService<E>,
         events: &mpsc::UnboundedSender<CredentialShellEvent>,
+        repository_lists: &mpsc::UnboundedSender<RepositoryListReply>,
     ) where
         E: IsolationEngine + Clone + 'static,
     {
@@ -3602,6 +3617,20 @@ impl App {
             self.foreground = Foreground::GetStarted(panel);
             return;
         }
+        if let Some(browser) = panel.repositories.as_mut() {
+            match browser.key(key) {
+                RepositoriesKey::Still => {}
+                RepositoriesKey::Closed => panel.repositories = None,
+                RepositoriesKey::Save => panel.repositories = None,
+                RepositoriesKey::Chosen(repository) => {
+                    panel.repositories = None;
+                    self.set_project_repository(&repository.url);
+                    panel.focus = SetupFocus::Create;
+                }
+            }
+            self.foreground = Foreground::GetStarted(panel);
+            return;
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.foreground = Foreground::Tasks;
@@ -3610,6 +3639,13 @@ impl App {
             KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => panel.move_focus(true),
             KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => panel.move_focus(false),
             KeyCode::Char(' ') if panel.focus == SetupFocus::Agent => panel.agent.open(),
+            // Space is the shortcut into the list whatever the login state: the
+            // listing says for itself when it cannot answer.
+            KeyCode::Char(' ') if panel.focus == SetupFocus::Code => {
+                self.open_setup_repositories(&mut panel, task_service, repository_lists);
+                self.foreground = Foreground::GetStarted(panel);
+                return;
+            }
             KeyCode::Enter => match panel.focus {
                 SetupFocus::Name => panel.editing_name = true,
                 SetupFocus::Agent => match self.active_agent() {
@@ -3618,7 +3654,7 @@ impl App {
                         // closes: this is the one sign-in that does not start at
                         // Settings.
                         self.foreground = Foreground::GetStarted(panel);
-                        self.sign_in_from_setup = true;
+                        self.setup_sign_in = Some(kind.profile());
                         self.open_credential_shell(
                             &kind.to_string(),
                             kind.profile(),
@@ -3629,27 +3665,49 @@ impl App {
                     }
                     None => panel.agent.open(),
                 },
-                SetupFocus::Create => {
-                    let Some(agent) = self.active_agent() else {
-                        self.say("Choose an agent first");
-                        self.foreground = Foreground::GetStarted(panel);
-                        return;
-                    };
-                    // The agent's own CLI is the only thing that can say it is
-                    // signed out; when it says so, work would stop immediately.
-                    if matches!(
-                        self.credential_status.get(agent.profile()),
-                        Some(CredentialStatus::Checked {
-                            signed_in: false,
-                            ..
-                        })
-                    ) {
-                        self.say("Sign in to the agent first");
+                SetupFocus::Code => {
+                    let vcs = self.active_vcs();
+                    if self
+                        .credential_status
+                        .get(vcs.profile())
+                        .is_some_and(signed_in)
+                    {
+                        self.open_setup_repositories(&mut panel, task_service, repository_lists);
                         self.foreground = Foreground::GetStarted(panel);
                         return;
                     }
-                    self.open_new_task(false);
+                    self.foreground = Foreground::GetStarted(panel);
+                    self.setup_sign_in = Some(vcs.profile());
+                    self.open_credential_shell(vcs.label(), vcs.profile(), task_service, events);
                     return;
+                }
+                SetupFocus::Machine => {
+                    // Only a machine on this network is actionable: what the project
+                    // runs on is otherwise Settings' business.
+                    if let Some(offer) = self.setup().offer
+                        && self.adopt_remote(&offer)
+                    {
+                        self.set_project_machine(&offer.address);
+                        let address = offer.address.clone();
+                        self.check_remote(&address).await;
+                        self.watch_remote(&address);
+                    }
+                }
+                SetupFocus::Create => {
+                    if self.active_agent().is_none() {
+                        self.say("Choose an agent first");
+                    } else if self.active_repository().is_none() {
+                        self.say(
+                            "Choose a repository: a task's work has nowhere to go without one",
+                        );
+                    } else if self.signed_out_agent() {
+                        self.say("Sign in to the agent first");
+                    } else if self.signed_out_vcs() {
+                        self.say("Sign in to your version control first");
+                    } else {
+                        self.open_new_task(false);
+                        return;
+                    }
                 }
                 SetupFocus::Settings => {
                     open_panel(self, task_service).await;
@@ -3661,13 +3719,169 @@ impl App {
         self.foreground = Foreground::GetStarted(panel);
     }
 
+    /// Open the repository list over the first screen, and ask for a fresh one.
+    fn open_setup_repositories<E>(
+        &mut self,
+        panel: &mut GetStarted,
+        task_service: &TaskService<E>,
+        replies: &mpsc::UnboundedSender<RepositoryListReply>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let cached = self.repositories.clone().unwrap_or_default();
+        let current = self.active_repository();
+        panel.repositories = Some(Repositories::new(&cached, current.as_deref()));
+        self.spawn_repository_list(self.active_vcs(), task_service, replies);
+    }
+
+    /// Whether the agent's own CLI has said it is signed out.
+    fn signed_out_agent(&self) -> bool {
+        self.active_agent()
+            .is_some_and(|agent| self.signed_out(agent.profile()))
+    }
+
+    fn signed_out_vcs(&self) -> bool {
+        self.signed_out(self.active_vcs().profile())
+    }
+
+    fn signed_out(&self, profile: &'static str) -> bool {
+        matches!(
+            self.credential_status.get(profile),
+            Some(CredentialStatus::Checked {
+                signed_in: false,
+                ..
+            })
+        )
+    }
+
+    /// The installation as the first screen reads it.
+    pub(in crate::tui) fn setup(&self) -> SetupState {
+        let vcs = self.active_vcs();
+        let active = self.active_project_id();
+        let configured = self.configured_remotes();
+        let offer = self
+            .discovered_remotes
+            .values()
+            .filter(|remote| !configured.contains(&remote.address))
+            .min_by(|left, right| left.label.cmp(&right.label))
+            .map(|remote| MachineOffer {
+                label: remote.label.clone(),
+                address: remote.address.clone(),
+            });
+        SetupState {
+            agent: self.active_agent(),
+            agent_status: self
+                .active_agent()
+                .and_then(|agent| self.credential_status.get(agent.profile()))
+                .cloned()
+                .unwrap_or_default(),
+            vcs,
+            vcs_status: self
+                .credential_status
+                .get(vcs.profile())
+                .cloned()
+                .unwrap_or_default(),
+            repository: self.active_repository(),
+            host: self
+                .projects()
+                .into_iter()
+                .find(|project| project.id == active)
+                .and_then(|project| project.host),
+            offer,
+        }
+    }
+
+    /// Adopt a machine that announced itself here, answering whether it was saved.
+    fn adopt_remote(&mut self, offer: &MachineOffer) -> bool {
+        let Some(file) = self.settings_file.as_mut() else {
+            return false;
+        };
+        let mut proposed = file.settings().clone();
+        proposed.add_remote(&offer.address);
+        let saved = file.save(proposed);
+        match saved {
+            Ok(()) => {
+                self.remote_status.remove(&offer.address);
+                true
+            }
+            Err(error) => {
+                self.problem(error.to_string());
+                false
+            }
+        }
+    }
+
+    /// Run the project in front on a machine, here or elsewhere.
+    fn set_project_machine(&mut self, address: &str) {
+        let active = self.active_project_id();
+        let Some(file) = self.settings_file.as_mut() else {
+            return;
+        };
+        let mut proposed = file.settings().clone();
+        let Some(mut project) = proposed.project(&active).cloned() else {
+            return;
+        };
+        project.host = Some(address.to_owned());
+        proposed.add_project(project);
+        let saved = file.save(proposed);
+        if let Err(error) = saved {
+            self.problem(error.to_string());
+        }
+    }
+
+    fn active_vcs(&self) -> VcsProviderKind {
+        let active = self.active_project_id();
+        self.projects()
+            .into_iter()
+            .find(|project| project.id == active)
+            .map(|project| project.vcs_provider())
+            .unwrap_or_else(VcsProviderKind::sole)
+    }
+
+    fn active_repository(&self) -> Option<String> {
+        let active = self.active_project_id();
+        self.projects()
+            .into_iter()
+            .find(|project| project.id == active)
+            .and_then(|project| project.repository)
+    }
+
+    /// Point the project in front at a repository.
+    fn set_project_repository(&mut self, url: &str) {
+        let active = self.active_project_id();
+        let Some(file) = self.settings_file.as_mut() else {
+            return;
+        };
+        let mut proposed = file.settings().clone();
+        let Some(mut project) = proposed.project(&active).cloned() else {
+            return;
+        };
+        project.repository = Some(url.to_owned());
+        proposed.add_project(project);
+        let saved = file.save(proposed);
+        if let Err(error) = saved {
+            self.problem(error.to_string());
+        }
+    }
+
+    /// The profiles the first screen has to ask about.
+    fn setup_profiles(&self) -> Vec<&'static str> {
+        let mut profiles = Vec::new();
+        if let Some(agent) = self.active_agent() {
+            profiles.push(agent.profile());
+        }
+        profiles.push(self.active_vcs().profile());
+        profiles
+    }
+
     /// Whether the first-run screen has an agent whose login has not been asked
     /// about yet.
     pub(in crate::tui) fn wants_setup_check(&self) -> bool {
         matches!(self.foreground, Foreground::GetStarted(_))
             && self
-                .active_agent()
-                .is_some_and(|agent| !self.credential_status.contains_key(agent.profile()))
+                .setup_profiles()
+                .iter()
+                .any(|profile| !self.credential_status.contains_key(profile))
     }
 
     pub(in crate::tui) fn ask_setup_check<E>(
@@ -3677,18 +3891,18 @@ impl App {
     ) where
         E: IsolationEngine + Clone + 'static,
     {
-        let Some(agent) = self.active_agent() else {
-            return;
-        };
-        self.ask_profiles(vec![agent.profile()], task_service, reports);
+        let profiles: Vec<&'static str> = self
+            .setup_profiles()
+            .into_iter()
+            .filter(|profile| !self.credential_status.contains_key(profile))
+            .collect();
+        self.ask_profiles(profiles, task_service, reports);
     }
 
     /// Leave a credential shell for wherever the sign-in was started.
     fn leave_credentials(&mut self) {
-        if mem::take(&mut self.sign_in_from_setup) {
-            if let Some(agent) = self.active_agent() {
-                self.credential_status.remove(agent.profile());
-            }
+        if let Some(profile) = mem::take(&mut self.setup_sign_in) {
+            self.credential_status.remove(profile);
             self.foreground = Foreground::GetStarted(self.get_started_panel());
         } else {
             self.foreground = Foreground::Panel;

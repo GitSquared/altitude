@@ -19,6 +19,7 @@ use crate::{
     agent::AgentKind,
     tui::{
         app::CredentialStatus,
+        popups::repositories::Repositories,
         widgets::{
             chrome::Hint,
             palette,
@@ -28,6 +29,7 @@ use crate::{
             utils::truncate,
         },
     },
+    vcs::VcsProviderKind,
 };
 
 /// What the keys are on.
@@ -35,17 +37,51 @@ use crate::{
 pub enum Focus {
     Name,
     Agent,
+    Code,
+    Machine,
     Create,
     Settings,
 }
 
-const ROWS: [Focus; 4] = [Focus::Name, Focus::Agent, Focus::Create, Focus::Settings];
+const ROWS: [Focus; 6] = [
+    Focus::Name,
+    Focus::Agent,
+    Focus::Code,
+    Focus::Machine,
+    Focus::Create,
+    Focus::Settings,
+];
+
+/// A machine on this network that this installation does not know yet.
+#[derive(Clone)]
+pub struct MachineOffer {
+    pub label: String,
+    pub address: String,
+}
+
+/// What the screen has to say about the installation it is setting up.
+///
+/// Owned values rather than the application's, because the screen is drawn while
+/// the foreground is borrowed, and the two things it reads are small.
+#[derive(Clone)]
+pub struct SetupState {
+    pub agent: Option<AgentKind>,
+    pub agent_status: CredentialStatus,
+    pub vcs: VcsProviderKind,
+    pub vcs_status: CredentialStatus,
+    pub repository: Option<String>,
+    /// The machine this project runs on, when it is not this one.
+    pub host: Option<String>,
+    /// A remote announcing here that this installation has not adopted.
+    pub offer: Option<MachineOffer>,
+}
 
 pub struct GetStarted {
     pub focus: Focus,
     pub name: Field,
     pub editing_name: bool,
     pub agent: Select<AgentKind>,
+    pub repositories: Option<Repositories>,
 }
 
 impl GetStarted {
@@ -62,6 +98,7 @@ impl GetStarted {
             },
             name: Field::with(project_name),
             editing_name: false,
+            repositories: None,
             agent: Select::new(
                 "agent",
                 agents
@@ -84,9 +121,14 @@ impl GetStarted {
         self.focus = ROWS[next];
     }
 
-    /// Whether an edit has the keys, in which case `?` and `q` are characters.
+    /// Whether the keys are characters here: an edit, or a list long enough that
+    /// typing narrows it.
     pub fn is_typing(&self) -> bool {
         self.editing_name
+            || self
+                .repositories
+                .as_ref()
+                .is_some_and(|browser| browser.select.is_searching())
     }
 
     /// Put the name back to what is saved, when an edit is left.
@@ -94,12 +136,15 @@ impl GetStarted {
         self.name = Field::with(name);
     }
 
-    pub fn hints(&self, agent: Option<AgentKind>) -> Vec<Hint> {
+    pub fn hints(&self, setup: &SetupState) -> Vec<Hint> {
         if self.editing_name {
             return vec![
                 Hint::new("enter", "save the name"),
                 Hint::new("esc", "leave it as it was"),
             ];
+        }
+        if let Some(browser) = &self.repositories {
+            return browser.select.hints();
         }
         if self.agent.is_open() {
             return self.agent.hints();
@@ -107,13 +152,35 @@ impl GetStarted {
         let mut hints = vec![Hint::new("j/k", "move"), Hint::new("esc", "look around")];
         match self.focus {
             Focus::Name => hints.insert(0, Hint::new("enter", "rename")),
-            Focus::Agent => match agent {
+            Focus::Agent => match setup.agent {
                 Some(_) => {
                     hints.insert(0, Hint::new("enter", "sign in"));
                     hints.insert(1, Hint::new("space", "change"));
                 }
                 None => hints.insert(0, Hint::new("enter", "choose")),
             },
+            Focus::Code => {
+                if signed_in(&setup.vcs_status) {
+                    hints.insert(
+                        0,
+                        Hint::new(
+                            "enter",
+                            if setup.repository.is_some() {
+                                "change repository"
+                            } else {
+                                "choose repository"
+                            },
+                        ),
+                    );
+                } else {
+                    hints.insert(0, Hint::new("enter", "sign in"));
+                }
+            }
+            Focus::Machine => {
+                if setup.host.is_none() && setup.offer.is_some() {
+                    hints.insert(0, Hint::new("enter", "add it"));
+                }
+            }
             Focus::Create => hints.insert(0, Hint::new("enter", "create a task")),
             Focus::Settings => hints.insert(0, Hint::new("enter", "open settings")),
         }
@@ -133,19 +200,13 @@ pub fn signed_in(status: &CredentialStatus) -> bool {
     )
 }
 
-pub fn draw(
-    frame: &mut Frame,
-    area: Rect,
-    panel: &mut GetStarted,
-    agent: Option<AgentKind>,
-    status: &CredentialStatus,
-) {
+pub fn draw(frame: &mut Frame, area: Rect, panel: &mut GetStarted, setup: &SetupState) {
     let body = Surface::new()
         .padding(Padding::uniform(2))
         .draw(frame, area);
     let [title, rows, actions_area, detail, note] = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(2),
+        Constraint::Length(4),
         Constraint::Length(1),
         Constraint::Min(4),
         Constraint::Length(1),
@@ -156,7 +217,7 @@ pub fn draw(
         Paragraph::new(Line::from(vec![
             Span::styled("GET STARTED", palette::heading()),
             Span::raw("  "),
-            Span::styled("one choice before a task can run", palette::muted()),
+            Span::styled("what a task needs before it can run", palette::muted()),
         ])),
         title,
     );
@@ -170,19 +231,19 @@ pub fn draw(
         panel.focus == Focus::Name,
         width,
     );
-    let agent_status = match agent {
+    let agent_status = match setup.agent {
         None => "not chosen".to_owned(),
-        Some(kind) if matches!(status, CredentialStatus::Checking) => {
+        Some(kind) if matches!(setup.agent_status, CredentialStatus::Checking) => {
             format!("{kind} · checking…")
         }
-        Some(kind) if signed_in(status) => format!("{kind} · signed in"),
+        Some(kind) if signed_in(&setup.agent_status) => format!("{kind} · signed in"),
         Some(kind) => format!("{kind} · not signed in"),
     };
     let agent_row = row(
-        signed_in(status),
+        signed_in(&setup.agent_status),
         "Agent",
         &agent_status,
-        if agent.is_some() {
+        if setup.agent.is_some() {
             "enter sign in"
         } else {
             "enter choose"
@@ -190,26 +251,73 @@ pub fn draw(
         panel.focus == Focus::Agent,
         width,
     );
+    let vcs = setup.vcs.label();
+    let vcs_signed_in = signed_in(&setup.vcs_status);
+    let code_value = match (&setup.repository, vcs_signed_in) {
+        (Some(repository), true) => repository.clone(),
+        (Some(repository), false) => format!("{repository} · {vcs} not signed in"),
+        (None, true) => format!("no repository · {vcs} connected"),
+        (None, false) => format!("no repository · {vcs} not connected"),
+    };
+    let code_row = row(
+        setup.repository.is_some() && vcs_signed_in,
+        "Code",
+        &code_value,
+        if vcs_signed_in {
+            "enter choose"
+        } else {
+            "enter sign in"
+        },
+        panel.focus == Focus::Code,
+        width,
+    );
+    let machine_value = match (&setup.host, &setup.offer) {
+        (Some(host), _) => host.clone(),
+        (None, Some(offer)) => format!("{} · found on this network", offer.label),
+        (None, None) => "this machine".to_owned(),
+    };
+    let machine_row = row(
+        true,
+        "Machine",
+        &machine_value,
+        if setup.host.is_none() && setup.offer.is_some() {
+            "enter add"
+        } else {
+            ""
+        },
+        panel.focus == Focus::Machine,
+        width,
+    );
     let actions = Line::from(vec![
         action("Create the first task", panel.focus == Focus::Create),
         Span::raw("      "),
         action("Open Settings", panel.focus == Focus::Settings),
     ]);
-    frame.render_widget(Paragraph::new(vec![name, agent_row]), rows);
+    frame.render_widget(
+        Paragraph::new(vec![name, agent_row, code_row, machine_row]),
+        rows,
+    );
     frame.render_widget(Paragraph::new(actions), actions_area);
 
-    let anchor = Rect {
+    let code_anchor = Rect {
+        y: rows.y + 2,
+        height: 1,
+        ..rows
+    };
+    let agent_anchor = Rect {
         y: rows.y + 1,
         height: 1,
         ..rows
     };
     if panel.agent.is_open() {
-        panel.agent.draw_list_below(frame, body, anchor);
+        panel.agent.draw_list_below(frame, body, agent_anchor);
+    } else if let Some(browser) = panel.repositories.as_mut() {
+        browser.draw(frame, body, code_anchor);
     } else if panel.editing_name {
         draw_name_editor(frame, detail, panel);
     } else {
         frame.render_widget(
-            Paragraph::new(detail_text(panel.focus, agent))
+            Paragraph::new(detail_text(panel.focus, setup))
                 .wrap(Wrap { trim: true })
                 .style(palette::muted()),
             detail,
@@ -246,14 +354,15 @@ fn draw_name_editor(frame: &mut Frame, area: Rect, panel: &mut GetStarted) {
     );
 }
 
-fn detail_text(focus: Focus, agent: Option<AgentKind>) -> String {
+fn detail_text(focus: Focus, setup: &SetupState) -> String {
+    let vcs = setup.vcs.label();
     match focus {
         Focus::Name => {
             "The project is the work: its repository, its caches, what the agent is told, and the \
              machine it runs on. A name you recognise is enough."
                 .to_owned()
         }
-        Focus::Agent if agent.is_none() => {
+        Focus::Agent if setup.agent.is_none() => {
             "The agent is what does the work, in a sandbox of its own. Choose one you can sign in \
              to; either works with any project."
                 .to_owned()
@@ -263,8 +372,44 @@ fn detail_text(focus: Focus, agent: Option<AgentKind>) -> String {
              writes is kept here and mounted into every task."
                 .to_owned()
         }
-        Focus::Create if agent.is_none() => {
+        Focus::Code if !signed_in(&setup.vcs_status) => {
+            format!(
+                "Sign in to {vcs} so a task can push its work out of the sandbox. Nothing a task \
+                 does survives its sandbox; the repository is where it goes."
+            )
+        }
+        Focus::Code if setup.repository.is_none() => {
+            "Choose the repository tasks start from. It is cloned into each sandbox before the \
+             first turn, and it is where finished work is pushed."
+                .to_owned()
+        }
+        Focus::Code => {
+            "The repository a task starts from and pushes back to. Changing it changes where the \
+             next task's work goes."
+                .to_owned()
+        }
+        Focus::Create if setup.agent.is_none() => {
             "A task needs an agent. Choose one and sign in, and this is where work starts."
+                .to_owned()
+        }
+        Focus::Create if setup.repository.is_none() => {
+            "A task needs a repository to put its work in. Choose one above, and this is where \
+             work starts."
+                .to_owned()
+        }
+        Focus::Machine if setup.host.is_some() => format!(
+            "This project's tasks run on {}. That machine keeps the code it clones and the caches \
+             it builds, so moving the project moves where its work lives.",
+            setup.host.as_deref().unwrap_or_default()
+        ),
+        Focus::Machine if setup.offer.is_some() => {
+            "A remote on this network. Adding it lets this project run there, with its own caches, \
+             and leaves everything else here. Other machines live in Settings → Remotes."
+                .to_owned()
+        }
+        Focus::Machine => {
+            "Tasks run on this machine, in sandboxes thrown away after them. A remote is another \
+             machine that can run a project; one on this network would appear here."
                 .to_owned()
         }
         Focus::Create => {
@@ -273,8 +418,8 @@ fn detail_text(focus: Focus, agent: Option<AgentKind>) -> String {
                 .to_owned()
         }
         Focus::Settings => {
-            "Repositories, caches, instructions, the machine a project runs on, and any task \
-             tracker are all in Settings."
+            "Caches, instructions, the machine a project runs on, and any task tracker are all in \
+             Settings."
                 .to_owned()
         }
     }
