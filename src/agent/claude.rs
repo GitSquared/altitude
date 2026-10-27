@@ -16,6 +16,7 @@ pub struct ClaudeStream {
     pending: String,
     report: Option<TaskAgentTurnReport>,
     received_result: bool,
+    model: Option<String>,
     error: Option<String>,
 }
 
@@ -60,6 +61,7 @@ impl ClaudeStream {
             pending: String::new(),
             report: None,
             received_result: false,
+            model: None,
             error: None,
         }
     }
@@ -70,6 +72,16 @@ impl ClaudeStream {
         };
         if message.get("type").and_then(Value::as_str) == Some("result") {
             self.received_result = true;
+            self.model = message
+                .get("model")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    message
+                        .get("modelUsage")
+                        .and_then(Value::as_object)
+                        .and_then(|usage| usage.keys().next().map(String::as_str))
+                })
+                .map(str::to_owned);
             if message.get("is_error").and_then(Value::as_bool) == Some(true) {
                 self.error = Some(
                     if message
@@ -115,7 +127,10 @@ impl TaskReportDecoder for ClaudeStream {
             let line = mem::take(&mut self.pending);
             self.process_line(&line);
         }
-        let report = self.report.take();
+        let mut report = self.report.take();
+        if let Some(report) = &mut report {
+            report.model = self.model.take();
+        }
         let error = self.error.take();
         report.ok_or_else(|| {
             error.unwrap_or_else(|| {

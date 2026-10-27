@@ -172,6 +172,7 @@ struct Card {
     title: String,
     project: String,
     agent: Option<AgentKind>,
+    model: Option<String>,
     host: String,
     /// The tracker issue this task is bound to, when it is bound to one.
     issue: Option<String>,
@@ -199,6 +200,7 @@ impl Card {
             title: summary.title.clone(),
             project: summary.project.clone(),
             agent: summary.agent,
+            model: summary.model.clone(),
             host: summary.host.clone(),
             issue: summary
                 .tracker_issue
@@ -270,9 +272,20 @@ fn draw_card(frame: &mut Frame, area: Rect, card: &Card, focused: bool) {
         return;
     }
 
-    let agent = match card.agent {
-        Some(kind) => kind.to_string(),
-        None => "no agent".to_owned(),
+    let model = card.model.as_deref().map(|model| {
+        model
+            .rsplit('/')
+            .next()
+            .unwrap_or(model)
+            .to_ascii_lowercase()
+    });
+    let agent = match (card.agent, model) {
+        (Some(kind), Some(model)) => {
+            format!("{}-{model}", kind.to_string().to_ascii_lowercase())
+        }
+        (Some(kind), None) => kind.to_string(),
+        (None, Some(model)) => model,
+        (None, None) => "no agent".to_owned(),
     };
     // The title is part of the card, not its frame: a long title wraps inside
     // the card rather than being cut short on the border.

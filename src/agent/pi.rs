@@ -88,6 +88,7 @@ pub struct PiStream {
     pending: String,
     report: Option<TaskAgentTurnReport>,
     settled: bool,
+    model: Option<String>,
     error: Option<String>,
 }
 
@@ -97,6 +98,7 @@ impl PiStream {
             pending: String::new(),
             report: None,
             settled: false,
+            model: None,
             error: None,
         }
     }
@@ -134,6 +136,10 @@ impl PiStream {
                 {
                     return;
                 }
+                self.model = message
+                    .and_then(|message| message.get("model"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
                 let stop_reason = message
                     .and_then(|message| message.get("stopReason"))
                     .and_then(Value::as_str);
@@ -182,7 +188,10 @@ impl TaskReportDecoder for PiStream {
             let line = mem::take(&mut self.pending);
             self.process_line(&line);
         }
-        let report = self.report.take();
+        let mut report = self.report.take();
+        if let Some(report) = &mut report {
+            report.model = self.model.take();
+        }
         let error = self.error.take();
         report.ok_or_else(|| {
             error.unwrap_or_else(|| {

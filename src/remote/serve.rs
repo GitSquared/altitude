@@ -502,13 +502,7 @@ impl TaskHost for OwnTasks {
                     .find(|task| task.id == task_id)
                 && let Some(reference) = task.facts.tracker_issue.clone()
                 && let Err(error) = tracker
-                    .pilot_task(
-                        peer,
-                        task_id.clone(),
-                        reference,
-                        task.agent_kind
-                            .map(|kind| kind.to_string().to_ascii_lowercase()),
-                    )
+                    .pilot_task(peer, task_id.clone(), reference, task.session_agent())
                     .await
             {
                 tracing::warn!(task = %task_id, %error, "could not pilot a transferred bound task");
@@ -711,13 +705,7 @@ impl TaskHost for OwnTasks {
                         && tracker.has_account(peer)
                         && let Some(reference) = task.facts.tracker_issue.clone()
                         && let Err(error) = tracker
-                            .pilot_task(
-                                peer,
-                                task.id.clone(),
-                                reference,
-                                task.agent_kind
-                                    .map(|kind| kind.to_string().to_ascii_lowercase()),
-                            )
+                            .pilot_task(peer, task.id.clone(), reference, task.session_agent())
                             .await
                     {
                         tracing::warn!(task = %task.id, %error, "could not pilot a delegated issue task");
@@ -957,7 +945,7 @@ impl super::tracker::Host for OwnTasks {
         })
     }
 
-    fn agent_name(&self, task_id: String) -> super::tracker::HostFuture<'_, Option<String>> {
+    fn session_agent(&self, task_id: String) -> super::tracker::HostFuture<'_, Option<String>> {
         Box::pin(async move {
             Ok(self
                 .tasks
@@ -966,8 +954,7 @@ impl super::tracker::Host for OwnTasks {
                 .map_err(|error| error.to_string())?
                 .into_iter()
                 .find(|task| task.id == task_id)
-                .and_then(|task| task.agent_kind)
-                .map(|kind| kind.to_string().to_ascii_lowercase()))
+                .and_then(|task| task.session_agent()))
         })
     }
 

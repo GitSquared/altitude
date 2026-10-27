@@ -361,6 +361,9 @@ pub struct TaskSummary {
     #[serde(default)]
     pub project_id: Option<String>,
     pub agent: Option<AgentKind>,
+    /// The model the harness last reported using.
+    #[serde(default)]
+    pub model: Option<String>,
     pub status: TaskExecutionStatus,
     pub mode: TaskExecutionMode,
     /// Why it is not running, when it is not.
@@ -429,6 +432,7 @@ impl TaskSummary {
                 .as_ref()
                 .map(|project| project.id.clone()),
             agent: task.agent_kind,
+            model: task.facts.model.clone(),
             status: task.facts.execution_status.clone(),
             mode: task.facts.execution_mode,
             pause_reason: task.facts.execution_pause_reason.clone(),

@@ -14,6 +14,9 @@ pub struct TaskAgentTurnReport {
     pub summary: String,
     #[serde(default)]
     pub operator_signal: Option<TaskOperatorSignalDraft>,
+    /// The model the harness actually used, when its output named one.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -239,6 +242,8 @@ pub struct TaskFacts {
     #[sqlx(json(nullable))]
     pub project: Option<Project>,
     pub agent_conversation_id: Option<String>,
+    /// The model the harness last reported using.
+    pub model: Option<String>,
     pub execution_status: TaskExecutionStatus,
     pub execution_pause_reason: Option<TaskExecutionPauseReason>,
     pub execution_mode: TaskExecutionMode,
@@ -336,6 +341,12 @@ pub enum TaskHistoryEvent {
         requested_action: TaskAgentRequestedAction,
         operator_attention_level: TaskOperatorAttentionLevel,
         summary: String,
+    },
+    /// The model the harness reported for a turn, as the harness names it.
+    ///
+    /// Observation only: Altitude records what ran, not what should have run.
+    AgentModelObserved {
+        model: String,
     },
     OperatorSignalRaised {
         signal: TaskOperatorSignal,
@@ -494,6 +505,7 @@ pub struct TaskAgentTurnContext {
     pub host: String,
     pub project: Option<Project>,
     pub agent: Option<AgentKind>,
+    pub model: Option<String>,
     pub execution_status: TaskExecutionStatus,
     pub execution_mode: TaskExecutionMode,
     pub operator_attention_level: TaskOperatorAttentionLevel,
@@ -510,12 +522,13 @@ impl fmt::Display for TaskAgentTurnContext {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(
             formatter,
-            "task_id={}; title={:?}; harness={}; host={}; project={}",
+            "task_id={}; title={:?}; harness={}; model={}; host={}; project={}",
             self.task_id,
             self.title,
             self.agent
                 .map(|kind| kind.to_string())
                 .unwrap_or_else(|| "none".into()),
+            self.model.as_deref().unwrap_or("unknown"),
             self.host,
             self.project
                 .as_ref()
@@ -640,6 +653,7 @@ impl Task {
             host: self.host.clone(),
             project: self.facts.project.clone(),
             agent: self.agent_kind,
+            model: self.facts.model.clone(),
             execution_status: TaskExecutionStatus::Running,
             execution_mode,
             operator_attention_level: self.facts.operator_attention_level.clone(),
@@ -649,6 +663,28 @@ impl Task {
             datetime: Local::now().to_rfc3339_opts(SecondsFormat::Secs, true),
             latest_operator_message: self.facts.latest_operator_message.clone(),
             code_contribution_observations: self.code_contribution_observations.clone(),
+        }
+    }
+
+    /// How this task reads as an agent in a session title: `harness-model`.
+    ///
+    /// The model may carry a provider prefix; a title needs the model's own name.
+    pub fn session_agent(&self) -> Option<String> {
+        let harness = self
+            .agent_kind
+            .map(|kind| kind.to_string().to_ascii_lowercase());
+        let model = self.facts.model.as_deref().map(|model| {
+            model
+                .rsplit('/')
+                .next()
+                .unwrap_or(model)
+                .to_ascii_lowercase()
+        });
+        match (harness, model) {
+            (Some(harness), Some(model)) => Some(format!("{harness}-{model}")),
+            (Some(harness), None) => Some(harness),
+            (None, Some(model)) => Some(model),
+            (None, None) => None,
         }
     }
 }

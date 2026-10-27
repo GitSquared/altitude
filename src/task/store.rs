@@ -429,6 +429,15 @@ impl TaskStore {
             operator_attention_level: attention,
             summary: report.summary.clone(),
         }];
+        if let Some(model) = report
+            .model
+            .as_deref()
+            .filter(|model| !model.trim().is_empty())
+        {
+            events.push(TaskHistoryEvent::AgentModelObserved {
+                model: model.to_owned(),
+            });
+        }
         // A run that is answering a thread keeps speaking on it. The thread id is
         // reused only while it is unresolved: one the operator resolved meanwhile
         // is a conversation that ended, and this report starts a new one.

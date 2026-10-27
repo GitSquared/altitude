@@ -132,8 +132,8 @@ pub trait Host: Send + Sync + 'static {
     fn accept(&self, task_id: String, signal_id: String) -> HostFuture<'_, ()>;
     /// Whether the task is still in play, so a removed task stops being reported.
     fn is_active(&self, task_id: String) -> HostFuture<'_, bool>;
-    /// The harness a task runs, for the session title. None until one is chosen.
-    fn agent_name(&self, task_id: String) -> HostFuture<'_, Option<String>>;
+    /// The harness and model a task runs, for the session title.
+    fn session_agent(&self, task_id: String) -> HostFuture<'_, Option<String>>;
 }
 
 pub struct RemoteTracker {
@@ -187,7 +187,7 @@ impl RemoteTracker {
         peer: EndpointId,
         task_id: String,
         issue: IssueReference,
-        agent: Option<String>,
+        session_agent: Option<String>,
     ) -> Result<(), String> {
         let Some(tracker_user_id) = self.user_for_peer(&peer.to_string()) else {
             return Err("sync a Linear account to this remote before delegating issue work".into());
@@ -211,7 +211,7 @@ impl RemoteTracker {
             origin: RouteOrigin::Piloted,
         })?;
         if let Err(error) = self
-            .set_session_summary(&session_id, &tracker_user_id, agent.as_deref())
+            .set_session_summary(&session_id, &tracker_user_id, session_agent.as_deref())
             .await
         {
             tracing::warn!(session = %session_id, %error, "could not name a piloted session");
@@ -585,9 +585,9 @@ impl RemoteTracker {
             cursor: 0,
             origin: RouteOrigin::Delegated,
         })?;
-        let agent_name = host.agent_name(task_id.clone()).await?;
+        let session_agent = host.session_agent(task_id.clone()).await?;
         if let Err(error) = self
-            .set_session_summary(session_id, author, agent_name.as_deref())
+            .set_session_summary(session_id, author, session_agent.as_deref())
             .await
         {
             tracing::warn!(session = %session_id, %error, "could not name a delegated session");
@@ -1047,6 +1047,19 @@ impl RemoteTracker {
         let start = if folded { events.len() } else { route.cursor };
         for (index, (_, event)) in events.iter().enumerate().skip(start) {
             match event {
+                TaskHistoryEvent::AgentModelObserved { .. } => {
+                    if let Ok(Some(session_agent)) = host.session_agent(route.task_id.clone()).await
+                        && let Err(error) = self
+                            .set_session_summary(
+                                &route.session_id,
+                                &route.tracker_user_id,
+                                Some(&session_agent),
+                            )
+                            .await
+                    {
+                        tracing::warn!(task = %route.task_id, %error, "could not update the session model label");
+                    }
+                }
                 TaskHistoryEvent::AgentRunStarted { agent_run_id, .. } => {
                     if events[..index].iter().any(|(_, event)| {
                         matches!(
