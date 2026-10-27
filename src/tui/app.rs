@@ -3570,6 +3570,7 @@ impl App {
         task_service: &TaskService<E>,
         events: &mpsc::UnboundedSender<CredentialShellEvent>,
         repository_lists: &mpsc::UnboundedSender<RepositoryListReply>,
+        tracker_connects: &mpsc::UnboundedSender<TrackerConnectReply>,
     ) where
         E: IsolationEngine + Clone + 'static,
     {
@@ -3693,6 +3694,21 @@ impl App {
                         self.watch_remote(&address);
                     }
                 }
+                SetupFocus::Tracker => {
+                    match self.tracker_state {
+                        TrackerState::Connected => {
+                            open_panel(self, task_service).await;
+                            self.panel.section = Section::Trackers;
+                            self.panel.cursor.reset();
+                            return;
+                        }
+                        _ => {
+                            // Connecting and cancelling are the same key, as they
+                            // are in Settings.
+                            self.connect_tracker(task_service, tracker_connects);
+                        }
+                    }
+                }
                 SetupFocus::Create => {
                     if self.active_agent().is_none() {
                         self.say("Choose an agent first");
@@ -3754,6 +3770,17 @@ impl App {
         )
     }
 
+    /// Read the tracker's live session, which only its own provider can answer.
+    pub(in crate::tui) fn refresh_tracker_state<E>(&mut self, task_service: &TaskService<E>)
+    where
+        E: IsolationEngine + Clone + 'static,
+    {
+        self.tracker_state = match task_service.tracker() {
+            Some(tracker) if tracker.is_connected() => TrackerState::Connected,
+            _ => TrackerState::NotConnected,
+        };
+    }
+
     /// The installation as the first screen reads it.
     pub(in crate::tui) fn setup(&self) -> SetupState {
         let vcs = self.active_vcs();
@@ -3788,6 +3815,7 @@ impl App {
                 .find(|project| project.id == active)
                 .and_then(|project| project.host),
             offer,
+            tracker: self.tracker_state,
         }
     }
 
@@ -6268,10 +6296,7 @@ where
     }
     app.base_description = task_service.base_description();
     app.profiles = task_service.credentials().profiles();
-    app.tracker_state = match task_service.tracker() {
-        Some(tracker) if tracker.is_connected() => TrackerState::Connected,
-        _ => TrackerState::NotConnected,
-    };
+    app.refresh_tracker_state(task_service);
     match app.remote_keys.list().await {
         Ok(keys) => app.remembered_keys = keys,
         Err(error) => app.problem(format!("could not read remembered remotes: {error}")),

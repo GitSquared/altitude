@@ -223,6 +223,7 @@ where
     // What a profile is called where an operator reads it, and the first thing a
     // new installation is shown.
     app.profiles = task_service.credentials().profiles();
+    app.refresh_tracker_state(&task_service);
     if app.should_offer_setup() {
         app.open_get_started();
     }
@@ -1063,8 +1064,14 @@ where
                 .await
         }
         Foreground::GetStarted(_) => {
-            app.get_started_key(key, task_service, credential_events, repositories)
-                .await
+            app.get_started_key(
+                key,
+                task_service,
+                credential_events,
+                repositories,
+                tracker_connects,
+            )
+            .await
         }
         Foreground::Panel => {
             app.panel_keys(

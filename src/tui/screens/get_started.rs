@@ -17,8 +17,9 @@ use ratatui::{
 
 use crate::{
     agent::AgentKind,
+    tracker::TrackerKind,
     tui::{
-        app::CredentialStatus,
+        app::{CredentialStatus, TrackerState},
         popups::repositories::Repositories,
         widgets::{
             chrome::Hint,
@@ -39,15 +40,17 @@ pub enum Focus {
     Agent,
     Code,
     Remote,
+    Tracker,
     Create,
     Settings,
 }
 
-const ROWS: [Focus; 6] = [
+const ROWS: [Focus; 7] = [
     Focus::Name,
     Focus::Agent,
     Focus::Code,
     Focus::Remote,
+    Focus::Tracker,
     Focus::Create,
     Focus::Settings,
 ];
@@ -74,6 +77,7 @@ pub struct SetupState {
     pub host: Option<String>,
     /// A remote announcing here that this installation has not adopted.
     pub offer: Option<RemoteOffer>,
+    pub tracker: TrackerState,
 }
 
 pub struct GetStarted {
@@ -181,6 +185,17 @@ impl GetStarted {
                     hints.insert(0, Hint::new("enter", "add it"));
                 }
             }
+            Focus::Tracker => hints.insert(
+                0,
+                Hint::new(
+                    "enter",
+                    match setup.tracker {
+                        TrackerState::NotConnected => "connect",
+                        TrackerState::Connecting => "cancel",
+                        TrackerState::Connected => "manage",
+                    },
+                ),
+            ),
             Focus::Create => hints.insert(0, Hint::new("enter", "create a task")),
             Focus::Settings => hints.insert(0, Hint::new("enter", "open settings")),
         }
@@ -206,7 +221,7 @@ pub fn draw(frame: &mut Frame, area: Rect, panel: &mut GetStarted, setup: &Setup
         .draw(frame, area);
     let [title, rows, actions_area, detail, note] = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(4),
+        Constraint::Length(5),
         Constraint::Length(1),
         Constraint::Min(4),
         Constraint::Length(1),
@@ -288,13 +303,31 @@ pub fn draw(frame: &mut Frame, area: Rect, panel: &mut GetStarted, setup: &Setup
         panel.focus == Focus::Remote,
         width,
     );
+    let tracker = TrackerKind::sole().label();
+    let tracker_value = match setup.tracker {
+        TrackerState::NotConnected => "none · optional".to_owned(),
+        TrackerState::Connecting => format!("{tracker} · connecting…"),
+        TrackerState::Connected => format!("{tracker} · connected"),
+    };
+    let tracker_row = row(
+        setup.tracker == TrackerState::Connected,
+        "Tracker",
+        &tracker_value,
+        match setup.tracker {
+            TrackerState::NotConnected => "enter connect",
+            TrackerState::Connecting => "enter cancel",
+            TrackerState::Connected => "enter manage",
+        },
+        panel.focus == Focus::Tracker,
+        width,
+    );
     let actions = Line::from(vec![
         action("Create the first task", panel.focus == Focus::Create),
         Span::raw("      "),
         action("Open Settings", panel.focus == Focus::Settings),
     ]);
     frame.render_widget(
-        Paragraph::new(vec![name, agent_row, code_row, remote_row]),
+        Paragraph::new(vec![name, agent_row, code_row, remote_row, tracker_row]),
         rows,
     );
     frame.render_widget(Paragraph::new(actions), actions_area);
@@ -421,6 +454,24 @@ fn detail_text(focus: Focus, setup: &SetupState) -> String {
              A project runs where its remote is, and each machine keeps its own checkouts and \
              caches. None is paired here yet, so this project runs on this machine; one on your \
              network would appear above."
+                .to_owned()
+        }
+        Focus::Tracker if setup.tracker == TrackerState::Connected => {
+            "The tracker is connected. Link an issue to a task from the task list with ctrl-l, \
+             and Altitude reports progress back as the work moves. Settings → Trackers manages \
+             the connection."
+                .to_owned()
+        }
+        Focus::Tracker if setup.tracker == TrackerState::Connecting => {
+            "Waiting on the browser and the callback. This screen updates when the sign-in lands, \
+             and nothing else here depends on it."
+                .to_owned()
+        }
+        Focus::Tracker => {
+            "A task tracker is where issues live, and connecting one links an issue to a task and \
+             reports progress back as work moves. It is optional: a task can start from an idea. \
+             Letting a tracker start work on its own is a later step, once a project claims a team \
+             on a remote that accepts it."
                 .to_owned()
         }
         Focus::Create => {
