@@ -6654,25 +6654,13 @@ impl App {
             };
             for request in shell.process(bytes) {
                 match request {
-                    GuestRequest::Copy(text) => {
-                        // A program that copies a link is usually asking for it to
-                        // be opened: Claude Code's sign-in falls back to OSC 52
-                        // when it cannot find a browser, and a login page on the
-                        // clipboard is not where the operator wanted it. The copy
-                        // still happens; the question is what makes it a browser.
-                        let candidate = text.trim().to_owned();
-                        let opens = Link::parse(&candidate).is_some();
-                        match copy_to_clipboard(text) {
-                            Ok(()) => {
-                                shell.show_clipboard_confirmation();
-                                tracing::info!("copied terminal text to clipboard");
-                            }
-                            Err(error) => tracing::error!(%error, "could not copy terminal text"),
+                    GuestRequest::Copy(text) => match copy_to_clipboard(text) {
+                        Ok(()) => {
+                            shell.show_clipboard_confirmation();
+                            tracing::info!("copied terminal text to clipboard");
                         }
-                        if opens && asked_to_open.is_none() {
-                            asked_to_open = Some(candidate);
-                        }
-                    }
+                        Err(error) => tracing::error!(%error, "could not copy terminal text"),
+                    },
                     GuestRequest::Open(url) => asked_to_open = Some(url),
                 }
             }
