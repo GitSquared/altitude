@@ -88,7 +88,7 @@ struct OwnTasks {
     tracker: Option<Arc<super::tracker::RemoteTracker>>,
     /// Whether this machine may start work that arrives from a tracker, whatever
     /// the project says about itself.
-    accept_delegated_work: bool,
+    delegation_paused: bool,
 }
 
 /// Who is watching this machine's tasks, one entry per open watch.
@@ -778,10 +778,12 @@ impl super::tracker::Host for OwnTasks {
         label: String,
     ) -> super::tracker::HostFuture<'_, String> {
         Box::pin(async move {
-            if !self.accept_delegated_work {
-                return Err("This machine is not accepting delegated work. Turn on \
-                     `accept_delegated_work` in its serve.toml and restart it."
-                    .into());
+            if self.delegation_paused {
+                return Err(
+                    "This machine has paused delegated work. Its operator has to \
+                     turn off `pause_delegated_work` in its serve.toml and restart it."
+                        .into(),
+                );
             }
             let owner = peer.to_string();
             let scoped = self
@@ -835,9 +837,9 @@ impl super::tracker::Host for OwnTasks {
                 .is_some_and(|route| route.accepts_delegated_work)
             {
                 return Err(format!(
-                    "Project {:?} claims this team but is not authorized to accept delegated \
-                     work. Turn on \"Accept delegated work\" for it in Settings → Projects, then \
-                     push your setup here.",
+                    "Project {:?} claims this team but has not accepted delegated work. Its \
+                     operator has to turn on \"Accept delegated work\" for it in Settings → \
+                     Projects, then push their setup here.",
                     project.name
                 ));
             }
@@ -1312,7 +1314,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         tracker: linear_runtime
             .as_ref()
             .map(|runtime| runtime.tracker.clone()),
-        accept_delegated_work: settings.accept_delegated_work,
+        delegation_paused: settings.pause_delegated_work,
     });
     if let Some(runtime) = linear_runtime {
         let tracker = runtime.tracker.clone();
