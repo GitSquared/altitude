@@ -19,6 +19,7 @@ mod sandbox;
 
 pub use microsandbox::MicrosandboxIsolation;
 pub(crate) use sandbox::private_directory;
+pub(crate) use sandbox::run_collecting;
 /// Shared with the VCS providers so capsule commands are quoted one way.
 pub(crate) use sandbox::shell_quote;
 pub use sandbox::{DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand};

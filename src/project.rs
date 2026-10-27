@@ -137,6 +137,15 @@ impl Project {
         }
     }
 
+    /// The build shared by every sandbox that runs a profile's own tools.
+    ///
+    /// A sign-in, a login check, and a repository listing are the same image for
+    /// the same profile, and giving them one id is what stops the CLI being
+    /// installed once per gesture.
+    pub fn profile_build() -> Self {
+        Self::profile_only("credentials")
+    }
+
     /// A build that belongs to no project: one CLI's own tools, and nothing else.
     ///
     /// A sign-in and an observer need a sandbox but not a project's code, setup, or

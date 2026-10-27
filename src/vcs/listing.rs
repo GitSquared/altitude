@@ -8,7 +8,7 @@
 use std::{error::Error, fmt};
 
 use crate::{
-    isolation::{CommandEvent, IsolationEngine, OutputStream, Unwatched, WATCHER_PREFIX},
+    isolation::{IsolationEngine, Unwatched, WATCHER_PREFIX, run_collecting},
     project::Project,
     vcs::{Repository, VcsProviderKind},
 };
@@ -28,7 +28,7 @@ where
 {
     let provider = answering(kind);
     let recipes = vec![provider.profile_recipe()];
-    let project = Project::profile_only("credentials");
+    let project = Project::profile_build();
     if engine
         .project_snapshot(project.clone(), recipes.clone())
         .is_none()
@@ -48,7 +48,7 @@ where
         .watcher(id.clone(), project, recipes, &Unwatched)
         .await
         .map_err(|error| ListingError(error.to_string()))?;
-    let listed = run(engine, &id, provider.repository_list_command()).await;
+    let listed = list(engine, &id, provider.repository_list_command()).await;
     if let Err(error) = engine.remove(id).await {
         tracing::warn!(%error, "could not remove a repository listing sandbox");
     }
@@ -57,46 +57,25 @@ where
         .ok_or_else(|| ListingError("the provider's answer could not be read".to_owned()))
 }
 
-/// Run the listing command to completion and answer with what it printed.
-async fn run<E>(engine: &E, id: &str, command: String) -> Result<String, ListingError>
+/// Run the listing command and answer with what it printed, refusing a failure.
+async fn list<E>(engine: &E, id: &str, command: String) -> Result<String, ListingError>
 where
     E: IsolationEngine + Clone,
 {
-    let mut session = engine
-        .run_command(id.to_owned(), command)
+    let (status, output, errors) = run_collecting(engine, id.to_owned(), command)
         .await
         .map_err(|error| ListingError(error.to_string()))?;
-    // Only stdout is the answer; a CLI that warns on stderr must not turn its
-    // JSON into something unreadable, and its warning is the useful part when it
-    // fails.
-    let mut output = String::new();
-    let mut errors = String::new();
-    while let Some(event) = session.events.recv().await {
-        match event {
-            CommandEvent::Output { stream, bytes } => {
-                let text = String::from_utf8_lossy(&bytes);
-                match stream {
-                    OutputStream::Stdout => output.push_str(&text),
-                    OutputStream::Stderr => errors.push_str(&text),
-                }
-            }
-            CommandEvent::Exited(0) => return Ok(output),
-            CommandEvent::Exited(code) => {
-                let said = if errors.trim().is_empty() {
-                    output.trim()
-                } else {
-                    errors.trim()
-                };
-                return Err(ListingError(format!(
-                    "the repository list exited with code {code}: {said}"
-                )));
-            }
-            CommandEvent::Failed(error) => return Err(ListingError(error)),
-        }
+    if status != 0 {
+        let said = if errors.trim().is_empty() {
+            output.trim()
+        } else {
+            errors.trim()
+        };
+        return Err(ListingError(format!(
+            "the repository list exited with code {status}: {said}"
+        )));
     }
-    Err(ListingError(
-        "the repository list closed without an exit status".to_owned(),
-    ))
+    Ok(output)
 }
 
 /// Why a listing could not be read, in the words the picker shows.

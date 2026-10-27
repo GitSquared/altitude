@@ -17,8 +17,8 @@ use crate::{config::Config, project::Project};
 
 use super::{
     BaseSandboxRecipe, BaseSandboxSnapshot, CommandEvent, CredentialCheck, CredentialReport,
-    CredentialSandbox, EnvironmentProgressSink, IsolationEngine, IsolationError, SandboxMount,
-    SandboxOptions, SandboxSize, SetupStep, VsockRoute,
+    CredentialSandbox, EnvironmentProgressSink, IsolationEngine, IsolationError, OutputStream,
+    SandboxMount, SandboxOptions, SandboxSize, SetupStep, VsockRoute,
 };
 
 /// The current Alpine environment runs as root, so home-relative requirements
@@ -555,7 +555,7 @@ pub(super) async fn credential_reports(
     let Some(snapshot) = snapshot else {
         return Ok(None);
     };
-    let plan = SandboxPlan::compose(config, Project::profile_only("credentials"), recipes)?;
+    let plan = SandboxPlan::compose(config, Project::profile_build(), recipes)?;
     create(
         engine,
         config,
@@ -616,7 +616,7 @@ pub(super) async fn credential_shell(
         .find(|recipe| recipe.profile == profile)
         .map(|recipe| recipe.sign_in_command.command())
         .ok_or_else(|| IsolationError::new(format!("no recipe for the {profile} profile")))?;
-    let plan = SandboxPlan::compose(config, Project::profile_only("credentials"), recipes)?;
+    let plan = SandboxPlan::compose(config, Project::profile_build(), recipes)?;
     create(
         engine,
         config,
@@ -792,12 +792,34 @@ async fn run_to_end(
     id: String,
     command: String,
 ) -> Result<(i32, String), IsolationError> {
+    let (status, output, errors) = run_collecting(engine, id, command).await?;
+    Ok((status, output + &errors))
+}
+
+/// Runs a command to completion, answering with its exit status and what it
+/// printed on each stream.
+///
+/// The streams are kept apart because a provider's answer is JSON on one and its
+/// warnings are prose on the other, and a caller reading one must not have to
+/// parse the other.
+pub(crate) async fn run_collecting(
+    engine: &impl IsolationEngine,
+    id: String,
+    command: String,
+) -> Result<(i32, String, String), IsolationError> {
     let mut session = engine.run_command(id, command).await?;
     let mut output = String::new();
+    let mut errors = String::new();
     while let Some(event) = session.events.recv().await {
         match event {
-            CommandEvent::Output { bytes, .. } => output.push_str(&String::from_utf8_lossy(&bytes)),
-            CommandEvent::Exited(status) => return Ok((status, output)),
+            CommandEvent::Output { stream, bytes } => {
+                let text = String::from_utf8_lossy(&bytes);
+                match stream {
+                    OutputStream::Stdout => output.push_str(&text),
+                    OutputStream::Stderr => errors.push_str(&text),
+                }
+            }
+            CommandEvent::Exited(status) => return Ok((status, output, errors)),
             CommandEvent::Failed(error) => return Err(IsolationError::new(error)),
         }
     }

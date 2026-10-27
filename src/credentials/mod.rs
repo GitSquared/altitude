@@ -143,7 +143,7 @@ where
         }
         let Some(snapshot) = self
             .isolation
-            .project_snapshot(Project::profile_only("credentials"), recipes.clone())
+            .project_snapshot(Project::profile_build(), recipes.clone())
         else {
             return Ok(profiles
                 .into_iter()
@@ -198,7 +198,7 @@ where
         let recipes = vec![self.recipe(profile)?];
         let snapshot = self
             .isolation
-            .project_snapshot(Project::profile_only("credentials"), recipes.clone());
+            .project_snapshot(Project::profile_build(), recipes.clone());
         Ok((recipes, snapshot))
     }
 
