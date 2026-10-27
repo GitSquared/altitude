@@ -220,6 +220,12 @@ where
     // first picker of a session names its machines instead of printing addresses
     // the operator never typed as names.
     app.reload_remembered_keys().await;
+    // What a profile is called where an operator reads it, and the first thing a
+    // new installation is shown.
+    app.profiles = task_service.credentials().profiles();
+    if app.should_offer_setup() {
+        app.open_get_started();
+    }
     let Feeds {
         task_execution: mut task_execution_updates,
         watched_tasks: mut watched,
@@ -434,7 +440,9 @@ where
             // so moving between screens does not restart it or give it a new
             // origin. Each screen marks the cells it has not covered, and the
             // field is painted into what is left once everything above it is drawn.
-            let screen = app.foreground.shows_settings() || app.foreground.shows_signals();
+            let screen = app.foreground.shows_settings()
+                || app.foreground.shows_signals()
+                || app.foreground.shows_get_started();
             if screen {
                 frame.render_widget(Clear, content);
             }
@@ -479,6 +487,28 @@ where
                 // drawn over it, so the thread it is about stays in view.
                 screens::signals::draw(frame, content, &mut app);
                 modal = Some(content);
+            } else if app.foreground.shows_get_started() {
+                let agent = app.active_agent();
+                let status = agent
+                    .and_then(|agent| app.credential_status.get(agent.profile()).cloned())
+                    .unwrap_or_default();
+                if let Foreground::GetStarted(panel) = &mut app.foreground {
+                    screens::get_started::draw(frame, content, panel, agent, &status);
+                }
+                if let super::app::CredentialShellState::Opening {
+                    progress: Some(progress),
+                    ..
+                } = &app.credential_shell
+                {
+                    widgets::chrome::dim(frame, content);
+                    modal = Some(widgets::loading::draw(
+                        frame,
+                        content,
+                        progress,
+                        app.animation_tick(),
+                    ));
+                }
+                modal = modal.or(Some(content));
             }
             // A terminal goes over the screen it was opened from, which is the
             // settings panel for a sign-in and the task list for a task's run. It
@@ -663,6 +693,10 @@ where
                 changed |= app.sync_credentials();
                 if app.wants_credential_check() {
                     app.ask_credential_checks(&task_service, &credential_reports);
+                    changed = true;
+                }
+                if app.wants_setup_check() {
+                    app.ask_setup_check(&task_service, &credential_reports);
                     changed = true;
                 }
                 redraw |= changed;
@@ -906,6 +940,10 @@ where
             composer.body.paste(&text);
         } else if let Foreground::NewTask(new_task) = &mut app.foreground {
             new_task.paste(&text);
+        } else if let Foreground::GetStarted(panel) = &mut app.foreground {
+            if panel.editing_name {
+                panel.name.paste(&text);
+            }
         } else if let Some(form) = &mut app.panel.form {
             // A list that is open is narrowed by what is pasted; otherwise the
             // text goes to the field the caret is in.
@@ -1025,6 +1063,10 @@ where
         }
         Foreground::NewTask(_) => {
             app.new_task_key(key, event_loop, task_service, issue_reads, delegations)
+                .await
+        }
+        Foreground::GetStarted(_) => {
+            app.get_started_key(key, task_service, credential_events)
                 .await
         }
         Foreground::Panel => {

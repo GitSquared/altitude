@@ -77,6 +77,7 @@ pub fn help_sections() -> Vec<HelpSection> {
             title: "Tasks",
             bindings: &[
                 ("c", "Create a task"),
+                ("g", "Set up this installation while it has no agent"),
                 ("Ctrl-L", "Link a Linear issue and start work on it"),
                 (
                     "[ / ]",

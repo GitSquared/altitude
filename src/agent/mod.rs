@@ -28,6 +28,20 @@ impl Default for AgentKind {
     }
 }
 
+impl AgentKind {
+    /// The profile this harness's login lives in.
+    ///
+    /// The interface asks this so it never has to spell a profile name; the recipe
+    /// a harness contributes repeats it for the build, which is the one place the
+    /// name has to exist besides here.
+    pub fn profile(self) -> &'static str {
+        match self {
+            Self::Claude => "agents/claude",
+            Self::Pi => "agents/pi",
+        }
+    }
+}
+
 impl fmt::Display for AgentKind {
     /// How the operator reads this harness in the interface, which is not how
     /// it is spelled in settings, where the serde name is lowercase.

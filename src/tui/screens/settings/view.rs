@@ -13,7 +13,7 @@ use crate::{
 };
 
 use super::{
-    pages::{agent_profile, hostname},
+    pages::hostname,
     panel::{Section, Setting},
     rows::{Credential, CredentialKind, Row, RowKind, View, switch_row},
 };
@@ -140,7 +140,7 @@ impl App {
 
     /// The login of the profile a coding agent runs under.
     fn agent_credential(&self, kind: AgentKind) -> Credential {
-        let profile = agent_profile(kind);
+        let profile = kind.profile();
         match self
             .profiles
             .iter()

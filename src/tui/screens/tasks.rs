@@ -114,10 +114,17 @@ fn draw_tasks(
     let cards = cards(app);
     let total = cards.len();
     if total == 0 {
-        frame.render_widget(
-            Paragraph::new(Span::styled("No tasks yet", palette::muted())),
-            area,
-        );
+        let mut lines = vec![Line::styled("No tasks yet", palette::muted())];
+        // Setup is only pointed at while the one required choice is missing: a
+        // working installation is not nagged about the first run.
+        if app.setup_incomplete() {
+            lines.push(Line::from(""));
+            lines.push(Line::styled(
+                "choose an agent to run work — g",
+                palette::attention(),
+            ));
+        }
+        frame.render_widget(Paragraph::new(lines), area);
         return;
     }
     let rows = (area.height / (height + 1)).max(1) as usize;

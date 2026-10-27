@@ -54,11 +54,12 @@ use crate::{
 use super::background::terrain::Terrain;
 use super::widgets::{alert::Alert, list};
 use popups::confirm::{CredentialTarget, PendingConfirm};
-use popups::new_task::{Answer, Hit as NewTaskHit, Host, NewTask, SearchToken};
+use popups::new_task::{AGENTS, Answer, Hit as NewTaskHit, Host, NewTask, SearchToken};
 use popups::open_link::{self, Link, OpenLink};
 use popups::send_task::{Decision as SendDecision, SendTask};
 use popups::setup::{Setup, SetupKind};
 use popups::sign_in::{Decision as SignInDecision, SignIn};
+use screens::get_started::{Focus as SetupFocus, GetStarted, NameKey, name_key};
 use screens::settings::{
     CredentialKind, Depth, Focus, Form, GitIdentity, Panel, Repositories, RowKind, Section,
     Setting, SettingsHit, Target,
@@ -95,6 +96,8 @@ pub(in crate::tui) enum Foreground {
     Setup(Setup),
     /// What a tool's own sign-in asks, before its terminal opens.
     SignIn(Box<SignIn>),
+    /// The first screen a new installation shows: the one choice a task needs.
+    GetStarted(Box<GetStarted>),
     /// A task's signal threads: what is waiting, and the conversations about it.
     Signals,
     /// A terminal, taking every key there is.
@@ -110,7 +113,7 @@ impl Foreground {
     /// Screens arrive and leave the same way, whatever they show.
     pub(in crate::tui) fn is_screen(&self) -> bool {
         match self {
-            Self::Panel | Self::Signals => true,
+            Self::Panel | Self::Signals | Self::GetStarted(_) => true,
             Self::Keys(behind) => behind.is_screen(),
             _ => false,
         }
@@ -123,6 +126,15 @@ impl Foreground {
             Self::Signals => true,
             Self::Confirm(confirm) => confirm.is_signal(),
             Self::Keys(behind) => behind.shows_signals(),
+            _ => false,
+        }
+    }
+
+    /// Whether the first-run screen is what is being read.
+    pub(in crate::tui) fn shows_get_started(&self) -> bool {
+        match self {
+            Self::GetStarted(_) => true,
+            Self::Keys(behind) => behind.shows_get_started(),
             _ => false,
         }
     }
@@ -691,6 +703,9 @@ pub struct App {
     /// The last repository listing, so opening a picker shows something at once
     /// and a fresh list replaces it when it lands.
     repositories: Option<Vec<Repository>>,
+    /// Whether the credential shell that is opening was opened from the first-run
+    /// screen, so it comes back there instead of to Settings.
+    sign_in_from_setup: bool,
     /// The profiles a task mounts, read when the panel opens.
     pub(in crate::tui) profiles: Vec<ProfileSummary>,
     /// What the Linear tracker's session is doing, read when the panel opens
@@ -827,6 +842,7 @@ impl App {
             remembered_keys: Vec::new(),
             base_description: None,
             repositories: None,
+            sign_in_from_setup: false,
             profiles: Vec::new(),
             tracker_state: TrackerState::NotConnected,
             tracker_connect: None,
@@ -1234,6 +1250,13 @@ impl App {
             Foreground::Confirm(pending) => pending.hints(),
             Foreground::SendTask(sending) => sending.hints(),
             Foreground::NewTask(new_task) => new_task.hints(),
+            Foreground::GetStarted(panel) => {
+                if matches!(self.credential_shell, CredentialShellState::Opening { .. }) {
+                    vec![Hint::new("esc / q", "cancel")]
+                } else {
+                    panel.hints(self.agent())
+                }
+            }
             Foreground::Panel => {
                 // Only a wait with something to show offers leaving it; a shell that
                 // opens at once would otherwise flash a key that means nothing yet.
@@ -1378,6 +1401,9 @@ impl App {
                 if self.projects().len() > 1 {
                     hints.push(Hint::new("[ ]", "projects"));
                 }
+                if self.setup_incomplete() {
+                    hints.push(Hint::new("g", "set up"));
+                }
                 let (local, remote) = self.visible_counts();
                 if local + remote > 0 {
                     hints.extend([
@@ -1419,6 +1445,7 @@ impl App {
     pub(in crate::tui) fn is_typing(&self) -> bool {
         match &self.foreground {
             Foreground::NewTask(new_task) => new_task.is_typing(),
+            Foreground::GetStarted(panel) => panel.is_typing(),
             _ => {
                 self.signal_composer.is_some()
                     || self
@@ -1711,7 +1738,7 @@ impl App {
                     tokio::spawn(async move {
                         let _ = service.credentials().close_shell(shell.id()).await;
                     });
-                    self.foreground = Foreground::Panel;
+                    self.leave_credentials();
                     return;
                 };
                 self.shells.insert(
@@ -1739,6 +1766,7 @@ impl App {
             }
             CredentialShellEvent::Unavailable { reason, .. } => {
                 self.credential_shell = CredentialShellState::Idle;
+                self.sign_in_from_setup = false;
                 self.problem(format!("No shell: {reason}"));
             }
         }
@@ -1758,13 +1786,21 @@ impl App {
                 cancel.cancel();
             }
             self.credential_shell = CredentialShellState::Idle;
+            self.sign_in_from_setup = false;
             return;
         };
         let id = ShellId::Credentials(shell.id().to_owned());
         self.shells.remove(&id);
         if self.open_shell() == Some(&id) {
-            // Back to the credentials it was about, so the row can say what changed.
-            self.foreground = Foreground::Panel;
+            // Back to where the sign-in was asked for, so what changed is in front.
+            if mem::take(&mut self.sign_in_from_setup) {
+                if let Some(agent) = self.active_agent() {
+                    self.credential_status.remove(agent.profile());
+                }
+                self.foreground = Foreground::GetStarted(self.get_started_panel());
+            } else {
+                self.foreground = Foreground::Panel;
+            }
         }
         let service = task_service.clone();
         tokio::spawn(async move {
@@ -2913,6 +2949,18 @@ impl App {
         E: IsolationEngine + Clone + 'static,
     {
         let profiles = self.unasked_profiles();
+        self.ask_profiles(profiles, task_service, reports);
+    }
+
+    /// Ask about a set of profiles in one sandbox, off the loop.
+    fn ask_profiles<E>(
+        &mut self,
+        profiles: Vec<&'static str>,
+        task_service: &TaskService<E>,
+        reports: &mpsc::UnboundedSender<CredentialCheckReply>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
         if profiles.is_empty() {
             return;
         }
@@ -3372,6 +3420,278 @@ impl App {
                     browser.failed(error);
                 }
             }
+        }
+    }
+
+    /// The agent a task in the project in front would run under.
+    ///
+    /// The project's own choice comes first: a default is what a project that has
+    /// not chosen gets, not a rule that overrides it.
+    pub(in crate::tui) fn active_agent(&self) -> Option<AgentKind> {
+        let active = self.active_project_id();
+        self.projects()
+            .into_iter()
+            .find(|project| project.id == active)
+            .and_then(|project| project.agent)
+            .or_else(|| self.agent())
+    }
+
+    /// Choose the agent the project in front will run, wherever that choice lives.
+    ///
+    /// A project that names its own agent keeps doing so: the panel is editing
+    /// that project's answer, not the default underneath it.
+    fn set_active_agent(&mut self, agent: AgentKind) {
+        let active = self.active_project_id();
+        let pinned = self
+            .projects()
+            .into_iter()
+            .any(|project| project.id == active && project.agent.is_some());
+        if !pinned {
+            self.set_agent(agent);
+            return;
+        }
+        let Some(file) = self.settings_file.as_mut() else {
+            return;
+        };
+        let mut proposed = file.settings().clone();
+        let Some(mut project) = proposed.project(&active).cloned() else {
+            return;
+        };
+        project.agent = Some(agent);
+        proposed.add_project(project);
+        let saved = file.save(proposed);
+        if let Err(error) = saved {
+            self.problem(error.to_string());
+        }
+    }
+
+    /// Whether the first screen still has something to settle.
+    ///
+    /// Missing an agent, or one the CLI says is signed out, is the same answer: a
+    /// task started now would stop. Unknown is not a reason to keep offering it.
+    pub(in crate::tui) fn setup_incomplete(&self) -> bool {
+        match self.active_agent() {
+            None => true,
+            Some(agent) => matches!(
+                self.credential_status.get(agent.profile()),
+                Some(CredentialStatus::Checked {
+                    signed_in: false,
+                    ..
+                })
+            ),
+        }
+    }
+
+    /// Whether this installation still has the one thing a task needs.
+    pub(in crate::tui) fn should_offer_setup(&self) -> bool {
+        self.active_agent().is_none() && self.tasks.is_empty() && self.remote_tasks.is_empty()
+    }
+
+    pub(in crate::tui) fn open_get_started(&mut self) {
+        self.foreground = Foreground::GetStarted(self.get_started_panel());
+    }
+
+    fn get_started_panel(&self) -> Box<GetStarted> {
+        Box::new(GetStarted::new(
+            &self.active_project_name(),
+            self.active_agent(),
+            &AGENTS,
+        ))
+    }
+
+    fn active_project_name(&self) -> String {
+        let active = self.active_project_id();
+        self.projects()
+            .into_iter()
+            .find(|project| project.id == active)
+            .map(|project| project.name)
+            .unwrap_or_default()
+    }
+
+    /// Ask the creation question, about an intent or about an issue.
+    pub(in crate::tui) fn open_new_task(&mut self, linking: bool) {
+        if !self.reload_settings() {
+            return;
+        }
+        let question = NewTask::new(
+            self.projects(),
+            &self.active_project_id(),
+            self.active_agent(),
+        );
+        self.foreground = Foreground::NewTask(Box::new(if linking {
+            question.linking()
+        } else {
+            question
+        }));
+    }
+
+    /// Rename a project, answering whether it was saved.
+    fn rename_project(&mut self, id: &str, name: &str) -> bool {
+        let Some(file) = self.settings_file.as_mut() else {
+            return false;
+        };
+        let mut proposed = file.settings().clone();
+        let Some(mut project) = proposed.project(id).cloned() else {
+            return false;
+        };
+        project.name = name.to_owned();
+        proposed.add_project(project);
+        let saved = file.save(proposed);
+        match saved {
+            Ok(()) => true,
+            Err(error) => {
+                self.problem(error.to_string());
+                false
+            }
+        }
+    }
+
+    /// The keys of the first-run screen.
+    ///
+    /// It owns every key while it is in front, including the one that dismisses it:
+    /// a first question that can be answered by accident is not a question.
+    pub(in crate::tui) async fn get_started_key<E>(
+        &mut self,
+        key: KeyEvent,
+        task_service: &TaskService<E>,
+        events: &mpsc::UnboundedSender<CredentialShellEvent>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let Foreground::GetStarted(mut panel) = mem::take(&mut self.foreground) else {
+            return;
+        };
+        // A shell being prepared is a wait; leaving it is the only key it has.
+        if matches!(self.credential_shell, CredentialShellState::Opening { .. }) {
+            if is_dismiss(key) {
+                self.close_credential_shell(task_service).await;
+            }
+            self.foreground = Foreground::GetStarted(panel);
+            return;
+        }
+        if panel.editing_name {
+            match name_key(key) {
+                NameKey::Save => {
+                    let name = panel.name.value().trim().to_owned();
+                    if name.is_empty() {
+                        self.say("A project needs a name");
+                    } else if self.rename_project(&self.active_project_id(), &name) {
+                        panel.editing_name = false;
+                        panel.focus = SetupFocus::Agent;
+                    }
+                }
+                NameKey::Cancel => {
+                    panel.editing_name = false;
+                    let saved = self.active_project_name();
+                    panel.reset_name(&saved);
+                }
+                NameKey::Typing(key) => panel.name.handle_key(key),
+            }
+            self.foreground = Foreground::GetStarted(panel);
+            return;
+        }
+        if panel.agent.is_open() {
+            let before = panel.agent.chosen_value().copied();
+            panel.agent.handle_key(key);
+            if !panel.agent.is_open()
+                && let Some(chosen) = panel.agent.chosen_value().copied()
+                && before != Some(chosen)
+            {
+                self.set_active_agent(chosen);
+            }
+            self.foreground = Foreground::GetStarted(panel);
+            return;
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.foreground = Foreground::Tasks;
+                return;
+            }
+            KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => panel.move_focus(true),
+            KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => panel.move_focus(false),
+            KeyCode::Char(' ') if panel.focus == SetupFocus::Agent => panel.agent.open(),
+            KeyCode::Enter => match panel.focus {
+                SetupFocus::Name => panel.editing_name = true,
+                SetupFocus::Agent => match self.active_agent() {
+                    Some(kind) => {
+                        // The panel waits behind the shell, and comes back when it
+                        // closes: this is the one sign-in that does not start at
+                        // Settings.
+                        self.foreground = Foreground::GetStarted(panel);
+                        self.sign_in_from_setup = true;
+                        self.open_credential_shell(
+                            &kind.to_string(),
+                            kind.profile(),
+                            task_service,
+                            events,
+                        );
+                        return;
+                    }
+                    None => panel.agent.open(),
+                },
+                SetupFocus::Create => {
+                    let Some(agent) = self.active_agent() else {
+                        self.say("Choose an agent first");
+                        self.foreground = Foreground::GetStarted(panel);
+                        return;
+                    };
+                    // The agent's own CLI is the only thing that can say it is
+                    // signed out; when it says so, work would stop immediately.
+                    if matches!(
+                        self.credential_status.get(agent.profile()),
+                        Some(CredentialStatus::Checked {
+                            signed_in: false,
+                            ..
+                        })
+                    ) {
+                        self.say("Sign in to the agent first");
+                        self.foreground = Foreground::GetStarted(panel);
+                        return;
+                    }
+                    self.open_new_task(false);
+                    return;
+                }
+                SetupFocus::Settings => {
+                    open_panel(self, task_service).await;
+                    return;
+                }
+            },
+            _ => {}
+        }
+        self.foreground = Foreground::GetStarted(panel);
+    }
+
+    /// Whether the first-run screen has an agent whose login has not been asked
+    /// about yet.
+    pub(in crate::tui) fn wants_setup_check(&self) -> bool {
+        matches!(self.foreground, Foreground::GetStarted(_))
+            && self
+                .active_agent()
+                .is_some_and(|agent| !self.credential_status.contains_key(agent.profile()))
+    }
+
+    pub(in crate::tui) fn ask_setup_check<E>(
+        &mut self,
+        task_service: &TaskService<E>,
+        reports: &mpsc::UnboundedSender<CredentialCheckReply>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let Some(agent) = self.active_agent() else {
+            return;
+        };
+        self.ask_profiles(vec![agent.profile()], task_service, reports);
+    }
+
+    /// Leave a credential shell for wherever the sign-in was started.
+    fn leave_credentials(&mut self) {
+        if mem::take(&mut self.sign_in_from_setup) {
+            if let Some(agent) = self.active_agent() {
+                self.credential_status.remove(agent.profile());
+            }
+            self.foreground = Foreground::GetStarted(self.get_started_panel());
+        } else {
+            self.foreground = Foreground::Panel;
         }
     }
 
@@ -4859,6 +5179,10 @@ impl App {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
             // The tabs are one keystroke away in either direction, and they are
             // the context every other key works in.
+            KeyCode::Char('g') if self.setup_incomplete() => {
+                self.open_get_started();
+                return Ok(false);
+            }
             KeyCode::Char('[') => {
                 self.switch_project(false);
                 return Ok(false);
@@ -4867,15 +5191,7 @@ impl App {
                 self.switch_project(true);
                 return Ok(false);
             }
-            KeyCode::Char('c') => {
-                if self.reload_settings() {
-                    self.foreground = Foreground::NewTask(Box::new(NewTask::new(
-                        self.projects(),
-                        &self.active_project_id(),
-                        self.agent(),
-                    )));
-                }
-            }
+            KeyCode::Char('c') => self.open_new_task(false),
             // Linking an issue is the other way to start work: the same question,
             // asked of the tracker instead of the operator's prose. A chord,
             // because `l` is navigation wherever there is a column to its right.

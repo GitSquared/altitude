@@ -715,13 +715,6 @@ fn counted(count: i64, unit: &str) -> String {
 }
 
 /// Which profile a coding agent's login lives in.
-pub(super) fn agent_profile(kind: AgentKind) -> &'static str {
-    match kind {
-        AgentKind::Pi => "agents/pi",
-        AgentKind::Claude => "agents/claude",
-    }
-}
-
 pub(super) fn agent_purpose(kind: AgentKind) -> &'static str {
     match kind {
         AgentKind::Pi => "A coding harness by Earendil. Altitude drives it to run your tasks.",
