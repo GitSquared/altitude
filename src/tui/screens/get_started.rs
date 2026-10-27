@@ -63,10 +63,12 @@ const HELP_ROWS: u16 = 6;
 enum Marker {
     /// Settled: answered, chosen, or deliberately none.
     Done,
-    /// Not settled, and nothing runs until it is.
+    /// Chosen, but not usable until something else happens: an agent that is
+    /// signed out, where picking another would do.
     Blocking,
-    /// Not settled, and nothing depends on it.
-    Optional,
+    /// Nothing has been answered here yet. Whether anything depends on it is
+    /// what the row's copy says.
+    Unset,
     /// There is an answer to give here that has not been given.
     Question,
 }
@@ -76,7 +78,7 @@ impl Marker {
         match self {
             Self::Done => "✓",
             Self::Blocking => "●",
-            Self::Optional => "○",
+            Self::Unset => "○",
             Self::Question => "?",
         }
     }
@@ -536,7 +538,7 @@ fn checklist(panel: &GetStarted, setup: &SetupState, width: u16) -> Vec<Line<'st
     };
     lines.push(row(
         if panel.name.is_blank() {
-            Marker::Blocking
+            Marker::Unset
         } else {
             Marker::Done
         },
@@ -560,10 +562,10 @@ fn checklist(panel: &GetStarted, setup: &SetupState, width: u16) -> Vec<Line<'st
         Some(kind) => format!("{kind} · not signed in"),
     };
     lines.push(row(
-        if setup.agent.is_some() && signed_in(&setup.agent_status) {
-            Marker::Done
-        } else {
-            Marker::Blocking
+        match (setup.agent, signed_in(&setup.agent_status)) {
+            (Some(_), true) => Marker::Done,
+            (Some(_), false) => Marker::Blocking,
+            (None, _) => Marker::Unset,
         },
         "Coding agent",
         &agent_value,
@@ -587,7 +589,7 @@ fn checklist(panel: &GetStarted, setup: &SetupState, width: u16) -> Vec<Line<'st
             if setup.repository.is_some() {
                 Marker::Done
             } else {
-                Marker::Blocking
+                Marker::Unset
             },
             "Version control",
             pill,
@@ -597,7 +599,7 @@ fn checklist(panel: &GetStarted, setup: &SetupState, width: u16) -> Vec<Line<'st
         ));
     } else {
         lines.push(row(
-            Marker::Blocking,
+            Marker::Unset,
             "Version control",
             "VCS not connected",
             "enter sign in",
@@ -623,7 +625,7 @@ fn checklist(panel: &GetStarted, setup: &SetupState, width: u16) -> Vec<Line<'st
         if setup.commits.is_set() {
             Marker::Done
         } else {
-            Marker::Blocking
+            Marker::Unset
         },
         "Commits",
         &commits_value,
@@ -645,7 +647,7 @@ fn checklist(panel: &GetStarted, setup: &SetupState, width: u16) -> Vec<Line<'st
         if tracker == TrackerState::Connected {
             Marker::Done
         } else {
-            Marker::Optional
+            Marker::Unset
         },
         "Task tracker",
         &tracker_value,
