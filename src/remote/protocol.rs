@@ -109,6 +109,11 @@ pub enum LinkRequest {
     Signal {
         command: SignalCommand,
     },
+    /// Add a new message from the operator to a task's expressed intent.
+    Input {
+        task_id: String,
+        body: String,
+    },
     /// Ask what profiles the remote already holds for the asking peer.
     ///
     /// Authenticated: the answer is the asking peer's own held stamps, not

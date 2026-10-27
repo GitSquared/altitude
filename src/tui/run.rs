@@ -1097,7 +1097,7 @@ where
                 return Ok(true);
             }
         }
-        Foreground::Message(_) => app.message_key(key, event_loop).await,
+        Foreground::Message(_) => app.message_key(key, event_loop, remote_signals).await,
         Foreground::Panel => {
             app.panel_keys(
                 key,

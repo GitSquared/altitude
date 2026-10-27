@@ -411,6 +411,12 @@ pub trait TaskHost: Send + Sync + 'static {
         peer: EndpointId,
         command: super::protocol::SignalCommand,
     ) -> BoxFuture<Result<(), String>>;
+    fn input(
+        &self,
+        peer: EndpointId,
+        task_id: String,
+        body: String,
+    ) -> BoxFuture<Result<(), String>>;
     /// Build what a peer's pushed configuration asks for, and forget what it no
     /// longer runs. `forget_logins` says the peer keeps no project here.
     fn configure(&self, peer: EndpointId, forget_logins: bool) -> BoxFuture<Result<(), String>>;
@@ -579,6 +585,13 @@ async fn answer(
         }
         LinkRequest::Signal { command } => {
             let response = match handler.tasks.signal(peer, command).await {
+                Ok(()) => LinkResponse::Accepted,
+                Err(reason) => LinkResponse::Rejected { reason },
+            };
+            write_frame(&mut send, &response).await?;
+        }
+        LinkRequest::Input { task_id, body } => {
+            let response = match handler.tasks.input(peer, task_id, body).await {
                 Ok(()) => LinkResponse::Accepted,
                 Err(reason) => LinkResponse::Rejected { reason },
             };

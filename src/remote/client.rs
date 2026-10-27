@@ -488,6 +488,28 @@ impl LinkClient {
         }
     }
 
+    pub async fn express_input(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        task_id: &str,
+        body: &str,
+    ) -> LinkResult<()> {
+        match self
+            .say(
+                peer,
+                &LinkRequest::Input {
+                    task_id: task_id.into(),
+                    body: body.into(),
+                },
+            )
+            .await?
+        {
+            LinkResponse::Accepted => Ok(()),
+            LinkResponse::Rejected { reason } => Err(reason.into()),
+            other => Err(format!("unexpected answer: {other:?}").into()),
+        }
+    }
+
     pub async fn reply_operator_signal(
         &self,
         peer: impl Into<EndpointAddr>,

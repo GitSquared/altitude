@@ -333,6 +333,30 @@ impl TaskHost for OwnTasks {
         })
     }
 
+    fn input(
+        &self,
+        peer: EndpointId,
+        task_id: String,
+        body: String,
+    ) -> BoxFuture<Result<(), String>> {
+        let tasks = Arc::clone(&self.tasks);
+        Box::pin(async move {
+            let task = tasks
+                .list()
+                .await
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .find(|task| {
+                    task.id == task_id && task.operator_id() == Some(peer.to_string().as_str())
+                })
+                .ok_or("this task is not active under your identity")?;
+            tasks
+                .express_input(&task.id, body)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
     fn hand_over(&self, peer: EndpointId, task_id: String) -> BoxFuture<Result<Handover, String>> {
         let tasks = self.tasks.clone();
         let config = self.config.clone();

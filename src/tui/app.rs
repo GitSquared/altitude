@@ -502,6 +502,10 @@ pub(in crate::tui) enum RemoteSignalsReply {
         action: RemoteSignalAction,
         result: Result<(), String>,
     },
+    Sent {
+        remote: RemoteSignals,
+        result: Result<(), String>,
+    },
 }
 
 /// What came back from asking a remote to run a task. The address names the
@@ -1339,9 +1343,7 @@ impl App {
                     Hint::new("f", "filter"),
                     Hint::new("s", "sort"),
                 ];
-                if self.remote_signals.is_none() {
-                    hints.push(Hint::new("n", "message agent"));
-                }
+                hints.push(Hint::new("n", "message agent"));
                 if matches!(self.signal_focus, SignalFocus::Filter | SignalFocus::Sort) {
                     hints.push(Hint::new("enter", "open"));
                 } else if let Some(thread) = self.signal_thread() {
@@ -5500,6 +5502,7 @@ impl App {
         &mut self,
         key: KeyEvent,
         event_loop: &TaskEventLoop<E>,
+        remote_signals: &mpsc::Sender<RemoteSignalsReply>,
     ) where
         E: IsolationEngine + Clone + 'static,
     {
@@ -5512,12 +5515,17 @@ impl App {
         match decision {
             Some(MessageDecision::Cancel) => self.foreground = Foreground::Signals,
             Some(MessageDecision::Send(body)) => {
-                match event_loop.express_input(&task_id, body).await {
-                    Ok(()) => {
-                        self.foreground = Foreground::Signals;
-                        self.alert = Some(Alert::note("Message sent to the agent."));
+                if let Some(remote) = self.remote_signals.clone() {
+                    self.act_on_remote_input(remote, body, remote_signals);
+                    self.foreground = Foreground::Signals;
+                } else {
+                    match event_loop.express_input(&task_id, body).await {
+                        Ok(()) => {
+                            self.foreground = Foreground::Signals;
+                            self.alert = Some(Alert::note("Message sent to the agent."));
+                        }
+                        Err(error) => self.problem(error.to_string()),
                     }
-                    Err(error) => self.problem(error.to_string()),
                 }
             }
             None => {}
@@ -6224,6 +6232,30 @@ impl App {
     }
 
     /// Send one action to the machine that owns the open signals.
+    fn act_on_remote_input(
+        &self,
+        remote: RemoteSignals,
+        body: String,
+        replies: &mpsc::Sender<RemoteSignalsReply>,
+    ) {
+        let client = self.link.clone();
+        let keys = self.remote_keys.clone();
+        let replies = replies.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let peer = Self::remote_peer(&remote.address, &keys).await?;
+                client
+                    .express_input(peer, &remote.task_id, &body)
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+            .await;
+            let _ = replies
+                .send(RemoteSignalsReply::Sent { remote, result })
+                .await;
+        });
+    }
+
     pub(in crate::tui) fn act_on_remote_signal(
         &self,
         signal_id: String,
@@ -6304,6 +6336,17 @@ impl App {
                     // The screen stays open with what it has, which is nothing
                     // new: the operator can retry by opening it again.
                     Err(error) => self.say(error),
+                }
+            }
+            RemoteSignalsReply::Sent { remote, result } => {
+                if !self.is_current_remote_signals(&remote) {
+                    return;
+                }
+                match result {
+                    Ok(()) => {
+                        self.alert = Some(Alert::note("Message sent to the agent."));
+                    }
+                    Err(error) => self.problem(error),
                 }
             }
             RemoteSignalsReply::Resolved {
