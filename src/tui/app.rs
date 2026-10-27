@@ -1782,7 +1782,12 @@ impl App {
             }
             CredentialShellEvent::Unavailable { reason, .. } => {
                 self.credential_shell = CredentialShellState::Idle;
-                self.setup_sign_in = None;
+                // A sign-in that never started is not an answer about the login
+                // that was there before: ask again rather than leave the row
+                // saying what it said before the attempt.
+                if let Some(profile) = self.setup_sign_in.take() {
+                    self.credential_status.remove(profile);
+                }
                 self.problem(format!("No shell: {reason}"));
             }
         }
@@ -1802,7 +1807,12 @@ impl App {
                 cancel.cancel();
             }
             self.credential_shell = CredentialShellState::Idle;
-            self.setup_sign_in = None;
+            // The same answer as closing an open shell: cancelling before the
+            // terminal appears still means the row has to be checked again, or
+            // it goes on reporting the login the attempt was meant to replace.
+            if let Some(profile) = self.setup_sign_in.take() {
+                self.credential_status.remove(profile);
+            }
             return;
         };
         let id = ShellId::Credentials(shell.id().to_owned());
