@@ -5,7 +5,7 @@ use crate::{
         App,
         widgets::{
             palette, signal,
-            surface::Surface,
+            surface::{self, Surface},
             tabs::{self, Tab},
         },
     },
@@ -46,16 +46,17 @@ fn grid(area: Rect) -> (usize, u16, u16) {
 pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     app.task_targets.clear();
     app.project_targets.clear();
-    // The projects sit in a gutter above the pane, so the frame below starts at a
-    // rule rather than under a row that belongs to something else. The list then
-    // sits in its surface like every other screen, and the grid is laid out in
-    // what the border leaves. The field under it is drawn by the runner, so every
-    // screen shows the same one.
-    let [gutter, pane] = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(area);
-    draw_tabs(frame, gutter, app);
-    let body = Surface::new()
-        .padding(Padding::uniform(1))
-        .draw(frame, pane);
+    // The projects are the pane's header: a row of tabs inside the border, with
+    // the pane's divider under it. The field under the surface is drawn by the
+    // runner, so every screen shows the same one.
+    let inner = Surface::new().draw(frame, area);
+    let [header, body] = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
+    draw_tabs(frame, header, inner, app);
+    let body = Rect {
+        x: inner.x.saturating_add(1),
+        width: inner.width.saturating_sub(2),
+        ..body
+    };
     let (columns, card_width, height) = grid(body);
     app.grid_columns = columns;
     draw_tasks(frame, body, app, columns, card_width, height);
@@ -66,7 +67,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
 /// The one in front is inverted and the others are quiet, and a project whose
 /// tasks are blocking on the operator says how many. Choosing a project narrows
 /// everything under the bar, including where a new task is founded.
-fn draw_tabs(frame: &mut Frame, area: Rect, app: &mut App) {
+fn draw_tabs(frame: &mut Frame, area: Rect, pane: Rect, app: &mut App) {
     let projects = app.projects();
     if projects.is_empty() {
         return;
@@ -82,9 +83,10 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &mut App) {
         .iter()
         .position(|project| project.id == active)
         .unwrap_or(0);
-    for (rect, index) in tabs::gutter(frame, area, &tabs, selected) {
+    for (rect, index) in tabs::draw(frame, area, &tabs, selected) {
         app.project_targets.add(rect, index);
     }
+    surface::horizontal_divider(frame, pane, area.y.saturating_add(1));
 }
 
 fn draw_tasks(

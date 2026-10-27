@@ -15,7 +15,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::Style,
-    widgets::{Block, BorderType, Clear, Padding},
+    widgets::{Block, BorderType, Clear},
 };
 
 /// The style every edge takes, whatever is behind it.
@@ -161,11 +161,6 @@ impl Surface {
                 .border_style(outline()),
             opaque: false,
         }
-    }
-
-    pub fn padding(mut self, padding: Padding) -> Self {
-        self.block = self.block.padding(padding);
-        self
     }
 
     /// Cover the field inside the border, so the surface reads as a solid pane.

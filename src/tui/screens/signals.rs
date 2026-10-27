@@ -296,9 +296,14 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         frame.render_widget(Clear, plan);
         draw_plan(frame, plan, app);
     } else {
-        let [tabs, pane] =
-            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(detail);
+        let [tabs, _, pane] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .areas(detail);
         draw_plan_tabs(frame, tabs, app);
+        surface::horizontal_divider(frame, detail, tabs.y.saturating_add(1));
         frame.render_widget(Clear, pane);
         if app.signal_plan_open {
             draw_plan(frame, pane, app);
