@@ -1,9 +1,9 @@
 //! A line of tabs over the work they change: the projects above the task list,
 //! and the conversation or the plan on a narrow signals screen.
 //!
-//! The selected tab is the terminal's own colours inverted, so it reads as a
-//! place rather than as a word; the others are quiet. Every label is uppercase,
-//! because a tab names a place and is not a sentence.
+//! The selected tab is bold and the others are quiet, so it reads as the place
+//! you are rather than as a word to press. A label keeps the case it was named
+//! in: a project called "Altitude" is not a heading.
 //!
 //! A bar that belongs to a whole pane sits in its header: the tabs on the first
 //! row inside the border, and the pane's divider under them, so the content
@@ -12,7 +12,6 @@
 use ratatui::{
     Frame,
     layout::Rect,
-    style::Modifier,
     text::{Line, Span},
     widgets::Paragraph,
 };
@@ -53,10 +52,10 @@ pub fn draw(frame: &mut Frame, area: Rect, tabs: &[Tab], selected: usize) -> Vec
             spans.push(Span::styled("│", palette::muted()));
             x = x.saturating_add(1);
         }
-        let label = format!(" {} ", tab.label.to_uppercase());
+        let label = format!(" {} ", tab.label);
         let width = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
         let style = if index == selected {
-            palette::primary().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+            palette::primary().bold()
         } else {
             palette::muted()
         };
