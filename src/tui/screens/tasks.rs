@@ -46,16 +46,16 @@ fn grid(area: Rect) -> (usize, u16, u16) {
 pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     app.task_targets.clear();
     app.project_targets.clear();
-    // The list sits in a surface like every other screen, and the grid is laid out
-    // in what the border leaves. The field under it is drawn by the runner, so
-    // every screen shows the same one.
-    let content = Surface::new()
+    // The projects sit in a gutter above the pane, so the frame below starts at a
+    // rule rather than under a row that belongs to something else. The list then
+    // sits in its surface like every other screen, and the grid is laid out in
+    // what the border leaves. The field under it is drawn by the runner, so every
+    // screen shows the same one.
+    let [gutter, pane] = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(area);
+    draw_tabs(frame, gutter, app);
+    let body = Surface::new()
         .padding(Padding::uniform(1))
-        .draw(frame, area);
-    // The projects are tabs over the whole list, so the tab bar keeps its row even
-    // when there is one project: it is where the work is, not an extra.
-    let [tabs, body] = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(content);
-    draw_tabs(frame, tabs, app);
+        .draw(frame, pane);
     let (columns, card_width, height) = grid(body);
     app.grid_columns = columns;
     draw_tasks(frame, body, app, columns, card_width, height);
@@ -82,7 +82,7 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &mut App) {
         .iter()
         .position(|project| project.id == active)
         .unwrap_or(0);
-    for (rect, index) in tabs::draw(frame, area, &tabs, selected) {
+    for (rect, index) in tabs::gutter(frame, area, &tabs, selected) {
         app.project_targets.add(rect, index);
     }
 }

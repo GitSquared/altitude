@@ -4,6 +4,9 @@
 //! The selected tab is the terminal's own colours inverted, so it reads as a
 //! place rather than as a word; the others are quiet. Every label is uppercase,
 //! because a tab names a place and is not a sentence.
+//!
+//! A bar that belongs to a whole pane sits in a gutter: a rule, the tabs, and a
+//! rule, so the pane below starts at a line rather than in the middle of one.
 
 use ratatui::{
     Frame,
@@ -33,6 +36,55 @@ impl Tab {
         self.attention = count;
         self
     }
+}
+
+/// Draws the tabs in a gutter: a rule above, the tabs, a rule below. Answers
+/// with where each tab was drawn, so a click can choose one.
+pub fn gutter(frame: &mut Frame, area: Rect, tabs: &[Tab], selected: usize) -> Vec<(Rect, usize)> {
+    if area.height == 0 {
+        return Vec::new();
+    }
+    if area.height >= 3 {
+        rule(
+            frame,
+            Rect {
+                y: area.y,
+                height: 1,
+                ..area
+            },
+        );
+        rule(
+            frame,
+            Rect {
+                y: area.y + 2,
+                height: 1,
+                ..area
+            },
+        );
+    }
+    if area.height < 2 {
+        return Vec::new();
+    }
+    draw(
+        frame,
+        Rect {
+            y: area.y + 1,
+            height: 1,
+            ..area
+        },
+        tabs,
+        selected,
+    )
+}
+
+fn rule(frame: &mut Frame, area: Rect) {
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            "─".repeat(usize::from(area.width)),
+            palette::muted(),
+        )),
+        area,
+    );
 }
 
 /// Draws the tabs, and answers with where each was drawn so a click can choose
