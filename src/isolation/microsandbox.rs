@@ -713,7 +713,9 @@ fn build_namespace(snapshots_dir: &Path) -> String {
 ///
 /// A project's name is written for a person and may hold spaces; an id a runtime
 /// keys machines by may not. The readable part stays, because a sandbox left
-/// behind is looked for by name.
+/// behind is looked for by name. The runtime also asks that the name begin with
+/// an alphanumeric, so a project called `.rust` or `_scratch` loses its lead
+/// rather than failing to build a sandbox at all.
 fn artifact_name(name: &str) -> String {
     let mut slug = String::with_capacity(name.len());
     let mut last_dash = false;
@@ -726,7 +728,11 @@ fn artifact_name(name: &str) -> String {
             last_dash = true;
         }
     }
-    let slug = slug.trim_matches('-');
+    let slug = slug.trim_start_matches(|character: char| !character.is_ascii_alphanumeric());
+    // Long names are cut here rather than by the runtime: the prefix and suffix
+    // this is put between are fixed, and the readable part is what can give.
+    let slug: String = slug.chars().take(40).collect();
+    let slug = slug.trim_end_matches(['-', '.']);
     if slug.is_empty() {
         "project".to_owned()
     } else {
