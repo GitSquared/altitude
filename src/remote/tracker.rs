@@ -1337,14 +1337,14 @@ impl RemoteTracker {
              1. You have Altitude set up, or download it.\n\
              2. You have {tracker} connected in Altitude.\n\
              3. You have synced to the remote running at {host}.\n\n\
-             Altitude picks this up as soon as you have synced."
+             Reply here once you have synced to try again."
         );
         self.config
             .automation
             .create_activity(
                 session_id,
-                &stable_id(session_id, "sync-guidance"),
-                AgentActivityContent::Elicitation { body },
+                &stable_id(session_id, "sync-error"),
+                AgentActivityContent::Error { body },
             )
             .await
             .map_err(|error| error.to_string())
@@ -1365,8 +1365,8 @@ impl RemoteTracker {
             .automation
             .create_activity(
                 session_id,
-                &stable_id(session_id, "start-guidance"),
-                AgentActivityContent::Elicitation { body },
+                &stable_id(session_id, "start-error"),
+                AgentActivityContent::Error { body },
             )
             .await
             .map_err(|error| error.to_string())

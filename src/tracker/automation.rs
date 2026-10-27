@@ -765,7 +765,7 @@ pub struct CommentSite {
 pub enum AgentActivityContent {
     Thought { body: String },
     Response { body: String },
-    Elicitation { body: String },
+    Error { body: String },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -41,10 +41,14 @@ static LINEAR: Guide = Guide {
     ],
     steps: &[
         Step {
-            prose: "Create an OAuth application in Linear's API settings, named Altitude, with \
-                    Agent session events, Inbox notifications, and Permission changes enabled. \
-                    Enable Issues too if this remote should follow status changes. The client ID \
-                    it gives you belongs in the remote's settings next.",
+            prose: "Create an OAuth application in Linear's API settings, named Altitude. \
+                    Enable webhooks, then select Agent session events (required), Inbox \
+                    notifications (required for comments and mentions), and Permission changes. \
+                    Select Issues too if this remote should react to human status changes; \
+                    without it Altitude still reports status out, but does not notice an issue \
+                    being completed or moved. Leave unrelated data and OAuth authorization \
+                    events off. The install asks for read, write, app:assignable, and \
+                    app:mentionable.",
             code: &[],
         },
         Step {

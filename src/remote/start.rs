@@ -30,12 +30,12 @@ impl fmt::Display for StartRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Paused => formatter.write_str(
-                "Delegated work is paused on this machine. Turn off `pause_delegated_work` in \
-                 its serve.toml and restart it.",
+                "Delegated work is paused on this Altitude remote server. Turn off \
+                 `pause_delegated_work` in its serve.toml and restart it.",
             ),
             Self::NoSetup => formatter.write_str(
-                "This machine has no setup for you yet. In Altitude, open Settings → Remotes, \
-                 connect this machine, and sync your setup before delegating work.",
+                "This Altitude remote server has no setup from you yet. In Altitude, open \
+                 Settings → Remotes, connect it, and sync before delegating work.",
             ),
             Self::NoScope => formatter.write_str(
                 "The tracker did not say which team, project, or repository this issue belongs \
@@ -43,22 +43,25 @@ impl fmt::Display for StartRefusal {
             ),
             Self::NoProject { scope } => write!(
                 formatter,
-                "No project on this machine claims {scope}. On the machine that runs this \
-                 work, open Settings → Projects and add the scope to a project's tracker \
-                 route, then sync."
+                "No project on this Altitude remote server claims {scope}. In Altitude, \
+                 open Settings → Projects and add the scope to a project's tracker route, then \
+                 sync this remote server."
             ),
             Self::NotAccepting { project, scope } => write!(
                 formatter,
-                "Project \"{project}\" claims {scope} but is not accepting delegated work. On \
-                 the machine that runs this work, open Settings → Projects and turn on \
-                 \"Accept delegated work\" for \"{project}\", then sync."
+                "Project \"{project}\" claims {scope} but is not accepting delegated work. In \
+                 Altitude, open Settings → Projects and turn on \"Accept delegated work\" for \
+                 \"{project}\", then sync this remote server."
             ),
             Self::NoAgent => formatter.write_str(
-                "No agent is chosen for this work. On the machine that runs it, choose one for \
-                 the project or for Altitude, then sync.",
+                "No agent is chosen for this work. In Altitude, choose one for the project or \
+                 for Altitude, then sync this remote server.",
             ),
             Self::Unavailable { reason } => {
-                write!(formatter, "This machine could not start the work: {reason}")
+                write!(
+                    formatter,
+                    "The Altitude remote server could not start the work: {reason}"
+                )
             }
         }
     }
