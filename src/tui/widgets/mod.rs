@@ -15,5 +15,6 @@ pub mod question;
 pub mod select;
 pub mod signal;
 pub mod surface;
+pub mod tabs;
 pub mod text;
 pub mod utils;

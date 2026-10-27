@@ -1,10 +1,11 @@
 //! The first thing a new installation shows, and the only thing it shows until
 //! the work could actually start.
 //!
-//! A card rather than a wizard: every row is the thing itself, edited where it
-//! is read, so naming the project, choosing the agent, and picking a repository
-//! are one gesture each. The card is not dismissible while a task would not run:
-//! a first question that can be answered by accident is not a question.
+//! A card rather than a wizard: the name and the commit identity are edited where
+//! they are read, and a row that asks a question opens its own picker over the
+//! card before the sign-in that follows it. The card is not dismissible while a
+//! task would not run: a first question that can be answered by accident is not
+//! a question.
 
 use std::slice;
 
@@ -195,6 +196,9 @@ impl Commits {
 pub struct GetStarted {
     pub focus: Focus,
     pub name: Field,
+    /// Whether the name is taking letters, as opposed to being the row the keys
+    /// are on. Typing is a state you enter, not one the caret is always in.
+    pub name_editing: bool,
     pub agent: Select<AgentKind>,
     pub vcs: Select<VcsProviderKind>,
     pub tracker: Select<TrackerKind>,
@@ -231,6 +235,7 @@ impl GetStarted {
         Self {
             focus,
             name: Field::with(name),
+            name_editing: false,
             commits: Commits::from(identity),
             repositories: None,
             agent: Select::new(
@@ -280,7 +285,7 @@ impl GetStarted {
     /// Whether the keys are characters here: the name, or a list long enough
     /// that typing narrows it.
     pub fn is_typing(&self) -> bool {
-        self.focus == Focus::Name
+        self.name_editing
             || (self.commits.open && self.commits.takes_text())
             || self.agent.is_searching()
             || self.vcs.is_searching()
@@ -332,13 +337,17 @@ impl GetStarted {
         if self.tracker.is_open() {
             return self.tracker.hints();
         }
-        // A field takes letters, so the keys for moving are the ones that are
-        // not letters: tab and enter.
+        if self.name_editing {
+            return vec![
+                Hint::new("type", "the name"),
+                Hint::new("enter", "save"),
+                Hint::new("esc", "leave it as it was"),
+            ];
+        }
         if self.focus == Focus::Name {
             return vec![
-                Hint::new("type", "name the project"),
-                Hint::new("tab", "next"),
-                Hint::new("enter", "next"),
+                Hint::new("enter", "edit the name"),
+                Hint::new("j/k", "move"),
             ];
         }
         let mut hints = vec![Hint::new("j/k", "move")];
@@ -476,10 +485,21 @@ pub fn draw(frame: &mut Frame, area: Rect, panel: &mut GetStarted, setup: &Setup
     );
     draw_footer(frame, *areas.last().expect("a footer"), panel, setup);
 
-    // The repository list is a pop-up over the card rather than a row of it: it
-    // is long and searchable, and growing the card around it would bury the row
-    // that opened it.
-    if let Some(browser) = panel.repositories.as_mut() {
+    // A picker is a pop-up over the card, not rows of it: the choice is a
+    // question of its own, and it comes before the sign-in that follows it.
+    if panel.agent.is_open() {
+        panel
+            .agent
+            .draw_list_below(frame, area, row_anchor(areas[4], 1));
+    } else if panel.vcs.is_open() {
+        panel
+            .vcs
+            .draw_list_below(frame, area, row_anchor(areas[4], 2));
+    } else if panel.tracker.is_open() {
+        panel
+            .tracker
+            .draw_list_below(frame, area, row_anchor(areas[4], 4));
+    } else if let Some(browser) = panel.repositories.as_mut() {
         browser.draw(frame, area, row_anchor(areas[4], 2));
     }
 }
@@ -509,7 +529,7 @@ fn checklist(panel: &GetStarted, setup: &SetupState, width: u16) -> Vec<Line<'st
     let mut lines = Vec::new();
     let focused = panel.focus;
 
-    let name_value = if focused == Focus::Name {
+    let name_value = if panel.name_editing {
         panel.name.marked()
     } else {
         panel.name.value().to_owned()
@@ -522,7 +542,11 @@ fn checklist(panel: &GetStarted, setup: &SetupState, width: u16) -> Vec<Line<'st
         },
         "Project name",
         &name_value,
-        "",
+        if panel.name_editing {
+            "enter save"
+        } else {
+            "enter edit"
+        },
         focused == Focus::Name,
         width,
     ));
@@ -551,9 +575,6 @@ fn checklist(panel: &GetStarted, setup: &SetupState, width: u16) -> Vec<Line<'st
         focused == Focus::Agent,
         width,
     ));
-    if panel.agent.is_open() {
-        lines.extend(options(&panel.agent, width));
-    }
 
     let vcs_signed_in = signed_in(&setup.vcs_status);
     if vcs_signed_in {
@@ -583,9 +604,6 @@ fn checklist(panel: &GetStarted, setup: &SetupState, width: u16) -> Vec<Line<'st
             focused == Focus::VersionControl,
             width,
         ));
-    }
-    if panel.vcs.is_open() {
-        lines.extend(options(&panel.vcs, width));
     }
 
     // Shown, not gated: the identity is installation-wide and usually already
@@ -639,9 +657,6 @@ fn checklist(panel: &GetStarted, setup: &SetupState, width: u16) -> Vec<Line<'st
         focused == Focus::Tracker,
         width,
     ));
-    if panel.tracker.is_open() {
-        lines.extend(options(&panel.tracker, width));
-    }
 
     let remote_value = match (&setup.host, &setup.offer) {
         (Some(host), _) => host.clone(),
@@ -798,45 +813,6 @@ fn row(
         Span::styled(format!("{value:<available$}"), style),
         Span::styled(trailing, palette::muted()),
     ])
-}
-
-/// The open list, written as rows of the card rather than as a box over it.
-fn options<T>(select: &Select<T>, width: u16) -> Vec<Line<'static>> {
-    let chosen = select.chosen_index();
-    let indent = " ".repeat(LABEL_WIDTH + 5);
-    select
-        .shown_offers()
-        .into_iter()
-        .map(|offer| {
-            let mark = if offer.under_keys {
-                "▸"
-            } else if offer.index == chosen {
-                "●"
-            } else {
-                "○"
-            };
-            let mark_style = if offer.under_keys {
-                palette::accent()
-            } else {
-                palette::muted()
-            };
-            let label_style = if offer.under_keys {
-                palette::primary().bold()
-            } else if offer.ready {
-                palette::primary()
-            } else {
-                palette::muted()
-            };
-            let room = usize::from(width)
-                .saturating_sub(indent.chars().count())
-                .saturating_sub(2);
-            Line::from(vec![
-                Span::raw(indent.clone()),
-                Span::styled(format!("{mark} "), mark_style),
-                Span::styled(truncate(offer.label, room), label_style),
-            ])
-        })
-        .collect()
 }
 
 /// The identity, as four rows under the one that opens it.

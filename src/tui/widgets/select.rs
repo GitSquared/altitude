@@ -36,15 +36,6 @@ const SEARCH_FROM: usize = 5;
 /// The mark that says a pill opens.
 const OPENS: char = '▼';
 
-/// One offer, as a page drawing the list inline reads it.
-pub struct ShownOffer<'a> {
-    pub index: usize,
-    pub label: &'a str,
-    pub ready: bool,
-    /// Whether the keys are on this row: the one enter would take.
-    pub under_keys: bool,
-}
-
 /// One thing that can be chosen.
 pub struct Offer<T> {
     pub value: T,
@@ -109,27 +100,6 @@ impl<T> Select<T> {
 
     pub fn chosen_value(&self) -> Option<&T> {
         self.chosen_offer().map(|offer| &offer.value)
-    }
-
-    /// Which offer is taken, as an index into the offers.
-    pub fn chosen_index(&self) -> usize {
-        self.chosen
-    }
-
-    /// The offers as the keys see them, for a page that draws the list inline
-    /// rather than over the page.
-    pub fn shown_offers(&self) -> Vec<ShownOffer<'_>> {
-        let matches = self.matches();
-        matches
-            .iter()
-            .enumerate()
-            .map(|(at, index)| ShownOffer {
-                index: *index,
-                label: self.offers[*index].label.as_str(),
-                ready: self.offers[*index].ready,
-                under_keys: at == self.at,
-            })
-            .collect()
     }
 
     /// The chosen value's name, or nothing when there is none to choose.

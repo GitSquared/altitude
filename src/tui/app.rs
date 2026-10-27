@@ -602,6 +602,9 @@ pub struct App {
     pub(in crate::tui) signal_composer: Option<Composer>,
     /// Whether a narrow screen is showing the plan instead of the conversation.
     pub(in crate::tui) signal_plan_open: bool,
+    /// Whether the last signals frame had room only for the tab bar, which is
+    /// what makes Tab a tab key there and nowhere else.
+    pub(in crate::tui) signal_plan_tabs: bool,
     /// What the keys are on inside the signals screen, and which message of the
     /// selected thread they are on.
     pub(in crate::tui) signal_focus: SignalFocus,
@@ -790,6 +793,7 @@ impl App {
             signal_scroll: 0,
             signal_composer: None,
             signal_plan_open: false,
+            signal_plan_tabs: false,
             signal_focus: SignalFocus::List,
             signal_message_cursor: 0,
             signal_targets: Targets::default(),
@@ -3648,6 +3652,23 @@ impl App {
                 && before != Some(chosen)
             {
                 self.set_active_agent(chosen);
+                self.foreground = Foreground::GetStarted(panel);
+                // The picker comes first; the sign-in it needs comes after, over
+                // the card rather than over anything else.
+                let needs_sign_in = !self
+                    .credential_status
+                    .get(chosen.profile())
+                    .is_some_and(signed_in);
+                if needs_sign_in {
+                    self.setup_sign_in = Some(chosen.profile());
+                    self.open_credential_shell(
+                        &chosen.to_string(),
+                        chosen.profile(),
+                        task_service,
+                        events,
+                    );
+                }
+                return false;
             }
             self.foreground = Foreground::GetStarted(panel);
             return false;
@@ -3693,25 +3714,28 @@ impl App {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return true;
         }
-        // The name is a field, so letters are letters: tab and enter are how the
-        // caret leaves it, and escape puts back what is saved.
-        if panel.focus == SetupFocus::Name {
+        // Typing is a state the name is put into, so j and k keep moving the
+        // caret between rows until enter says otherwise.
+        if panel.name_editing {
             match key.code {
+                KeyCode::Enter => {
+                    self.commit_name(&panel);
+                    panel.name_editing = false;
+                }
                 KeyCode::Tab | KeyCode::Down => {
                     self.commit_name(&panel);
+                    panel.name_editing = false;
                     panel.move_focus(true);
                 }
                 KeyCode::BackTab | KeyCode::Up => {
                     self.commit_name(&panel);
+                    panel.name_editing = false;
                     panel.move_focus(false);
-                }
-                KeyCode::Enter => {
-                    self.commit_name(&panel);
-                    panel.focus = SetupFocus::Agent;
                 }
                 KeyCode::Esc => {
                     let saved = self.active_project_name();
                     panel.reset_name(&saved);
+                    panel.name_editing = false;
                 }
                 _ => panel.name.handle_key(key),
             }
@@ -3719,11 +3743,12 @@ impl App {
             return false;
         }
         match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => return true,
             KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => panel.move_focus(true),
             KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => panel.move_focus(false),
             KeyCode::Char(' ') if panel.focus == SetupFocus::Agent => panel.agent.open(),
             KeyCode::Enter => match panel.focus {
-                SetupFocus::Name => {}
+                SetupFocus::Name => panel.name_editing = true,
                 SetupFocus::Agent => match self.active_agent() {
                     Some(kind) => {
                         // The card waits behind the shell, and comes back when it
@@ -5588,18 +5613,20 @@ impl App {
             self.apply_signal_view();
             return;
         }
-        // Tab and the horizontal arrows move between the parts of the screen.
-        // j/k and the vertical arrows move inside the part that has the keys.
+        // Tab switches the screen's tabs where it has them; the horizontal
+        // arrows and h/l move between the parts of the screen. j/k and the
+        // vertical arrows move inside the part that has the keys.
+        if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+            if self.signal_plan_tabs {
+                self.signal_plan_open = !self.signal_plan_open;
+            }
+            return;
+        }
         if matches!(
             key.code,
-            KeyCode::Tab
-                | KeyCode::BackTab
-                | KeyCode::Right
-                | KeyCode::Left
-                | KeyCode::Char('l')
-                | KeyCode::Char('h')
+            KeyCode::Right | KeyCode::Left | KeyCode::Char('l') | KeyCode::Char('h')
         ) {
-            let forward = matches!(key.code, KeyCode::Tab | KeyCode::Right | KeyCode::Char('l'));
+            let forward = matches!(key.code, KeyCode::Right | KeyCode::Char('l'));
             self.move_signal_focus(forward);
             return;
         }
@@ -5831,6 +5858,14 @@ impl App {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
             // The tabs are one keystroke away in either direction, and they are
             // the context every other key works in.
+            KeyCode::Tab => {
+                self.switch_project(true);
+                return Ok(false);
+            }
+            KeyCode::BackTab => {
+                self.switch_project(false);
+                return Ok(false);
+            }
             KeyCode::Char('[') => {
                 self.switch_project(false);
                 return Ok(false);
@@ -5863,11 +5898,11 @@ impl App {
                 let columns = self.grid_columns();
                 self.select_adjacent(-(columns as isize), columns);
             }
-            KeyCode::Right | KeyCode::Tab => {
+            KeyCode::Right | KeyCode::Char('l') => {
                 let columns = self.grid_columns();
                 self.select_adjacent(1, columns);
             }
-            KeyCode::Left | KeyCode::BackTab => {
+            KeyCode::Left | KeyCode::Char('h') => {
                 let columns = self.grid_columns();
                 self.select_adjacent(-1, columns);
             }

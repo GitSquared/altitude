@@ -1,0 +1,79 @@
+//! A line of tabs over the work they change: the projects above the task list,
+//! and the conversation or the plan on a narrow signals screen.
+//!
+//! The selected tab is the terminal's own colours inverted, so it reads as a
+//! place rather than as a word; the others are quiet. Every label is uppercase,
+//! because a tab names a place and is not a sentence.
+
+use ratatui::{
+    Frame,
+    layout::Rect,
+    style::Modifier,
+    text::{Line, Span},
+    widgets::Paragraph,
+};
+
+use super::palette;
+
+pub struct Tab {
+    pub label: String,
+    /// Work waiting on the operator, drawn beside the tab rather than inside it.
+    pub attention: usize,
+}
+
+impl Tab {
+    pub fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            attention: 0,
+        }
+    }
+
+    pub fn attention(mut self, count: usize) -> Self {
+        self.attention = count;
+        self
+    }
+}
+
+/// Draws the tabs, and answers with where each was drawn so a click can choose
+/// one. A selection past the end draws every tab quiet.
+pub fn draw(frame: &mut Frame, area: Rect, tabs: &[Tab], selected: usize) -> Vec<(Rect, usize)> {
+    if area.height == 0 {
+        return Vec::new();
+    }
+    let mut spans = Vec::new();
+    let mut targets = Vec::new();
+    let mut x = area.x;
+    for (index, tab) in tabs.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw("  "));
+            x = x.saturating_add(2);
+        }
+        let label = format!(" {} ", tab.label.to_uppercase());
+        let width = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
+        let style = if index == selected {
+            palette::primary().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+        } else {
+            palette::muted()
+        };
+        spans.push(Span::styled(label, style));
+        let mut total = width;
+        if tab.attention > 0 {
+            let count = format!(" {}", tab.attention);
+            total = total.saturating_add(u16::try_from(count.chars().count()).unwrap_or(u16::MAX));
+            spans.push(Span::styled(count, palette::accent()));
+        }
+        targets.push((
+            Rect {
+                x,
+                y: area.y,
+                width: total,
+                height: 1,
+            },
+            index,
+        ));
+        x = x.saturating_add(total);
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    targets
+}

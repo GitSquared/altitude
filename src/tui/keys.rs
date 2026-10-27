@@ -53,14 +53,17 @@ pub fn help_sections() -> Vec<HelpSection> {
         HelpSection {
             title: "Navigation",
             bindings: &[
-                ("← / → · Tab", "Move across columns or cards"),
+                ("← / → · h / l", "Move across columns or cards"),
                 ("j / k · ↓ / ↑", "Select the next or previous item"),
                 (
                     "Tab / Shift-Tab",
-                    "Move forward or backward between controls",
+                    "Switch screen tabs; in a form, move between fields",
                 ),
                 ("Enter", "Activate the selected item or action"),
-                ("Esc / q", "Close a panel; q quits from the task list"),
+                (
+                    "Esc / q",
+                    "Close a panel; quit from the task list or the first screen",
+                ),
                 ("Ctrl-C", "Quit Altitude"),
                 ("?", "Open or close this keyboard guide"),
                 (
@@ -79,8 +82,8 @@ pub fn help_sections() -> Vec<HelpSection> {
                 ("c", "Create a task"),
                 ("Ctrl-L", "Link a Linear issue and start work on it"),
                 (
-                    "[ / ]",
-                    "Move to the previous or next project; the grid and a new task follow it",
+                    "Tab / Shift-Tab · [ / ]",
+                    "Switch project tabs; the grid and a new task follow",
                 ),
                 ("s", "Open Settings"),
                 ("Enter / i", "Read and answer the selected task's signals"),
@@ -97,7 +100,6 @@ pub fn help_sections() -> Vec<HelpSection> {
                     "d / Delete / Backspace",
                     "Delete the selected task, after confirmation",
                 ),
-                ("Tab / Shift-Tab", "Select the next or previous card"),
             ],
         },
         HelpSection {
@@ -178,7 +180,10 @@ pub fn help_sections() -> Vec<HelpSection> {
                 ),
                 ("f / s", "Filter or sort the thread list"),
                 ("n", "Write a new message to the agent"),
-                ("p", "Show the plan on a narrow screen"),
+                (
+                    "Tab / Shift-Tab · p",
+                    "Switch between the conversation and the plan on a narrow screen",
+                ),
                 (
                     "PgUp / PgDn · Home / End",
                     "Scroll the conversation by a message",

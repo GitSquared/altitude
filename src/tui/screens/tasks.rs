@@ -3,7 +3,11 @@ use crate::{
     remote::TaskSummary,
     tui::{
         App,
-        widgets::{palette, signal, surface::Surface},
+        widgets::{
+            palette, signal,
+            surface::Surface,
+            tabs::{self, Tab},
+        },
     },
 };
 
@@ -59,7 +63,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
 
 /// The projects, as tabs over the task list.
 ///
-/// The one in front is underlined and the others are quiet, and a project whose
+/// The one in front is inverted and the others are quiet, and a project whose
 /// tasks are blocking on the operator says how many. Choosing a project narrows
 /// everything under the bar, including where a new task is founded.
 fn draw_tabs(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -68,39 +72,19 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
     let active = app.active_project_id();
-    let mut spans = Vec::new();
-    let mut x = area.x;
-    for (index, project) in projects.iter().enumerate() {
-        if index > 0 {
-            spans.push(Span::raw("    "));
-            x = x.saturating_add(4);
-        }
-        let attention = app.attention_in_project(&project.id);
-        let style = if project.id == active {
-            palette::primary().bold().underlined()
-        } else {
-            palette::muted()
-        };
-        let label = project.name.clone();
-        let mut width = u16::try_from(label.chars().count()).unwrap_or(0);
-        spans.push(Span::styled(label, style));
-        if attention > 0 {
-            let marker = format!(" {attention}");
-            width = width.saturating_add(u16::try_from(marker.chars().count()).unwrap_or(0));
-            spans.push(Span::styled(marker, palette::accent()));
-        }
-        app.project_targets.add(
-            Rect {
-                x,
-                y: area.y,
-                width,
-                height: 1,
-            },
-            index,
-        );
-        x = x.saturating_add(width);
+    let tabs: Vec<Tab> = projects
+        .iter()
+        .map(|project| {
+            Tab::new(project.name.clone()).attention(app.attention_in_project(&project.id))
+        })
+        .collect();
+    let selected = projects
+        .iter()
+        .position(|project| project.id == active)
+        .unwrap_or(0);
+    for (rect, index) in tabs::draw(frame, area, &tabs, selected) {
+        app.project_targets.add(rect, index);
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_tasks(

@@ -35,6 +35,7 @@ use crate::{
             list::{self, Row},
             palette, signal,
             surface::{self, Surface},
+            tabs::{self, Tab},
             text::TextBox,
             utils::{ago, shimmer, since, truncate},
         },
@@ -283,6 +284,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     ])
     .areas(list);
     draw_threads(frame, threads, app);
+    app.signal_plan_tabs = inner.width < PLAN_COLUMN_MIN;
     if inner.width >= PLAN_COLUMN_MIN {
         let parts =
             Layout::horizontal([Constraint::Min(0), Constraint::Length(PLAN_WIDTH)]).split(detail);
@@ -317,18 +319,9 @@ fn draw_plan_tabs(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
     frame.render_widget(Clear, area);
-    let (signals, plan) = if app.signal_plan_open {
-        (
-            Span::styled("  signals  ", palette::muted()),
-            Span::styled("[ plan ]", palette::accent().bold()),
-        )
-    } else {
-        (
-            Span::styled("[ signals ]", palette::accent().bold()),
-            Span::styled("  plan  ", palette::muted()),
-        )
-    };
-    frame.render_widget(Paragraph::new(Line::from(vec![signals, plan])), area);
+    let tabs = [Tab::new("Signals"), Tab::new("Plan")];
+    let selected = usize::from(app.signal_plan_open);
+    tabs::draw(frame, area, &tabs, selected);
 }
 
 /// The agent's plan, beside the conversation or in a narrow screen's tab.
