@@ -47,6 +47,7 @@ use crate::{
     tui::widgets::palette,
     tui::widgets::{
         chrome::Hint,
+        layers::Behind,
         pointer::Targets,
         select::{Offer, Select},
     },
@@ -640,7 +641,7 @@ pub struct App {
     /// The screen a credential terminal was opened over, kept so the terminal can
     /// be closed to the very thing that asked for it: the card with the same row
     /// focused, or the settings list.
-    shell_behind: Option<Foreground>,
+    shell_behind: Behind<Foreground>,
     /// A task travelling here from a remote, while it travels.
     pub(in crate::tui) transfer: Option<TransferView>,
     /// What each address last answered, for the list to show.
@@ -812,7 +813,7 @@ impl App {
             settings_file,
             panel: Panel::new(),
             foreground: Foreground::default(),
-            shell_behind: None,
+            shell_behind: Behind::default(),
             transfer: None,
             remote_status: HashMap::new(),
             remote_trackers: HashMap::new(),
@@ -1464,7 +1465,7 @@ impl App {
         matches!(self.foreground, Foreground::Shell(ShellId::Credentials(_)))
             && self
                 .shell_behind
-                .as_ref()
+                .under()
                 .is_some_and(Foreground::shows_get_started)
     }
 
@@ -1743,7 +1744,7 @@ impl App {
                 let id = ShellId::Credentials(shell.id().to_owned());
                 // What was in front stays, so closing the terminal returns to it
                 // rather than to whatever the shell happened to cover.
-                self.shell_behind = Some(mem::replace(
+                self.shell_behind.cover(mem::replace(
                     &mut self.foreground,
                     Foreground::Shell(id.clone()),
                 ));
@@ -1811,7 +1812,7 @@ impl App {
                 self.credential_status.remove(profile);
             }
             // Back to the screen that asked, with the row that asked still on it.
-            self.foreground = self.shell_behind.take().unwrap_or(Foreground::Panel);
+            self.foreground = self.shell_behind.uncover().unwrap_or(Foreground::Panel);
         }
         let service = task_service.clone();
         tokio::spawn(async move {
@@ -3840,7 +3841,11 @@ impl App {
     /// something else in front, which is the signing-key page.
     async fn commits_key(&mut self, panel: &mut GetStarted, key: KeyEvent) -> bool {
         match key.code {
+            // Leaving saves, as it does for the project name. What cannot be
+            // saved goes back to what is stored rather than trapping the keys in
+            // an edit with no way out.
             KeyCode::Esc => {
+                self.save_commits(panel).await;
                 panel.commits.reload(&self.git_identity);
                 false
             }
@@ -4295,7 +4300,7 @@ impl App {
         if let Some(profile) = mem::take(&mut self.setup_sign_in) {
             self.credential_status.remove(profile);
         }
-        self.foreground = self.shell_behind.take().unwrap_or(Foreground::Panel);
+        self.foreground = self.shell_behind.uncover().unwrap_or(Foreground::Panel);
     }
 
     /// Whether a project has a task in play, here or on the machine it runs on.

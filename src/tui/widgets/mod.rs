@@ -6,6 +6,7 @@ pub mod card;
 pub mod chrome;
 pub mod columns;
 pub mod header;
+pub mod layers;
 pub mod list;
 pub mod loading;
 pub mod palette;

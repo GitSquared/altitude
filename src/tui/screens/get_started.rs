@@ -315,15 +315,17 @@ impl GetStarted {
                     Hint::new("type", "the value"),
                     Hint::new("tab", "next"),
                     Hint::new("enter", "save"),
-                    Hint::new("esc", "leave it as it was"),
+                    Hint::new("esc", "save and leave"),
                 ],
                 CommitsField::Sign => vec![
                     Hint::new("enter", "turn it on or off"),
                     Hint::new("tab", "next"),
+                    Hint::new("esc", "save and leave"),
                 ],
                 CommitsField::Key => vec![
                     Hint::new("enter", "show or make the key"),
                     Hint::new("tab", "next"),
+                    Hint::new("esc", "save and leave"),
                 ],
             };
         }
