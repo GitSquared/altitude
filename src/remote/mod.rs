@@ -6,6 +6,7 @@
 //! downloads and acknowledgements to one recipient and survive process restarts.
 
 mod admin;
+mod admission;
 mod announce;
 mod bundle;
 pub(crate) use bundle::{HeldConfig, Logins};

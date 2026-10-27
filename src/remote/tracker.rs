@@ -1,11 +1,13 @@
 //! The remote's Linear coordinator: signed webhooks in, task host out.
 //!
 //! A serve role has no person at the keyboard. Work arrives as a Linear
-//! AgentSessionEvent or an Issue status change, is durably recorded before the
-//! webhook is acknowledged, and is then routed to the task host that owns the
-//! capsule. This module owns only the mapping between an external issue/session
-//! and a local task, a peer, and a tracker user; the task's own state is always
-//! read back from the host, never cached here.
+//! AgentSessionEvent, an Issue status change, or a comment notification, is
+//! durably recorded before the webhook is acknowledged, and is then routed to
+//! the task host that owns the capsule. Comments pass through
+//! [`super::admission`] before anything reacts or wakes. This module owns only
+//! the mapping between an external issue/session and a local task, a peer, and a
+//! tracker user; the task's own state is always read back from the host, never
+//! cached here.
 //!
 //! The coordinator calls the host through [`Host`], a small callback surface the
 //! serve role implements over its task event loop. Keeping the two apart is what
@@ -55,7 +57,10 @@ use crate::{
     },
 };
 
-use super::identity::write_private;
+use super::{
+    admission::{self, Actor, Admission, InputFacts},
+    identity::write_private,
+};
 
 /// One webhook request, and the one resource this coordinator handles.
 const WEBHOOK_ROUTE: &str = "/linear/webhook";
@@ -89,6 +94,8 @@ pub struct RemoteTrackerConfig {
     /// Where each peer's pushed configuration lives, because that is where the
     /// account a peer is signed in as is written down.
     pub operators_dir: PathBuf,
+    /// This machine's name, as the session summary reads it.
+    pub host_label: String,
 }
 
 /// The task operations the coordinator asks of the machine that owns the capsule.
@@ -125,6 +132,8 @@ pub trait Host: Send + Sync + 'static {
     fn accept(&self, task_id: String, signal_id: String) -> HostFuture<'_, ()>;
     /// Whether the task is still in play, so a removed task stops being reported.
     fn is_active(&self, task_id: String) -> HostFuture<'_, bool>;
+    /// The harness a task runs, for the session title. None until one is chosen.
+    fn agent_name(&self, task_id: String) -> HostFuture<'_, Option<String>>;
 }
 
 pub struct RemoteTracker {
@@ -178,6 +187,7 @@ impl RemoteTracker {
         peer: EndpointId,
         task_id: String,
         issue: IssueReference,
+        agent: Option<String>,
     ) -> Result<(), String> {
         let Some(tracker_user_id) = self.user_for_peer(&peer.to_string()) else {
             return Err("sync a Linear account to this remote before delegating issue work".into());
@@ -193,13 +203,20 @@ impl RemoteTracker {
             .map_err(|error| error.to_string())?;
         self.upsert_route(Route {
             issue_id: issue.id,
-            session_id,
+            session_id: session_id.clone(),
             peer: peer.to_string(),
-            tracker_user_id,
+            tracker_user_id: tracker_user_id.clone(),
             task_id,
             cursor: 0,
             origin: RouteOrigin::Piloted,
-        })
+        })?;
+        if let Err(error) = self
+            .set_session_summary(&session_id, &tracker_user_id, agent.as_deref())
+            .await
+        {
+            tracing::warn!(session = %session_id, %error, "could not name a piloted session");
+        }
+        Ok(())
     }
 
     /// Drain queued webhooks and report task life, forever.
@@ -348,6 +365,7 @@ impl RemoteTracker {
                 )
                 .await
             }
+            StoredEvent::Comment(comment) => self.handle_comment(comment, host).await,
         }
     }
 
@@ -380,7 +398,7 @@ impl RemoteTracker {
             .automation
             .create_activity(
                 &route.session_id,
-                &activity_id(&route.task_id, "stopped"),
+                &stable_id(&route.task_id, "stopped"),
                 AgentActivityContent::Response {
                     body: "Stopped by the operator. The task's capsule was disposed.".to_owned(),
                 },
@@ -416,6 +434,71 @@ impl RemoteTracker {
             return Ok(());
         };
         let label = event.creator_name.as_deref().unwrap_or(author);
+        // A mention creates a new session beside the existing task. It is a
+        // message into that task, never a redelegation. A delegation's comment is
+        // the generated session root; a mention's comment is a human thread.
+        let is_mention = match event.comment_id.as_deref() {
+            Some(comment_id) => {
+                !self
+                    .config
+                    .automation
+                    .comment_site(comment_id)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .is_artificial_session_root
+            }
+            None => false,
+        };
+        // A teammate's mention is a boundary case: acknowledge it and name the
+        // operator, but do not run work for them.
+        if let Some(route) = self.route_for_issue(issue_id)
+            && is_mention
+        {
+            if let Some(source_comment_id) = event
+                .source_comment_id
+                .as_ref()
+                .or(event.comment_id.as_ref())
+            {
+                self.react_eyes(source_comment_id).await;
+            }
+            if author == route.tracker_user_id {
+                let body = event.prompt_body.clone().unwrap_or_default();
+                if !body.trim().is_empty() {
+                    host.instruct(
+                        route.task_id,
+                        format!(
+                            "A mention from the task's operator:\n\n{body}\n\n\
+                             This comment was addressed to you. Continue the task with it."
+                        ),
+                    )
+                    .await?;
+                    self.config
+                        .automation
+                        .create_activity(
+                            &event.session_id,
+                            &stable_id(&event.session_id, "routed"),
+                            AgentActivityContent::Response {
+                                body: "This mention was routed to the task's existing Altitude session."
+                                    .to_owned(),
+                            },
+                        )
+                        .await
+                        .map_err(|error| error.to_string())?;
+                }
+                return Ok(());
+            }
+            let body = self.boundary_reply(&route.tracker_user_id).await;
+            self.config
+                .automation
+                .create_activity(
+                    &event.session_id,
+                    &stable_id(&event.session_id, "redirect"),
+                    AgentActivityContent::Response { body },
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            return Ok(());
+        }
         self.delegate(issue_id, &event.session_id, author, label, host)
             .await
     }
@@ -447,7 +530,7 @@ impl RemoteTracker {
         // capsules never own the same issue.
         let redelegation = if let Some(existing) = self.route_for_issue(issue_id) {
             host.stop(existing.task_id.clone()).await?;
-            self.config.automation.create_activity(&existing.session_id, &activity_id(&existing.task_id, "redelegated"), AgentActivityContent::Response {
+            self.config.automation.create_activity(&existing.session_id, &stable_id(&existing.task_id, "redelegated"), AgentActivityContent::Response {
                 body: "This delegation was replaced. Altitude stopped the previous task and disposed of its capsule.".into(),
             }).await.map_err(|error| error.to_string())?;
             self.retire_route(&existing)?;
@@ -470,7 +553,7 @@ impl RemoteTracker {
             .automation
             .create_activity(
                 session_id,
-                &activity_id(session_id, "starting"),
+                &stable_id(session_id, "starting"),
                 AgentActivityContent::Thought {
                     body: format!("Starting work on this issue for {label}."),
                 },
@@ -502,12 +585,19 @@ impl RemoteTracker {
             cursor: 0,
             origin: RouteOrigin::Delegated,
         })?;
+        let agent_name = host.agent_name(task_id.clone()).await?;
+        if let Err(error) = self
+            .set_session_summary(session_id, author, agent_name.as_deref())
+            .await
+        {
+            tracing::warn!(session = %session_id, %error, "could not name a delegated session");
+        }
         if redelegation {
             self.config
                 .automation
                 .create_activity(
                     session_id,
-                    &activity_id(&task_id, "redelegated"),
+                    &stable_id(&task_id, "redelegated"),
                     AgentActivityContent::Thought {
                         body: format!(
                             "Redelegated: this work now runs for operator {author} on remote {peer}."
@@ -542,8 +632,26 @@ impl RemoteTracker {
             return Ok(());
         };
         // Only the current delegation operator's reply counts; a teammate's
-        // comment is context, not a decision.
+        // prompt is not a decision. Say so on the session and name the operator
+        // rather than silently ignoring a human who spoke to the app.
         if !event.is_from(&route.tracker_user_id) {
+            let body = self.boundary_reply(&route.tracker_user_id).await;
+            let discriminator = event
+                .activity_id
+                .as_deref()
+                .unwrap_or(event.session_id.as_str());
+            self.config
+                .automation
+                .create_activity(
+                    &event.session_id,
+                    &stable_id(
+                        &event.session_id,
+                        &format!("teammate-redirect:{discriminator}"),
+                    ),
+                    AgentActivityContent::Response { body },
+                )
+                .await
+                .map_err(|error| error.to_string())?;
             return Ok(());
         }
         let signals = host.unresolved_signals(route.task_id.clone()).await?;
@@ -649,6 +757,176 @@ impl RemoteTracker {
         self.finish_accepted(&route, &events).await
     }
 
+    /// A comment reached a task's issue or document. Decide whether it is for
+    /// the agent before reacting or waking anyone.
+    async fn handle_comment(&self, event: &CommentInput, host: &dyn Host) -> Result<(), String> {
+        let site = self
+            .config
+            .automation
+            .comment_site(&event.comment_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        // The generated session root is Linear's own transcript surface, not a
+        // signal comment. Its replies arrive as prompts on the session.
+        if site.is_artificial_session_root {
+            return Ok(());
+        }
+        let issue_id = site.issue_id.clone().or_else(|| event.issue_id.clone());
+        let Some(issue_id) = issue_id else {
+            return Ok(());
+        };
+        let Some(route) = self.route_for_issue(&issue_id) else {
+            return Ok(());
+        };
+        if !host.is_active(route.task_id.clone()).await? {
+            return Ok(());
+        }
+        let app_user_id = self.config.automation.app_user_id();
+        let actor = if event.actor_id == route.tracker_user_id {
+            Actor::Operator
+        } else if event.actor_id == app_user_id {
+            Actor::Agent
+        } else {
+            Actor::OtherHuman
+        };
+        // A non-operator speaking is enough to make the thread shared, even if
+        // Linear's author list is incomplete.
+        let has_other_humans = actor == Actor::OtherHuman
+            || site.authors_truncated
+            || site
+                .human_authors
+                .iter()
+                .any(|id| id.as_str() != route.tracker_user_id && id.as_str() != app_user_id);
+        let facts = InputFacts {
+            actor,
+            is_mention: event.is_mention,
+            is_agent_thread: site.root_author_id.as_deref() == Some(app_user_id),
+            is_agent_document_comment: site.document_content_id.is_some()
+                && site.parent_id.is_none()
+                && site.document_creator_id.as_deref() == Some(app_user_id),
+            // Signal comments do not exist yet; the binding ledger will set this
+            // when they do.
+            is_tracked_signal: false,
+            has_other_humans,
+        };
+        let decision = admission::decide(&facts);
+        tracing::info!(
+            comment = %event.comment_id,
+            root = %site.root_comment_id,
+            site_comment = %site.comment_id,
+            task = %route.task_id,
+            ?decision,
+            reason = decision.reason(),
+            mention = event.is_mention,
+            "Linear comment admitted"
+        );
+        match decision {
+            Admission::Ignore | Admission::Context => Ok(()),
+            Admission::Wake => {
+                self.react_eyes(&event.comment_id).await;
+                let body = if event.body.trim().is_empty() {
+                    site.body.clone()
+                } else {
+                    event.body.clone()
+                };
+                let source = if site.document_id.is_some() {
+                    "document"
+                } else {
+                    "issue"
+                };
+                let author = site.author_name.as_deref().unwrap_or("The operator");
+                let instruction = format!(
+                    "A comment from {author} on the task's {source}:\n\n{body}\n\n\
+                     This comment was addressed to you. Continue the task with it."
+                );
+                host.instruct(route.task_id, instruction).await
+            }
+            Admission::Redirect => {
+                self.react_eyes(&event.comment_id).await;
+                let body = self.boundary_reply(&route.tracker_user_id).await;
+                self.config
+                    .automation
+                    .comment_reply(
+                        site.issue_id.as_deref(),
+                        site.document_content_id.as_deref(),
+                        &event.comment_id,
+                        &body,
+                        &stable_id("comment", &format!("{}:redirect", event.comment_id)),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+        }
+    }
+
+    /// A deterministic acknowledgement, so a retry cannot add a second reaction.
+    async fn react_eyes(&self, comment_id: &str) {
+        let id = stable_id("reaction", &format!("{comment_id}:eyes"));
+        if let Err(error) = self
+            .config
+            .automation
+            .react_to_comment(comment_id, "eyes", Some(&id))
+            .await
+        {
+            tracing::debug!(comment = comment_id, %error, "could not add the acknowledgement reaction");
+        }
+    }
+
+    async fn boundary_reply(&self, operator_id: &str) -> String {
+        let operator = self.operator_mention(operator_id).await;
+        if operator.starts_with("https://") {
+            format!(
+                "I can only take direction from {operator} on this task. Could you \
+                 confirm what you'd like me to do?"
+            )
+        } else {
+            format!(
+                "I can only take direction from {operator} on this task. I've flagged \
+                 this for them."
+            )
+        }
+    }
+
+    /// `altitude / operator@host / harness`, the session's public title.
+    async fn set_session_summary(
+        &self,
+        session_id: &str,
+        operator_id: &str,
+        agent: Option<&str>,
+    ) -> Result<(), String> {
+        let operator = self.operator_handle(operator_id).await;
+        let agent = agent.unwrap_or("agent");
+        let summary = format!("altitude / {operator}@{} / {agent}", self.config.host_label);
+        self.config
+            .automation
+            .update_session_summary(session_id, &summary)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn operator_handle(&self, user_id: &str) -> String {
+        match self.config.automation.user_url(user_id).await {
+            Ok(url) => url
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .filter(|handle| !handle.is_empty())
+                .unwrap_or("operator")
+                .to_owned(),
+            Err(_) => "operator".to_owned(),
+        }
+    }
+
+    async fn operator_mention(&self, user_id: &str) -> String {
+        match self.config.automation.user_url(user_id).await {
+            Ok(url) if !url.is_empty() => url,
+            Ok(_) | Err(_) => {
+                tracing::warn!(user = user_id, "could not read the operator's profile URL");
+                "the task's operator".to_owned()
+            }
+        }
+    }
+
     /// Report task life outward, and stop work the issue no longer delegates.
     ///
     /// A completed issue is not accepted here: a poll cannot prove who changed
@@ -726,7 +1004,7 @@ impl RemoteTracker {
             .automation
             .create_activity(
                 &route.session_id,
-                &activity_id(&route.task_id, "unhooked"),
+                &stable_id(&route.task_id, "unhooked"),
                 AgentActivityContent::Response {
                     body: "This issue is no longer delegated to Altitude; the task was stopped."
                         .to_owned(),
@@ -783,7 +1061,7 @@ impl RemoteTracker {
                             .automation
                             .create_activity(
                                 &route.session_id,
-                                &activity_id(&route.task_id, agent_run_id),
+                                &stable_id(&route.task_id, agent_run_id),
                                 AgentActivityContent::Thought {
                                     body:
                                         "Your reply was received. Altitude is continuing the work."
@@ -816,8 +1094,21 @@ impl RemoteTracker {
                         .await?;
                     }
                 }
-                TaskHistoryEvent::OperatorSignalConfirmed { .. }
-                | TaskHistoryEvent::TaskCompleted { .. } => {
+                TaskHistoryEvent::OperatorSignalResolved {
+                    signal_id,
+                    resolved: true,
+                    ..
+                } => {
+                    self.resolve_signal_comment(route, signal_id, &events[..=index])
+                        .await;
+                }
+                TaskHistoryEvent::OperatorSignalConfirmed { signal_id } => {
+                    self.resolve_signal_comment(route, signal_id, &events[..=index])
+                        .await;
+                    return self.finish_accepted(route, &events[..=index]).await;
+                }
+                TaskHistoryEvent::TaskCompleted { .. } => {
+                    self.resolve_signal_comments(route, &events[..=index]).await;
                     return self.finish_accepted(route, &events[..=index]).await;
                 }
                 _ => {}
@@ -857,7 +1148,7 @@ impl RemoteTracker {
             .automation
             .create_activity(
                 &route.session_id,
-                &activity_id(&route.task_id, "transferred"),
+                &stable_id(&route.task_id, "transferred"),
                 AgentActivityContent::Response {
                     body: "This work moved to another machine and continues there.".to_owned(),
                 },
@@ -876,78 +1167,118 @@ impl RemoteTracker {
         body: &str,
         contributions: &[String],
     ) -> Result<(), String> {
-        let id = activity_id(&route.task_id, signal_id);
         let reference = self.issue_reference(&route.issue_id);
+        let comment_id = stable_id(
+            "comment",
+            &format!("signal:{}:{}", route.task_id, signal_id),
+        );
         match kind {
+            // Updates are the session's transcript, not an issue comment.
             TaskOperatorSignalKind::Update => {
-                let body = format!("**Altitude update: {}**\n\n{}", title.trim(), body.trim());
+                let body = format!("**○ Info:** {}\n\n{}", title.trim(), body.trim());
                 self.config
                     .automation
                     .create_activity(
                         &route.session_id,
-                        &id,
+                        &stable_id(&route.task_id, signal_id),
                         AgentActivityContent::Thought { body },
                     )
                     .await
                     .map_err(|error| error.to_string())
             }
             TaskOperatorSignalKind::Decision => {
-                let body = format!("**Altitude decision: {}**\n\n{}", title.trim(), body.trim());
+                let body = format!("**→ Decision:** {}\n\n{}", title.trim(), body.trim());
                 self.config
                     .automation
-                    .create_activity(
-                        &route.session_id,
-                        &id,
-                        AgentActivityContent::Thought { body },
-                    )
+                    .comment_on_issue(&route.issue_id, &body, &comment_id)
                     .await
                     .map_err(|error| error.to_string())
             }
             TaskOperatorSignalKind::Blocked => {
+                let operator = self.operator_mention(&route.tracker_user_id).await;
                 let body = format!(
-                    "**Altitude needs you: {}**\n\n{}\n\nReply here to unblock the task.",
+                    "**? Needs you:** {}\n\n{}\n\n{operator}\n\nReply here to unblock the task.",
                     title.trim(),
                     body.trim()
                 );
                 self.config
                     .automation
-                    .create_activity(
-                        &route.session_id,
-                        &id,
-                        AgentActivityContent::Elicitation { body },
-                    )
+                    .comment_on_issue(&route.issue_id, &body, &comment_id)
                     .await
                     .map_err(|error| error.to_string())?;
-                self.config
+                if let Err(error) = self
+                    .config
                     .automation
                     .status(&reference, TrackerStatus::InReview)
                     .await
-                    .map_err(|error| error.to_string())
+                {
+                    tracing::warn!(issue = %route.issue_id, %error, "signal comment posted without an attention status");
+                }
+                Ok(())
             }
             TaskOperatorSignalKind::InReview => {
-                // An elicitation keeps the session awaiting the operator; a
-                // response here would mark it complete before anyone accepted.
-                let mut body = format!(
-                    "**Altitude finished the work: {}**\n\n{}\n\nReply to accept and complete, or reply with further instructions.",
-                    title.trim(),
-                    body.trim()
-                );
+                let operator = self.operator_mention(&route.tracker_user_id).await;
+                let mut body =
+                    format!("**◆ Ready to review:** {}\n\n{}", title.trim(), body.trim());
                 append_contributions(&mut body, contributions);
+                body.push_str(&format!(
+                    "\n\n{operator}\n\nReply here to accept, or send it back with changes."
+                ));
                 self.config
                     .automation
-                    .create_activity(
-                        &route.session_id,
-                        &id,
-                        AgentActivityContent::Elicitation { body },
-                    )
+                    .comment_on_issue(&route.issue_id, &body, &comment_id)
                     .await
                     .map_err(|error| error.to_string())?;
-                self.config
+                if let Err(error) = self
+                    .config
                     .automation
                     .status(&reference, TrackerStatus::InReview)
                     .await
-                    .map_err(|error| error.to_string())
+                {
+                    tracing::warn!(issue = %route.issue_id, %error, "review comment posted without an In Review status");
+                }
+                Ok(())
             }
+        }
+    }
+
+    /// Resolve the comment a signal was published as, if it has one.
+    async fn resolve_signal_comment(
+        &self,
+        route: &Route,
+        signal_id: &str,
+        events: &[(i64, TaskHistoryEvent)],
+    ) {
+        let Some(kind) = signal_kind(events, signal_id) else {
+            return;
+        };
+        if kind == TaskOperatorSignalKind::Update {
+            return;
+        }
+        let comment_id = stable_id(
+            "comment",
+            &format!("signal:{}:{}", route.task_id, signal_id),
+        );
+        if let Err(error) = self
+            .config
+            .automation
+            .resolve_comment(&comment_id, None)
+            .await
+        {
+            tracing::warn!(task = %route.task_id, signal = signal_id, %error, "could not resolve a signal comment");
+        }
+    }
+
+    async fn resolve_signal_comments(&self, route: &Route, events: &[(i64, TaskHistoryEvent)]) {
+        let mut seen = HashSet::new();
+        for (_, event) in events {
+            let TaskHistoryEvent::OperatorSignalRaised { signal } = event else {
+                continue;
+            };
+            if signal.kind == TaskOperatorSignalKind::Update || !seen.insert(signal.id.clone()) {
+                continue;
+            }
+            self.resolve_signal_comment(route, &signal.id, events).await;
         }
     }
 
@@ -966,7 +1297,7 @@ impl RemoteTracker {
             .automation
             .create_activity(
                 &route.session_id,
-                &activity_id(&route.task_id, "accepted"),
+                &stable_id(&route.task_id, "accepted"),
                 AgentActivityContent::Response {
                     body: accepted_body(&contribution_urls(events)),
                 },
@@ -992,7 +1323,7 @@ impl RemoteTracker {
             .automation
             .create_activity(
                 session_id,
-                &activity_id(session_id, "sync-guidance"),
+                &stable_id(session_id, "sync-guidance"),
                 AgentActivityContent::Elicitation { body },
             )
             .await
@@ -1012,7 +1343,7 @@ impl RemoteTracker {
             .automation
             .create_activity(
                 session_id,
-                &activity_id(session_id, "start-guidance"),
+                &stable_id(session_id, "start-guidance"),
                 AgentActivityContent::Elicitation { body },
             )
             .await
@@ -1283,6 +1614,33 @@ fn classify_webhook(tracker: &RemoteTracker, body: &[u8]) -> WebhookOutcome {
                 }
             }
         },
+        "AppUserNotification" => match parse_app_notification(body) {
+            Err(_) => WebhookOutcome::Reject("the notification event could not be read"),
+            Ok(event) => {
+                if event.organization_id != tracker.config.automation.workspace_id() {
+                    return WebhookOutcome::Reject("another workspace");
+                }
+                if event.app_user_id != tracker.config.automation.app_user_id() {
+                    return WebhookOutcome::Reject("another app user");
+                }
+                if event
+                    .oauth_client_id
+                    .as_deref()
+                    .is_some_and(|id| id != tracker.config.oauth_client_id)
+                {
+                    return WebhookOutcome::Reject("another OAuth application");
+                }
+                if !event.is_fresh() {
+                    return WebhookOutcome::Reject(
+                        "older than the freshness window · check this machine's clock",
+                    );
+                }
+                match event.into_stored() {
+                    Some(stored) => WebhookOutcome::Store(stored),
+                    None => WebhookOutcome::Ignore("a notification that carries no comment"),
+                }
+            }
+        },
         _ => WebhookOutcome::Ignore("not a resource this coordinator handles"),
     }
 }
@@ -1365,6 +1723,101 @@ impl IssueEvent {
             state_id,
             actor_id: self.actor.id,
             occurred_at_ms,
+        }))
+    }
+}
+
+/// An `AppUserNotification` webhook, as far as the coordinator trusts it.
+///
+/// Only notifications that carry a comment are turned into input. A status or
+/// assignment notification is lifecycle, not a message to the agent.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AppNotificationEvent {
+    organization_id: String,
+    app_user_id: String,
+    #[serde(default)]
+    oauth_client_id: Option<String>,
+    webhook_timestamp: f64,
+    action: String,
+    notification: AppNotification,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AppNotification {
+    #[serde(rename = "type")]
+    notification_type: String,
+    #[serde(default)]
+    actor_id: Option<String>,
+    #[serde(default)]
+    comment_id: Option<String>,
+    #[serde(default)]
+    issue_id: Option<String>,
+    #[serde(default)]
+    document_id: Option<String>,
+    #[serde(default)]
+    comment: Option<NotificationComment>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NotificationComment {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    user_id: Option<String>,
+    #[serde(default)]
+    issue_id: Option<String>,
+}
+
+fn parse_app_notification(body: &[u8]) -> Result<AppNotificationEvent, serde_json::Error> {
+    serde_json::from_slice(body)
+}
+
+impl AppNotificationEvent {
+    fn is_fresh(&self) -> bool {
+        let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+            return false;
+        };
+        (now.as_millis() as f64 - self.webhook_timestamp).abs()
+            <= WEBHOOK_MAX_AGE.as_millis() as f64
+    }
+
+    /// Turn the notification into the comment input it carries, if it carries
+    /// one. Everything else is left to the lifecycle handlers.
+    fn into_stored(self) -> Option<StoredEvent> {
+        let is_mention = matches!(
+            self.action.as_str(),
+            "issueCommentMention" | "documentCommentMention"
+        ) || self.notification.notification_type.ends_with("Mention");
+        let is_new_comment = matches!(
+            self.action.as_str(),
+            "issueNewComment" | "documentNewComment"
+        );
+        if !is_mention && !is_new_comment {
+            return None;
+        }
+        let comment = self.notification.comment.unwrap_or_default();
+        let comment_id = self
+            .notification
+            .comment_id
+            .or_else(|| (!comment.id.is_empty()).then_some(comment.id))?;
+        let actor_id = self
+            .notification
+            .actor_id
+            .or(comment.user_id)
+            .filter(|id| !id.is_empty())?;
+        let issue_id = self.notification.issue_id.or(comment.issue_id);
+        Some(StoredEvent::Comment(CommentInput {
+            comment_id,
+            issue_id,
+            document_id: self.notification.document_id,
+            actor_id,
+            is_mention,
+            body: comment.body,
         }))
     }
 }
@@ -1575,6 +2028,7 @@ struct TerminatedSession {
 enum StoredEvent {
     Session(Box<SessionEvent>),
     IssueStateChanged(IssueStateChanged),
+    Comment(CommentInput),
 }
 
 impl StoredEvent {
@@ -1588,6 +2042,17 @@ impl StoredEvent {
             StoredEvent::IssueStateChanged(change) => {
                 format!("issue {} · state {}", change.issue_id, change.state_id)
             }
+            StoredEvent::Comment(comment) => {
+                format!(
+                    "comment {} · {}",
+                    comment.comment_id,
+                    if comment.is_mention {
+                        "mention"
+                    } else {
+                        "comment"
+                    }
+                )
+            }
         }
     }
 
@@ -1599,6 +2064,7 @@ impl StoredEvent {
                 "issue:{}:{}:{}:{}",
                 change.issue_id, change.state_id, change.actor_id, change.occurred_at_ms
             ),
+            StoredEvent::Comment(comment) => format!("comment:{}", comment.comment_id),
         }
     }
 }
@@ -1610,6 +2076,8 @@ struct SessionEvent {
     #[serde(default)]
     issue_id: Option<String>,
     #[serde(default)]
+    comment_id: Option<String>,
+    #[serde(default)]
     creator_id: Option<String>,
     #[serde(default)]
     creator_name: Option<String>,
@@ -1619,6 +2087,8 @@ struct SessionEvent {
     prompt_body: Option<String>,
     #[serde(default)]
     signal: Option<String>,
+    #[serde(default)]
+    source_comment_id: Option<String>,
     /// The signed activity id, which is a prompt's own identity: a redelivery is
     /// the same activity whatever the unsigned delivery header says.
     #[serde(default)]
@@ -1635,6 +2105,22 @@ struct IssueStateChanged {
     state_id: String,
     actor_id: String,
     occurred_at_ms: i64,
+}
+
+/// A comment notification reduced to what admission needs.
+///
+/// The body is kept because a wake hands the operator's words to the task. It
+/// is never written to a log line.
+#[derive(Clone, Serialize, Deserialize)]
+struct CommentInput {
+    comment_id: String,
+    #[serde(default)]
+    issue_id: Option<String>,
+    #[serde(default)]
+    document_id: Option<String>,
+    actor_id: String,
+    is_mention: bool,
+    body: String,
 }
 
 impl SessionEvent {
@@ -1706,6 +2192,7 @@ impl From<&AgentSessionEvent> for SessionEvent {
             action: event.action.clone(),
             session_id: event.agent_session.id.clone(),
             issue_id: event.agent_session.issue_id.clone(),
+            comment_id: event.agent_session.comment_id.clone(),
             creator_id: event.delegation_author_id().map(str::to_owned),
             creator_name: event
                 .agent_session
@@ -1715,6 +2202,7 @@ impl From<&AgentSessionEvent> for SessionEvent {
             prompt_author_id: event.prompt_author_id().map(str::to_owned),
             prompt_body: activity.and_then(|activity| activity.content.body.clone()),
             signal: activity.and_then(|activity| activity.signal.clone()),
+            source_comment_id: event.agent_session.source_comment_id.clone(),
             activity_id: activity.map(|activity| activity.id.clone()),
             occurred_at_ms: event.webhook_timestamp as i64,
         }
@@ -1730,9 +2218,21 @@ fn persist(path: &Path, ledger: &Ledger) -> Result<(), String> {
         .map_err(|error| format!("could not write the tracker ledger: {error}"))
 }
 
-/// A UUID that is stable for one task's one signal, so a lost response can be
-/// retried without creating a second activity.
-fn activity_id(namespace: &str, discriminator: &str) -> String {
+fn signal_kind(
+    events: &[(i64, TaskHistoryEvent)],
+    signal_id: &str,
+) -> Option<TaskOperatorSignalKind> {
+    events.iter().rev().find_map(|(_, event)| match event {
+        TaskHistoryEvent::OperatorSignalRaised { signal } if signal.id == signal_id => {
+            Some(signal.kind)
+        }
+        _ => None,
+    })
+}
+
+/// A UUID that is stable for one tracker object, so a lost response can be
+/// retried without creating a second activity, comment, or reaction.
+fn stable_id(namespace: &str, discriminator: &str) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(namespace.as_bytes());
     hasher.update(b"\0");

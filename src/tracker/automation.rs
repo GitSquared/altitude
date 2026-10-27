@@ -1,5 +1,6 @@
-//! Linear's native agent API: an app-token GraphQL transport and the signed
-//! AgentSessionEvent webhook.
+//! Linear's native agent API: an app-token GraphQL transport, the signed
+//! AgentSessionEvent webhook, and the comment/reaction calls the coordinator
+//! needs to answer a human in a shared issue.
 //!
 //! The MCP adapter in [`super::Linear`] serves the interactive client, where a
 //! person signs in. A remote coordinator has no person and no browser: it acts
@@ -58,6 +59,38 @@ const CREATE_SESSION_ON_ISSUE_MUTATION: &str = "mutation CreateAgentSessionOnIss
 
 const UPDATE_STATE_MUTATION: &str = "mutation UpdateIssueState($id: String!, $input: IssueUpdateInput!) { \
     issueUpdate(id: $id, input: $input) { success } }";
+
+const COMMENT_SITE_QUERY: &str = "query CommentSite($id: String!) { comment(id: $id) { \
+    id body parentId issueId documentContentId isArtificialAgentSessionRoot \
+    user { id name } \
+    parent { id parentId issueId documentContentId user { id } } \
+    issue { id team { id } comments(first: 100) { pageInfo { hasNextPage } \
+    nodes { user { id } } } } \
+    documentContent { id document { id creator { id } issue { id } \
+    comments(first: 100) { pageInfo { hasNextPage } nodes { user { id } } } } } } }";
+
+const CREATE_COMMENT_MUTATION: &str = "mutation CreateComment($input: CommentCreateInput!) { \
+    commentCreate(input: $input) { success comment { id } } }";
+
+const COMMENT_EXISTS_QUERY: &str = "query CommentExists($id: String!) { comment(id: $id) { \
+    id parentId body resolvedAt } }";
+
+const COMMENT_UPDATE_MUTATION: &str = "mutation UpdateComment($id: String!, $input: CommentUpdateInput!) { \
+    commentUpdate(id: $id, input: $input) { success } }";
+
+const COMMENT_UNRESOLVE_MUTATION: &str = "mutation UnresolveComment($id: String!) { \
+    commentUnresolve(id: $id) { success } }";
+
+const COMMENT_RESOLVE_MUTATION: &str = "mutation ResolveComment($id: String!, $resolvingCommentId: String) { \
+    commentResolve(id: $id, resolvingCommentId: $resolvingCommentId) { success } }";
+
+const CREATE_REACTION_MUTATION: &str = "mutation CreateReaction($input: ReactionCreateInput!) { \
+    reactionCreate(input: $input) { success reaction { id } } }";
+
+const USER_URL_QUERY: &str = "query UserUrl($id: String!) { user(id: $id) { id name url } }";
+
+const UPDATE_SESSION_SUMMARY_MUTATION: &str = "mutation UpdateSession($id: String!, $input: AgentSessionUpdateInput!) { \
+    agentSessionUpdate(id: $id, input: $input) { success } }";
 
 pub struct LinearAutomation {
     token: RwLock<String>,
@@ -192,6 +225,285 @@ impl LinearAutomation {
             .await?;
         mutation_succeeded(&data, "issueUpdate")?;
         Ok(())
+    }
+
+    /// The thread, document, and authors around one comment.
+    ///
+    /// Admission needs facts, not a cached copy of the issue. Every call is a
+    /// point-in-time read of the discussion as Linear has it now.
+    pub async fn comment_site(&self, comment_id: &str) -> Result<CommentSite, TrackerError> {
+        let data = self
+            .graphql(COMMENT_SITE_QUERY, json!({ "id": comment_id }))
+            .await?;
+        let comment = data
+            .get("comment")
+            .filter(|comment| !comment.is_null())
+            .ok_or_else(|| TrackerError::new("Linear did not return that comment"))?;
+        let parent = comment.get("parent").filter(|parent| !parent.is_null());
+        let root = parent.unwrap_or(comment);
+        let document = comment.pointer("/documentContent/document");
+        let document_issue_id = document
+            .and_then(|document| document.pointer("/issue/id"))
+            .and_then(Value::as_str);
+        let issue_id = comment
+            .get("issueId")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                parent
+                    .and_then(|parent| parent.get("issueId"))
+                    .and_then(Value::as_str)
+            })
+            .or(document_issue_id)
+            .map(str::to_owned);
+        let mut authors = Vec::new();
+        let mut push_author = |id: Option<&str>| {
+            if let Some(id) = id.filter(|id| !id.is_empty())
+                && !authors.iter().any(|known| known == id)
+            {
+                authors.push(id.to_owned());
+            }
+        };
+        push_author(comment.pointer("/user/id").and_then(Value::as_str));
+        push_author(
+            parent
+                .and_then(|parent| parent.pointer("/user/id"))
+                .and_then(Value::as_str),
+        );
+        for connection in [
+            comment.pointer("/issue/comments/nodes"),
+            comment.pointer("/documentContent/document/comments/nodes"),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Some(nodes) = connection.as_array() {
+                for node in nodes {
+                    push_author(node.pointer("/user/id").and_then(Value::as_str));
+                }
+            }
+        }
+        Ok(CommentSite {
+            comment_id: string_field(comment, "id")?,
+            body: comment
+                .get("body")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            parent_id: comment
+                .get("parentId")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            issue_id,
+            document_content_id: comment
+                .get("documentContentId")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    parent
+                        .and_then(|parent| parent.get("documentContentId"))
+                        .and_then(Value::as_str)
+                })
+                .map(str::to_owned),
+            document_id: document
+                .and_then(|document| document.get("id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            root_comment_id: string_field(root, "id")?,
+            root_author_id: root
+                .pointer("/user/id")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            document_creator_id: document
+                .and_then(|document| document.pointer("/creator/id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            author_name: comment
+                .pointer("/user/name")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            is_artificial_session_root: comment
+                .get("isArtificialAgentSessionRoot")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            authors_truncated: comment
+                .pointer("/issue/comments/pageInfo/hasNextPage")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                || comment
+                    .pointer("/documentContent/document/comments/pageInfo/hasNextPage")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            human_authors: authors,
+        })
+    }
+
+    /// Reply in an issue or document comment thread.
+    ///
+    /// `parentId` alone is not enough: Linear requires exactly one parent entity
+    /// id beside it, so the caller passes the issue or document content the
+    /// thread belongs to.
+    pub async fn comment_reply(
+        &self,
+        issue_id: Option<&str>,
+        document_content_id: Option<&str>,
+        parent_id: &str,
+        body: &str,
+        id: &str,
+    ) -> Result<(), TrackerError> {
+        let mut input = json!({ "parentId": parent_id, "body": body, "id": id });
+        if let Some(document_content_id) = document_content_id {
+            input["documentContentId"] = json!(document_content_id);
+        } else if let Some(issue_id) = issue_id {
+            input["issueId"] = json!(issue_id);
+        } else {
+            return Err(TrackerError::new(
+                "a comment reply needs the issue or document it belongs to",
+            ));
+        }
+        let outcome = self
+            .graphql(CREATE_COMMENT_MUTATION, json!({ "input": input }))
+            .await
+            .and_then(|data| {
+                mutation_succeeded(&data, "commentCreate")?;
+                Ok(())
+            });
+        if let Err(error) = outcome {
+            // A response can be lost after creation. Prove the comment with our
+            // stable id arrived before creating another one on retry.
+            if let Ok(existing) = self
+                .graphql(COMMENT_EXISTS_QUERY, json!({ "id": id }))
+                .await
+                && existing.pointer("/comment/id").and_then(Value::as_str) == Some(id)
+                && existing
+                    .pointer("/comment/parentId")
+                    .and_then(Value::as_str)
+                    == Some(parent_id)
+            {
+                return Ok(());
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Post a top-level issue comment under a stable id.
+    ///
+    /// A signal is re-raised into the same thread, so an existing comment is
+    /// updated and reopened rather than duplicated.
+    pub async fn comment_on_issue(
+        &self,
+        issue_id: &str,
+        body: &str,
+        id: &str,
+    ) -> Result<(), TrackerError> {
+        let input = json!({ "issueId": issue_id, "body": body, "id": id });
+        let outcome = self
+            .graphql(CREATE_COMMENT_MUTATION, json!({ "input": input }))
+            .await
+            .and_then(|data| {
+                mutation_succeeded(&data, "commentCreate")?;
+                Ok(())
+            });
+        if let Ok(()) = outcome {
+            return Ok(());
+        }
+        // The comment may already exist from a lost response or a re-raised
+        // signal. Update it and make sure it is open before treating it as sent.
+        let existing = self
+            .graphql(COMMENT_EXISTS_QUERY, json!({ "id": id }))
+            .await?;
+        if existing.pointer("/comment/id").and_then(Value::as_str) != Some(id)
+            || existing
+                .pointer("/comment/parentId")
+                .and_then(Value::as_str)
+                .is_some()
+        {
+            return outcome;
+        }
+        if existing.pointer("/comment/body").and_then(Value::as_str) != Some(body) {
+            let data = self
+                .graphql(
+                    COMMENT_UPDATE_MUTATION,
+                    json!({ "id": id, "input": { "body": body } }),
+                )
+                .await?;
+            mutation_succeeded(&data, "commentUpdate")?;
+        }
+        if existing
+            .pointer("/comment/resolvedAt")
+            .is_some_and(|resolved| !resolved.is_null())
+        {
+            let data = self
+                .graphql(COMMENT_UNRESOLVE_MUTATION, json!({ "id": id }))
+                .await?;
+            mutation_succeeded(&data, "commentUnresolve")?;
+        }
+        Ok(())
+    }
+
+    /// Resolve a comment thread, optionally naming the reply that resolved it.
+    pub async fn resolve_comment(
+        &self,
+        comment_id: &str,
+        resolving_comment_id: Option<&str>,
+    ) -> Result<(), TrackerError> {
+        let data = self
+            .graphql(
+                COMMENT_RESOLVE_MUTATION,
+                json!({
+                    "id": comment_id,
+                    "resolvingCommentId": resolving_comment_id,
+                }),
+            )
+            .await?;
+        mutation_succeeded(&data, "commentResolve").map(|_| ())
+    }
+
+    /// Add one reaction to a comment, optionally under a stable id so a retry is
+    /// the same reaction rather than a second one.
+    pub async fn react_to_comment(
+        &self,
+        comment_id: &str,
+        emoji: &str,
+        id: Option<&str>,
+    ) -> Result<(), TrackerError> {
+        let mut input = json!({ "commentId": comment_id, "emoji": emoji });
+        if let Some(id) = id {
+            input["id"] = json!(id);
+        }
+        let data = self
+            .graphql(CREATE_REACTION_MUTATION, json!({ "input": input }))
+            .await?;
+        mutation_succeeded(&data, "reactionCreate").map(|_| ())
+    }
+
+    /// Set the session title. The model row in Linear's details is internal;
+    /// the title is the public place to name what is running.
+    pub async fn update_session_summary(
+        &self,
+        session_id: &str,
+        summary: &str,
+    ) -> Result<(), TrackerError> {
+        let data = self
+            .graphql(
+                UPDATE_SESSION_SUMMARY_MUTATION,
+                json!({ "id": session_id, "input": { "summary": summary } }),
+            )
+            .await?;
+        mutation_succeeded(&data, "agentSessionUpdate").map(|_| ())
+    }
+
+    /// The profile URL Linear uses for a person.
+    ///
+    /// A bare profile URL in Markdown renders as a mention, which is how the
+    /// redirect names the operator without guessing a workspace slug.
+    pub async fn user_url(&self, user_id: &str) -> Result<String, TrackerError> {
+        let data = self
+            .graphql(USER_URL_QUERY, json!({ "id": user_id }))
+            .await?;
+        data.pointer("/user/url")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| TrackerError::new("Linear returned no profile URL for that user"))
     }
 
     /// Sponsor an agent session on an issue through the public Agent API.
@@ -392,6 +704,30 @@ pub struct WorkflowState {
     pub name: String,
     #[serde(rename = "type")]
     pub state_type: String,
+}
+
+/// The facts around one comment that admission is allowed to use.
+///
+/// The body is included because a wake hands the operator's words to the task;
+/// the coordinator never logs it.
+#[derive(Clone, Debug)]
+pub struct CommentSite {
+    pub comment_id: String,
+    pub body: String,
+    pub parent_id: Option<String>,
+    pub issue_id: Option<String>,
+    pub document_content_id: Option<String>,
+    pub document_id: Option<String>,
+    pub root_comment_id: String,
+    pub root_author_id: Option<String>,
+    pub document_creator_id: Option<String>,
+    pub author_name: Option<String>,
+    pub is_artificial_session_root: bool,
+    /// A busy thread may have more authors than one page returned. Truncated is
+    /// treated as shared because an unknown participant must not cause a wake.
+    pub authors_truncated: bool,
+    /// Every human who has spoken in this thread or document, from Linear.
+    pub human_authors: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]

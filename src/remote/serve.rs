@@ -501,7 +501,15 @@ impl TaskHost for OwnTasks {
                     .into_iter()
                     .find(|task| task.id == task_id)
                 && let Some(reference) = task.facts.tracker_issue.clone()
-                && let Err(error) = tracker.pilot_task(peer, task_id.clone(), reference).await
+                && let Err(error) = tracker
+                    .pilot_task(
+                        peer,
+                        task_id.clone(),
+                        reference,
+                        task.agent_kind
+                            .map(|kind| kind.to_string().to_ascii_lowercase()),
+                    )
+                    .await
             {
                 tracing::warn!(task = %task_id, %error, "could not pilot a transferred bound task");
             }
@@ -702,8 +710,15 @@ impl TaskHost for OwnTasks {
                     if let Some(tracker) = &tracker
                         && tracker.has_account(peer)
                         && let Some(reference) = task.facts.tracker_issue.clone()
-                        && let Err(error) =
-                            tracker.pilot_task(peer, task.id.clone(), reference).await
+                        && let Err(error) = tracker
+                            .pilot_task(
+                                peer,
+                                task.id.clone(),
+                                reference,
+                                task.agent_kind
+                                    .map(|kind| kind.to_string().to_ascii_lowercase()),
+                            )
+                            .await
                     {
                         tracing::warn!(task = %task.id, %error, "could not pilot a delegated issue task");
                     }
@@ -939,6 +954,20 @@ impl super::tracker::Host for OwnTasks {
                 .await
                 .map(|_| ())
                 .map_err(|error| error.to_string())
+        })
+    }
+
+    fn agent_name(&self, task_id: String) -> super::tracker::HostFuture<'_, Option<String>> {
+        Box::pin(async move {
+            Ok(self
+                .tasks
+                .list()
+                .await
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .find(|task| task.id == task_id)
+                .and_then(|task| task.agent_kind)
+                .map(|kind| kind.to_string().to_ascii_lowercase()))
         })
     }
 
@@ -1530,6 +1559,7 @@ async fn connect_tracker(
         oauth_client_id: settings.client_id.clone(),
         storage_path: config.data_dir().join("trackers/linear/deliveries.json"),
         operators_dir: config.data_dir().join("operators"),
+        host_label: whoami::hostname().unwrap_or_else(|_| "remote".to_owned()),
     })?;
     let settings = settings.clone();
     let path = credentials_path.to_owned();

@@ -42,8 +42,9 @@ static LINEAR: Guide = Guide {
     steps: &[
         Step {
             prose: "Create an OAuth application in Linear's API settings, named Altitude, with \
-                    the Agent session and Issue webhook events enabled. The client ID it gives \
-                    you belongs in the remote's settings next.",
+                    Agent session events, Inbox notifications, and Permission changes enabled. \
+                    Enable Issues too if this remote should follow status changes. The client ID \
+                    it gives you belongs in the remote's settings next.",
             code: &[],
         },
         Step {
