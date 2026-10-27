@@ -12,5 +12,9 @@ for argument in "$@"; do
 	esac
 done
 [ -n "$url" ] || exit 4
-printf '\033]1337;open;%s\007' "$url"
+# A program may start its opener with its output detached — the `open` package
+# does exactly that — so the sequence goes to the terminal itself. /dev/tty is
+# the pty Altitude streams; where there is no terminal, stdout is all there is.
+printf '\033]1337;open;%s\007' "$url" > /dev/tty 2>/dev/null \
+	|| printf '\033]1337;open;%s\007' "$url"
 exit 0
