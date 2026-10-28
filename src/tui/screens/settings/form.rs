@@ -14,7 +14,7 @@ use ratatui::{
 
 use crate::{
     agent::AgentKind,
-    project::Project,
+    project::{Project, ProjectCommits},
     tui::{
         popups::{new_task::AGENTS, repositories::Repositories, scopes::Scopes},
         widgets::{
@@ -84,6 +84,10 @@ pub enum Focus {
     Instructions,
     Scope,
     Agent,
+    Identity,
+    CommitName,
+    CommitEmail,
+    Signing,
     Host,
     Accept,
     Cancel,
@@ -100,6 +104,9 @@ impl Focus {
                 | Self::Setup
                 | Self::Caches
                 | Self::Instructions
+                | Self::CommitName
+                | Self::CommitEmail
+                | Self::Signing
                 | Self::Scope
         )
     }
@@ -177,6 +184,26 @@ fn groups(project: bool) -> Vec<Group> {
             kind: Kind::Choice,
         },
         Group {
+            focus: Focus::Identity,
+            label: "Git identity",
+            kind: Kind::Choice,
+        },
+        Group {
+            focus: Focus::CommitName,
+            label: "Commit name",
+            kind: Kind::Single,
+        },
+        Group {
+            focus: Focus::CommitEmail,
+            label: "Commit email",
+            kind: Kind::Single,
+        },
+        Group {
+            focus: Focus::Signing,
+            label: "Signing key (optional)",
+            kind: Kind::Single,
+        },
+        Group {
             focus: Focus::Scope,
             // Overridden with the provider's own word when the form is drawn.
             label: "Task tracker team",
@@ -205,6 +232,16 @@ pub struct Form {
     pub caches: TextBox,
     pub instructions: TextBox,
     pub scope: Field,
+    pub commit_name: Field,
+    pub commit_email: Field,
+    pub signing: Field,
+    /// The identities projects have used, for the choice above the fields.
+    identity_choices: Vec<ProjectCommits>,
+    /// The installation's own identity, which a project inherits when it stores
+    /// none.
+    default_commits: Option<ProjectCommits>,
+    /// Which saved identity filled the fields; nothing is the default.
+    identity_at: Option<usize>,
     /// The coding agent new tasks here use, or nothing for the installation's
     /// default.
     pub agent: Option<AgentKind>,
@@ -229,13 +266,17 @@ pub struct Form {
 }
 
 /// Every focus a project form walks, in order.
-const PROJECT_FIELDS: [Focus; 11] = [
+const PROJECT_FIELDS: [Focus; 15] = [
     Focus::Primary,
     Focus::Repository,
     Focus::Setup,
     Focus::Caches,
     Focus::Instructions,
     Focus::Agent,
+    Focus::Identity,
+    Focus::CommitName,
+    Focus::CommitEmail,
+    Focus::Signing,
     Focus::Scope,
     Focus::Host,
     Focus::Accept,
@@ -252,6 +293,8 @@ impl Form {
         scope_label: &str,
         remotes: &[String],
         default_agent: Option<AgentKind>,
+        default_commits: Option<ProjectCommits>,
+        identities: Vec<ProjectCommits>,
     ) -> Self {
         let project = Project::new("");
         Self::for_project(
@@ -260,6 +303,8 @@ impl Form {
             scope_label,
             remotes,
             default_agent,
+            default_commits,
+            identities,
         )
     }
 
@@ -269,7 +314,14 @@ impl Form {
         scope_label: &str,
         remotes: &[String],
         default_agent: Option<AgentKind>,
+        default_commits: Option<ProjectCommits>,
+        identities: Vec<ProjectCommits>,
     ) -> Self {
+        let commits = project.commits.clone().or_else(|| default_commits.clone());
+        let identity_at = project
+            .commits
+            .as_ref()
+            .and_then(|commits| identities.iter().position(|known| known == commits));
         let mut host_choices = remotes.to_vec();
         if let Some(host) = &project.host
             && !host_choices.contains(host)
@@ -290,6 +342,21 @@ impl Form {
                     .and_then(|route| route.scope.as_deref())
                     .unwrap_or_default(),
             ),
+            commit_name: Field::with(commits.as_ref().map_or("", |commits| commits.name.as_str())),
+            commit_email: Field::with(
+                commits
+                    .as_ref()
+                    .map_or("", |commits| commits.email.as_str()),
+            ),
+            signing: Field::with(
+                commits
+                    .as_ref()
+                    .and_then(|commits| commits.signing_key.as_deref())
+                    .unwrap_or_default(),
+            ),
+            identity_choices: identities,
+            default_commits,
+            identity_at,
             agent: project.agent,
             default_agent,
             host: project.host.clone(),
@@ -315,6 +382,12 @@ impl Form {
             caches: TextBox::new(""),
             instructions: TextBox::new(""),
             scope: Field::with(""),
+            commit_name: Field::with(""),
+            commit_email: Field::with(""),
+            signing: Field::with(""),
+            identity_choices: Vec::new(),
+            default_commits: None,
+            identity_at: None,
             agent: None,
             default_agent: None,
             host: None,
@@ -360,6 +433,9 @@ impl Form {
             Focus::Setup => self.setup.handle_key(key),
             Focus::Caches => self.caches.handle_key(key),
             Focus::Instructions => self.instructions.handle_key(key),
+            Focus::CommitName => self.commit_name.handle_key(key),
+            Focus::CommitEmail => self.commit_email.handle_key(key),
+            Focus::Signing => self.signing.handle_key(key),
             Focus::Scope => self.scope.handle_key(key),
             _ => {}
         }
@@ -380,6 +456,65 @@ impl Form {
     /// Where the project runs, or nothing for this machine.
     pub fn host_value(&self) -> Option<String> {
         self.host.clone()
+    }
+
+    /// The commit identity the fields describe, when they describe one.
+    pub fn commits(&self) -> Option<ProjectCommits> {
+        let name = self.commit_name.value().trim().to_owned();
+        let email = self.commit_email.value().trim().to_owned();
+        if name.is_empty() || email.is_empty() {
+            return None;
+        }
+        let signing = self.signing.value().trim();
+        Some(ProjectCommits {
+            name,
+            email,
+            signing_key: (!signing.is_empty()).then(|| signing.to_owned()),
+        })
+    }
+
+    /// Whether the fields still describe the installation's own identity.
+    pub fn commits_are_default(&self) -> bool {
+        self.commits() == self.default_commits
+    }
+
+    /// Move to the next saved identity, filling the fields with it. Nothing is
+    /// the installation's default.
+    pub fn cycle_identity(&mut self) {
+        let mut options: Vec<Option<usize>> = vec![None];
+        options.extend((0..self.identity_choices.len()).map(Some));
+        let at = options
+            .iter()
+            .position(|option| *option == self.identity_at)
+            .unwrap_or(0);
+        self.identity_at = options[(at + 1) % options.len()];
+        let commits = self
+            .identity_at
+            .and_then(|index| self.identity_choices.get(index).cloned())
+            .or_else(|| self.default_commits.clone());
+        self.commit_name =
+            Field::with(commits.as_ref().map_or("", |commits| commits.name.as_str()));
+        self.commit_email = Field::with(
+            commits
+                .as_ref()
+                .map_or("", |commits| commits.email.as_str()),
+        );
+        self.signing = Field::with(
+            commits
+                .as_ref()
+                .and_then(|commits| commits.signing_key.as_deref())
+                .unwrap_or_default(),
+        );
+    }
+
+    fn identity_value(&self) -> String {
+        match self.commits() {
+            None => "not set".to_owned(),
+            Some(commits) if Some(&commits) == self.default_commits.as_ref() => {
+                format!("default · {} <{}>", commits.name, commits.email)
+            }
+            Some(commits) => format!("{} <{}>", commits.name, commits.email),
+        }
     }
 
     /// Move to the next agent on offer, wrapping. Nothing is the installation's
@@ -423,6 +558,9 @@ impl Form {
             Focus::Setup => self.setup.paste(text),
             Focus::Caches => self.caches.paste(text),
             Focus::Instructions => self.instructions.paste(text),
+            Focus::CommitName => self.commit_name.paste(text),
+            Focus::CommitEmail => self.commit_email.paste(text),
+            Focus::Signing => self.signing.paste(text),
             Focus::Scope => self.scope.paste(text),
             _ => {}
         }
@@ -558,6 +696,9 @@ fn draw_group(frame: &mut Frame, area: Rect, form: &Form, group: &Group) {
             let field = match group.focus {
                 Focus::Primary => &form.primary,
                 Focus::Repository => &form.repository,
+                Focus::CommitName => &form.commit_name,
+                Focus::CommitEmail => &form.commit_email,
+                Focus::Signing => &form.signing,
                 Focus::Scope => &form.scope,
                 _ => return,
             };
@@ -585,6 +726,7 @@ fn draw_group(frame: &mut Frame, area: Rect, form: &Form, group: &Group) {
             draw_label(frame, area, group.label);
             let value = match group.focus {
                 Focus::Agent => form.agent_value(),
+                Focus::Identity => form.identity_value(),
                 _ => form.host.as_deref().unwrap_or("this machine").to_owned(),
             };
             let style = if focused {

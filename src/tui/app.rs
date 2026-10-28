@@ -27,7 +27,7 @@ use crate::{
         credential_shell_id,
     },
     isolation::{EnvironmentDescription, EnvironmentProgress, IsolationEngine, ProfileSummary},
-    project::{Project, TrackerRoute, normalize_repository},
+    project::{Project, ProjectCommits, TrackerRoute, normalize_repository},
     remote::{
         Announcement, ConfigBundle, ConfigPush, DiscoveredRemote, DiscoveryEvent, LinkClient,
         RemoteKey, RemoteKeyStatus, RemoteKeys, RemoteState, TaskOrigin, TaskRequest, TaskSummary,
@@ -1925,7 +1925,13 @@ impl App {
             KeyCode::Char('n') if self.panel.section.grows() => {
                 self.panel.form = Some(match self.panel.section {
                     Section::Remotes => Form::for_remote(Target::NewRemote, ""),
-                    _ => Form::new_project(&self.scope_label(), &self.remotes(), self.agent()),
+                    _ => Form::new_project(
+                        &self.scope_label(),
+                        &self.remotes(),
+                        self.agent(),
+                        self.default_commits(),
+                        self.saved_identities(),
+                    ),
                 });
             }
             _ if is_remove(key) && self.selected_row().is_some_and(|row| row.is_removable()) => {
@@ -3225,6 +3231,8 @@ impl App {
                 &self.scope_label(),
                 &self.remotes(),
                 self.agent(),
+                self.default_commits(),
+                self.saved_identities(),
             ),
             RowKind::Discovered(_) => return,
             RowKind::Remote { address, .. } => Form::for_remote(
@@ -3434,6 +3442,9 @@ impl App {
                 }
                 KeyCode::Enter | KeyCode::Char(' ') if form.focus == Focus::Agent => {
                     form.cycle_agent();
+                }
+                KeyCode::Enter | KeyCode::Char(' ') if form.focus == Focus::Identity => {
+                    form.cycle_identity();
                 }
                 KeyCode::Enter if form.enters_newline() => form.handle_text(key),
                 KeyCode::Enter => match form.focus {
@@ -4521,6 +4532,14 @@ impl App {
                 project.repository = repository;
                 project.host = form.host_value();
                 project.agent = form.agent;
+                project.commits = if form.commits_are_default() {
+                    None
+                } else {
+                    form.commits()
+                };
+                if let Some(commits) = &project.commits {
+                    proposed.remember_identity(commits);
+                }
                 project.setup_command = form.setup.value();
                 project.caches = form.cache_paths();
                 project.instructions = form.instruction_text();
@@ -6309,6 +6328,27 @@ impl App {
 
     pub(in crate::tui) fn git_identity(&self) -> GitIdentity {
         self.git_identity.clone()
+    }
+
+    /// The installation's own commit identity, as a project inherits it.
+    fn default_commits(&self) -> Option<ProjectCommits> {
+        Some(ProjectCommits {
+            name: self.git_identity.name.clone()?,
+            email: self.git_identity.email.clone()?,
+            signing_key: self
+                .git_identity
+                .signs_commits
+                .then(|| self.git_identity.signing_key.clone())
+                .flatten(),
+        })
+    }
+
+    /// The identities projects have used, for the form's choice.
+    fn saved_identities(&self) -> Vec<ProjectCommits> {
+        self.settings_file
+            .as_ref()
+            .map(|file| file.settings().identities().to_vec())
+            .unwrap_or_default()
     }
 
     pub(in crate::tui) async fn refresh_git_identity(&mut self) {

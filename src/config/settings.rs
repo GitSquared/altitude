@@ -1,4 +1,7 @@
-use crate::{agent::AgentKind, project::Project};
+use crate::{
+    agent::AgentKind,
+    project::{Project, ProjectCommits},
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
@@ -33,6 +36,10 @@ pub struct Settings {
     /// The projects this installation can work on.
     #[serde(default)]
     projects: Vec<Project>,
+    /// Commit identities projects have used, so a new project can reuse one
+    /// rather than being typed again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    identities: Vec<ProjectCommits>,
 }
 
 impl Default for Settings {
@@ -44,6 +51,7 @@ impl Default for Settings {
             defaults: Defaults::default(),
             interface: Interface::default(),
             projects: vec![Project::new(String::new())],
+            identities: Vec::new(),
         }
     }
 }
@@ -234,6 +242,18 @@ impl Settings {
     /// Choose the coding agent Altitude drives.
     pub fn set_agent(&mut self, agent: AgentKind) {
         self.defaults.agent = Some(agent);
+    }
+
+    /// Commit identities projects have used, so the next project can pick one.
+    pub fn identities(&self) -> &[ProjectCommits] {
+        &self.identities
+    }
+
+    /// Keep an identity a project uses, without duplicating one already here.
+    pub fn remember_identity(&mut self, commits: &ProjectCommits) {
+        if !self.identities.contains(commits) {
+            self.identities.push(commits.clone());
+        }
     }
 
     /// How the interface behaves.

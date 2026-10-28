@@ -67,6 +67,20 @@ pub struct Project {
     /// The tracker work this project claims.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracker: Option<TrackerRoute>,
+    /// The identity commits made here carry, when it differs from the
+    /// installation's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commits: Option<ProjectCommits>,
+}
+
+/// A commit identity a project can carry instead of the installation's own.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ProjectCommits {
+    pub name: String,
+    pub email: String,
+    /// A signing key the version-control profile holds, when commits are signed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signing_key: Option<String>,
 }
 
 /// Work arriving from a task tracker, and what it may do here.
@@ -134,6 +148,7 @@ impl Project {
             host: None,
             vcs: None,
             tracker: None,
+            commits: None,
         }
     }
 
@@ -163,6 +178,7 @@ impl Project {
             host: None,
             vcs: None,
             tracker: None,
+            commits: None,
         }
     }
 
@@ -263,6 +279,28 @@ impl Project {
         }
         if let Some(repository) = &self.repository {
             normalize_repository(repository)?;
+        }
+        if let Some(commits) = &self.commits {
+            let valid = |value: &str| {
+                let trimmed = value.trim();
+                !trimmed.is_empty()
+                    && trimmed == value
+                    && value.len() <= 128
+                    && !value.chars().any(char::is_control)
+            };
+            if !valid(&commits.name) || !valid(&commits.email) {
+                return Err(ProjectError(
+                    "a project's commit name and email must be one line each, without leading or trailing space"
+                        .to_owned(),
+                ));
+            }
+            if let Some(key) = &commits.signing_key
+                && (key.trim().is_empty() || key.chars().any(char::is_control))
+            {
+                return Err(ProjectError(
+                    "a project's signing key must be one non-empty line".to_owned(),
+                ));
+            }
         }
         if let Some(route) = &self.tracker
             && let Some(scope) = &route.scope

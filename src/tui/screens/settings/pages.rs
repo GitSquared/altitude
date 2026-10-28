@@ -256,6 +256,25 @@ pub(super) fn project_lines(
             palette::accent(),
         ),
     ]));
+    lines.push(Line::from(vec![
+        Span::styled("commits     ", palette::muted()),
+        Span::styled(
+            match &project.commits {
+                Some(commits) => format!(
+                    "{} <{}>{}",
+                    commits.name,
+                    commits.email,
+                    if commits.signing_key.is_some() {
+                        " · signed"
+                    } else {
+                        ""
+                    }
+                ),
+                None => "the installation's default".to_owned(),
+            },
+            palette::accent(),
+        ),
+    ]));
     lines.push(Line::from(""));
     lines.push(Line::styled("setup", palette::muted()));
     if project.setup_command.trim().is_empty() {

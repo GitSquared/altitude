@@ -13,7 +13,10 @@ use std::{
     time::Duration,
 };
 
-use crate::{config::Config, project::Project};
+use crate::{
+    config::Config,
+    project::{Project, ProjectCommits},
+};
 
 use super::{
     BaseSandboxRecipe, BaseSandboxSnapshot, CommandEvent, CredentialCheck, CredentialReport,
@@ -188,6 +191,17 @@ impl SandboxPlan {
             .collect::<Vec<_>>()
             .join("\n");
         let tag = blake3::hash(identity.as_bytes()).to_hex()[..12].to_owned();
+        let commits = project.commits.clone();
+        let mut environment = vec![
+            ("HOME".into(), GUEST_HOME.into()),
+            ("SHELL".into(), "/bin/bash".into()),
+            // So that a tool which asks a browser to open something uses the
+            // opener Altitude answers, not a browser that is not there.
+            ("BROWSER".into(), OPENER.into()),
+        ];
+        if let Some(commits) = &commits {
+            add_commits_env(&mut environment, commits);
+        }
         let mut plan = Self {
             project,
             recipe: BaseSandboxRecipe::new(
@@ -204,13 +218,7 @@ impl SandboxPlan {
                 environment_base: None,
                 network_enabled: true,
                 mounts: Vec::new(),
-                environment: vec![
-                    ("HOME".into(), GUEST_HOME.into()),
-                    ("SHELL".into(), "/bin/bash".into()),
-                    // So that a tool which asks a browser to open something uses the
-                    // opener Altitude answers, not a browser that is not there.
-                    ("BROWSER".into(), OPENER.into()),
-                ],
+                environment,
                 vsock: Vec::new(),
                 size: SandboxSize::CAPSULE,
             },
@@ -733,6 +741,45 @@ async fn create(
         return Err(error);
     }
     Ok(())
+}
+
+/// Put a project's commit identity into the environment every git command in the
+/// sandbox reads.
+///
+/// Git applies `GIT_CONFIG_*` pairs on top of the profile's global config, so a
+/// project overrides the name and email while the signing key and its format stay
+/// with the profile that holds the key.
+fn add_commits_env(environment: &mut Vec<(String, String)>, commits: &ProjectCommits) {
+    let name = commits.name.trim();
+    let email = commits.email.trim();
+    if name.is_empty() || email.is_empty() {
+        return;
+    }
+    for variable in ["GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"] {
+        environment.push((variable.to_owned(), name.to_owned()));
+    }
+    for variable in ["GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"] {
+        environment.push((variable.to_owned(), email.to_owned()));
+    }
+    let mut pairs = vec![("user.name", name), ("user.email", email)];
+    if let Some(key) = commits
+        .signing_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+    {
+        pairs.push(("user.signingkey", key));
+        pairs.push(("commit.gpgsign", "true"));
+    } else {
+        // A project that names its own identity and no key does not inherit the
+        // login's signing setting by accident.
+        pairs.push(("commit.gpgsign", "false"));
+    }
+    environment.push(("GIT_CONFIG_COUNT".to_owned(), pairs.len().to_string()));
+    for (index, (key, value)) in pairs.into_iter().enumerate() {
+        environment.push((format!("GIT_CONFIG_KEY_{index}"), key.to_owned()));
+        environment.push((format!("GIT_CONFIG_VALUE_{index}"), value.to_owned()));
+    }
 }
 
 pub(crate) fn shell_quote(value: &str) -> String {
