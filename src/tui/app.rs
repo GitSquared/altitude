@@ -6198,6 +6198,12 @@ impl App {
         if let Some(status) = self.credential_status.remove(id) {
             self.credential_status.insert(target.clone(), status);
         }
+        if let Some(at) = self.credential_checked_at.remove(id) {
+            self.credential_checked_at.insert(target.clone(), at);
+        }
+        if self.credential_checking.remove(id) {
+            self.credential_checking.insert(target.clone());
+        }
         if let Some(state) = self.tracker_states.remove(id) {
             self.tracker_states.insert(target.clone(), state);
         }
