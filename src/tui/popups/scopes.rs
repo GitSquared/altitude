@@ -108,16 +108,21 @@ impl Scopes {
 }
 
 fn offers(scopes: &[ScopeSummary]) -> Vec<Offer<ScopeSummary>> {
-    scopes
-        .iter()
-        .cloned()
-        .map(|scope| {
-            let label = if scope.key.is_empty() {
-                scope.name.clone()
-            } else {
-                format!("{} ({})", scope.name, scope.key)
-            };
-            Offer::new(scope, label)
-        })
-        .collect()
+    let mut offers = vec![Offer::new(
+        ScopeSummary {
+            id: String::new(),
+            key: String::new(),
+            name: "whole account".to_owned(),
+        },
+        "Whole account",
+    )];
+    offers.extend(scopes.iter().cloned().map(|scope| {
+        let label = if scope.key.is_empty() {
+            scope.name.clone()
+        } else {
+            format!("{} ({})", scope.name, scope.key)
+        };
+        Offer::new(scope, label)
+    }));
+    offers
 }

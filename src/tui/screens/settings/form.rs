@@ -19,6 +19,7 @@ use crate::{
     project::{Project, ProjectCommits},
     tui::{
         popups::{repositories::Repositories, scopes::Scopes},
+        screens::settings::rows::ProjectDefaults,
         widgets::{
             button, chrome, palette,
             text::{Field, FieldStyle, TextBox},
@@ -96,12 +97,7 @@ impl Focus {
     pub fn takes_text(self) -> bool {
         matches!(
             self,
-            Self::Primary
-                | Self::Repository
-                | Self::Setup
-                | Self::Caches
-                | Self::Instructions
-                | Self::Scope
+            Self::Primary | Self::Repository | Self::Setup | Self::Caches | Self::Instructions
         )
     }
 
@@ -191,9 +187,8 @@ fn groups(project: bool) -> Vec<Group> {
         },
         Group {
             focus: Focus::Scope,
-            // Overridden with the provider's own word when the form is drawn.
             label: "Task tracker team",
-            kind: Kind::Single,
+            kind: Kind::Choice,
         },
         Group {
             focus: Focus::Host,
@@ -217,9 +212,6 @@ pub struct Form {
     pub instructions: TextBox,
     pub scope: Field,
     identity_choices: Vec<ProjectCommits>,
-    /// The installation's own identity, which a project inherits when it stores
-    /// none.
-    default_commits: Option<ProjectCommits>,
     identity_at: Option<usize>,
     /// The coding agent new tasks here use, or nothing for the installation's
     /// default.
@@ -228,7 +220,6 @@ pub struct Form {
     pub vcs_credential: Option<String>,
     pub tracker_credential: Option<String>,
     credentials: Vec<Credential>,
-    default_agent: Option<AgentKind>,
     pub host: Option<String>,
     /// The machines offered, besides this one. A stale address already on the
     /// project is kept, so editing does not silently move the work.
@@ -239,6 +230,8 @@ pub struct Form {
     scroll: u16,
     /// Whether the wheel moved the form away from the caret's group.
     free_scroll: bool,
+    /// Where each group and action was drawn, for a click.
+    hits: Vec<(Rect, Focus)>,
     /// How the tracker's scope is named in this form: a Linear team, a Jira
     /// project, a GitHub repository.
     scope_label: String,
@@ -271,8 +264,7 @@ impl Form {
     pub fn new_project(
         scope_label: &str,
         remotes: &[String],
-        default_agent: Option<AgentKind>,
-        default_commits: Option<ProjectCommits>,
+        defaults: ProjectDefaults,
         identities: Vec<ProjectCommits>,
         credentials: Vec<Credential>,
     ) -> Self {
@@ -282,38 +274,34 @@ impl Form {
             &project,
             scope_label,
             remotes,
-            default_agent,
-            default_commits,
+            defaults,
             identities,
             credentials,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn for_project(
         target: Target,
         project: &Project,
         scope_label: &str,
         remotes: &[String],
-        default_agent: Option<AgentKind>,
-        default_commits: Option<ProjectCommits>,
+        defaults: ProjectDefaults,
         identities: Vec<ProjectCommits>,
         credentials: Vec<Credential>,
     ) -> Self {
         let mut identities = identities;
-        let identity_at = match project.commits.as_ref() {
-            None => None,
-            Some(commits) if Some(commits) == default_commits.as_ref() => None,
-            Some(commits) => Some(
-                identities
-                    .iter()
-                    .position(|known| known == commits)
-                    .unwrap_or_else(|| {
-                        identities.push(commits.clone());
-                        identities.len() - 1
-                    }),
-            ),
-        };
+        let selected_commits = project.commits.clone().or(defaults.commits.clone());
+        let identity_at = selected_commits.map(|commits| {
+            identities
+                .iter()
+                .position(|known| *known == commits)
+                .unwrap_or_else(|| {
+                    identities.push(commits);
+                    identities.len() - 1
+                })
+        });
         let mut host_choices = remotes.to_vec();
         if let Some(host) = &project.host
             && !host_choices.contains(host)
@@ -335,17 +323,16 @@ impl Form {
                     .unwrap_or_default(),
             ),
             identity_choices: identities,
-            default_commits,
             identity_at,
             agent: project.agent,
-            agent_credential: project.agent_credential.clone(),
-            vcs_credential: project.vcs_credential.clone(),
+            agent_credential: project.agent_credential.clone().or(defaults.agent),
+            vcs_credential: project.vcs_credential.clone().or(defaults.vcs),
             tracker_credential: project
                 .tracker
                 .as_ref()
-                .and_then(|route| route.credential.clone()),
+                .and_then(|route| route.credential.clone())
+                .or(defaults.tracker),
             credentials,
-            default_agent,
             host: project.host.clone(),
             host_choices,
             accepts_delegated_work: project
@@ -355,6 +342,7 @@ impl Form {
             focus: Focus::Primary,
             scroll: 0,
             free_scroll: false,
+            hits: Vec::new(),
             scope_label: scope_label.to_owned(),
             repositories: None,
             scopes: None,
@@ -371,20 +359,19 @@ impl Form {
             instructions: TextBox::new(""),
             scope: Field::with(""),
             identity_choices: Vec::new(),
-            default_commits: None,
             identity_at: None,
             agent: None,
             agent_credential: None,
             vcs_credential: None,
             tracker_credential: None,
             credentials: Vec::new(),
-            default_agent: None,
             host: None,
             host_choices: Vec::new(),
             accepts_delegated_work: false,
             focus: Focus::Primary,
             scroll: 0,
             free_scroll: false,
+            hits: Vec::new(),
             scope_label: String::new(),
             repositories: None,
             scopes: None,
@@ -422,6 +409,14 @@ impl Form {
         };
     }
 
+    /// The field a click lands on, if it lands on the page.
+    pub fn hit(&self, column: u16, row: u16) -> Option<Focus> {
+        self.hits.iter().find_map(|(area, focus)| {
+            (column >= area.x && column < area.right() && row >= area.y && row < area.bottom())
+                .then_some(*focus)
+        })
+    }
+
     pub fn enters_newline(&self) -> bool {
         self.focus.is_multiline()
     }
@@ -433,7 +428,6 @@ impl Form {
             Focus::Setup => self.setup.handle_key(key),
             Focus::Caches => self.caches.handle_key(key),
             Focus::Instructions => self.instructions.handle_key(key),
-            Focus::Scope => self.scope.handle_key(key),
             _ => {}
         }
     }
@@ -456,41 +450,33 @@ impl Form {
     pub fn commits(&self) -> Option<ProjectCommits> {
         self.identity_at
             .and_then(|index| self.identity_choices.get(index).cloned())
-            .or_else(|| self.default_commits.clone())
     }
 
-    pub fn commits_are_default(&self) -> bool {
-        self.identity_at.is_none() || self.commits() == self.default_commits
-    }
-
-    /// Move to the next saved identity. Nothing is the installation's default.
     pub fn cycle_identity(&mut self) {
-        let mut options: Vec<Option<usize>> = vec![None];
-        options.extend((0..self.identity_choices.len()).map(Some));
-        let at = options
-            .iter()
-            .position(|option| *option == self.identity_at)
-            .unwrap_or(0);
-        self.identity_at = options[(at + 1) % options.len()];
+        if self.identity_choices.is_empty() {
+            return;
+        }
+        let at = self.identity_at.unwrap_or(0);
+        self.identity_at = Some((at + 1) % self.identity_choices.len());
     }
 
     fn identity_value(&self) -> String {
-        match (self.identity_at, self.commits()) {
-            (None, Some(commits)) => format!("default · {} <{}>", commits.name, commits.email),
-            (Some(_), Some(commits)) => format!("{} <{}>", commits.name, commits.email),
-            (_, None) => "not set".to_owned(),
-        }
+        self.commits().map_or_else(
+            || "not set".to_owned(),
+            |commits| format!("{} <{}>", commits.name, commits.email),
+        )
     }
 
-    /// Move to the next identity for a slot, wrapping. Nothing is the
-    /// installation's default, so a project only stores a choice when it differs.
     pub fn cycle_agent(&mut self) {
         let options = self.identities_for(Slot::Agent);
+        if options.is_empty() {
+            return;
+        }
         let at = options
             .iter()
-            .position(|option| option == &self.agent_credential)
+            .position(|option| self.agent_credential.as_ref() == Some(option))
             .unwrap_or(0);
-        self.agent_credential = options[(at + 1) % options.len()].clone();
+        self.agent_credential = Some(options[(at + 1) % options.len()].clone());
         self.agent = self
             .agent_credential
             .as_deref()
@@ -503,60 +489,57 @@ impl Form {
 
     pub fn cycle_vcs(&mut self) {
         let options = self.identities_for(Slot::VersionControl);
+        if options.is_empty() {
+            return;
+        }
         let at = options
             .iter()
-            .position(|option| option == &self.vcs_credential)
+            .position(|option| self.vcs_credential.as_ref() == Some(option))
             .unwrap_or(0);
-        self.vcs_credential = options[(at + 1) % options.len()].clone();
+        self.vcs_credential = Some(options[(at + 1) % options.len()].clone());
     }
 
     pub fn cycle_tracker(&mut self) {
         let options = self.identities_for(Slot::Tracker);
+        if options.is_empty() {
+            return;
+        }
         let at = options
             .iter()
-            .position(|option| option == &self.tracker_credential)
+            .position(|option| self.tracker_credential.as_ref() == Some(option))
             .unwrap_or(0);
-        self.tracker_credential = options[(at + 1) % options.len()].clone();
+        self.tracker_credential = Some(options[(at + 1) % options.len()].clone());
         self.scope = Field::with("");
     }
 
-    fn identities_for(&self, slot: Slot) -> Vec<Option<String>> {
-        let mut options = vec![None];
-        options.extend(
-            self.credentials
-                .iter()
-                .filter(|credential| {
-                    credential
-                        .service()
-                        .is_some_and(|service| service.slot() == slot)
-                })
-                .map(|credential| Some(credential.id.clone())),
-        );
-        options
+    fn identities_for(&self, slot: Slot) -> Vec<String> {
+        self.credentials
+            .iter()
+            .filter(|credential| {
+                credential
+                    .service()
+                    .is_some_and(|service| service.slot() == slot)
+            })
+            .map(|credential| credential.id.clone())
+            .collect()
     }
 
-    fn identity_label(&self, id: Option<&str>, default: &str) -> String {
-        match id {
-            Some(id) => self
-                .credentials
+    fn identity_label(&self, id: Option<&str>, missing: &str) -> String {
+        id.and_then(|id| {
+            self.credentials
                 .iter()
                 .find(|credential| credential.id == id)
                 .map(|credential| credential.label.clone())
-                .unwrap_or_else(|| default.to_owned()),
-            None => format!("default · {default}"),
-        }
+        })
+        .unwrap_or_else(|| missing.to_owned())
     }
 
     fn agent_value(&self) -> String {
-        let default = self
-            .default_agent
-            .map(|agent| agent.to_string())
-            .unwrap_or_else(|| "not chosen".to_owned());
-        self.identity_label(self.agent_credential.as_deref(), &default)
+        self.identity_label(self.agent_credential.as_deref(), "not chosen")
     }
 
     fn vcs_value(&self) -> String {
-        self.identity_label(self.vcs_credential.as_deref(), "the installation's login")
+        self.identity_label(self.vcs_credential.as_deref(), "none")
     }
 
     fn tracker_value(&self) -> String {
@@ -580,7 +563,6 @@ impl Form {
             Focus::Setup => self.setup.paste(text),
             Focus::Caches => self.caches.paste(text),
             Focus::Instructions => self.instructions.paste(text),
-            Focus::Scope => self.scope.paste(text),
             _ => {}
         }
     }
@@ -668,6 +650,7 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &mut Form, tick: Op
     }
 
     let mut content = Buffer::empty(Rect::new(0, 0, fields.width, content_height.max(1)));
+    form.hits.clear();
     let mut cursor = None;
     let mut repository_anchor = None;
     let mut scope_anchor = None;
@@ -691,6 +674,7 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &mut Form, tick: Op
                 height: heights[index],
                 ..fields
             };
+            form.hits.push((anchor, group.focus));
             if group.focus == Focus::Repository {
                 repository_anchor = Some(anchor);
             }
@@ -728,7 +712,7 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &mut Form, tick: Op
     }
 
     // The actions sit at the bottom right, where the eye ends up.
-    button::actions(
+    let buttons = button::actions(
         frame,
         area,
         body.actions,
@@ -737,6 +721,9 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &mut Form, tick: Op
             button::Action::primary("save").focused(form.focus == Focus::Save),
         ],
     );
+    for (rect, focus) in buttons.into_iter().zip([Focus::Cancel, Focus::Save]) {
+        form.hits.push((rect, focus));
+    }
 }
 
 fn draw_group(buffer: &mut Buffer, area: Rect, form: &Form, group: &Group) -> Option<(u16, u16)> {
@@ -776,12 +763,25 @@ fn draw_group(buffer: &mut Buffer, area: Rect, form: &Form, group: &Group) -> Op
             text.render_titled(buffer, below_label(area), focused, None)
         }
         Kind::Choice => {
-            draw_label(buffer, area, group.label, focused);
+            let label = if group.focus == Focus::Scope {
+                form.scope_label.as_str()
+            } else {
+                group.label
+            };
+            draw_label(buffer, area, label, focused);
             let value = match group.focus {
                 Focus::Agent => form.agent_value(),
                 Focus::VcsIdentity => form.vcs_value(),
                 Focus::TrackerIdentity => form.tracker_value(),
                 Focus::Identity => form.identity_value(),
+                Focus::Scope => {
+                    let scope = form.scope.value();
+                    if scope.trim().is_empty() {
+                        "whole account".to_owned()
+                    } else {
+                        scope.to_owned()
+                    }
+                }
                 _ => form.host.as_deref().unwrap_or("this machine").to_owned(),
             };
             let style = if focused {

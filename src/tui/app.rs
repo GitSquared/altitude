@@ -926,17 +926,60 @@ impl App {
     }
 
     pub(in crate::tui) fn panel_mouse(&mut self, mouse: MouseEvent) {
-        if let Some(form) = self.panel.form.as_mut() {
-            if form.repositories.is_some() {
-                let chosen = form.repository_mouse(mouse);
-                if let Some(repository) = chosen {
+        if self.panel.form.is_some() {
+            let has_repositories = self
+                .panel
+                .form
+                .as_ref()
+                .is_some_and(|form| form.repositories.is_some());
+            if has_repositories {
+                let chosen = self
+                    .panel
+                    .form
+                    .as_mut()
+                    .and_then(|form| form.repository_mouse(mouse));
+                if let Some(repository) = chosen
+                    && let Some(form) = self.panel.form.as_mut()
+                {
                     form.set_repository(&repository.url);
                 }
                 return;
             }
+            let target = self
+                .panel
+                .form
+                .as_ref()
+                .and_then(|form| form.hit(mouse.column, mouse.row));
             match mouse.kind {
-                MouseEventKind::ScrollUp => form.scroll_by(true),
-                MouseEventKind::ScrollDown => form.scroll_by(false),
+                MouseEventKind::ScrollUp => {
+                    if let Some(form) = self.panel.form.as_mut() {
+                        form.scroll_by(true);
+                    }
+                }
+                MouseEventKind::ScrollDown => {
+                    if let Some(form) = self.panel.form.as_mut() {
+                        form.scroll_by(false);
+                    }
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    let Some(focus) = target else {
+                        return;
+                    };
+                    if let Some(form) = self.panel.form.as_mut() {
+                        form.focus = focus;
+                    }
+                    match focus {
+                        Focus::Cancel => self.panel.form = None,
+                        Focus::Save => {
+                            if let Some(form) = self.panel.form.take()
+                                && !self.save_form(&form)
+                            {
+                                self.panel.form = Some(form);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 _ => {}
             }
             return;
@@ -1009,10 +1052,7 @@ impl App {
     /// word, so the setting does not ask a Linear operator for a "scope".
     fn scope_label(&self) -> String {
         let kind = TrackerKind::sole();
-        format!(
-            "Task tracker {} (optional; empty claims the whole account)",
-            kind.scope_noun()
-        )
+        format!("Task tracker {}", kind.scope_noun())
     }
 
     /// The id of the project the grid is showing.
@@ -2153,8 +2193,7 @@ impl App {
                     self.panel.form = Some(Form::new_project(
                         &self.scope_label(),
                         &self.remotes(),
-                        self.agent(),
-                        self.default_commits(),
+                        self.project_defaults(),
                         self.saved_identities(),
                         self.settings_credentials(),
                     ))
@@ -3451,8 +3490,7 @@ impl App {
                 &project,
                 &self.scope_label(),
                 &self.remotes(),
-                self.agent(),
-                self.default_commits(),
+                self.project_defaults(),
                 self.saved_identities(),
                 self.settings_credentials(),
             ),
@@ -4839,11 +4877,7 @@ impl App {
                         Service::VersionControl(kind) => Some(kind),
                         _ => None,
                     });
-                project.commits = if form.commits_are_default() {
-                    None
-                } else {
-                    form.commits()
-                };
+                project.commits = form.commits();
                 if let Some(commits) = &project.commits {
                     proposed.remember_identity(commits);
                 }
@@ -4853,12 +4887,9 @@ impl App {
                 let scope = form.scope.value().trim();
                 // A project that accepts the whole account is a route too, and
                 // says so; one that claims nothing is not.
-                let default_tracker = proposed
-                    .default_credential(Slot::Tracker)
-                    .map(str::to_owned);
                 project.tracker =
                     (!scope.is_empty() || form.accepts_delegated_work).then(|| TrackerRoute {
-                        credential: form.tracker_credential.clone().or(default_tracker),
+                        credential: form.tracker_credential.clone(),
                         scope: (!scope.is_empty()).then(|| scope.to_owned()),
                         accepts_delegated_work: form.accepts_delegated_work,
                     });
@@ -6176,7 +6207,7 @@ impl App {
                     })
                 })
             });
-            let wants_scopes = key.code == KeyCode::Enter
+            let wants_scopes = matches!(key.code, KeyCode::Enter | KeyCode::Char(' '))
                 && self
                     .panel
                     .form

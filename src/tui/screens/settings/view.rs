@@ -70,7 +70,7 @@ impl App {
 
     /// What a project with no binding of its own uses. The page shows the
     /// identity this names, never the fact that it was inherited.
-    fn project_defaults(&self) -> ProjectDefaults {
+    pub(in crate::tui) fn project_defaults(&self) -> ProjectDefaults {
         let settings = self.settings_file.as_ref().map(|file| file.settings());
         ProjectDefaults {
             agent: settings
