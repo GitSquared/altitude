@@ -326,6 +326,9 @@ const ASK_AFTER: Duration = Duration::from_millis(400);
 /// How long after nothing could check a login the section tries again, so a sandbox
 /// that will not start is not asked on every tick.
 const CHECK_RETRY_AFTER: Duration = Duration::from_secs(15);
+/// How long a login answer is shown before it is asked about again. The old
+/// answer stays on screen while the new check is out.
+const CHECK_FRESH_FOR: Duration = Duration::from_secs(10 * 60);
 /// How long a task watch waits before dialling again, and how far that grows.
 const WATCH_RETRY: Duration = Duration::from_secs(1);
 const WATCH_RETRY_MAX: Duration = Duration::from_secs(30);
@@ -675,6 +678,12 @@ pub struct App {
     pub(in crate::tui) remote_trackers: HashMap<String, Vec<TrackerConnection>>,
     /// What each profile's own check last said about its login.
     pub(in crate::tui) credential_status: HashMap<String, CredentialStatus>,
+    /// When each answer last came back, so reopening Settings shows the last
+    /// answer instead of starting its checks again.
+    credential_checked_at: HashMap<String, Instant>,
+    /// The profiles whose checks are out, kept apart from the answer shown so a
+    /// stale status stays visible while it is revalidated.
+    credential_checking: HashSet<String>,
     /// When the credentials list started showing, which the wait before asking is
     /// measured from. Absent while it is not showing.
     credentials_visible_since: Option<Instant>,
@@ -858,6 +867,8 @@ impl App {
             remote_status: HashMap::new(),
             remote_trackers: HashMap::new(),
             credential_status: HashMap::new(),
+            credential_checked_at: HashMap::new(),
+            credential_checking: HashSet::new(),
             credentials_visible_since: None,
             credential_check_generation: 0,
             credential_retry_at: None,
@@ -1991,6 +2002,8 @@ impl App {
                 // saying what it said before the attempt.
                 if let Some(profile) = self.setup_sign_in.take() {
                     self.credential_status.remove(&profile);
+                    self.credential_checked_at.remove(&profile);
+                    self.credential_checking.remove(&profile);
                 }
                 self.problem(format!("No shell: {reason}"));
             }
@@ -3150,8 +3163,6 @@ impl App {
         match (showing, self.credentials_visible_since) {
             (true, None) => {
                 self.credentials_visible_since = Some(Instant::now());
-                self.credential_check_generation = self.credential_check_generation.wrapping_add(1);
-                self.credential_status.clear();
                 self.credential_retry_at = None;
                 true
             }
@@ -3166,9 +3177,11 @@ impl App {
     /// Whether any profile is being asked about right now, which is what keeps the
     /// dot moving while it waits.
     pub(in crate::tui) fn is_asking_credentials(&self) -> bool {
-        self.credential_status
-            .values()
-            .any(CredentialStatus::is_in_progress)
+        !self.credential_checking.is_empty()
+            || self
+                .credential_status
+                .values()
+                .any(CredentialStatus::is_in_progress)
     }
 
     /// Whether it is time to ask about this page's logins: the list is showing, it
@@ -3198,10 +3211,19 @@ impl App {
             .iter()
             .map(|summary| summary.profile.clone())
             .filter(|profile| prefix.is_none_or(|prefix| profile.starts_with(prefix)))
-            .filter(|profile| match self.credential_status.get(profile) {
-                None => true,
-                Some(CredentialStatus::Unanswered) => retry_due,
-                Some(_) => false,
+            .filter(|profile| {
+                if self.credential_checking.contains(profile) {
+                    return false;
+                }
+                match self.credential_status.get(profile) {
+                    None => true,
+                    Some(CredentialStatus::Unanswered) => retry_due,
+                    Some(CredentialStatus::Checking) => false,
+                    Some(_) => self
+                        .credential_checked_at
+                        .get(profile)
+                        .is_none_or(|at| at.elapsed() >= CHECK_FRESH_FOR),
+                }
             })
             .collect()
     }
@@ -3246,8 +3268,17 @@ impl App {
             return;
         }
         for profile in &profiles {
-            self.credential_status
-                .insert(profile.clone(), CredentialStatus::Checking);
+            self.credential_checking.insert(profile.clone());
+            // A stale answer stays on screen while its replacement is out; only a
+            // profile with nothing to show says it is checking.
+            if self
+                .credential_status
+                .get(profile)
+                .is_none_or(|status| matches!(status, CredentialStatus::Unanswered))
+            {
+                self.credential_status
+                    .insert(profile.clone(), CredentialStatus::Checking);
+            }
         }
         self.credential_retry_at = None;
         let service = task_service.clone();
@@ -3281,6 +3312,9 @@ impl App {
         let mut nothing_answered = false;
         let mut suggested = None;
         for (profile, status) in reply.answers {
+            self.credential_checking.remove(&profile);
+            self.credential_checked_at
+                .insert(profile.clone(), Instant::now());
             nothing_answered |= matches!(status, CredentialStatus::Unanswered);
             if let CredentialStatus::Checked {
                 signed_in: true,
@@ -3295,7 +3329,7 @@ impl App {
             self.credential_status.insert(profile, status);
         }
         if let Some((id, login)) = suggested {
-            self.suggest_credential_name(&id, &login);
+            self.adopt_identity_name(&id, &login);
         }
         if nothing_answered {
             self.credential_retry_at = Some(Instant::now() + CHECK_RETRY_AFTER);
@@ -3581,10 +3615,20 @@ impl App {
                     }
                 };
                 match removed {
-                    Ok(()) => match file.save(proposed) {
-                        Ok(()) => Ok(()),
-                        Err(error) => Err(error.to_string()),
-                    },
+                    Ok(()) => {
+                        if let Err(error) = self.config.remove_profile(&id) {
+                            tracing::warn!(%error, profile = %id, "could not remove a deleted identity's profile");
+                        }
+                        self.credential_status.remove(&id);
+                        self.credential_checked_at.remove(&id);
+                        self.credential_checking.remove(&id);
+                        self.tracker_states.remove(&id);
+                        self.profiles.retain(|profile| profile.profile != id);
+                        match file.save(proposed) {
+                            Ok(()) => Ok(()),
+                            Err(error) => Err(error.to_string()),
+                        }
+                    }
                     Err(error) => Err(error),
                 }
             }
@@ -6053,7 +6097,12 @@ impl App {
             Ok(true) => {
                 self.say("Tracker identity connected");
                 if let Some(name) = self.tracker_account_name(&reply.credential) {
-                    self.suggest_credential_name(&reply.credential, &name);
+                    let moved = self.adopt_identity_name(&reply.credential, &name);
+                    if moved != reply.credential {
+                        self.tracker_states
+                            .insert(reply.credential.clone(), TrackerState::NotConnected);
+                        return;
+                    }
                 }
                 TrackerState::Connected
             }
@@ -6082,6 +6131,85 @@ impl App {
         let account: TrackerAccount = serde_json::from_str(&text).ok()?;
         let name = account.display_name.trim();
         (!name.is_empty()).then(|| name.to_owned())
+    }
+
+    /// Move a freshly checked identity to the id its account name implies,
+    /// unless it is already named by hand or a task already uses it.
+    fn adopt_identity_name(&mut self, id: &str, label: &str) -> String {
+        let Some(service) = Service::from_id(id) else {
+            return id.to_owned();
+        };
+        let Some(credential) = self
+            .settings_file
+            .as_ref()
+            .and_then(|file| file.settings().credential(id))
+            .cloned()
+        else {
+            return id.to_owned();
+        };
+        if !credential.label_auto {
+            return id.to_owned();
+        }
+        let target = new_id(service, label, |candidate| {
+            candidate != id
+                && (self
+                    .settings_file
+                    .as_ref()
+                    .is_some_and(|file| file.settings().credential(candidate).is_some())
+                    || self.config.profile_dir(candidate).is_dir())
+        });
+        if target == id {
+            self.suggest_credential_name(id, label);
+            return id.to_owned();
+        }
+        if self.tasks.iter().any(|task| {
+            task.project().is_some_and(|project| {
+                project.agent_credential.as_deref() == Some(id)
+                    || project.vcs_credential.as_deref() == Some(id)
+                    || project
+                        .tracker
+                        .as_ref()
+                        .and_then(|route| route.credential.as_deref())
+                        == Some(id)
+            })
+        }) {
+            self.suggest_credential_name(id, label);
+            return id.to_owned();
+        }
+        if let Err(error) = self.config.move_profile(id, &target) {
+            tracing::warn!(%error, from = %id, to = %target, "could not move an identity's profile");
+            self.suggest_credential_name(id, label);
+            return id.to_owned();
+        }
+        let Some(file) = self.settings_file.as_mut() else {
+            return id.to_owned();
+        };
+        let mut proposed = file.settings().clone();
+        if let Err(error) = proposed.reidentify(id, &target, label) {
+            self.problem(error.to_string());
+            let _ = self.config.move_profile(&target, id);
+            return id.to_owned();
+        }
+        if let Err(error) = file.save(proposed) {
+            self.problem(error.to_string());
+            let _ = self.config.move_profile(&target, id);
+            return id.to_owned();
+        }
+        if let Some(status) = self.credential_status.remove(id) {
+            self.credential_status.insert(target.clone(), status);
+        }
+        if let Some(state) = self.tracker_states.remove(id) {
+            self.tracker_states.insert(target.clone(), state);
+        }
+        for profile in &mut self.profiles {
+            if profile.profile == id {
+                profile.profile = target.clone();
+            }
+        }
+        if self.tracker_connecting.as_deref() == Some(id) {
+            self.tracker_connecting = Some(target.clone());
+        }
+        target
     }
 
     fn suggest_credential_name(&mut self, id: &str, label: &str) {

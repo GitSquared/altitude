@@ -356,6 +356,54 @@ impl Settings {
         Ok(())
     }
 
+    /// Give an identity the id its account name implies, and carry every
+    /// reference to it along.
+    pub fn reidentify(&mut self, old: &str, new: &str, label: &str) -> Result<(), SettingsError> {
+        if old == new {
+            self.suggest_credential_name(old, label);
+            return Ok(());
+        }
+        let candidate = Credential::new(new, label);
+        if !candidate.is_valid() {
+            return Err(SettingsError::Invalid(format!(
+                "{new:?} is not a usable identity id"
+            )));
+        }
+        if self.credential(new).is_some() {
+            return Err(SettingsError::Invalid(format!(
+                "identity {new:?} already exists"
+            )));
+        }
+        let Some(credential) = self.credentials.iter_mut().find(|c| c.id == old) else {
+            return Err(SettingsError::Invalid(format!("no credential {old:?}")));
+        };
+        credential.id = new.to_owned();
+        credential.label = label.to_owned();
+        for default in [
+            &mut self.defaults.agent_credential,
+            &mut self.defaults.vcs_credential,
+            &mut self.defaults.tracker_credential,
+        ] {
+            if default.as_deref() == Some(old) {
+                *default = Some(new.to_owned());
+            }
+        }
+        for project in &mut self.projects {
+            if project.agent_credential.as_deref() == Some(old) {
+                project.agent_credential = Some(new.to_owned());
+            }
+            if project.vcs_credential.as_deref() == Some(old) {
+                project.vcs_credential = Some(new.to_owned());
+            }
+            if let Some(route) = &mut project.tracker
+                && route.credential.as_deref() == Some(old)
+            {
+                route.credential = Some(new.to_owned());
+            }
+        }
+        Ok(())
+    }
+
     /// Update an auto-named identity when its service reports who it is.
     pub fn suggest_credential_name(&mut self, id: &str, label: &str) {
         let label = label.trim();

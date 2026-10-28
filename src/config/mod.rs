@@ -311,6 +311,49 @@ impl Config {
         self.scoped_data_dir().join(profile).join("profile")
     }
 
+    /// Forget a credential's whole profile directory, login files included.
+    pub fn remove_profile(&self, id: &str) -> io::Result<()> {
+        let Some(root) = self.profile_root(id) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{id:?} is not a safe profile id"),
+            ));
+        };
+        match fs::remove_dir_all(&root) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Move a credential's profile to a new id after its account named it.
+    pub fn move_profile(&self, from: &str, to: &str) -> io::Result<()> {
+        let (Some(source), Some(target)) = (self.profile_root(from), self.profile_root(to)) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a profile id must be a confined relative path",
+            ));
+        };
+        if !source.exists() {
+            return Ok(());
+        }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::rename(source, target)
+    }
+
+    fn profile_root(&self, id: &str) -> Option<PathBuf> {
+        if id.is_empty()
+            || Path::new(id)
+                .components()
+                .any(|part| !matches!(part, Component::Normal(_)))
+        {
+            return None;
+        }
+        self.profile_dir(id).parent().map(Path::to_owned)
+    }
+
     /// Where the base image's snapshots are kept: what every project is built on
     /// top of.
     ///
