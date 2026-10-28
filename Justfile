@@ -6,6 +6,10 @@ dev:
 build:
     cargo build --release --locked
 
+# Render the app icon from its source, for `brew install librsvg`.
+icon:
+    rsvg-convert -w 512 -h 512 assets/icon.svg -o assets/icon.png
+
 # Run a built release binary
 run:
     ./target/release/altitude

@@ -41,15 +41,15 @@ static LINEAR: Guide = Guide {
     ],
     steps: &[
         Step {
-            prose: "Create an OAuth application in Linear's API settings, named Altitude. \
-                    Enable webhooks, then select Agent session events (required), Inbox \
-                    notifications (required for comments and mentions), and Permission changes. \
-                    Select Issues too if this remote should react to human status changes; \
-                    without it Altitude still reports status out, but does not notice an issue \
-                    being completed or moved. Leave unrelated data and OAuth authorization \
-                    events off. The install asks for read, write, app:assignable, and \
-                    app:mentionable.",
-            code: &[],
+            prose: "Create an OAuth application in Linear's API settings, named Altitude, with \
+                    the URL below as its icon. Enable webhooks, then select Agent session \
+                    events (required), Inbox notifications (required for comments and \
+                    mentions), and Permission changes. Select Issues too if this remote should \
+                    react to human status changes; without it Altitude still reports status \
+                    out, but does not notice an issue being completed or moved. Leave \
+                    unrelated data and OAuth authorization events off. The install asks for \
+                    read, write, app:assignable, and app:mentionable.",
+            code: &["https://raw.githubusercontent.com/GitSquared/altitude/main/assets/icon.png"],
         },
         Step {
             prose: "Give the remote the application in its serve.toml. public_url is the HTTPS \
