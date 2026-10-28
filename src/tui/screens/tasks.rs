@@ -28,7 +28,6 @@ use crate::{
     vcs::{ContributionReadiness, now_ms},
 };
 
-/// The narrowest a card may be and still show an intent.
 const MIN_CARD_WIDTH: u16 = 26;
 
 /// How the cards are laid out in an area.
@@ -163,14 +162,11 @@ struct Card {
     agent: Option<AgentKind>,
     model: Option<String>,
     host: String,
-    /// The tracker issue this task is bound to, when it is bound to one.
     issue: Option<String>,
     /// Whether this task is asking for a person loudly enough to be marked out by
     /// its frame rather than only by a line inside it.
     is_alarm: bool,
-    /// How it is going, already in the words the card has room for.
     status: Line<'static>,
-    /// What else it has to say, in the order it should be read.
     extras: Vec<Line<'static>>,
 }
 
@@ -385,7 +381,6 @@ fn is_alarming(summary: &TaskSummary) -> bool {
         && summary.attention == TaskOperatorAttentionLevel::Alarm
 }
 
-/// What else a card has to say: the things that mean someone has to look.
 fn card_extras(summary: &TaskSummary, now_ms: i64) -> Vec<Line<'static>> {
     let mut extras = Vec::new();
     match summary.contributions.len() {
@@ -438,7 +433,6 @@ fn card_extras(summary: &TaskSummary, now_ms: i64) -> Vec<Line<'static>> {
     extras
 }
 
-/// What a waiting task is doing, with its place in the build kept visible.
 fn build_label(progress: &EnvironmentProgress, width: usize) -> String {
     let count = format!(" ({}/{})", progress.completed + 1, progress.total);
     format!(

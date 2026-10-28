@@ -62,12 +62,10 @@ use super::{
     identity::write_private,
 };
 
-/// One webhook request, and the one resource this coordinator handles.
 const WEBHOOK_ROUTE: &str = "/altitude/linear/webhook";
 const MAX_WEBHOOK_BYTES: usize = 1024 * 1024;
 const SIGNATURE_HEADER: &str = "linear-signature";
 
-/// How often the coordinator reports task life. A webhook wakes it sooner.
 const TICK: Duration = Duration::from_secs(10);
 /// A failed delivery is retried at a fixed pace: the work is already durable on
 /// disk, so a tracker outage should not produce a request storm.
@@ -78,7 +76,6 @@ const DONE_RETENTION: Duration = Duration::from_secs(600);
 const TERMINATED_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_DONE: usize = 512;
 const MAX_TERMINATED: usize = 1024;
-/// A Linear webhook is only trusted while it is this fresh.
 const WEBHOOK_MAX_AGE: Duration = Duration::from_secs(300);
 
 /// Everything the coordinator needs that the serve role already owns.
@@ -94,7 +91,6 @@ pub struct RemoteTrackerConfig {
     /// Where each peer's pushed configuration lives, because that is where the
     /// account a peer is signed in as is written down.
     pub operators_dir: PathBuf,
-    /// This machine's name, as the session summary reads it.
     pub host_label: String,
 }
 
@@ -118,28 +114,19 @@ pub trait Host: Send + Sync + 'static {
         issue: IssueSnapshot,
         label: String,
     ) -> super::StartFuture<'_, String>;
-    /// Cancel a task and dispose of its capsule. Never an acceptance.
     fn stop(&self, task_id: String) -> HostFuture<'_, ()>;
-    /// The task's currently unresolved operator signals.
     fn unresolved_signals(&self, task_id: String) -> HostFuture<'_, Vec<TaskOperatorSignalThread>>;
-    /// The task's history, oldest first.
     fn events(&self, task_id: String) -> HostFuture<'_, Vec<(i64, TaskHistoryEvent)>>;
-    /// Add the operator's instructions to the task, waking it if it is not running.
     fn instruct(&self, task_id: String, instruction: String) -> HostFuture<'_, ()>;
-    /// Reply in a thread, as the tracker's operator did.
     fn reply(&self, task_id: String, signal_id: String, answer: String) -> HostFuture<'_, ()>;
-    /// Accept a wrap-up request, the only way a task ends.
     fn accept(&self, task_id: String, signal_id: String) -> HostFuture<'_, ()>;
-    /// Whether the task is still in play, so a removed task stops being reported.
     fn is_active(&self, task_id: String) -> HostFuture<'_, bool>;
-    /// The harness and model a task runs, for the session title.
     fn session_agent(&self, task_id: String) -> HostFuture<'_, Option<String>>;
 }
 
 pub struct RemoteTracker {
     config: RemoteTrackerConfig,
     ledger: Mutex<Ledger>,
-    /// Woken when a webhook is recorded, so the operator does not wait a tick.
     notify: Notify,
     /// Whether anything has arrived since this process started. The first
     /// delivery is said at info because it is the only proof a freshly installed
@@ -408,7 +395,6 @@ impl RemoteTracker {
         self.retire_route(&route)
     }
 
-    /// A new Agent Session is a delegation, or a redelegation of active work.
     async fn handle_created(&self, event: &SessionEvent, host: &dyn Host) -> Result<(), String> {
         let Some(issue_id) = event.issue_id.as_deref() else {
             return Ok(());
@@ -608,7 +594,6 @@ impl RemoteTracker {
         Ok(())
     }
 
-    /// A prompt is an operator's answer to whatever the task is waiting on.
     async fn handle_prompted(&self, event: &SessionEvent, host: &dyn Host) -> Result<(), String> {
         let Some(answer) = event.prompt_body.as_deref() else {
             return Ok(());
@@ -857,7 +842,6 @@ impl RemoteTracker {
         }
     }
 
-    /// A deterministic acknowledgement, so a retry cannot add a second reaction.
     async fn react_eyes(&self, comment_id: &str) {
         let id = stable_id("reaction", &format!("{comment_id}:eyes"));
         if let Err(error) = self
@@ -878,7 +862,6 @@ impl RemoteTracker {
         )
     }
 
-    /// `altitude / operator@host / harness`, the session's public title.
     async fn set_session_summary(
         &self,
         session_id: &str,
@@ -1242,7 +1225,6 @@ impl RemoteTracker {
         }
     }
 
-    /// Resolve the comment a signal was published as, if it has one.
     async fn resolve_signal_comment(
         &self,
         route: &Route,
@@ -1282,7 +1264,6 @@ impl RemoteTracker {
         }
     }
 
-    /// The operator accepted: report Done, say so once, and drop the route.
     async fn finish_accepted(
         &self,
         route: &Route,
@@ -1307,7 +1288,6 @@ impl RemoteTracker {
         self.retire_route(route)
     }
 
-    /// An unknown delegation is educated once, not run.
     async fn post_sync_guidance(&self, session_id: &str) -> Result<(), String> {
         let tracker = TrackerKind::Linear.label();
         let host = whoami::hostname().unwrap_or_else(|_| "this remote".to_owned());
@@ -1356,7 +1336,6 @@ impl RemoteTracker {
             .map_err(|error| error.to_string())
     }
 
-    /// The tracker user a peer is signed in as, from what that peer pushed.
     fn peer_for_user(&self, tracker_user_id: &str) -> Option<String> {
         let mut matches = self
             .accounts()
@@ -1385,7 +1364,6 @@ impl RemoteTracker {
         self.user_for_peer(&peer.to_string()).is_some()
     }
 
-    /// The tracker user a peer is signed in as, from what it pushed.
     fn user_for_peer(&self, peer: &str) -> Option<String> {
         self.accounts()
             .into_iter()
@@ -1461,7 +1439,6 @@ impl RemoteTracker {
         })
     }
 
-    /// Remove a route and remember the session so a replay cannot restart it.
     fn retire_route(&self, route: &Route) -> Result<(), String> {
         let now = now_ms();
         self.mutate(|ledger| {
@@ -1671,7 +1648,6 @@ fn webhook_event_type(body: &[u8]) -> Option<String> {
         .map(|envelope| envelope.event_type)
 }
 
-/// An `Issue` webhook, as far as the coordinator trusts it.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct IssueEvent {
@@ -1850,7 +1826,6 @@ pub struct AccountRecord {
     pub changed_at_ms: i64,
 }
 
-/// Where a peer's tracker accounts are kept, beside the configuration it pushed.
 pub fn accounts_path(operator_dir: &Path) -> PathBuf {
     operator_dir.join("accounts.json")
 }
@@ -2071,7 +2046,6 @@ impl StoredEvent {
         }
     }
 
-    /// The signed content that makes a redelivery the same work.
     fn dedupe_key(&self) -> String {
         match self {
             StoredEvent::Session(session) => session.dedupe_key(),

@@ -101,7 +101,6 @@ Never install project tooling into the sandbox, a profile mount, or a shared cac
 When the operator asks about how their tasks are set up, explain the setting and where it lives in Altitude's Settings rather than trying to change it from inside the sandbox.
 ";
 
-/// The autonomy Altitude expects from every harness while no operator is watching.
 const AUTOPILOT_SYSTEM_PROMPT: &str = "Altitude owns this task. It keeps the task's record, decides when your turns run, and carries signals between you and the operator, who is usually away from the terminal. You cannot close a task; only the operator can. Continue autonomously whenever the next action is reasonably implied by the original task. Match the precision of the operator's expressed intent. Investigate and take reasonable defaults instead of asking for confirmation. Altitude will ask for a structured task report after this work turn ends. To ask a blocking question or request final review, finish this work turn with a concise account of the question or result; the following report turn creates the signal and pauses execution. Use `tasks_signal` with action=open for updates and decisions during the work turn; a blocking question or review request belongs in the report that ends it. Keep your plan current with `tasks_plan`: a short checklist the operator can watch, replaced as the work changes. Do not wait inside a command for the operator. You are one harness in an isolated sandbox on one machine, working one task; Altitude gives you the task's context and its tools at the start of each turn, and that is the whole of what it knows about your situation. When you create or find a pull request for this task, call `vcs_link_pull_request` with its full URL, once for each pull request, including ones opened from a fork or a different branch. Altitude watches the linked pull requests and will wake you when checks fail or the branch needs attention, so do not run your own CI watcher or poll for check status: the current state of every linked pull request is in the task context you were given. The operator's interface names this task by its title, and until you set one it shows the task's id instead, so set a title with `tasks_title` before you do anything else: at most six words saying what this task is. Refresh it through the same tool as the work becomes something else, keeping it a short summary of what the task has become rather than a restatement of the original request. Altitude carries your words to the operator only through signals. When the task context names a project repository, it is already checked out at the path given and the caches listed are shared with other tasks: do not clone it again, and never clear a shared cache. When you write in a signal thread, write only the message the operator should read: no preface about the message you are answering, no heading like `Summary:`, and no restatement of the tool call.";
 /// How Altitude runs a task, then what the operator said about this project.
 ///
@@ -196,7 +195,6 @@ pub trait AgentEngine: Send + Sync {
     fn profile_recipe(&self) -> ProfileRecipe;
     fn new_conversation_id(&self) -> String;
     fn conversation_transcript_path(&self, conversation_id: &str) -> String;
-    /// A work turn: the harness continues the conversation autonomously.
     fn autopilot_command(
         &self,
         conversation_id: &str,
@@ -204,16 +202,13 @@ pub trait AgentEngine: Send + Sync {
         context: &TaskAgentTurnContext,
         resume: bool,
     ) -> String;
-    /// A report turn: the harness returns Altitude's report and does no work.
     fn report_command(&self, conversation_id: &str, context: &TaskAgentTurnContext) -> String;
-    /// An operator turn: the harness hands its terminal to the operator.
     fn operator_command(&self, conversation_id: &str) -> String;
     /// Whether handing the terminal to the operator needs an existing
     /// conversation. Claude resumes one specific conversation and fails without
     /// it; Pi creates the session on demand, which is what lets an operator log
     /// in before a task's first turn has ever succeeded.
     fn operator_requires_conversation(&self) -> bool;
-    /// Decodes this harness's report-turn output into Altitude's task report.
     fn report_decoder(&self) -> Box<dyn TaskReportDecoder>;
 }
 
@@ -224,11 +219,9 @@ pub trait AgentEngine: Send + Sync {
 pub trait TaskReportDecoder: Send {
     fn process(&mut self, bytes: &[u8]);
     fn report(self: Box<Self>) -> Result<TaskAgentTurnReport, String>;
-    /// Flushes the final output fragment and exposes a harness failure diagnostic.
     fn failure_message(&mut self) -> Option<&str>;
 }
 
-/// The harnesses Altitude can drive, chosen per project.
 #[derive(Clone)]
 pub struct AgentEngines {
     claude: ClaudeCode,

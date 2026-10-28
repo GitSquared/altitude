@@ -26,9 +26,7 @@ use super::{
     PORT_RELAY_GUEST_PORT, SandboxMount, SandboxOptions, SandboxSize, SetupStep, VsockRoute,
 };
 
-/// The workspace runs as root, so home-relative requirements resolve from here.
 const GUEST_HOME: &str = "/root";
-/// Where the opener every sandbox is given lives, and what `$BROWSER` points at.
 const OPENER: &str = "/usr/local/bin/xdg-open";
 pub const REFRESH_AFTER: Duration = Duration::from_secs(72 * 60 * 60);
 
@@ -47,7 +45,6 @@ pub enum SignInCommand {
 }
 
 impl SignInCommand {
-    /// The command a credential shell runs.
     pub fn command(self) -> &'static str {
         match self {
             Self::Direct(command) | Self::Interactive(command) => command,
@@ -61,23 +58,18 @@ impl SignInCommand {
     }
 }
 
-/// Knowledge supplied by an agent or VCS module. No host I/O or lifecycle hooks.
 #[derive(Clone)]
 pub struct ProfileRecipe {
-    /// Stable relative profile identity, e.g. `agents/claude` or `vcs/github`.
     pub profile: String,
     /// What this profile is called where an operator reads it, which is the name
     /// the settings list shows and the shell that sets it up names.
     pub display: &'static str,
-    /// What the operator does to sign in, said before a sign-in they have to drive.
     pub sign_in: &'static str,
-    /// What a credential shell runs instead of a login prompt.
     pub sign_in_command: SignInCommand,
     /// A command that exits 0 when this profile is signed in, and prints what it
     /// found. Run in a sandbox with the profile mounted, so it sees the login a task
     /// would see and never its contents: what it prints is what an operator reads.
     pub status_command: &'static str,
-    /// What this recipe installs, in the operator's words; a waiting task shows it.
     pub label: &'static str,
     pub setup_command: &'static str,
     pub directories: Vec<PersistentDirectory>,
@@ -92,7 +84,6 @@ pub enum GuestPath {
 
 #[derive(Clone)]
 pub struct PersistentDirectory {
-    /// Relative path inside the profile.
     pub relative_path: &'static str,
     pub guest_path: GuestPath,
     pub defaults: Vec<DefaultFile>,
@@ -100,7 +91,6 @@ pub struct PersistentDirectory {
     /// the operator may have edited.
     pub managed: Vec<(&'static str, &'static str)>,
     pub instructions: &'static str,
-    /// Redirect these guest subdirectories to the task disk, outside the shared profile.
     pub task_local_subdirectories: Vec<&'static str>,
 }
 
@@ -454,7 +444,6 @@ pub async fn ensure_project(
     engine.ensure_base(plan.recipe, progress).await
 }
 
-/// What a sandbox is made from, when it is not built for it.
 enum SnapshotSource {
     /// A task's capsule: the environment boundary it was exported with is part of
     /// what it is, and a capsule that travels has to prove it.
@@ -469,7 +458,6 @@ enum SnapshotSource {
 /// records the environment it was built on.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SandboxKind {
-    /// A task's. Its own state goes on its capsule, and its capsule travels.
     Task,
     /// A credential shell's. Its own state goes nowhere, and it is thrown away
     /// where it was made.
@@ -477,7 +465,6 @@ enum SandboxKind {
 }
 
 impl SandboxKind {
-    /// Where the subdirectories that must not reach the shared profile live.
     fn state_root(self) -> &'static str {
         match self {
             Self::Task => "/altitude/task-state",
@@ -944,7 +931,6 @@ async fn run_setup(
     }
 }
 
-/// The end of what a command printed, for an error that says it in one line.
 fn printed_tail(output: &str) -> &str {
     const LIMIT: usize = 400;
     match output.char_indices().rev().nth(LIMIT) {

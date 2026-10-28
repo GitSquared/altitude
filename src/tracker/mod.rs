@@ -68,7 +68,6 @@ impl TrackerKind {
     }
 }
 
-/// The file inside a tracker profile that says which account it is signed in as.
 pub const ACCOUNT_FILE: &str = "identity.json";
 
 /// The tracker account a machine is signed in as, as it travels to a remote.
@@ -80,7 +79,6 @@ pub const ACCOUNT_FILE: &str = "identity.json";
 #[derive(Clone, Debug)]
 pub struct ScopeSummary {
     pub id: String,
-    /// What a person types for it, and what a route usually stores.
     pub key: String,
     pub name: String,
 }
@@ -122,12 +120,9 @@ pub struct IssueReference {
 /// it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IssueScope {
-    /// What the provider guarantees, and what matching prefers.
     pub id: String,
-    /// The names a person might type, such as a team key or a repository name.
     #[serde(default)]
     pub aliases: Vec<String>,
-    /// How this reads in a sentence, e.g. `Linear team ALT`.
     pub label: String,
 }
 
@@ -220,7 +215,6 @@ impl fmt::Display for TrackerError {
 
 impl Error for TrackerError {}
 
-/// Tracker credentials remain on the host; agents receive only bound issue reads.
 pub trait IssueReader: Send + Sync {
     fn read<'a>(&'a self, reference: &'a IssueReference) -> TrackerFuture<'a, IssueSnapshot>;
 }

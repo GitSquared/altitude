@@ -10,7 +10,6 @@ use super::palette;
 use crate::task::TaskOperatorSignalKind;
 
 pub struct SignalView {
-    /// The kind's name inside its group.
     pub label: &'static str,
     /// The same kind as a task card reads it, where there is no group heading to
     /// carry the action.

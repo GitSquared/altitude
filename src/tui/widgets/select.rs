@@ -33,10 +33,8 @@ use crate::tui::widgets::{chrome, palette, utils::truncate};
 /// step through, and a search box over three rows is a mode to remember.
 const SEARCH_FROM: usize = 5;
 
-/// The mark that says a pill opens.
 const OPENS: char = '▼';
 
-/// One thing that can be chosen.
 pub struct Offer<T> {
     pub value: T,
     pub label: String,
@@ -55,9 +53,7 @@ impl<T> Offer<T> {
     }
 }
 
-/// A value chosen from its offers, and the open list when it is open.
 pub struct Select<T> {
-    /// What is being chosen, shown on the pill and over the list.
     name: &'static str,
     offers: Vec<Offer<T>>,
     chosen: usize,
@@ -102,7 +98,6 @@ impl<T> Select<T> {
         self.chosen_offer().map(|offer| &offer.value)
     }
 
-    /// The chosen value's name, or nothing when there is none to choose.
     pub fn label(&self) -> &str {
         self.chosen_offer().map_or("", |offer| offer.label.as_str())
     }
@@ -124,7 +119,6 @@ impl<T> Select<T> {
         self.query.clear();
     }
 
-    /// Whether there is anything to choose, which a page that is waiting says.
     pub fn is_empty(&self) -> bool {
         self.offers.is_empty()
     }
@@ -186,7 +180,6 @@ impl<T> Select<T> {
         hints
     }
 
-    /// Choose the first offer `test` accepts, answering whether there was one.
     pub fn is_open(&self) -> bool {
         self.open
     }
@@ -197,7 +190,6 @@ impl<T> Select<T> {
         self.open && self.offers.len() >= self.search_from
     }
 
-    /// Open the list on the chosen offer, with nothing typed.
     pub fn open(&mut self) {
         self.open = true;
         self.query.clear();
@@ -266,7 +258,6 @@ impl<T> Select<T> {
         true
     }
 
-    /// Move the keys one match, for a wheel notch over the open list.
     pub fn scroll(&mut self, forward: bool) {
         if self.open {
             let matches = self.matches();
@@ -289,7 +280,6 @@ impl<T> Select<T> {
         };
     }
 
-    /// The offers the typed query still matches, in the order they were given.
     fn matches(&self) -> Vec<usize> {
         let query = self.query.to_lowercase();
         self.offers
@@ -520,7 +510,6 @@ impl<T> Select<T> {
     }
 }
 
-/// One offer: the mark that it is the one chosen, and what it is called.
 fn offer_line<T>(offer: &Offer<T>, chosen: bool, focused: bool, width: usize) -> Line<'static> {
     let mark = if chosen { "✓" } else { " " };
     if focused {

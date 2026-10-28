@@ -52,14 +52,10 @@ pub struct TaskService<E> {
     isolation: E,
     snapshots_dir: PathBuf,
     agents: AgentEngines,
-    /// The operator used when this installation founds a task for itself.
     identity: InstallationIdentity,
     environment_progress: EnvironmentProgressRegistry,
-    /// Where each running task's agent channel listens.
     agent_channels: AgentChannels,
-    /// The loopback ports a taken-over task's terminal can reach.
     port_relays: PortRelays,
-    /// The logins tasks run under: a separate service, because a login is not a task.
     credentials: Credentials<E>,
     trackers: Option<Arc<dyn TrackerHost>>,
     issue_reader: Option<Arc<dyn IssueReader>>,
@@ -219,12 +215,10 @@ where
         self.signal_changes.subscribe()
     }
 
-    /// One task as it reads now, for an interface keeping a card current.
     pub async fn task(&self, id: &str) -> Result<Option<Task>, TaskServiceError> {
         self.store.get(id).await.map_err(TaskServiceError::Task)
     }
 
-    /// The logins tasks run under.
     pub fn credentials(&self) -> &Credentials<E> {
         &self.credentials
     }
@@ -259,7 +253,6 @@ where
         self.tracker_for("trackers/linear")
     }
 
-    /// The tracker identity a project route names, or the service default.
     pub fn tracker_connectable(&self, credential: &str) -> Option<Arc<dyn TrackerProvider>> {
         self.trackers
             .as_ref()
@@ -300,7 +293,6 @@ where
             .map_err(TaskServiceError::AgentChannel)
     }
 
-    /// Close a task's agent channel and remove the socket behind it.
     pub(super) fn release_agent_channel(&self, task_id: &str) {
         self.agent_channels.release(task_id);
     }
@@ -311,7 +303,6 @@ where
         self.port_relays.channel(sandbox_id)
     }
 
-    /// Bind the relay a task's terminal is about to be opened over.
     pub(super) fn bind_ports(&self, sandbox_id: &str) -> Result<(), TaskServiceError> {
         self.port_relays
             .bind(sandbox_id)
@@ -319,12 +310,10 @@ where
             .map_err(|error| TaskServiceError::Isolation(IsolationError::new(error.to_string())))
     }
 
-    /// Hear about each port that becomes reachable, for an interface to show.
     pub fn port_notices(&self) -> broadcast::Receiver<PortNotice> {
         self.port_relays.subscribe()
     }
 
-    /// Close the relay a task's terminal held, answering nothing when it held none.
     pub(super) fn release_ports(&self, task: &Task) {
         if let Some(sandbox_id) = &task.facts.sandbox_id {
             self.port_relays.release(sandbox_id);

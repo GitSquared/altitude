@@ -30,7 +30,6 @@ pub fn is_secondary(key: KeyEvent) -> bool {
     key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
-/// Whether a key means "remove the thing the focus is on".
 pub fn is_remove(key: KeyEvent) -> bool {
     matches!(
         key.code,
@@ -38,7 +37,6 @@ pub fn is_remove(key: KeyEvent) -> bool {
     )
 }
 
-/// Whether a key means "show me what the keys do here".
 pub fn is_help(key: KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char('?'))
 }

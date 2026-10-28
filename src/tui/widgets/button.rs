@@ -17,9 +17,7 @@ use super::palette;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Emphasis {
-    /// The answer the surface exists for.
     Primary,
-    /// The other way out, still a button.
     Secondary,
 }
 
@@ -92,7 +90,6 @@ impl<'a> Button<'a> {
     }
 }
 
-/// One answer at the foot of a modal.
 pub struct Action<'a> {
     pub label: &'a str,
     pub focused: bool,
@@ -171,5 +168,4 @@ pub fn actions(frame: &mut Frame, modal: Rect, area: Rect, actions: &[Action]) -
         .collect()
 }
 
-/// Between two answers, so they are two things rather than one row of text.
 const ACTION_GAP: u16 = 3;

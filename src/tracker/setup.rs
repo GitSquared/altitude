@@ -10,10 +10,8 @@ use super::TrackerKind;
 
 pub(crate) struct Guide {
     pub title: &'static str,
-    /// What the shared app is, before any step.
     pub intro: &'static [&'static str],
     pub steps: &'static [Step],
-    /// What the reader does once the remote has it.
     pub closing: &'static [&'static str],
 }
 
@@ -22,15 +20,10 @@ pub(crate) struct Step {
     pub items: &'static [Item],
 }
 
-/// One line of a step, at the depth it is read at.
 pub(crate) enum Item {
-    /// A sentence under the step's title.
     Text(&'static str),
-    /// A point at the step's own level.
     Bullet(&'static str),
-    /// A point under the bullet above it.
     Detail(&'static str),
-    /// A literal line: toml, a URL, a command. Never formatted.
     Code(&'static str),
 }
 

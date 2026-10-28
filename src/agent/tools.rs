@@ -13,14 +13,10 @@
 use serde_json::Value;
 use std::{error::Error, fmt, future::Future, pin::Pin, sync::Arc};
 
-/// One capability a subsystem offers an agent, as the agent's harness sees it.
 #[derive(Clone, Debug)]
 pub struct AgentTool {
-    /// `<namespace>_<action>`, so the name says who answers it.
     pub name: String,
-    /// What the agent reads to decide whether to call it.
     pub description: String,
-    /// A JSON Schema for the arguments object.
     pub input_schema: Value,
 }
 
@@ -74,7 +70,6 @@ pub trait AgentToolProvider: Send + Sync {
     /// `<namespace>_<action>`.
     fn namespace(&self) -> &'static str;
     fn tools(&self) -> Vec<AgentTool>;
-    /// Answer one call. The name is one of [`AgentToolProvider::tools`].
     fn call(&self, name: &str, arguments: Value) -> AgentToolFuture<'_>;
 }
 

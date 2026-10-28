@@ -28,20 +28,16 @@ pub struct Settings {
     /// and one the tailnet gave is better than an IP that will move.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     remotes: Vec<String>,
-    /// What a task is given when nobody says otherwise.
     #[serde(default)]
     defaults: Defaults,
-    /// How the interface behaves, as opposed to what it configures.
     #[serde(default)]
     interface: Interface,
-    /// The projects this installation can work on.
     #[serde(default)]
     projects: Vec<Project>,
     /// Commit identities projects have used, so a new project can reuse one
     /// rather than being typed again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     identities: Vec<ProjectCommits>,
-    /// The named credentials this installation can use.
     #[serde(default)]
     credentials: Vec<Credential>,
 }
@@ -73,10 +69,8 @@ pub struct Defaults {
     /// service the old `agent` field names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_credential: Option<String>,
-    /// The version-control identity a project inherits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vcs_credential: Option<String>,
-    /// The tracker identity a project inherits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracker_credential: Option<String>,
     /// The coding agent Altitude drives.
@@ -88,7 +82,6 @@ pub struct Defaults {
     pub agent: Option<AgentKind>,
 }
 
-/// Preferences about the interface itself.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Interface {
@@ -114,7 +107,6 @@ impl Default for Interface {
     }
 }
 
-/// A loaded file and its exact source, used to detect edits before saving.
 pub struct SettingsFile {
     path: PathBuf,
     source: String,
@@ -160,7 +152,6 @@ impl SettingsFile {
         &self.settings
     }
 
-    /// Adopt a proposed edit only after it has been successfully saved.
     pub fn save(&mut self, settings: Settings) -> Result<(), SettingsError> {
         settings.validate()?;
         // The stable lock file serializes Altitude writers across atomic renames.
@@ -287,7 +278,6 @@ impl Settings {
         }
     }
 
-    /// Every credential an interface can list.
     pub fn credentials(&self) -> &[Credential] {
         &self.credentials
     }
@@ -298,7 +288,6 @@ impl Settings {
             .find(|credential| credential.id == id)
     }
 
-    /// The credential a project inherits for a slot, when it binds none.
     pub fn default_credential(&self, slot: Slot) -> Option<&str> {
         match slot {
             Slot::Agent => self.defaults.agent_credential.as_deref(),
@@ -307,7 +296,6 @@ impl Settings {
         }
     }
 
-    /// Add a credential, refusing one that is not a usable id or is already here.
     pub fn add_credential(&mut self, credential: Credential) -> Result<(), SettingsError> {
         if !credential.is_valid() {
             return Err(SettingsError::Invalid(format!(
@@ -325,7 +313,6 @@ impl Settings {
         Ok(())
     }
 
-    /// Rename an identity, leaving its id and profile directory alone.
     pub fn rename_credential(&mut self, id: &str, label: &str) -> Result<(), SettingsError> {
         let label = label.trim();
         if label.is_empty() || label.len() > 64 || label.chars().any(char::is_control) {
@@ -400,7 +387,6 @@ impl Settings {
         Ok(())
     }
 
-    /// Update an auto-named identity when its service reports who it is.
     pub fn suggest_credential_name(&mut self, id: &str, label: &str) {
         let label = label.trim();
         if label.is_empty() || label.len() > 64 || label.chars().any(char::is_control) {
@@ -423,7 +409,6 @@ impl Settings {
         }
     }
 
-    /// Make an identity the default for its slot.
     pub fn set_default_credential(&mut self, id: &str) -> Result<(), SettingsError> {
         let Some(credential) = self.credential(id) else {
             return Err(SettingsError::Invalid(format!("no credential {id:?}")));
@@ -512,7 +497,6 @@ impl Settings {
         used
     }
 
-    /// The projects this installation works on, oldest first.
     pub fn projects(&self) -> &[Project] {
         &self.projects
     }
@@ -521,7 +505,6 @@ impl Settings {
         self.projects.iter().find(|project| project.id == id)
     }
 
-    /// The addresses this host delegates to.
     pub fn remotes(&self) -> &[String] {
         &self.remotes
     }
@@ -556,44 +539,36 @@ impl Settings {
         shared
     }
 
-    /// The coding agent Altitude drives, if one has been chosen.
     pub fn agent(&self) -> Option<AgentKind> {
         self.defaults.agent
     }
 
-    /// Choose the coding agent Altitude drives.
     pub fn set_agent(&mut self, agent: AgentKind) {
         self.defaults.agent = Some(agent);
     }
 
-    /// Commit identities projects have used, so the next project can pick one.
     pub fn identities(&self) -> &[ProjectCommits] {
         &self.identities
     }
 
-    /// Keep an identity a project uses, without duplicating one already here.
     pub fn remember_identity(&mut self, commits: &ProjectCommits) {
         if !self.identities.contains(commits) {
             self.identities.push(commits.clone());
         }
     }
 
-    /// How the interface behaves.
     pub fn interface(&self) -> &Interface {
         &self.interface
     }
 
-    /// Whether the keys that work are listed at the bottom of the screen.
     pub fn set_keyboard_hints(&mut self, on: bool) {
         self.interface.keyboard_hints = on;
     }
 
-    /// Whether the interface animates.
     pub fn set_animations(&mut self, on: bool) {
         self.interface.animations = on;
     }
 
-    /// Add a project, replacing one with the same id.
     pub fn add_project(&mut self, project: Project) {
         self.projects.retain(|existing| existing.id != project.id);
         self.projects.push(project);
@@ -609,7 +584,6 @@ impl Settings {
         self.projects.retain(|existing| existing.id != id);
     }
 
-    /// Add a remote address, replacing any entry for the same address.
     pub fn add_remote(&mut self, address: &str) {
         let address = address.trim();
         self.remotes
@@ -617,7 +591,6 @@ impl Settings {
         self.remotes.push(address.to_owned());
     }
 
-    /// Forget a remote address.
     pub fn remove_remote(&mut self, address: &str) {
         self.remotes
             .retain(|existing| !existing.eq_ignore_ascii_case(address));

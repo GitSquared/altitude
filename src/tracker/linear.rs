@@ -253,7 +253,6 @@ impl Linear {
         Ok(())
     }
 
-    /// Ask Linear who this is and write the answer into the profile.
     async fn record_account(&self, session: &Session) -> Result<(), TrackerError> {
         let account = read_account(session).await?;
         let bytes = serde_json::to_vec_pretty(&account)
@@ -434,7 +433,6 @@ impl Linear {
     }
 }
 
-/// Ask Linear which account a live session is signed in as.
 async fn read_account(session: &Session) -> Result<TrackerAccount, TrackerError> {
     let parameter = if session.accepts("get_user", "query") {
         "query"
@@ -546,7 +544,6 @@ fn issue_list(value: &Value) -> Result<Vec<Value>, TrackerError> {
     object_list(value, "issues")
 }
 
-/// A list a tool returned, either as the array itself or under its own name.
 fn object_list(value: &Value, name: &str) -> Result<Vec<Value>, TrackerError> {
     let array = match value {
         Value::Array(items) => items,

@@ -30,12 +30,9 @@ use tokio::{
 
 use super::TrackerError;
 
-/// Linear's hosted MCP server, which is the endpoint every client tool speaks to.
 pub(super) const MCP_URL: &str = "https://mcp.linear.app/mcp";
-/// The grant inside the tracker's profile.
 const GRANT_FILE: &str = "grant.json";
 
-/// The OAuth grant, kept as JSON beside the account it names.
 pub(super) struct Grant(PathBuf);
 
 impl Grant {
@@ -83,7 +80,6 @@ impl CredentialStore for Grant {
     }
 }
 
-/// Whether this profile holds a sign-in.
 pub(super) fn has_grant(profile: &Path) -> bool {
     Grant::new(profile).is_present()
 }
@@ -94,7 +90,6 @@ pub(super) fn grant_changed_at(profile: &Path) -> Option<SystemTime> {
     Grant::new(profile).changed_at()
 }
 
-/// A client for the MCP server, signing in first when nothing is saved.
 pub(super) async fn authorized_client(
     profile: &Path,
 ) -> Result<AuthClient<reqwest::Client>, TrackerError> {
@@ -108,7 +103,6 @@ pub(super) async fn authorized_client(
     Ok(AuthClient::new(reqwest::Client::new(), manager))
 }
 
-/// An MCP transport for this profile, over the grant the manager holds.
 pub(super) fn transport(
     client: AuthClient<reqwest::Client>,
 ) -> StreamableHttpClientTransport<AuthClient<reqwest::Client>> {

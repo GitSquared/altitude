@@ -23,14 +23,12 @@ use super::SettingsError;
 /// thing to be told.
 pub const DEFAULT_PORT: u16 = 25848;
 
-/// The address a server listens on when nobody has said otherwise.
 pub fn default_listen() -> String {
     format!("0.0.0.0:{DEFAULT_PORT}")
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ServeSettings {
-    /// `address:port`, UDP.
     pub listen: String,
     pub linear: Option<LinearSettings>,
     /// Whether this machine has been told to stop starting work for a tracker.
@@ -101,7 +99,6 @@ fn template() -> String {
     )
 }
 
-/// Writes a file only the owner can read, refusing to replace one that exists.
 fn write_new(path: &Path, contents: &str) -> Result<(), SettingsError> {
     let directory = path.parent().expect("a settings path has a parent");
     fs::create_dir_all(directory).map_err(SettingsError::Io)?;
@@ -139,7 +136,6 @@ pub struct LinearSettings {
     pub webhook_secret_env: String,
 }
 
-/// Written by hand, so a debug print must not be the way a secret leaves.
 impl fmt::Debug for LinearSettings {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         fn redacted(secret: &Option<String>) -> Option<&'static str> {

@@ -78,19 +78,16 @@ const MAX_WIDTH: u16 = 88;
 /// Its height, which is the prompt's room plus the spacing, the pills and the
 /// actions. The prompt takes what is left of it.
 const HEIGHT: u16 = 17;
-/// Between two pills, so they read as three things rather than one strip.
 const PILL_GAP: u16 = 2;
 /// How long a query rests before it is searched, so a word typed a letter at a
 /// time is one search rather than ten.
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
 
-/// Which page this is, so a reply meant for another one is never shown here.
 static NEXT_POPUP: AtomicU64 = AtomicU64::new(1);
 /// Which read is which, so a snapshot that arrives after the question was
 /// dismissed cannot still create a task.
 static NEXT_SUBMISSION: AtomicU64 = AtomicU64::new(1);
 
-/// What holds the keys, top to bottom.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Task,
@@ -108,13 +105,10 @@ const ORDER: [Focus; 5] = [
     Focus::Create,
 ];
 
-/// What a click on this page can land on.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::tui) enum Hit {
     Prompt,
-    /// One of the choices, by the control it belongs to.
     Pill(Focus),
-    /// One offer of the open list, by its place among the offers.
     Offer(usize),
     Cancel,
     Create,
@@ -125,7 +119,6 @@ pub(in crate::tui) enum Hit {
 /// The creation page no longer chooses one, because a task runs where its project
 /// runs; the send chooser still does, for the one move a task has.
 pub struct Host {
-    /// Where it is reached, or nothing for this machine.
     pub address: Option<String>,
     pub label: String,
     /// Whether it can be given work. One that is syncing or unreachable is shown and
@@ -133,22 +126,16 @@ pub struct Host {
     pub ready: bool,
 }
 
-/// What a search reply is about: this popup, and this version of its query.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct SearchToken {
     popup: u64,
     generation: u64,
 }
 
-/// Where the issue page is.
 enum IssuePhase {
-    /// The query is empty.
     Idle,
-    /// A query is waiting out its debounce or out on the wire.
     Searching,
-    /// An answer came back, and the results (possibly none) are shown.
     Ready,
-    /// The search could not be answered, and the message says why.
     Failed(String),
 }
 
@@ -162,7 +149,6 @@ pub(in crate::tui) struct Submission {
     pub(in crate::tui) remember: Option<AgentKind>,
 }
 
-/// The question, and the answers so far.
 pub struct NewTask {
     task: TextBox,
     project: Select<Project>,
@@ -176,20 +162,16 @@ pub struct NewTask {
     refused: bool,
     focus: Focus,
 
-    /// Which page this is, so a reply for another one is discarded.
     popup_id: u64,
     /// Bumped whenever the query changes, so a reply about the old query is not
     /// shown under the new one.
     generation: u64,
-    /// Whether the prompt is a search box.
     issue: bool,
     phase: IssuePhase,
     results: Vec<IssueSummary>,
     selected_result: usize,
-    /// When the query last changed, which the debounce is measured from.
     query_due: Option<Instant>,
     search_in_flight: bool,
-    /// The read that is standing between the operator and a created task.
     submission: Option<Submission>,
     /// A submission asked for while the search was still out, waiting for the
     /// first result.
@@ -197,18 +179,15 @@ pub struct NewTask {
     /// Where the keys were before a chord jumped to a pill, so closing its list
     /// puts them back: a chord is a detour, tabbing is a move.
     focus_return: Option<Focus>,
-    /// A snapshot read that failed, kept so the operator can try again.
     read_error: Option<String>,
 }
 
-/// What the question ended in.
 pub enum Answer {
     Cancel,
     Create {
         task: String,
         project: Box<Project>,
         agent: AgentKind,
-        /// The agent to remember, when this was the first answer.
         remember: Option<AgentKind>,
     },
     /// Read this issue's snapshot before founding the task. The token says which
@@ -291,7 +270,6 @@ impl NewTask {
         self.focus == Focus::Task || self.list_open()
     }
 
-    /// Whether the focused pill has its list open.
     fn list_open(&self) -> bool {
         match self.focus {
             Focus::Project => self.project.is_open(),
@@ -362,7 +340,6 @@ impl NewTask {
         }
     }
 
-    /// Read a mouse event against what the last frame drew.
     pub(in crate::tui) fn mouse(
         &mut self,
         mouse: MouseEvent,
@@ -441,7 +418,6 @@ impl NewTask {
         self.agent.close();
     }
 
-    /// Whether the question can be answered, and what is missing when it cannot.
     pub fn refusal(&self) -> Option<&'static str> {
         // A read under way, or a submission waiting for the first result, is not
         // a second answer.
@@ -536,7 +512,6 @@ impl NewTask {
         }
     }
 
-    /// Give the key to the pill whose list is open, answering whether one was.
     fn list_key(&mut self, key: KeyEvent) -> bool {
         match self.focus {
             Focus::Project => self.project.handle_key(key),
@@ -632,7 +607,6 @@ impl NewTask {
         self.query_due = has_query.then(Instant::now);
     }
 
-    /// The search the page owes, once its query has rested long enough.
     pub(in crate::tui) fn due_search(&mut self, now: Instant) -> Option<(SearchToken, String)> {
         if !self.issue || self.search_in_flight {
             return None;
@@ -657,7 +631,6 @@ impl NewTask {
         ))
     }
 
-    /// Whether a reply is still about the query this page is showing.
     fn is_current(&self, token: SearchToken) -> bool {
         self.issue && token.popup == self.popup_id && token.generation == self.generation
     }
@@ -809,7 +782,6 @@ impl NewTask {
         })
     }
 
-    /// Start reading the chosen issue, remembering what to found when it lands.
     fn begin_submission(&mut self) -> Option<u64> {
         if self.submission.is_some() {
             return None;
@@ -945,7 +917,6 @@ pub fn draw(
     popup
 }
 
-/// The results, or the reason there are none yet.
 fn draw_issue(frame: &mut Frame, area: Rect, new_task: &NewTask, tick: Option<usize>) {
     let note = new_task
         .read_error
@@ -1008,7 +979,6 @@ fn draw_issue(frame: &mut Frame, area: Rect, new_task: &NewTask, tick: Option<us
     }
 }
 
-/// One search result: what it is called, what it is about, and where it lives.
 fn result_line(summary: &IssueSummary, width: usize, focused: bool) -> Line<'static> {
     let text = match &summary.project {
         Some(project) => format!(
@@ -1030,7 +1000,6 @@ fn result_line(summary: &IssueSummary, width: usize, focused: bool) -> Line<'sta
     Line::from(spans)
 }
 
-/// What is chosen, as pills: what is chosen is what you press.
 fn draw_choices(frame: &mut Frame, area: Rect, new_task: &NewTask) -> [Rect; 2] {
     let named = [
         new_task.project.pill_width(true),

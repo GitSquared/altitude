@@ -29,7 +29,6 @@ const DEFAULT_SETTINGS: &str = r#"{
 }
 "#;
 
-/// The MCP tools Claude may call without asking, which are Altitude's channel.
 const MCP_TOOLS: &str = "mcp__altitude__*";
 
 /// Claude's view of Altitude's channel: the bridge this recipe writes as a

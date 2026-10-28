@@ -8,7 +8,6 @@ use crate::{
     tui::widgets::list,
 };
 
-/// The lists the panel holds, in the order the rail shows them.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     Interface,
@@ -40,7 +39,6 @@ impl Section {
         }
     }
 
-    /// One line under the section's name in the rail.
     pub fn description(self) -> &'static str {
         match self {
             Self::Interface => "Adjust look and feel",
@@ -70,7 +68,6 @@ impl Section {
         }
     }
 
-    /// The section a newly created identity belongs to, from the service itself.
     pub fn for_service(service: Service) -> Self {
         match service.slot() {
             Slot::Agent => Self::Agents,
@@ -89,7 +86,6 @@ impl Section {
     }
 }
 
-/// A preference that is on or off.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Setting {
     KeyboardHints,
@@ -115,14 +111,12 @@ impl Setting {
     }
 }
 
-/// Whether the focus is in the rail or the list.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Depth {
     Rail,
     List,
 }
 
-/// The panel's state: where the focus is, and whatever is drawn over it.
 pub struct Panel {
     pub section: Section,
     /// The list's selection and where its view starts, so a long list can be
@@ -154,7 +148,6 @@ impl Default for Panel {
 }
 
 impl Panel {
-    /// Move within the focused list, which at the rail means the section.
     pub fn move_selection(&mut self, forward: bool, rows: usize) {
         self.detail_scroll = 0;
         match self.depth {
@@ -175,17 +168,14 @@ impl Panel {
         }
     }
 
-    /// Where the list's cursor is.
     pub fn selected(&self) -> usize {
         self.cursor.selected()
     }
 
-    /// Put the list's cursor on a row.
     pub fn select_row(&mut self, index: usize) {
         self.cursor.select(index);
     }
 
-    /// The row the focus is on, in the list the rail has selected.
     pub fn selected_row<'a>(&self, view: &'a View) -> Option<&'a Row> {
         view.rows.get(self.selected())
     }

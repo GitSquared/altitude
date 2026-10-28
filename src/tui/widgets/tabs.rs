@@ -20,7 +20,6 @@ use super::palette;
 
 pub struct Tab {
     pub label: String,
-    /// Work waiting on the operator, drawn beside the tab rather than inside it.
     pub attention: usize,
 }
 

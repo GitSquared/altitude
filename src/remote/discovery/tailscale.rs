@@ -46,7 +46,6 @@ struct Peer {
     name: Option<String>,
 }
 
-/// One peer worth probing, and what to write down if it turns out to be a remote.
 struct Candidate {
     address: SocketAddr,
     /// What to reach it by once it is known to be one: the name where the tailnet

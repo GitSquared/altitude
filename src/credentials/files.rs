@@ -45,7 +45,6 @@ pub(super) fn has_saved_login(directory: &Path, profile: &str) -> bool {
     })
 }
 
-/// Remove a profile's saved login, leaving everything else in it.
 pub(super) fn forget(directory: &Path, profile: &str) -> Result<(), String> {
     let files = login_files(profile)
         .ok_or_else(|| format!("no saved login is known for the {profile} profile"))?;

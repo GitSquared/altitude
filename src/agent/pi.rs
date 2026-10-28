@@ -43,9 +43,7 @@ const DEFAULT_MCP: &str = r#"{
 }
 "#;
 
-/// Where the report turn writes the generated extension inside the capsule.
 const REPORT_EXTENSION_PATH: &str = "/tmp/altitude-report.ts";
-/// The channel the schema travels on, so the report contract stays Altitude's.
 const REPORT_SCHEMA_ENV: &str = "ALTITUDE_REPORT_SCHEMA";
 /// The name the extension below registers. The shim repeats this name and
 /// `REPORT_SCHEMA_ENV`; both mentions sit in this file, near each other.

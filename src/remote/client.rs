@@ -19,17 +19,14 @@ use super::{
 
 // ------------------------------------------------------------- the client side
 
-/// The kind of network path a connection is using.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PathKind {
-    /// A direct IP path.
     Direct,
     /// Traffic is going through a relay server.
     ///
     /// Unreachable while Altitude configures no relay, and kept because this
     /// mirrors what iroh itself reports rather than what we expect to see.
     Relay,
-    /// No path was selected at the time it was observed.
     Unestablished,
 }
 
@@ -37,7 +34,6 @@ pub enum PathKind {
 /// between "hole punching worked" and "we are paying a relay".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LinkPath {
-    /// The path carrying application data.
     pub selected: PathKind,
     /// Whether a direct IP path was open as well. Reading relay with a direct
     /// path open means hole punching succeeded and iroh's deliberately sticky
@@ -85,7 +81,6 @@ pub struct LinkClient {
 }
 
 impl LinkClient {
-    /// Binds a client endpoint. Nothing about a remote is needed to do this.
     pub async fn bind(identity: &super::InstallationKey) -> LinkResult<Self> {
         let endpoint = builder()
             .secret_key(identity.secret_key().clone())
@@ -104,7 +99,6 @@ impl LinkClient {
         self.endpoint.close().await;
     }
 
-    /// Dials a remote, and closes the connection however the exchange ends.
     async fn dial(&self, peer: impl Into<EndpointAddr>) -> LinkResult<Dial> {
         Ok(Dial(self.endpoint.connect(peer, LINK_ALPN).await?))
     }
@@ -128,7 +122,6 @@ impl LinkClient {
         answer
     }
 
-    /// Say one thing, send a body after it, and hear one answer.
     async fn say_with_body(
         &self,
         peer: impl Into<EndpointAddr>,
@@ -147,7 +140,6 @@ impl LinkClient {
         answer
     }
 
-    /// Say one thing, and read the body of the answer.
     async fn ask_for_body(
         &self,
         peer: impl Into<EndpointAddr>,
@@ -253,7 +245,6 @@ impl LinkClient {
         }
     }
 
-    /// Fetches one archive, counting as it lands and stopping when asked.
     pub async fn fetch_part(
         &self,
         peer: &EndpointAddr,
@@ -320,7 +311,6 @@ impl LinkClient {
         }
     }
 
-    /// Gives up a staged import, so a stopped send leaves nothing half-written.
     pub async fn abandon_import(&self, peer: &EndpointAddr, transfer_id: &str) -> LinkResult<()> {
         match self
             .say(
@@ -375,7 +365,6 @@ impl LinkClient {
         }
     }
 
-    /// Send one bounded piece of an archive to the remote staging it.
     pub async fn put_import_part(
         &self,
         peer: &EndpointAddr,
@@ -455,7 +444,6 @@ impl LinkClient {
         }
     }
 
-    /// The task's threads, resolved ones included.
     pub async fn signal_threads(
         &self,
         peer: impl Into<EndpointAddr>,
@@ -599,7 +587,6 @@ impl LinkClient {
 struct Dial(Connection);
 
 impl Dial {
-    /// The key that answered, which the handshake has authenticated.
     fn remote(&self) -> EndpointId {
         self.0.remote_id()
     }

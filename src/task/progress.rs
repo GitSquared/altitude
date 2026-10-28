@@ -14,7 +14,6 @@ use std::{
 pub struct EnvironmentProgressRegistry(Arc<Mutex<HashMap<String, EnvironmentProgress>>>);
 
 impl EnvironmentProgressRegistry {
-    /// A writer for one task's build.
     pub fn writer(&self, task_id: &str) -> EnvironmentProgressWriter {
         EnvironmentProgressWriter {
             task_id: task_id.to_owned(),

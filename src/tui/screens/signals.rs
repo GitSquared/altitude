@@ -46,17 +46,14 @@ use crate::{
 /// for a title and a line of what was said, and no wider: the conversation is
 /// what the room is for.
 const LIST_WIDTH: u16 = 40;
-/// The plan column is narrower than the conversation, by design.
 const PLAN_WIDTH: u16 = 32;
 /// The gutter between the plan's text and its border, so the column reads like
 /// the signals list rather than sitting on the divider.
 const PLAN_PADDING: u16 = 1;
-/// Below this the plan moves into the conversation pane as a tab.
 const PLAN_COLUMN_MIN: u16 = 112;
 /// The gutter between the list's rows and the frame, so the rows do not sit on
 /// the border.
 const LIST_PADDING: u16 = 1;
-/// How many lines the reply box gets, border included.
 const COMPOSER_HEIGHT: u16 = 5;
 
 /// Which threads the list shows.
@@ -92,7 +89,6 @@ impl SignalFilter {
     }
 }
 
-/// How long a resolved thread stays in the unresolved view.
 pub const LINGER_MS: i64 = 5_000;
 
 pub fn is_lingering(thread: &TaskOperatorSignalThread, now_ms: i64) -> bool {
@@ -102,19 +98,16 @@ pub fn is_lingering(thread: &TaskOperatorSignalThread, now_ms: i64) -> bool {
             .is_some_and(|at| now_ms.saturating_sub(at) < LINGER_MS)
 }
 
-/// Which way the threads inside a tier read, by when the thread was raised.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignalSort {
     Oldest,
     Newest,
 }
 
-/// What the keyboard is focused on inside the signals screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignalFocus {
     List,
     Detail,
-    /// One of the available actions, by its place in the footer.
     Action(usize),
     Filter,
     Sort,
@@ -138,7 +131,6 @@ impl SignalFocus {
     }
 }
 
-/// What a click on the signals screen can land on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignalHit {
     List,
@@ -167,7 +159,6 @@ pub enum SignalAction {
 }
 
 impl SignalAction {
-    /// What the button and the hint call this action in a given thread.
     pub fn label(self, kind: TaskOperatorSignalKind, resolved: bool) -> &'static str {
         match self {
             Self::Reply => "reply",
@@ -182,7 +173,6 @@ impl SignalAction {
     }
 }
 
-/// The action enter takes on this thread.
 pub fn primary_action(thread: &TaskOperatorSignalThread) -> Option<SignalAction> {
     if thread.is_resolved() {
         return (thread.kind == TaskOperatorSignalKind::Decision).then_some(SignalAction::Resolve);
@@ -216,7 +206,6 @@ pub fn actions(thread: &TaskOperatorSignalThread) -> Vec<SignalAction> {
         .collect()
 }
 
-/// How a group reads: its name, the mark beside it, and its tone.
 struct Group {
     title: &'static str,
     symbol: char,
@@ -330,7 +319,6 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     surface::horizontal_divider(frame, list, divider.y);
 }
 
-/// The tab line on a narrow screen: the conversation, or the plan.
 fn draw_plan_tabs(frame: &mut Frame, area: Rect, app: &App) {
     if area.height == 0 {
         return;
@@ -341,7 +329,6 @@ fn draw_plan_tabs(frame: &mut Frame, area: Rect, app: &App) {
     tabs::draw(frame, area, &tabs, selected);
 }
 
-/// Inset an area by `columns` on both sides.
 fn inset(area: Rect, columns: u16) -> Rect {
     Rect {
         x: area.x.saturating_add(columns),
@@ -350,7 +337,6 @@ fn inset(area: Rect, columns: u16) -> Rect {
     }
 }
 
-/// The agent's plan, beside the conversation or in a narrow screen's tab.
 fn draw_plan(frame: &mut Frame, area: Rect, app: &App) {
     let [title, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)])
         .areas(inset(area, PLAN_PADDING));
@@ -421,7 +407,6 @@ fn draw_plan(frame: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-/// The filter and sort pills at the top of the list.
 fn draw_controls(frame: &mut Frame, toolbar: Rect, popup_area: Rect, app: &mut App) {
     let filter_at = Rect {
         x: toolbar.x.saturating_add(LIST_PADDING),
@@ -734,7 +719,6 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
     app.signal_scroll = scroll;
 }
 
-/// One thread's conversation, as the screen draws it.
 struct Conversation<'a> {
     thread: &'a TaskOperatorSignalThread,
     agent: &'a str,
@@ -744,7 +728,6 @@ struct Conversation<'a> {
     tick: Option<usize>,
 }
 
-/// What the frame learned about the conversation, for the keys and the wheel.
 struct ConversationLayout {
     hitboxes: Vec<(Rect, usize)>,
     rows: Vec<(u16, u16)>,
@@ -959,7 +942,6 @@ fn one_line(body: &str) -> String {
         .to_owned()
 }
 
-/// How the side that resolved a thread reads.
 fn who(resolved_by: Option<TaskOperatorSignalAuthor>, agent: &str) -> &str {
     match resolved_by {
         Some(TaskOperatorSignalAuthor::Operator) => "you",
@@ -967,7 +949,6 @@ fn who(resolved_by: Option<TaskOperatorSignalAuthor>, agent: &str) -> &str {
     }
 }
 
-/// The reply being written, and the thread it will answer.
 pub struct Composer {
     pub task_id: String,
     pub signal_id: String,
@@ -983,7 +964,6 @@ impl Composer {
         }
     }
 
-    /// Whether there is nothing to send.
     pub fn is_blank(&self) -> bool {
         self.body.value().trim().is_empty()
     }

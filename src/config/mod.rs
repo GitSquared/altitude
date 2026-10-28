@@ -158,12 +158,10 @@ impl Config {
         !matches!(self.scope, ConfigScope::Personal)
     }
 
-    /// Where the serve role reads its settings.
     pub fn serve_settings_path(&self) -> PathBuf {
         self.config_dir.join("serve.toml")
     }
 
-    /// Use a different data directory, for a caller that was told to.
     pub fn with_data_dir(mut self, data_dir: PathBuf) -> Self {
         self.data_dir = data_dir;
         self
@@ -311,7 +309,6 @@ impl Config {
         self.scoped_data_dir().join(profile).join("profile")
     }
 
-    /// Forget a credential's whole profile directory, login files included.
     pub fn remove_profile(&self, id: &str) -> io::Result<()> {
         let Some(root) = self.profile_root(id) else {
             return Err(io::Error::new(
@@ -326,7 +323,6 @@ impl Config {
         }
     }
 
-    /// Move a credential's profile to a new id after its account named it.
     pub fn move_profile(&self, from: &str, to: &str) -> io::Result<()> {
         let (Some(source), Some(target)) = (self.profile_root(from), self.profile_root(to)) else {
             return Err(io::Error::new(
@@ -404,7 +400,6 @@ impl Config {
         Ok(())
     }
 
-    /// The directory this scope's own state lives under.
     pub(crate) fn scoped_data_dir(&self) -> &Path {
         match &self.scope {
             ConfigScope::Operator(directory) => directory,

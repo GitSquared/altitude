@@ -22,22 +22,18 @@ use crate::{
     },
 };
 
-/// The name a shell opened to set up a profile's login has.
 pub fn credential_shell_id() -> String {
     // Keep the local socket path below macOS's Unix socket limit.
     let nonce = uuid::Uuid::new_v4().simple().to_string();
     format!("{CREDENTIAL_PREFIX}shell-{}", &nonce[..16])
 }
 
-/// What came back from a credential shell.
 pub enum CredentialShellEvent {
     Preparing {
         id: String,
         label: String,
     },
-    /// A terminal is running in a sandbox, and here it is.
     Opened(CredentialShell),
-    /// No shell: the sandbox could not be made.
     Unavailable {
         id: String,
         reason: String,
@@ -54,7 +50,6 @@ pub enum CredentialShellEvent {
         id: String,
         code: i32,
     },
-    /// The shell broke.
     Failed {
         id: String,
         error: String,
@@ -104,7 +99,6 @@ impl CredentialShellCancel {
     }
 }
 
-/// A credential shell that is running, and the channel its keys go down.
 pub struct CredentialShell {
     id: String,
     commands: mpsc::UnboundedSender<Command>,
@@ -271,7 +265,6 @@ where
             .map_err(|error| CredentialsError::Isolation(IsolationError::new(error.to_string())))
     }
 
-    /// Throw away a shell nobody is waiting for, and the channel that would serve it.
     async fn discard_shell(&self, id: &str) {
         self.channels.release(id);
         self.relays.release(id);

@@ -18,11 +18,8 @@ use crate::tui::widgets::{palette, utils::shimmer};
 /// measurement, not a page.
 const WIDTH: u16 = 62;
 
-/// What a transfer is doing, in the words the modal has room for.
 pub struct Progress<'a> {
-    /// What the window is about: pulling a task here, sending one away.
     pub title: &'a str,
-    /// The thing moving, named the way the operator named it.
     pub label: &'a str,
     /// What the transfer is waiting on. Empty while bytes are moving, when the
     /// numbers say it instead.
@@ -31,17 +28,14 @@ pub struct Progress<'a> {
     /// count yet, which is what makes the bar indeterminate.
     pub done: u64,
     pub total: u64,
-    /// Bytes per second over the last moment, when there is one to show.
     pub rate: Option<f64>,
 }
 
 impl Progress<'_> {
-    /// Whether there are bytes to count yet, which is what draws the bar.
     fn has_total(&self) -> bool {
         self.total > 0 && self.done <= self.total
     }
 
-    /// How far along, as whole percent.
     fn percent(&self) -> u16 {
         if self.total == 0 {
             return 0;
@@ -50,7 +44,6 @@ impl Progress<'_> {
     }
 }
 
-/// Draw the transfer, and answer with the box it occupies.
 pub fn draw(frame: &mut Frame, area: Rect, progress: &Progress<'_>, tick: Option<usize>) -> Rect {
     let [row] = Layout::horizontal([Constraint::Length(WIDTH.min(area.width))])
         .flex(Flex::Center)
@@ -125,7 +118,6 @@ pub fn draw(frame: &mut Frame, area: Rect, progress: &Progress<'_>, tick: Option
     popup
 }
 
-/// The bar, with the whole percent at its right edge where it does not move.
 fn draw_bar(frame: &mut Frame, area: Rect, progress: &Progress<'_>) {
     let percent = format!("{:>4}%", progress.percent());
     // A space between the bar and the numbers, and the bar is what is left.
@@ -156,7 +148,6 @@ fn amount(bytes: u64) -> String {
     }
 }
 
-/// How long the rest will take at this rate, in the rough words a wait deserves.
 fn remaining(bytes: u64, rate: f64) -> Option<String> {
     let seconds = bytes as f64 / rate;
     if !seconds.is_finite() || seconds < 0.0 {

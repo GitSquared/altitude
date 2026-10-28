@@ -27,7 +27,6 @@ use tokio::{
 use super::LinkResult;
 use crate::tracker::TrackerKind;
 
-/// How long either side waits for the other before giving up.
 const EXCHANGE_LIMIT: Duration = Duration::from_secs(5);
 /// Enough for a request head and then some. A body is never read, because there
 /// is nothing to ask for.
@@ -42,13 +41,9 @@ pub struct Announcement {
     /// The protocol a client must speak to this server, so a client can tell it is
     /// talking to the right thing rather than to whatever else is on the port.
     pub protocol: String,
-    /// The public key, which is the thing a client cannot otherwise obtain.
     pub id: String,
-    /// How the server reads to a human, e.g. the machine it is on.
     pub label: String,
-    /// Which build is answering.
     pub version: String,
-    /// What it can do with a task right now.
     pub state: RemoteState,
     pub trackers: Vec<TrackerConnection>,
 }
@@ -61,7 +56,6 @@ pub struct Announcement {
 #[serde(rename_all = "snake_case")]
 pub enum TrackerReadiness {
     Ready,
-    /// Configured, and the shared app has never been installed on that machine.
     NotInstalled,
     /// Installed, and the login would not verify — a replaced secret, a revoked
     /// grant, or a clock far enough off to break the signature.
@@ -103,7 +97,6 @@ pub enum RemoteState {
     Ready,
 }
 
-/// The listeners that answer announcements.
 pub(super) struct Broadcast {
     tasks: Vec<JoinHandle<()>>,
 }
@@ -139,7 +132,6 @@ impl Broadcast {
         Ok(Self { tasks })
     }
 
-    /// Stops answering. Dropping a server should not leave a port open.
     pub(super) fn stop(self) {
         for task in self.tasks {
             task.abort();

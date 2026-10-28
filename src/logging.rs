@@ -11,7 +11,6 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use crate::config::Config;
 
-/// Serve logs stay on stdout so terminals and service managers share one stream.
 pub fn init_service() {
     let terminal = io::stdout().is_terminal();
     let color = terminal

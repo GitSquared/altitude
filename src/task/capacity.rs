@@ -53,10 +53,8 @@ pub const MEMORY_TARGET_PERCENT: f64 = 80.0;
 /// the window has four, which is about forty seconds at [`SAMPLE_INTERVAL`].
 pub const MIN_READINGS: usize = 4;
 
-/// One reading of the whole host. Both percentages are in `0.0..=100.0`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ResourceSample {
-    /// Milliseconds since the Unix epoch, matching the timestamps tasks record.
     pub at_ms: i64,
     pub cpu_percent: f64,
     pub memory_percent: f64,
@@ -90,17 +88,14 @@ impl SampleWindow {
         self.samples.push_back(sample);
     }
 
-    /// Whether the window is still too young to act on. See [`MIN_READINGS`].
     pub fn is_warming_up(&self) -> bool {
         self.samples.len() < MIN_READINGS
     }
 
-    /// The 75th percentile of CPU over the window, or `None` while it is empty.
     pub fn cpu_p75(&self) -> Option<f64> {
         percentile_75(self.samples.iter().map(|sample| sample.cpu_percent))
     }
 
-    /// The 75th percentile of memory over the window, or `None` while it is empty.
     pub fn memory_p75(&self) -> Option<f64> {
         percentile_75(self.samples.iter().map(|sample| sample.memory_percent))
     }
@@ -162,7 +157,6 @@ pub struct HostCapacity {
 }
 
 impl HostCapacity {
-    /// Capacity before anything has been observed: see [`optimistic_start`].
     pub fn new() -> Self {
         Self {
             window: SampleWindow::new(),
@@ -170,7 +164,6 @@ impl HostCapacity {
         }
     }
 
-    /// Take a reading and report the limit that now applies.
     pub fn observe(&mut self, sample: ResourceSample, demand: usize) -> usize {
         self.window.push(sample);
         self.limit = next_slot_limit(self.limit, &self.window, demand);

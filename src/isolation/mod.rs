@@ -23,7 +23,6 @@ pub(crate) use relay::{PORT_RELAY_GUEST_PORT, install_script, with_helper};
 pub use relay::{PortNotice, PortRelays};
 pub(crate) use sandbox::private_directory;
 pub(crate) use sandbox::run_collecting;
-/// Shared with the VCS providers so capsule commands are quoted one way.
 pub(crate) use sandbox::shell_quote;
 pub use sandbox::{DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand};
 
@@ -71,7 +70,6 @@ impl BaseSandboxRecipe {
         }
     }
 
-    /// The work this recipe describes, as one value to compare and persist.
     pub fn setup_command(&self) -> String {
         self.steps
             .iter()
@@ -98,7 +96,6 @@ pub struct SetupStep {
 pub struct CredentialSandbox {
     pub id: String,
     pub recipes: Vec<ProfileRecipe>,
-    /// The built environment to make it from, if there is one to reuse.
     pub snapshot: Option<String>,
     /// Channels the sandbox's own programs reach this machine through. A shell
     /// gets the relay that makes its ports reachable; a check needs none.
@@ -114,12 +111,9 @@ impl SetupStep {
     }
 }
 
-/// What an environment build is doing, for the task that waits on it.
 #[derive(Clone, Debug)]
 pub struct EnvironmentProgress {
-    /// The step in progress, in the operator's words.
     pub label: String,
-    /// Steps finished before this one, and the build's step count.
     pub completed: usize,
     pub total: usize,
 }
@@ -130,7 +124,6 @@ pub trait EnvironmentProgressSink: Send + Sync {
     fn report(&self, progress: EnvironmentProgress);
 }
 
-/// A build nobody is watching, for when a caller has no task to report progress to.
 pub struct Unwatched;
 
 impl EnvironmentProgressSink for Unwatched {
@@ -156,11 +149,8 @@ pub struct BaseSandboxSnapshot {
 /// contents.
 #[derive(Clone, Debug)]
 pub struct ProfileSummary {
-    /// The recipe's stable profile identity, e.g. `agents/claude`.
     pub profile: String,
-    /// What this profile is called where an operator reads it.
     pub display: &'static str,
-    /// What the operator does to sign in, for a sign-in they have to drive.
     pub sign_in: &'static str,
     /// How this profile's sign-in is run, which decides whether it needs telling
     /// first.
@@ -181,12 +171,9 @@ pub const CREDENTIAL_PREFIX: &str = "credentials-";
 /// sandbox that is in use.
 pub const WATCHER_PREFIX: &str = "watcher-";
 
-/// What a profile's own check said about it.
 #[derive(Clone, Debug)]
 pub struct CredentialReport {
-    /// What the command printed, which is what an operator reads.
     pub output: String,
-    /// Whether it exited 0, which is how a profile says it is signed in.
     pub signed_in: bool,
 }
 
@@ -196,7 +183,6 @@ pub struct CredentialReport {
 /// sandbox is the expensive part of asking, not running a command in it.
 #[derive(Clone, Debug)]
 pub struct CredentialCheck {
-    /// The profile whose login the command reads, so its answer reaches that row.
     pub profile: String,
     pub command: String,
 }
@@ -209,9 +195,7 @@ pub struct CredentialCheck {
 /// versions.
 #[derive(Clone, Debug)]
 pub struct EnvironmentDescription {
-    /// The image as it names itself, e.g. `Ubuntu 24.04`.
     pub os_release: String,
-    /// Installed packages as `name-version`, in the order the build listed them.
     pub packages: Vec<String>,
     pub built_at_ms: i64,
 }
@@ -243,13 +227,11 @@ pub struct SandboxSize {
 }
 
 impl SandboxSize {
-    /// An agent working a repository.
     pub const CAPSULE: Self = Self {
         cpus: 4,
         memory_mib: 5 * 1_024,
     };
 
-    /// One command, such as reading a provider's state.
     pub const COMMAND: Self = Self {
         cpus: 1,
         memory_mib: 512,

@@ -7,22 +7,18 @@
 //! from Settings and one opened from the first screen are the same widget; only
 //! the thing underneath is different.
 
-/// The screen a surface covered when it took the foreground.
 #[derive(Default)]
 pub struct Behind<T>(Option<T>);
 
 impl<T> Behind<T> {
-    /// Record what is covered, as the surface takes the foreground.
     pub fn cover(&mut self, under: T) {
         self.0 = Some(under);
     }
 
-    /// Take back what was covered, when the surface closes.
     pub fn uncover(&mut self) -> Option<T> {
         self.0.take()
     }
 
-    /// What is covered, for drawing under the surface.
     pub fn under(&self) -> Option<&T> {
         self.0.as_ref()
     }

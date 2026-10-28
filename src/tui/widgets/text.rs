@@ -17,16 +17,12 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthChar;
 
-/// How a field should be drawn.
 pub struct FieldStyle<'a> {
     pub focused: bool,
-    /// Drawn on the box's top border, when a box is drawn at all.
     pub title: Option<&'a str>,
-    /// Drawn before the text, inside the box.
     pub prefix: &'a str,
 }
 
-/// One line of text, with a caret.
 #[derive(Clone, Default)]
 pub struct Field {
     value: String,
@@ -34,7 +30,6 @@ pub struct Field {
 }
 
 impl Field {
-    /// A field holding `value`, with the caret at the end of it.
     pub fn with(value: &str) -> Self {
         Self {
             value: value.to_owned(),
@@ -54,7 +49,6 @@ impl Field {
         value.into_iter().collect()
     }
 
-    /// Whether there is nothing but whitespace.
     pub fn is_blank(&self) -> bool {
         self.value.trim().is_empty()
     }
@@ -159,7 +153,6 @@ pub struct TextBox {
 }
 
 impl TextBox {
-    /// A box holding `value`, with the caret after the last character of it.
     pub fn new(value: &str) -> Self {
         let lines: Vec<String> = if value.is_empty() {
             vec![String::new()]
@@ -171,7 +164,6 @@ impl TextBox {
         Self { lines, row, column }
     }
 
-    /// The whole box as one string, which is what a setup command is.
     pub fn value(&self) -> String {
         self.lines.join("\n")
     }
@@ -307,7 +299,6 @@ impl TextBox {
         }
     }
 
-    /// The lines as they are drawn at `width`, in rows rather than lines.
     fn rows(&self, width: usize) -> Vec<Row> {
         self.lines
             .iter()
@@ -328,7 +319,6 @@ impl TextBox {
     }
 }
 
-/// One drawn row of a box: a stretch of one of its lines, by character.
 struct Row {
     line: usize,
     start: usize,
@@ -376,7 +366,6 @@ fn wrap(text: &str, width: usize) -> Vec<(usize, usize)> {
     rows
 }
 
-/// The border a field or box wears, so it is obvious which one has the caret.
 fn border_style(focused: bool) -> Style {
     if focused {
         palette::accent()
@@ -385,7 +374,6 @@ fn border_style(focused: bool) -> Style {
     }
 }
 
-/// A key event built by hand, for pasted newlines and characters.
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }

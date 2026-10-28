@@ -41,7 +41,6 @@ pub struct AppCredentials {
     pub app_user_id: String,
 }
 
-/// What a machine already has installed, read from the file it saved.
 pub struct Installed {
     pub credentials: AppCredentials,
     pub installed_at: Option<SystemTime>,

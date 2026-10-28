@@ -22,7 +22,6 @@ pub enum VcsProviderKind {
 }
 
 impl VcsProviderKind {
-    /// Every kind this build knows, in the order a URL is offered to them.
     pub const ALL: &[Self] = &[Self::GitHub];
 
     /// The provider a repository field lists from while a build knows one.
@@ -51,19 +50,15 @@ impl VcsProviderKind {
     }
 }
 
-/// A repository a provider's login can reach, as a picker lists it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Repository {
-    /// `owner/name`, which is how the provider names it.
     pub name: String,
-    /// What a clone takes.
     pub url: String,
     pub is_private: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CodeContribution {
-    /// Provider-scoped stable identity. The provider adapter owns its format.
     pub id: String,
     pub provider: VcsProviderKind,
     pub host: String,
@@ -97,7 +92,6 @@ pub trait VcsProvider: Send + Sync {
         output: &str,
     ) -> Option<Vec<ContributionObservation>>;
 
-    /// What a sandbox has to install before this provider's commands can run.
     fn profile_recipe(&self) -> ProfileRecipe;
 
     /// What the provider's own CLI runs to list the repositories its login can
@@ -124,29 +118,17 @@ pub trait VcsProvider: Send + Sync {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MergeStanding {
-    /// A person merged it.
     Merged,
-    /// A person closed it without merging.
     Closed,
-    /// A draft, not offered for review yet.
     Draft,
-    /// Nobody has reviewed it, and a review is what is outstanding.
     AwaitingReview,
-    /// A reviewer asked for changes.
     ChangesRequested,
-    /// A reviewer approved it, and nothing else stands in the way.
     Approved,
-    /// Nothing stands in the way, and no review is expected.
     Clear,
-    /// Blocked by something the provider does not name.
     Blocked,
-    /// The branch is out of date with its base.
     Behind,
-    /// Checks have not settled.
     Unstable,
-    /// The branch cannot be merged as it stands.
     Conflicting,
-    /// The provider cannot say yet.
     Unknown,
 }
 
@@ -203,11 +185,8 @@ pub struct ContributionState {
 /// of every provider.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContributionReadiness {
-    /// Checks have not finished. There is nothing to decide yet.
     Pending,
-    /// Checks finished and nothing needs the agent. The operator decides next.
     Ready,
-    /// Something about the contribution needs the agent before a human review.
     NeedsAction,
 }
 
@@ -294,10 +273,8 @@ impl ContributionOutlook {
     }
 }
 
-/// What a provider reported about one contribution.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ContributionObservation {
-    /// [`CodeContribution::id`] this is about.
     pub contribution_id: String,
     pub state: ContributionState,
     /// One operator-facing line, e.g. `ci 1 failing, 2 passing · merge blocked ·
@@ -305,7 +282,6 @@ pub struct ContributionObservation {
     pub summary: String,
 }
 
-/// The contribution a URL names, if any provider claims it.
 pub fn contribution_from_url(url: &str) -> Option<CodeContribution> {
     VcsProviderKind::ALL
         .iter()
@@ -323,7 +299,6 @@ pub struct ProviderBatch {
 }
 
 impl ProviderBatch {
-    /// The batches every contribution given falls into.
     pub fn of(contributions: &[CodeContribution]) -> Vec<Self> {
         VcsProviderKind::ALL
             .iter()
@@ -341,7 +316,6 @@ impl ProviderBatch {
             .collect()
     }
 
-    /// The shell command that reports every contribution in this batch.
     pub fn command(&self) -> String {
         answering(self.kind).observation_command(&self.contributions)
     }
@@ -366,19 +340,16 @@ pub fn profile_recipes() -> Vec<ProfileRecipe> {
         .collect()
 }
 
-/// The recipe one provider contributes, for a named credential.
 pub(crate) fn profile_recipe(kind: VcsProviderKind) -> ProfileRecipe {
     answering(kind).profile_recipe()
 }
 
-/// The provider that answers for one kind of contribution.
 fn answering(kind: VcsProviderKind) -> &'static dyn VcsProvider {
     match kind {
         VcsProviderKind::GitHub => &GitHub,
     }
 }
 
-/// The host's clock, in the unit a contribution's own timestamps are compared in.
 pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

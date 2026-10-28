@@ -28,26 +28,18 @@ use crate::{
 
 pub struct Repositories {
     pub select: Select<Repository>,
-    /// Where each offer was drawn, so a click can find it.
     rows: Vec<(Rect, usize)>,
-    /// Why there is nothing to choose, when it is not still on its way.
     error: Option<String>,
 }
 
-/// What a key did while the list was open.
 pub enum Key {
-    /// The list is still open.
     Still,
-    /// The list closed without choosing: the caller keeps what it had.
     Closed,
-    /// The form should save, as ctrl-enter does everywhere.
     Save,
-    /// The list closed on this repository.
     Chosen(Repository),
 }
 
 impl Repositories {
-    /// Open on the repository already chosen, when it is in the list.
     pub fn new(repositories: &[Repository], current: Option<&str>) -> Self {
         let chosen = current
             .and_then(|current| {
@@ -65,7 +57,6 @@ impl Repositories {
         }
     }
 
-    /// Take a fresh listing, keeping what was chosen where it is still there.
     pub fn fill(&mut self, repositories: &[Repository]) {
         let chosen = self
             .select
@@ -86,7 +77,6 @@ impl Repositories {
         self.error = Some(error);
     }
 
-    /// Whether the list is still being asked for.
     pub fn is_listing(&self) -> bool {
         self.error.is_none() && self.select.is_empty()
     }
@@ -123,7 +113,6 @@ impl Repositories {
         self.select.chosen_value().cloned()
     }
 
-    /// Draw the list under the field it fills, or why it has not arrived.
     pub fn draw(&mut self, frame: &mut Frame, area: Rect, anchor: Rect, tick: Option<usize>) {
         if !self.select.is_empty() {
             self.rows = self.select.draw_list_below(frame, area, anchor);

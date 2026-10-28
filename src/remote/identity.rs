@@ -48,12 +48,10 @@ impl InstallationKey {
         Ok(Self { secret_key })
     }
 
-    /// The public key other peers dial.
     pub fn id(&self) -> EndpointId {
         self.secret_key.public()
     }
 
-    /// The key itself, for building an endpoint.
     pub fn secret_key(&self) -> &SecretKey {
         &self.secret_key
     }

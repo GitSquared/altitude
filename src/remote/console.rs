@@ -11,10 +11,8 @@ use std::{
     mem,
 };
 
-/// The width the serve role reads at.
 const WIDTH: usize = 78;
 
-/// Whether there is someone at the keyboard to answer.
 pub fn has_terminal() -> bool {
     io::stdin().is_terminal()
 }
@@ -25,7 +23,6 @@ fn styled() -> bool {
     io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none()
 }
 
-/// The text in bold, where the terminal can show it.
 pub fn bold(text: &str) -> String {
     if styled() {
         format!("\x1b[1m{text}\x1b[0m")
@@ -34,7 +31,6 @@ pub fn bold(text: &str) -> String {
     }
 }
 
-/// One answer, or nothing when there is no terminal to read it from.
 fn line(prompt: &str) -> io::Result<Option<String>> {
     if !has_terminal() {
         return Ok(None);
@@ -81,7 +77,6 @@ pub fn field(label: &str, value: impl fmt::Display) {
     println!("  {}{value}", bold(&format!("{label:<12}")));
 }
 
-/// A wrapped paragraph.
 pub fn paragraph(text: &str) {
     prose(text, "", "");
 }

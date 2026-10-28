@@ -12,7 +12,6 @@ use crate::vcs::{CodeContribution, ContributionObservation};
 pub struct TaskAgentTurnReport {
     #[serde(default)]
     pub operator_signal: Option<TaskOperatorSignalDraft>,
-    /// The model the harness actually used, when its output named one.
     #[serde(default)]
     pub model: Option<String>,
 }
@@ -63,10 +62,8 @@ pub struct TaskInput {
     pub author: TaskInputAuthor,
     pub source: TaskInputSource,
     pub body: String,
-    /// The signal thread this input answers, when it was written in one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub responding_to: Option<String>,
-    /// The tracker's own id for the comment or document this came from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_id: Option<String>,
 }
@@ -176,7 +173,6 @@ pub struct TaskAgentRun {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskOperatorSignal {
-    /// Unique inside its task; the thread uses the same id.
     pub id: String,
     pub task_id: String,
     pub kind: TaskOperatorSignalKind,
@@ -192,18 +188,14 @@ pub struct TaskOperatorSignal {
 /// conversation can become a review request without losing what led there.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskOperatorSignalThread {
-    /// The opening signal's id, and unique inside this task.
     pub id: String,
     pub task_id: String,
     pub kind: TaskOperatorSignalKind,
     pub title: String,
-    /// When the thread opened.
     pub opened_at_ms: i64,
-    /// When the agent last raised on this thread.
     pub last_raised_at_ms: i64,
     pub messages: Vec<TaskOperatorSignalMessage>,
     pub resolved: bool,
-    /// Who marked the thread resolved, and when. A later message opens it again.
     pub resolved_by: Option<TaskOperatorSignalAuthor>,
     pub resolved_at_ms: Option<i64>,
 }
@@ -219,7 +211,6 @@ pub struct TaskOperatorSignalMessage {
     pub at_ms: i64,
 }
 
-/// Which side of a conversation wrote a message.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskOperatorSignalAuthor {
@@ -270,23 +261,19 @@ pub struct Task {
     /// it. Its own machine until the task is delegated.
     pub host: String,
     pub code_contributions: Vec<CodeContribution>,
-    /// Latest observed state per contribution, oldest contribution first.
     pub code_contribution_observations: Vec<ContributionObservation>,
     pub facts: TaskFacts,
 }
 
-/// Latest recorded values. Consumers decide which facts are relevant to their operation.
 #[derive(Clone, Debug, sqlx::FromRow)]
 pub struct TaskFacts {
     pub accepted: bool,
     pub intent: String,
-    /// The short name the agent chose for the task, when it has chosen one.
     pub title: Option<String>,
     /// The key of the operator whose work this is, from the earliest recorded
     /// intent. It scopes their settings, logins and builds on a machine that
     /// serves several peers.
     pub operator_id: Option<String>,
-    /// How that operator reads to a human. Presentation only.
     pub operator_label: Option<String>,
     /// The project this task was founded in, as it was recorded then.
     ///
@@ -296,9 +283,7 @@ pub struct TaskFacts {
     #[sqlx(json(nullable))]
     pub project: Option<Project>,
     pub agent_conversation_id: Option<String>,
-    /// The model the harness last reported using.
     pub model: Option<String>,
-    /// The agent's latest full plan, replaced as a whole.
     #[sqlx(json(nullable))]
     pub plan: Option<Vec<TaskPlanStep>>,
     pub execution_status: TaskExecutionStatus,
@@ -318,7 +303,6 @@ pub struct TaskFacts {
     /// arrived by transfer carries where it belongs with the rest of its history.
     #[sqlx(json(nullable))]
     pub tracker_issue: Option<IssueReference>,
-    /// The blocking signal the operator is being waited on for, when one is open.
     pub blocking_signal_kind: Option<TaskOperatorSignalKind>,
     pub unresolved_signal_count: u32,
     /// The wrap-up request the host is holding while it watches linked
@@ -332,7 +316,6 @@ pub struct TaskFacts {
     pub review_wake_reason: Option<String>,
 }
 
-/// Semantic history written by Altitude's controllers, never directly by agents.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum TaskHistoryEvent {
@@ -383,7 +366,6 @@ pub enum TaskHistoryEvent {
     /// request cannot land on whichever run happens to end next; a request with
     /// no run to receive it is refused rather than recorded.
     ControlRequested {
-        /// The driver the operator asked for, not the one in effect.
         requested_mode: TaskExecutionMode,
         agent_run_id: String,
     },
@@ -403,11 +385,9 @@ pub enum TaskHistoryEvent {
     AgentModelObserved {
         model: String,
     },
-    /// A new contribution to what the operator has asked for.
     TaskInputExpressed {
         input: TaskInput,
     },
-    /// The agent replaced its plan.
     PlanUpdated {
         steps: Vec<TaskPlanStep>,
     },
@@ -551,7 +531,6 @@ pub enum TaskAgentRunOutcome {
     Failed,
 }
 
-/// One step in the agent's current plan.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskPlanStep {
     pub content: String,
@@ -580,12 +559,10 @@ pub struct TaskAgentTurnContext {
     /// The task's current title, which may still be the intent before the agent
     /// has named it.
     pub title: String,
-    /// The machine this task's capsule runs on.
     pub host: String,
     pub project: Option<Project>,
     pub agent: Option<AgentKind>,
     pub model: Option<String>,
-    /// The agent's latest full plan, replaced as a whole.
     pub plan: Vec<TaskPlanStep>,
     pub execution_status: TaskExecutionStatus,
     pub execution_mode: TaskExecutionMode,
@@ -595,7 +572,6 @@ pub struct TaskAgentTurnContext {
     pub last_error: Option<String>,
     pub datetime: String,
     pub latest_operator_message: Option<TaskOperatorSignalMessage>,
-    /// What the linked contributions currently look like outside Altitude.
     pub code_contribution_observations: Vec<ContributionObservation>,
 }
 
@@ -671,7 +647,6 @@ impl fmt::Display for TaskAgentTurnContext {
     }
 }
 
-/// The longest a task title may be before it stops being readable in a list.
 const TITLE_LIMIT: usize = 48;
 
 /// A title, normalized to what a list can show.

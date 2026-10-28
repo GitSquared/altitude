@@ -8,26 +8,18 @@
 //! This module is pure. The coordinator gathers the facts and performs the
 //! decision; keeping the decision here makes the policy reviewable in one place.
 
-/// Who wrote the comment, as far as this task is concerned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Actor {
-    /// The human this task belongs to.
     Operator,
-    /// A human the task does not belong to.
     OtherHuman,
-    /// The tracker app itself, or an actor we cannot attribute.
     Agent,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Admission {
-    /// Not this task's conversation.
     Ignore,
-    /// Keep it for the agent's next turn without starting one.
     Context,
-    /// Give the agent a turn with this input.
     Wake,
-    /// Tell a non-operator that the agent answers its operator, and name them.
     Redirect,
 }
 
@@ -42,16 +34,13 @@ impl Admission {
     }
 }
 
-/// What the coordinator learned about one comment before deciding.
 #[derive(Clone, Copy, Debug)]
 pub struct InputFacts {
     pub actor: Actor,
-    /// The tracker told us the comment mentions the app.
     pub is_mention: bool,
     /// The root of this thread was written by the app, so a reply is a
     /// conversation with the agent rather than a comment on an issue.
     pub is_agent_thread: bool,
-    /// The comment is a top-level comment on a document the app created.
     pub is_agent_document_comment: bool,
     /// A signal root this task published and tracks. Reserved for the signal
     /// binding ledger; false until signal comments exist.

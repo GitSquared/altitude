@@ -30,7 +30,6 @@ use crate::{
     project::Project,
 };
 
-/// What one profile's login came to, and how that was found.
 pub struct CredentialAnswer {
     pub signed_in: bool,
     pub output: String,
@@ -93,7 +92,6 @@ impl<E> Credentials<E>
 where
     E: IsolationEngine + Clone,
 {
-    /// What a named credential looks like to the list and sign-in surfaces.
     pub fn summary(&self, profile: &str) -> Option<ProfileSummary> {
         let recipe = self.recipe(profile).ok()?;
         Some(ProfileSummary {
@@ -257,7 +255,6 @@ where
         }
     }
 
-    /// Where a mounted profile keeps its files on this host.
     fn profile_directory(&self, profile: &str) -> PathBuf {
         self.config.profile_dir(profile)
     }

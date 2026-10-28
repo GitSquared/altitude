@@ -20,7 +20,6 @@ use crate::tui::widgets::palette;
 /// thirty frames a second from costing thirty noise evaluations.
 pub const CLOCK: Duration = Duration::from_millis(33);
 
-/// How many frames sit between two sampled height fields.
 const KEYFRAME_TICKS: usize = 24;
 
 /// How fast the terrain evolves along the noise field's third axis.
@@ -33,7 +32,6 @@ const MORPH_PER_SECOND: f64 = 0.01;
 const WORLD_WIDTH: f64 = 3.2;
 const WORLD_HEIGHT: f64 = 2.0;
 
-/// How many octaves of terrain, and how many contour lines per unit of height.
 const OCTAVES: usize = 3;
 const LEVELS: f64 = 14.3;
 
@@ -53,7 +51,6 @@ const ELEVATION_AXIS: f64 = 0.28;
 /// slice is a valid terrain, this one just happens to be a known-good one.
 const Z_ORIGIN: f64 = 15.246592;
 
-/// Push middle elevations down into valleys, leaving the peaks as the detail.
 const REDISTRIBUTION: f64 = 2.0;
 
 /// How much of the broad landscape shape to mix back in.
@@ -71,30 +68,20 @@ const SWELL_WEIGHT: f64 = 0.16;
 const OPEN_SYMBOL: &str = "\u{e000}";
 const OPEN_CELL: Cell = Cell::new(OPEN_SYMBOL);
 
-/// The braille dot each position in a cell's 2×4 pixel grid stands for.
 const DOTS: [[u8; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
 
 #[derive(Default)]
 pub struct Terrain {
     tick: usize,
-    /// The two sampled height fields the current frame interpolates between.
     heights: [Vec<f64>; 2],
-    /// The interpolated heights the glyphs are packed from.
     current: Vec<f64>,
-    /// Pixel corners and rows in noise space, reused between frames.
     xs: Vec<f64>,
     ys: Vec<f64>,
-    /// What the last pack found for every cell in the field's area.
     glyphs: Vec<Cell>,
-    /// The cells the last pack was for, so a frame that changes neither replays.
     open: Vec<(u16, u16)>,
-    /// Where this frame found open cells, kept to reuse its allocation.
     scan: Vec<(u16, u16)>,
-    /// Open cell runs per cell row, for evaluating only the visible heights.
     runs: Vec<Vec<(u16, u16)>>,
-    /// The tick and area the glyphs were packed for.
     drawn: Option<(usize, Rect)>,
-    /// The keyframe index and area the sampled heights are for.
     sampled: Option<(usize, Rect)>,
 }
 
@@ -103,7 +90,6 @@ impl Terrain {
         self.tick = self.tick.wrapping_add(1);
     }
 
-    /// Mark the field's area before the interface draws over it.
     pub fn mark(&self, buffer: &mut Buffer, area: Rect) {
         for y in area.top()..area.bottom() {
             let start = buffer.index_of(area.left(), y);
@@ -111,7 +97,6 @@ impl Terrain {
         }
     }
 
-    /// Draw the field into whatever the interface left open.
     pub fn draw(&mut self, buffer: &mut Buffer, area: Rect) {
         let mut scan = mem::take(&mut self.scan);
         scan.clear();
@@ -224,7 +209,6 @@ impl Terrain {
         }
     }
 
-    /// Sample the height fields that bracket the current keyframe.
     fn sample(
         &mut self,
         area: Rect,
@@ -371,7 +355,6 @@ fn elevation(x: f64, y: f64, z: f64) -> f64 {
     height.powf(REDISTRIBUTION) + SWELL_WEIGHT * swell
 }
 
-/// The normalized fractal noise, before redistribution and the broad swell.
 #[inline(always)]
 fn texture(x: f64, y: f64, z: f64) -> f64 {
     let mut texture = 0.0;

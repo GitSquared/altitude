@@ -9,7 +9,6 @@
 use crate::{agent::AgentKind, tracker::TrackerKind, vcs::VcsProviderKind};
 use serde::{Deserialize, Serialize};
 
-/// Which slot of a project a credential can fill.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Slot {
     Agent,
@@ -17,7 +16,6 @@ pub enum Slot {
     Tracker,
 }
 
-/// The external services a credential can belong to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Service {
     Agent(AgentKind),
@@ -26,7 +24,6 @@ pub enum Service {
 }
 
 impl Service {
-    /// Every service this build can connect.
     pub const ALL: [Self; 4] = [
         Self::Agent(AgentKind::Claude),
         Self::Agent(AgentKind::Pi),
@@ -34,7 +31,6 @@ impl Service {
         Self::Tracker(TrackerKind::Linear),
     ];
 
-    /// The service a profile id names, with any instance suffix ignored.
     pub fn from_id(id: &str) -> Option<Self> {
         let mut parts = id.split('/');
         match (parts.next()?, parts.next()?) {
@@ -54,7 +50,6 @@ impl Service {
         }
     }
 
-    /// What this service is called, independent of the credential.
     pub fn label(self) -> &'static str {
         match self {
             Self::Agent(AgentKind::Claude) => "Claude Code",
@@ -70,7 +65,6 @@ impl Service {
         !matches!(self, Self::Tracker(_))
     }
 
-    /// The id every installation starts with for this service.
     pub fn default_id(self) -> &'static str {
         match self {
             Self::Agent(AgentKind::Claude) => "agents/claude",
@@ -81,12 +75,9 @@ impl Service {
     }
 }
 
-/// One named credential.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Credential {
-    /// Stable, and the profile directory a task mounts.
     pub id: String,
-    /// What an operator reads and binds by.
     pub label: String,
     /// Whether the label is still the one the service or the fallback chose.
     /// A rename turns this off, so a later account hint does not overwrite it.
@@ -111,7 +102,6 @@ impl Credential {
         Service::from_id(&self.id)
     }
 
-    /// Whether the id is usable as a profile directory and a route.
     pub fn is_valid(&self) -> bool {
         let id = self.id.trim();
         !id.is_empty()

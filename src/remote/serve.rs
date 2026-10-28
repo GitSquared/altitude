@@ -81,7 +81,6 @@ struct OwnTasks {
     /// alive while pieces are being fetched; the history says when it was staged,
     /// which is the floor a restart starts from.
     activity: Arc<Mutex<HashMap<String, i64>>>,
-    /// Who is watching this machine's tasks, and where each one's changes go.
     watchers: Arc<Watchers>,
     read_slots: Arc<Semaphore>,
     readiness: watch::Sender<RemoteState>,
@@ -116,7 +115,6 @@ impl Watchers {
         receiving
     }
 
-    /// A task changed, and this is who it belongs to.
     fn changed(&self, operator: &str, summary: TaskSummary) {
         let mut peers = self.peers.lock().expect("watchers lock poisoned");
         peers.retain(|watching| {
@@ -132,7 +130,6 @@ impl Watchers {
         });
     }
 
-    /// The machine can be given work, which nothing about a task says.
     fn ready(&self) {
         let mut peers = self.peers.lock().expect("watchers lock poisoned");
         peers.retain(|watching| {
@@ -217,7 +214,6 @@ impl OwnTasks {
         }
     }
 
-    /// The transfer a task is staged for, and when it was staged.
     async fn staged_transfer(&self, task_id: &str) -> Option<(String, i64)> {
         self.tasks
             .events(task_id)
@@ -987,7 +983,6 @@ impl super::tracker::Host for OwnTasks {
     }
 }
 
-/// Wait until the machine's runtime can make sandboxes, or say why it cannot.
 async fn wait_until_ready(runtime: &mut watch::Receiver<IsolationStatus>) -> Result<(), String> {
     loop {
         match &*runtime.borrow_and_update() {

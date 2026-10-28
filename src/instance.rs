@@ -15,22 +15,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// The database this process is driving, held until the process exits.
 pub struct Instance {
     _file: fs::File,
 }
 
-/// Why a database could not be claimed.
 pub enum ClaimError {
-    /// Another client is already driving it.
-    InUse {
-        database: PathBuf,
-    },
+    InUse { database: PathBuf },
     Io(io::Error),
 }
 
 impl Instance {
-    /// Claim a database, or say who already has it.
     pub fn claim(database: &Path) -> Result<Self, ClaimError> {
         // The database is created when it is opened, which is after this on a first
         // start, and the lock lives beside it.
@@ -80,7 +74,6 @@ impl fmt::Debug for ClaimError {
 
 impl Error for ClaimError {}
 
-/// The lock that belongs to a database file, beside it and named after it.
 fn lock_path(database: &Path) -> PathBuf {
     let mut name = database
         .file_name()

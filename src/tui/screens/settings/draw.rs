@@ -29,7 +29,6 @@ use super::{
     rows::{RowKind, View, mark},
 };
 
-/// What a click on the settings screen can select.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsHit {
     Section(usize),
@@ -191,7 +190,6 @@ fn draw_columns(
     frame.render_widget(pane, detail_area);
 }
 
-/// What the description column says when there is no row to describe.
 fn draw_empty_detail(frame: &mut Frame, area: Rect, section: Section) {
     let message = match section {
         Section::Agents | Section::VersionControl | Section::Trackers => {
@@ -213,7 +211,6 @@ fn draw_empty_detail(frame: &mut Frame, area: Rect, section: Section) {
     );
 }
 
-/// The third column: what is known about the row the list has selected.
 fn detail(panel: &Panel, view: &View, tick: Option<usize>) -> Paragraph<'static> {
     let heading = move |text: String| Line::styled(text, palette::heading());
     let Some(row) = panel.selected_row(view) else {

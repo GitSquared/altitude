@@ -19,14 +19,12 @@ use crate::tui::{
     widgets::{button, chrome, palette},
 };
 
-/// A sign-in the operator drives, described before its terminal opens.
 pub struct SignIn {
     pub display: String,
     pub profile: String,
     lines: Vec<Line<'static>>,
 }
 
-/// What the operator answered.
 pub enum Decision {
     Cancel,
     Open,

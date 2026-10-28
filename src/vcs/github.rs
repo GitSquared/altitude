@@ -219,13 +219,11 @@ fn graphql_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// The answer to one contribution query, keyed by the alias its contribution got.
 #[derive(Deserialize)]
 struct ContributionQuery {
     data: Option<HashMap<String, Option<PullRequestView>>>,
 }
 
-/// What one pull request looks like, as the host reads it.
 fn observation_of(
     contribution: &CodeContribution,
     view: &PullRequestView,
@@ -264,17 +262,14 @@ fn observation_of(
     }
 }
 
-/// The subset of `gh pr view --json` this provider reads.
 #[derive(Deserialize)]
 struct PullRequestView {
     #[serde(rename = "headRefOid")]
     head_ref_oid: String,
-    /// When the pull request was opened, which is what its checks are timed from.
     #[serde(rename = "createdAt", default)]
     created_at: Option<String>,
     #[serde(rename = "reviewDecision", default)]
     review_decision: Option<String>,
-    /// Absent or null when a pull request has no checks at all.
     #[serde(rename = "statusCheckRollup", default)]
     status_check_rollup: Option<Vec<CheckRollupEntry>>,
     #[serde(default)]
@@ -296,7 +291,6 @@ struct PullRequestView {
 /// is the difference between seeing a failing check and never seeing it at all.
 const CHECKS_APPEAR_WITHIN_MS: i64 = 60_000;
 
-/// A provider timestamp as the host measures it.
 fn created_at_ms(created_at: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(created_at)
         .ok()

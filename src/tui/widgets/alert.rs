@@ -18,7 +18,6 @@ use crate::tui::widgets::{button, chrome, palette};
 const MAX_WIDTH: u16 = 64;
 const MIN_WIDTH: u16 = 28;
 
-/// Something to read, and one way to be done with it.
 pub struct Alert {
     pub message: String,
     /// Whether this is something that went wrong. A problem reads in the colour
@@ -46,7 +45,6 @@ impl Alert {
     }
 }
 
-/// Draw the message, and answer with the box it occupies.
 pub fn draw(frame: &mut Frame, area: Rect, alert: &Alert) -> Rect {
     let width = (area.width * 2 / 3)
         .clamp(MIN_WIDTH, MAX_WIDTH)

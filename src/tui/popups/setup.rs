@@ -24,7 +24,6 @@ pub enum SetupKind {
 
 struct TrackerOption {
     provider: TrackerKind,
-    /// The mark: on, off, or nothing to say yet.
     is_ready: Option<bool>,
     status: &'static str,
 }
@@ -65,7 +64,6 @@ pub struct Setup {
     /// What `c` puts on the clipboard, when the page is showing something to take
     /// away rather than something to read.
     copy: Option<String>,
-    /// Whether closing goes back to the first-run card rather than the panel.
     returns_to_card: bool,
 }
 
@@ -100,7 +98,6 @@ impl Setup {
         }
     }
 
-    /// Make `c` copy this text, and say so in the hints.
     pub fn with_copy(mut self, text: String) -> Self {
         self.copy = Some(text);
         self
@@ -110,7 +107,6 @@ impl Setup {
         self.copy.as_deref()
     }
 
-    /// Close back to the first-run card, which is what opened this page.
     pub fn returning_to_card(mut self) -> Self {
         self.returns_to_card = true;
         self
@@ -180,7 +176,6 @@ impl Setup {
         }
     }
 
-    /// Move the guide by one wheel notch.
     pub(in crate::tui) fn wheel(&mut self, up: bool, rows: u16) {
         self.scroll = if up {
             self.scroll.saturating_sub(rows)

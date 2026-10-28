@@ -44,7 +44,6 @@ const HISTORY_FILE: &str = "history.json";
 const ENVIRONMENT_FILE: &str = "environment.tar.zst";
 const CAPSULE_FILE: &str = "capsule.tar.zst";
 
-/// A foreign error as the string this module's callers speak in.
 fn message(error: impl fmt::Display) -> String {
     error.to_string()
 }
@@ -58,7 +57,6 @@ struct OutgoingTransfer {
     peer: EndpointAddr,
 }
 
-/// What the destination keeps for one incoming transfer, written once.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct IncomingTransfer {
     peer: String,
@@ -207,7 +205,6 @@ where
     Ok(destination_task)
 }
 
-/// Upload each archive the remote does not already hold, in bounded pieces.
 async fn upload_handover(
     client: &LinkClient,
     peer: &EndpointAddr,
@@ -380,7 +377,6 @@ impl IncomingTransfers {
         }
     }
 
-    /// Write one piece of an archive, at the offset it belongs at.
     pub async fn put(
         &self,
         peer: EndpointId,
@@ -561,7 +557,6 @@ impl IncomingTransfers {
     }
 }
 
-/// Import the environment the capsule is a delta on, then the capsule itself.
 async fn import_snapshots(directory: &Path, handover: &Handover) -> Result<Option<String>, String> {
     let Some(environment) = &handover.environment else {
         return if handover.capsule.len == 0 {
@@ -626,7 +621,6 @@ fn refuse_foreign_founder(history: &[(i64, TaskHistoryEvent)], peer: &str) -> Re
     }
 }
 
-/// The display name, file name, and announced archive for one part.
 fn part_details(
     handover: &Handover,
     part: TransferPart,
@@ -668,7 +662,6 @@ fn transfer_directory(config: &Config, transfer_id: &str) -> Result<PathBuf, Str
         .join(transfer_id))
 }
 
-/// Write one piece, refusing to let a retry disagree with what is already there.
 fn write_piece(path: &Path, offset: u64, bytes: &[u8]) -> Result<(), String> {
     let mut file = fs::OpenOptions::new()
         .create(true)

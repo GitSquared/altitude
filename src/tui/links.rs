@@ -10,14 +10,12 @@
 /// shorter than a payload.
 const LONGEST: usize = 2_048;
 
-/// An address a sandbox asked for, checked into something a browser may be given.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Link {
     url: String,
 }
 
 impl Link {
-    /// What a browser may be handed, or nothing.
     pub fn parse(url: &str) -> Option<Self> {
         if url.len() > LONGEST || url.chars().any(|c| c.is_control() || c.is_whitespace()) {
             return None;

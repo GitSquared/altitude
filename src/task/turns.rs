@@ -400,7 +400,6 @@ where
         Ok(task)
     }
 
-    /// Stop a task's capsule and answer with where its snapshot landed.
     async fn suspend_capsule(&self, task: &Task) -> Result<String, TaskServiceError> {
         let sandbox_id = task
             .facts

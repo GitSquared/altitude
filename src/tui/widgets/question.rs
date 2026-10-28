@@ -11,7 +11,6 @@ use ratatui::{
 
 use crate::tui::widgets::{button, chrome, palette};
 
-/// Draw the question, and answer with the box it occupies.
 pub fn draw(
     frame: &mut Frame,
     area: Rect,

@@ -75,14 +75,11 @@ pub struct TaskEventLoop<E> {
     runs: Arc<Mutex<HashMap<String, ActiveRun>>>,
     control_requests: Arc<Mutex<HashMap<String, RequestedControl>>>,
     terminal_output: Arc<Mutex<HashMap<String, CachedTerminalOutput>>>,
-    /// What the host will run at once, and what it has observed to decide it.
     capacity: Arc<Mutex<HostCapacity>>,
     /// Tasks admitted but not yet running. A task stays `Pending` until its run
     /// reports, so without this it would be admitted again on the next pass.
     starting: Arc<Mutex<HashSet<String>>>,
-    /// The observation sandboxes, shared by every held review of one owner.
     watchers: Arc<Watchers<E>>,
-    /// When each held review is next worth a look.
     review_waits: Arc<ReviewWaits>,
 }
 
@@ -144,7 +141,6 @@ where
         (event_loop, receiver)
     }
 
-    /// What the host will run at once, for an interface that has to explain a wait.
     pub fn capacity_limit(&self) -> usize {
         self.capacity
             .lock()
@@ -152,7 +148,6 @@ where
             .limit()
     }
 
-    /// Observe the host on an interval, and let the observation admit work.
     fn watch_host_capacity(&self) {
         let event_loop = self.clone();
         tokio::spawn(async move {
@@ -283,7 +278,6 @@ where
         &self.service
     }
 
-    /// One task as it reads now, for a screen that is showing it.
     pub async fn task(&self, task_id: &str) -> Result<Option<Task>, TaskServiceError> {
         self.service.task(task_id).await
     }
@@ -520,7 +514,6 @@ where
         true
     }
 
-    /// Take the run this host is driving for a task, if it still has one.
     fn take_active_run(&self, task_id: &str) -> Option<ActiveRun> {
         self.runs
             .lock()
@@ -782,7 +775,6 @@ where
         Ok(())
     }
 
-    /// Build what a task's project needs, and say where its snapshot is.
     pub async fn prepare_project(
         &self,
         project: &Project,
@@ -791,7 +783,6 @@ where
         self.service.prepare_project(project, agent).await
     }
 
-    /// Build what a task's project needs for one operator.
     pub async fn prepare_project_as_operator(
         &self,
         owner: &str,
@@ -955,7 +946,6 @@ where
         Ok(())
     }
 
-    /// Everything that happened to a task, in order, with when it happened.
     pub async fn events(
         &self,
         task_id: &str,
@@ -1213,7 +1203,6 @@ where
         }
     }
 
-    /// One held review, decided from what its owner's provider reported.
     async fn decide_held_review(&self, task: &Task, observations: &[ContributionObservation]) {
         let Some(deferred) = task.facts.deferred_review.clone() else {
             return;
@@ -1374,7 +1363,6 @@ where
         }
     }
 
-    /// Interpret a finished run inside tasks/, keeping the UI concerned only with updates and input.
     async fn handle_run_termination(
         &self,
         task: Task,

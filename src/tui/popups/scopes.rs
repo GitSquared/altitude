@@ -26,21 +26,14 @@ use crate::{
 
 pub struct Scopes {
     pub select: Select<ScopeSummary>,
-    /// Where each offer was drawn, so a click can find it.
     rows: Vec<(Rect, usize)>,
-    /// Why there is nothing to choose, when it is not still on its way.
     error: Option<String>,
 }
 
-/// What a key did while the list was open.
 pub enum Key {
-    /// The list is still open.
     Still,
-    /// The list closed without choosing: the caller keeps what it had.
     Closed,
-    /// The form should save, as ctrl-enter does everywhere.
     Save,
-    /// The list closed on this team.
     Chosen(ScopeSummary),
 }
 
@@ -55,7 +48,6 @@ impl Scopes {
         }
     }
 
-    /// Take a fresh listing.
     pub fn fill(&mut self, scopes: &[ScopeSummary]) {
         self.select.set_offers(offers(scopes));
         self.error = None;
@@ -65,7 +57,6 @@ impl Scopes {
         self.error = Some(error);
     }
 
-    /// Whether the list is still being asked for.
     pub fn is_listing(&self) -> bool {
         self.error.is_none() && self.select.is_empty()
     }
@@ -86,7 +77,6 @@ impl Scopes {
         Key::Closed
     }
 
-    /// Draw the list under the field it fills, or why it has not arrived.
     pub fn draw(&mut self, frame: &mut Frame, area: Rect, anchor: Rect, tick: Option<usize>) {
         if !self.select.is_empty() {
             self.rows = self.select.draw_list_below(frame, area, anchor);

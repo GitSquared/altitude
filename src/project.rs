@@ -29,19 +29,14 @@ pub const DEFAULT_CACHES: &[&str] = &[
     "~/go/pkg/mod",
 ];
 
-/// A piece of work, and the machine state it is done in.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Project {
-    /// Stable across renames, and what storage and tasks are keyed by.
     pub id: String,
     pub name: String,
-    /// What a task's machine installs on top of the base image.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub setup_command: String,
-    /// The repository a task starts from, when the project has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
-    /// Directories shared by every task in this project on this machine.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub caches: Vec<String>,
     /// What the operator wants known about this work, given to the agent as part
@@ -64,13 +59,10 @@ pub struct Project {
     /// project is moving its work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
-    /// The version-control login this project's repositories come from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vcs: Option<VcsProviderKind>,
-    /// The version-control identity this project's repositories come from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vcs_credential: Option<String>,
-    /// The tracker work this project claims.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracker: Option<TrackerRoute>,
     /// The identity commits made here carry, when it differs from the
@@ -79,12 +71,10 @@ pub struct Project {
     pub commits: Option<ProjectCommits>,
 }
 
-/// A commit identity a project can carry instead of the installation's own.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ProjectCommits {
     pub name: String,
     pub email: String,
-    /// A signing key the version-control profile holds, when commits are signed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signing_key: Option<String>,
 }
@@ -95,7 +85,6 @@ pub struct ProjectCommits {
 /// scope become. Without one, a delegated issue starts nothing and says so.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct TrackerRoute {
-    /// The tracker identity this route speaks through.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<String>,
     /// The provider's scope, by id or by the name a person types: a Linear team, a
@@ -115,7 +104,6 @@ pub struct TrackerRoute {
 }
 
 impl TrackerRoute {
-    /// Whether this route claims exactly the scope an issue named.
     pub fn claims(&self, id: &str, aliases: &[String]) -> bool {
         let Some(scope) = &self.scope else {
             return false;
@@ -126,12 +114,10 @@ impl TrackerRoute {
                 .any(|alias| scope.eq_ignore_ascii_case(alias))
     }
 
-    /// Whether this route claims every scope of its account.
     pub fn claims_anything(&self) -> bool {
         self.scope.is_none()
     }
 
-    /// The key two routes are compared by, for refusing an ambiguous pair.
     pub fn claim_key(&self) -> String {
         self.scope
             .as_ref()
@@ -141,7 +127,6 @@ impl TrackerRoute {
 }
 
 impl Project {
-    /// A project with nothing configured, and the caches that make it useful.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
@@ -195,7 +180,6 @@ impl Project {
         }
     }
 
-    /// The version-control provider this project's repositories come from.
     pub fn vcs_provider(&self) -> VcsProviderKind {
         self.vcs.unwrap_or_else(VcsProviderKind::sole)
     }
@@ -208,7 +192,6 @@ impl Project {
         self.name.to_ascii_lowercase()
     }
 
-    /// The repository as a list row reads it: `owner/name` rather than a URL.
     pub fn repository_label(&self) -> Option<String> {
         let repository = self.repository.as_deref()?;
         let short = repository
@@ -227,7 +210,6 @@ impl Project {
         self.repository_name().map(|name| format!("~/{name}"))
     }
 
-    /// The repository's last path segment, which names its directory.
     fn repository_name(&self) -> Option<String> {
         let repository = self.repository.as_deref()?;
         repository
@@ -414,7 +396,6 @@ pub fn normalize_repository(value: &str) -> Result<String, ProjectError> {
     Ok(repository)
 }
 
-/// A cache path is a place inside the sandbox, written the way it is reached.
 fn validate_cache(value: &str) -> Result<(), ProjectError> {
     let trimmed = value.trim().trim_end_matches('/');
     let invalid = |why: &str| Err(ProjectError(format!("cache {value:?} {why}")));

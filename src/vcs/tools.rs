@@ -11,7 +11,6 @@ use super::contribution_from_url;
 use crate::agent::tools::{AgentTool, AgentToolError, AgentToolFuture, AgentToolProvider};
 use crate::task::TaskStore;
 
-/// The `vcs` agent tools, bound to one task's record.
 pub struct VcsAgentTools {
     store: TaskStore,
     task_id: String,

@@ -50,14 +50,12 @@ pub struct Message<'a> {
     pub when: &'a str,
     pub body: &'a str,
     pub from_operator: bool,
-    /// Whether the message has the keyboard's focus in the conversation.
     pub focused: bool,
     /// What the operator's message says about its journey. Absent for the
     /// agent's side, which is not waiting on anyone.
     pub tick: Option<Tick>,
 }
 
-/// How many rows the card takes at this width, border included.
 pub fn height(width: u16, body: &str) -> u16 {
     // The border takes two columns and the padding takes two more.
     let text_width = width.saturating_sub(4).max(1);
@@ -118,7 +116,6 @@ pub fn draw_clipped(
     }
 }
 
-/// Put the tick on the bottom border, right-aligned and clear of the corner.
 fn stamp_tick(buffer: &mut Buffer, tick: Tick) {
     let glyphs = tick.glyphs().chars().collect::<Vec<_>>();
     let row = buffer.area.height.saturating_sub(1);

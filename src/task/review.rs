@@ -44,11 +44,8 @@ const READ_TIMEOUT: Duration = Duration::from_secs(60);
 /// waiting on it.
 pub(super) const OBSERVATION_ATTEMPTS: u32 = 5;
 
-/// What one look at an owner's contributions found.
 pub(super) enum Look {
-    /// Every linked contribution was read.
     Read(Vec<ContributionObservation>),
-    /// The provider was asked and could not be read.
     Unreadable,
     /// The provider was not asked, because the host is stopping or because its
     /// recent reads failed and it is waiting out a backoff.
@@ -72,14 +69,10 @@ pub(super) struct Watchers<E> {
     stopped: AtomicBool,
 }
 
-/// What the host keeps for one credential owner.
 #[derive(Default)]
 struct Owner {
-    /// The sandbox that reads this owner's providers, made on first use.
     sandbox: Option<String>,
-    /// Looks that failed since the last one that worked.
     failures: u32,
-    /// When another look is allowed, while a failure is being waited out.
     retry_at: Option<Instant>,
 }
 
@@ -148,7 +141,6 @@ where
         }
     }
 
-    /// Drop the sandbox of every owner that has no held review left.
     pub(super) async fn retain(&self, owners: &HashSet<String>) {
         let mut live = self.owners.lock().await;
         let dropped: Vec<String> = live
@@ -163,7 +155,6 @@ where
         }
     }
 
-    /// Throw away every watcher sandbox and refuse to make another.
     pub(super) async fn shutdown(&self) {
         self.stopped.store(true, Ordering::Release);
         let ids: Vec<String> = self
@@ -197,7 +188,6 @@ where
         }
     }
 
-    /// Make the owner's sandbox, scoped to them before it is made.
     async fn open(&self, owner: &str) -> Result<String, TaskServiceError> {
         let service = self.service.as_operator(owner)?;
         let id = watcher_sandbox_id(owner);
@@ -272,7 +262,6 @@ impl ReviewWaits {
             .collect()
     }
 
-    /// Record what a look found, which decides when the next one is worth it.
     pub(super) async fn looked(&self, task_id: &str, moved: bool) {
         if let Some(wait) = self.waits.lock().await.get_mut(task_id) {
             if moved {
@@ -284,12 +273,9 @@ impl ReviewWaits {
     }
 }
 
-/// How long one held review waits before its next look.
 #[derive(Clone, Copy)]
 struct ReviewWait {
-    /// When the next look is allowed.
     next_at: Instant,
-    /// How long it is waiting now.
     interval: Duration,
 }
 
@@ -305,13 +291,11 @@ impl ReviewWait {
         now >= self.next_at
     }
 
-    /// The wait after a look that found something new.
     fn moved(&mut self) {
         self.interval = REVIEW_POLL_INTERVAL;
         self.next_at = Instant::now() + self.interval;
     }
 
-    /// The wait after a look that found what the last one did.
     fn unchanged(&mut self) {
         self.interval = (self.interval * 2).min(REVIEW_POLL_CEILING);
         self.next_at = Instant::now() + self.interval;

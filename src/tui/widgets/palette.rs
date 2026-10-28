@@ -50,7 +50,6 @@ pub fn selection_detail() -> Style {
     Style::new().fg(Color::Gray)
 }
 
-/// The edge of whatever holds the caret, and marks that invite a second look.
 pub fn accent() -> Style {
     Style::new().fg(Color::Cyan)
 }
@@ -93,22 +92,18 @@ pub fn backdrop() -> Style {
     muted().add_modifier(Modifier::DIM)
 }
 
-/// Work that is going well: running, accepted, in review.
 pub fn good() -> Style {
     Style::new().fg(Color::Green)
 }
 
-/// Work that is waiting on a person.
 pub fn attention() -> Style {
     Style::new().fg(Color::Yellow)
 }
 
-/// An assumption worth reviewing, rather than work that needs answering.
 pub fn decision() -> Style {
     Style::new().fg(Color::LightBlue)
 }
 
-/// Work that has failed, or something the operator has to see.
 pub fn bad() -> Style {
     Style::new().fg(Color::Red)
 }

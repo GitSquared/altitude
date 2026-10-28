@@ -40,10 +40,8 @@ use super::settings::GitIdentity;
 /// eye has a column to read, and the task list behind it keeps its own.
 const CARD_WIDTH: u16 = 80;
 
-/// The label column, wide enough for "Version control" and a space after it.
 const LABEL_WIDTH: usize = 15;
 
-/// The action column, on the right of every row.
 const ACTION_WIDTH: usize = 16;
 
 /// The rows the help under the steps keeps, whatever it says.
@@ -61,7 +59,6 @@ const HELP_ROWS: u16 = 6;
 /// having happened.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Marker {
-    /// Settled: answered, chosen, or deliberately none.
     Done,
     /// Chosen, but whether it is usable is not known yet: a check is out, or no
     /// answer came.
@@ -69,7 +66,6 @@ enum Marker {
     /// Nothing has been answered here yet. Whether anything depends on it is
     /// what the row's copy says.
     Unset,
-    /// There is an answer to give here that has not been given.
     Question,
 }
 
@@ -84,7 +80,6 @@ impl Marker {
     }
 }
 
-/// What the keys are on.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Name,
@@ -110,7 +105,6 @@ const ROWS: [Focus; 8] = [
     Focus::Ready,
 ];
 
-/// A remote announcing on this network that this installation does not know yet.
 #[derive(Clone)]
 pub struct RemoteOffer {
     pub label: String,
@@ -127,21 +121,15 @@ pub struct SetupState {
     pub agent_status: CredentialStatus,
     pub vcs: VcsProviderKind,
     pub vcs_status: CredentialStatus,
-    /// Whether the repositories behind the VCS login are still being read.
     pub vcs_listing: bool,
     pub repository: Option<String>,
-    /// The machine new tasks for this project start on, when it is not this one.
     pub host: Option<String>,
-    /// A remote announcing here that this installation has not adopted.
     pub offer: Option<RemoteOffer>,
     pub tracker: TrackerState,
-    /// The identity and signing the commits made in a task carry.
     pub commits: GitIdentity,
-    /// Whether the version-control profile holds a signing key.
     pub has_key: bool,
 }
 
-/// The identity and signing as the card edits them.
 pub struct Commits {
     pub open: bool,
     pub name: Field,
@@ -176,7 +164,6 @@ impl Commits {
         }
     }
 
-    /// Put back what is saved, and close.
     pub fn reload(&mut self, identity: &GitIdentity) {
         *self = Self::from(identity);
     }
@@ -302,12 +289,10 @@ impl GetStarted {
                 .is_some_and(|browser| browser.select.is_searching())
     }
 
-    /// Take the repository the list just returned, and show it.
     pub fn set_repository(&mut self, repository: &Repository) {
         self.repository = repository_select(slice::from_ref(repository), Some(&repository.url));
     }
 
-    /// Put the name back to what is saved, when a draft is abandoned.
     pub fn reset_name(&mut self, name: &str) {
         self.name = Field::with(name);
     }
@@ -415,7 +400,6 @@ impl GetStarted {
     }
 }
 
-/// Whether every required answer is in, and the name has been written down.
 pub fn ready(setup: &SetupState, name: &Field) -> bool {
     !name.is_blank()
         && setup.agent.is_some()
@@ -533,7 +517,6 @@ fn subtitle() -> Text<'static> {
     ])
 }
 
-/// The welcome without its styling, for measuring how tall it will be.
 fn subtitle_plain() -> &'static str {
     "welcome to ⛰  altitude, a tool to pilot agents efficiently and keep your focus on the \
      decisions that matter.\n\nlet's get you set up:"
@@ -876,7 +859,6 @@ fn row(
     ])
 }
 
-/// The identity, as four rows under the one that opens it.
 fn commits_editor(commits: &Commits, setup: &SetupState, width: u16) -> Vec<Line<'static>> {
     let indent = " ".repeat(LABEL_WIDTH + 7);
     let name = if commits.field == CommitsField::Name {

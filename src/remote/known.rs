@@ -19,9 +19,7 @@ use super::{LinkResult, announce::Announcement, protocol::RemoteTicket};
 /// address.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemoteKeyStatus {
-    /// Nothing is recorded for this address: it has not answered before.
     New,
-    /// The same key as the one recorded.
     Known,
     /// A different key.
     ///
@@ -33,7 +31,6 @@ pub enum RemoteKeyStatus {
 }
 
 impl RemoteKeyStatus {
-    /// Classifies an answering key against whatever is recorded for its address.
     pub fn classify(recorded: Option<&str>, answering: &EndpointId) -> Self {
         match recorded {
             None => Self::New,
@@ -43,13 +40,9 @@ impl RemoteKeyStatus {
     }
 }
 
-/// A remote, as met: what it says about itself, and how it compares to memory.
 pub struct Sighting {
-    /// Where to reach it.
     pub ticket: RemoteTicket,
-    /// What it said.
     pub announcement: Announcement,
-    /// How the key it answered with stands next to the one recorded.
     pub key_status: RemoteKeyStatus,
 }
 

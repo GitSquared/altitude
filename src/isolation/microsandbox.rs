@@ -126,7 +126,6 @@ pub struct MicrosandboxIsolation {
     config: Config,
     data_home: PathBuf,
     cache_home: PathBuf,
-    /// Microsandbox's Unix sockets exceed macOS path limits under the longer data home.
     socket_safe_home: PathBuf,
     build_lock: BuildLock,
 }
@@ -145,7 +144,6 @@ struct BuildLock {
     path: PathBuf,
 }
 
-/// A held build slot, released when the build ends or this process dies.
 struct BuildGuard {
     _file: fs::File,
 }
@@ -157,7 +155,6 @@ impl BuildLock {
         }
     }
 
-    /// Wait for the build slot, without holding a runtime thread while waiting.
     async fn acquire(&self) -> Result<BuildGuard, IsolationError> {
         let path = self.path.clone();
         spawn_blocking(move || {
@@ -252,7 +249,6 @@ impl MicrosandboxIsolation {
         }
     }
 
-    /// Connects the harness bridge to the credential shell's empty MCP endpoint.
     fn credential_shell_channel(&self, id: &str) -> Option<VsockRoute> {
         if !id.starts_with(&format!("{CREDENTIAL_PREFIX}shell-")) {
             return None;
@@ -1146,7 +1142,6 @@ impl IsolationEngine for MicrosandboxIsolation {
     }
 }
 
-/// The end of a failing command's output, where the reason usually is.
 fn output_tail(output: &str) -> &str {
     const LIMIT: usize = 1_000;
     let mut start = output.len().saturating_sub(LIMIT);

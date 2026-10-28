@@ -10,10 +10,8 @@ use std::sync::{
 };
 use tokio::sync::watch;
 
-/// Why a transfer stopped early, in the words the interface can show.
 pub const STOPPED: &str = "the transfer was stopped";
 
-/// What a transfer is doing at this moment.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TransferUpdate {
     /// What the transfer is waiting on while it has nothing to count. Empty
@@ -25,13 +23,11 @@ pub struct TransferUpdate {
     pub total: u64,
 }
 
-/// The moving side of a transfer.
 pub struct Transfer {
     updates: watch::Sender<TransferUpdate>,
     stopped: Arc<AtomicBool>,
 }
 
-/// The watching side: what has landed, and the one thing it can ask for.
 pub struct Watching {
     pub updates: watch::Receiver<TransferUpdate>,
     stopped: Arc<AtomicBool>,
@@ -46,7 +42,6 @@ impl Watching {
 }
 
 impl Transfer {
-    /// Starts watching a transfer that has nothing to count yet.
     pub fn start(stage: impl Into<String>) -> (Self, Watching) {
         let stopped = Arc::new(AtomicBool::new(false));
         let (updates, watching) = watch::channel(TransferUpdate {
@@ -88,12 +83,10 @@ impl Transfer {
         self.updates.send_modify(|update| update.stage = stage);
     }
 
-    /// Counts bytes that have landed.
     pub fn advanced(&self, bytes: u64) {
         self.updates.send_modify(|update| update.done += bytes);
     }
 
-    /// Whether the operator has asked this transfer to stop.
     pub fn is_stopped(&self) -> bool {
         self.stopped.load(Ordering::Relaxed)
     }

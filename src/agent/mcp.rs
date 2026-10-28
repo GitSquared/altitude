@@ -25,7 +25,6 @@ pub const AGENT_CHANNEL_PORT: u32 = 5000;
 /// else is offered the newest, which is the protocol's own negotiation.
 const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
-/// Serve one agent's MCP session until the stream closes.
 pub async fn serve_agent<R, W>(
     registry: AgentToolRegistry,
     reader: R,

@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Settings;
 
-/// Everything a remote needs to be this client, as far as running a task goes.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConfigBundle {
     /// The configuration, so the remote holds the same environments.
@@ -18,7 +17,6 @@ pub struct ConfigBundle {
     /// does is no business of a machine running a task, and hashing it would sync a
     /// preference as though it were configuration.
     pub settings: String,
-    /// The logins, one entry per profile, and only the ones being sent.
     pub profiles: Vec<ProfileBundle>,
     /// Whether this machine should forget the operator's logins.
     ///
@@ -28,7 +26,6 @@ pub struct ConfigBundle {
     pub remove_logins: bool,
 }
 
-/// A profile snapshot, including an empty snapshot when its files were removed.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProfileBundle {
     pub profile: String,
@@ -36,15 +33,12 @@ pub struct ProfileBundle {
     pub files: Vec<ProfileFile>,
 }
 
-/// One file inside a profile, at its path relative to the profile's directory.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProfileFile {
     pub path: String,
-    /// Base64, because these are credential files and the bundle is JSON.
     pub contents: String,
 }
 
-/// What a remote says it holds for a profile, so a client can send only what is new.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfileDigest {
     pub profile: String,
@@ -59,7 +53,6 @@ pub struct HeldConfig {
 }
 
 impl HeldConfig {
-    /// Reads what this remote holds, or nothing when it has been sent nothing yet.
     pub fn load(path: &Path) -> Self {
         fs::read_to_string(path)
             .ok()
@@ -86,9 +79,7 @@ impl HeldConfig {
 /// a machine they may have added a week ago and never given work.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Logins {
-    /// The machine is about to run work, so it needs to be able to.
     Always,
-    /// Send them only when the machine holds a project of its own.
     WithWork,
 }
 

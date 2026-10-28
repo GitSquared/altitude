@@ -38,7 +38,6 @@ const BUDGET_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 /// cache over budget, and takes it up again the next time a capsule is created.
 const QUIET_FOR: Duration = Duration::from_secs(60 * 60);
 
-/// Where a task finds the cache.
 pub(crate) const GUEST_PATH: &str = "/altitude/git-cache";
 
 /// The mirror file name suffix, which is what marks a directory here as one.

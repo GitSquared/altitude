@@ -50,7 +50,6 @@ async fn main() -> ExitCode {
     }
 }
 
-/// The interactive client: a terminal, and a person at it.
 async fn client() -> Result<(), Box<dyn Error>> {
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;

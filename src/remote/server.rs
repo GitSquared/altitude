@@ -45,14 +45,12 @@ use crate::{
     tracker::{ACCOUNT_FILE, TrackerAccount, TrackerKind},
 };
 
-/// What a pushed configuration did with the tracker account it carries.
 enum ConfigWrite {
     Written {
         /// The operator keeps no project here, so the logins that arrived with
         /// this configuration are no longer this machine's to hold.
         forget_logins: bool,
     },
-    /// Another client already claims that account, so nothing was written.
     LinkedElsewhere {
         provider: TrackerKind,
         display_name: String,
@@ -147,7 +145,6 @@ struct LinkHandler {
     /// operator.
     data_dir: PathBuf,
     config_lock: Arc<AsyncMutex<()>>,
-    /// The tasks this machine owns, which is the only place they exist.
     tasks: Arc<dyn TaskHost>,
 }
 
@@ -346,12 +343,10 @@ impl LinkHandler {
         holders
     }
 
-    /// Where one peer's pushed configuration and logins live.
     fn operator_dir(&self, peer: EndpointId) -> PathBuf {
         self.data_dir.join("operators").join(peer.to_string())
     }
 
-    /// The profiles this peer has already been sent.
     fn held_profiles(&self, peer: EndpointId) -> Vec<ProfileDigest> {
         HeldConfig::load(&self.operator_dir(peer).join("profiles.json")).profiles
     }
@@ -375,7 +370,6 @@ fn remove_missing_profile_files(
     Ok(())
 }
 
-/// What a server is started with: who it is, where it listens, and what it holds.
 pub struct ServerParts {
     pub identity: InstallationKey,
     pub clients: ClientRecord,
@@ -384,10 +378,8 @@ pub struct ServerParts {
     /// Where pushed configurations and logins are written, one directory per
     /// operator.
     pub data_dir: PathBuf,
-    /// What this machine can do with a task right now.
     pub state: watch::Receiver<RemoteState>,
     pub trackers: Vec<TrackerConnection>,
-    /// The tasks this machine owns, which is the only place they exist.
     pub tasks: Arc<dyn TaskHost>,
 }
 
@@ -397,7 +389,6 @@ pub struct ServerParts {
 /// machine's business, which is why this is a trait rather than the link reaching
 /// into a task service it should know nothing about.
 pub trait TaskHost: Send + Sync + 'static {
-    /// The task's threads, resolved ones included.
     fn signal_threads(
         &self,
         peer: EndpointId,
@@ -419,11 +410,8 @@ pub trait TaskHost: Send + Sync + 'static {
     fn configure(&self, peer: EndpointId, forget_logins: bool) -> BoxFuture<Result<(), String>>;
     fn run(&self, peer: EndpointId, request: TaskRequest) -> BoxFuture<Result<(), String>>;
     fn list(&self, peer: EndpointId) -> BoxFuture<Result<Vec<TaskSummary>, String>>;
-    /// What this peer may see now, and the changes that follow.
     fn watch(&self, peer: EndpointId) -> BoxFuture<Result<Watching, String>>;
-    /// Remove a task and dispose of its capsule, as the owning machine would.
     fn remove(&self, peer: EndpointId, task_id: String) -> BoxFuture<Result<(), String>>;
-    /// Stop a task and bundle it for another machine to continue.
     fn hand_over(&self, peer: EndpointId, task_id: String) -> BoxFuture<Result<Handover, String>>;
     fn transfer_piece(
         &self,
@@ -433,23 +421,18 @@ pub trait TaskHost: Send + Sync + 'static {
         offset: u64,
         len: u64,
     ) -> BoxFuture<Result<Vec<u8>, String>>;
-    /// Give up a prepared transfer, running the task here again.
     fn abandon_take(&self, peer: EndpointId, transfer_id: String) -> BoxFuture<Result<(), String>>;
-    /// Give up a staged import the source stopped sending.
     fn abandon_import(
         &self,
         peer: EndpointId,
         transfer_id: String,
     ) -> BoxFuture<Result<(), String>>;
-    /// Commit source removal after the prepared recipient verifies its arrival.
     fn handed_over(&self, peer: EndpointId, transfer_id: String) -> BoxFuture<Result<(), String>>;
-    /// Accept a pushed task and say whether the base environment must follow.
     fn prepare_import(
         &self,
         peer: EndpointId,
         handover: Handover,
     ) -> BoxFuture<Result<bool, String>>;
-    /// Write one bounded piece of an archive the recipient is staging.
     fn put_import_part(
         &self,
         peer: EndpointId,
@@ -458,13 +441,11 @@ pub trait TaskHost: Send + Sync + 'static {
         offset: u64,
         bytes: Vec<u8>,
     ) -> BoxFuture<Result<(), String>>;
-    /// Land and boot the staged task, answering what it is called here.
     fn stage_import(
         &self,
         peer: EndpointId,
         transfer_id: String,
     ) -> BoxFuture<Result<String, String>>;
-    /// The source relinquished ownership; begin the landed task.
     fn commit_import(&self, peer: EndpointId, transfer_id: String)
     -> BoxFuture<Result<(), String>>;
 }
@@ -479,7 +460,6 @@ pub struct Watching {
     pub changes: UnboundedReceiver<WatchEvent>,
 }
 
-/// A future a trait object can hold, which an `async fn` in a trait cannot be.
 pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
 /// Writes a file beside the real one and moves it into place, so nothing ever reads
@@ -498,7 +478,6 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
     fs::rename(&incoming, path)
 }
 
-/// Takes away everyone else's access to a file or directory this user owns.
 #[cfg(unix)]
 fn set_private(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -843,12 +822,10 @@ impl LinkServer {
         })
     }
 
-    /// The public key a client dials.
     pub fn id(&self) -> EndpointId {
         self.identity.id()
     }
 
-    /// The server's address as a string to hand to a client out of band.
     pub fn ticket(&self) -> LinkResult<RemoteTicket> {
         RemoteTicket::new(self.addr())
     }
@@ -860,7 +837,6 @@ impl LinkServer {
         self.router.endpoint().addr()
     }
 
-    /// Stops accepting and closes the endpoint.
     pub async fn shutdown(self) -> LinkResult<()> {
         self.broadcast.stop();
         self.router.shutdown().await?;

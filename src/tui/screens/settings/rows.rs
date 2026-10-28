@@ -36,24 +36,19 @@ pub enum RowKind {
     Project {
         project: Project,
     },
-    /// The identity git commits under, read from the version-control profile.
     GitIdentity(GitIdentity),
     /// Something a task logs in with: this installation's key, or a login a task
     /// is given.
     Credential(Credential),
     Remote {
         address: String,
-        /// What that address last answered with, if it has been met.
         remembered: Option<RemoteKey>,
-        /// What it is doing now: the list says so without being asked.
         status: RemoteStatus,
-        /// Whether the configuration it holds is the one this client has.
         needs_config: bool,
         /// What its last announcement said its shared trackers are, when it has
         /// answered. Absent while it has not, which is unknown rather than empty.
         trackers: Option<Vec<TrackerConnection>>,
     },
-    /// A remote announcing on the network that this client has not adopted.
     Discovered(DiscoveredRemote),
     Switch {
         setting: Setting,
@@ -97,7 +92,6 @@ impl Row {
         }
     }
 
-    /// Whether this row is a remote this client has configured.
     pub fn is_configured_remote(&self) -> bool {
         matches!(self.kind, RowKind::Remote { .. })
     }
@@ -111,7 +105,6 @@ impl Row {
         matches!(self.kind, RowKind::Project { .. } | RowKind::Remote { .. })
     }
 
-    /// Whether delete here removes a saved sign-in rather than the row itself.
     pub fn forgets_credentials(&self) -> bool {
         matches!(
             &self.kind,
@@ -122,7 +115,6 @@ impl Row {
         )
     }
 
-    /// The profile whose login this row stands for, when it stands for one.
     pub fn profile(&self) -> Option<&str> {
         match &self.kind {
             RowKind::Credential(credential) => match &credential.kind {
@@ -187,13 +179,9 @@ impl Row {
 /// remembered keys, and what the built base image is made of.
 pub struct View {
     pub rows: Vec<Row>,
-    /// The named identities the pages can label a project's bindings with.
     pub credentials: Vec<NamedCredential>,
-    /// What a project inherits when it binds nothing itself.
     pub defaults: ProjectDefaults,
-    /// What each tracker identity last answered about its live session.
     pub tracker_states: HashMap<String, TrackerState>,
-    /// What the base image is made of, once it has been built here.
     pub base: Option<EnvironmentDescription>,
 }
 
@@ -207,11 +195,9 @@ pub struct ProjectDefaults {
     pub commits: Option<ProjectCommits>,
 }
 
-/// One credential, as the list shows it.
 pub struct Credential {
     pub label: String,
     pub kind: CredentialKind,
-    /// The projects whose effective binding is this credential.
     pub used_by: Vec<String>,
 }
 
@@ -272,17 +258,14 @@ pub enum CredentialKind {
         key: String,
         data_dir: String,
     },
-    /// A host-side tracker identity: a live session, not a mount.
     Tracker {
         profile: String,
         directory: String,
         status: TrackerState,
     },
-    /// A profile a task mounts. Presence and place only: never the contents.
     Profile {
         profile: String,
         directory: String,
-        /// What that profile's own check said about it, if it has been asked.
         status: CredentialStatus,
     },
 }
@@ -298,7 +281,6 @@ pub struct GitIdentity {
     pub email: Option<String>,
     pub signing_key: Option<String>,
     pub signs_commits: bool,
-    /// The projects that commit under this installation-level identity.
     pub used_by: Vec<String>,
 }
 

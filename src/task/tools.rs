@@ -16,12 +16,10 @@ use super::{
 use crate::agent::tools::{AgentTool, AgentToolError, AgentToolFuture, AgentToolProvider};
 use crate::tracker::IssueReader;
 
-/// The `tasks` agent tools, bound to one task's record.
 pub struct TaskAgentTools {
     store: TaskStore,
     task_id: String,
     tracker: Option<Arc<dyn IssueReader>>,
-    /// Told after a write, so the interface showing the thread reads it.
     changes: broadcast::Sender<String>,
 }
 
@@ -40,7 +38,6 @@ impl TaskAgentTools {
         }
     }
 
-    /// Tell whoever is showing this task's threads that one changed.
     fn announce(&self) {
         let _ = self.changes.send(self.task_id.clone());
     }
@@ -111,7 +108,6 @@ impl TaskAgentTools {
         serde_json::to_value(&snapshot).map_err(tool_failure)
     }
 
-    /// Read or replace the agent's plan for this task.
     async fn plan(&self, arguments: &Value) -> Result<Value, AgentToolError> {
         self.ensure_active().await?;
         match arguments.get("action").and_then(Value::as_str) {
@@ -342,7 +338,6 @@ fn argument<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, AgentToolEr
         .ok_or_else(|| AgentToolError::new(format!("this tool needs a {name}")))
 }
 
-/// One thread as the agent reads it: the conversation and whether it is done.
 fn thread_json(thread: &TaskOperatorSignalThread) -> Value {
     json!({
         "id": thread.id,

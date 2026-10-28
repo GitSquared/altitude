@@ -33,10 +33,8 @@ use super::{VsockRoute, private_directory};
 /// is `ALTITUDE_PORTS_PORT` in `assets/port-relay.py`.
 pub(crate) const PORT_RELAY_GUEST_PORT: u32 = 5001;
 
-/// Where the helper lives inside a sandbox.
 const HELPER: &str = "/usr/local/bin/altitude-port-relay.py";
 
-/// The command that writes the helper into a sandbox.
 pub(crate) fn install_script() -> String {
     format!(
         "cat > {HELPER} <<'ALTITUDE_PORTS'\n{}ALTITUDE_PORTS\nchmod 0755 {HELPER}\n",
@@ -68,19 +66,16 @@ const CLIENT_PATIENCE: Duration = Duration::from_secs(10);
 /// an operator started.
 const FIRST_FORWARDED_PORT: u16 = 1024;
 
-/// A sandbox port this machine can now reach, for whoever wants to say so.
 #[derive(Clone, Debug)]
 pub struct PortNotice {
     pub sandbox: String,
     pub port: u16,
 }
 
-/// The relay channels this process holds open, by sandbox id.
 #[derive(Clone)]
 pub struct PortRelays {
     directory: PathBuf,
     relays: Arc<Mutex<HashMap<String, Relay>>>,
-    /// Told once each time a port becomes reachable, for an interface to show.
     notices: broadcast::Sender<PortNotice>,
 }
 
@@ -93,7 +88,6 @@ struct Relay {
 struct RelayState {
     notices: broadcast::Sender<PortNotice>,
     forwarded: HashMap<u16, Forwarded>,
-    /// Clients waiting for the sandbox to dial back, oldest first per port.
     pending: HashMap<u16, VecDeque<Pending>>,
     /// Ports that had no host number to take, so the operator is told once rather
     /// than on every retry.
@@ -106,7 +100,6 @@ struct Forwarded {
     /// Which announcement this forwarding answers, so a control connection that
     /// has already been replaced cannot take the live one down with it.
     announcement: u64,
-    /// One message per client waiting to be carried.
     orders: mpsc::UnboundedSender<()>,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -125,7 +118,6 @@ impl PortRelays {
         }
     }
 
-    /// Hear about each port that becomes reachable, once.
     pub fn subscribe(&self) -> broadcast::Receiver<PortNotice> {
         self.notices.subscribe()
     }
@@ -178,7 +170,6 @@ impl PortRelays {
         Ok(route)
     }
 
-    /// Close everything a sandbox's relay opened, including the ports it took.
     pub fn release(&self, id: &str) {
         let relay = self.relays.lock().expect("relay lock poisoned").remove(id);
         let Some(relay) = relay else {
@@ -252,7 +243,6 @@ async fn read_line(stream: &mut UnixStream) -> Option<String> {
     None
 }
 
-/// Take a sandbox's listener for as long as it exists here.
 async fn announce(mut stream: UnixStream, port: u16, state: Arc<Mutex<RelayState>>, id: String) {
     if port < FIRST_FORWARDED_PORT {
         let _ = stream.write_all(b"R\n").await;
@@ -400,7 +390,6 @@ async fn announce(mut stream: UnixStream, port: u16, state: Arc<Mutex<RelayState
     }
 }
 
-/// Keep a task with the port it serves, or say the port is already gone.
 fn track(state: &Arc<Mutex<RelayState>>, port: u16, task: JoinHandle<()>) -> bool {
     let mut state = state.lock().expect("relay state lock poisoned");
     match state.forwarded.get_mut(&port) {
@@ -415,7 +404,6 @@ fn track(state: &Arc<Mutex<RelayState>>, port: u16, task: JoinHandle<()>) -> boo
     }
 }
 
-/// Join one client on this machine to one connection the sandbox dials back.
 async fn join(mut stream: UnixStream, port: u16, state: Arc<Mutex<RelayState>>) {
     let Some(mut client) = state
         .lock()

@@ -441,7 +441,6 @@ impl LinearAutomation {
         Ok(())
     }
 
-    /// Resolve a comment thread, optionally naming the reply that resolved it.
     pub async fn resolve_comment(
         &self,
         comment_id: &str,
@@ -493,7 +492,6 @@ impl LinearAutomation {
         mutation_succeeded(&data, "agentSessionUpdate").map(|_| ())
     }
 
-    /// Mirror the agent's plan onto its Linear Agent Session.
     pub async fn update_session_plan(
         &self,
         session_id: &str,
@@ -756,7 +754,6 @@ pub struct CommentSite {
     /// A busy thread may have more authors than one page returned. Truncated is
     /// treated as shared because an unknown participant must not cause a wake.
     pub authors_truncated: bool,
-    /// Every human who has spoken in this thread or document, from Linear.
     pub human_authors: Vec<String>,
 }
 
@@ -871,7 +868,6 @@ pub struct WebhookUser {
 
 #[derive(Debug)]
 pub enum WebhookError {
-    /// The payload's timestamp was outside the freshness window.
     StaleTimestamp,
     UnsupportedEvent(String),
     ForeignWorkspace,

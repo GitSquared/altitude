@@ -11,10 +11,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::{tracker::TrackerKind, version::VERSION};
 
-/// The serve mode, written once so the root's long help and the subcommand agree.
 const SERVE_MODE: &str = "Run altitude serve on a headless server to let your team run agents beyond their own machines, and pilot them directly from your task tracker.";
 
-/// The root help opens with the same icon, name, and version as `--version`.
 const ROOT_HELP_TEMPLATE: &str = "\
 {name} {version}
 {about}
@@ -42,7 +40,6 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Run as a headless remote hosting agents for clients
     #[command(long_about = SERVE_MODE, after_help = SERVE_AFTER_HELP)]
     Serve(ServeArgs),
 }
@@ -62,7 +59,6 @@ each operator's own login.
 
 Set LOG_LEVEL=debug for detailed logs. Terminal colors are automatic; set NO_COLOR to disable them.";
 
-/// What `connect` asks the operator to do, in order, once per workspace.
 const CONNECT_AFTER_HELP: &str = "\
 The steps:
 \x20 1. Choose the HTTPS address that reaches the remote.
@@ -105,11 +101,8 @@ pub struct ServeArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ServeCommand {
-    /// List the clients that have used this remote, and what each one pushed
     Clients,
-    /// Forget a client: its pushed configuration, its logins, and its tasks
     Evict {
-        /// The client's public key, as `clients` prints it
         key: String,
     },
     /// Install Altitude as a service on this machine, then exit
@@ -132,7 +125,6 @@ pub enum ServeCommand {
 
 #[derive(Debug, Args)]
 pub struct ConnectArgs {
-    /// The task tracker whose shared app to install
     #[arg(value_enum)]
     pub tracker: Tracker,
 }

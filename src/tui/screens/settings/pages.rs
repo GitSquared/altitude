@@ -67,14 +67,11 @@ pub(super) struct Connector {
     title: String,
     reach: Reach,
     status: String,
-    /// One value the status accents, e.g. the short key of this installation.
     status_value: Option<String>,
     /// A public name the provider reports, when the check printed one. Never
     /// guessed: absent when the report does not name one.
     identity: Option<String>,
-    /// A short reason the status reads the way it does.
     note: Option<String>,
-    /// The one next step, when there is one.
     action: Option<&'static str>,
     purpose: &'static str,
     /// Projects whose effective binding is this identity, when it is one. A
@@ -83,7 +80,6 @@ pub(super) struct Connector {
     fields: Vec<(&'static str, String)>,
 }
 
-/// Whether a connector is on, off, or still being asked about.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Reach {
     On,
@@ -425,7 +421,6 @@ pub(super) fn profile_connector(
     }
 }
 
-/// This installation's key, or a profile's login, as the page reads it.
 pub(super) fn credential_connector(credential: &Credential) -> Connector {
     let mut connector = match &credential.kind {
         CredentialKind::Installation {
@@ -478,7 +473,6 @@ pub(super) fn credential_connector(credential: &Credential) -> Connector {
     connector
 }
 
-/// The git identity and signing a task commits with.
 pub(super) fn git_connector(identity: &GitIdentity) -> Connector {
     let is_set = identity.is_set();
     let status = match (is_set, identity.signs_commits) {
@@ -518,7 +512,6 @@ pub(super) fn git_connector(identity: &GitIdentity) -> Connector {
     }
 }
 
-/// Linear, as the page reads it: a live session rather than a login kept on disk.
 pub(super) fn tracker_connector(state: TrackerState, profile_dir: &Path) -> Connector {
     let (reach, note, action) = match state {
         TrackerState::Connected => (
@@ -760,7 +753,6 @@ fn short_key(key: &str) -> String {
     }
 }
 
-/// How long ago something was seen, coarsely: the exact minute is not the point.
 fn met_ago(seen_at_ms: i64) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -775,7 +767,6 @@ fn met_ago(seen_at_ms: i64) -> String {
     }
 }
 
-/// A count and its unit, saying "1 hour" rather than "1 hours".
 fn counted(count: i64, unit: &str) -> String {
     if count == 1 {
         format!("1 {unit}")

@@ -22,17 +22,14 @@ use crate::{
     task::TaskStore,
 };
 
-/// One client, as the remote can describe it without reading what it sent.
 pub struct KnownClient {
     pub key: String,
-    /// The profiles it pushed, by name: what it is signed in to here.
     pub services: Vec<String>,
     /// The tracker accounts it pushed, which are what routes its work in a tracker
     /// to this machine.
     pub accounts: Vec<AccountRecord>,
 }
 
-/// Print what this remote knows about its clients.
 pub async fn list(config: &Config) -> LinkResult<()> {
     let database = Database::open(config).await?;
     let store = TaskStore::new(&database);
@@ -120,7 +117,6 @@ pub async fn evict(config: &Config, key: &str) -> LinkResult<()> {
     Ok(())
 }
 
-/// The clients with a directory here, which is every client that pushed anything.
 fn archive(data_dir: &Path) -> io::Result<Vec<KnownClient>> {
     let root = data_dir.join("operators");
     let mut clients = Vec::new();

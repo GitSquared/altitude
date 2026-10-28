@@ -24,10 +24,8 @@ use crate::{
     version::VERSION,
 };
 
-/// The name every screen wears.
 const TITLE: &str = "⛰  altitude";
 
-/// A key, and what it does here.
 #[derive(Clone)]
 pub struct Hint {
     pub keys: &'static str,
@@ -103,7 +101,6 @@ fn frame_areas(inner: Rect, guidance_rows: u16) -> [Rect; 3] {
     .areas(inner)
 }
 
-/// The guidance, wrapped to the width.
 fn guidance_lines(hints: &[Hint], width: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut line = String::new();
@@ -227,12 +224,10 @@ pub fn centered_at_most(area: Rect, percent_x: u16, max_width: u16, height: u16)
     horizontal
 }
 
-/// Where a modal's words and its answers go, inside its frame.
 pub struct Body {
     /// What the modal says, one empty row from the top of the frame and one
     /// from the rule under it.
     pub content: Rect,
-    /// The rule, and the answers under it.
     pub actions: Rect,
 }
 

@@ -31,9 +31,7 @@ use super::{LinkResult, identity::write_private};
 /// where a server writes it stays the caller's decision.
 #[derive(Clone, Debug)]
 pub struct ClientRecord {
-    /// Where the record is kept.
     path: PathBuf,
-    /// Kept sorted so the file has a stable order and diffs stay readable.
     seen: Arc<RwLock<BTreeSet<EndpointId>>>,
 }
 

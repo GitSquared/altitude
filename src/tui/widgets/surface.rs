@@ -71,7 +71,6 @@ const DOWN: u8 = 2;
 const LEFT: u8 = 4;
 const RIGHT: u8 = 8;
 
-/// Add strokes to a cell, answering whether the cell was inside the buffer.
 fn join(buffer: &mut Buffer, x: u16, y: u16, added: u8) -> bool {
     if x < buffer.area.x
         || x >= buffer.area.right()
@@ -128,7 +127,6 @@ fn stroke(directions: u8) -> &'static str {
     }
 }
 
-/// A vertical divider between columns, joined to the frame at both ends.
 pub fn vertical_divider(frame: &mut Frame, inner: Rect, x: u16) {
     if inner.height == 0 || x < inner.x || x >= inner.right() {
         return;
@@ -146,14 +144,12 @@ pub fn vertical_divider(frame: &mut Frame, inner: Rect, x: u16) {
     }
 }
 
-/// A bordered region over the field.
 pub struct Surface {
     block: Block<'static>,
     opaque: bool,
 }
 
 impl Surface {
-    /// A surface the field shows through.
     pub fn new() -> Self {
         Self {
             block: Block::bordered()
@@ -163,13 +159,11 @@ impl Surface {
         }
     }
 
-    /// Cover the field inside the border, so the surface reads as a solid pane.
     pub fn opaque(mut self) -> Self {
         self.opaque = true;
         self
     }
 
-    /// Draw the surface and answer the area it leaves inside the border.
     pub fn draw(self, frame: &mut Frame, area: Rect) -> Rect {
         let inner = self.block.inner(area);
         if self.opaque {

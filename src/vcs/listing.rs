@@ -57,7 +57,6 @@ where
         .ok_or_else(|| ListingError("the provider's answer could not be read".to_owned()))
 }
 
-/// Run the listing command and answer with what it printed, refusing a failure.
 async fn list<E>(engine: &E, id: &str, command: String) -> Result<String, ListingError>
 where
     E: IsolationEngine + Clone,
@@ -78,7 +77,6 @@ where
     Ok(output)
 }
 
-/// Why a listing could not be read, in the words the picker shows.
 #[derive(Debug)]
 pub struct ListingError(String);
 

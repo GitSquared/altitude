@@ -16,7 +16,6 @@ impl<E> TaskService<E>
 where
     E: IsolationEngine + Clone,
 {
-    /// The task that owns a signal, when this machine knows the thread.
     pub async fn task_for_signal(
         &self,
         task_id: &str,
@@ -28,7 +27,6 @@ where
             .map_err(TaskServiceError::Task)
     }
 
-    /// The inputs that express what the operator has asked for, oldest first.
     pub async fn inputs(&self, task_id: &str) -> Result<Vec<TaskInput>, TaskServiceError> {
         self.store
             .inputs(task_id)
@@ -97,7 +95,6 @@ where
         Ok(Some((task, run, session)))
     }
 
-    /// The threads that still need an answer or an ending.
     pub async fn unresolved_signal_threads(
         &self,
         task_id: &str,
@@ -108,7 +105,6 @@ where
             .map_err(TaskServiceError::Task)
     }
 
-    /// Every thread a task has, resolved ones included.
     pub async fn signal_threads(
         &self,
         task_id: &str,
@@ -231,7 +227,6 @@ where
     }
 }
 
-/// The input log as prose for a turn that needs the whole expressed intent.
 fn render_inputs(inputs: &[TaskInput]) -> String {
     let mut text = String::new();
     for input in inputs {

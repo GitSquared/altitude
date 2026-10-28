@@ -195,7 +195,6 @@ impl App {
         }
     }
 
-    /// This installation's hostname, key, and where its state lives.
     fn installation_credential(&self) -> Credential {
         let identity = self.config.identity();
         let hostname = hostname();
@@ -217,7 +216,6 @@ impl App {
         }
     }
 
-    /// The projects that leave commits to the installation-level identity.
     fn projects_using_default_commits(&self) -> Vec<String> {
         self.projects()
             .into_iter()
@@ -231,7 +229,6 @@ impl App {
             .collect()
     }
 
-    /// The addresses the settings file configures.
     pub(in crate::tui) fn configured_remotes(&self) -> Vec<String> {
         self.settings_file
             .as_ref()

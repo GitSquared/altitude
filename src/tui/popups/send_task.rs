@@ -22,25 +22,19 @@ use crate::{
     },
 };
 
-/// The task being sent, and the machines that could receive it.
 pub(in crate::tui) struct SendTask {
     task_id: String,
     title: String,
     project: String,
     agent: Option<AgentKind>,
-    /// The remotes only: this machine is where the task already is.
     hosts: Vec<Host>,
     selected: usize,
 }
 
-/// What the operator answered.
 pub(in crate::tui) enum Decision {
     Cancel,
-    /// There is no machine to send to yet, so open the settings that add one.
     Settings,
-    Send {
-        address: String,
-    },
+    Send { address: String },
 }
 
 impl SendTask {

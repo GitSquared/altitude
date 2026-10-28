@@ -16,7 +16,6 @@ use ratatui::{
 
 use crate::tui::widgets::{palette, utils::shimmer};
 
-/// Draw the wait, and answer with the box it occupies.
 pub fn draw(frame: &mut Frame, area: Rect, message: &str, tick: Option<usize>) -> Rect {
     // Wide enough for the line it is waiting on and a space either side, and no
     // wider.

@@ -43,7 +43,6 @@ where
             Err(error) => self.conversation_failure(task, format!("could not read {kind} conversation transcript: {error}")).await,
         }
     }
-    /// The harness that owns this task's conversation.
     pub(super) fn engine(&self, task: &Task) -> Result<&dyn AgentEngine, TaskServiceError> {
         Ok(self.agents.engine(self.agent_kind(task)?))
     }
@@ -51,7 +50,6 @@ where
         task.agent_kind
             .ok_or(TaskServiceError::Task(TaskError::MissingAgent))
     }
-    /// Decodes a report turn's output for the task's harness.
     pub fn report_decoder(&self, task: &Task) -> Option<Box<dyn TaskReportDecoder>> {
         task.agent_kind
             .map(|kind| self.agents.engine(kind).report_decoder())

@@ -27,7 +27,6 @@ pub fn name(id: &str) -> &str {
     id.split_once('_').map_or(id, |(_, name)| name)
 }
 
-/// An id with the given prefix and distinct, lowercase English words.
 fn words(prefix: &str, count: usize) -> String {
     let list = Language::English.word_list();
     let mut rng = rand::rng();

@@ -116,7 +116,6 @@ fn print_report(linear: &LinearSettings, settings_path: &Path) -> Result<(), Box
     Err(io::Error::other(format!("Missing from this machine:\n{listed}")).into())
 }
 
-/// A login is already here. Say what it is, and replace it only when asked.
 async fn replace(
     linear: &LinearSettings,
     credentials_path: &Path,
@@ -150,7 +149,6 @@ fn print_installed(credentials: &oauth::AppCredentials, credentials_path: &Path)
     );
 }
 
-/// A workspace by name when Linear gave one, and by id when it did not.
 fn workspace(credentials: &oauth::AppCredentials) -> String {
     if credentials.workspace_name.is_empty() {
         credentials.workspace_id.clone()

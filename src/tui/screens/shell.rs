@@ -21,11 +21,8 @@ use tui_term::{vt100, widget::PseudoTerminal};
 /// What the program in a sandbox asked this machine to do, because a terminal
 /// cannot do it from in there.
 pub enum GuestRequest {
-    /// Put this on the clipboard.
     Copy(String),
-    /// Open this in a browser, which is on this side of the terminal.
     Open(String),
-    /// Answer a question the program asked its terminal, which lives here.
     Reply(Vec<u8>),
 }
 

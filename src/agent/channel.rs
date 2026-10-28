@@ -19,13 +19,11 @@ use crate::{
     isolation::private_directory,
 };
 
-/// What one socket's listener is doing, so it can be stopped with the socket.
 struct Channel {
     handle: JoinHandle<()>,
     path: PathBuf,
 }
 
-/// The agent channels this process holds open, by sandbox id.
 #[derive(Clone)]
 pub struct AgentChannels {
     directory: PathBuf,
@@ -85,7 +83,6 @@ impl AgentChannels {
         Ok(path)
     }
 
-    /// Stop the socket `id`'s harness dials, and remove it.
     pub fn release(&self, id: &str) {
         if let Some(channel) = self
             .channels

@@ -27,7 +27,6 @@ pub struct RemoteKey {
     pub address: String,
     pub key: String,
     pub label: String,
-    /// Which build answered, as it reported it.
     pub version: String,
     pub seen_at_ms: i64,
 }
@@ -93,7 +92,6 @@ impl RemoteKeys {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Every remote remembered, by address.
     pub async fn list(&self) -> Result<Vec<RemoteKey>, sqlx::Error> {
         sqlx::query_as::<_, RemoteKey>(
             "SELECT address, key, label, version, seen_at_ms FROM remote_keys ORDER BY address",

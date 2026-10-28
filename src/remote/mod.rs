@@ -49,7 +49,6 @@ pub use {
     transfer::Transfer,
 };
 
-/// Boxed errors: a typed error enum would be speculation until a caller exists.
 pub type LinkError = Box<dyn Error + Send + Sync>;
 
 pub type LinkResult<T> = Result<T, LinkError>;

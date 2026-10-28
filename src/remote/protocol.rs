@@ -42,7 +42,6 @@ const MAX_FRAME_BYTES: usize = 64 * 1024;
 /// Upper bound on a single blob, so a peer cannot make a remote allocate
 /// without limit. Disk archives travel as bounded pieces instead.
 pub(super) const MAX_BLOB_BYTES: u64 = 64 * 1024 * 1024;
-/// Write granularity for blob bytes.
 pub(super) const CHUNK_BYTES: usize = 64 * 1024;
 pub(super) const TRANSFER_PIECE_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -62,13 +61,11 @@ pub(super) fn builder() -> Builder {
 
 // ------------------------------------------------------------------- the wire
 
-/// A BLAKE3 digest, as lowercase hex.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct BlobHash(String);
 
 impl BlobHash {
-    /// Hashes a buffer.
     pub fn of(bytes: &[u8]) -> Self {
         Self(blake3::hash(bytes).to_hex().to_string())
     }
@@ -80,7 +77,6 @@ impl fmt::Display for BlobHash {
     }
 }
 
-/// One request. A blob's bytes follow the frame on the same stream.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum LinkRequest {
     /// Ask the remote who it is. The answer is authenticated by the handshake,
@@ -95,7 +91,6 @@ pub enum LinkRequest {
         hash: BlobHash,
         len: u64,
     },
-    /// Ask what tasks the remote owns, once.
     ListTasks,
     /// Watch what the remote owns: the answer is what it holds now, followed by
     /// one frame per change for as long as this stream is open.
@@ -109,7 +104,6 @@ pub enum LinkRequest {
     Signal {
         command: SignalCommand,
     },
-    /// Add a new message from the operator to a task's expressed intent.
     Input {
         task_id: String,
         body: String,
@@ -171,19 +165,15 @@ pub enum LinkRequest {
     AbandonTake {
         transfer_id: String,
     },
-    /// Give up a staged import, so a stopped push leaves nothing half-written.
     AbandonImport {
         transfer_id: String,
     },
-    /// The recipient has every piece and may land and boot the task.
     StageImport {
         transfer_id: String,
     },
-    /// The source has relinquished ownership. Begin the landed task.
     CommitImport {
         transfer_id: String,
     },
-    /// Announce an upload: `len` raw bytes follow, whose digest must be `hash`.
     PutBlob {
         hash: BlobHash,
         len: u64,
@@ -203,10 +193,8 @@ pub enum LinkRequest {
     },
 }
 
-/// What a remote did with a pushed configuration.
 #[derive(Clone, Debug)]
 pub enum ConfigPush {
-    /// It holds the configuration now.
     Stored,
     /// The tracker account already belongs to another client there, and nothing
     /// was written until somebody says which client it should be.
@@ -230,19 +218,15 @@ pub enum WatchEvent {
     Ready,
 }
 
-/// The remote's answer to a [`LinkRequest`].
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum LinkResponse {
-    /// Who the remote is.
     Identified {
         remote: String,
     },
-    /// The upload arrived and its digest matched.
     Stored {
         hash: BlobHash,
         len: u64,
     },
-    /// The configuration arrived, and the remote holds it now.
     Configured,
     /// The tracker account this configuration carries is already linked for
     /// another client, so nothing was written.
@@ -255,11 +239,9 @@ pub enum LinkResponse {
     /// The remote took the task. What it called it is read from the machine rather
     /// than returned, because the machine is where the task is.
     Accepted,
-    /// What the remote owns, as its own cards would show it.
     Tasks {
         summaries: Vec<TaskSummary>,
     },
-    /// One task changed, sent while a watch is open.
     TaskChanged {
         summary: Box<TaskSummary>,
     },
@@ -270,18 +252,14 @@ pub enum LinkResponse {
     TaskRemoved {
         id: String,
     },
-    /// The machine can be given work now, which is not a change to any task.
     Ready,
     Signals {
         signals: Vec<TaskOperatorSignalThread>,
     },
-    /// What the remote holds for the asking peer's profiles.
     HeldProfiles {
         profiles: Vec<ProfileDigest>,
     },
-    /// The remote removed the task and disposed of its capsule.
     Removed,
-    /// The task is stopped, and this is what has to travel for it to continue.
     Handover {
         handover: Box<Handover>,
     },
@@ -290,20 +268,17 @@ pub enum LinkResponse {
     ImportPrepared {
         needs_environment: bool,
     },
-    /// The recipient landed and booted the task, and this is what it is called here.
     Imported {
         task_id: String,
     },
     TransferPiece {
         len: u64,
     },
-    /// The request was understood and refused.
     Rejected {
         reason: String,
     },
 }
 
-/// What a client asks a remote to run.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskRequest {
     pub origin: TaskOrigin,
@@ -324,7 +299,6 @@ pub enum TaskOrigin {
     Issue(Box<IssueSnapshot>),
 }
 
-/// A change an operator asks of one task thread.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SignalCommand {
     Reply {
@@ -352,7 +326,6 @@ pub enum SignalCommand {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskSummary {
     pub id: String,
-    /// The machine that owns it, which is the machine answering.
     pub host: String,
     /// What a card calls it: the agent's name for the work, or the task's id
     /// until the agent has given it one.
@@ -366,32 +339,25 @@ pub struct TaskSummary {
     #[serde(default)]
     pub project_id: Option<String>,
     pub agent: Option<AgentKind>,
-    /// The model the harness last reported using.
     #[serde(default)]
     pub model: Option<String>,
-    /// The agent's latest plan, so a card and a task screen can show it.
     #[serde(default)]
     pub plan: Vec<TaskPlanStep>,
     pub status: TaskExecutionStatus,
     pub mode: TaskExecutionMode,
-    /// Why it is not running, when it is not.
     #[serde(default)]
     pub pause_reason: Option<TaskExecutionPauseReason>,
-    /// How loudly this task is asking to be looked at.
     pub attention: TaskOperatorAttentionLevel,
-    /// The blocking signal the operator is being waited on for, when one is open.
     #[serde(default)]
     pub blocking_signal_kind: Option<TaskOperatorSignalKind>,
     #[serde(default)]
     pub unresolved_signal_count: u32,
-    /// What went wrong, when something did.
     #[serde(default)]
     pub last_error: Option<String>,
     /// The tracker issue this task is bound to, when it is bound to one, so a
     /// client can act on the binding without reading the whole task.
     #[serde(default)]
     pub tracker_issue: Option<IssueReference>,
-    /// How the operator whose work this is reads to a human.
     #[serde(default)]
     pub operator_label: Option<String>,
     /// What this task has open for review, so a client reads the same rows the
@@ -400,11 +366,9 @@ pub struct TaskSummary {
     pub contributions: Vec<ContributionSummary>,
 }
 
-/// One pull request a task has open, as the owning machine last read it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ContributionSummary {
     pub reference: String,
-    /// One operator-facing line, e.g. `ci 1 failing, 2 passing · merge blocked`.
     #[serde(default)]
     pub summary: Option<String>,
     /// What the provider last reported. Its meaning is read where it is drawn,
@@ -467,7 +431,6 @@ impl TaskSummary {
     }
 }
 
-/// Everything a machine needs to continue a task it did not start.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Handover {
     pub task_id: String,
@@ -498,7 +461,6 @@ pub struct HandoverRecord {
     pub events: Vec<RecordedEvent>,
 }
 
-/// One thing that happened, and when it happened.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RecordedEvent {
     pub recorded_at_ms: i64,
@@ -512,18 +474,15 @@ pub struct HandoverDraft {
     pub intent: String,
     pub project: Project,
     pub agent: AgentKind,
-    /// The conversation to continue, so the agent picks up where it left off.
     pub agent_conversation_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferArchive {
     pub len: u64,
-    /// Hex blake3 of the archive, checked where it lands.
     pub digest: String,
 }
 
-/// A framed message: a big-endian u32 length, then that many bytes of JSON.
 pub(super) async fn write_frame<W, T>(writer: &mut W, value: &T) -> LinkResult<()>
 where
     W: AsyncWrite + Unpin,
@@ -554,7 +513,6 @@ where
     Ok(serde_json::from_slice(&body)?)
 }
 
-/// Reads exactly `len` bytes, refusing anything above `max` before allocating.
 pub(super) async fn read_body<R>(reader: &mut R, len: u64, max: u64) -> LinkResult<Vec<u8>>
 where
     R: AsyncRead + Unpin,
@@ -580,18 +538,15 @@ pub struct RemoteTicket {
 }
 
 impl RemoteTicket {
-    /// Renders an address as a ticket.
     pub fn new(addr: EndpointAddr) -> LinkResult<Self> {
         let text = serde_json::to_string(&addr)?;
         Ok(Self { addr, text })
     }
 
-    /// The key to dial, without the network addresses.
     pub fn id(&self) -> EndpointId {
         self.addr.id
     }
 
-    /// The port the remote advertises, if it advertises any address at all.
     pub fn port(&self) -> Option<u16> {
         self.addr.ip_addrs().next().map(|socket| socket.port())
     }

@@ -28,16 +28,12 @@ use crate::{
     },
 };
 
-/// A question with two answers, one of which cannot be undone.
 pub struct Confirm {
     pub question: String,
-    /// The word on the destructive button: delete, remove, discard.
     pub destructive: &'static str,
-    /// 0 is cancel, 1 is the destructive button.
     pub button: usize,
 }
 
-/// What the operator answered.
 pub enum Decision {
     Cancel,
     Confirm,
@@ -55,7 +51,6 @@ impl Confirm {
         }
     }
 
-    /// The keys that work here, for the guidance line.
     pub fn hints(&self) -> Vec<chrome::Hint> {
         vec![
             chrome::Hint::new("tab", "switch"),
@@ -118,7 +113,6 @@ pub fn draw(frame: &mut Frame, area: Rect, confirm: &Confirm) -> Rect {
     popup
 }
 
-/// A question waiting on an answer, and what the answer would do.
 pub(in crate::tui) struct PendingConfirm {
     dialog: Confirm,
     action: ConfirmAction,
@@ -132,7 +126,6 @@ impl PendingConfirm {
         }
     }
 
-    /// Confirming deletes a row the settings screen lists.
     pub(in crate::tui) fn deleting(target: Target, question: String) -> Self {
         Self {
             dialog: Confirm::new(question, "delete"),
@@ -140,7 +133,6 @@ impl PendingConfirm {
         }
     }
 
-    /// Confirming stops the agent and gives the operator the terminal.
     pub(in crate::tui) fn taking_over(task_id: String, question: String) -> Self {
         Self {
             dialog: Confirm::new(question, "take over"),
@@ -179,7 +171,6 @@ impl PendingConfirm {
         }
     }
 
-    /// Confirming removes a task from the overview and disposes of its capsule.
     pub(in crate::tui) fn removing(task_id: String, question: String) -> Self {
         Self {
             dialog: Confirm::new(question, "delete"),
@@ -233,7 +224,6 @@ enum ConfirmAction {
     ConfirmSignal { task_id: String, signal_id: String },
 }
 
-/// Take an answer to the confirmation, and act on it.
 pub(in crate::tui) async fn handle_confirm_key<E>(
     app: &mut App,
     terminal: &DefaultTerminal,

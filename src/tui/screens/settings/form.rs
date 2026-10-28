@@ -58,7 +58,6 @@ impl Target {
         }
     }
 
-    /// What the form replaces, if anything.
     pub fn original(&self) -> Option<&str> {
         match self {
             Self::Remote { original } => Some(original),
@@ -66,7 +65,6 @@ impl Target {
         }
     }
 
-    /// The project this form edits, when it edits one.
     pub fn project_id(&self) -> Option<&str> {
         match self {
             Self::Project { id } => Some(id),
@@ -75,7 +73,6 @@ impl Target {
     }
 }
 
-/// Which part of the form holds the caret.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Primary,
@@ -98,7 +95,6 @@ pub enum Focus {
 }
 
 impl Focus {
-    /// Whether this part takes typed text, and so owns enter and escape.
     pub fn takes_text(self) -> bool {
         matches!(
             self,
@@ -114,13 +110,11 @@ impl Focus {
         )
     }
 
-    /// Whether enter is a newline here rather than a move to the next field.
     fn is_multiline(self) -> bool {
         matches!(self, Self::Setup | Self::Caches | Self::Instructions)
     }
 }
 
-/// What one block of the form is, which decides how tall it is and what it draws.
 #[derive(Clone, Copy)]
 enum Kind {
     Single,
@@ -130,7 +124,6 @@ enum Kind {
 }
 
 impl Kind {
-    /// The rows a block needs, its label included.
     fn rows(self) -> u16 {
         match self {
             Self::Single => 4,
@@ -235,10 +228,8 @@ fn groups(project: bool) -> Vec<Group> {
     ]
 }
 
-/// A page over the panel, holding one project or one remote.
 pub struct Form {
     pub target: Target,
-    /// The name, or the remote's address.
     pub primary: Field,
     pub repository: Field,
     pub setup: TextBox,
@@ -248,12 +239,10 @@ pub struct Form {
     pub commit_name: Field,
     pub commit_email: Field,
     pub signing: Field,
-    /// The identities projects have used, for the choice above the fields.
     identity_choices: Vec<ProjectCommits>,
     /// The installation's own identity, which a project inherits when it stores
     /// none.
     default_commits: Option<ProjectCommits>,
-    /// Which saved identity filled the fields; nothing is the default.
     identity_at: Option<usize>,
     /// The coding agent new tasks here use, or nothing for the installation's
     /// default.
@@ -262,27 +251,21 @@ pub struct Form {
     pub vcs_credential: Option<String>,
     pub tracker_credential: Option<String>,
     credentials: Vec<Credential>,
-    /// The installation's default agent, shown so "default" has a name.
     default_agent: Option<AgentKind>,
-    /// Where this project's tasks run, or nothing for this machine.
     pub host: Option<String>,
     /// The machines offered, besides this one. A stale address already on the
     /// project is kept, so editing does not silently move the work.
     host_choices: Vec<String>,
     pub accepts_delegated_work: bool,
     pub focus: Focus,
-    /// The first group drawn, so the caret's group is always on screen.
     first_group: usize,
     /// How the tracker's scope is named in this form: a Linear team, a Jira
     /// project, a GitHub repository.
     scope_label: String,
-    /// The repository list, while it is open over the form.
     pub repositories: Option<Repositories>,
-    /// The tracker's teams, while its picker is open over the form.
     pub scopes: Option<Scopes>,
 }
 
-/// Every focus a project form walks, in order.
 const PROJECT_FIELDS: [Focus; 17] = [
     Focus::Primary,
     Focus::Repository,
@@ -435,7 +418,6 @@ impl Form {
         }
     }
 
-    /// Move the caret to the next or previous field, wrapping.
     pub fn move_focus(&mut self, forward: bool) {
         let fields: &[Focus] = if self.target.is_remote() {
             &REMOTE_FIELDS
@@ -454,12 +436,10 @@ impl Form {
         self.focus = fields[next];
     }
 
-    /// Whether enter means a newline rather than the next field.
     pub fn enters_newline(&self) -> bool {
         self.focus.is_multiline()
     }
 
-    /// Give a key to the box that has the caret.
     pub fn handle_text(&mut self, key: KeyEvent) {
         match self.focus {
             Focus::Primary => self.primary.handle_key(key),
@@ -475,7 +455,6 @@ impl Form {
         }
     }
 
-    /// Whether the form is ready to save, and why not when it is not.
     pub fn refusal(&self) -> Option<&'static str> {
         if self.primary.is_blank() {
             return Some(if self.target.is_remote() {
@@ -487,12 +466,10 @@ impl Form {
         None
     }
 
-    /// Where the project runs, or nothing for this machine.
     pub fn host_value(&self) -> Option<String> {
         self.host.clone()
     }
 
-    /// The commit identity the fields describe, when they describe one.
     pub fn commits(&self) -> Option<ProjectCommits> {
         let name = self.commit_name.value().trim().to_owned();
         let email = self.commit_email.value().trim().to_owned();
@@ -507,7 +484,6 @@ impl Form {
         })
     }
 
-    /// Whether the fields still describe the installation's own identity.
     pub fn commits_are_default(&self) -> bool {
         self.commits() == self.default_commits
     }
@@ -632,7 +608,6 @@ impl Form {
         self.identity_label(self.tracker_credential.as_deref(), "none")
     }
 
-    /// Move to the next machine on offer, wrapping.
     pub fn cycle_host(&mut self) {
         let mut options = vec![None];
         options.extend(self.host_choices.iter().cloned().map(Some));
@@ -643,7 +618,6 @@ impl Form {
         self.host = options[(at + 1) % options.len()].clone();
     }
 
-    /// Give pasted text to the box that has the caret.
     pub fn paste(&mut self, text: &str) {
         match self.focus {
             Focus::Primary => self.primary.paste(text),
@@ -659,7 +633,6 @@ impl Form {
         }
     }
 
-    /// Take the repository a picker chose.
     pub fn set_repository(&mut self, url: &str) {
         self.repository = Field::with(url);
     }
@@ -672,7 +645,6 @@ impl Form {
         Some(chosen)
     }
 
-    /// The caches the form lists, one per line, without blanks.
     pub fn cache_paths(&self) -> Vec<String> {
         self.caches
             .value()
@@ -683,7 +655,6 @@ impl Form {
             .collect()
     }
 
-    /// What the instructions box says, when it says anything.
     pub fn instruction_text(&self) -> Option<String> {
         let text = self.instructions.value();
         (!text.trim().is_empty()).then(|| text.trim_end().to_owned())
@@ -885,7 +856,6 @@ fn draw_label(frame: &mut Frame, area: Rect, text: &str) {
     );
 }
 
-/// The box a field's input is drawn in, one row below its label.
 fn below_label(area: Rect) -> Rect {
     Rect {
         y: area.y.saturating_add(1),

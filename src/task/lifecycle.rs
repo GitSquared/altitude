@@ -108,7 +108,6 @@ where
             .map_err(TaskServiceError::Isolation)
     }
 
-    /// Build what a task's project needs for one operator.
     pub async fn prepare_project_as_operator(
         &self,
         owner: &str,
@@ -458,7 +457,6 @@ where
         }))
         .await
     }
-    /// Everything that happened to a task, in order, with when it happened.
     pub async fn events(
         &self,
         task_id: &str,

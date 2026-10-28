@@ -54,7 +54,6 @@ pub struct TaskDraft {
     /// is mapped to.
     pub identity_id: String,
     pub identity_label: String,
-    /// The machine that holds the capsule, which is the machine that may run it.
     pub host: String,
     pub agent_kind: Option<AgentKind>,
     pub agent_conversation_id: Option<String>,
@@ -70,9 +69,7 @@ pub struct TaskStore {
 /// The request either goes out in the agent's words or waits for the linked
 /// contributions to answer.
 pub(crate) enum ReviewRequest<'a> {
-    /// Raise what the report asks for, as the agent wrote it.
     Raise,
-    /// Hold it until the linked contributions answer.
     Hold(&'a TaskOperatorSignalDraft),
 }
 
@@ -115,7 +112,6 @@ impl TaskStore {
         .map_err(TaskError::Database)
     }
 
-    /// The task that owns a signal, when the signal id is one of its own.
     pub async fn task_for_signal(
         &self,
         task_id: &str,
@@ -135,7 +131,6 @@ impl TaskStore {
         }
     }
 
-    /// One task by id, whether or not it is still in play.
     pub async fn get(&self, task_id: &str) -> Result<Option<Task>, TaskError> {
         sqlx::query_as::<_, TaskRow>(concat!(
             include_str!("read_task.sql"),
@@ -279,7 +274,6 @@ impl TaskStore {
         .map(|row| row.map(Task::from))
     }
 
-    /// Whether a task is still in play, by id.
     pub async fn is_active(&self, task_id: &str) -> Result<bool, TaskError> {
         let active: Option<bool> =
             sqlx::query_scalar("SELECT removed_at_ms IS NULL FROM tasks WHERE id = ?")
@@ -290,7 +284,6 @@ impl TaskStore {
         Ok(active.unwrap_or(false))
     }
 
-    /// Append related facts atomically and read their latest values before releasing the writer.
     pub async fn append_events(
         &self,
         task_id: &str,
@@ -343,7 +336,6 @@ impl TaskStore {
         .map(Task::from)
     }
 
-    /// Write events at the times they happened, which is what arriving history needs.
     async fn write_recorded_events(
         transaction: &mut Transaction<'_, Sqlite>,
         task_id: &str,
@@ -786,7 +778,6 @@ impl TaskStore {
         Ok(threads)
     }
 
-    /// One thread, by id, if it belongs to this task.
     pub async fn signal_thread(
         &self,
         task_id: &str,
@@ -799,7 +790,6 @@ impl TaskStore {
             .find(|thread| thread.id == signal_id))
     }
 
-    /// Add an agent message to a thread, reopening it if it was resolved.
     pub async fn message_signal(
         &self,
         task_id: &str,
@@ -810,7 +800,6 @@ impl TaskStore {
             .await
     }
 
-    /// Replace the agent's plan as a whole.
     pub async fn set_plan(
         &self,
         task_id: &str,
@@ -977,7 +966,6 @@ impl TaskStore {
             ))
     }
 
-    /// Whether a signal thread is still unresolved.
     pub async fn is_signal_unresolved(
         &self,
         task_id: &str,
@@ -1046,7 +1034,6 @@ impl TaskStore {
         Ok(task)
     }
 
-    /// Commit the ownership change and removal together so a transfer can be retried.
     pub async fn relinquish(
         &self,
         task_id: &str,
@@ -1104,7 +1091,6 @@ impl TaskStore {
     }
 }
 
-/// The issue a create call binds to, when it binds one.
 fn tracker_binding(events: &[TaskHistoryEvent]) -> Option<&IssueReference> {
     events.iter().find_map(|event| match event {
         TaskHistoryEvent::TrackerIssueBound { issue } => Some(&issue.issue.reference),

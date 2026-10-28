@@ -23,7 +23,6 @@ use ratatui::{
 
 use crate::tui::widgets::{palette, utils::truncate};
 
-/// A section heading attached to the row that starts it.
 pub struct Heading {
     pub title: String,
     pub note: Option<String>,
@@ -33,20 +32,14 @@ pub struct Heading {
     pub tone: Style,
 }
 
-/// One row of a list.
 pub struct Row {
-    /// A section heading above this row, when it starts a group.
     pub heading: Option<Heading>,
-    /// The line the list is read by.
     pub title: String,
-    /// Said under the title: what the row last had to say.
     pub detail: Option<String>,
-    /// Said at the right edge of the first line.
     pub note: Option<String>,
     /// The mark in front of the first line, where the row has a status of its
     /// own. Its spans keep their own styles; only their width is measured here.
     pub mark: Vec<Span<'static>>,
-    /// How the name reads when the focus is elsewhere. The focus bar overrides it.
     pub tone: Style,
 }
 
@@ -72,7 +65,6 @@ impl Row {
         self
     }
 
-    /// Give the group's heading the mark and tone of what it holds.
     pub fn heading_kind(mut self, mark: Vec<Span<'static>>, tone: Style) -> Self {
         if let Some(heading) = &mut self.heading {
             heading.mark = mark;
@@ -101,7 +93,6 @@ impl Row {
         self
     }
 
-    /// How many lines the row takes, before the list's spacing.
     fn height(&self) -> u16 {
         u16::from(self.heading.is_some()) + 1 + u16::from(self.detail.is_some())
     }
@@ -258,7 +249,6 @@ impl Cursor {
         }
     }
 
-    /// Whether the view is still catching up with where it should be.
     pub fn is_gliding(&self) -> bool {
         self.offset != self.target
     }
@@ -290,12 +280,10 @@ impl Cursor {
     }
 }
 
-/// The height a uniform list's first row takes, gap included.
 pub fn row_height(rows: &[Row]) -> u16 {
     rows.first().map_or(2, |row| row.height() + 1)
 }
 
-/// How many rows of a list with mixed heights fit in `height`.
 pub fn visible(height: u16, rows: &[Row]) -> usize {
     let mut used = 0;
     let mut count = 0;
@@ -384,7 +372,6 @@ pub fn draw(
     hitboxes
 }
 
-/// The full-width bar behind one row, gutter included.
 fn bar(frame: &mut Frame, area: Rect, rows: &[Row], offset: usize, index: usize, style: Style) {
     if index < offset || index >= rows.len() {
         return;
@@ -411,7 +398,6 @@ fn bar(frame: &mut Frame, area: Rect, rows: &[Row], offset: usize, index: usize,
     frame.render_widget(Block::default().style(style), bar);
 }
 
-/// A section heading: its name, and the count at the right edge.
 fn heading_line(heading: &Heading, width: usize) -> Line<'static> {
     let note = heading.note.as_deref().unwrap_or_default();
     let note_width = Line::from(note).width();

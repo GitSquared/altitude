@@ -25,17 +25,12 @@ use crate::{
 
 use super::console::{ask, choose, field, has_terminal, paragraph};
 
-/// The systemd unit name.
 const UNIT: &str = "altitude.service";
-/// The launchd job label, which is reverse-DNS because launchd expects one.
 const LABEL: &str = "dev.saillard.altitude.remote";
 
-/// Who starts it, and whose permissions it runs with.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Scope {
-    /// This user, and nothing beyond what that user can already do.
     User,
-    /// Without anyone logged in, which is the machine owner's business.
     Machine,
 }
 
@@ -120,7 +115,6 @@ pub async fn uninstall(_args: &ServeArgs, _base: &Config) -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// One service found on this machine, and what removing it takes.
 struct Installation {
     path: PathBuf,
     scope: Scope,
@@ -183,7 +177,6 @@ fn config_home() -> PathBuf {
         .unwrap_or_else(|| home().join(".config"))
 }
 
-/// The launchd domain a job belongs to: this user's session, or the machine's.
 fn domain(scope: Scope, uid: &str) -> String {
     match scope {
         Scope::User => format!("gui/{uid}"),
@@ -191,10 +184,8 @@ fn domain(scope: Scope, uid: &str) -> String {
     }
 }
 
-/// Everything about this machine that the definition needs to carry.
 struct Service {
     exe: PathBuf,
-    /// `serve`, plus whatever this run was told, so the service starts the same way.
     arguments: Vec<String>,
     environment: Vec<(String, String)>,
     user: String,
@@ -484,7 +475,6 @@ impl Service {
     }
 }
 
-/// A definition that has been rendered but not yet installed.
 struct Plan {
     path: PathBuf,
     contents: String,
@@ -529,7 +519,6 @@ impl Step {
     }
 }
 
-/// `systemctl` for whichever manager this scope belongs to.
 fn systemctl(arguments: &[&str], scope: Scope) -> Vec<String> {
     let mut command = vec!["systemctl".to_owned()];
     if scope == Scope::User {
@@ -639,7 +628,6 @@ impl Plan {
         Ok(())
     }
 
-    /// What a manager calls a service it has started, in a word.
     fn running_word(&self) -> &'static str {
         if matches!(env::consts::OS, "linux") {
             "active"
@@ -743,7 +731,6 @@ fn uid() -> String {
         .unwrap_or_default()
 }
 
-/// systemd splits `ExecStart` on whitespace unless an argument is quoted.
 fn systemd_quote(argument: &str) -> String {
     let plain = !argument.is_empty()
         && argument

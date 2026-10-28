@@ -13,7 +13,6 @@ use crate::{
     vcs,
 };
 
-/// The profiles a task driven by `agent` mounts.
 pub fn task(agents: &AgentEngines, agent: AgentKind) -> Vec<ProfileRecipe> {
     [
         vec![agents.engine(agent).profile_recipe()],
@@ -22,7 +21,6 @@ pub fn task(agents: &AgentEngines, agent: AgentKind) -> Vec<ProfileRecipe> {
     .concat()
 }
 
-/// Every profile Altitude can mount, whichever agent a task runs.
 pub fn every(agents: &AgentEngines) -> Vec<ProfileRecipe> {
     let mut recipes = vec![
         agents.engine(AgentKind::Pi).profile_recipe(),

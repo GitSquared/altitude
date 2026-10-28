@@ -7,7 +7,6 @@ use tokio::time::{self, Duration, Interval, MissedTickBehavior};
 
 use crate::tui::widgets::palette;
 
-/// How many characters wide the travelling highlight is.
 const SHIMMER_WIDTH: usize = 3;
 
 pub fn shimmer_clock() -> Interval {
@@ -39,7 +38,6 @@ pub struct Dot {
 }
 
 impl Dot {
-    /// A mark for an answer that has arrived, or will not.
     pub fn still(glyph: char, style: Style) -> Self {
         Self {
             glyph,
@@ -48,7 +46,6 @@ impl Dot {
         }
     }
 
-    /// A mark for a question that is still out.
     pub fn travelling(glyph: char, style: Style) -> Self {
         Self {
             glyph,
@@ -129,7 +126,6 @@ pub fn plain(text: &str) -> String {
     plain
 }
 
-/// Shortens `text` to `width` characters, marking the cut with an ellipsis.
 pub fn truncate(text: &str, width: usize) -> String {
     if text.chars().count() <= width {
         return text.to_owned();
@@ -158,7 +154,6 @@ pub fn since(at_ms: i64, now_ms: i64) -> String {
     }
 }
 
-/// The same age as a phrase: `just now`, or `12m ago`.
 pub fn ago(at_ms: i64, now_ms: i64) -> String {
     if now_ms.saturating_sub(at_ms) < 60_000 {
         "just now".to_owned()

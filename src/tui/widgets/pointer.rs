@@ -10,7 +10,6 @@
 
 use ratatui::layout::Rect;
 
-/// What a page's drawn rectangles mean, kept until the next frame replaces them.
 pub struct Targets<T> {
     entries: Vec<(Rect, T)>,
 }
@@ -34,7 +33,6 @@ impl<T> Targets<T> {
         self.entries.push((area, target));
     }
 
-    /// What a click at a terminal column and row landed on, if anything.
     pub fn at(&self, column: u16, row: u16) -> Option<&T> {
         self.entries
             .iter()

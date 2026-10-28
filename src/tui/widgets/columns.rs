@@ -13,12 +13,9 @@ use ratatui::{
 
 use super::surface;
 
-/// How narrow the last column may get before the others give width back.
 const MIN_DETAIL: u16 = 24;
-/// The column a divider occupies.
 const DIVIDER: u16 = 1;
 
-/// A run of columns inside a surface's inner area.
 pub struct Columns<'a> {
     widths: &'a [u16],
 }

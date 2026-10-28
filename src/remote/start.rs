@@ -7,22 +7,14 @@
 
 use std::{fmt, future::Future, pin::Pin};
 
-/// A start refusal the tracker coordinator can report back verbatim.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StartRefusal {
-    /// This machine has the delegated-work brake on.
     Paused,
-    /// The peer has not pushed the settings this machine runs work with.
     NoSetup,
-    /// The tracker did not name the issue's scope.
     NoScope,
-    /// No project on this machine claims the issue's scope.
     NoProject { scope: String },
-    /// A project claims the scope but will not start unattended work.
     NotAccepting { project: String, scope: String },
-    /// Neither the project nor the machine has chosen an agent.
     NoAgent,
-    /// Something on this machine failed before the work could start.
     Unavailable { reason: String },
 }
 
