@@ -926,16 +926,18 @@ impl App {
     }
 
     pub(in crate::tui) fn panel_mouse(&mut self, mouse: MouseEvent) {
-        if self.panel.form.is_some() {
-            let chosen = self
-                .panel
-                .form
-                .as_mut()
-                .and_then(|form| form.repository_mouse(mouse));
-            if let Some(repository) = chosen
-                && let Some(form) = self.panel.form.as_mut()
-            {
-                form.set_repository(&repository.url);
+        if let Some(form) = self.panel.form.as_mut() {
+            if form.repositories.is_some() {
+                let chosen = form.repository_mouse(mouse);
+                if let Some(repository) = chosen {
+                    form.set_repository(&repository.url);
+                }
+                return;
+            }
+            match mouse.kind {
+                MouseEventKind::ScrollUp => form.scroll_by(true),
+                MouseEventKind::ScrollDown => form.scroll_by(false),
+                _ => {}
             }
             return;
         }

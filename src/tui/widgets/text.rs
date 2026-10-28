@@ -10,10 +10,11 @@ use crate::tui::widgets::palette;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
+    buffer::Buffer,
     layout::Rect,
     style::Style,
     text::Line,
-    widgets::{Block, BorderType, Padding, Paragraph},
+    widgets::{Block, BorderType, Padding, Paragraph, Widget},
 };
 use unicode_width::UnicodeWidthChar;
 
@@ -90,6 +91,18 @@ impl Field {
     /// caret is kept on screen by measuring terminal columns, which is not the
     /// same as counting characters.
     pub fn draw(&self, frame: &mut Frame, area: Rect, style: &FieldStyle) {
+        if let Some(position) = self.render(frame.buffer_mut(), area, style) {
+            frame.set_cursor_position(position);
+        }
+    }
+
+    /// Draw into a buffer, answering where the caret goes when focused.
+    pub fn render(
+        &self,
+        buffer: &mut Buffer,
+        area: Rect,
+        style: &FieldStyle,
+    ) -> Option<(u16, u16)> {
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(border_style(style.focused))
@@ -99,9 +112,9 @@ impl Field {
             None => block,
         };
         let inner = block.inner(area);
-        frame.render_widget(block, area);
+        block.render(area, buffer);
         if inner.height == 0 || inner.width == 0 {
-            return;
+            return None;
         }
 
         let prefix_width = Line::from(style.prefix).width();
@@ -117,20 +130,15 @@ impl Field {
         }
         let value = self.value.replace(['\r', '\n'], "↵");
         let caret_column = Line::from(&before_caret[start..]).width();
-        frame.render_widget(
-            Paragraph::new(Line::from(format!(
-                "{}{}",
-                style.prefix,
-                &value[start.min(value.len())..]
-            ))),
-            inner,
-        );
-        if style.focused {
-            frame.set_cursor_position((
-                inner.x + prefix_width as u16 + caret_column as u16,
-                inner.y,
-            ));
-        }
+        Paragraph::new(Line::from(format!(
+            "{}{}",
+            style.prefix,
+            &value[start.min(value.len())..]
+        )))
+        .render(inner, buffer);
+        style
+            .focused
+            .then_some((inner.x + prefix_width as u16 + caret_column as u16, inner.y))
     }
 
     fn byte_index(&self) -> usize {
@@ -248,6 +256,19 @@ impl TextBox {
     /// The same box with something said on its top border, for a box that is one
     /// question rather than a field of a larger page.
     pub fn draw_titled(&self, frame: &mut Frame, area: Rect, focused: bool, title: Option<&str>) {
+        if let Some(position) = self.render_titled(frame.buffer_mut(), area, focused, title) {
+            frame.set_cursor_position(position);
+        }
+    }
+
+    /// Draw into a buffer, answering where the caret goes when focused.
+    pub fn render_titled(
+        &self,
+        buffer: &mut Buffer,
+        area: Rect,
+        focused: bool,
+        title: Option<&str>,
+    ) -> Option<(u16, u16)> {
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(border_style(focused))
@@ -257,9 +278,9 @@ impl TextBox {
             None => block,
         };
         let inner = block.inner(area);
-        frame.render_widget(block, area);
+        block.render(area, buffer);
         if inner.height == 0 || inner.width == 0 {
-            return;
+            return None;
         }
         let rows = self.rows(usize::from(inner.width));
         // The caret's row, not the caret's line: a long paragraph is several
@@ -284,19 +305,19 @@ impl TextBox {
                 )
             })
             .collect();
-        frame.render_widget(Paragraph::new(text), inner);
-        if focused {
+        Paragraph::new(text).render(inner, buffer);
+        focused.then(|| {
             let row = &rows[caret];
             let before_caret = self.lines[row.line]
                 .chars()
                 .skip(row.start)
                 .take(self.column - row.start)
                 .collect::<String>();
-            frame.set_cursor_position((
+            (
                 inner.x + Line::from(before_caret).width() as u16,
                 inner.y + (caret - offset) as u16,
-            ));
-        }
+            )
+        })
     }
 
     fn rows(&self, width: usize) -> Vec<Row> {

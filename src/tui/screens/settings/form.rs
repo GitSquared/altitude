@@ -7,9 +7,10 @@
 use crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::{
     Frame,
+    buffer::Buffer,
     layout::Rect,
     text::Line,
-    widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap},
+    widgets::{Block, BorderType, Clear, Padding, Paragraph, Widget, Wrap},
 };
 
 use crate::{
@@ -234,7 +235,10 @@ pub struct Form {
     host_choices: Vec<String>,
     pub accepts_delegated_work: bool,
     pub focus: Focus,
-    first_group: usize,
+    /// How many rows of the form are above the viewport.
+    scroll: u16,
+    /// Whether the wheel moved the form away from the caret's group.
+    free_scroll: bool,
     /// How the tracker's scope is named in this form: a Linear team, a Jira
     /// project, a GitHub repository.
     scope_label: String,
@@ -349,7 +353,8 @@ impl Form {
                 .as_ref()
                 .is_some_and(|route| route.accepts_delegated_work),
             focus: Focus::Primary,
-            first_group: 0,
+            scroll: 0,
+            free_scroll: false,
             scope_label: scope_label.to_owned(),
             repositories: None,
             scopes: None,
@@ -378,7 +383,8 @@ impl Form {
             host_choices: Vec::new(),
             accepts_delegated_work: false,
             focus: Focus::Primary,
-            first_group: 0,
+            scroll: 0,
+            free_scroll: false,
             scope_label: String::new(),
             repositories: None,
             scopes: None,
@@ -401,6 +407,19 @@ impl Form {
             (at + fields.len() - 1) % fields.len()
         };
         self.focus = fields[next];
+        self.free_scroll = false;
+    }
+
+    /// Move the form by a wheel notch, letting the operator read past the
+    /// caret's group without moving it.
+    pub fn scroll_by(&mut self, up: bool) {
+        const ROWS: u16 = 3;
+        self.free_scroll = true;
+        self.scroll = if up {
+            self.scroll.saturating_sub(ROWS)
+        } else {
+            self.scroll.saturating_add(ROWS)
+        };
     }
 
     pub fn enters_newline(&self) -> bool {
@@ -614,48 +633,88 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &mut Form, tick: Op
 
     let body = chrome::body(inner);
     let fields = body.content;
+    if fields.width == 0 || fields.height == 0 {
+        return;
+    }
     let groups = groups(project);
-    // The caret's group must be on screen, so the window of drawn groups starts
-    // at the first one that lets it fit. The actions are not groups, so being on
-    // one keeps the last group in view rather than jumping back to the top.
-    let focused = groups
-        .iter()
-        .position(|candidate| candidate.focus == form.focus)
-        .unwrap_or(groups.len().saturating_sub(1));
-    form.first_group = form.first_group.min(focused);
-    loop {
-        let used: u16 = groups
+    let mut tops = Vec::with_capacity(groups.len());
+    let mut heights = Vec::with_capacity(groups.len());
+    let mut top = 0u16;
+    for group in &groups {
+        let height = group.kind.rows();
+        tops.push(top);
+        heights.push(height);
+        top = top.saturating_add(height).saturating_add(1);
+    }
+    let content_height = top;
+    let max_scroll = content_height.saturating_sub(fields.height);
+    form.scroll = form.scroll.min(max_scroll);
+    if !form.free_scroll
+        && let Some(index) = groups
             .iter()
-            .skip(form.first_group)
-            .map(|candidate| candidate.kind.rows() + 1)
-            .sum();
-        if used <= fields.height || form.first_group == focused {
-            break;
+            .position(|candidate| candidate.focus == form.focus)
+    {
+        let at = tops[index];
+        let height = heights[index];
+        if at < form.scroll {
+            form.scroll = at;
+        } else if at.saturating_add(height) > form.scroll.saturating_add(fields.height) {
+            form.scroll = at
+                .saturating_add(height)
+                .saturating_sub(fields.height)
+                .min(at);
         }
-        form.first_group += 1;
+        form.scroll = form.scroll.min(max_scroll);
     }
 
-    let mut y = fields.y;
+    let mut content = Buffer::empty(Rect::new(0, 0, fields.width, content_height.max(1)));
+    let mut cursor = None;
     let mut repository_anchor = None;
     let mut scope_anchor = None;
-    for candidate in groups.iter().skip(form.first_group) {
-        let height = candidate.kind.rows();
-        if y + height > fields.bottom() {
+    for (index, group) in groups.iter().enumerate() {
+        let rect = Rect {
+            x: 0,
+            y: tops[index],
+            width: fields.width,
+            height: heights[index],
+        };
+        let drawn = draw_group(&mut content, rect, form, group);
+        if group.focus == form.focus {
+            cursor = drawn;
+        }
+        let screen_y = i32::from(fields.y) + i32::from(tops[index]) - i32::from(form.scroll);
+        if screen_y + i32::from(heights[index]) > i32::from(fields.y)
+            && screen_y < i32::from(fields.bottom())
+        {
+            let anchor = Rect {
+                y: u16::try_from(screen_y.max(i32::from(fields.y))).unwrap_or(fields.y),
+                height: heights[index],
+                ..fields
+            };
+            if group.focus == Focus::Repository {
+                repository_anchor = Some(anchor);
+            }
+            if group.focus == Focus::Scope {
+                scope_anchor = Some(anchor);
+            }
+        }
+    }
+
+    let target = frame.buffer_mut();
+    for row in 0..fields.height {
+        let source = form.scroll.saturating_add(row);
+        if source >= content_height {
             break;
         }
-        let rect = Rect {
-            y,
-            height,
-            ..fields
-        };
-        if candidate.focus == Focus::Repository {
-            repository_anchor = Some(rect);
+        for column in 0..fields.width {
+            target[(fields.x + column, fields.y + row)] = content[(column, source)].clone();
         }
-        if candidate.focus == Focus::Scope {
-            scope_anchor = Some(rect);
-        }
-        draw_group(frame, rect, form, candidate);
-        y += height + 1;
+    }
+    if let Some((x, y)) = cursor
+        && y >= form.scroll
+        && y < form.scroll.saturating_add(fields.height)
+    {
+        frame.set_cursor_position((fields.x + x, fields.y + y - form.scroll));
     }
     if let Some(anchor) = repository_anchor
         && let Some(browser) = form.repositories.as_mut()
@@ -680,7 +739,7 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &mut Form, tick: Op
     );
 }
 
-fn draw_group(frame: &mut Frame, area: Rect, form: &Form, group: &Group) {
+fn draw_group(buffer: &mut Buffer, area: Rect, form: &Form, group: &Group) -> Option<(u16, u16)> {
     let focused = form.focus == group.focus;
     match group.kind {
         Kind::Single => {
@@ -689,35 +748,35 @@ fn draw_group(frame: &mut Frame, area: Rect, form: &Form, group: &Group) {
             } else {
                 group.label
             };
-            draw_label(frame, area, label);
+            draw_label(buffer, area, label, focused);
             let field = match group.focus {
                 Focus::Primary => &form.primary,
                 Focus::Repository => &form.repository,
                 Focus::Scope => &form.scope,
-                _ => return,
+                _ => return None,
             };
-            field.draw(
-                frame,
+            field.render(
+                buffer,
                 below_label(area),
                 &FieldStyle {
                     focused,
                     title: None,
                     prefix: "",
                 },
-            );
+            )
         }
         Kind::Multi => {
-            draw_label(frame, area, group.label);
+            draw_label(buffer, area, group.label, focused);
             let text = match group.focus {
                 Focus::Setup => &form.setup,
                 Focus::Caches => &form.caches,
                 Focus::Instructions => &form.instructions,
-                _ => return,
+                _ => return None,
             };
-            text.draw(frame, below_label(area), focused);
+            text.render_titled(buffer, below_label(area), focused, None)
         }
         Kind::Choice => {
-            draw_label(frame, area, group.label);
+            draw_label(buffer, area, group.label, focused);
             let value = match group.focus {
                 Focus::Agent => form.agent_value(),
                 Focus::VcsIdentity => form.vcs_value(),
@@ -730,10 +789,9 @@ fn draw_group(frame: &mut Frame, area: Rect, form: &Form, group: &Group) {
             } else {
                 palette::muted()
             };
-            frame.render_widget(
-                Paragraph::new(Line::styled(format!("‹ {value} ›"), style)),
-                below_label(area),
-            );
+            Paragraph::new(Line::styled(format!("‹ {value} ›"), style))
+                .render(below_label(area), buffer);
+            None
         }
         Kind::Toggle => {
             let mark = if form.accepts_delegated_work {
@@ -746,43 +804,52 @@ fn draw_group(frame: &mut Frame, area: Rect, form: &Form, group: &Group) {
             } else {
                 palette::muted()
             };
-            frame.render_widget(
-                Paragraph::new(Line::styled(format!("{mark} {}", group.label), style)),
-                Rect { height: 1, ..area },
-            );
+            Paragraph::new(Line::styled(format!("{mark} {}", group.label), style))
+                .render(Rect { height: 1, ..area }, buffer);
             if area.height > 2 {
-                frame.render_widget(
-                    Paragraph::new(vec![
-                        Line::styled(
-                            "If a remote and task tracker are connected, turn this on to let \
-                             your task tracker start altitude agents on @mention and delegation.",
-                            palette::muted(),
-                        ),
-                        Line::from(""),
-                        Line::styled(
-                            "This enables you to pilot your task entirely from your task tracker.",
-                            palette::muted(),
-                        ),
-                    ])
-                    .wrap(Wrap { trim: true }),
+                Paragraph::new(vec![
+                    Line::styled(
+                        "If a remote and task tracker are connected, turn this on to let \
+                         your task tracker start altitude agents on @mention and delegation.",
+                        palette::muted(),
+                    ),
+                    Line::from(""),
+                    Line::styled(
+                        "This enables you to pilot your task entirely from your task tracker.",
+                        palette::muted(),
+                    ),
+                ])
+                .wrap(Wrap { trim: true })
+                .render(
                     Rect {
                         y: area.y.saturating_add(2),
                         height: area.height.saturating_sub(2),
                         ..area
                     },
+                    buffer,
                 );
             }
+            None
         }
     }
 }
 
-fn draw_label(frame: &mut Frame, area: Rect, text: &str) {
-    frame.render_widget(
-        Paragraph::new(Line::styled(text, palette::muted())),
+fn draw_label(buffer: &mut Buffer, area: Rect, text: &str, focused: bool) {
+    let style = if focused {
+        palette::primary().bold()
+    } else {
+        palette::muted()
+    };
+    Paragraph::new(Line::styled(
+        format!("{}{text}", if focused { "› " } else { "  " }),
+        style,
+    ))
+    .render(
         Rect {
             height: area.height.min(1),
             ..area
         },
+        buffer,
     );
 }
 
