@@ -3672,10 +3672,9 @@ impl App {
             }
         } else {
             match key.code {
-                // Escape leaves the text box first, and the page only on the second
-                // press, so a setup command can hold newlines without trapping the
-                // operator in it.
-                KeyCode::Esc if form.focus.takes_text() => form.focus = Focus::Cancel,
+                // Escape leaves the page from a text box too, so cancelling a form
+                // is one gesture rather than a first press that only moves focus.
+                KeyCode::Esc => keep = false,
                 _ if is_dismiss(key) && !form.focus.takes_text() => keep = false,
                 // The chord that starts work on the creation page saves here, so a
                 // page with fields is finished the same way from wherever the caret
