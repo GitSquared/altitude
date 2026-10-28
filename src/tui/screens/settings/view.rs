@@ -3,14 +3,8 @@
 //! image is made of.
 
 use crate::{
-    agent::AgentKind,
     credentials::{Service, Slot},
-    isolation::ProfileSummary,
-    tui::{
-        App,
-        app::{CredentialStatus, RemoteStatus},
-        popups::new_task::AGENTS,
-    },
+    tui::{App, app::RemoteStatus},
 };
 
 use super::{
@@ -101,51 +95,6 @@ impl App {
                 switch_row(Setting::KeyboardHints, self.keyboard_hints()),
                 switch_row(Setting::Animations, self.animations()),
             ],
-            Section::Agents => AGENTS
-                .into_iter()
-                .map(|kind| {
-                    let credential = self.agent_credential(kind);
-                    let mut detail = credential.summary().to_owned();
-                    if self.agent() == Some(kind) {
-                        detail.push_str(" · default");
-                    }
-                    Row {
-                        label: kind.to_string(),
-                        detail: Some(detail),
-                        kind: RowKind::Agent { kind, credential },
-                    }
-                })
-                .collect(),
-            Section::VersionControl => {
-                let identity = self.git_identity();
-                let mut rows = vec![Row {
-                    label: "Git identity".to_owned(),
-                    detail: Some(if identity.is_set() { "set" } else { "not set" }.to_owned()),
-                    kind: RowKind::GitIdentity(identity),
-                }];
-                rows.extend(
-                    self.profiles
-                        .iter()
-                        .filter(|profile| profile.profile.starts_with("vcs/"))
-                        .map(|profile| {
-                            let credential = self.profile_credential(profile);
-                            let detail = credential.summary().to_owned();
-                            Row {
-                                label: profile.display.to_owned(),
-                                detail: Some(detail),
-                                kind: RowKind::Credential(credential),
-                            }
-                        }),
-                );
-                rows
-            }
-            Section::Trackers => vec![Row {
-                label: "Linear".to_owned(),
-                detail: Some(self.tracker_state.summary().to_owned()),
-                kind: RowKind::Tracker {
-                    state: self.tracker_state,
-                },
-            }],
             Section::Projects => self
                 .projects()
                 .into_iter()
@@ -166,7 +115,6 @@ impl App {
             rows,
             credentials: self.settings_credentials(),
             base: self.base_description.clone(),
-            tracker_profile_dir: self.tracker_profile_dir(),
         }
     }
 
@@ -187,47 +135,6 @@ impl App {
                     .map(|identity| identity.id.clone())
                     .unwrap_or_else(|error| format!("unreadable: {error}")),
                 data_dir: self.config.data_dir().display().to_string(),
-            },
-        }
-    }
-
-    /// One profile's login, with the place it lives and what its own check last
-    /// said. Names and places only: a credential is never read, and never shown.
-    fn profile_credential(&self, profile: &ProfileSummary) -> Credential {
-        Credential {
-            label: profile.display.to_owned(),
-            kind: CredentialKind::Profile {
-                profile: profile.profile.clone(),
-                directory: self
-                    .config
-                    .profile_dir(&profile.profile)
-                    .display()
-                    .to_string(),
-                status: self
-                    .credential_status
-                    .get(&profile.profile)
-                    .cloned()
-                    .unwrap_or_default(),
-            },
-        }
-    }
-
-    /// The login of the profile a coding agent runs under.
-    fn agent_credential(&self, kind: AgentKind) -> Credential {
-        let profile = kind.profile();
-        match self
-            .profiles
-            .iter()
-            .find(|summary| summary.profile == profile)
-        {
-            Some(summary) => self.profile_credential(summary),
-            None => Credential {
-                label: kind.to_string(),
-                kind: CredentialKind::Profile {
-                    profile: profile.to_owned(),
-                    directory: String::new(),
-                    status: CredentialStatus::default(),
-                },
             },
         }
     }

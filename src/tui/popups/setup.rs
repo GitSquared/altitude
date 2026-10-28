@@ -19,7 +19,6 @@ pub enum SetupKind {
     Remote,
     RemoteTrackers,
     RemoteTrackerGuide(TrackerKind),
-    Linear,
     SigningKey,
 }
 
@@ -253,7 +252,6 @@ impl Setup {
             SetupKind::RemoteTrackerGuide(kind) => {
                 format!("Set up {} on the remote", kind.label())
             }
-            SetupKind::Linear => "Sign in to Linear".to_owned(),
             SetupKind::SigningKey => "Signing key".to_owned(),
         }
     }

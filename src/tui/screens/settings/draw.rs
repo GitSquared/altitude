@@ -22,11 +22,11 @@ use crate::tui::widgets::{
 use super::{
     form::draw_form,
     pages::{
-        agent_purpose, credential_connector, git_connector, profile_connector, project_lines,
-        remote_connector, section_heading, tracker_connector, tracker_summary,
+        credential_connector, git_connector, project_lines, remote_connector, section_heading,
+        tracker_summary,
     },
     panel::{Depth, Panel, Section},
-    rows::{CredentialKind, RowKind, View, mark},
+    rows::{RowKind, View, mark},
 };
 
 /// What a click on the settings screen can select.
@@ -196,22 +196,8 @@ fn detail(panel: &Panel, view: &View, tick: Option<usize>) -> Paragraph<'static>
         RowKind::Project { project } => {
             project_lines(project, view.base.as_ref(), &view.credentials, heading)
         }
-        RowKind::Agent { kind, credential } => match &credential.kind {
-            CredentialKind::Profile {
-                profile,
-                directory,
-                status,
-            } => profile_connector(label, agent_purpose(*kind), profile, directory, status),
-            CredentialKind::Installation { .. } | CredentialKind::Tracker { .. } => {
-                credential_connector(credential)
-            }
-        }
-        .lines(heading, tick),
         RowKind::GitIdentity(identity) => git_connector(identity).lines(heading, tick),
         RowKind::Credential(credential) => credential_connector(credential).lines(heading, tick),
-        RowKind::Tracker { state } => {
-            tracker_connector(*state, &view.tracker_profile_dir).lines(heading, tick)
-        }
         RowKind::Switch { setting, on } => {
             let mut status = mark(*on, false).spans(tick);
             status.push(Span::styled(

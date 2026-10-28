@@ -655,20 +655,18 @@ impl TaskHost for OwnTasks {
             // their logins. A task still in play needs them, so its presence
             // postpones this until the task is no longer here.
             if forget_logins && nothing_theirs {
-                let profiles: Vec<String> = tasks
-                    .service()
-                    .credentials()
-                    .profiles()
-                    .iter()
-                    .map(|profile| profile.profile.clone())
-                    .collect();
                 let directory = scoped.scoped_data_dir().to_path_buf();
                 spawn_blocking(move || {
-                    scoped.forget_profiles(&profiles)?;
                     // What this machine said it held is gone with the files, or a
                     // later push would think they were still here and skip them.
                     let held_path = directory.join("profiles.json");
                     let mut held = super::HeldConfig::load(&held_path);
+                    let profiles = held
+                        .profiles
+                        .iter()
+                        .map(|profile| profile.profile.clone())
+                        .collect::<Vec<_>>();
+                    scoped.forget_profiles(&profiles)?;
                     held.profiles.clear();
                     held.save(&held_path)?;
                     for provider in TrackerKind::ALL {
@@ -1312,15 +1310,6 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
             }
         });
     }
-    // What this machine can mount is what a pushed configuration may carry,
-    // besides the tracker profiles that only travel.
-    let mounted_profiles: Vec<String> = task_loop
-        .service()
-        .credentials()
-        .profiles()
-        .iter()
-        .map(|profile| profile.profile.clone())
-        .collect();
     if reports_through_pushed_logins {
         let syncing = Arc::clone(&task_loop);
         tokio::spawn(async move {
@@ -1368,7 +1357,6 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         listen,
         label,
         data_dir: config.data_dir().to_owned(),
-        mounted_profiles,
         state: observed,
         trackers,
         tasks: host.clone(),

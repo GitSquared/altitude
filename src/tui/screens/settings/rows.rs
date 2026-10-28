@@ -1,10 +1,7 @@
 //! What a row is, and what it says about itself: the mark it wears, the keys it
 //! offers, and the facts the rest of the panel asks it for.
 
-use std::path::PathBuf;
-
 use crate::{
-    agent::AgentKind,
     credentials::Credential as NamedCredential,
     isolation::EnvironmentDescription,
     project::Project,
@@ -37,12 +34,6 @@ pub enum RowKind {
     Project {
         project: Project,
     },
-    /// A coding agent, which may be the one new tasks use, and the login a task
-    /// drives it with.
-    Agent {
-        kind: AgentKind,
-        credential: Credential,
-    },
     /// The identity git commits under, read from the version-control profile.
     GitIdentity(GitIdentity),
     /// Something a task logs in with: this installation's key, or a login a task
@@ -62,11 +53,6 @@ pub enum RowKind {
     },
     /// A remote announcing on the network that this client has not adopted.
     Discovered(DiscoveredRemote),
-    /// A tracker Altitude can bind an issue to. Today that is Linear, and the
-    /// row says whether its live session is connected.
-    Tracker {
-        state: TrackerState,
-    },
     Switch {
         setting: Setting,
         on: bool,
@@ -100,20 +86,13 @@ impl Row {
             // The same question mark the first screen gives a machine found on
             // the network: it is an offer, not something this client holds.
             RowKind::Discovered(_) => Some(Dot::still('?', palette::muted())),
-            RowKind::Agent { credential, .. } => credential.dot(),
             RowKind::Credential(credential) => credential.dot(),
             RowKind::GitIdentity(identity) => Some(mark(identity.is_set(), false)),
-            RowKind::Tracker { state } => Some(tracker_mark(*state)),
             // A preference is the same kind of fact as a login or a remote: on,
             // or not. It reads with the same mark rather than a word of its own.
             RowKind::Switch { on, .. } => Some(mark(*on, false)),
             _ => None,
         }
-    }
-
-    /// Whether this row is a coding agent.
-    pub fn is_agent(&self) -> bool {
-        matches!(self.kind, RowKind::Agent { .. })
     }
 
     /// Whether this row is a remote this client has configured.
@@ -132,26 +111,23 @@ impl Row {
 
     /// Whether delete here removes a saved sign-in rather than the row itself.
     pub fn forgets_credentials(&self) -> bool {
-        matches!(self.kind, RowKind::Agent { .. } | RowKind::Tracker { .. })
-            || matches!(
-                &self.kind,
-                RowKind::Credential(Credential {
-                    kind: CredentialKind::Profile { .. },
-                    ..
-                })
-            )
+        matches!(
+            &self.kind,
+            RowKind::Credential(Credential {
+                kind: CredentialKind::Profile { .. } | CredentialKind::Tracker { .. },
+                ..
+            })
+        )
     }
 
     /// The profile whose login this row stands for, when it stands for one.
     pub fn profile(&self) -> Option<&str> {
         match &self.kind {
-            RowKind::Agent { credential, .. } | RowKind::Credential(credential) => {
-                match &credential.kind {
-                    CredentialKind::Profile { profile, .. }
-                    | CredentialKind::Tracker { profile, .. } => Some(profile.as_str()),
-                    CredentialKind::Installation { .. } => None,
-                }
-            }
+            RowKind::Credential(credential) => match &credential.kind {
+                CredentialKind::Profile { profile, .. }
+                | CredentialKind::Tracker { profile, .. } => Some(profile.as_str()),
+                CredentialKind::Installation { .. } => None,
+            },
             _ => None,
         }
     }
@@ -163,14 +139,6 @@ impl Row {
     pub fn hints(&self, connecting_tracker: bool) -> Vec<chrome::Hint> {
         match &self.kind {
             RowKind::Project { .. } => vec![chrome::Hint::new("enter", "edit")],
-            RowKind::Agent { credential, .. } => {
-                let mut hints = Vec::new();
-                if !credential.is_pending() {
-                    hints.push(chrome::Hint::new("enter", "sign in"));
-                }
-                hints.push(chrome::Hint::new("space", "set as default"));
-                hints
-            }
             RowKind::GitIdentity(_) => vec![chrome::Hint::new("enter", "sign in")],
             RowKind::Credential(credential) => match &credential.kind {
                 CredentialKind::Installation { .. } => {
@@ -205,14 +173,6 @@ impl Row {
                 chrome::Hint::new("e", "edit"),
             ],
             RowKind::Discovered(_) => vec![chrome::Hint::new("enter", "use remote")],
-            RowKind::Tracker { .. } => vec![chrome::Hint::new(
-                "enter",
-                if connecting_tracker {
-                    "cancel sign-in"
-                } else {
-                    "sign in"
-                },
-            )],
             RowKind::Switch { .. } => vec![chrome::Hint::new("enter", "toggle")],
         }
     }
@@ -226,8 +186,6 @@ pub struct View {
     pub credentials: Vec<NamedCredential>,
     /// What the base image is made of, once it has been built here.
     pub base: Option<EnvironmentDescription>,
-    /// Where Linear keeps its sign-in profile, for the Trackers page.
-    pub tracker_profile_dir: PathBuf,
 }
 
 /// One credential, as the list shows it.

@@ -1,6 +1,5 @@
-//! The settings panel: what the interface shows, which agent drives a task and
-//! how it signs in, the git identity tasks commit with, the projects work happens
-//! in, and the remotes it can be delegated to.
+//! The settings panel: the identities work runs with, the projects it works on,
+//! the remotes it can be delegated to, and how the interface looks.
 //!
 //! Fullscreen, and three columns. The rail picks a list and the list picks a
 //! row. The third column is not a place the focus goes: it only says what is

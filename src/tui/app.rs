@@ -59,7 +59,7 @@ use crate::{
 use super::background::terrain::Terrain;
 use super::links::Link;
 use super::widgets::{alert::Alert, list};
-use popups::confirm::{CredentialTarget, PendingConfirm};
+use popups::confirm::PendingConfirm;
 use popups::identity::{IdentitySetup, RenameDecision, RenameIdentity, SetupDecision};
 use popups::message::{Decision as MessageDecision, MessagePrompt};
 use popups::new_task::{AGENTS, Answer, Hit as NewTaskHit, Host, NewTask, SearchToken};
@@ -2117,9 +2117,6 @@ impl App {
             {
                 self.set_default_identity()
             }
-            KeyCode::Char(' ') if self.selected_row().is_some_and(|row| row.is_agent()) => {
-                self.edit_selected()
-            }
             KeyCode::Char('e') if self.panel.section == Section::Identities => {
                 self.open_rename_identity()
             }
@@ -2159,7 +2156,7 @@ impl App {
             _ => {}
         }
         if self.panel.section != previous_section {
-            if self.panel.section == Section::VersionControl {
+            if self.panel.section == Section::Identities {
                 self.refresh_git_identity().await;
             }
             self.credentials_visible_since = None;
@@ -2209,35 +2206,6 @@ impl App {
                         }
                         Err(error) => self.problem(error.to_string()),
                     }
-                }
-            }
-            // A tracker is signed in to, which is a browser and a callback rather
-            // than a page here.
-            Some(RowKind::Tracker { .. }) => {
-                let lines = if self.tracker_state == TrackerState::Connected {
-                    vec![
-                        Line::from("Linear is signed in."),
-                        Line::from(""),
-                        Line::from(
-                            "To use another account, close this window and press Delete on the Linear row to remove this sign-in.",
-                        ),
-                    ]
-                } else {
-                    vec![
-                        Line::from("Finish signing in in your browser."),
-                        Line::from(""),
-                        Line::from("Esc or q cancels this sign-in."),
-                    ]
-                };
-                self.foreground = Foreground::Setup(Setup::new(SetupKind::Linear, lines));
-                if self.tracker_state != TrackerState::Connected {
-                    self.connect_tracker(task_service, tracker_connects);
-                }
-                self.alert = None;
-            }
-            Some(RowKind::Agent { credential, .. }) => {
-                if let CredentialKind::Profile { profile, .. } = credential.kind {
-                    self.begin_sign_in(&credential.label, &profile, task_service, events);
                 }
             }
             Some(RowKind::GitIdentity(_)) => {
@@ -3156,10 +3124,7 @@ impl App {
     /// poll that found nothing does not ask for a frame.
     pub(in crate::tui) fn sync_credentials(&mut self) -> bool {
         let showing = matches!(self.foreground, Foreground::Panel)
-            && matches!(
-                self.panel.section,
-                Section::Identities | Section::Agents | Section::VersionControl
-            );
+            && matches!(self.panel.section, Section::Identities);
         match (showing, self.credentials_visible_since) {
             (true, None) => {
                 self.credentials_visible_since = Some(Instant::now());
@@ -3200,8 +3165,7 @@ impl App {
     /// An answer that came back is not asked again, and one that could not run waits
     /// out a backoff rather than being retried on the next tick.
     fn unasked_profiles(&self) -> Vec<String> {
-        let prefix = self.panel.section.profile_prefix();
-        if prefix.is_none() && self.panel.section != Section::Identities {
+        if self.panel.section != Section::Identities {
             return Vec::new();
         }
         let retry_due = self
@@ -3210,7 +3174,6 @@ impl App {
         self.profiles
             .iter()
             .map(|summary| summary.profile.clone())
-            .filter(|profile| prefix.is_none_or(|prefix| profile.starts_with(prefix)))
             .filter(|profile| {
                 if self.credential_checking.contains(profile) {
                     return false;
@@ -3470,10 +3433,6 @@ impl App {
                 self.toggle(setting, !on);
                 return;
             }
-            RowKind::Agent { kind, .. } => {
-                self.set_agent(kind);
-                return;
-            }
             // The installation's key is made, not signed in to, so there is no
             // terminal to open for it.
             RowKind::GitIdentity(_) => {
@@ -3482,12 +3441,6 @@ impl App {
             }
             RowKind::Credential(_) => {
                 self.say("This is how remotes recognise this machine, and it is not edited here");
-                return;
-            }
-            // A tracker is signed in to with enter, which starts a browser
-            // sign-in rather than a form here.
-            RowKind::Tracker { .. } => {
-                self.say("Press enter to sign in to Linear");
                 return;
             }
             RowKind::Project { project } => Form::for_project(
@@ -3544,121 +3497,73 @@ impl App {
         let Some(row) = self.selected_row() else {
             return;
         };
-        let (target, question) = match &row.kind {
-            RowKind::Credential(credential) if self.panel.section == Section::Identities => {
-                let Some(id) = credential.profile() else { return };
-                (
-                    CredentialTarget::Identity(id.to_owned()),
-                    format!(
-                        "Delete the {} identity? Its login is forgotten here. Projects and the \
-                         default must stop using it first.",
-                        credential.label
-                    ),
-                )
-            }
-            RowKind::Agent { .. } | RowKind::Credential(_) => {
-                let Some(profile) = row.profile() else { return };
-                let scope = if profile == "agents/pi" {
-                    "all Pi provider sign-ins"
-                } else if profile == "vcs/github" {
-                    "the GitHub CLI sign-in"
-                } else {
-                    "the Claude Code sign-in"
-                };
-                (
-                    CredentialTarget::Profile(profile.to_owned()),
-                    format!("Delete {scope} saved on this machine? Tool settings and copies already sent to remotes are kept."),
-                )
-            }
-            RowKind::Tracker { .. } => (CredentialTarget::Linear, "Delete this machine's personal Linear sign-in? The remote's shared Linear app is kept.".to_owned()),
-            _ => return,
+        let RowKind::Credential(credential) = row.kind else {
+            return;
         };
-        self.foreground =
-            Foreground::Confirm(PendingConfirm::forgetting_credentials(target, question));
+        let Some(id) = credential.profile().map(str::to_owned) else {
+            return;
+        };
+        let question = format!(
+            "Delete the {} identity? Its login and profile are forgotten here. Projects and \
+             the default must stop using it first.",
+            credential.label
+        );
+        self.foreground = Foreground::Confirm(PendingConfirm::forgetting_credentials(id, question));
     }
 
     pub(in crate::tui) async fn forget_credentials<E>(
         &mut self,
-        target: CredentialTarget,
+        id: String,
         service: &TaskService<E>,
     ) where
         E: IsolationEngine + Clone + 'static,
     {
-        let result = match target {
-            CredentialTarget::Profile(profile) => service
+        let Some(file) = self.settings_file.as_mut() else {
+            self.problem("Settings are unavailable; fix the file and reopen");
+            return;
+        };
+        let mut proposed = file.settings().clone();
+        if let Err(error) = proposed.remove_credential(&id) {
+            self.problem(error.to_string());
+            return;
+        }
+        let service_of = Service::from_id(&id);
+        let removed = if service_of.is_some_and(|service| service.is_mounted()) {
+            service
                 .credentials()
-                .forget(&profile)
-                .map_err(|error| error.to_string()),
-            CredentialTarget::Identity(id) => {
-                let Some(file) = self.settings_file.as_mut() else {
-                    self.problem("Settings are unavailable; fix the file and reopen");
-                    return;
-                };
-                let mut proposed = file.settings().clone();
-                if let Err(error) = proposed.remove_credential(&id) {
-                    self.problem(error.to_string());
-                    return;
-                }
-                let service_of = Service::from_id(&id);
-                let removed = if service_of.is_some_and(|service| service.is_mounted()) {
-                    service
-                        .credentials()
-                        .forget(&id)
-                        .map_err(|error| error.to_string())
-                } else {
-                    match service.tracker_connectable(&id) {
-                        Some(tracker) => tracker
-                            .clear_credentials()
-                            .await
-                            .map_err(|error| error.to_string()),
-                        None => Err("this tracker identity is unavailable".to_owned()),
-                    }
-                };
-                match removed {
-                    Ok(()) => {
-                        if let Err(error) = self.config.remove_profile(&id) {
-                            tracing::warn!(%error, profile = %id, "could not remove a deleted identity's profile");
-                        }
-                        self.credential_status.remove(&id);
-                        self.credential_checked_at.remove(&id);
-                        self.credential_checking.remove(&id);
-                        self.tracker_states.remove(&id);
-                        self.profiles.retain(|profile| profile.profile != id);
-                        match file.save(proposed) {
-                            Ok(()) => Ok(()),
-                            Err(error) => Err(error.to_string()),
-                        }
-                    }
-                    Err(error) => Err(error),
-                }
-            }
-            CredentialTarget::Linear => {
-                if let Some(handle) = self.tracker_connect.take() {
-                    handle.abort();
-                }
-                self.tracker_connect_attempt = self.tracker_connect_attempt.wrapping_add(1);
-                match service.tracker() {
-                    Some(tracker) => tracker
-                        .clear_credentials()
-                        .await
-                        .map_err(|error| error.to_string()),
-                    None => Err("Linear is unavailable".to_owned()),
-                }
+                .forget(&id)
+                .map_err(|error| error.to_string())
+        } else {
+            match service.tracker_connectable(&id) {
+                Some(tracker) => tracker
+                    .clear_credentials()
+                    .await
+                    .map_err(|error| error.to_string()),
+                None => Err("this tracker identity is unavailable".to_owned()),
             }
         };
         self.foreground = Foreground::Panel;
+        let result = match removed {
+            Ok(()) => {
+                if let Err(error) = self.config.remove_profile(&id) {
+                    tracing::warn!(%error, profile = %id, "could not remove a deleted identity's profile");
+                }
+                self.credential_status.remove(&id);
+                self.credential_checked_at.remove(&id);
+                self.credential_checking.remove(&id);
+                self.tracker_states.remove(&id);
+                self.profiles.retain(|profile| profile.profile != id);
+                file.save(proposed).map_err(|error| error.to_string())
+            }
+            Err(error) => Err(error),
+        };
         match result {
             Ok(()) => {
                 self.credential_check_generation = self.credential_check_generation.wrapping_add(1);
-                self.credential_status.clear();
                 self.credentials_visible_since = None;
-                self.tracker_state = match service.tracker() {
-                    Some(tracker) if tracker.is_connected() => TrackerState::Connected,
-                    _ => TrackerState::NotConnected,
-                };
-                self.say("Saved sign-in deleted");
+                self.say("Identity deleted");
             }
-            Err(error) => self.problem(format!("Could not delete the saved sign-in: {error}")),
+            Err(error) => self.problem(format!("Could not delete the identity: {error}")),
         }
     }
 
@@ -3669,10 +3574,8 @@ impl App {
         // The question is built first: it borrows the name the target then moves.
         let (question, target) = match row.kind {
             RowKind::Switch { .. }
-            | RowKind::Agent { .. }
             | RowKind::GitIdentity(_)
             | RowKind::Credential(_)
-            | RowKind::Tracker { .. }
             | RowKind::Discovered(_) => {
                 return;
             }
@@ -4304,7 +4207,7 @@ impl App {
                 SetupFocus::Tracker => {
                     if self.tracker_state == TrackerState::Connected {
                         self.foreground = Foreground::GetStarted(panel);
-                        open_panel_at(self, task_service, Section::Trackers).await;
+                        open_panel_at(self, task_service, Section::Identities).await;
                         return false;
                     }
                     if self.tracker_state != TrackerState::Connecting {
@@ -5525,13 +5428,6 @@ impl App {
     /// Close the keys, returning to what they covered.
     pub(in crate::tui) fn setup_key(&mut self, key: KeyEvent) {
         if is_dismiss(key) {
-            if matches!(&self.foreground, Foreground::Setup(setup) if matches!(setup.kind, SetupKind::Linear))
-                && let Some(handle) = self.tracker_connect.take()
-            {
-                handle.abort();
-                self.tracker_connect_attempt = self.tracker_connect_attempt.wrapping_add(1);
-                self.tracker_state = TrackerState::NotConnected;
-            }
             // A provider's guide steps back to the list it came from; everything
             // else closes to the panel.
             let stays = match &mut self.foreground {
@@ -5824,12 +5720,6 @@ impl App {
         }
     }
 
-    /// Where Linear keeps its sign-in profile. Shown in settings; the interface
-    /// never reads its contents, and it is never mounted into a task.
-    pub(in crate::tui) fn tracker_profile_dir(&self) -> PathBuf {
-        self.config.profile_dir(TrackerKind::Linear.profile())
-    }
-
     /// The search the issue page owes, if its query has rested long enough.
     pub(in crate::tui) fn due_issue_search(&mut self) -> Option<(SearchToken, String)> {
         let Foreground::NewTask(question) = &mut self.foreground else {
@@ -6089,10 +5979,6 @@ impl App {
         }
         self.tracker_connect = None;
         self.tracker_connecting = None;
-        let setup_open = matches!(&self.foreground, Foreground::Setup(setup) if matches!(setup.kind, SetupKind::Linear));
-        if setup_open {
-            self.foreground = Foreground::Panel;
-        }
         let state = match reply.result {
             Ok(true) => {
                 self.say("Tracker identity connected");

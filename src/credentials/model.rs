@@ -66,7 +66,6 @@ impl Service {
 
     /// Whether a task mounts this credential's directory, as opposed to the host
     /// using it as a session.
-    #[allow(dead_code)]
     pub fn is_mounted(self) -> bool {
         !matches!(self, Self::Tracker(_))
     }
@@ -79,23 +78,6 @@ impl Service {
             Self::VersionControl(VcsProviderKind::GitHub) => "vcs/github",
             Self::Tracker(TrackerKind::Linear) => "trackers/linear",
         }
-    }
-
-    /// The service's default credential id for a slot, when a build has only one.
-    #[allow(dead_code)]
-    pub fn sole_id(slot: Slot) -> Option<&'static str> {
-        match slot {
-            Slot::Agent => None,
-            Slot::VersionControl => Some("vcs/github"),
-            Slot::Tracker => Some("trackers/linear"),
-        }
-    }
-
-    /// The instance part of an id, which is what distinguishes two credentials of
-    /// one service.
-    #[allow(dead_code)]
-    pub fn instance(id: &str) -> &str {
-        id.splitn(3, '/').nth(2).unwrap_or_default()
     }
 }
 
@@ -125,20 +107,8 @@ impl Credential {
         }
     }
 
-    #[allow(dead_code)]
     pub fn service(&self) -> Option<Service> {
         Service::from_id(&self.id)
-    }
-
-    /// What the list row calls this: the label, with the service beside it.
-    #[allow(dead_code)]
-    pub fn display(&self) -> String {
-        match self.service() {
-            Some(service) if service.label() != self.label => {
-                format!("{} · {}", self.label, service.label())
-            }
-            _ => self.label.clone(),
-        }
     }
 
     /// Whether the id is usable as a profile directory and a route.
@@ -165,7 +135,6 @@ impl Credential {
 
 /// Build the id for a new credential of `service`, using a slug of its label and
 /// a short suffix when that is taken.
-#[allow(dead_code)]
 pub fn new_id(service: Service, label: &str, taken: impl Fn(&str) -> bool) -> String {
     let slug: String = label
         .trim()

@@ -11,7 +11,6 @@ use std::{
 use ratatui::text::{Line, Span};
 
 use crate::{
-    agent::AgentKind,
     credentials::Credential as NamedCredential,
     isolation::EnvironmentDescription,
     project::Project,
@@ -784,13 +783,5 @@ fn counted(count: i64, unit: &str) -> String {
         format!("1 {unit}")
     } else {
         format!("{count} {unit}s")
-    }
-}
-
-/// Which profile a coding agent's login lives in.
-pub(super) fn agent_purpose(kind: AgentKind) -> &'static str {
-    match kind {
-        AgentKind::Pi => "A coding harness by Earendil. Altitude drives it to run your tasks.",
-        AgentKind::Claude => "A coding harness by Anthropic. Altitude drives it to run your tasks.",
     }
 }

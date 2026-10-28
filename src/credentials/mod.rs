@@ -139,22 +139,6 @@ impl<E> Credentials<E>
 where
     E: IsolationEngine + Clone + 'static,
 {
-    /// Every profile Altitude can mount, so an interface can say what logins exist.
-    ///
-    /// The profiles a task mounts depend on the agent it runs; this is the whole of
-    /// them, which is what a login list is about.
-    pub fn profiles(&self) -> Vec<ProfileSummary> {
-        mounts::every(&self.agents)
-            .into_iter()
-            .map(|recipe| ProfileSummary {
-                profile: recipe.profile,
-                display: recipe.display,
-                sign_in: recipe.sign_in,
-                sign_in_command: recipe.sign_in_command,
-            })
-            .collect()
-    }
-
     /// Whether a sign-in for this profile would find its build ready.
     ///
     /// Asked before a shell is opened, so a wait is only shown when there is one. The

@@ -87,7 +87,7 @@ fn arriving_accounts(decoded: &[(PathBuf, Vec<u8>)]) -> Vec<(TrackerKind, Option
 /// A pushed file is a login, and only one a task mounts here is one. A tracker
 /// profile is the exception: it travels so a remote can route tracker work, and
 /// is never mounted.
-fn is_allowed_profile(_mounted: &[String], profile: &str) -> bool {
+fn is_allowed_profile(profile: &str) -> bool {
     // A pushed profile is a credential id, and the id says which service it
     // belongs to. The path checks below keep it confined; this keeps it a
     // service this build knows.
@@ -146,9 +146,6 @@ struct LinkHandler {
     /// Where pushed configurations and logins are written, one directory per
     /// operator.
     data_dir: PathBuf,
-    /// The profiles a task mounts here, which is what a pushed configuration may
-    /// carry besides a tracker profile.
-    mounted_profiles: Arc<Vec<String>>,
     config_lock: Arc<AsyncMutex<()>>,
     /// The tasks this machine owns, which is the only place they exist.
     tasks: Arc<dyn TaskHost>,
@@ -197,7 +194,7 @@ impl LinkHandler {
             .map_err(|error| io::Error::other(format!("not a configuration: {error}")))?;
         let mut decoded = Vec::new();
         for profile in &bundle.profiles {
-            if !is_allowed_profile(&self.mounted_profiles, &profile.profile) {
+            if !is_allowed_profile(&profile.profile) {
                 return Err(io::Error::other("unknown credential profile"));
             }
             for file in &profile.files {
@@ -387,9 +384,6 @@ pub struct ServerParts {
     /// Where pushed configurations and logins are written, one directory per
     /// operator.
     pub data_dir: PathBuf,
-    /// The profiles a task mounts here, so a pushed configuration can be checked
-    /// against what this machine actually knows how to mount.
-    pub mounted_profiles: Vec<String>,
     /// What this machine can do with a task right now.
     pub state: watch::Receiver<RemoteState>,
     pub trackers: Vec<TrackerConnection>,
@@ -793,7 +787,6 @@ impl LinkServer {
             listen,
             label,
             data_dir,
-            mounted_profiles,
             state,
             trackers,
             tasks,
@@ -803,7 +796,6 @@ impl LinkServer {
             id: identity.id(),
             blobs: Arc::clone(&blobs),
             data_dir,
-            mounted_profiles: Arc::new(mounted_profiles),
             config_lock: Arc::new(AsyncMutex::new(())),
             tasks,
         };

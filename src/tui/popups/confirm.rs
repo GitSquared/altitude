@@ -124,20 +124,11 @@ pub(in crate::tui) struct PendingConfirm {
     action: ConfirmAction,
 }
 
-pub(in crate::tui) enum CredentialTarget {
-    Profile(String),
-    Identity(String),
-    Linear,
-}
-
 impl PendingConfirm {
-    pub(in crate::tui) fn forgetting_credentials(
-        target: CredentialTarget,
-        question: String,
-    ) -> Self {
+    pub(in crate::tui) fn forgetting_credentials(id: String, question: String) -> Self {
         Self {
             dialog: Confirm::new(question, "delete"),
-            action: ConfirmAction::ForgetCredentials(target),
+            action: ConfirmAction::ForgetCredentials(id),
         }
     }
 
@@ -238,7 +229,7 @@ enum ConfirmAction {
     ReplaceKey { address: String },
     TakeOver { id: String },
     DeleteSetting(Target),
-    ForgetCredentials(CredentialTarget),
+    ForgetCredentials(String),
     ConfirmSignal { task_id: String, signal_id: String },
 }
 

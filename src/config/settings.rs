@@ -288,12 +288,10 @@ impl Settings {
     }
 
     /// Every credential an interface can list.
-    #[allow(dead_code)]
     pub fn credentials(&self) -> &[Credential] {
         &self.credentials
     }
 
-    #[allow(dead_code)]
     pub fn credential(&self, id: &str) -> Option<&Credential> {
         self.credentials
             .iter()
@@ -301,7 +299,6 @@ impl Settings {
     }
 
     /// The credential a project inherits for a slot, when it binds none.
-    #[allow(dead_code)]
     pub fn default_credential(&self, slot: Slot) -> Option<&str> {
         match slot {
             Slot::Agent => self.defaults.agent_credential.as_deref(),
@@ -311,7 +308,6 @@ impl Settings {
     }
 
     /// Add a credential, refusing one that is not a usable id or is already here.
-    #[allow(dead_code)]
     pub fn add_credential(&mut self, credential: Credential) -> Result<(), SettingsError> {
         if !credential.is_valid() {
             return Err(SettingsError::Invalid(format!(
