@@ -68,6 +68,9 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
 /// tasks are blocking on the operator says how many. Choosing a project narrows
 /// everything under the bar, including where a new task is founded.
 fn draw_tabs(frame: &mut Frame, area: Rect, pane: Rect, app: &mut App) {
+    // The tabs own their row: the gutter to their right is solid rather than a
+    // window onto the field, so a contour never moves behind a project name.
+    surface::cover(frame, area);
     let projects = app.projects();
     if projects.is_empty() {
         return;

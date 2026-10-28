@@ -254,7 +254,7 @@ where
     let mut reading_configuration = false;
     let (configuration_reads, mut configuration_read) = mpsc::unbounded_channel();
     let mut scan = None;
-    let mut remotes_visible = false;
+    let mut discovering = false;
 
     let mut mouse_captured = false;
     // Whether the terminal is reporting the keys the creation question needs.
@@ -354,13 +354,18 @@ where
         });
     }
     loop {
-        let showing_remotes = app.foreground.shows_settings()
-            && !app.credentials_over_card()
-            && app.panel.section == screens::settings::Section::Remotes;
-        if showing_remotes != remotes_visible {
-            remotes_visible = showing_remotes;
+        // Discovery runs wherever a discovered machine can be shown: the first
+        // screen's Remote row, and the Remotes page. Starting it when the card
+        // opens is what lets the row offer a machine without being pressed first.
+        let wants_discovery = app.foreground.shows_get_started()
+            || app.credentials_over_card()
+            || (app.foreground.shows_settings()
+                && !app.credentials_over_card()
+                && app.panel.section == screens::settings::Section::Remotes);
+        if wants_discovery != discovering {
+            discovering = wants_discovery;
             scan = None;
-            if showing_remotes {
+            if discovering {
                 app.discovered_remotes.clear();
                 scan = match app.link.scan_remotes().await {
                     Ok(scan) => Some(scan),

@@ -703,6 +703,9 @@ pub struct App {
     /// The profile a sign-in from the first screen was for, so it comes back
     /// there instead of to Settings and asks about that login again.
     setup_sign_in: Option<&'static str>,
+    /// Whether Settings was opened from the first screen, so leaving it returns
+    /// there rather than to the task list behind it.
+    panel_from_setup: bool,
     /// The profiles a task mounts, read when the panel opens.
     pub(in crate::tui) profiles: Vec<ProfileSummary>,
     /// What the Linear tracker's session is doing, read when the panel opens
@@ -845,6 +848,7 @@ impl App {
             repositories_listing: false,
             repositories_requested: false,
             setup_sign_in: None,
+            panel_from_setup: false,
             profiles: Vec::new(),
             tracker_state: TrackerState::NotConnected,
             tracker_connect: None,
@@ -1867,10 +1871,14 @@ impl App {
             }
             KeyCode::Home => self.panel.detail_scroll = 0,
             _ if is_dismiss(key) || key.code == KeyCode::Char('s') => {
-                // A machine that cannot run a task is not offered the task list:
-                // the first screen is what has to be finished, and Settings was
-                // opened from it.
-                if self.setup_incomplete() {
+                // Return to what opened Settings. The first screen is a place of
+                // its own until the operator starts work from it, so leaving
+                // Settings from the card goes back to the card rather than to
+                // the task list behind it.
+                if self.panel_from_setup {
+                    self.panel_from_setup = false;
+                    self.open_get_started();
+                } else if self.setup_incomplete() {
                     self.open_get_started();
                 } else {
                     self.foreground = Foreground::Tasks;
@@ -3852,6 +3860,7 @@ impl App {
                 }
                 SetupFocus::Tracker => {
                     if self.tracker_state == TrackerState::Connected {
+                        self.foreground = Foreground::GetStarted(panel);
                         open_panel_at(self, task_service, Section::Trackers).await;
                         return false;
                     }
@@ -3869,6 +3878,7 @@ impl App {
                         }
                     }
                     _ => {
+                        self.foreground = Foreground::GetStarted(panel);
                         open_panel_at(self, task_service, Section::Remotes).await;
                         return false;
                     }
@@ -3884,6 +3894,7 @@ impl App {
                     }
                 }
                 SetupFocus::Settings => {
+                    self.foreground = Foreground::GetStarted(panel);
                     open_panel(self, task_service).await;
                     return false;
                 }
@@ -6898,7 +6909,10 @@ async fn open_panel<E>(app: &mut App, task_service: &TaskService<E>)
 where
     E: IsolationEngine + Clone + 'static,
 {
-    app.foreground = Foreground::Panel;
+    let behind = mem::replace(&mut app.foreground, Foreground::Panel);
+    if !matches!(behind, Foreground::Panel) {
+        app.panel_from_setup = matches!(behind, Foreground::GetStarted(_));
+    }
     app.panel = Panel::new();
     if !app.reload_settings() {
         return;
