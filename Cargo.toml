@@ -1,6 +1,6 @@
 [package]
 name = "altitude"
-version = "0.1.0"
+version = "0.5.0"
 edition = "2024"
 authors = ["Gabriel Saillard <gabriel@saillard.dev>"]
 description = "altitude helps you get shit done with agents."
