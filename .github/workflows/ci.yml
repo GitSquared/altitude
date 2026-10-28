@@ -87,3 +87,85 @@ jobs:
 
       - name: Smoke test
         run: ./target/debug/altitude --version
+
+  dist:
+    name: dist (${{ matrix.target }})
+    # Binaries belong to commits that land on main. A pull request's checkout is
+    # a merge commit, and its artifacts would be thrown away.
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-15
+            target: aarch64-apple-darwin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore build caches
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: dist-${{ matrix.target }}
+
+      - name: Build
+        env:
+          ALTITUDE_GIT_SHA: ${{ github.sha }}
+        run: cargo build --release --locked
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          version="$(./target/release/altitude --version)"
+          echo "$version"
+          case "$version" in
+            *"-${GITHUB_SHA:0:6}") ;;
+            *)
+              echo "::error::--version does not end with the commit"
+              exit 1
+              ;;
+          esac
+
+      - name: Package
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            strip -x target/release/altitude
+          else
+            strip target/release/altitude
+          fi
+
+          version="$(cargo metadata --locked --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "altitude") | .version')"
+          name="altitude-${version}-${GITHUB_SHA:0:6}-${TARGET}"
+          mkdir -p "dist/${name}"
+          cp target/release/altitude "dist/${name}/"
+          cp README.md LICENSE "dist/${name}/"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          rm -rf "dist/${name}"
+
+          ls -lh dist
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: altitude-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+          # The archive is already compressed; a second pass only costs time.
+          compression-level: 0

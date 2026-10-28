@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::tracker::TrackerKind;
+use crate::{tracker::TrackerKind, version::VERSION};
 
 /// The serve mode, written once so the root's long help and the subcommand agree.
 const SERVE_MODE: &str = "Run altitude serve on a headless server to let your team run agents beyond their own machines, and pilot them directly from your task tracker.";
@@ -27,7 +27,7 @@ const ROOT_HELP_TEMPLATE: &str = "\
 #[command(
     name = "altitude",
     display_name = "⛰  altitude",
-    version = concat!("v", env!("CARGO_PKG_VERSION")),
+    version = VERSION,
     about = env!("CARGO_PKG_DESCRIPTION"),
     long_about = format!(
         "{}\n\nStart altitude without any argument for the interactive TUI application to manage tasks and agents.\n\n{SERVE_MODE}", env!("CARGO_PKG_DESCRIPTION")

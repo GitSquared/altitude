@@ -33,6 +33,7 @@ mod task;
 mod tracker;
 mod tui;
 mod vcs;
+mod version;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {

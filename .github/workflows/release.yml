@@ -93,6 +93,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build
+        env:
+          ALTITUDE_GIT_SHA: ${{ github.sha }}
         run: cargo build --release --locked
 
       - name: Smoke test

@@ -16,9 +16,12 @@ use ratatui::{
     widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap},
 };
 
-use crate::tui::{
-    keys::HelpSection,
-    widgets::{palette, utils::centered_width},
+use crate::{
+    tui::{
+        keys::HelpSection,
+        widgets::{palette, utils::centered_width},
+    },
+    version::VERSION,
 };
 
 /// The name every screen wears.
@@ -62,7 +65,7 @@ pub fn draw(frame: &mut Frame, hints: &[Hint], guidance_enabled: bool) -> Rect {
         Layout::horizontal([Constraint::Min(0), Constraint::Min(0)]).areas(header);
     frame.render_widget(Line::styled(TITLE, palette::heading()), title);
     frame.render_widget(
-        Line::styled(concat!("v", env!("CARGO_PKG_VERSION")), palette::muted()).right_aligned(),
+        Line::styled(VERSION, palette::muted()).right_aligned(),
         version,
     );
     if !guidance.is_empty() {

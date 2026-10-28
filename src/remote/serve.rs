@@ -20,6 +20,7 @@ use crate::{
     isolation::capsule::{ENVIRONMENT_LABEL, EnvironmentBase},
     task::TaskExecutionPauseReason,
     vcs::now_ms,
+    version::VERSION,
 };
 use iroh::EndpointId;
 use microsandbox::{SaveOpts, Snapshot};
@@ -1164,7 +1165,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     let settings = ServeSettings::load_or_create(&settings_path)?;
     let credentials_path = config.data_dir().join("trackers/linear/oauth.json");
     logging::init_service();
-    tracing::info!("⛰  altitude v{} · remote", env!("CARGO_PKG_VERSION"));
+    tracing::info!("⛰  altitude {VERSION} · remote");
     tracing::debug!("Checking sandbox host requirements");
     MicrosandboxIsolation::check_host()?;
     tracing::debug!("Sandbox host requirements passed");
