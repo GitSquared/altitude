@@ -552,7 +552,13 @@ impl Settings {
     }
 
     pub fn remember_identity(&mut self, commits: &ProjectCommits) {
-        if !self.identities.contains(commits) {
+        if let Some(known) = self
+            .identities
+            .iter_mut()
+            .find(|known| known.email.eq_ignore_ascii_case(&commits.email))
+        {
+            *known = commits.clone();
+        } else {
             self.identities.push(commits.clone());
         }
     }

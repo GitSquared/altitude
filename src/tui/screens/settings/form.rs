@@ -85,9 +85,6 @@ pub enum Focus {
     VcsIdentity,
     TrackerIdentity,
     Identity,
-    CommitName,
-    CommitEmail,
-    Signing,
     Host,
     Accept,
     Cancel,
@@ -103,9 +100,6 @@ impl Focus {
                 | Self::Setup
                 | Self::Caches
                 | Self::Instructions
-                | Self::CommitName
-                | Self::CommitEmail
-                | Self::Signing
                 | Self::Scope
         )
     }
@@ -191,23 +185,8 @@ fn groups(project: bool) -> Vec<Group> {
         },
         Group {
             focus: Focus::Identity,
-            label: "Git identity",
+            label: "Commit identity",
             kind: Kind::Choice,
-        },
-        Group {
-            focus: Focus::CommitName,
-            label: "Commit name",
-            kind: Kind::Single,
-        },
-        Group {
-            focus: Focus::CommitEmail,
-            label: "Commit email",
-            kind: Kind::Single,
-        },
-        Group {
-            focus: Focus::Signing,
-            label: "Signing key (optional)",
-            kind: Kind::Single,
         },
         Group {
             focus: Focus::Scope,
@@ -236,9 +215,6 @@ pub struct Form {
     pub caches: TextBox,
     pub instructions: TextBox,
     pub scope: Field,
-    pub commit_name: Field,
-    pub commit_email: Field,
-    pub signing: Field,
     identity_choices: Vec<ProjectCommits>,
     /// The installation's own identity, which a project inherits when it stores
     /// none.
@@ -266,7 +242,7 @@ pub struct Form {
     pub scopes: Option<Scopes>,
 }
 
-const PROJECT_FIELDS: [Focus; 17] = [
+const PROJECT_FIELDS: [Focus; 14] = [
     Focus::Primary,
     Focus::Repository,
     Focus::Setup,
@@ -276,9 +252,6 @@ const PROJECT_FIELDS: [Focus; 17] = [
     Focus::VcsIdentity,
     Focus::TrackerIdentity,
     Focus::Identity,
-    Focus::CommitName,
-    Focus::CommitEmail,
-    Focus::Signing,
     Focus::Scope,
     Focus::Host,
     Focus::Accept,
@@ -323,11 +296,20 @@ impl Form {
         identities: Vec<ProjectCommits>,
         credentials: Vec<Credential>,
     ) -> Self {
-        let commits = project.commits.clone().or_else(|| default_commits.clone());
-        let identity_at = project
-            .commits
-            .as_ref()
-            .and_then(|commits| identities.iter().position(|known| known == commits));
+        let mut identities = identities;
+        let identity_at = match project.commits.as_ref() {
+            None => None,
+            Some(commits) if Some(commits) == default_commits.as_ref() => None,
+            Some(commits) => Some(
+                identities
+                    .iter()
+                    .position(|known| known == commits)
+                    .unwrap_or_else(|| {
+                        identities.push(commits.clone());
+                        identities.len() - 1
+                    }),
+            ),
+        };
         let mut host_choices = remotes.to_vec();
         if let Some(host) = &project.host
             && !host_choices.contains(host)
@@ -346,18 +328,6 @@ impl Form {
                     .tracker
                     .as_ref()
                     .and_then(|route| route.scope.as_deref())
-                    .unwrap_or_default(),
-            ),
-            commit_name: Field::with(commits.as_ref().map_or("", |commits| commits.name.as_str())),
-            commit_email: Field::with(
-                commits
-                    .as_ref()
-                    .map_or("", |commits| commits.email.as_str()),
-            ),
-            signing: Field::with(
-                commits
-                    .as_ref()
-                    .and_then(|commits| commits.signing_key.as_deref())
                     .unwrap_or_default(),
             ),
             identity_choices: identities,
@@ -395,9 +365,6 @@ impl Form {
             caches: TextBox::new(""),
             instructions: TextBox::new(""),
             scope: Field::with(""),
-            commit_name: Field::with(""),
-            commit_email: Field::with(""),
-            signing: Field::with(""),
             identity_choices: Vec::new(),
             default_commits: None,
             identity_at: None,
@@ -447,9 +414,6 @@ impl Form {
             Focus::Setup => self.setup.handle_key(key),
             Focus::Caches => self.caches.handle_key(key),
             Focus::Instructions => self.instructions.handle_key(key),
-            Focus::CommitName => self.commit_name.handle_key(key),
-            Focus::CommitEmail => self.commit_email.handle_key(key),
-            Focus::Signing => self.signing.handle_key(key),
             Focus::Scope => self.scope.handle_key(key),
             _ => {}
         }
@@ -471,25 +435,16 @@ impl Form {
     }
 
     pub fn commits(&self) -> Option<ProjectCommits> {
-        let name = self.commit_name.value().trim().to_owned();
-        let email = self.commit_email.value().trim().to_owned();
-        if name.is_empty() || email.is_empty() {
-            return None;
-        }
-        let signing = self.signing.value().trim();
-        Some(ProjectCommits {
-            name,
-            email,
-            signing_key: (!signing.is_empty()).then(|| signing.to_owned()),
-        })
+        self.identity_at
+            .and_then(|index| self.identity_choices.get(index).cloned())
+            .or_else(|| self.default_commits.clone())
     }
 
     pub fn commits_are_default(&self) -> bool {
-        self.commits() == self.default_commits
+        self.identity_at.is_none() || self.commits() == self.default_commits
     }
 
-    /// Move to the next saved identity, filling the fields with it. Nothing is
-    /// the installation's default.
+    /// Move to the next saved identity. Nothing is the installation's default.
     pub fn cycle_identity(&mut self) {
         let mut options: Vec<Option<usize>> = vec![None];
         options.extend((0..self.identity_choices.len()).map(Some));
@@ -498,32 +453,13 @@ impl Form {
             .position(|option| *option == self.identity_at)
             .unwrap_or(0);
         self.identity_at = options[(at + 1) % options.len()];
-        let commits = self
-            .identity_at
-            .and_then(|index| self.identity_choices.get(index).cloned())
-            .or_else(|| self.default_commits.clone());
-        self.commit_name =
-            Field::with(commits.as_ref().map_or("", |commits| commits.name.as_str()));
-        self.commit_email = Field::with(
-            commits
-                .as_ref()
-                .map_or("", |commits| commits.email.as_str()),
-        );
-        self.signing = Field::with(
-            commits
-                .as_ref()
-                .and_then(|commits| commits.signing_key.as_deref())
-                .unwrap_or_default(),
-        );
     }
 
     fn identity_value(&self) -> String {
-        match self.commits() {
-            None => "not set".to_owned(),
-            Some(commits) if Some(&commits) == self.default_commits.as_ref() => {
-                format!("default · {} <{}>", commits.name, commits.email)
-            }
-            Some(commits) => format!("{} <{}>", commits.name, commits.email),
+        match (self.identity_at, self.commits()) {
+            (None, Some(commits)) => format!("default · {} <{}>", commits.name, commits.email),
+            (Some(_), Some(commits)) => format!("{} <{}>", commits.name, commits.email),
+            (_, None) => "not set".to_owned(),
         }
     }
 
@@ -625,9 +561,6 @@ impl Form {
             Focus::Setup => self.setup.paste(text),
             Focus::Caches => self.caches.paste(text),
             Focus::Instructions => self.instructions.paste(text),
-            Focus::CommitName => self.commit_name.paste(text),
-            Focus::CommitEmail => self.commit_email.paste(text),
-            Focus::Signing => self.signing.paste(text),
             Focus::Scope => self.scope.paste(text),
             _ => {}
         }
@@ -760,9 +693,6 @@ fn draw_group(frame: &mut Frame, area: Rect, form: &Form, group: &Group) {
             let field = match group.focus {
                 Focus::Primary => &form.primary,
                 Focus::Repository => &form.repository,
-                Focus::CommitName => &form.commit_name,
-                Focus::CommitEmail => &form.commit_email,
-                Focus::Signing => &form.signing,
                 Focus::Scope => &form.scope,
                 _ => return,
             };

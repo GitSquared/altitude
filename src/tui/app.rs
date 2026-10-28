@@ -4371,6 +4371,22 @@ impl App {
             return false;
         }
         self.refresh_git_identity().await;
+        let Some(file) = self.settings_file.as_mut() else {
+            self.problem("Settings are unavailable; fix the file and reopen");
+            return false;
+        };
+        let mut proposed = file.settings().clone();
+        proposed.remember_identity(&ProjectCommits {
+            name: name.to_owned(),
+            email: email.to_owned(),
+            signing_key: signs
+                .then(|| self.git_identity.signing_key.clone())
+                .flatten(),
+        });
+        if let Err(error) = file.save(proposed) {
+            self.problem(error.to_string());
+            return false;
+        }
         true
     }
 
