@@ -1711,6 +1711,7 @@ impl App {
         };
         let id = new_id(service, &label, |candidate| {
             existing.iter().any(|credential| credential.id == candidate)
+                || self.config.profile_dir(candidate).is_dir()
         });
         let credential = Credential::new(id.clone(), label.clone());
         let Some(file) = self.settings_file.as_mut() else {
@@ -6099,6 +6100,10 @@ impl App {
     /// Whether a sign-in is out, which is what keeps its dot moving.
     pub(in crate::tui) fn is_connecting_tracker(&self) -> bool {
         self.tracker_state == TrackerState::Connecting
+            || self
+                .tracker_states
+                .values()
+                .any(|state| *state == TrackerState::Connecting)
     }
 
     /// Whether the issue page is waiting on a search or a read, which is what
