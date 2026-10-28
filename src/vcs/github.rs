@@ -15,6 +15,10 @@ use crate::{
 /// repository the machine already has. See `assets/git-shim.sh`.
 const SETUP_COMMAND: &str = concat!(
     "apk add --no-cache git openssh-client-default github-cli gnupg\n",
+    // The login this profile mounts is the GitHub CLI's, so git is pointed at the
+    // same one. Without it an https clone of a private repository stops at a
+    // username prompt, and the sandbox's own setup has nobody to answer it.
+    "git config --system credential.https://github.com.helper '!gh auth git-credential'\n",
     "cat > /usr/local/bin/git <<'ALTITUDE_GIT_SHIM'\n",
     include_str!("assets/git-shim.sh"),
     "ALTITUDE_GIT_SHIM\n",
@@ -59,8 +63,14 @@ impl VcsProvider for GitHub {
                     include_str!("assets/gnupg.md"),
                 ),
             ],
-            // A directory mount lets `git config --global` atomically replace its file.
-            environment: vec![("GIT_CONFIG_GLOBAL", "/altitude/git/config")],
+            environment: vec![
+                // A directory mount lets `git config --global` atomically replace its file.
+                ("GIT_CONFIG_GLOBAL", "/altitude/git/config"),
+                // A sandbox has a terminal, so a credential git does not have is a
+                // prompt waiting for an operator who is not there. Failing instead
+                // is the same answer, in the place the operator can read it.
+                ("GIT_TERMINAL_PROMPT", "0"),
+            ],
         }
     }
 

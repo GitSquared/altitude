@@ -13,6 +13,8 @@ use std::{
     time::Duration,
 };
 
+use tokio::time;
+
 use crate::{
     config::Config,
     project::{Project, ProjectCommits},
@@ -895,26 +897,59 @@ pub(crate) async fn run_collecting(
     ))
 }
 
+/// How long a sandbox's own directory setup may take before it counts as stuck.
+///
+/// A command waiting on something that will never come looks exactly like a slow
+/// one from here, and a task still being prepared holds its slot while it waits.
+/// The clone this runs is the slow part, so the limit is generous: it is here to
+/// end a wait, not to hurry a large repository.
+const SETUP_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
 async fn run_setup(
     engine: &impl IsolationEngine,
     id: String,
     command: String,
 ) -> Result<(), IsolationError> {
-    let mut session = engine.run_command(id, command).await?;
+    // Kept outside the command so a wait that is cut short still says what the
+    // sandbox had printed: a prompt is the only trace a stuck setup leaves.
     let mut output = String::new();
-    while let Some(event) = session.events.recv().await {
-        match event {
-            CommandEvent::Output { bytes, .. } => output.push_str(&String::from_utf8_lossy(&bytes)),
-            CommandEvent::Exited(0) => return Ok(()),
-            CommandEvent::Exited(code) => {
-                return Err(IsolationError::new(format!(
-                    "task directory setup exited with code {code}: {output}"
-                )));
+    let setup = async {
+        let mut session = engine.run_command(id, command).await?;
+        while let Some(event) = session.events.recv().await {
+            match event {
+                CommandEvent::Output { bytes, .. } => {
+                    output.push_str(&String::from_utf8_lossy(&bytes));
+                }
+                CommandEvent::Exited(0) => return Ok(()),
+                CommandEvent::Exited(code) => {
+                    return Err(IsolationError::new(format!(
+                        "task directory setup exited with code {code}: {}",
+                        printed_tail(&output),
+                    )));
+                }
+                CommandEvent::Failed(error) => return Err(IsolationError::new(error)),
             }
-            CommandEvent::Failed(error) => return Err(IsolationError::new(error)),
         }
+        Err(IsolationError::new(
+            "task directory setup closed without an exit status",
+        ))
+    };
+    let result = time::timeout(SETUP_TIMEOUT, setup).await;
+    match result {
+        Ok(result) => result,
+        Err(_) => Err(IsolationError::new(format!(
+            "task directory setup did not finish within {} minutes: {}",
+            SETUP_TIMEOUT.as_secs() / 60,
+            printed_tail(&output),
+        ))),
     }
-    Err(IsolationError::new(
-        "task directory setup closed without an exit status",
-    ))
+}
+
+/// The end of what a command printed, for an error that says it in one line.
+fn printed_tail(output: &str) -> &str {
+    const LIMIT: usize = 400;
+    match output.char_indices().rev().nth(LIMIT) {
+        Some((index, _)) => output[index..].trim(),
+        None => output.trim(),
+    }
 }
