@@ -15,7 +15,7 @@ use uuid::Uuid;
 const INSTALL_COMMAND: &str = concat!(
     "npm install -g --ignore-scripts --no-fund --no-audit --no-progress --color=false ",
     "@earendil-works/pi-coding-agent@0.99.1",
-    " && test -x /usr/local/bin/pi"
+    " && command -v pi >/dev/null"
 );
 
 /// Forced rather than left to the operator: the workspace is already isolated,
