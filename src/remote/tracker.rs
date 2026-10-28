@@ -1204,13 +1204,7 @@ impl RemoteTracker {
                     .map_err(|error| error.to_string())
             }
             TaskOperatorSignalKind::Blocked => {
-                let operator = self.operator_mention(&route.tracker_user_id).await;
-                let body = format!(
-                    "**? Needs you:** {}\n\n{}\n\n{operator}\n\nReply here and Altitude will \
-                     continue the task.",
-                    title.trim(),
-                    body.trim()
-                );
+                let body = format!("**? Needs you:** {}\n\n{}", title.trim(), body.trim());
                 self.config
                     .automation
                     .comment_on_issue(&route.issue_id, &body, &comment_id)
@@ -1227,13 +1221,9 @@ impl RemoteTracker {
                 Ok(())
             }
             TaskOperatorSignalKind::InReview => {
-                let operator = self.operator_mention(&route.tracker_user_id).await;
                 let mut body =
                     format!("**◆ Ready to review:** {}\n\n{}", title.trim(), body.trim());
                 append_contributions(&mut body, contributions);
-                body.push_str(&format!(
-                    "\n\n{operator}\n\nReply here to accept, or describe the changes you want."
-                ));
                 self.config
                     .automation
                     .comment_on_issue(&route.issue_id, &body, &comment_id)
@@ -1328,9 +1318,10 @@ impl RemoteTracker {
              On your computer:\n\n\
              1. Open Altitude, or install it if you don't have it.\n\
              2. In Settings → Remotes, add this remote: {host}\n\
-             3. Connect your {tracker} account, so Altitude knows whose work this is.\n\
-             4. Sync the remote.\n\n\
-             Reply here once you've synced, and Altitude will pick this issue up."
+             3. In Settings → Identities, sign in to {tracker}, so Altitude knows whose work \
+             this is.\n\n\
+             Altitude passes your setup to this remote in the background. Reply here once \
+             that's done, and this issue gets picked up."
         );
         self.config
             .automation
@@ -2346,12 +2337,13 @@ fn append_contributions(body: &mut String, contributions: &[String]) {
     if contributions.is_empty() {
         return;
     }
-    body.push_str("\n\nWhat was submitted:\n");
-    for url in contributions {
-        body.push_str("- ");
-        body.push_str(url);
-        body.push('\n');
-    }
+    body.push_str("\n\n");
+    let list = contributions
+        .iter()
+        .map(|url| format!("- {url}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    body.push_str(&list);
 }
 
 fn accepted_body(contributions: &[String]) -> String {
