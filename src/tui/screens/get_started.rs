@@ -603,7 +603,7 @@ fn checklist(panel: &GetStarted, setup: &SetupState, width: u16) -> Vec<Line<'st
         lines.push(row(
             Marker::Unset,
             "Version control",
-            "VCS not connected",
+            "not connected",
             "enter sign in",
             focused == Focus::VersionControl,
             width,
