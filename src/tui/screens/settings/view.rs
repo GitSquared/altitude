@@ -122,15 +122,15 @@ impl App {
         Credential {
             label: profile.display.to_owned(),
             kind: CredentialKind::Profile {
-                profile: profile.profile,
+                profile: profile.profile.clone(),
                 directory: self
                     .config
-                    .profile_dir(profile.profile)
+                    .profile_dir(&profile.profile)
                     .display()
                     .to_string(),
                 status: self
                     .credential_status
-                    .get(profile.profile)
+                    .get(&profile.profile)
                     .cloned()
                     .unwrap_or_default(),
             },
@@ -149,7 +149,7 @@ impl App {
             None => Credential {
                 label: kind.to_string(),
                 kind: CredentialKind::Profile {
-                    profile,
+                    profile: profile.to_owned(),
                     directory: String::new(),
                     status: CredentialStatus::default(),
                 },

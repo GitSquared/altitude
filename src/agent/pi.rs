@@ -266,7 +266,7 @@ impl AgentEngine for PiCode {
 
     fn profile_recipe(&self) -> ProfileRecipe {
         ProfileRecipe {
-            profile: "agents/pi",
+            profile: "agents/pi".to_owned(),
             display: "Pi",
             sign_in: "Use /login in Pi to connect your provider.",
             // Pi has no sign-in command: the provider is chosen in its own interface.

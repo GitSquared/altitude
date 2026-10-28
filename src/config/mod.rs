@@ -9,7 +9,10 @@ use std::{
 
 use directories::ProjectDirs;
 
-use crate::remote::InstallationKey;
+use crate::{
+    credentials::{Credential, Service},
+    remote::InstallationKey,
+};
 
 mod serve;
 mod settings;
@@ -251,7 +254,15 @@ impl Config {
     }
 
     pub fn load_or_create_settings(&self) -> Result<SettingsFile, SettingsError> {
-        SettingsFile::load_or_create(self.settings_path())
+        // Profiles already on disk are the identities a pre-credential settings
+        // file did not name. A fresh installation has none, and onboarding creates
+        // what the operator chooses.
+        let existing = Service::ALL
+            .iter()
+            .filter(|service| self.profile_dir(service.default_id()).is_dir())
+            .map(|service| Credential::new(service.default_id(), service.label()))
+            .collect::<Vec<_>>();
+        SettingsFile::load_or_create(self.settings_path(), &existing)
     }
 
     pub fn database_path(&self) -> PathBuf {
@@ -330,7 +341,7 @@ impl Config {
     /// A machine that runs none of an operator's projects keeps none of their
     /// logins. Lookups by profile name are confined the same way every other
     /// profile path is.
-    pub fn forget_profiles(&self, profiles: &[&str]) -> io::Result<()> {
+    pub fn forget_profiles(&self, profiles: &[String]) -> io::Result<()> {
         for profile in profiles {
             if Path::new(profile)
                 .components()

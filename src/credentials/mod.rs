@@ -8,10 +8,14 @@
 //! could mount.
 
 mod files;
+mod model;
 mod shell;
 
 use std::{error::Error, fmt, path::PathBuf};
 
+use crate::vcs;
+
+pub use model::{Credential, Service, Slot};
 pub use shell::{
     CredentialShell, CredentialShellCancel, CredentialShellEvent, credential_shell_id,
 };
@@ -87,6 +91,41 @@ where
 
 impl<E> Credentials<E>
 where
+    E: IsolationEngine + Clone,
+{
+    /// The one recipe a profile's sign-in needs.
+    ///
+    /// One rather than the set a task gets: a login is written by the CLI that owns it,
+    /// so the environment is that CLI's and the wait is its install rather than somebody
+    /// else's.
+    pub(crate) fn recipe(&self, profile: &str) -> Result<ProfileRecipe, CredentialsError> {
+        if let Some(recipe) = mounts::every(&self.agents)
+            .into_iter()
+            .find(|recipe| recipe.profile == profile)
+        {
+            return Ok(recipe);
+        }
+        let service = Service::from_id(profile).ok_or_else(|| {
+            CredentialsError::Refused(format!(
+                "no profile recipe for {profile}; nothing can sign it in"
+            ))
+        })?;
+        let mut recipe = match service {
+            Service::Agent(kind) => self.agents.engine(kind).profile_recipe(),
+            Service::VersionControl(kind) => vcs::profile_recipe(kind),
+            Service::Tracker(_) => {
+                return Err(CredentialsError::Refused(format!(
+                    "{profile} is a host-side identity, not a sandbox profile"
+                )));
+            }
+        };
+        recipe.profile = profile.to_owned();
+        Ok(recipe)
+    }
+}
+
+impl<E> Credentials<E>
+where
     E: IsolationEngine + Clone + 'static,
 {
     /// Every profile Altitude can mount, so an interface can say what logins exist.
@@ -128,8 +167,8 @@ where
     /// sandbox rather than one each.
     pub async fn answers(
         &self,
-        mut profiles: Vec<&'static str>,
-    ) -> Result<Vec<(&'static str, CredentialAnswer)>, CredentialsError> {
+        mut profiles: Vec<String>,
+    ) -> Result<Vec<(String, CredentialAnswer)>, CredentialsError> {
         // The composition is the build's identity, so the order must be the
         // same for the same set of profiles or every page would build twice.
         profiles.sort_unstable();
@@ -138,7 +177,7 @@ where
         for profile in &profiles {
             let recipe = self.recipe(profile)?;
             checks.push(CredentialCheck {
-                profile,
+                profile: profile.clone(),
                 command: recipe.status_command.to_owned(),
             });
             recipes.push(recipe);
@@ -149,7 +188,7 @@ where
         else {
             return Ok(profiles
                 .into_iter()
-                .map(|profile| (profile, self.saved_login(profile)))
+                .map(|profile| (profile.clone(), self.saved_login(&profile)))
                 .collect());
         };
         let sandbox = CredentialSandbox {
@@ -205,22 +244,6 @@ where
         Ok((recipes, snapshot))
     }
 
-    /// The one recipe a profile's sign-in needs.
-    ///
-    /// One rather than the set a task gets: a login is written by the CLI that owns it,
-    /// so the environment is that CLI's and the wait is its install rather than somebody
-    /// else's.
-    fn recipe(&self, profile: &str) -> Result<ProfileRecipe, CredentialsError> {
-        mounts::every(&self.agents)
-            .into_iter()
-            .find(|recipe| recipe.profile == profile)
-            .ok_or_else(|| {
-                CredentialsError::Refused(format!(
-                    "no profile recipe for {profile}; nothing can sign it in"
-                ))
-            })
-    }
-
     /// What the login files in a profile's directory say, without a sandbox.
     ///
     /// Only presence and size are read, never the contents. A file there is a saved
@@ -250,7 +273,7 @@ where
 /// A check and a shell can be asked for at the same time — the list asks about the
 /// profiles it shows, and the operator can open one while an answer is still coming —
 /// so they cannot share a name.
-fn check_id(profiles: &[&str]) -> String {
-    let first = profiles.first().copied().unwrap_or("profiles");
+fn check_id(profiles: &[String]) -> String {
+    let first = profiles.first().map(String::as_str).unwrap_or("profiles");
     format!("{CREDENTIAL_PREFIX}check-{}", first.replace('/', "-"))
 }

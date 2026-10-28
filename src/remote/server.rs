@@ -84,8 +84,8 @@ fn arriving_accounts(decoded: &[(PathBuf, Vec<u8>)]) -> Vec<(TrackerKind, Option
 /// A pushed file is a login, and only one a task mounts here is one. A tracker
 /// profile is the exception: it travels so a remote can route tracker work, and
 /// is never mounted.
-fn is_allowed_profile(mounted: &[&str], profile: &str) -> bool {
-    mounted.contains(&profile)
+fn is_allowed_profile(mounted: &[String], profile: &str) -> bool {
+    mounted.iter().any(|known| known == profile)
         || TrackerKind::ALL
             .iter()
             .any(|kind| kind.profile() == profile)
@@ -145,7 +145,7 @@ struct LinkHandler {
     data_dir: PathBuf,
     /// The profiles a task mounts here, which is what a pushed configuration may
     /// carry besides a tracker profile.
-    mounted_profiles: Arc<Vec<&'static str>>,
+    mounted_profiles: Arc<Vec<String>>,
     config_lock: Arc<AsyncMutex<()>>,
     /// The tasks this machine owns, which is the only place they exist.
     tasks: Arc<dyn TaskHost>,
@@ -386,7 +386,7 @@ pub struct ServerParts {
     pub data_dir: PathBuf,
     /// The profiles a task mounts here, so a pushed configuration can be checked
     /// against what this machine actually knows how to mount.
-    pub mounted_profiles: Vec<&'static str>,
+    pub mounted_profiles: Vec<String>,
     /// What this machine can do with a task right now.
     pub state: watch::Receiver<RemoteState>,
     pub trackers: Vec<TrackerConnection>,

@@ -207,7 +207,7 @@ impl AgentEngine for ClaudeCode {
 
     fn profile_recipe(&self) -> ProfileRecipe {
         ProfileRecipe {
-            profile: "agents/claude",
+            profile: "agents/claude".to_owned(),
             display: "Claude Code",
             sign_in: "Follow Claude Code's sign-in instructions.",
             // The sign-in is a command inside Claude Code's own interface, so there

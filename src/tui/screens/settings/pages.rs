@@ -350,7 +350,7 @@ pub(super) fn project_lines(
 pub(super) fn profile_connector(
     title: String,
     purpose: &'static str,
-    profile: &'static str,
+    profile: &str,
     directory: &str,
     status: &CredentialStatus,
 ) -> Connector {

@@ -366,6 +366,11 @@ pub fn profile_recipes() -> Vec<ProfileRecipe> {
         .collect()
 }
 
+/// The recipe one provider contributes, for a named credential.
+pub(crate) fn profile_recipe(kind: VcsProviderKind) -> ProfileRecipe {
+    answering(kind).profile_recipe()
+}
+
 /// The provider that answers for one kind of contribution.
 fn answering(kind: VcsProviderKind) -> &'static dyn VcsProvider {
     match kind {

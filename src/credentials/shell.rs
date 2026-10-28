@@ -160,7 +160,7 @@ where
     pub async fn open_shell(
         &self,
         id: String,
-        profile: &'static str,
+        profile: &str,
         cancel: CredentialShellCancel,
         events: &mpsc::UnboundedSender<CredentialShellEvent>,
     ) -> Result<(), CredentialsError> {

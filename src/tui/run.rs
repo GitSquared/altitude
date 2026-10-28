@@ -668,7 +668,7 @@ where
             _ = configuration_clock.tick(), if !reading_configuration => {
                 reading_configuration = true;
                 let config = app.config.clone();
-                let profiles: Vec<_> = task_service.credentials().profiles().iter().map(|profile| profile.profile).collect();
+                let profiles: Vec<_> = task_service.credentials().profiles().iter().map(|profile| profile.profile.clone()).collect();
                 let addresses = app.configured_remotes();
                 let reports = configuration_reads.clone();
                 tokio::spawn(async move {

@@ -1,7 +1,7 @@
 use crate::{
     agent::{AgentChannels, AgentEngines, AgentError, AgentKind, tools::AgentToolRegistry},
     config::{Config, InstallationIdentity},
-    credentials::Credentials,
+    credentials::{Credentials, CredentialsError},
     isolation::{
         EnvironmentDescription, EnvironmentProgress, IsolationEngine, IsolationError, PortNotice,
         PortRelays, VsockRoute,
@@ -136,6 +136,7 @@ pub enum TaskServiceError {
     InvalidReport(String),
     AgentChannel(io::Error),
     RepositoryListing(String),
+    Credentials(CredentialsError),
 }
 impl fmt::Display for TaskServiceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -146,6 +147,7 @@ impl fmt::Display for TaskServiceError {
             Self::InvalidReport(error) => write!(formatter, "invalid agent turn report: {error}"),
             Self::AgentChannel(error) => write!(formatter, "agent channel error: {error}"),
             Self::RepositoryListing(error) => formatter.write_str(error),
+            Self::Credentials(error) => error.fmt(formatter),
         }
     }
 }

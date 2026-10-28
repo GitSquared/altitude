@@ -30,7 +30,7 @@ pub struct GitHub;
 impl VcsProvider for GitHub {
     fn profile_recipe(&self) -> ProfileRecipe {
         ProfileRecipe {
-            profile: "vcs/github",
+            profile: "vcs/github".to_owned(),
             display: "GitHub",
             sign_in: "Follow the GitHub CLI's sign-in instructions.",
             // The one profile whose sign-in is a command of its own: it finishes,

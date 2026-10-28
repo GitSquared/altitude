@@ -655,12 +655,12 @@ impl TaskHost for OwnTasks {
             // their logins. A task still in play needs them, so its presence
             // postpones this until the task is no longer here.
             if forget_logins && nothing_theirs {
-                let profiles: Vec<&str> = tasks
+                let profiles: Vec<String> = tasks
                     .service()
                     .credentials()
                     .profiles()
                     .iter()
-                    .map(|profile| profile.profile)
+                    .map(|profile| profile.profile.clone())
                     .collect();
                 let directory = scoped.scoped_data_dir().to_path_buf();
                 spawn_blocking(move || {
@@ -1314,12 +1314,12 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     }
     // What this machine can mount is what a pushed configuration may carry,
     // besides the tracker profiles that only travel.
-    let mounted_profiles: Vec<&'static str> = task_loop
+    let mounted_profiles: Vec<String> = task_loop
         .service()
         .credentials()
         .profiles()
         .iter()
-        .map(|profile| profile.profile)
+        .map(|profile| profile.profile.clone())
         .collect();
     if reports_through_pushed_logins {
         let syncing = Arc::clone(&task_loop);

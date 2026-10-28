@@ -142,11 +142,11 @@ impl Row {
     }
 
     /// The profile whose login this row stands for, when it stands for one.
-    pub fn profile(&self) -> Option<&'static str> {
+    pub fn profile(&self) -> Option<&str> {
         match &self.kind {
             RowKind::Agent { credential, .. } | RowKind::Credential(credential) => {
                 match &credential.kind {
-                    CredentialKind::Profile { profile, .. } => Some(profile),
+                    CredentialKind::Profile { profile, .. } => Some(profile.as_str()),
                     CredentialKind::Installation { .. } => None,
                 }
             }
@@ -266,7 +266,7 @@ pub enum CredentialKind {
     },
     /// A profile a task mounts. Presence and place only: never the contents.
     Profile {
-        profile: &'static str,
+        profile: String,
         directory: String,
         /// What that profile's own check said about it, if it has been asked.
         status: CredentialStatus,

@@ -806,7 +806,7 @@ impl IsolationEngine for MicrosandboxIsolation {
     async fn credential_shell(
         &self,
         sandbox: CredentialSandbox,
-        profile: &'static str,
+        profile: &str,
         progress: &dyn EnvironmentProgressSink,
     ) -> Result<String, IsolationError> {
         sandbox::credential_shell(self, &self.config, sandbox, profile, progress).await
@@ -836,7 +836,7 @@ impl IsolationEngine for MicrosandboxIsolation {
         sandbox: CredentialSandbox,
         checks: Vec<CredentialCheck>,
         progress: &dyn EnvironmentProgressSink,
-    ) -> Result<Option<Vec<(&'static str, CredentialReport)>>, IsolationError> {
+    ) -> Result<Option<Vec<(String, CredentialReport)>>, IsolationError> {
         sandbox::credential_reports(self, &self.config, sandbox, checks, progress).await
     }
 

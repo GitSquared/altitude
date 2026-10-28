@@ -125,7 +125,7 @@ pub(in crate::tui) struct PendingConfirm {
 }
 
 pub(in crate::tui) enum CredentialTarget {
-    Profile(&'static str),
+    Profile(String),
     Linear,
 }
 

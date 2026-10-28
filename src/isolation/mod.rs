@@ -157,7 +157,7 @@ pub struct BaseSandboxSnapshot {
 #[derive(Clone, Debug)]
 pub struct ProfileSummary {
     /// The recipe's stable profile identity, e.g. `agents/claude`.
-    pub profile: &'static str,
+    pub profile: String,
     /// What this profile is called where an operator reads it.
     pub display: &'static str,
     /// What the operator does to sign in, for a sign-in they have to drive.
@@ -197,7 +197,7 @@ pub struct CredentialReport {
 #[derive(Clone, Debug)]
 pub struct CredentialCheck {
     /// The profile whose login the command reads, so its answer reaches that row.
-    pub profile: &'static str,
+    pub profile: String,
     pub command: String,
 }
 
@@ -451,7 +451,7 @@ pub trait IsolationEngine: Send + Sync {
     fn credential_shell(
         &self,
         sandbox: CredentialSandbox,
-        profile: &'static str,
+        profile: &str,
         progress: &dyn EnvironmentProgressSink,
     ) -> impl Future<Output = Result<String, IsolationError>> + Send;
 
@@ -537,7 +537,7 @@ pub trait IsolationEngine: Send + Sync {
         sandbox: CredentialSandbox,
         checks: Vec<CredentialCheck>,
         progress: &dyn EnvironmentProgressSink,
-    ) -> impl Future<Output = Result<Option<Vec<(&'static str, CredentialReport)>>, IsolationError>> + Send;
+    ) -> impl Future<Output = Result<Option<Vec<(String, CredentialReport)>>, IsolationError>> + Send;
 
     /// Throw away sandboxes a client left behind.
     ///

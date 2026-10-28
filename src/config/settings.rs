@@ -1,5 +1,6 @@
 use crate::{
     agent::AgentKind,
+    credentials::{Credential, Service, Slot},
     project::{Project, ProjectCommits},
 };
 use serde::{Deserialize, Serialize};
@@ -40,6 +41,9 @@ pub struct Settings {
     /// rather than being typed again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     identities: Vec<ProjectCommits>,
+    /// The named credentials this installation can use.
+    #[serde(default)]
+    credentials: Vec<Credential>,
 }
 
 impl Default for Settings {
@@ -52,6 +56,7 @@ impl Default for Settings {
             interface: Interface::default(),
             projects: vec![Project::new(String::new())],
             identities: Vec::new(),
+            credentials: Vec::new(),
         }
     }
 }
@@ -64,6 +69,16 @@ impl Default for Settings {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Defaults {
+    /// The coding-agent credential new tasks use. Absent is the default for the
+    /// service the old `agent` field names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_credential: Option<String>,
+    /// The version-control identity a project inherits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcs_credential: Option<String>,
+    /// The tracker identity a project inherits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracker_credential: Option<String>,
     /// The coding agent Altitude drives.
     ///
     /// Independent of projects: what is installed and what works in it are
@@ -107,7 +122,10 @@ pub struct SettingsFile {
 }
 
 impl SettingsFile {
-    pub(super) fn load_or_create(path: PathBuf) -> Result<Self, SettingsError> {
+    pub(super) fn load_or_create(
+        path: PathBuf,
+        existing: &[Credential],
+    ) -> Result<Self, SettingsError> {
         let _lock = lock_settings(&path)?;
         let source = match fs::read_to_string(&path) {
             Ok(source) => source,
@@ -121,8 +139,16 @@ impl SettingsFile {
             }
             Err(error) => return Err(SettingsError::Io(error)),
         };
-        let settings: Settings = toml::from_str(&source).map_err(SettingsError::Parse)?;
+        let mut settings: Settings = toml::from_str(&source).map_err(SettingsError::Parse)?;
+        settings.normalize(existing);
         settings.validate()?;
+        let normalized = toml::to_string_pretty(&settings).map_err(SettingsError::Serialize)?;
+        let source = if normalized == source {
+            source
+        } else {
+            write_settings(&path, &normalized)?;
+            normalized
+        };
         Ok(Self {
             path,
             source,
@@ -190,6 +216,138 @@ fn write_settings(path: &Path, contents: &str) -> Result<(), SettingsError> {
 }
 
 impl Settings {
+    /// Fill in what a file written before credentials existed did not say.
+    ///
+    /// A fresh installation starts with no identities; onboarding creates the
+    /// ones the operator chooses. Profiles already on disk are adopted once, so an
+    /// installation that predates credentials keeps its logins. A project that
+    /// named a service by kind keeps meaning that service's adopted identity.
+    fn normalize(&mut self, existing: &[Credential]) {
+        if self.credentials.is_empty() {
+            self.credentials = existing.to_vec();
+        }
+        let known = |id: &str| {
+            self.credentials
+                .iter()
+                .any(|credential| credential.id == id)
+        };
+        if self
+            .defaults
+            .agent_credential
+            .as_deref()
+            .is_none_or(|id| !known(id))
+        {
+            self.defaults.agent_credential = self
+                .defaults
+                .agent
+                .map(|agent| format!("agents/{}", agent_slug(agent)))
+                .filter(|id| known(id));
+        }
+        if self
+            .defaults
+            .vcs_credential
+            .as_deref()
+            .is_none_or(|id| !known(id))
+        {
+            self.defaults.vcs_credential = Some("vcs/github".to_owned()).filter(|id| known(id));
+        }
+        if self
+            .defaults
+            .tracker_credential
+            .as_deref()
+            .is_none_or(|id| !known(id))
+        {
+            self.defaults.tracker_credential =
+                Some("trackers/linear".to_owned()).filter(|id| known(id));
+        }
+        for project in &mut self.projects {
+            if project
+                .agent_credential
+                .as_deref()
+                .is_none_or(|id| !known(id))
+            {
+                project.agent_credential = project
+                    .agent
+                    .map(|agent| format!("agents/{}", agent_slug(agent)))
+                    .filter(|id| known(id))
+                    .or_else(|| self.defaults.agent_credential.clone());
+            }
+            if project
+                .vcs_credential
+                .as_deref()
+                .is_none_or(|id| !known(id))
+            {
+                project.vcs_credential = self.defaults.vcs_credential.clone();
+            }
+            if let Some(route) = &mut project.tracker
+                && route.credential.as_deref().is_none_or(|id| !known(id))
+            {
+                route.credential = self.defaults.tracker_credential.clone();
+            }
+        }
+    }
+
+    /// Every credential an interface can list.
+    #[allow(dead_code)]
+    pub fn credentials(&self) -> &[Credential] {
+        &self.credentials
+    }
+
+    #[allow(dead_code)]
+    pub fn credential(&self, id: &str) -> Option<&Credential> {
+        self.credentials
+            .iter()
+            .find(|credential| credential.id == id)
+    }
+
+    /// The credential a project inherits for a slot, when it binds none.
+    #[allow(dead_code)]
+    pub fn default_credential(&self, slot: Slot) -> Option<&str> {
+        match slot {
+            Slot::Agent => self.defaults.agent_credential.as_deref(),
+            Slot::VersionControl => self.defaults.vcs_credential.as_deref(),
+            Slot::Tracker => self.defaults.tracker_credential.as_deref(),
+        }
+    }
+
+    /// Add a credential, refusing one that is not a usable id or is already here.
+    #[allow(dead_code)]
+    pub fn add_credential(&mut self, credential: Credential) -> Result<(), SettingsError> {
+        if !credential.is_valid() {
+            return Err(SettingsError::Invalid(format!(
+                "credential {:?} is not a usable named identity",
+                credential.id
+            )));
+        }
+        if self.credential(&credential.id).is_some() {
+            return Err(SettingsError::Invalid(format!(
+                "credential {:?} already exists",
+                credential.id
+            )));
+        }
+        self.credentials.push(credential);
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub fn remove_credential(&mut self, id: &str) -> Result<(), SettingsError> {
+        if self.projects.iter().any(|project| {
+            project.agent_credential.as_deref() == Some(id)
+                || project.vcs_credential.as_deref() == Some(id)
+                || project
+                    .tracker
+                    .as_ref()
+                    .and_then(|route| route.credential.as_deref())
+                    == Some(id)
+        }) {
+            return Err(SettingsError::Invalid(
+                "a project still binds this identity".to_owned(),
+            ));
+        }
+        self.credentials.retain(|credential| credential.id != id);
+        Ok(())
+    }
+
     /// The projects this installation works on, oldest first.
     pub fn projects(&self) -> &[Project] {
         &self.projects
@@ -302,6 +460,61 @@ impl Settings {
     }
 
     fn validate(&self) -> Result<(), SettingsError> {
+        let mut credential_ids = HashSet::new();
+        for credential in &self.credentials {
+            if !credential.is_valid() {
+                return Err(SettingsError::Invalid(format!(
+                    "credential {:?} is not a usable named identity",
+                    credential.id
+                )));
+            }
+            if !credential_ids.insert(credential.id.as_str()) {
+                return Err(SettingsError::Invalid(format!(
+                    "duplicate credential id: {}",
+                    credential.id
+                )));
+            }
+        }
+        for (slot, id) in [
+            (Slot::Agent, self.defaults.agent_credential.as_deref()),
+            (
+                Slot::VersionControl,
+                self.defaults.vcs_credential.as_deref(),
+            ),
+            (Slot::Tracker, self.defaults.tracker_credential.as_deref()),
+        ] {
+            if let Some(id) = id
+                && (!credential_ids.contains(id)
+                    || Service::from_id(id).is_none_or(|service| service.slot() != slot))
+            {
+                return Err(SettingsError::Invalid(format!(
+                    "default credential {id:?} does not name a {slot:?} identity"
+                )));
+            }
+        }
+        for project in &self.projects {
+            for (slot, id) in [
+                (Slot::Agent, project.agent_credential.as_deref()),
+                (Slot::VersionControl, project.vcs_credential.as_deref()),
+                (
+                    Slot::Tracker,
+                    project
+                        .tracker
+                        .as_ref()
+                        .and_then(|route| route.credential.as_deref()),
+                ),
+            ] {
+                if let Some(id) = id
+                    && (!credential_ids.contains(id)
+                        || Service::from_id(id).is_none_or(|service| service.slot() != slot))
+                {
+                    return Err(SettingsError::Invalid(format!(
+                        "project {:?} binds {id:?}, which is not a {slot:?} identity",
+                        project.name
+                    )));
+                }
+            }
+        }
         let mut ids = HashSet::new();
         let mut names = HashSet::new();
         for project in &self.projects {
@@ -364,6 +577,13 @@ impl Settings {
 ///
 /// Checked only far enough to catch a typo. Proving an address reaches something
 /// means dialling it, which the link does and reports on its own.
+fn agent_slug(agent: AgentKind) -> &'static str {
+    match agent {
+        AgentKind::Claude => "claude",
+        AgentKind::Pi => "pi",
+    }
+}
+
 fn validate_remote_address(address: &str) -> Result<(), SettingsError> {
     let invalid = |why: &str| {
         Err(SettingsError::Invalid(format!(

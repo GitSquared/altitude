@@ -49,8 +49,15 @@ pub struct Project {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
     /// The harness a task here runs unless one is picked.
+    ///
+    /// Kept as the service a legacy project named; `agent_credential` is what new
+    /// work reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentKind>,
+    /// The coding-agent identity new tasks here use. Absent is the installation's
+    /// default for the slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_credential: Option<String>,
     /// The machine this project's tasks run on. Absent is this machine.
     ///
     /// A task does not choose: work goes where its project runs, so moving a
@@ -58,12 +65,11 @@ pub struct Project {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
     /// The version-control login this project's repositories come from.
-    ///
-    /// Absent is the only one this build knows, which is what a machine with one
-    /// GitHub login needs. A project names its connection when a machine can hold
-    /// more than one, the same way it names its agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vcs: Option<VcsProviderKind>,
+    /// The version-control identity this project's repositories come from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcs_credential: Option<String>,
     /// The tracker work this project claims.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracker: Option<TrackerRoute>,
@@ -89,6 +95,9 @@ pub struct ProjectCommits {
 /// scope become. Without one, a delegated issue starts nothing and says so.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct TrackerRoute {
+    /// The tracker identity this route speaks through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential: Option<String>,
     /// The provider's scope, by id or by the name a person types: a Linear team, a
     /// Jira project, a GitHub repository.
     ///
@@ -145,8 +154,10 @@ impl Project {
                 .collect(),
             instructions: None,
             agent: None,
+            agent_credential: None,
             host: None,
             vcs: None,
+            vcs_credential: None,
             tracker: None,
             commits: None,
         }
@@ -175,8 +186,10 @@ impl Project {
             caches: Vec::new(),
             instructions: None,
             agent: None,
+            agent_credential: None,
             host: None,
             vcs: None,
+            vcs_credential: None,
             tracker: None,
             commits: None,
         }

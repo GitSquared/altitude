@@ -22,7 +22,7 @@ use crate::tui::{
 /// A sign-in the operator drives, described before its terminal opens.
 pub struct SignIn {
     pub display: String,
-    pub profile: &'static str,
+    pub profile: String,
     lines: Vec<Line<'static>>,
 }
 
@@ -33,7 +33,7 @@ pub enum Decision {
 }
 
 impl SignIn {
-    pub fn new(display: &str, profile: &'static str, instructions: &str) -> Self {
+    pub fn new(display: &str, profile: String, instructions: &str) -> Self {
         let lines = vec![
             Line::from(instructions.to_owned()),
             Line::from(""),

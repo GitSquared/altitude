@@ -7,7 +7,7 @@ use crate::{
         CommandEvent, CommandSession, IsolationEngine, SandboxOptions, VsockRoute, mounts,
     },
     project::Project,
-    vcs,
+    vcs::VcsProviderKind,
 };
 use futures_util::future::join_all;
 
@@ -209,20 +209,35 @@ where
             ],
             None => Vec::new(),
         };
+        let project = task
+            .project()
+            .cloned()
+            .ok_or(TaskServiceError::Task(TaskError::MissingProject))?;
         let create = match task.agent_kind {
             Some(kind) => {
+                let agent_id = project
+                    .agent_credential
+                    .clone()
+                    .unwrap_or_else(|| kind.profile().to_owned());
+                let vcs_id = project
+                    .vcs_credential
+                    .clone()
+                    .or_else(|| project.vcs.map(VcsProviderKind::profile).map(str::to_owned))
+                    .unwrap_or_else(|| "vcs/github".to_owned());
+                let agent_recipe = self
+                    .credentials
+                    .recipe(&agent_id)
+                    .map_err(TaskServiceError::Credentials)?;
+                let vcs_recipe = self
+                    .credentials
+                    .recipe(&vcs_id)
+                    .map_err(TaskServiceError::Credentials)?;
                 isolation
                     .provision(
                         sandbox_id.clone(),
                         snapshot_path.clone(),
-                        task.project()
-                            .cloned()
-                            .ok_or(TaskServiceError::Task(TaskError::MissingProject))?,
-                        [
-                            vec![self.agents.engine(kind).profile_recipe()],
-                            vcs::profile_recipes(),
-                        ]
-                        .concat(),
+                        project,
+                        vec![agent_recipe, vcs_recipe],
                         vsock,
                         &progress,
                     )

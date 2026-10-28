@@ -66,7 +66,7 @@ impl SignInCommand {
 #[derive(Clone)]
 pub struct ProfileRecipe {
     /// Stable relative profile identity, e.g. `agents/claude` or `vcs/github`.
-    pub profile: &'static str,
+    pub profile: String,
     /// What this profile is called where an operator reads it, which is the name
     /// the settings list shows and the shell that sets it up names.
     pub display: &'static str,
@@ -230,14 +230,14 @@ impl SandboxPlan {
         };
         let mut profiles = HashSet::new();
         for recipe in recipes {
-            relative_path(recipe.profile, false)?;
-            if !profiles.insert(recipe.profile) {
+            relative_path(&recipe.profile, false)?;
+            if !profiles.insert(recipe.profile.clone()) {
                 return Err(IsolationError::new("duplicate profile recipe"));
             }
             for directory in recipe.directories {
                 relative_path(directory.relative_path, true)?;
                 let host_path = config
-                    .profile_dir(recipe.profile)
+                    .profile_dir(&recipe.profile)
                     .join(directory.relative_path);
                 let guest_path = match directory.guest_path {
                     GuestPath::Absolute(path) => {
@@ -275,7 +275,7 @@ impl SandboxPlan {
                 }
                 for path in directory.task_local_subdirectories {
                     relative_path(path, false)?;
-                    let source = Path::new(recipe.profile)
+                    let source = Path::new(&recipe.profile)
                         .join(directory.relative_path)
                         .join(path);
                     let target = guest_path.join(path);
@@ -556,7 +556,7 @@ pub(super) async fn credential_reports(
     sandbox: CredentialSandbox,
     checks: Vec<CredentialCheck>,
     progress: &dyn EnvironmentProgressSink,
-) -> Result<Option<Vec<(&'static str, CredentialReport)>>, IsolationError> {
+) -> Result<Option<Vec<(String, CredentialReport)>>, IsolationError> {
     let CredentialSandbox {
         id,
         recipes,
@@ -584,7 +584,7 @@ pub(super) async fn credential_reports(
     for check in checks {
         match run_to_end(engine, id.clone(), check.command).await {
             Ok((status, output)) => reports.push((
-                check.profile,
+                check.profile.clone(),
                 CredentialReport {
                     output,
                     signed_in: status == 0,

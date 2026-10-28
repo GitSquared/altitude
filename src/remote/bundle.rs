@@ -128,7 +128,7 @@ impl ConfigBundle {
     pub fn of(
         settings: &str,
         data_dir: &Path,
-        mounted: &[&str],
+        mounted: &[String],
         held: &[ProfileDigest],
         host: Option<&str>,
         logins: Logins,
@@ -149,7 +149,7 @@ impl ConfigBundle {
         let profiles = if profiles {
             mounted
                 .iter()
-                .copied()
+                .map(String::as_str)
                 .chain(TrackerKind::ALL.iter().map(|kind| kind.profile()))
                 .map(|profile| ProfileBundle::of(data_dir, profile))
                 .collect::<io::Result<Vec<_>>>()?

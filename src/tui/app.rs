@@ -237,7 +237,7 @@ impl CredentialStatus {
 
 pub(in crate::tui) struct CredentialCheckReply {
     pub generation: u64,
-    pub answers: Vec<(&'static str, CredentialStatus)>,
+    pub answers: Vec<(String, CredentialStatus)>,
 }
 
 /// A repository listing that arrived while the interface was drawing.
@@ -663,7 +663,7 @@ pub struct App {
     /// Runtime only: it is a fact about the remote, not something to persist.
     pub(in crate::tui) remote_trackers: HashMap<String, Vec<TrackerConnection>>,
     /// What each profile's own check last said about its login.
-    pub(in crate::tui) credential_status: HashMap<&'static str, CredentialStatus>,
+    pub(in crate::tui) credential_status: HashMap<String, CredentialStatus>,
     /// When the credentials list started showing, which the wait before asking is
     /// measured from. Absent while it is not showing.
     credentials_visible_since: Option<Instant>,
@@ -717,7 +717,7 @@ pub struct App {
     repositories_requested: bool,
     /// The profile a sign-in from the first screen was for, so it comes back
     /// there instead of to Settings and asks about that login again.
-    setup_sign_in: Option<&'static str>,
+    setup_sign_in: Option<String>,
     /// Whether Settings was opened from the first screen, so leaving it returns
     /// there rather than to the task list behind it.
     panel_from_setup: bool,
@@ -1638,7 +1638,7 @@ impl App {
     fn begin_sign_in<E>(
         &mut self,
         display: &str,
-        profile: &'static str,
+        profile: &str,
         task_service: &TaskService<E>,
         events: &mpsc::UnboundedSender<CredentialShellEvent>,
     ) where
@@ -1652,12 +1652,12 @@ impl App {
             Some(summary) if summary.sign_in_command.is_interactive() => {
                 self.foreground = Foreground::SignIn(Box::new(SignIn::new(
                     summary.display,
-                    profile,
+                    profile.to_owned(),
                     summary.sign_in,
                 )));
                 self.alert = None;
             }
-            _ => self.open_credential_shell(display, profile, task_service, events),
+            _ => self.open_credential_shell(display, profile.to_owned(), task_service, events),
         }
     }
 
@@ -1692,7 +1692,7 @@ impl App {
     pub(in crate::tui) fn open_credential_shell<E>(
         &mut self,
         display: &str,
-        profile: &'static str,
+        profile: String,
         task_service: &TaskService<E>,
         events: &mpsc::UnboundedSender<CredentialShellEvent>,
     ) where
@@ -1706,7 +1706,7 @@ impl App {
         let id = credential_shell_id();
         // A built environment is a wait of a moment, so it gets no wait to look at:
         // the box appears only when there is an install to watch.
-        let progress = (!task_service.credentials().build_ready(profile))
+        let progress = (!task_service.credentials().build_ready(&profile))
             .then(|| "Preparing your sign-in…".to_owned());
         self.credential_shell = CredentialShellState::Opening {
             id: id.clone(),
@@ -1720,7 +1720,7 @@ impl App {
         tokio::spawn(async move {
             match service
                 .credentials()
-                .open_shell(id.clone(), profile, cancel, &events)
+                .open_shell(id.clone(), &profile, cancel, &events)
                 .await
             {
                 Ok(()) => {}
@@ -1823,7 +1823,7 @@ impl App {
                 // that was there before: ask again rather than leave the row
                 // saying what it said before the attempt.
                 if let Some(profile) = self.setup_sign_in.take() {
-                    self.credential_status.remove(profile);
+                    self.credential_status.remove(&profile);
                 }
                 self.problem(format!("No shell: {reason}"));
             }
@@ -1848,7 +1848,7 @@ impl App {
             // terminal appears still means the row has to be checked again, or
             // it goes on reporting the login the attempt was meant to replace.
             if let Some(profile) = self.setup_sign_in.take() {
-                self.credential_status.remove(profile);
+                self.credential_status.remove(&profile);
             }
             return;
         };
@@ -1856,7 +1856,7 @@ impl App {
         self.shells.remove(&id);
         if self.open_shell() == Some(&id) {
             if let Some(profile) = mem::take(&mut self.setup_sign_in) {
-                self.credential_status.remove(profile);
+                self.credential_status.remove(&profile);
             }
             // Back to the screen that asked, with the row that asked still on it.
             self.foreground = self.shell_behind.uncover().unwrap_or(Foreground::Panel);
@@ -2036,7 +2036,7 @@ impl App {
             }
             Some(RowKind::Agent { credential, .. }) => {
                 if let CredentialKind::Profile { profile, .. } = credential.kind {
-                    self.begin_sign_in(&credential.label, profile, task_service, events);
+                    self.begin_sign_in(&credential.label, &profile, task_service, events);
                 }
             }
             Some(RowKind::GitIdentity(_)) => {
@@ -2044,7 +2044,7 @@ impl App {
             }
             Some(RowKind::Credential(credential)) => {
                 if let CredentialKind::Profile { profile, .. } = credential.kind {
-                    self.begin_sign_in(&credential.label, profile, task_service, events);
+                    self.begin_sign_in(&credential.label, &profile, task_service, events);
                 } else {
                     self.foreground = Foreground::Setup(Setup::new(
                         SetupKind::Remote,
@@ -2994,7 +2994,7 @@ impl App {
     ///
     /// An answer that came back is not asked again, and one that could not run waits
     /// out a backoff rather than being retried on the next tick.
-    fn unasked_profiles(&self) -> Vec<&'static str> {
+    fn unasked_profiles(&self) -> Vec<String> {
         let Some(prefix) = self.panel.section.profile_prefix() else {
             return Vec::new();
         };
@@ -3003,9 +3003,9 @@ impl App {
             .is_none_or(|at| Instant::now() >= at);
         self.profiles
             .iter()
-            .map(|summary| summary.profile)
+            .map(|summary| summary.profile.clone())
             .filter(|profile| profile.starts_with(prefix))
-            .filter(|profile| match self.credential_status.get(*profile) {
+            .filter(|profile| match self.credential_status.get(profile) {
                 None => true,
                 Some(CredentialStatus::Unanswered) => retry_due,
                 Some(_) => false,
@@ -3031,7 +3031,7 @@ impl App {
     /// Ask about a set of profiles in one sandbox, off the loop.
     fn ask_profiles<E>(
         &mut self,
-        profiles: Vec<&'static str>,
+        profiles: Vec<String>,
         task_service: &TaskService<E>,
         reports: &mpsc::UnboundedSender<CredentialCheckReply>,
     ) where
@@ -3042,7 +3042,7 @@ impl App {
         }
         for profile in &profiles {
             self.credential_status
-                .insert(*profile, CredentialStatus::Checking);
+                .insert(profile.clone(), CredentialStatus::Checking);
         }
         self.credential_retry_at = None;
         let service = task_service.clone();
@@ -3280,7 +3280,7 @@ impl App {
                     "the Claude Code sign-in"
                 };
                 (
-                    CredentialTarget::Profile(profile),
+                    CredentialTarget::Profile(profile.to_owned()),
                     format!("Delete {scope} saved on this machine? Tool settings and copies already sent to remotes are kept."),
                 )
             }
@@ -3301,7 +3301,7 @@ impl App {
         let result = match target {
             CredentialTarget::Profile(profile) => service
                 .credentials()
-                .forget(profile)
+                .forget(&profile)
                 .map_err(|error| error.to_string()),
             CredentialTarget::Linear => {
                 if let Some(handle) = self.tracker_connect.take() {
@@ -3838,10 +3838,10 @@ impl App {
                     .get(chosen.profile())
                     .is_some_and(signed_in);
                 if needs_sign_in {
-                    self.setup_sign_in = Some(chosen.profile());
+                    self.setup_sign_in = Some(chosen.profile().to_owned());
                     self.open_credential_shell(
                         &chosen.to_string(),
-                        chosen.profile(),
+                        chosen.profile().to_owned(),
                         task_service,
                         events,
                     );
@@ -3863,8 +3863,13 @@ impl App {
                 // Choosing a provider is choosing the sign-in that makes it
                 // usable: the repository list comes after it, never before.
                 self.foreground = Foreground::GetStarted(panel);
-                self.setup_sign_in = Some(chosen.profile());
-                self.open_credential_shell(chosen.label(), chosen.profile(), task_service, events);
+                self.setup_sign_in = Some(chosen.profile().to_owned());
+                self.open_credential_shell(
+                    chosen.label(),
+                    chosen.profile().to_owned(),
+                    task_service,
+                    events,
+                );
                 return false;
             }
             self.foreground = Foreground::GetStarted(panel);
@@ -3926,10 +3931,10 @@ impl App {
                         // closes: this is the one sign-in that does not start at
                         // Settings.
                         self.foreground = Foreground::GetStarted(panel);
-                        self.setup_sign_in = Some(kind.profile());
+                        self.setup_sign_in = Some(kind.profile().to_owned());
                         self.open_credential_shell(
                             &kind.to_string(),
-                            kind.profile(),
+                            kind.profile().to_owned(),
                             task_service,
                             events,
                         );
@@ -4436,12 +4441,12 @@ impl App {
     }
 
     /// The profiles the first screen has to ask about.
-    fn setup_profiles(&self) -> Vec<&'static str> {
+    fn setup_profiles(&self) -> Vec<String> {
         let mut profiles = Vec::new();
         if let Some(agent) = self.setup_agent() {
-            profiles.push(agent.profile());
+            profiles.push(agent.profile().to_owned());
         }
-        profiles.push(self.active_vcs().profile());
+        profiles.push(self.active_vcs().profile().to_owned());
         profiles
     }
 
@@ -4452,7 +4457,7 @@ impl App {
             && self
                 .setup_profiles()
                 .iter()
-                .any(|profile| !self.credential_status.contains_key(profile))
+                .any(|profile| !self.credential_status.contains_key(profile.as_str()))
     }
 
     pub(in crate::tui) fn ask_setup_check<E>(
@@ -4462,10 +4467,10 @@ impl App {
     ) where
         E: IsolationEngine + Clone + 'static,
     {
-        let profiles: Vec<&'static str> = self
+        let profiles: Vec<String> = self
             .setup_profiles()
             .into_iter()
-            .filter(|profile| !self.credential_status.contains_key(profile))
+            .filter(|profile| !self.credential_status.contains_key(profile.as_str()))
             .collect();
         self.ask_profiles(profiles, task_service, reports);
     }
@@ -4473,7 +4478,7 @@ impl App {
     /// Leave a credential shell for wherever the sign-in was started.
     fn leave_credentials(&mut self) {
         if let Some(profile) = mem::take(&mut self.setup_sign_in) {
-            self.credential_status.remove(profile);
+            self.credential_status.remove(&profile);
         }
         self.foreground = self.shell_behind.uncover().unwrap_or(Foreground::Panel);
     }
@@ -4562,6 +4567,7 @@ impl App {
                 // says so; one that claims nothing is not.
                 project.tracker =
                     (!scope.is_empty() || form.accepts_delegated_work).then(|| TrackerRoute {
+                        credential: None,
                         scope: (!scope.is_empty()).then(|| scope.to_owned()),
                         accepts_delegated_work: form.accepts_delegated_work,
                     });
