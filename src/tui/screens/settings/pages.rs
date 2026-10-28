@@ -11,8 +11,6 @@ use std::{
 use ratatui::text::{Line, Span};
 
 use crate::{
-    credentials::Credential as NamedCredential,
-    isolation::EnvironmentDescription,
     project::Project,
     remote::{RemoteKey, TrackerConnection, TrackerReadiness},
     tracker::{TrackerKind, setup::Item},
@@ -25,7 +23,7 @@ use crate::{
     },
 };
 
-use super::rows::{Credential, CredentialKind, GitIdentity, mark};
+use super::rows::{Credential, CredentialKind, GitIdentity, View, mark};
 
 /// A small heading inside a page, so a page that has to say several things can
 /// be read in the order it means them.
@@ -210,89 +208,89 @@ pub(in crate::tui) fn remote_tracker_setup_lines(kind: TrackerKind) -> Vec<Line<
 /// rather than what a form remembers.
 pub(super) fn project_lines(
     project: &Project,
-    base: Option<&EnvironmentDescription>,
-    credentials: &[NamedCredential],
+    view: &View,
     heading: impl Fn(String) -> Line<'static>,
 ) -> Vec<Line<'static>> {
-    let mut lines = vec![heading(project.name.clone()), Line::from("")];
-    match &project.repository {
-        Some(repository) => {
-            lines.push(Line::from(vec![
-                Span::styled("repository  ", palette::muted()),
-                Span::styled(
-                    project
-                        .repository_label()
-                        .unwrap_or_else(|| repository.clone()),
-                    palette::accent(),
-                ),
-            ]));
-            if let Some(checkout) = project.checkout_path() {
-                lines.push(Line::from(vec![
-                    Span::styled("checkout    ", palette::muted()),
-                    Span::styled(checkout, palette::accent()),
-                ]));
-            }
-        }
-        None => lines.push(Line::styled(
-            "No repository. Tasks find their own code.",
-            palette::muted(),
-        )),
+    const LABEL: usize = 16;
+
+    fn tag(label: &str, value: String) -> Line<'static> {
+        Line::from(vec![
+            Span::styled(format!("{label:<LABEL$}"), palette::muted()),
+            Span::styled(value, palette::accent()),
+        ])
     }
-    lines.push(Line::from(vec![
-        Span::styled("start new tasks on  ", palette::muted()),
-        Span::styled(
-            project
-                .host
-                .clone()
-                .unwrap_or_else(|| "this machine".to_owned()),
-            palette::accent(),
-        ),
-    ]));
-    let label = |id: Option<&str>, fallback: &str| {
-        id.and_then(|id| {
-            credentials
-                .iter()
-                .find(|credential| credential.id == id)
-                .map(|credential| credential.label.clone())
-        })
-        .unwrap_or_else(|| fallback.to_owned())
+
+    let credentials = &view.credentials;
+    let defaults = &view.defaults;
+    let label = |id: Option<&str>| {
+        let Some(id) = id else {
+            return "not set".to_owned();
+        };
+        credentials
+            .iter()
+            .find(|credential| credential.id == id)
+            .map_or_else(|| id.to_owned(), |credential| credential.label.clone())
     };
-    lines.push(Line::from(vec![
-        Span::styled("coding agent  ", palette::muted()),
-        Span::styled(
-            label(
-                project.agent_credential.as_deref(),
-                &project
-                    .agent
-                    .map_or_else(|| "the default".to_owned(), |agent| agent.to_string()),
-            ),
-            palette::accent(),
-        ),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("version ctrl  ", palette::muted()),
-        Span::styled(
-            label(
-                project.vcs_credential.as_deref(),
-                "the installation's login",
-            ),
-            palette::accent(),
-        ),
-    ]));
-    if let Some(route) = &project.tracker {
-        lines.push(Line::from(vec![
-            Span::styled("task tracker  ", palette::muted()),
-            Span::styled(
-                label(route.credential.as_deref(), "the default"),
-                palette::accent(),
-            ),
-        ]));
-    }
-    lines.push(Line::from(vec![
-        Span::styled("commits     ", palette::muted()),
-        Span::styled(
-            match &project.commits {
-                Some(commits) => format!(
+
+    let agent = project
+        .agent_credential
+        .as_deref()
+        .or(defaults.agent.as_deref());
+    let vcs = project
+        .vcs_credential
+        .as_deref()
+        .or(defaults.vcs.as_deref());
+    let tracker = project.tracker.as_ref().map(|route| {
+        let id = route.credential.as_deref().or(defaults.tracker.as_deref());
+        let mut value = label(id);
+        let kind = TrackerKind::sole();
+        match &route.scope {
+            Some(scope) => value.push_str(&format!(" · {} {scope}", kind.scope_noun())),
+            None => value.push_str(" · whole account"),
+        }
+        let state = id
+            .and_then(|id| view.tracker_states.get(id))
+            .copied()
+            .unwrap_or_default();
+        value.push_str(match state {
+            TrackerState::Connected if route.accepts_delegated_work => {
+                " · connected · ready to delegate"
+            }
+            TrackerState::Connected => " · connected · not accepting delegated work",
+            TrackerState::Connecting => " · connecting…",
+            TrackerState::NotConnected => " · not connected",
+        });
+        value
+    });
+
+    let mut lines = vec![heading(project.name.clone()), Line::from("")];
+    lines.push(tag("agent", label(agent)));
+    lines.push(tag("version control", label(vcs)));
+    lines.push(tag(
+        "task tracker",
+        tracker.unwrap_or_else(|| "not configured".to_owned()),
+    ));
+    lines.push(tag(
+        "remote",
+        project
+            .host
+            .clone()
+            .unwrap_or_else(|| "this machine".to_owned()),
+    ));
+    lines.push(tag(
+        "repository",
+        project
+            .repository_label()
+            .or_else(|| project.repository.clone())
+            .unwrap_or_else(|| "not set".to_owned()),
+    ));
+    let commits = project.commits.as_ref().or(defaults.commits.as_ref());
+    lines.push(tag(
+        "commits",
+        commits.map_or_else(
+            || "not set".to_owned(),
+            |commits| {
+                format!(
                     "{} <{}>{}",
                     commits.name,
                     commits.email,
@@ -301,12 +299,11 @@ pub(super) fn project_lines(
                     } else {
                         ""
                     }
-                ),
-                None => "the installation's default".to_owned(),
+                )
             },
-            palette::accent(),
         ),
-    ]));
+    ));
+
     lines.push(Line::from(""));
     lines.push(Line::styled("setup", palette::muted()));
     if project.setup_command.trim().is_empty() {
@@ -317,7 +314,11 @@ pub(super) fn project_lines(
     } else {
         lines.push(Line::from(project.setup_command.trim_end().to_owned()));
     }
-    if let Some(description) = base.filter(|description| !description.alpine_release.is_empty()) {
+    if let Some(description) = view
+        .base
+        .as_ref()
+        .filter(|description| !description.alpine_release.is_empty())
+    {
         lines.push(Line::from(""));
         lines.push(Line::styled("base image", palette::muted()));
         lines.push(Line::from(vec![
@@ -334,45 +335,9 @@ pub(super) fn project_lines(
             Span::styled(met_ago(description.built_at_ms), palette::accent()),
         ]));
         lines.push(Line::from(vec![
-            Span::styled("packages    ", palette::muted()),
+            Span::styled(format!("{:<LABEL$}", "packages"), palette::muted()),
             Span::styled(description.packages.join(", "), palette::accent()),
         ]));
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::styled("work arrives from", palette::muted()));
-    match &project.tracker {
-        Some(route) => {
-            let kind = TrackerKind::sole();
-            let mut spans = vec![Span::styled(
-                label(route.credential.as_deref(), "the default tracker"),
-                palette::accent(),
-            )];
-            spans.push(Span::raw(" · "));
-            spans.push(Span::styled(kind.label(), palette::accent()));
-            match &route.scope {
-                Some(scope) => {
-                    spans.push(Span::raw(format!(" · {} ", kind.scope_noun())));
-                    spans.push(Span::styled(scope.clone(), palette::accent()));
-                }
-                None => spans.push(Span::styled(" · the whole account", palette::accent())),
-            }
-            if route.accepts_delegated_work {
-                spans.push(Span::styled(
-                    " · accepting delegated work",
-                    palette::primary(),
-                ));
-            } else {
-                spans.push(Span::styled(
-                    " · not accepting delegated work",
-                    palette::muted(),
-                ));
-            }
-            lines.push(Line::from(spans));
-        }
-        None => lines.push(Line::styled(
-            "nothing. A team on a project is what lets work arrive from it.",
-            palette::muted(),
-        )),
     }
     if let Some(instructions) = &project.instructions {
         lines.push(Line::from(""));

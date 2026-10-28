@@ -1,10 +1,12 @@
 //! What a row is, and what it says about itself: the mark it wears, the keys it
 //! offers, and the facts the rest of the panel asks it for.
 
+use std::collections::HashMap;
+
 use crate::{
     credentials::Credential as NamedCredential,
     isolation::EnvironmentDescription,
-    project::Project,
+    project::{Project, ProjectCommits},
     remote::{DiscoveredRemote, RemoteKey, TrackerConnection},
     tui::{
         app::{CredentialStatus, RemoteStatus, TrackerState},
@@ -23,9 +25,9 @@ pub struct Row {
     /// What the list shows: a name where there is one, an address where there is
     /// not yet.
     pub label: String,
-    /// Said under the name: whether it is signed in, which one is the default,
-    /// or where a remote lives. A line rather than a note at the right edge, so
-    /// a long status does not have to fit beside a long name.
+    /// Said under the name: whether it is signed in, which projects use it, or
+    /// where a remote lives. A line rather than a note at the right edge, so a
+    /// long status does not have to fit beside a long name.
     pub detail: Option<String>,
     pub kind: RowKind,
 }
@@ -187,8 +189,22 @@ pub struct View {
     pub rows: Vec<Row>,
     /// The named identities the pages can label a project's bindings with.
     pub credentials: Vec<NamedCredential>,
+    /// What a project inherits when it binds nothing itself.
+    pub defaults: ProjectDefaults,
+    /// What each tracker identity last answered about its live session.
+    pub tracker_states: HashMap<String, TrackerState>,
     /// What the base image is made of, once it has been built here.
     pub base: Option<EnvironmentDescription>,
+}
+
+/// The installation's fallback for project bindings, read so a page can print
+/// the identity a project actually uses rather than the word "default".
+#[derive(Default)]
+pub struct ProjectDefaults {
+    pub agent: Option<String>,
+    pub vcs: Option<String>,
+    pub tracker: Option<String>,
+    pub commits: Option<ProjectCommits>,
 }
 
 /// One credential, as the list shows it.

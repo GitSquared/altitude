@@ -192,9 +192,7 @@ fn detail(panel: &Panel, view: &View, tick: Option<usize>) -> Paragraph<'static>
     };
     let label = row.label.clone();
     let lines = match &row.kind {
-        RowKind::Project { project } => {
-            project_lines(project, view.base.as_ref(), &view.credentials, heading)
-        }
+        RowKind::Project { project } => project_lines(project, view, heading),
         RowKind::GitIdentity(identity) => git_connector(identity).lines(heading, tick),
         RowKind::Credential(credential) => credential_connector(credential).lines(heading, tick),
         RowKind::Switch { setting, on } => {

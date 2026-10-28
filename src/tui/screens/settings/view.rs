@@ -10,7 +10,7 @@ use crate::{
 use super::{
     pages::hostname,
     panel::{Section, Setting},
-    rows::{Credential, CredentialKind, Row, RowKind, View, switch_row},
+    rows::{Credential, CredentialKind, ProjectDefaults, Row, RowKind, View, switch_row},
 };
 
 impl App {
@@ -41,11 +41,70 @@ impl App {
                 .collect(),
             Section::Remotes => self.remote_rows(),
         };
+        let credentials = self.settings_credentials();
+        let tracker_states = credentials
+            .iter()
+            .filter(|credential| {
+                credential
+                    .service()
+                    .is_some_and(|service| service.slot() == Slot::Tracker)
+            })
+            .map(|credential| {
+                (
+                    credential.id.clone(),
+                    self.tracker_state_for(&credential.id),
+                )
+            })
+            .collect();
         View {
             rows,
-            credentials: self.settings_credentials(),
+            credentials,
+            defaults: self.project_defaults(),
+            tracker_states,
             base: self.base_description.clone(),
         }
+    }
+
+    /// What a project with no binding of its own uses. The page shows the
+    /// identity this names, never the fact that it was inherited.
+    fn project_defaults(&self) -> ProjectDefaults {
+        let settings = self.settings_file.as_ref().map(|file| file.settings());
+        ProjectDefaults {
+            agent: settings
+                .and_then(|settings| settings.default_credential(Slot::Agent))
+                .map(str::to_owned),
+            vcs: settings
+                .and_then(|settings| settings.default_credential(Slot::VersionControl))
+                .map(str::to_owned),
+            tracker: settings
+                .and_then(|settings| settings.default_credential(Slot::Tracker))
+                .map(str::to_owned),
+            commits: self.default_commits(),
+        }
+    }
+
+    /// The projects whose effective binding for this slot is the identity. A
+    /// project that inherits the installation's fallback is bound to it in what
+    /// it does, so it is listed here even though the project file says nothing.
+    fn projects_bound_to(&self, id: &str, slot: Slot) -> Vec<String> {
+        let fallback = self
+            .settings_file
+            .as_ref()
+            .and_then(|file| file.settings().default_credential(slot));
+        self.projects()
+            .into_iter()
+            .filter_map(|project| {
+                let effective = match slot {
+                    Slot::Agent => project.agent_credential.as_deref().or(fallback),
+                    Slot::VersionControl => project.vcs_credential.as_deref().or(fallback),
+                    Slot::Tracker => project
+                        .tracker
+                        .as_ref()
+                        .and_then(|route| route.credential.as_deref().or(fallback)),
+                };
+                (effective == Some(id) && !project.name.trim().is_empty()).then_some(project.name)
+            })
+            .collect()
     }
 
     /// The identities one service section holds, with the git identity above the
@@ -105,18 +164,15 @@ impl App {
                 status.summary().to_owned(),
             )
         };
-        let is_default = self.settings_file.as_ref().is_some_and(|file| {
-            file.settings()
-                .default_credential(service.slot())
-                .is_some_and(|default| default == id)
-        });
+        let projects = self.projects_bound_to(&id, service.slot());
+        let binding = if projects.is_empty() {
+            "no projects".to_owned()
+        } else {
+            format!("used by {}", projects.join(", "))
+        };
         Row {
             label: label.clone(),
-            detail: Some(format!(
-                "{} · {status}{}",
-                service.label(),
-                if is_default { " · default" } else { "" }
-            )),
+            detail: Some(format!("{binding} · {status}")),
             kind: RowKind::Credential(Credential { label, kind }),
         }
     }
