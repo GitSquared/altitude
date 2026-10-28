@@ -4464,7 +4464,7 @@ impl App {
         self.foreground = self.shell_behind.uncover().unwrap_or(Foreground::Panel);
     }
 
-    /// Whether a project has a task in play, here or on the machine it runs on.
+    /// Whether a project has a task in play, here or on the machine its tasks start on.
     fn project_has_tasks(&self, id: &str) -> bool {
         self.tasks
             .iter()

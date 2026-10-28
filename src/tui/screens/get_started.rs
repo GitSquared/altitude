@@ -130,7 +130,7 @@ pub struct SetupState {
     /// Whether the repositories behind the VCS login are still being read.
     pub vcs_listing: bool,
     pub repository: Option<String>,
-    /// The machine this project runs on, when it is not this one.
+    /// The machine new tasks for this project start on, when it is not this one.
     pub host: Option<String>,
     /// A remote announcing here that this installation has not adopted.
     pub offer: Option<RemoteOffer>,

@@ -59,8 +59,8 @@ impl Default for Settings {
 /// What a new task gets when nobody says otherwise.
 ///
 /// What the work is — its setup, repository, caches, instructions, and the machine
-/// it runs on — belongs to the project. This is what is left that is not about a
-/// project.
+/// its tasks start on — belongs to the project. This is what is left that is not
+/// about a project.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Defaults {
