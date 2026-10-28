@@ -169,10 +169,22 @@ where
         }
         let (recipes, snapshot) = self.credential_build(profile)?;
         self.bind_channel(&id)?;
+        // The relay is this sandbox's loopback on this machine's: a sign-in that
+        // answers in a browser needs its callback to arrive here.
+        let vsock = match self.relays.bind(&id) {
+            Ok(route) => vec![route],
+            Err(error) => {
+                self.channels.release(&id);
+                return Err(CredentialsError::Isolation(IsolationError::new(
+                    error.to_string(),
+                )));
+            }
+        };
         let sandbox = CredentialSandbox {
             id: id.clone(),
             recipes,
             snapshot,
+            vsock,
         };
         let command = self
             .isolation
@@ -242,6 +254,7 @@ where
     /// last as long as the terminal in front of the operator.
     pub async fn close_shell(&self, id: &str) -> Result<(), IsolationError> {
         self.channels.release(id);
+        self.relays.release(id);
         self.isolation.remove(id.to_owned()).await
     }
 
@@ -261,6 +274,7 @@ where
     /// Throw away a shell nobody is waiting for, and the channel that would serve it.
     async fn discard_shell(&self, id: &str) {
         self.channels.release(id);
+        self.relays.release(id);
         if let Err(error) = self.isolation.remove(id.to_owned()).await {
             tracing::debug!(%error, "no credential shell sandbox to remove");
         }

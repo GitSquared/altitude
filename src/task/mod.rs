@@ -2,7 +2,10 @@ use crate::{
     agent::{AgentChannels, AgentEngines, AgentError, AgentKind, tools::AgentToolRegistry},
     config::{Config, InstallationIdentity},
     credentials::Credentials,
-    isolation::{EnvironmentDescription, EnvironmentProgress, IsolationEngine, IsolationError},
+    isolation::{
+        EnvironmentDescription, EnvironmentProgress, IsolationEngine, IsolationError, PortRelays,
+        VsockRoute,
+    },
     project::Project,
     tracker::{IssueReader, TrackerProvider},
     vcs::{self, Repository, VcsProviderKind, tools::VcsAgentTools},
@@ -54,6 +57,8 @@ pub struct TaskService<E> {
     environment_progress: EnvironmentProgressRegistry,
     /// Where each running task's agent channel listens.
     agent_channels: AgentChannels,
+    /// The loopback ports a taken-over task's terminal can reach.
+    port_relays: PortRelays,
     /// The logins tasks run under: a separate service, because a login is not a task.
     credentials: Credentials<E>,
     trackers: Option<Arc<dyn TrackerHost>>,
@@ -191,6 +196,7 @@ where
             store,
             snapshots_dir: config.task_snapshots_dir(),
             agent_channels: AgentChannels::new(config.agent_channel_dir()),
+            port_relays: PortRelays::new(config.agent_channel_dir()),
             credentials: Credentials::new(isolation.clone(), config, agents.clone()),
             isolation,
             agents,
@@ -292,6 +298,27 @@ where
     /// Close a task's agent channel and remove the socket behind it.
     pub(super) fn release_agent_channel(&self, task_id: &str) {
         self.agent_channels.release(task_id);
+    }
+
+    /// The relay channel a task's sandbox is made with, so that taking the task
+    /// over can reach whatever its terminal starts listening on.
+    pub(super) fn relay_channel(&self, sandbox_id: &str) -> VsockRoute {
+        self.port_relays.channel(sandbox_id)
+    }
+
+    /// Bind the relay a task's terminal is about to be opened over.
+    pub(super) fn bind_ports(&self, sandbox_id: &str) -> Result<(), TaskServiceError> {
+        self.port_relays
+            .bind(sandbox_id)
+            .map(|_| ())
+            .map_err(|error| TaskServiceError::Isolation(IsolationError::new(error.to_string())))
+    }
+
+    /// Close the relay a task's terminal held, answering nothing when it held none.
+    pub(super) fn release_ports(&self, task: &Task) {
+        if let Some(sandbox_id) = &task.facts.sandbox_id {
+            self.port_relays.release(sandbox_id);
+        }
     }
 
     /// What each task's environment build is doing, for an interface to show.

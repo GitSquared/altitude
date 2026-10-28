@@ -15,9 +15,12 @@ pub(crate) mod capsule;
 mod git_cache;
 mod microsandbox;
 pub(crate) mod mounts;
+mod relay;
 mod sandbox;
 
 pub use microsandbox::MicrosandboxIsolation;
+pub use relay::PortRelays;
+pub(crate) use relay::{PORT_RELAY_GUEST_PORT, install_script, with_helper};
 pub(crate) use sandbox::private_directory;
 pub(crate) use sandbox::run_collecting;
 /// Shared with the VCS providers so capsule commands are quoted one way.
@@ -97,6 +100,9 @@ pub struct CredentialSandbox {
     pub recipes: Vec<ProfileRecipe>,
     /// The built environment to make it from, if there is one to reuse.
     pub snapshot: Option<String>,
+    /// Channels the sandbox's own programs reach this machine through. A shell
+    /// gets the relay that makes its ports reachable; a check needs none.
+    pub vsock: Vec<VsockRoute>,
 }
 
 impl SetupStep {

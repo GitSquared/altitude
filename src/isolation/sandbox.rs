@@ -18,7 +18,7 @@ use crate::{config::Config, project::Project};
 use super::{
     BaseSandboxRecipe, BaseSandboxSnapshot, CommandEvent, CredentialCheck, CredentialReport,
     CredentialSandbox, EnvironmentProgressSink, IsolationEngine, IsolationError, OutputStream,
-    SandboxMount, SandboxOptions, SandboxSize, SetupStep, VsockRoute,
+    PORT_RELAY_GUEST_PORT, SandboxMount, SandboxOptions, SandboxSize, SetupStep, VsockRoute,
 };
 
 /// The current Alpine environment runs as root, so home-relative requirements
@@ -551,6 +551,7 @@ pub(super) async fn credential_reports(
         id,
         recipes,
         snapshot,
+        vsock: _,
     } = sandbox;
     let Some(snapshot) = snapshot else {
         return Ok(None);
@@ -610,13 +611,18 @@ pub(super) async fn credential_shell(
         id,
         recipes,
         snapshot,
+        vsock,
     } = sandbox;
     let command = recipes
         .iter()
         .find(|recipe| recipe.profile == profile)
         .map(|recipe| recipe.sign_in_command.command())
         .ok_or_else(|| IsolationError::new(format!("no recipe for the {profile} profile")))?;
-    let plan = SandboxPlan::compose(config, Project::profile_build(), recipes)?;
+    let mut plan = SandboxPlan::compose(config, Project::profile_build(), recipes)?;
+    let relay = vsock
+        .iter()
+        .any(|route| route.guest_port == PORT_RELAY_GUEST_PORT);
+    plan.options.vsock = vsock;
     create(
         engine,
         config,
@@ -627,7 +633,10 @@ pub(super) async fn credential_shell(
         progress,
     )
     .await?;
-    Ok(command.to_owned())
+    if !relay {
+        return Ok(command.to_owned());
+    }
+    Ok(super::with_helper(command))
 }
 
 /// A sandbox that answers a provider's read commands with an owner's profile
@@ -690,11 +699,19 @@ async fn create(
             (path, base)
         }
     };
+    let relay = plan
+        .options
+        .vsock
+        .iter()
+        .any(|route| route.guest_port == PORT_RELAY_GUEST_PORT);
     plan.options.snapshot_path = Some(path);
     plan.options.environment_base = base;
     engine.create(id.clone(), plan.options).await?;
     let mut command = String::from("set -eu\n");
     command.push_str(&opener_script());
+    if relay {
+        command.push_str(&super::install_script());
+    }
     let root = kind.state_root();
     for (source, target) in plan.local_mounts {
         let source = shell_quote(&Path::new(root).join(source).to_string_lossy());

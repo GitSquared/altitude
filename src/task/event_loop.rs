@@ -1056,6 +1056,7 @@ where
                             .take_active_run(&task.id)
                             .is_some_and(|active| active.suspending);
                         let control = event_loop.take_control_request(&task.id, &run.id);
+                        service.release_ports(&task);
                         if suspending {
                             tracing::debug!(task_id = %task.id, "command ended during intentional suspension");
                             return;

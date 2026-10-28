@@ -198,10 +198,15 @@ where
         // because a vsock route is fixed at creation and does not survive a
         // restored capsule's rebuild without being asked for again.
         let vsock = match task.agent_kind {
-            Some(_) => vec![VsockRoute {
-                host_socket: self.bind_agent_channel(&task.id)?,
-                guest_port: mcp::AGENT_CHANNEL_PORT,
-            }],
+            Some(_) => vec![
+                VsockRoute {
+                    host_socket: self.bind_agent_channel(&task.id)?,
+                    guest_port: mcp::AGENT_CHANNEL_PORT,
+                },
+                // Fixed now, bound when the operator opens a terminal: a task
+                // started before a takeover is still reachable when it comes.
+                self.relay_channel(&sandbox_id),
+            ],
             None => Vec::new(),
         };
         let create = match task.agent_kind {
@@ -305,6 +310,7 @@ where
     }
     pub(super) async fn release_resources(&self, task: &Task) -> Result<Task, TaskServiceError> {
         self.release_agent_channel(&task.id);
+        self.release_ports(task);
         let mut task = task.clone();
         if task.facts.sandbox_available {
             let id = task

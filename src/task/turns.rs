@@ -1,7 +1,9 @@
 //! Driving a task: one turn at a time, by autopilot or by an operator.
 
 use crate::{
-    isolation::{CommandEvent, CommandSession, IsolationEngine, OutputStream, Unwatched},
+    isolation::{
+        CommandEvent, CommandSession, IsolationEngine, OutputStream, Unwatched, with_helper,
+    },
     project::Project,
     vcs::{self, ContributionObservation, ProviderBatch},
 };
@@ -288,13 +290,30 @@ where
         let conversation_id = self
             .agent_conversation(&task, engine.operator_requires_conversation())
             .await?;
-        self.launch(
-            task,
-            engine.operator_command(&conversation_id),
-            TaskExecutionMode::Operator,
-            None,
-        )
-        .await
+        let command = engine.operator_command(&conversation_id);
+        let mut bound = None;
+        let command = match task.facts.sandbox_id.as_deref() {
+            Some(sandbox_id) => match self.bind_ports(sandbox_id) {
+                Ok(()) => {
+                    bound = Some(sandbox_id.to_owned());
+                    with_helper(&command)
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "a taken-over task's ports stay in its sandbox");
+                    command
+                }
+            },
+            None => command,
+        };
+        let launched = self
+            .launch(task, command, TaskExecutionMode::Operator, None)
+            .await;
+        if launched.is_err()
+            && let Some(sandbox_id) = bound
+        {
+            self.port_relays.release(&sandbox_id);
+        }
+        launched
     }
     pub(super) async fn launch(
         &self,

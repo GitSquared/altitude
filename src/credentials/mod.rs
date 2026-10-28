@@ -21,7 +21,7 @@ use crate::{
     config::Config,
     isolation::{
         CREDENTIAL_PREFIX, CredentialCheck, CredentialSandbox, IsolationEngine, IsolationError,
-        ProfileRecipe, ProfileSummary, Unwatched, mounts,
+        PortRelays, ProfileRecipe, ProfileSummary, Unwatched, mounts,
     },
     project::Project,
 };
@@ -67,6 +67,7 @@ pub struct Credentials<E> {
     config: Config,
     agents: AgentEngines,
     channels: AgentChannels,
+    relays: PortRelays,
 }
 
 impl<E> Credentials<E>
@@ -77,6 +78,7 @@ where
         Self {
             isolation,
             channels: AgentChannels::new(config.agent_channel_dir()),
+            relays: PortRelays::new(config.agent_channel_dir()),
             config,
             agents,
         }
@@ -154,6 +156,7 @@ where
             id: check_id(&profiles),
             recipes,
             snapshot: Some(snapshot),
+            vsock: Vec::new(),
         };
         let reports = self
             .isolation
