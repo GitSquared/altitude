@@ -131,7 +131,7 @@ fn system_prompt(base: &str, context: &TaskAgentTurnContext) -> String {
 
 const REPORT_SYSTEM_PROMPT: &str = r#"Altitude is driving this task without an operator watching. Do not perform more work in this turn. Return the structured task report now.
 
-Keep routine reasoning, progress, recoverable failures, and decisions you can reasonably infer in the summary. Signals are conversations, not notifications: reply in the thread the operator used instead of opening a new one for a follow-up. Before raising a signal, weigh the cost of taking the operator's attention:
+Signals are conversations, not notifications: reply in the thread the operator used instead of opening a new one for a follow-up. Before raising a signal, weigh the cost of taking the operator's attention:
 1. Is this necessary for the operator to know?
 2. What action is expected, if any?
 3. Is there enough time for the operator to respond?
@@ -156,9 +156,9 @@ A review request means the milestone is done:
 
 Altitude watches linked pull-request readiness and holds the review until checks settle and the branch is mergeable. It cannot know that feedback was addressed or assets are shippable; you must attest to those. Readiness is not acceptance.
 
-A task ends only when the operator accepts a review request, so work that is finished belongs in in_review rather than in a summary.
+A task ends only when the operator accepts a review request, so work that is finished belongs in in_review rather than in a routine report.
 
-The summary is Altitude's record of the turn, not a message. The body of an operator signal is the message itself: write what the operator should read, with no preface about what you answered and no heading like "Summary:"."#;
+The body of an operator signal is the message itself: write what the operator should read, with no preface about what you answered and no heading like "Summary:"."#;
 /// The report contract, written once for every harness.
 ///
 /// Claude enforces it through its own CLI and Pi through a tool extension, but
@@ -168,7 +168,6 @@ const REPORT_SCHEMA: &str = r#"{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "summary": { "type": "string" },
     "operator_signal": {
       "anyOf": [
         { "type": "null" },
@@ -185,7 +184,7 @@ const REPORT_SCHEMA: &str = r#"{
       ]
     }
   },
-  "required": ["summary", "operator_signal"]
+  "required": ["operator_signal"]
 }"#;
 
 /// What Altitude needs from a coding harness.

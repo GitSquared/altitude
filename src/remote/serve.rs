@@ -1291,7 +1291,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
                     | TaskExecutionUpdate::Started(Ok(task))
                     | TaskExecutionUpdate::Finished(_, Ok(task))
                     | TaskExecutionUpdate::OperatorReady(task)
-                    | TaskExecutionUpdate::Report { task, .. } => watchers.publish(&task),
+                    | TaskExecutionUpdate::Report { task } => watchers.publish(&task),
                     TaskExecutionUpdate::Removed(id, _) => watchers.removed(id),
                     // A failure that came before a task existed carries no task
                     // with it, so what changed is read from the store rather than

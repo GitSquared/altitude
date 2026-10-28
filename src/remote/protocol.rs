@@ -394,9 +394,6 @@ pub struct TaskSummary {
     /// How the operator whose work this is reads to a human.
     #[serde(default)]
     pub operator_label: Option<String>,
-    /// What the agent last reported, in the words a card has room for.
-    #[serde(default)]
-    pub latest_turn_summary: Option<String>,
     /// What this task has open for review, so a client reads the same rows the
     /// owning machine would.
     #[serde(default)]
@@ -451,7 +448,6 @@ impl TaskSummary {
             last_error: task.facts.last_error.clone(),
             tracker_issue: task.facts.tracker_issue.clone(),
             operator_label: task.facts.operator_label.clone(),
-            latest_turn_summary: task.facts.latest_turn_summary.clone(),
             contributions: task
                 .code_contributions
                 .iter()

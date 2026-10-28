@@ -42,7 +42,6 @@ pub enum TaskExecutionUpdate {
     OperatorReady(Task),
     Report {
         task: Task,
-        summary: String,
     },
 }
 
@@ -1434,14 +1433,9 @@ where
                     .report()
                     .map_err(TaskServiceError::InvalidReport)?;
                 let (task, action) = self.service.apply_report(&task, run, &report).await?;
-                let _ = self.events.send(TaskExecutionUpdate::Report {
-                    task: task.clone(),
-                    summary: task
-                        .facts
-                        .latest_turn_summary
-                        .clone()
-                        .unwrap_or(report.summary),
-                });
+                let _ = self
+                    .events
+                    .send(TaskExecutionUpdate::Report { task: task.clone() });
                 match action {
                     TaskAgentRequestedAction::Continue => {
                         self.service.continue_turn(run).await?;

@@ -89,11 +89,6 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      WHERE task_id = tasks.id
        AND json_type(payload, '$.data.error') IS NOT NULL
      ORDER BY sequence DESC LIMIT 1) AS last_error,
-    (SELECT payload ->> '$.data.summary'
-     FROM task_event_logs
-     WHERE task_id = tasks.id
-       AND json_type(payload, '$.data.summary') IS NOT NULL
-     ORDER BY sequence DESC LIMIT 1) AS latest_turn_summary,
     (SELECT json_object(
          'id', 'm' || e.sequence,
          'author', 'operator',

@@ -7073,25 +7073,6 @@ impl App {
         self.signal_viewport_rows = 0;
     }
 
-    /// What the screen says when there is no thread to read: the wait while a
-    /// remote is being asked, or the task's own last words.
-    pub(in crate::tui) fn signals_summary(&self) -> Option<String> {
-        // A remote's own last words, read from what it last answered with. The
-        // task is not in this machine's list, so it is not looked for there.
-        if let Some(remote) = &self.remote_signals {
-            if self.remote_signals_loading {
-                return Some(format!("asking {}…", remote.address));
-            }
-            return self
-                .remote_tasks
-                .iter()
-                .find(|held| held.address == remote.address && held.summary.id == remote.task_id)
-                .and_then(|held| held.summary.latest_turn_summary.clone());
-        }
-        self.signal_task()
-            .and_then(|task| task.facts.latest_turn_summary.clone())
-    }
-
     /// The address to reach a remote at, once its key is checked against the one
     /// remembered for it. A different key is refused: signals are not something to
     /// send to a stranger.
@@ -7342,10 +7323,7 @@ impl App {
                     .insert(shell_id.clone(), Shell::new(rows, cols, history, title));
                 self.foreground = Foreground::Shell(shell_id);
             }
-            TaskExecutionUpdate::Report { task, summary } => {
-                // The agent's own words are already recorded in the task's
-                // history; the card does not repeat them.
-                let _ = summary;
+            TaskExecutionUpdate::Report { task } => {
                 self.replace_task(task);
             }
             _ => {}

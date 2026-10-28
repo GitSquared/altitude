@@ -565,7 +565,7 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
     let heading = match app.signal_thread() {
         Some(thread) => truncate(&thread.title, usize::from(padded.width)),
         None if app.remote_signals_loading => "Asking the machine that owns this task".to_owned(),
-        None => "Nothing is asking for you".to_owned(),
+        None => String::new(),
     };
     let [title, meta, _, rest] = Layout::vertical([
         Constraint::Length(1),
@@ -917,24 +917,30 @@ fn draw_buttons(
 }
 
 fn draw_empty(frame: &mut Frame, area: Rect, app: &App) {
+    let [_, row, _] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+    ])
+    .areas(area);
     if app.remote_signals_loading {
+        let asking = app
+            .remote_signals
+            .as_ref()
+            .map(|remote| format!("asking {}…", remote.address))
+            .unwrap_or_default();
         frame.render_widget(
-            Paragraph::new(Line::from(shimmer(
-                &app.signals_summary().unwrap_or_default(),
-                app.animation_tick(),
-            ))),
-            area,
+            Paragraph::new(Line::from(shimmer(&asking, app.animation_tick()))).centered(),
+            row,
         );
         return;
     }
-    if let Some(summary) = app.signals_summary() {
-        frame.render_widget(
-            Paragraph::new(summary)
-                .style(palette::muted())
-                .wrap(Wrap { trim: true }),
-            area,
-        );
-    }
+    frame.render_widget(
+        Paragraph::new("Agent hasn't raised any signals yet")
+            .style(palette::muted())
+            .centered(),
+        row,
+    );
 }
 
 /// What the agent's message reads as on one line: its first line, so a list row

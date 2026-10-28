@@ -10,7 +10,6 @@ use crate::vcs::{CodeContribution, ContributionObservation};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskAgentTurnReport {
-    pub summary: String,
     #[serde(default)]
     pub operator_signal: Option<TaskOperatorSignalDraft>,
     /// The model the harness actually used, when its output named one.
@@ -311,7 +310,6 @@ pub struct TaskFacts {
     pub snapshot_path: Option<String>,
     pub snapshot_available: bool,
     pub last_error: Option<String>,
-    pub latest_turn_summary: Option<String>,
     #[sqlx(json(nullable))]
     pub latest_operator_message: Option<TaskOperatorSignalMessage>,
     /// The tracker issue this task is bound to, when the operator bound one.
@@ -398,7 +396,6 @@ pub enum TaskHistoryEvent {
         agent_run_id: String,
         requested_action: TaskAgentRequestedAction,
         operator_attention_level: TaskOperatorAttentionLevel,
-        summary: String,
     },
     /// The model the harness reported for a turn, as the harness names it.
     ///

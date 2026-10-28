@@ -424,7 +424,6 @@ impl TaskStore {
             agent_run_id: agent_run.id.clone(),
             requested_action: report.requested_action(),
             operator_attention_level: attention,
-            summary: report.summary.clone(),
         }];
         if let Some(model) = report
             .model
