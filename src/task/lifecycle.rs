@@ -146,7 +146,7 @@ where
                 // told what happened to it rather than simply asked to resume.
                 let prompt = task.facts.review_wake_reason.clone().unwrap_or_else(|| {
                     if resume {
-                        "Altitude paused this task and restored its capsule from a snapshot. You \
+                        "Altitude paused this task and restored its sandbox from a snapshot. You \
                          are continuing the same conversation, and the current time is in the \
                          context below. Review the conversation and workspace state, then continue \
                          the task where it left off."

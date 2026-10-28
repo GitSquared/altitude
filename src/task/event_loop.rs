@@ -890,7 +890,7 @@ where
                 CommandEvent::Output { .. } => {}
                 _ => {
                     return Err(TaskServiceError::Task(super::TaskError::OperationRejected(
-                        "the landed capsule did not boot",
+                        "the transferred sandbox did not boot",
                     )));
                 }
             }

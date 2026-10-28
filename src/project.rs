@@ -246,7 +246,7 @@ impl Project {
         if let (Some(repository), Some(checkout)) = (&self.repository, checkout) {
             brief.push_str(&format!(
                 "Altitude cloned the project's repository into this sandbox before \
-                 the first turn, and the checkout is part of this task's capsule.\n\n\
+                 the first turn, and the checkout is part of this task's sandbox.\n\n\
                  repository: {repository}\ncheckout: {checkout}\n"
             ));
         } else {
