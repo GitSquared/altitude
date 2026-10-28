@@ -200,9 +200,15 @@ impl RemoteStatus {
     }
 }
 
-/// What a task's terminal is called on its frame, as opposed to the shell opened to
-/// set up credentials, which names the profile it is for.
-const TASK_SHELL: &str = "shell";
+/// What a task's terminal is called on its frame: the harness running it and the
+/// task, so two terminals can be told apart. The shell opened to set up a
+/// credential names the profile instead.
+fn task_shell_title(task: &Task) -> String {
+    let agent = task
+        .agent_kind
+        .map_or_else(|| "Agent".to_owned(), |agent| agent.to_string());
+    format!("{agent} - {}", task.title())
+}
 
 /// What a profile's own check last said about its login.
 ///
@@ -1456,7 +1462,7 @@ impl App {
             }
             // A shell takes every key there is, so it has no `?` to offer.
             Foreground::Shell(ShellId::Task(_)) => {
-                vec![Hint::new("ctrl-a", "hand it back")]
+                vec![Hint::new("ctrl-a", "put task back on autopilot")]
             }
             // Nothing to hand back to: the sandbox goes with the shell.
             Foreground::Shell(ShellId::Credentials(_)) => vec![Hint::new("ctrl-a", "close")],
@@ -6870,7 +6876,7 @@ impl App {
         let id = ShellId::Task(task.id.clone());
         self.shells.insert(
             id.clone(),
-            Shell::new(rows, cols, history, TASK_SHELL.to_owned()),
+            Shell::new(rows, cols, history, task_shell_title(&task)),
         );
         self.foreground = Foreground::Shell(id);
     }
@@ -6892,7 +6898,7 @@ impl App {
     }
 
     /// The installation's own commit identity, as a project inherits it.
-    fn default_commits(&self) -> Option<ProjectCommits> {
+    pub(in crate::tui) fn default_commits(&self) -> Option<ProjectCommits> {
         Some(ProjectCommits {
             name: self.git_identity.name.clone()?,
             email: self.git_identity.email.clone()?,
@@ -7315,6 +7321,7 @@ impl App {
             }
             TaskExecutionUpdate::OperatorReady(task) => {
                 let id = task.id.clone();
+                let title = task_shell_title(&task);
                 self.replace_task(task);
                 let shell_id = ShellId::Task(id.clone());
                 self.foreground = Foreground::Shell(shell_id.clone());
@@ -7322,10 +7329,8 @@ impl App {
                 let (rows, cols) = screens::shell::size(self.shell_area(terminal.size()?.into()));
                 let history = event_loop.cached_terminal_output(&id);
                 event_loop.resize_terminal(&id, rows, cols);
-                self.shells.insert(
-                    shell_id.clone(),
-                    Shell::new(rows, cols, history, TASK_SHELL.to_owned()),
-                );
+                self.shells
+                    .insert(shell_id.clone(), Shell::new(rows, cols, history, title));
                 self.foreground = Foreground::Shell(shell_id);
             }
             TaskExecutionUpdate::Report { task, summary } => {

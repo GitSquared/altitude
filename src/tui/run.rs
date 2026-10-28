@@ -1086,7 +1086,9 @@ where
         app.help_key(key);
         return Ok(false);
     }
-    if is_help(key) && !app.is_typing() {
+    // A terminal is not the interface: `?` is something the program in it may
+    // read, so help is not offered over one.
+    if is_help(key) && !app.is_typing() && app.open_shell().is_none() {
         app.help_scroll = 0;
         app.foreground = Foreground::Keys(Box::new(mem::take(&mut app.foreground)));
         return Ok(false);
