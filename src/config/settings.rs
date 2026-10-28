@@ -563,6 +563,33 @@ impl Settings {
         }
     }
 
+    /// Remove a saved commit identity, leaving projects that used it on the
+    /// installation's identity.
+    pub fn remove_identity(&mut self, commits: &ProjectCommits) {
+        let matches = |known: &ProjectCommits| {
+            known == commits || known.email.eq_ignore_ascii_case(&commits.email)
+        };
+        self.identities.retain(|known| !matches(known));
+        for project in &mut self.projects {
+            if project.commits.as_ref().is_some_and(matches) {
+                project.commits = None;
+            }
+        }
+    }
+
+    /// Replace a saved commit identity and every project bound to it.
+    pub fn replace_identity(&mut self, old: &ProjectCommits, new: ProjectCommits) {
+        let matches =
+            |known: &ProjectCommits| known == old || known.email.eq_ignore_ascii_case(&old.email);
+        self.identities.retain(|known| !matches(known));
+        self.remember_identity(&new);
+        for project in &mut self.projects {
+            if project.commits.as_ref().is_some_and(matches) {
+                project.commits = Some(new.clone());
+            }
+        }
+    }
+
     pub fn interface(&self) -> &Interface {
         &self.interface
     }

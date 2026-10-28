@@ -4,6 +4,7 @@
 
 use crate::{
     credentials::{Credential as NamedCredential, Service, Slot},
+    project::ProjectCommits,
     tui::{
         App,
         app::{CredentialStatus, RemoteStatus},
@@ -13,7 +14,9 @@ use crate::{
 use super::{
     pages::{hostname, public_identity},
     panel::{Section, Setting},
-    rows::{Credential, CredentialKind, ProjectDefaults, Row, RowKind, View, switch_row},
+    rows::{
+        Credential, CredentialKind, GitIdentity, ProjectDefaults, Row, RowKind, View, switch_row,
+    },
 };
 
 impl App {
@@ -115,22 +118,18 @@ impl App {
     fn identity_rows(&self, section: Section) -> Vec<Row> {
         let mut rows = Vec::new();
         if section == Section::VersionControl {
-            let mut identity = self.git_identity();
-            identity.used_by = if identity.is_set() {
-                self.projects_using_default_commits()
-            } else {
-                Vec::new()
-            };
-            let detail = match (&identity.name, &identity.email) {
-                (Some(name), _) => name.clone(),
-                (None, Some(email)) => email.clone(),
-                (None, None) => "not set".to_owned(),
-            };
-            rows.push(Row {
-                label: "Git identity".to_owned(),
-                detail: Some(detail),
-                kind: RowKind::GitIdentity(identity),
-            });
+            let default = self.default_commits();
+            let saved = self.saved_identities();
+            if let Some(commits) = default.clone()
+                && !saved
+                    .iter()
+                    .any(|known| known.email.eq_ignore_ascii_case(&commits.email))
+            {
+                rows.push(self.commit_row(&commits, false, default.as_ref()));
+            }
+            for commits in &saved {
+                rows.push(self.commit_row(commits, true, default.as_ref()));
+            }
         }
         rows.extend(
             self.settings_credentials()
@@ -142,6 +141,45 @@ impl App {
                 }),
         );
         rows
+    }
+
+    fn commit_row(
+        &self,
+        commits: &ProjectCommits,
+        saved: bool,
+        default: Option<&ProjectCommits>,
+    ) -> Row {
+        let label = if commits.label.is_empty() {
+            commits.name.clone()
+        } else {
+            commits.label.clone()
+        };
+        let is_default =
+            default.is_some_and(|known| known.email.eq_ignore_ascii_case(&commits.email));
+        let used_by = self
+            .projects()
+            .into_iter()
+            .filter_map(|project| {
+                let uses = match project.commits.as_ref() {
+                    Some(bound) => bound.email.eq_ignore_ascii_case(&commits.email),
+                    None => is_default,
+                };
+                (uses && !project.name.trim().is_empty()).then_some(project.name)
+            })
+            .collect();
+        Row {
+            label,
+            detail: Some(format!("git: {}", commits.email)),
+            kind: RowKind::GitIdentity(GitIdentity {
+                label: commits.label.clone(),
+                name: Some(commits.name.clone()),
+                email: Some(commits.email.clone()),
+                signing_key: commits.signing_key.clone(),
+                signs_commits: commits.signing_key.is_some(),
+                used_by,
+                saved: saved.then(|| commits.clone()),
+            }),
+        }
     }
 
     /// One named login, with the service it belongs to, the place it lives, and
@@ -183,7 +221,7 @@ impl App {
             } => public_identity(&id, output),
             _ => None,
         };
-        let detail = account.unwrap_or(status);
+        let detail = format!("{}: {}", service.label(), account.unwrap_or(status));
         Row {
             label: label.clone(),
             detail: Some(detail),
@@ -214,19 +252,6 @@ impl App {
             },
             used_by: Vec::new(),
         }
-    }
-
-    fn projects_using_default_commits(&self) -> Vec<String> {
-        self.projects()
-            .into_iter()
-            .filter_map(|project| {
-                project
-                    .commits
-                    .is_none()
-                    .then_some(project.name)
-                    .filter(|name| !name.trim().is_empty())
-            })
-            .collect()
     }
 
     pub(in crate::tui) fn configured_remotes(&self) -> Vec<String> {

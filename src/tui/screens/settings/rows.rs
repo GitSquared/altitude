@@ -102,7 +102,12 @@ impl Row {
     /// adopted. The last project cannot either, which the panel decides because
     /// that is a fact about the list rather than about the row.
     pub fn is_removable(&self) -> bool {
-        matches!(self.kind, RowKind::Project { .. } | RowKind::Remote { .. })
+        matches!(
+            self.kind,
+            RowKind::Project { .. }
+                | RowKind::Remote { .. }
+                | RowKind::GitIdentity(GitIdentity { saved: Some(_), .. })
+        )
     }
 
     pub fn forgets_credentials(&self) -> bool {
@@ -133,7 +138,13 @@ impl Row {
     pub fn hints(&self, connecting_tracker: bool) -> Vec<chrome::Hint> {
         match &self.kind {
             RowKind::Project { .. } => vec![chrome::Hint::new("enter", "edit")],
-            RowKind::GitIdentity(_) => vec![chrome::Hint::new("enter", "edit")],
+            RowKind::GitIdentity(identity) => {
+                let mut hints = vec![chrome::Hint::new("enter", "edit")];
+                if identity.saved.is_some() {
+                    hints.push(chrome::Hint::new("d", "delete"));
+                }
+                hints
+            }
             RowKind::Credential(credential) => match &credential.kind {
                 CredentialKind::Installation { .. } => {
                     vec![chrome::Hint::new("enter", "remote guide")]
@@ -277,11 +288,14 @@ pub enum CredentialKind {
 /// what a commit under a missing name or an unsigned commit looks like.
 #[derive(Clone, Debug, Default)]
 pub struct GitIdentity {
+    pub label: String,
     pub name: Option<String>,
     pub email: Option<String>,
     pub signing_key: Option<String>,
     pub signs_commits: bool,
     pub used_by: Vec<String>,
+    /// Absent for the identity read from the installation's git config.
+    pub saved: Option<ProjectCommits>,
 }
 
 impl GitIdentity {

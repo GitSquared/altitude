@@ -156,15 +156,49 @@ where
     /// instead. A page that said "not signed in" because nothing had been built yet
     /// sent the operator into a build to fix a sign-in they already had.
     ///
-    /// Every profile asked joins one composition, so the page costs one build and one
-    /// sandbox rather than one each.
+    /// Profiles of different services share one composition. Two identities of
+    /// one service cannot, because they would mount the same guest paths.
     pub async fn answers(
         &self,
         mut profiles: Vec<String>,
     ) -> Result<Vec<(String, CredentialAnswer)>, CredentialsError> {
-        // The composition is the build's identity, so the order must be the
-        // same for the same set of profiles or every page would build twice.
         profiles.sort_unstable();
+        // Two identities of one service mount the same guest paths, so they
+        // cannot share a check sandbox. Different services can, which keeps the
+        // common page to one build.
+        let mut by_service: Vec<(Option<Service>, Vec<String>)> = Vec::new();
+        for profile in profiles {
+            let service = Service::from_id(&profile);
+            if let Some((_, group)) = by_service.iter_mut().find(|(known, _)| *known == service) {
+                group.push(profile);
+            } else {
+                by_service.push((service, vec![profile]));
+            }
+        }
+        let mut batches = Vec::new();
+        let mut shared = Vec::new();
+        for (_, group) in by_service {
+            if group.len() == 1 {
+                shared.extend(group);
+            } else {
+                batches.extend(group.into_iter().map(|profile| vec![profile]));
+            }
+        }
+        if !shared.is_empty() {
+            batches.push(shared);
+        }
+        let mut answers = Vec::new();
+        for batch in batches {
+            answers.extend(self.answer_batch(batch).await?);
+        }
+        answers.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(answers)
+    }
+
+    async fn answer_batch(
+        &self,
+        profiles: Vec<String>,
+    ) -> Result<Vec<(String, CredentialAnswer)>, CredentialsError> {
         let mut recipes = Vec::new();
         let mut checks = Vec::new();
         for profile in &profiles {

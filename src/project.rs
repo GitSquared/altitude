@@ -73,6 +73,8 @@ pub struct Project {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ProjectCommits {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
     pub name: String,
     pub email: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

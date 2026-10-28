@@ -463,7 +463,14 @@ impl Form {
     fn identity_value(&self) -> String {
         self.commits().map_or_else(
             || "not set".to_owned(),
-            |commits| format!("{} <{}>", commits.name, commits.email),
+            |commits| {
+                let label = if commits.label.is_empty() {
+                    commits.name
+                } else {
+                    commits.label
+                };
+                format!("{label} <{}>", commits.email)
+            },
         )
     }
 

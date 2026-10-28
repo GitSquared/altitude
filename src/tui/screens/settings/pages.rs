@@ -484,7 +484,14 @@ pub(super) fn git_connector(identity: &GitIdentity) -> Connector {
         (false, _) => "not set",
     };
     Connector {
-        title: "Git identity".to_owned(),
+        title: if !identity.label.is_empty() {
+            identity.label.clone()
+        } else {
+            identity
+                .name
+                .clone()
+                .unwrap_or_else(|| "Git identity".to_owned())
+        },
         reach: if is_set { Reach::On } else { Reach::Off },
         status: status.to_owned(),
         status_value: None,

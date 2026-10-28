@@ -478,6 +478,13 @@ pub(in crate::tui) enum RemoteSignalAction {
     Accept,
 }
 
+#[derive(Clone)]
+enum CommitIdentityEdit {
+    Installation,
+    New,
+    Saved(ProjectCommits),
+}
+
 /// What came back from a remote task's signals: the list when it opens, or the
 /// outcome of acting on one.
 pub(in crate::tui) enum RemoteSignalsReply {
@@ -571,6 +578,10 @@ pub struct App {
     /// is a way to confuse yourself.
     pub(in crate::tui) credential_shell: CredentialShellState,
     git_identity: GitIdentity,
+    /// What the commit identity editor is changing.
+    commit_edit: Option<CommitIdentityEdit>,
+    /// Whether that editor was opened from the first-run card.
+    git_identity_over_card: bool,
     /// The task the signals screen is about. Held rather than read from the
     /// grid, so the screen stays about the same task while the grid is behind it.
     pub(in crate::tui) signal_task_id: Option<String>,
@@ -756,6 +767,8 @@ impl App {
             project_targets: Targets::default(),
             credential_shell: CredentialShellState::Idle,
             git_identity: GitIdentity::default(),
+            commit_edit: None,
+            git_identity_over_card: false,
             signal_task_id: None,
             signal_all_threads: Vec::new(),
             signal_threads: Vec::new(),
@@ -1691,7 +1704,7 @@ impl App {
             }
             SetupDecision::Chosen(IdentityChoice::GitIdentity) => {
                 self.foreground = Foreground::Panel;
-                self.open_git_identity();
+                self.open_new_commit_identity();
             }
         }
     }
@@ -1752,11 +1765,64 @@ impl App {
 
     fn open_git_identity(&mut self) {
         let identity = self.git_identity();
+        self.commit_edit = Some(CommitIdentityEdit::Installation);
+        self.git_identity_over_card = false;
         self.foreground = Foreground::GitIdentity(Box::new(GitIdentitySetup::new(
+            identity.name.as_deref().unwrap_or("Git identity"),
             identity.name.as_deref().unwrap_or_default(),
             identity.email.as_deref().unwrap_or_default(),
             identity.signs_commits,
         )));
+    }
+
+    fn open_onboarding_identity(&mut self) {
+        let identity = self.git_identity();
+        self.commit_edit = Some(CommitIdentityEdit::Installation);
+        self.git_identity_over_card = true;
+        self.foreground = Foreground::GitIdentity(Box::new(GitIdentitySetup::new(
+            identity.name.as_deref().unwrap_or("Git identity"),
+            identity.name.as_deref().unwrap_or_default(),
+            identity.email.as_deref().unwrap_or_default(),
+            identity.signs_commits,
+        )));
+    }
+
+    fn open_new_commit_identity(&mut self) {
+        self.commit_edit = Some(CommitIdentityEdit::New);
+        self.git_identity_over_card = false;
+        self.foreground = Foreground::GitIdentity(Box::new(GitIdentitySetup::new(
+            "Git identity",
+            "",
+            "",
+            false,
+        )));
+    }
+
+    fn open_saved_commit_identity(&mut self, commits: ProjectCommits) {
+        self.commit_edit = Some(CommitIdentityEdit::Saved(commits.clone()));
+        self.git_identity_over_card = false;
+        self.foreground = Foreground::GitIdentity(Box::new(GitIdentitySetup::new(
+            if commits.label.is_empty() {
+                &commits.name
+            } else {
+                &commits.label
+            },
+            &commits.name,
+            &commits.email,
+            commits.signing_key.is_some(),
+        )));
+    }
+
+    fn close_git_identity(&mut self) {
+        if mem::take(&mut self.git_identity_over_card) {
+            self.open_get_started();
+        } else {
+            self.foreground = Foreground::Panel;
+        }
+    }
+
+    pub(in crate::tui) fn git_identity_over_card(&self) -> bool {
+        self.git_identity_over_card
     }
 
     /// Save the identity the editor holds, or keep it open with what was typed
@@ -1769,21 +1835,35 @@ impl App {
             GitIdentityDecision::Still => {
                 self.foreground = Foreground::GitIdentity(identity);
             }
-            GitIdentityDecision::Closed => self.foreground = Foreground::Panel,
-            GitIdentityDecision::Save { name, email, signs } => {
-                if name.is_empty() || email.is_empty() {
-                    self.say("A commit needs a name and an email");
+            GitIdentityDecision::Closed => {
+                self.commit_edit = None;
+                self.close_git_identity();
+            }
+            GitIdentityDecision::Save {
+                label,
+                name,
+                email,
+                signs,
+            } => {
+                if label.is_empty() || name.is_empty() || email.is_empty() {
+                    self.say("An identity needs a name, a commit name, and an email");
                     self.foreground = Foreground::GitIdentity(Box::new(GitIdentitySetup::new(
-                        &name, &email, signs,
+                        &label, &name, &email, signs,
                     )));
                     return;
                 }
-                if self.save_commit_identity(&name, &email, signs).await {
-                    self.foreground = Foreground::Panel;
-                    self.say("Git identity updated");
+                let edit = self.commit_edit.clone();
+                let was_installation = matches!(edit, Some(CommitIdentityEdit::Installation));
+                if self
+                    .save_commit_identity(&label, &name, &email, signs, was_installation)
+                    .await
+                {
+                    self.commit_edit = None;
+                    self.close_git_identity();
+                    self.say("Git identity saved");
                 } else {
                     self.foreground = Foreground::GitIdentity(Box::new(GitIdentitySetup::new(
-                        &name, &email, signs,
+                        &label, &name, &email, signs,
                     )));
                 }
             }
@@ -2262,7 +2342,10 @@ impl App {
                     }
                 }
             }
-            Some(RowKind::GitIdentity(_)) => self.open_git_identity(),
+            Some(RowKind::GitIdentity(identity)) => match identity.saved {
+                Some(commits) => self.open_saved_commit_identity(commits),
+                None => self.open_git_identity(),
+            },
             Some(RowKind::Credential(credential)) => match credential.kind {
                 CredentialKind::Profile { profile, .. } => {
                     self.begin_sign_in(&credential.label, &profile, task_service, events);
@@ -3475,8 +3558,11 @@ impl App {
             }
             // The installation's key is made, not signed in to, so there is no
             // terminal to open for it.
-            RowKind::GitIdentity(_) => {
-                self.open_git_identity();
+            RowKind::GitIdentity(identity) => {
+                match identity.saved {
+                    Some(commits) => self.open_saved_commit_identity(commits),
+                    None => self.open_git_identity(),
+                }
                 return;
             }
             RowKind::Credential(_) => {
@@ -3611,16 +3697,44 @@ impl App {
         }
     }
 
+    pub(in crate::tui) fn delete_commit_identity(&mut self, commits: &ProjectCommits) {
+        let Some(file) = self.settings_file.as_mut() else {
+            self.problem("Settings are unavailable; fix the file and reopen");
+            return;
+        };
+        let mut proposed = file.settings().clone();
+        proposed.remove_identity(commits);
+        match file.save(proposed) {
+            Ok(()) => self.say("Commit identity deleted"),
+            Err(error) => self.problem(error.to_string()),
+        }
+    }
+
     pub(in crate::tui) fn ask_to_delete(&mut self) {
         let Some(row) = self.selected_row() else {
             return;
         };
         // The question is built first: it borrows the name the target then moves.
         let (question, target) = match row.kind {
-            RowKind::Switch { .. }
-            | RowKind::GitIdentity(_)
-            | RowKind::Credential(_)
-            | RowKind::Discovered(_) => {
+            RowKind::GitIdentity(identity) => {
+                let Some(commits) = identity.saved else {
+                    return;
+                };
+                self.foreground = Foreground::Confirm(PendingConfirm::deleting_commit_identity(
+                    commits.clone(),
+                    format!(
+                        "Delete the {} commit identity? Projects using it fall back to \
+                             the installation's identity.",
+                        if commits.label.is_empty() {
+                            commits.name.clone()
+                        } else {
+                            commits.label.clone()
+                        }
+                    ),
+                ));
+                return;
+            }
+            RowKind::Switch { .. } | RowKind::Credential(_) | RowKind::Discovered(_) => {
                 return;
             }
             RowKind::Project { project } => (
@@ -3994,7 +4108,7 @@ impl App {
         self.foreground = Foreground::GetStarted(self.get_started_panel());
     }
 
-    fn get_started_panel(&self) -> Box<GetStarted> {
+    pub(in crate::tui) fn get_started_panel(&self) -> Box<GetStarted> {
         let repositories = self.repositories.clone().unwrap_or_default();
         Box::new(GetStarted::new(
             &self.active_project_name(),
@@ -4236,8 +4350,8 @@ impl App {
                     panel.vcs.open();
                 }
                 SetupFocus::Commits => {
-                    panel.commits.open = true;
-                    panel.commits.field = CommitsField::Name;
+                    self.open_onboarding_identity();
+                    return false;
                 }
                 SetupFocus::Tracker => {
                     if self.tracker_state == TrackerState::Connected {
@@ -4389,40 +4503,65 @@ impl App {
         let name = panel.commits.name.value().trim().to_owned();
         let email = panel.commits.email.value().trim().to_owned();
         let signs = panel.commits.signs;
-        self.save_commit_identity(&name, &email, signs).await
+        self.save_commit_identity(&name, &name, &email, signs, true)
+            .await
     }
 
-    async fn save_commit_identity(&mut self, name: &str, email: &str, signs: bool) -> bool {
+    async fn save_commit_identity(
+        &mut self,
+        label: &str,
+        name: &str,
+        email: &str,
+        signs: bool,
+        write_default: bool,
+    ) -> bool {
+        let label = label.trim();
         let name = name.trim();
         let email = email.trim();
-        if name.is_empty() || email.is_empty() {
-            self.say("A commit needs a name and an email");
+        if label.is_empty() || name.is_empty() || email.is_empty() {
+            self.say("An identity needs a name, a commit name, and an email");
             return false;
         }
         // Read or make the key, and rewrite the signers with the email as it is
         // now: a rename must not leave signatures that verify against a name the
         // commit no longer carries.
-        if signs && let Err(error) = self.make_signing_key(email).await {
+        if signs
+            && self.signing_key_path().is_none()
+            && let Err(error) = self.make_signing_key(email).await
+        {
             self.problem(error);
             return false;
         }
-        if let Err(error) = self.write_commits(name, email, signs).await {
-            self.problem(error);
-            return false;
+        if write_default {
+            if let Err(error) = self.write_commits(name, email, signs).await {
+                self.problem(error);
+                return false;
+            }
+            self.refresh_git_identity().await;
         }
-        self.refresh_git_identity().await;
         let Some(file) = self.settings_file.as_mut() else {
             self.problem("Settings are unavailable; fix the file and reopen");
             return false;
         };
-        let mut proposed = file.settings().clone();
-        proposed.remember_identity(&ProjectCommits {
+        let commits = ProjectCommits {
+            label: label.to_owned(),
             name: name.to_owned(),
             email: email.to_owned(),
             signing_key: signs
-                .then(|| self.git_identity.signing_key.clone())
+                .then(|| {
+                    self.git_identity
+                        .signing_key
+                        .clone()
+                        .or_else(|| Some("/root/.ssh/id_ed25519_signing.pub".to_owned()))
+                })
                 .flatten(),
-        });
+        };
+        let mut proposed = file.settings().clone();
+        if let Some(CommitIdentityEdit::Saved(old)) = self.commit_edit.clone() {
+            proposed.replace_identity(&old, commits);
+        } else {
+            proposed.remember_identity(&commits);
+        }
         if let Err(error) = file.save(proposed) {
             self.problem(error.to_string());
             return false;
@@ -6918,6 +7057,11 @@ impl App {
 
     pub(in crate::tui) fn default_commits(&self) -> Option<ProjectCommits> {
         Some(ProjectCommits {
+            label: self
+                .git_identity
+                .name
+                .clone()
+                .unwrap_or_else(|| "Git identity".to_owned()),
             name: self.git_identity.name.clone()?,
             email: self.git_identity.email.clone()?,
             signing_key: self
@@ -6928,7 +7072,7 @@ impl App {
         })
     }
 
-    fn saved_identities(&self) -> Vec<ProjectCommits> {
+    pub(in crate::tui) fn saved_identities(&self) -> Vec<ProjectCommits> {
         self.settings_file
             .as_ref()
             .map(|file| file.settings().identities().to_vec())

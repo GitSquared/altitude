@@ -318,6 +318,7 @@ pub struct TaskFacts {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum TaskHistoryEvent {
     /// The agent renamed the task, which is a fact about what it turned out to be.
     ///

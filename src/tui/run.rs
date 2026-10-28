@@ -458,7 +458,9 @@ where
             // field is painted into what is left once everything above it is drawn.
             // A credential terminal opened from the card sits on the card, not on
             // the settings list: the card is what asked for it.
-            let first_run = app.foreground.shows_get_started() || app.credentials_over_card();
+            let first_run = app.foreground.shows_get_started()
+                || app.credentials_over_card()
+                || app.git_identity_over_card();
             let settings = app.foreground.shows_settings() && !first_run;
             let screen = settings || app.foreground.shows_signals() || first_run;
             if screen {
@@ -516,6 +518,9 @@ where
                 let tick = app.animation_tick();
                 if let Foreground::GetStarted(panel) = &mut app.foreground {
                     screens::get_started::draw(frame, content, panel, &setup, tick);
+                } else if app.git_identity_over_card() {
+                    let mut panel = app.get_started_panel();
+                    screens::get_started::draw(frame, content, &mut panel, &setup, tick);
                 }
                 if let super::app::CredentialShellState::Opening {
                     progress: Some(progress),
@@ -529,6 +534,9 @@ where
                         progress,
                         app.animation_tick(),
                     ));
+                }
+                if let Foreground::GitIdentity(identity) = &app.foreground {
+                    identity.draw(frame, content);
                 }
                 modal = modal.or(Some(content));
             }

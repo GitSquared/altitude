@@ -18,6 +18,7 @@ use ratatui::{
 
 use crate::{
     isolation::IsolationEngine,
+    project::ProjectCommits,
     task::TaskEventLoop,
     tui::{
         App,
@@ -133,6 +134,16 @@ impl PendingConfirm {
         }
     }
 
+    pub(in crate::tui) fn deleting_commit_identity(
+        commits: ProjectCommits,
+        question: String,
+    ) -> Self {
+        Self {
+            dialog: Confirm::new(question, "delete"),
+            action: ConfirmAction::DeleteCommitIdentity(commits),
+        }
+    }
+
     pub(in crate::tui) fn taking_over(task_id: String, question: String) -> Self {
         Self {
             dialog: Confirm::new(question, "take over"),
@@ -194,7 +205,9 @@ impl PendingConfirm {
     pub(in crate::tui) fn is_settings(&self) -> bool {
         matches!(
             self.action,
-            ConfirmAction::DeleteSetting(_) | ConfirmAction::ForgetCredentials(_)
+            ConfirmAction::DeleteSetting(_)
+                | ConfirmAction::DeleteCommitIdentity(_)
+                | ConfirmAction::ForgetCredentials(_)
         )
     }
 
@@ -220,6 +233,7 @@ enum ConfirmAction {
     ReplaceKey { address: String },
     TakeOver { id: String },
     DeleteSetting(Target),
+    DeleteCommitIdentity(ProjectCommits),
     ForgetCredentials(String),
     ConfirmSignal { task_id: String, signal_id: String },
 }
@@ -265,6 +279,10 @@ pub(in crate::tui) async fn handle_confirm_key<E>(
             ConfirmAction::DeleteSetting(target) => {
                 app.foreground = Foreground::Panel;
                 app.delete(target).await;
+            }
+            ConfirmAction::DeleteCommitIdentity(commits) => {
+                app.foreground = Foreground::Panel;
+                app.delete_commit_identity(&commits);
             }
             ConfirmAction::ForgetCredentials(target) => {
                 app.forget_credentials(target, event_loop.service()).await
