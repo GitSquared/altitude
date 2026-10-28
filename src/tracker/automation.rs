@@ -826,15 +826,17 @@ impl AgentSessionEvent {
     }
 }
 
+/// The session a webhook event belongs to, as far as the coordinator reads it.
+///
+/// Only the fields below are parsed. Linear's published schema also marks the
+/// session's `type` as required, and its own deliveries omit it: reading a field
+/// the coordinator does not use is how a valid delivery becomes unreadable.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSession {
     pub id: String,
     pub app_user_id: String,
     pub organization_id: String,
-    pub status: String,
-    #[serde(rename = "type")]
-    pub session_type: String,
     pub creator_id: Option<String>,
     pub creator: Option<WebhookUser>,
     pub issue_id: Option<String>,

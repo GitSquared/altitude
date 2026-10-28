@@ -400,7 +400,7 @@ impl RemoteTracker {
                 &route.session_id,
                 &stable_id(&route.task_id, "stopped"),
                 AgentActivityContent::Response {
-                    body: "Stopped by the operator. The task's capsule was disposed.".to_owned(),
+                    body: "Stopped. Altitude ended this task and deleted its sandbox.".to_owned(),
                 },
             )
             .await
@@ -478,7 +478,7 @@ impl RemoteTracker {
                             &event.session_id,
                             &stable_id(&event.session_id, "routed"),
                             AgentActivityContent::Response {
-                                body: "This mention was routed to the task's existing Altitude session."
+                                body: "Added to the task already running for this issue."
                                     .to_owned(),
                             },
                         )
@@ -531,7 +531,7 @@ impl RemoteTracker {
         let redelegation = if let Some(existing) = self.route_for_issue(issue_id) {
             host.stop(existing.task_id.clone()).await?;
             self.config.automation.create_activity(&existing.session_id, &stable_id(&existing.task_id, "redelegated"), AgentActivityContent::Response {
-                body: "This delegation was replaced. Altitude stopped the previous task and disposed of its capsule.".into(),
+                body: "A newer delegation replaced this one, so Altitude stopped this task and deleted its sandbox.".into(),
             }).await.map_err(|error| error.to_string())?;
             self.retire_route(&existing)?;
             true
@@ -555,7 +555,7 @@ impl RemoteTracker {
                 session_id,
                 &stable_id(session_id, "starting"),
                 AgentActivityContent::Thought {
-                    body: format!("Starting work on this issue for {label}."),
+                    body: format!("Altitude is setting up this task for {label}."),
                 },
             )
             .await
@@ -599,9 +599,7 @@ impl RemoteTracker {
                     session_id,
                     &stable_id(&task_id, "redelegated"),
                     AgentActivityContent::Thought {
-                        body: format!(
-                            "Redelegated: this work now runs for operator {author} on remote {peer}."
-                        ),
+                        body: format!("Redelegated: this task now runs for {label}."),
                     },
                 )
                 .await
@@ -874,17 +872,10 @@ impl RemoteTracker {
 
     async fn boundary_reply(&self, operator_id: &str) -> String {
         let operator = self.operator_mention(operator_id).await;
-        if operator.starts_with("https://") {
-            format!(
-                "I can only take direction from {operator} on this task. Could you \
-                 confirm what you'd like me to do?"
-            )
-        } else {
-            format!(
-                "I can only take direction from {operator} on this task. I've flagged \
-                 this for them."
-            )
-        }
+        format!(
+            "This task belongs to {operator}, so Altitude only takes direction from them here. \
+             Ask them to reply if you want it changed."
+        )
     }
 
     /// `altitude / operator@host / harness`, the session's public title.
@@ -922,7 +913,7 @@ impl RemoteTracker {
             Ok(url) if !url.is_empty() => url,
             Ok(_) | Err(_) => {
                 tracing::warn!(user = user_id, "could not read the operator's profile URL");
-                "the task's operator".to_owned()
+                "the person who delegated it".to_owned()
             }
         }
     }
@@ -1006,7 +997,7 @@ impl RemoteTracker {
                 &route.session_id,
                 &stable_id(&route.task_id, "unhooked"),
                 AgentActivityContent::Response {
-                    body: "This issue is no longer delegated to Altitude; the task was stopped."
+                    body: "This issue isn't delegated to Altitude anymore, so the task was                            stopped."
                         .to_owned(),
                 },
             )
@@ -1083,9 +1074,7 @@ impl RemoteTracker {
                                 &route.session_id,
                                 &stable_id(&route.task_id, agent_run_id),
                                 AgentActivityContent::Thought {
-                                    body:
-                                        "Your reply was received. Altitude is continuing the work."
-                                            .into(),
+                                    body: "Got your reply. Altitude is continuing the task.".into(),
                                 },
                             )
                             .await
@@ -1170,7 +1159,7 @@ impl RemoteTracker {
                 &route.session_id,
                 &stable_id(&route.task_id, "transferred"),
                 AgentActivityContent::Response {
-                    body: "This work moved to another machine and continues there.".to_owned(),
+                    body: "This task moved to another remote and keeps running there.".to_owned(),
                 },
             )
             .await
@@ -1215,12 +1204,7 @@ impl RemoteTracker {
                     .map_err(|error| error.to_string())
             }
             TaskOperatorSignalKind::Blocked => {
-                let operator = self.operator_mention(&route.tracker_user_id).await;
-                let body = format!(
-                    "**? Needs you:** {}\n\n{}\n\n{operator}\n\nReply here to unblock the task.",
-                    title.trim(),
-                    body.trim()
-                );
+                let body = format!("**? Needs you:** {}\n\n{}", title.trim(), body.trim());
                 self.config
                     .automation
                     .comment_on_issue(&route.issue_id, &body, &comment_id)
@@ -1237,13 +1221,9 @@ impl RemoteTracker {
                 Ok(())
             }
             TaskOperatorSignalKind::InReview => {
-                let operator = self.operator_mention(&route.tracker_user_id).await;
                 let mut body =
                     format!("**◆ Ready to review:** {}\n\n{}", title.trim(), body.trim());
                 append_contributions(&mut body, contributions);
-                body.push_str(&format!(
-                    "\n\n{operator}\n\nReply here to accept, or send it back with changes."
-                ));
                 self.config
                     .automation
                     .comment_on_issue(&route.issue_id, &body, &comment_id)
@@ -1332,12 +1312,16 @@ impl RemoteTracker {
         let tracker = TrackerKind::Linear.label();
         let host = whoami::hostname().unwrap_or_else(|_| "this remote".to_owned());
         let body = format!(
-            "Altitude runs this issue as coding work and reports progress back here. No machine \
-             is synced to it yet. Make sure:\n\n\
-             1. You have Altitude set up, or download it.\n\
-             2. You have {tracker} connected in Altitude.\n\
-             3. You have synced to the remote running at {host}.\n\n\
-             Reply here once you have synced to try again."
+            "**This remote isn't set up for delegated work yet.**\n\n\
+             No one has added this remote to a project in Altitude, so it has no code, no \
+             agent, and no settings to run this issue with.\n\n\
+             On your computer:\n\n\
+             1. Open Altitude, or install it if you don't have it.\n\
+             2. In Settings → Remotes, add this remote: {host}\n\
+             3. In Settings → Identities, sign in to {tracker}, so Altitude knows whose work \
+             this is.\n\n\
+             Altitude passes your setup to this remote in the background. Reply here once \
+             that's done, and this issue gets picked up."
         );
         self.config
             .automation
@@ -1358,8 +1342,8 @@ impl RemoteTracker {
         refusal: &super::StartRefusal,
     ) -> Result<(), String> {
         let body = format!(
-            "Altitude did not start this work.\n\n{refusal}\n\n\
-             Reply here to try again once it is resolved."
+            "**Nothing was started.**\n\n{refusal}\n\n\
+             Reply here once that's sorted, and Altitude will try again."
         );
         self.config
             .automation
@@ -1558,7 +1542,7 @@ async fn webhook(
             return StatusCode::OK.into_response();
         }
         WebhookOutcome::Reject(reason) => {
-            tracing::warn!(reason, "Linear delivery rejected");
+            tracing::warn!(%reason, "Linear delivery rejected");
             return StatusCode::BAD_REQUEST.into_response();
         }
     };
@@ -1586,23 +1570,28 @@ async fn webhook(
 /// What a signed webhook turns into, or why it turns into nothing.
 ///
 /// The reasons are logged where the outcome is returned, so the operator reading
-/// the log can tell a misconfiguration (a warning) from chatter (debug).
+/// the log can tell a misconfiguration (a warning) from chatter (debug). A
+/// rejection carries its detail because the only person who can fix a body this
+/// machine cannot read is the one reading that line; an ignore is a fixed phrase
+/// about a delivery that was handled correctly.
 enum WebhookOutcome {
     Store(StoredEvent),
     Ignore(&'static str),
-    Reject(&'static str),
+    Reject(String),
 }
 
 fn classify_webhook(tracker: &RemoteTracker, body: &[u8]) -> WebhookOutcome {
     let Some(event_type) = webhook_event_type(body) else {
-        return WebhookOutcome::Reject("the body has no event type");
+        return WebhookOutcome::Reject("the body has no event type".to_owned());
     };
     match event_type.as_str() {
         "AgentSessionEvent" => match parse_agent_session_event(body) {
             Err(WebhookError::UnsupportedEvent(_)) => {
                 WebhookOutcome::Ignore("an agent session action this coordinator does not run")
             }
-            Err(_) => WebhookOutcome::Reject("the agent session event could not be read"),
+            Err(error) => WebhookOutcome::Reject(format!(
+                "the agent session event could not be read: {error}"
+            )),
             Ok(event) => {
                 if event
                     .validate(
@@ -1611,23 +1600,25 @@ fn classify_webhook(tracker: &RemoteTracker, body: &[u8]) -> WebhookOutcome {
                     )
                     .is_err()
                 {
-                    return WebhookOutcome::Reject("another workspace or app");
+                    return WebhookOutcome::Reject("another workspace or app".to_owned());
                 }
                 if event.oauth_client_id != tracker.config.oauth_client_id {
-                    return WebhookOutcome::Reject("another OAuth application");
+                    return WebhookOutcome::Reject("another OAuth application".to_owned());
                 }
                 WebhookOutcome::Store(StoredEvent::Session(Box::new(SessionEvent::from(&event))))
             }
         },
         "Issue" => match parse_issue_event(body) {
-            Err(_) => WebhookOutcome::Reject("the issue event could not be read"),
+            Err(error) => {
+                WebhookOutcome::Reject(format!("the issue event could not be read: {error}"))
+            }
             Ok(event) => {
                 if event.organization_id != tracker.config.automation.workspace_id() {
-                    return WebhookOutcome::Reject("another workspace");
+                    return WebhookOutcome::Reject("another workspace".to_owned());
                 }
                 if !event.is_fresh() {
                     return WebhookOutcome::Reject(
-                        "older than the freshness window · check this machine's clock",
+                        "older than the freshness window · check this machine's clock".to_owned(),
                     );
                 }
                 match event.into_stored() {
@@ -1637,24 +1628,26 @@ fn classify_webhook(tracker: &RemoteTracker, body: &[u8]) -> WebhookOutcome {
             }
         },
         "AppUserNotification" => match parse_app_notification(body) {
-            Err(_) => WebhookOutcome::Reject("the notification event could not be read"),
+            Err(error) => {
+                WebhookOutcome::Reject(format!("the notification event could not be read: {error}"))
+            }
             Ok(event) => {
                 if event.organization_id != tracker.config.automation.workspace_id() {
-                    return WebhookOutcome::Reject("another workspace");
+                    return WebhookOutcome::Reject("another workspace".to_owned());
                 }
                 if event.app_user_id != tracker.config.automation.app_user_id() {
-                    return WebhookOutcome::Reject("another app user");
+                    return WebhookOutcome::Reject("another app user".to_owned());
                 }
                 if event
                     .oauth_client_id
                     .as_deref()
                     .is_some_and(|id| id != tracker.config.oauth_client_id)
                 {
-                    return WebhookOutcome::Reject("another OAuth application");
+                    return WebhookOutcome::Reject("another OAuth application".to_owned());
                 }
                 if !event.is_fresh() {
                     return WebhookOutcome::Reject(
-                        "older than the freshness window · check this machine's clock",
+                        "older than the freshness window · check this machine's clock".to_owned(),
                     );
                 }
                 match event.into_stored() {
@@ -2344,12 +2337,13 @@ fn append_contributions(body: &mut String, contributions: &[String]) {
     if contributions.is_empty() {
         return;
     }
-    body.push_str("\n\nWork submitted:\n");
-    for url in contributions {
-        body.push_str("- ");
-        body.push_str(url);
-        body.push('\n');
-    }
+    body.push_str("\n\n");
+    let list = contributions
+        .iter()
+        .map(|url| format!("- {url}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    body.push_str(&list);
 }
 
 fn accepted_body(contributions: &[String]) -> String {
