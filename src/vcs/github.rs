@@ -203,11 +203,15 @@ const CONTRIBUTION_FIELDS: &str = r#"    ... on PullRequest {
       state
       statusCheckRollup {
         contexts(first: 100) {
+          pageInfo { hasNextPage }
           nodes {
             ... on CheckRun { conclusion }
             ... on StatusContext { state }
           }
         }
+      }
+      commits(last: 1) {
+        nodes { commit { committedDate } }
       }
     }"#;
 
@@ -231,12 +235,26 @@ fn observation_of(
     let mut checks_passing = 0;
     let mut checks_failing = 0;
     let mut checks_pending = 0;
-    for check in view.status_check_rollup.as_deref().unwrap_or_default() {
+    let rollup = view.status_check_rollup.as_ref();
+    for check in rollup
+        .and_then(|rollup| rollup.contexts.as_ref())
+        .map(|contexts| contexts.nodes.as_slice())
+        .unwrap_or_default()
+    {
         match check.outcome() {
             CheckOutcome::Passing => checks_passing += 1,
             CheckOutcome::Failing => checks_failing += 1,
             CheckOutcome::Pending => checks_pending += 1,
         }
+    }
+    // A rollup that has more than the queried page cannot be called settled:
+    // the check that would fail may be on the next page.
+    if rollup
+        .and_then(|rollup| rollup.contexts.as_ref())
+        .and_then(|contexts| contexts.page_info.as_ref())
+        .is_some_and(|page| page.has_next_page)
+    {
+        checks_pending += 1;
     }
     let standing = merge_standing(view);
     ContributionObservation {
@@ -253,10 +271,9 @@ fn observation_of(
             checks_pending,
             standing,
             checks_settle_by_ms: view
-                .created_at
-                .as_deref()
-                .and_then(created_at_ms)
-                .map(|created| created + CHECKS_APPEAR_WITHIN_MS)
+                .head_committed_at()
+                .or_else(|| view.created_at.as_deref().and_then(created_at_ms))
+                .map(|committed| committed + CHECKS_APPEAR_WITHIN_MS)
                 .unwrap_or_default(),
         },
     }
@@ -271,7 +288,9 @@ struct PullRequestView {
     #[serde(rename = "reviewDecision", default)]
     review_decision: Option<String>,
     #[serde(rename = "statusCheckRollup", default)]
-    status_check_rollup: Option<Vec<CheckRollupEntry>>,
+    status_check_rollup: Option<CheckRollup>,
+    #[serde(default)]
+    commits: Option<CommitConnection>,
     #[serde(default)]
     mergeable: Option<String>,
     #[serde(rename = "mergeStateStatus", default)]
@@ -280,6 +299,56 @@ struct PullRequestView {
     is_draft: Option<bool>,
     #[serde(default)]
     state: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CheckRollup {
+    #[serde(default)]
+    contexts: Option<CheckContexts>,
+}
+
+#[derive(Deserialize)]
+struct CheckContexts {
+    #[serde(default)]
+    nodes: Vec<CheckRollupEntry>,
+    #[serde(rename = "pageInfo", default)]
+    page_info: Option<PageInfo>,
+}
+
+#[derive(Deserialize)]
+struct PageInfo {
+    #[serde(rename = "hasNextPage", default)]
+    has_next_page: bool,
+}
+
+#[derive(Deserialize)]
+struct CommitConnection {
+    #[serde(default)]
+    nodes: Vec<CommitNode>,
+}
+
+#[derive(Deserialize)]
+struct CommitNode {
+    commit: CommitDate,
+}
+
+#[derive(Deserialize)]
+struct CommitDate {
+    #[serde(rename = "committedDate", default)]
+    committed_date: Option<String>,
+}
+
+impl PullRequestView {
+    fn head_committed_at(&self) -> Option<i64> {
+        self.commits
+            .as_ref()?
+            .nodes
+            .first()?
+            .commit
+            .committed_date
+            .as_deref()
+            .and_then(created_at_ms)
+    }
 }
 
 /// How long GitHub may take to start a contribution's checks.

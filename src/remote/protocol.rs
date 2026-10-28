@@ -174,10 +174,6 @@ pub enum LinkRequest {
     CommitImport {
         transfer_id: String,
     },
-    PutBlob {
-        hash: BlobHash,
-        len: u64,
-    },
     /// Announce a configuration: `len` raw bytes follow, whose digest must be
     /// `hash`. It is what this client runs tasks with, so a remote that holds it
     /// can build the same environments.
@@ -222,10 +218,6 @@ pub enum WatchEvent {
 pub enum LinkResponse {
     Identified {
         remote: String,
-    },
-    Stored {
-        hash: BlobHash,
-        len: u64,
     },
     Configured,
     /// The tracker account this configuration carries is already linked for

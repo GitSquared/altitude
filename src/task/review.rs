@@ -189,9 +189,12 @@ where
     }
 
     async fn open(&self, owner: &str) -> Result<String, TaskServiceError> {
-        let service = self.service.as_operator(owner)?;
+        let (operator, credential) = owner
+            .split_once('\0')
+            .ok_or_else(|| TaskServiceError::Task(super::TaskError::MissingProject))?;
+        let service = self.service.as_operator(operator)?;
         let id = watcher_sandbox_id(owner);
-        service.open_watcher(id.clone()).await?;
+        service.open_watcher(id.clone(), credential).await?;
         Ok(id)
     }
 

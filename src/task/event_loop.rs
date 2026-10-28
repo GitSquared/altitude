@@ -1118,7 +1118,7 @@ where
             .collect();
         let owners: HashSet<String> = watching
             .iter()
-            .filter_map(|task| task.operator_id().map(str::to_owned))
+            .filter_map(|task| watcher_key(task))
             .collect();
         self.watchers.retain(&owners).await;
 
@@ -1133,7 +1133,7 @@ where
         // owners have something due, and each of those is asked once.
         let mut owner_names: Vec<String> = waiting
             .iter()
-            .filter_map(|task| task.operator_id().map(str::to_owned))
+            .filter_map(|task| watcher_key(task))
             .collect();
         owner_names.sort();
         owner_names.dedup();
@@ -1144,7 +1144,7 @@ where
             let theirs: Vec<&Task> = waiting
                 .iter()
                 .copied()
-                .filter(|task| task.operator_id() == Some(owner.as_str()))
+                .filter(|task| watcher_key(task).as_deref() == Some(owner.as_str()))
                 .collect();
             self.observe_owner(&owner, &theirs).await;
         }
@@ -1458,4 +1458,16 @@ where
         }
         Ok(())
     }
+}
+
+/// The operator and version-control credential whose watcher reads this task's
+/// contributions.
+fn watcher_key(task: &Task) -> Option<String> {
+    let operator = task.operator_id()?;
+    let project = task.project()?;
+    let credential = project
+        .vcs_credential
+        .clone()
+        .unwrap_or_else(|| project.vcs_provider().profile().to_owned());
+    Some(format!("{operator}\0{credential}"))
 }

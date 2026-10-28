@@ -1,14 +1,14 @@
-//! The server side: accept a connection, answer one request, hold the blobs.
+//! The server side: accept a connection and answer one request.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     fmt, fs,
     future::Future,
     io::{self, Write},
     net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket},
     path::{Component, Path, PathBuf},
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 use cap_std::fs::{Dir, OpenOptions, OpenOptionsExt, Permissions, PermissionsExt};
@@ -123,24 +123,9 @@ fn ipv6_available() -> bool {
     UdpSocket::bind("[::]:0").is_ok()
 }
 
-/// Blobs a server currently holds, keyed by digest.
-///
-/// In memory on purpose: this spike does not touch the capsule store, and a
-/// restart loses them.
-#[derive(Default)]
-struct BlobStore(Mutex<HashMap<BlobHash, Vec<u8>>>);
-
-impl BlobStore {
-    fn put(&self, hash: BlobHash, bytes: Vec<u8>) {
-        let mut store = self.0.lock().expect("blob store");
-        store.insert(hash, bytes);
-    }
-}
-
 #[derive(Clone)]
 struct LinkHandler {
     id: EndpointId,
-    blobs: Arc<BlobStore>,
     /// Where pushed configurations and logins are written, one directory per
     /// operator.
     data_dir: PathBuf,
@@ -150,7 +135,6 @@ struct LinkHandler {
 
 impl fmt::Debug for LinkHandler {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Deliberately does not print the blobs: they are payload, not identity.
         f.debug_struct("LinkHandler").field("id", &self.id).finish()
     }
 }
@@ -727,19 +711,6 @@ async fn answer(
             };
             write_frame(&mut send, &response).await?;
         }
-        LinkRequest::PutBlob { hash, len } => {
-            let bytes = read_body(&mut recv, len, MAX_BLOB_BYTES).await?;
-            let actual = BlobHash::of(&bytes);
-            let response = if actual == hash {
-                handler.blobs.put(hash.clone(), bytes);
-                LinkResponse::Stored { hash, len }
-            } else {
-                LinkResponse::Rejected {
-                    reason: format!("digest mismatch: announced {hash}, received {actual}"),
-                }
-            };
-            write_frame(&mut send, &response).await?;
-        }
     }
     send.finish()?;
     Ok(())
@@ -770,10 +741,8 @@ impl LinkServer {
             trackers,
             tasks,
         } = parts;
-        let blobs = Arc::new(BlobStore::default());
         let handler = LinkHandler {
             id: identity.id(),
-            blobs: Arc::clone(&blobs),
             data_dir,
             config_lock: Arc::new(AsyncMutex::new(())),
             tasks,

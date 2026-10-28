@@ -5,7 +5,7 @@ use crate::{
         CommandEvent, CommandSession, IsolationEngine, OutputStream, Unwatched, with_helper,
     },
     project::Project,
-    vcs::{self, ContributionObservation, ProviderBatch},
+    vcs::{ContributionObservation, ProviderBatch},
 };
 use uuid::Uuid;
 
@@ -428,12 +428,20 @@ where
     /// The base image plus what the providers install is the least that can
     /// read them, and the shell shape mounts the owner's own profile without
     /// making a task of it. It is left running for the next observation to reuse.
-    pub(super) async fn open_watcher(&self, id: String) -> Result<(), TaskServiceError> {
+    pub(super) async fn open_watcher(
+        &self,
+        id: String,
+        vcs_credential: &str,
+    ) -> Result<(), TaskServiceError> {
+        let recipe = self
+            .credentials
+            .recipe(vcs_credential)
+            .map_err(TaskServiceError::Credentials)?;
         self.isolation
             .watcher(
                 id,
                 Project::profile_only("vcs-observer"),
-                vcs::profile_recipes(),
+                vec![recipe],
                 &Unwatched,
             )
             .await
