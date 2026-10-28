@@ -3,21 +3,28 @@
 
 use super::form::Form;
 use super::rows::{Row, View};
-use crate::tui::widgets::list;
+use crate::{
+    credentials::{Service, Slot},
+    tui::widgets::list,
+};
 
 /// The lists the panel holds, in the order the rail shows them.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     Interface,
-    Identities,
+    Agents,
+    VersionControl,
+    Trackers,
     Projects,
     Remotes,
 }
 
 impl Section {
-    pub const ALL: [Section; 4] = [
+    pub const ALL: [Section; 6] = [
         Self::Interface,
-        Self::Identities,
+        Self::Agents,
+        Self::VersionControl,
+        Self::Trackers,
         Self::Projects,
         Self::Remotes,
     ];
@@ -25,7 +32,9 @@ impl Section {
     pub fn title(self) -> &'static str {
         match self {
             Self::Interface => "Interface",
-            Self::Identities => "Identities",
+            Self::Agents => "Coding agents",
+            Self::VersionControl => "Version control",
+            Self::Trackers => "Task tracker",
             Self::Projects => "Projects",
             Self::Remotes => "Remotes",
         }
@@ -35,18 +44,48 @@ impl Section {
     pub fn description(self) -> &'static str {
         match self {
             Self::Interface => "Adjust look and feel",
-            Self::Identities => "Logins work runs with",
-            Self::Projects => "What your agents work on",
+            Self::Agents => "The agents that write the code",
+            Self::VersionControl => "Git and commit signing",
+            Self::Trackers => "Keep your team in the loop",
+            Self::Projects => "Organize work streams",
             Self::Remotes => "Automate and keep work going",
         }
     }
 
     /// Whether this list can grow and shrink.
     ///
-    /// Only the projects and the remotes are the operator's to add and
-    /// remove: the other lists are what the installation already holds.
+    /// Every list but the preferences holds rows the operator adds and removes.
     pub fn grows(self) -> bool {
-        matches!(self, Self::Identities | Self::Projects | Self::Remotes)
+        self.slot().is_some() || matches!(self, Self::Projects | Self::Remotes)
+    }
+
+    /// The project slot this section's identities fill, when it is one of the
+    /// service sections rather than a list of projects, remotes, or preferences.
+    pub fn slot(self) -> Option<Slot> {
+        match self {
+            Self::Agents => Some(Slot::Agent),
+            Self::VersionControl => Some(Slot::VersionControl),
+            Self::Trackers => Some(Slot::Tracker),
+            Self::Interface | Self::Projects | Self::Remotes => None,
+        }
+    }
+
+    /// The section a newly created identity belongs to, from the service itself.
+    pub fn for_service(service: Service) -> Self {
+        match service.slot() {
+            Slot::Agent => Self::Agents,
+            Slot::VersionControl => Self::VersionControl,
+            Slot::Tracker => Self::Trackers,
+        }
+    }
+
+    /// The services a new identity in this section can be, in the order the
+    /// service picker offers them.
+    pub fn services(self) -> Vec<Service> {
+        Service::ALL
+            .into_iter()
+            .filter(|service| self.slot() == Some(service.slot()))
+            .collect()
     }
 }
 

@@ -7,7 +7,9 @@
 //! note at the right edge so a column of notes lines up.
 //!
 //! A row can start a group with a section heading. Rows may then differ in
-//! height, so the cursor measures the list when it decides how many fit.
+//! height, so the cursor measures the list when it decides how many fit. Every
+//! row is followed by a blank line, so blocks read apart rather than as one
+//! paragraph.
 
 use std::time::Duration;
 
@@ -46,8 +48,6 @@ pub struct Row {
     pub mark: Vec<Span<'static>>,
     /// How the name reads when the focus is elsewhere. The focus bar overrides it.
     pub tone: Style,
-    /// Whether a blank line follows the row, so fat rows can breathe.
-    pub gap: bool,
 }
 
 impl Row {
@@ -59,7 +59,6 @@ impl Row {
             note: None,
             mark: Vec::new(),
             tone: palette::primary(),
-            gap: false,
         }
     }
 
@@ -102,12 +101,7 @@ impl Row {
         self
     }
 
-    pub fn gap(mut self, gap: bool) -> Self {
-        self.gap = gap;
-        self
-    }
-
-    /// How many lines the row takes, before its gap.
+    /// How many lines the row takes, before the list's spacing.
     fn height(&self) -> u16 {
         u16::from(self.heading.is_some()) + 1 + u16::from(self.detail.is_some())
     }
@@ -298,8 +292,7 @@ impl Cursor {
 
 /// The height a uniform list's first row takes, gap included.
 pub fn row_height(rows: &[Row]) -> u16 {
-    rows.first()
-        .map_or(1, |row| row.height() + u16::from(row.gap))
+    rows.first().map_or(2, |row| row.height() + 1)
 }
 
 /// How many rows of a list with mixed heights fit in `height`.
@@ -307,7 +300,7 @@ pub fn visible(height: u16, rows: &[Row]) -> usize {
     let mut used = 0;
     let mut count = 0;
     for row in rows {
-        let row_height = row.height() + u16::from(row.gap);
+        let row_height = row.height() + 1;
         if used + row_height > height {
             break;
         }
@@ -357,7 +350,7 @@ pub fn draw(
         };
         frame.render_widget(Clear, rect);
         hitboxes.push((rect, index));
-        top = top.saturating_add(row.height() + u16::from(row.gap));
+        top = top.saturating_add(row.height() + 1);
     }
     if let Some(index) = selected.filter(|index| focused != Some(*index)) {
         bar(
@@ -383,9 +376,7 @@ pub fn draw(
                 lines.push(heading_line(heading, width));
             }
             lines.extend(row.lines(width, focused == Some(index), selected == Some(index)));
-            if row.gap {
-                lines.push(Line::default());
-            }
+            lines.push(Line::default());
             ListItem::new(lines)
         })
         .collect::<Vec<_>>();
@@ -403,7 +394,7 @@ fn bar(frame: &mut Frame, area: Rect, rows: &[Row], offset: usize, index: usize,
     let top = area.y.saturating_add(
         rows[offset..index]
             .iter()
-            .map(|row| row.height() + u16::from(row.gap))
+            .map(|row| row.height() + 1)
             .sum::<u16>(),
     ) + heading;
     let bottom = top.saturating_add(content_height).min(area.bottom());

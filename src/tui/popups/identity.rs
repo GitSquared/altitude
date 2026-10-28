@@ -1,4 +1,4 @@
-//! The two small questions the identities list asks: which service to connect,
+//! The two small questions a service section asks: which service to connect,
 //! and what to call the identity.
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -18,7 +18,7 @@ use crate::{
 };
 
 pub struct IdentitySetup {
-    services: [Service; 4],
+    services: Vec<Service>,
     at: usize,
 }
 
@@ -29,25 +29,26 @@ pub enum SetupDecision {
 }
 
 impl IdentitySetup {
-    pub fn new() -> Self {
-        Self {
-            services: Service::ALL,
-            at: 0,
-        }
+    pub fn new(services: Vec<Service>) -> Self {
+        Self { services, at: 0 }
     }
 
     pub fn key(&mut self, key: KeyEvent) -> SetupDecision {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => SetupDecision::Closed,
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab if !self.services.is_empty() => {
                 self.at = (self.at + 1) % self.services.len();
                 SetupDecision::Still
             }
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab if !self.services.is_empty() => {
                 self.at = (self.at + self.services.len() - 1) % self.services.len();
                 SetupDecision::Still
             }
-            KeyCode::Enter => SetupDecision::Chosen(self.services[self.at]),
+            KeyCode::Enter => self
+                .services
+                .get(self.at)
+                .copied()
+                .map_or(SetupDecision::Still, SetupDecision::Chosen),
             _ => SetupDecision::Still,
         }
     }

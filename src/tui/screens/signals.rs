@@ -507,7 +507,7 @@ fn draw_threads(frame: &mut Frame, area: Rect, app: &mut App) {
                     .is_some_and(|noticed| noticed.elapsed() < Duration::from_millis(1600));
             // The group heading carries the kind's mark and colour, so the row
             // can spend its width on the title and the age instead.
-            let mut row = Row::new(thread.title.clone()).detail(detail).gap(true);
+            let mut row = Row::new(thread.title.clone()).detail(detail);
             if starts {
                 let mark = vec![Span::styled(
                     format!("{} ", group.symbol),

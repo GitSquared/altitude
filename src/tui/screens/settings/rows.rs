@@ -144,10 +144,13 @@ impl Row {
                 CredentialKind::Installation { .. } => {
                     vec![chrome::Hint::new("enter", "remote guide")]
                 }
-                CredentialKind::Profile { .. } if credential.is_pending() => Vec::new(),
-                CredentialKind::Profile { .. } => {
-                    vec![chrome::Hint::new("enter", "sign in")]
+                CredentialKind::Profile { .. } if credential.is_pending() => {
+                    vec![chrome::Hint::new("e", "rename")]
                 }
+                CredentialKind::Profile { .. } => vec![
+                    chrome::Hint::new("enter", "sign in"),
+                    chrome::Hint::new("e", "rename"),
+                ],
                 CredentialKind::Tracker { .. } => vec![
                     chrome::Hint::new(
                         "enter",

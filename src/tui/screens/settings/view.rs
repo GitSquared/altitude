@@ -3,7 +3,7 @@
 //! image is made of.
 
 use crate::{
-    credentials::{Service, Slot},
+    credentials::{Credential as NamedCredential, Service, Slot},
     tui::{App, app::RemoteStatus},
 };
 
@@ -13,83 +13,13 @@ use super::{
     rows::{Credential, CredentialKind, Row, RowKind, View, switch_row},
 };
 
-fn service_from(service: Option<Service>) -> Slot {
-    service.map(|service| service.slot()).unwrap_or(Slot::Agent)
-}
-
 impl App {
     /// Everything the panel draws, assembled from the settings file and from
     /// what was read back about each remote and about the built base image.
     pub(in crate::tui) fn settings_view(&self) -> View {
         let rows = match self.panel.section {
-            Section::Identities => {
-                let mut rows = vec![Row {
-                    label: "Git identity".to_owned(),
-                    detail: Some(
-                        if self.git_identity().is_set() {
-                            "set · used for commits"
-                        } else {
-                            "not set"
-                        }
-                        .to_owned(),
-                    ),
-                    kind: RowKind::GitIdentity(self.git_identity()),
-                }];
-                for credential in self.settings_credentials() {
-                    let service = credential.service();
-                    let (kind, status) =
-                        if service.is_some_and(|service| service.slot() == Slot::Tracker) {
-                            let state = self.tracker_state_for(&credential.id);
-                            (
-                                CredentialKind::Tracker {
-                                    profile: credential.id.clone(),
-                                    directory: self
-                                        .config
-                                        .profile_dir(&credential.id)
-                                        .display()
-                                        .to_string(),
-                                    status: state,
-                                },
-                                state.summary().to_owned(),
-                            )
-                        } else {
-                            let status = self
-                                .credential_status
-                                .get(&credential.id)
-                                .cloned()
-                                .unwrap_or_default();
-                            (
-                                CredentialKind::Profile {
-                                    profile: credential.id.clone(),
-                                    directory: self
-                                        .config
-                                        .profile_dir(&credential.id)
-                                        .display()
-                                        .to_string(),
-                                    status: status.clone(),
-                                },
-                                status.summary().to_owned(),
-                            )
-                        };
-                    let service = service.map_or("unknown", |service| service.label());
-                    let is_default = self.settings_file.as_ref().is_some_and(|file| {
-                        file.settings()
-                            .default_credential(service_from(credential.service()))
-                            .is_some_and(|id| id == credential.id)
-                    });
-                    rows.push(Row {
-                        label: credential.label.clone(),
-                        detail: Some(format!(
-                            "{service} · {status}{}",
-                            if is_default { " · default" } else { "" }
-                        )),
-                        kind: RowKind::Credential(Credential {
-                            label: credential.label,
-                            kind,
-                        }),
-                    });
-                }
-                rows
+            Section::Agents | Section::VersionControl | Section::Trackers => {
+                self.identity_rows(self.panel.section)
             }
             Section::Interface => vec![
                 switch_row(Setting::KeyboardHints, self.keyboard_hints()),
@@ -115,6 +45,79 @@ impl App {
             rows,
             credentials: self.settings_credentials(),
             base: self.base_description.clone(),
+        }
+    }
+
+    /// The identities one service section holds, with the git identity above the
+    /// version-control logins it commits through.
+    fn identity_rows(&self, section: Section) -> Vec<Row> {
+        let mut rows = Vec::new();
+        if section == Section::VersionControl {
+            rows.push(Row {
+                label: "Git identity".to_owned(),
+                detail: Some(
+                    if self.git_identity().is_set() {
+                        "set · used for commits"
+                    } else {
+                        "not set"
+                    }
+                    .to_owned(),
+                ),
+                kind: RowKind::GitIdentity(self.git_identity()),
+            });
+        }
+        rows.extend(
+            self.settings_credentials()
+                .into_iter()
+                .filter_map(|credential| {
+                    let service = credential.service()?;
+                    (Some(service.slot()) == section.slot())
+                        .then(|| self.identity_row(credential, service))
+                }),
+        );
+        rows
+    }
+
+    /// One named login, with the service it belongs to, the place it lives, and
+    /// what its own check last said. The label is the operator's; the service is
+    /// the fallback that keeps two same-named identities readable.
+    fn identity_row(&self, credential: NamedCredential, service: Service) -> Row {
+        let id = credential.id;
+        let label = credential.label;
+        let (kind, status) = if service.slot() == Slot::Tracker {
+            let state = self.tracker_state_for(&id);
+            (
+                CredentialKind::Tracker {
+                    profile: id.clone(),
+                    directory: self.config.profile_dir(&id).display().to_string(),
+                    status: state,
+                },
+                state.summary().to_owned(),
+            )
+        } else {
+            let status = self.credential_status.get(&id).cloned().unwrap_or_default();
+            (
+                CredentialKind::Profile {
+                    profile: id.clone(),
+                    directory: self.config.profile_dir(&id).display().to_string(),
+                    status: status.clone(),
+                },
+                status.summary().to_owned(),
+            )
+        };
+        let is_default = self.settings_file.as_ref().is_some_and(|file| {
+            file.settings()
+                .default_credential(service.slot())
+                .is_some_and(|default| default == id)
+        });
+        Row {
+            label: label.clone(),
+            detail: Some(format!(
+                "{} · {status}{}",
+                service.label(),
+                if is_default { " · default" } else { "" }
+            )),
+            kind: RowKind::Credential(Credential { label, kind }),
         }
     }
 

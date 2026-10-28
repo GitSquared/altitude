@@ -1673,9 +1673,13 @@ impl App {
     /// A command that signs in and exits needs no page: the terminal is the
     /// sign-in. A tool that has to be driven gets its instructions before its
     /// screen, so the operator arrives knowing what to do there.
-    /// Open the service picker for a new identity.
-    fn open_identity_setup(&mut self) {
-        self.foreground = Foreground::IdentitySetup(Box::new(IdentitySetup::new()));
+    /// Open the service picker for a new identity, limited to the section's
+    /// services so adding from a section stays in that section.
+    fn open_identity_setup(&mut self, section: Section) {
+        let services = section.services();
+        if !services.is_empty() {
+            self.foreground = Foreground::IdentitySetup(Box::new(IdentitySetup::new(services)));
+        }
     }
 
     pub(in crate::tui) async fn identity_setup_key<E>(
@@ -1738,7 +1742,7 @@ impl App {
             self.problem(error.to_string());
             return;
         }
-        self.panel.section = Section::Identities;
+        self.panel.section = Section::for_service(service);
         self.foreground = Foreground::Panel;
         self.tracker_states
             .insert(id.clone(), TrackerState::NotConnected);
@@ -2099,7 +2103,7 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => self.panel.move_selection(true, rows),
             KeyCode::Up | KeyCode::Char('k') => self.panel.move_selection(false, rows),
             KeyCode::Delete | KeyCode::Backspace
-                if self.panel.section == Section::Identities
+                if self.panel.section.slot().is_some()
                     && self
                         .selected_row()
                         .is_some_and(|row| matches!(row.kind, RowKind::Credential(_))) =>
@@ -2110,14 +2114,19 @@ impl App {
                 self.ask_to_forget_credentials()
             }
             KeyCode::Char(' ')
-                if self.panel.section == Section::Identities
+                if self.panel.section.slot().is_some()
                     && self
                         .selected_row()
                         .is_some_and(|row| matches!(row.kind, RowKind::Credential(_))) =>
             {
                 self.set_default_identity()
             }
-            KeyCode::Char('e') if self.panel.section == Section::Identities => {
+            KeyCode::Char('e')
+                if self.panel.section.slot().is_some()
+                    && self
+                        .selected_row()
+                        .is_some_and(|row| matches!(row.kind, RowKind::Credential(_))) =>
+            {
                 self.open_rename_identity()
             }
             KeyCode::Char('e') if self.panel.section.grows() => self.edit_selected(),
@@ -2133,9 +2142,17 @@ impl App {
                 }
             }
             KeyCode::Char('n') if self.panel.section.grows() => match self.panel.section {
-                Section::Identities => self.open_identity_setup(),
+                Section::Agents | Section::VersionControl | Section::Trackers => {
+                    let services = self.panel.section.services();
+                    match services.as_slice() {
+                        [service] => {
+                            self.create_identity(*service, task_service, events, tracker_connects)
+                        }
+                        _ => self.open_identity_setup(self.panel.section),
+                    }
+                }
                 Section::Remotes => self.panel.form = Some(Form::for_remote(Target::NewRemote, "")),
-                _ => {
+                Section::Projects => {
                     self.panel.form = Some(Form::new_project(
                         &self.scope_label(),
                         &self.remotes(),
@@ -2145,6 +2162,7 @@ impl App {
                         self.settings_credentials(),
                     ))
                 }
+                Section::Interface => {}
             },
             _ if is_remove(key) && self.selected_row().is_some_and(|row| row.is_removable()) => {
                 self.ask_to_delete()
@@ -2156,7 +2174,7 @@ impl App {
             _ => {}
         }
         if self.panel.section != previous_section {
-            if self.panel.section == Section::Identities {
+            if self.panel.section == Section::VersionControl {
                 self.refresh_git_identity().await;
             }
             self.credentials_visible_since = None;
@@ -3116,15 +3134,15 @@ impl App {
         }
     }
 
-    /// Note whether the credentials list is showing, and start its clock when it
+    /// Note whether an identity section is showing, and start its clock when it
     /// appears.
     ///
     /// A fresh look every time it is opened, so a login made in a shell a moment ago
     /// is not still being reported as it was. Says whether anything changed, so a
     /// poll that found nothing does not ask for a frame.
     pub(in crate::tui) fn sync_credentials(&mut self) -> bool {
-        let showing = matches!(self.foreground, Foreground::Panel)
-            && matches!(self.panel.section, Section::Identities);
+        let showing =
+            matches!(self.foreground, Foreground::Panel) && self.panel.section.slot().is_some();
         match (showing, self.credentials_visible_since) {
             (true, None) => {
                 self.credentials_visible_since = Some(Instant::now());
@@ -3165,15 +3183,18 @@ impl App {
     /// An answer that came back is not asked again, and one that could not run waits
     /// out a backoff rather than being retried on the next tick.
     fn unasked_profiles(&self) -> Vec<String> {
-        if self.panel.section != Section::Identities {
+        let Some(slot) = self.panel.section.slot() else {
             return Vec::new();
-        }
+        };
         let retry_due = self
             .credential_retry_at
             .is_none_or(|at| Instant::now() >= at);
         self.profiles
             .iter()
             .map(|summary| summary.profile.clone())
+            .filter(|profile| {
+                Service::from_id(profile).is_some_and(|service| service.slot() == slot)
+            })
             .filter(|profile| {
                 if self.credential_checking.contains(profile) {
                     return false;
@@ -4207,7 +4228,7 @@ impl App {
                 SetupFocus::Tracker => {
                     if self.tracker_state == TrackerState::Connected {
                         self.foreground = Foreground::GetStarted(panel);
-                        open_panel_at(self, task_service, Section::Identities).await;
+                        open_panel_at(self, task_service, Section::Trackers).await;
                         return false;
                     }
                     if self.tracker_state != TrackerState::Connecting {

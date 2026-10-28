@@ -101,7 +101,6 @@ fn draw_columns(
             Row::new(section.title())
                 .detail(section.description())
                 .tone(tone)
-                .gap(true)
         })
         .collect::<Vec<_>>();
     for (rect, index) in list::draw(
