@@ -1558,7 +1558,7 @@ async fn webhook(
             return StatusCode::OK.into_response();
         }
         WebhookOutcome::Reject(reason) => {
-            tracing::warn!(reason, "Linear delivery rejected");
+            tracing::warn!(%reason, "Linear delivery rejected");
             return StatusCode::BAD_REQUEST.into_response();
         }
     };
@@ -1586,23 +1586,28 @@ async fn webhook(
 /// What a signed webhook turns into, or why it turns into nothing.
 ///
 /// The reasons are logged where the outcome is returned, so the operator reading
-/// the log can tell a misconfiguration (a warning) from chatter (debug).
+/// the log can tell a misconfiguration (a warning) from chatter (debug). A
+/// rejection carries its detail because the only person who can fix a body this
+/// machine cannot read is the one reading that line; an ignore is a fixed phrase
+/// about a delivery that was handled correctly.
 enum WebhookOutcome {
     Store(StoredEvent),
     Ignore(&'static str),
-    Reject(&'static str),
+    Reject(String),
 }
 
 fn classify_webhook(tracker: &RemoteTracker, body: &[u8]) -> WebhookOutcome {
     let Some(event_type) = webhook_event_type(body) else {
-        return WebhookOutcome::Reject("the body has no event type");
+        return WebhookOutcome::Reject("the body has no event type".to_owned());
     };
     match event_type.as_str() {
         "AgentSessionEvent" => match parse_agent_session_event(body) {
             Err(WebhookError::UnsupportedEvent(_)) => {
                 WebhookOutcome::Ignore("an agent session action this coordinator does not run")
             }
-            Err(_) => WebhookOutcome::Reject("the agent session event could not be read"),
+            Err(error) => WebhookOutcome::Reject(format!(
+                "the agent session event could not be read: {error}"
+            )),
             Ok(event) => {
                 if event
                     .validate(
@@ -1611,23 +1616,25 @@ fn classify_webhook(tracker: &RemoteTracker, body: &[u8]) -> WebhookOutcome {
                     )
                     .is_err()
                 {
-                    return WebhookOutcome::Reject("another workspace or app");
+                    return WebhookOutcome::Reject("another workspace or app".to_owned());
                 }
                 if event.oauth_client_id != tracker.config.oauth_client_id {
-                    return WebhookOutcome::Reject("another OAuth application");
+                    return WebhookOutcome::Reject("another OAuth application".to_owned());
                 }
                 WebhookOutcome::Store(StoredEvent::Session(Box::new(SessionEvent::from(&event))))
             }
         },
         "Issue" => match parse_issue_event(body) {
-            Err(_) => WebhookOutcome::Reject("the issue event could not be read"),
+            Err(error) => {
+                WebhookOutcome::Reject(format!("the issue event could not be read: {error}"))
+            }
             Ok(event) => {
                 if event.organization_id != tracker.config.automation.workspace_id() {
-                    return WebhookOutcome::Reject("another workspace");
+                    return WebhookOutcome::Reject("another workspace".to_owned());
                 }
                 if !event.is_fresh() {
                     return WebhookOutcome::Reject(
-                        "older than the freshness window · check this machine's clock",
+                        "older than the freshness window · check this machine's clock".to_owned(),
                     );
                 }
                 match event.into_stored() {
@@ -1637,24 +1644,26 @@ fn classify_webhook(tracker: &RemoteTracker, body: &[u8]) -> WebhookOutcome {
             }
         },
         "AppUserNotification" => match parse_app_notification(body) {
-            Err(_) => WebhookOutcome::Reject("the notification event could not be read"),
+            Err(error) => {
+                WebhookOutcome::Reject(format!("the notification event could not be read: {error}"))
+            }
             Ok(event) => {
                 if event.organization_id != tracker.config.automation.workspace_id() {
-                    return WebhookOutcome::Reject("another workspace");
+                    return WebhookOutcome::Reject("another workspace".to_owned());
                 }
                 if event.app_user_id != tracker.config.automation.app_user_id() {
-                    return WebhookOutcome::Reject("another app user");
+                    return WebhookOutcome::Reject("another app user".to_owned());
                 }
                 if event
                     .oauth_client_id
                     .as_deref()
                     .is_some_and(|id| id != tracker.config.oauth_client_id)
                 {
-                    return WebhookOutcome::Reject("another OAuth application");
+                    return WebhookOutcome::Reject("another OAuth application".to_owned());
                 }
                 if !event.is_fresh() {
                     return WebhookOutcome::Reject(
-                        "older than the freshness window · check this machine's clock",
+                        "older than the freshness window · check this machine's clock".to_owned(),
                     );
                 }
                 match event.into_stored() {
