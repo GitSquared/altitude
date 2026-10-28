@@ -47,8 +47,8 @@ static LINEAR: Guide = Guide {
     intro: &[
         "A remote signs in as a shared Linear app, not as you. Its owner installs it once per \
          workspace, and every task delegated there acts as that app.",
-        "Your own Linear sign-in under Settings → Identities is separate from the remote's: it \
-         decides which machine receives an issue delegated in Linear.",
+        "Your own Linear sign-in under Settings → Task tracker is separate from the remote's: \
+         it decides which machine receives an issue delegated in Linear.",
     ],
     steps: &[
         Step {
@@ -136,8 +136,8 @@ static LINEAR: Guide = Guide {
         },
     ],
     closing: &[
-        "Then sign in here under Settings → Identities → Linear: that account decides which \
-         machine a delegated issue runs on.",
+        "Then sign in here under Settings → Task tracker, choosing Linear: that account decides \
+         which machine a delegated issue runs on.",
         "A remote with no shared app still runs work sent from Altitude, and reports through each \
          operator's own login.",
     ],

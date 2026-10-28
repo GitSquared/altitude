@@ -67,7 +67,7 @@ impl Session {
         let transport = linear_auth::transport(client);
         let mut client = ().serve(transport).await.map_err(|_| {
             TrackerError::new(
-                "could not connect to Linear; sign in again from Settings → Identities",
+                "could not connect to Linear; sign in again from Settings → Task tracker",
             )
         })?;
 
@@ -203,7 +203,9 @@ impl Linear {
             return Ok(session);
         }
         if !self.has_saved_auth() {
-            return Err(TrackerError::new("Connect Linear in Settings → Identities"));
+            return Err(TrackerError::new(
+                "Connect Linear in Settings → Task tracker",
+            ));
         }
         self.connect_impl().await?;
         self.session()

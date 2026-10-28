@@ -1318,8 +1318,8 @@ impl RemoteTracker {
              On your computer:\n\n\
              1. Open Altitude, or install it if you don't have it.\n\
              2. In Settings → Remotes, add this remote: {host}\n\
-             3. In Settings → Identities, sign in to {tracker}, so Altitude knows whose work \
-             this is.\n\n\
+             3. In Settings → Task tracker, sign in to {tracker}, so Altitude knows whose \
+             work this is.\n\n\
              Altitude passes your setup to this remote in the background. Reply here once \
              that's done, and this issue gets picked up."
         );

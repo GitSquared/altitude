@@ -35,8 +35,8 @@ impl fmt::Display for StartRefusal {
             ),
             Self::NoSetup => formatter.write_str(
                 "This remote has no settings from your Altitude yet, so it doesn't know your \
-                 projects. Check in Settings → Remotes that this remote is added to one, then \
-                 reply here.",
+                 projects. In Settings → Projects, set a project's \"Start new tasks on\" to \
+                 this remote, then reply here.",
             ),
             Self::NoScope => formatter.write_str(
                 "Linear didn't say which team this issue belongs to, so Altitude can't tell \
@@ -45,8 +45,8 @@ impl fmt::Display for StartRefusal {
             Self::NoProject { scope } => write!(
                 formatter,
                 "No project in your Altitude is set up for {scope}. Open Settings → Projects, \
-                 choose the project that should take this work, add {scope} to its task \
-                 tracker, then reply here."
+                 choose the project that should take this work, and set its \"Task tracker \
+                 team\" to that team; then reply here."
             ),
             Self::NotAccepting { project, scope } => write!(
                 formatter,
@@ -55,9 +55,9 @@ impl fmt::Display for StartRefusal {
                  \"Accept delegated work\", then reply here."
             ),
             Self::NoAgent => formatter.write_str(
-                "Your project has no agent yet, so Altitude has nothing to run this task with. \
-                 Open Settings → Projects and give the project an agent, or choose one agent \
-                 for everything in Altitude, then reply here.",
+                "Your project has no coding agent yet, so Altitude has nothing to run this task \
+                 with. Open Settings → Projects, select the project, and choose one under \
+                 \"Coding agent\"; then reply here.",
             ),
             Self::Unavailable { reason } => {
                 write!(
