@@ -32,6 +32,11 @@ pub enum ClaimError {
 impl Instance {
     /// Claim a database, or say who already has it.
     pub fn claim(database: &Path) -> Result<Self, ClaimError> {
+        // The database is created when it is opened, which is after this on a first
+        // start, and the lock lives beside it.
+        if let Some(directory) = database.parent() {
+            fs::create_dir_all(directory)?;
+        }
         let file = fs::OpenOptions::new()
             .create(true)
             .truncate(false)
