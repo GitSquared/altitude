@@ -7,14 +7,17 @@
 //! the task. Provider credentials stay inside the provider; nothing here reads
 //! or records them.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc, time::SystemTime};
+
+use tokio::sync::Mutex;
 
 use crate::{
     agent::AgentKind,
-    config::InstallationIdentity,
+    config::{Config, InstallationIdentity},
+    credentials::{Service, Slot},
     isolation::IsolationEngine,
     project::Project,
-    tracker::{IssueSnapshot, TrackerError, TrackerProvider, TrackerStatus},
+    tracker::{IssueSnapshot, Linear, TrackerError, TrackerProvider, TrackerStatus},
 };
 
 use super::{Task, TaskExecutionPauseReason, TaskHistoryEvent, TaskService, TaskServiceError};
@@ -25,15 +28,65 @@ use super::{Task, TaskExecutionPauseReason, TaskHistoryEvent, TaskService, TaskS
 /// serving several peers has one login per peer, read from what each peer pushed,
 /// so the answer depends on who owns the task.
 pub trait TrackerHost: Send + Sync + 'static {
-    fn for_operator(&self, operator: &str) -> Option<Arc<dyn TrackerProvider>>;
+    fn for_credential(&self, operator: &str, credential: &str) -> Option<Arc<dyn TrackerProvider>>;
 }
 
-/// One login for every task, which is what a machine with a single account has.
-pub(crate) struct OwnTracker(pub(crate) Arc<dyn TrackerProvider>);
+/// The tracker identities this machine holds for its own work.
+///
+/// One `Linear` client per credential, opened lazily and kept until the grant it
+/// was opened from is replaced. A task is reported through the identity its
+/// project's route names, so two accounts never share a session.
+pub(crate) struct OwnTrackers {
+    config: Config,
+    opened: Mutex<HashMap<String, Opened>>,
+}
 
-impl TrackerHost for OwnTracker {
-    fn for_operator(&self, _operator: &str) -> Option<Arc<dyn TrackerProvider>> {
-        Some(self.0.clone())
+struct Opened {
+    tracker: Arc<Linear>,
+    signed_in_at: Option<SystemTime>,
+}
+
+impl OwnTrackers {
+    pub(crate) fn new(config: Config) -> Self {
+        Self {
+            config,
+            opened: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl TrackerHost for OwnTrackers {
+    fn for_credential(
+        &self,
+        _operator: &str,
+        credential: &str,
+    ) -> Option<Arc<dyn TrackerProvider>> {
+        if Service::from_id(credential)?.slot() != Slot::Tracker {
+            return None;
+        }
+        if let Ok(opened) = self.opened.try_lock()
+            && let Some(opened) = opened.get(credential)
+            && opened.signed_in_at == opened.tracker.sign_in_changed_at()
+        {
+            return Some(opened.tracker.clone() as Arc<dyn TrackerProvider>);
+        }
+        let directory = self.config.profile_dir(credential);
+        let tracker = Linear::from_directory(&directory).ok()?;
+        if !tracker.is_signed_in() {
+            return None;
+        }
+        let signed_in_at = tracker.sign_in_changed_at();
+        let tracker = Arc::new(tracker);
+        if let Ok(mut opened) = self.opened.try_lock() {
+            opened.insert(
+                credential.to_owned(),
+                Opened {
+                    tracker: Arc::clone(&tracker),
+                    signed_in_at,
+                },
+            );
+        }
+        Some(tracker as Arc<dyn TrackerProvider>)
     }
 }
 
@@ -99,9 +152,14 @@ where
             }
             // A task is reported through the account of the peer that owns it,
             // which is the login that peer pushed here.
+            let credential = task
+                .project()
+                .and_then(|project| project.tracker.as_ref())
+                .and_then(|route| route.credential.as_deref())
+                .unwrap_or("trackers/linear");
             let Some(provider) = task
                 .operator_id()
-                .and_then(|owner| host.for_operator(owner))
+                .and_then(|owner| host.for_credential(owner, credential))
             else {
                 continue;
             };

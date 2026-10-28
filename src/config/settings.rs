@@ -348,6 +348,42 @@ impl Settings {
         Ok(())
     }
 
+    /// The credential ids the projects and defaults in this file name.
+    ///
+    /// This is what a remote is sent: the identities its own projects use, and the
+    /// defaults a project without a binding inherits.
+    pub fn used_credential_ids(&self) -> Vec<String> {
+        let mut used = Vec::new();
+        for id in [
+            self.defaults.agent_credential.as_deref(),
+            self.defaults.vcs_credential.as_deref(),
+            self.defaults.tracker_credential.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            used.push(id.to_owned());
+        }
+        for project in &self.projects {
+            for id in [
+                project.agent_credential.as_deref(),
+                project.vcs_credential.as_deref(),
+                project
+                    .tracker
+                    .as_ref()
+                    .and_then(|route| route.credential.as_deref()),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                used.push(id.to_owned());
+            }
+        }
+        used.sort_unstable();
+        used.dedup();
+        used
+    }
+
     /// The projects this installation works on, oldest first.
     pub fn projects(&self) -> &[Project] {
         &self.projects

@@ -112,17 +112,9 @@ where
 
     let settings = fs::read_to_string(config.settings_path()).map_err(message)?;
     let held = client.held_profiles(peer.clone()).await.map_err(message)?;
-    let profiles: Vec<String> = event_loop
-        .service()
-        .credentials()
-        .profiles()
-        .iter()
-        .map(|p| p.profile.clone())
-        .collect();
     let bundle = ConfigBundle::of(
         &settings,
         config.data_dir(),
-        &profiles,
         &held,
         Some(address),
         super::Logins::Always,

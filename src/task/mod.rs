@@ -31,7 +31,7 @@ mod tools;
 mod tracker;
 pub use state::*;
 pub use store::{TaskDraft, TaskStore};
-pub use tracker::TrackerHost;
+pub(crate) use tracker::{OwnTrackers, TrackerHost};
 
 use progress::EnvironmentProgressRegistry;
 
@@ -243,15 +243,6 @@ where
             .map_err(|error| TaskServiceError::RepositoryListing(error.to_string()))
     }
 
-    pub fn with_tracker(mut self, tracker: Option<Arc<dyn TrackerProvider>>) -> Self {
-        self.issue_reader = tracker
-            .clone()
-            .map(|tracker| tracker as Arc<dyn IssueReader>);
-        self.trackers =
-            tracker.map(|tracker| Arc::new(tracker::OwnTracker(tracker)) as Arc<dyn TrackerHost>);
-        self
-    }
-
     /// Use the tracker each task's own operator pushed, for a machine serving
     /// other peers rather than reporting its own work.
     pub fn with_trackers(mut self, trackers: Arc<dyn TrackerHost>) -> Self {
@@ -265,9 +256,14 @@ where
     }
 
     pub fn tracker(&self) -> Option<Arc<dyn TrackerProvider>> {
+        self.tracker_for("trackers/linear")
+    }
+
+    /// The tracker identity a project route names, or the service default.
+    pub fn tracker_for(&self, credential: &str) -> Option<Arc<dyn TrackerProvider>> {
         self.trackers
             .as_ref()
-            .and_then(|host| host.for_operator(&self.identity.id))
+            .and_then(|host| host.for_credential(&self.identity.id, credential))
     }
 
     /// The one place Altitude's subsystems are bound into an agent's tool set.

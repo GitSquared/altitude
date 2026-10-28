@@ -15,7 +15,7 @@ use crate::{
     db::Database,
     isolation::MicrosandboxIsolation,
     remote::{InstallationKey, LinkClient, RemoteKeys},
-    task::{TaskEventLoop, TaskService, TaskStore},
+    task::{TaskEventLoop, TaskService, TaskStore, TrackerHost},
 };
 
 mod agent;
@@ -131,15 +131,10 @@ async fn client() -> Result<(), Box<dyn Error>> {
         else {
             return Ok(());
         };
-        let tracker = match tracker::Linear::from_directory(
-            &config.profile_dir(tracker::TrackerKind::Linear.profile()),
-        ) {
-            Ok(connection) => Some(Arc::new(connection) as Arc<dyn tracker::TrackerProvider>),
-            Err(error) => {
-                tracing::warn!(%error, "Linear setup needs attention");
-                None
-            }
-        };
+        let trackers = Arc::new(task::OwnTrackers::new(config.clone()));
+        let issue_reader = trackers
+            .for_credential(&identity.id, "trackers/linear")
+            .map(|tracker| tracker as Arc<dyn tracker::IssueReader>);
         let tasks = TaskService::new(
             TaskStore::new(&database),
             isolation,
@@ -147,7 +142,8 @@ async fn client() -> Result<(), Box<dyn Error>> {
             AgentEngines::new(),
             identity,
         )
-        .with_tracker(tracker);
+        .with_trackers(trackers)
+        .with_issue_reader(issue_reader);
         let Some(recovered) = tui::boot_task_resume(
             &mut terminal,
             &mut terminate,

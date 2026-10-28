@@ -1482,7 +1482,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
 /// which replaces the login the open one was made from.
 struct PushedTrackers {
     config: Config,
-    opened: Mutex<HashMap<String, Opened>>,
+    opened: Mutex<HashMap<(String, String), Opened>>,
 }
 
 struct Opened {
@@ -1500,8 +1500,9 @@ impl PushedTrackers {
 }
 
 impl TrackerHost for PushedTrackers {
-    fn for_operator(&self, operator: &str) -> Option<Arc<dyn TrackerProvider>> {
-        if let Some(opened) = self.opened.lock().ok()?.get(operator)
+    fn for_credential(&self, operator: &str, credential: &str) -> Option<Arc<dyn TrackerProvider>> {
+        let key = (operator.to_owned(), credential.to_owned());
+        if let Some(opened) = self.opened.lock().ok()?.get(&key)
             && opened.signed_in_at == opened.tracker.sign_in_changed_at()
         {
             return Some(opened.tracker.clone() as Arc<dyn TrackerProvider>);
@@ -1510,7 +1511,7 @@ impl TrackerHost for PushedTrackers {
             .config
             .for_operator(operator)
             .ok()?
-            .profile_dir(TrackerKind::Linear.profile());
+            .profile_dir(credential);
         let tracker = Linear::from_directory(&directory).ok()?;
         // A peer that pushed a tracker profile without signing in has nothing to
         // report through, and is not an error worth warning about every pass.
@@ -1520,7 +1521,7 @@ impl TrackerHost for PushedTrackers {
         let signed_in_at = tracker.sign_in_changed_at();
         let tracker = Arc::new(tracker);
         self.opened.lock().ok()?.insert(
-            operator.to_owned(),
+            key,
             Opened {
                 tracker: Arc::clone(&tracker),
                 signed_in_at,

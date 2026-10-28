@@ -40,7 +40,10 @@ use super::{
     },
 };
 
-use crate::tracker::{ACCOUNT_FILE, TrackerAccount, TrackerKind};
+use crate::{
+    credentials::Service,
+    tracker::{ACCOUNT_FILE, TrackerAccount, TrackerKind},
+};
 
 /// What a pushed configuration did with the tracker account it carries.
 enum ConfigWrite {
@@ -84,11 +87,11 @@ fn arriving_accounts(decoded: &[(PathBuf, Vec<u8>)]) -> Vec<(TrackerKind, Option
 /// A pushed file is a login, and only one a task mounts here is one. A tracker
 /// profile is the exception: it travels so a remote can route tracker work, and
 /// is never mounted.
-fn is_allowed_profile(mounted: &[String], profile: &str) -> bool {
-    mounted.iter().any(|known| known == profile)
-        || TrackerKind::ALL
-            .iter()
-            .any(|kind| kind.profile() == profile)
+fn is_allowed_profile(_mounted: &[String], profile: &str) -> bool {
+    // A pushed profile is a credential id, and the id says which service it
+    // belongs to. The path checks below keep it confined; this keeps it a
+    // service this build knows.
+    Service::from_id(profile).is_some()
 }
 
 // ------------------------------------------------------------- the server side

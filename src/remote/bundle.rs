@@ -8,7 +8,6 @@ use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Settings;
-use crate::tracker::TrackerKind;
 
 /// Everything a remote needs to be this client, as far as running a task goes.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -128,7 +127,6 @@ impl ConfigBundle {
     pub fn of(
         settings: &str,
         data_dir: &Path,
-        mounted: &[String],
         held: &[ProfileDigest],
         host: Option<&str>,
         logins: Logins,
@@ -147,10 +145,9 @@ impl ConfigBundle {
             Logins::WithWork => holds_work,
         };
         let profiles = if profiles {
-            mounted
+            parsed
+                .used_credential_ids()
                 .iter()
-                .map(String::as_str)
-                .chain(TrackerKind::ALL.iter().map(|kind| kind.profile()))
                 .map(|profile| ProfileBundle::of(data_dir, profile))
                 .collect::<io::Result<Vec<_>>>()?
         } else {
