@@ -17,9 +17,8 @@ use uuid::Uuid;
 
 use super::{
     Task, TaskAgentRun, TaskAgentRunOutcome, TaskDraft, TaskError, TaskExecutionMode,
-    TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent, TaskOperatorSignalAuthor,
-    TaskService, TaskServiceError, failure_events, run_ended, should_resume, should_suspend,
-    snapshot_name,
+    TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent, TaskService, TaskServiceError,
+    failure_events, run_ended, should_resume, should_suspend, snapshot_name,
 };
 
 impl<E> TaskService<E>
@@ -545,11 +544,12 @@ where
         self.record(&task.id, &events).await
     }
 
-    /// The events a failed attempt records: why it stopped, and an end to every
-    /// thread that was waiting on it.
+    /// The events a failed attempt records: why it stopped, and the blocked
+    /// thread that says so.
     ///
-    /// A stopped run ends the conversations it was part of. The failure itself
-    /// is the blocked thread raised beside them.
+    /// Existing conversations are left alone. A failure is news about this run,
+    /// not a reason to resolve questions the operator may still be reading or
+    /// answering in another thread.
     async fn stopped_events(
         &self,
         task: &Task,
@@ -560,19 +560,6 @@ where
             .next_signal_id(&task.id)
             .await
             .map_err(TaskServiceError::Task)?;
-        let mut events: Vec<TaskHistoryEvent> = failure_events(task, error, signal_id).into();
-        for thread in self
-            .store
-            .unresolved_signal_threads(&task.id)
-            .await
-            .map_err(TaskServiceError::Task)?
-        {
-            events.push(TaskHistoryEvent::OperatorSignalResolved {
-                signal_id: thread.id,
-                resolved: true,
-                by: TaskOperatorSignalAuthor::Agent,
-            });
-        }
-        Ok(events)
+        Ok(failure_events(task, error, signal_id).into())
     }
 }
