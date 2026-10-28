@@ -11,6 +11,8 @@ use std::{
 use ratatui::text::{Line, Span};
 
 use crate::{
+    agent::AgentKind,
+    credentials::Service,
     project::Project,
     remote::{RemoteKey, TrackerConnection, TrackerReadiness},
     tracker::{TrackerKind, setup::Item},
@@ -29,6 +31,23 @@ use super::rows::{Credential, CredentialKind, GitIdentity, View, mark};
 /// be read in the order it means them.
 pub(super) fn section_heading(text: &str) -> Line<'static> {
     Line::styled(text.to_owned(), palette::primary().bold())
+}
+
+/// The projects a credential is effectively bound to, named in the one colour
+/// the panel uses for a value that belongs to the operator.
+pub(super) fn used_by_lines(projects: &[String]) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(""), section_heading("Used by")];
+    if projects.is_empty() {
+        lines.push(Line::styled("No projects", palette::muted()));
+    } else {
+        lines.extend(projects.iter().map(|project| {
+            Line::from(vec![
+                Span::styled("• ", palette::muted()),
+                Span::styled(project.clone(), palette::accent()),
+            ])
+        }));
+    }
+    lines
 }
 
 fn field(label: &str, value: String) -> Line<'static> {
@@ -58,6 +77,9 @@ pub(super) struct Connector {
     /// The one next step, when there is one.
     action: Option<&'static str>,
     purpose: &'static str,
+    /// Projects whose effective binding is this identity, when it is one. A
+    /// remote or an installation has no projects of its own.
+    used_by: Option<Vec<String>>,
     fields: Vec<(&'static str, String)>,
 }
 
@@ -83,6 +105,9 @@ impl Connector {
         }
         lines.push(Line::from(""));
         lines.push(Line::from(self.purpose));
+        if let Some(projects) = self.used_by {
+            lines.extend(used_by_lines(&projects));
+        }
         if !self.fields.is_empty() {
             lines.push(Line::from(""));
             lines.extend(
@@ -395,13 +420,14 @@ pub(super) fn profile_connector(
         )
         .then_some("Press enter to sign in."),
         purpose,
+        used_by: None,
         fields: vec![("saved at", tilde(directory))],
     }
 }
 
 /// This installation's key, or a profile's login, as the page reads it.
 pub(super) fn credential_connector(credential: &Credential) -> Connector {
-    match &credential.kind {
+    let mut connector = match &credential.kind {
         CredentialKind::Installation {
             hostname,
             label,
@@ -417,6 +443,7 @@ pub(super) fn credential_connector(credential: &Credential) -> Connector {
             action: Some("Press enter to learn more about altitude remotes."),
             purpose: "How a remote recognises this installation. It travels with \
                       every task you delegate, and a remote you have used remembers it.",
+            used_by: None,
             fields: vec![
                 ("name", label.clone()),
                 ("identity", short_key(key)),
@@ -444,7 +471,11 @@ pub(super) fn credential_connector(credential: &Credential) -> Connector {
             directory,
             status,
         ),
+    };
+    if credential.profile().is_some() {
+        connector.used_by = Some(credential.used_by.clone());
     }
+    connector
 }
 
 /// The git identity and signing a task commits with.
@@ -465,6 +496,7 @@ pub(super) fn git_connector(identity: &GitIdentity) -> Connector {
         action: Some("Press enter to configure Git."),
         purpose: "The name, email, and signing key your tasks commit under, read from the \
                   version-control profile's git config.",
+        used_by: Some(identity.used_by.clone()),
         fields: vec![
             (
                 "name",
@@ -511,6 +543,7 @@ pub(super) fn tracker_connector(state: TrackerState, profile_dir: &Path) -> Conn
         note,
         action,
         purpose: "A task tracking and product management tool. Altitude reads your issues and updates their status as it works on them.",
+        used_by: None,
         fields: vec![("profile", tilde(&profile_dir.display().to_string()))],
     }
 }
@@ -577,6 +610,7 @@ pub(super) fn remote_connector(
         action,
         purpose: "A machine that keeps running your tasks after you close Altitude, so work \
                   carries on while you are away. Yours alone, or shared with a team.",
+        used_by: None,
         fields,
     }
 }
@@ -642,10 +676,12 @@ pub(super) fn tracker_summary(
 /// What a profile is for, in one line, so a page opens by saying what the
 /// operator is looking at.
 fn profile_purpose(profile: &str) -> &'static str {
-    match profile {
-        "vcs/github" => "The GitHub CLI login your tasks clone, push, and read pull requests with.",
-        "agents/pi" => "Pi uses your provider account to run tasks.",
-        "agents/claude" => "Claude Code uses your account to run tasks.",
+    match Service::from_id(profile) {
+        Some(Service::VersionControl(_)) => {
+            "The GitHub CLI login your tasks clone, push, and read pull requests with."
+        }
+        Some(Service::Agent(AgentKind::Pi)) => "Pi uses your provider account to run tasks.",
+        Some(Service::Agent(AgentKind::Claude)) => "Claude Code uses your account to run tasks.",
         _ => "A login a task is given.",
     }
 }
@@ -653,9 +689,9 @@ fn profile_purpose(profile: &str) -> &'static str {
 /// A public name a check printed, when it printed one in a shape the profile's
 /// CLI is known to use. Anything else yields nothing rather than a guess:
 /// signed in without a name is still true.
-fn public_identity(profile: &str, output: &str) -> Option<String> {
-    match profile {
-        "vcs/github" => github_account(output),
+pub(super) fn public_identity(profile: &str, output: &str) -> Option<String> {
+    match Service::from_id(profile)? {
+        Service::VersionControl(_) => github_account(output),
         _ => None,
     }
 }

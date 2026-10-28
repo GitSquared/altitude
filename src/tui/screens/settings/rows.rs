@@ -211,6 +211,8 @@ pub struct ProjectDefaults {
 pub struct Credential {
     pub label: String,
     pub kind: CredentialKind,
+    /// The projects whose effective binding is this credential.
+    pub used_by: Vec<String>,
 }
 
 impl Credential {
@@ -296,6 +298,8 @@ pub struct GitIdentity {
     pub email: Option<String>,
     pub signing_key: Option<String>,
     pub signs_commits: bool,
+    /// The projects that commit under this installation-level identity.
+    pub used_by: Vec<String>,
 }
 
 impl GitIdentity {

@@ -4,11 +4,14 @@
 
 use crate::{
     credentials::{Credential as NamedCredential, Service, Slot},
-    tui::{App, app::RemoteStatus},
+    tui::{
+        App,
+        app::{CredentialStatus, RemoteStatus},
+    },
 };
 
 use super::{
-    pages::hostname,
+    pages::{hostname, public_identity},
     panel::{Section, Setting},
     rows::{Credential, CredentialKind, ProjectDefaults, Row, RowKind, View, switch_row},
 };
@@ -112,17 +115,21 @@ impl App {
     fn identity_rows(&self, section: Section) -> Vec<Row> {
         let mut rows = Vec::new();
         if section == Section::VersionControl {
+            let mut identity = self.git_identity();
+            identity.used_by = if identity.is_set() {
+                self.projects_using_default_commits()
+            } else {
+                Vec::new()
+            };
+            let detail = match (&identity.name, &identity.email) {
+                (Some(name), _) => name.clone(),
+                (None, Some(email)) => email.clone(),
+                (None, None) => "not set".to_owned(),
+            };
             rows.push(Row {
                 label: "Git identity".to_owned(),
-                detail: Some(
-                    if self.git_identity().is_set() {
-                        "set · used for commits"
-                    } else {
-                        "not set"
-                    }
-                    .to_owned(),
-                ),
-                kind: RowKind::GitIdentity(self.git_identity()),
+                detail: Some(detail),
+                kind: RowKind::GitIdentity(identity),
             });
         }
         rows.extend(
@@ -164,16 +171,27 @@ impl App {
                 status.summary().to_owned(),
             )
         };
-        let projects = self.projects_bound_to(&id, service.slot());
-        let binding = if projects.is_empty() {
-            "no projects".to_owned()
-        } else {
-            format!("used by {}", projects.join(", "))
+        let used_by = self.projects_bound_to(&id, service.slot());
+        let account = match &kind {
+            CredentialKind::Profile {
+                status:
+                    CredentialStatus::Checked {
+                        signed_in: true,
+                        output,
+                    },
+                ..
+            } => public_identity(&id, output),
+            _ => None,
         };
+        let detail = account.unwrap_or(status);
         Row {
             label: label.clone(),
-            detail: Some(format!("{binding} · {status}")),
-            kind: RowKind::Credential(Credential { label, kind }),
+            detail: Some(detail),
+            kind: RowKind::Credential(Credential {
+                label,
+                kind,
+                used_by,
+            }),
         }
     }
 
@@ -195,7 +213,22 @@ impl App {
                     .unwrap_or_else(|error| format!("unreadable: {error}")),
                 data_dir: self.config.data_dir().display().to_string(),
             },
+            used_by: Vec::new(),
         }
+    }
+
+    /// The projects that leave commits to the installation-level identity.
+    fn projects_using_default_commits(&self) -> Vec<String> {
+        self.projects()
+            .into_iter()
+            .filter_map(|project| {
+                project
+                    .commits
+                    .is_none()
+                    .then_some(project.name)
+                    .filter(|name| !name.trim().is_empty())
+            })
+            .collect()
     }
 
     /// The addresses the settings file configures.
