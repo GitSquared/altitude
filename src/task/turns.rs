@@ -17,9 +17,6 @@ use super::{
     snapshot_name, store::ReviewRequest,
 };
 
-/// What the host says when a wrap-up request arrives with no pull request linked.
-const NO_PULL_REQUEST_LINKED: &str = "No pull request is linked to this task, so Altitude watched none. If there is one, send the task back and ask the agent to link it.";
-
 impl<E> TaskService<E>
 where
     E: IsolationEngine + Clone,
@@ -82,13 +79,13 @@ where
         // agent is next. The links are already in the store, so a restart resumes
         // watching every pull request the task linked.
         //
-        // One with no pull request linked goes out at once, saying so: the host
-        // watches linked pull requests, and an agent that forgot to link one must
-        // not read as a task that has none.
+        // One with no pull request linked goes out at once. The review is the
+        // agent's account of the work; what Altitude could not watch is Altitude's
+        // business, not the operator's.
         let review = match report.operator_signal.as_ref() {
             Some(signal) if signal.kind == TaskOperatorSignalKind::InReview => {
                 if task.code_contributions.is_empty() {
-                    ReviewRequest::RaiseWithNote(NO_PULL_REQUEST_LINKED)
+                    ReviewRequest::Raise
                 } else {
                     ReviewRequest::Hold(signal)
                 }

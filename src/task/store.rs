@@ -67,15 +67,11 @@ pub struct TaskStore {
 
 /// What the host does with the wrap-up request a report asks for.
 ///
-/// The three cases are the only three: the request goes out in the agent's
-/// words, goes out with something the host knows about it appended, or waits
-/// for the linked contributions to answer.
+/// The request either goes out in the agent's words or waits for the linked
+/// contributions to answer.
 pub(crate) enum ReviewRequest<'a> {
     /// Raise what the report asks for, as the agent wrote it.
     Raise,
-    /// Raise it with a note the host adds, for something the agent could not
-    /// know about the request.
-    RaiseWithNote(&'a str),
     /// Hold it until the linked contributions answer.
     Hold(&'a TaskOperatorSignalDraft),
 }
@@ -453,15 +449,12 @@ impl TaskStore {
             None if report.operator_signal.is_some() => Some(self.next_signal_id(task_id).await?),
             None => None,
         };
-        let signal = |draft: &TaskOperatorSignalDraft, note: Option<&str>| TaskOperatorSignal {
+        let signal = |draft: &TaskOperatorSignalDraft| TaskOperatorSignal {
             id: raised_id.clone().unwrap_or_default(),
             task_id: task_id.to_owned(),
             kind: draft.kind,
             title: draft.title.clone(),
-            body: match note {
-                Some(note) => format!("{}\n\n{note}", draft.body),
-                None => draft.body.clone(),
-            },
+            body: draft.body.clone(),
             raised_at_ms: now_ms(),
         };
         match review {
@@ -469,21 +462,14 @@ impl TaskStore {
             // the linked contributions can answer. Either way it is recorded
             // here, so the agent's request is never lost to a restart.
             ReviewRequest::Hold(draft) => events.push(TaskHistoryEvent::ReviewDeferred {
-                signal: signal(draft, None),
+                signal: signal(draft),
                 agent_run_id: agent_run.id.clone(),
             }),
             ReviewRequest::Raise => events.extend(report.operator_signal.iter().map(|draft| {
                 TaskHistoryEvent::OperatorSignalRaised {
-                    signal: signal(draft, None),
+                    signal: signal(draft),
                 }
             })),
-            ReviewRequest::RaiseWithNote(note) => {
-                events.extend(report.operator_signal.iter().map(|draft| {
-                    TaskHistoryEvent::OperatorSignalRaised {
-                        signal: signal(draft, Some(note)),
-                    }
-                }))
-            }
         }
         // A report that asks for nothing resolves the thread it was continuing:
         // the agent has what it needed and moved on.
