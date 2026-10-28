@@ -48,6 +48,9 @@ use crate::{
 const LIST_WIDTH: u16 = 40;
 /// The plan column is narrower than the conversation, by design.
 const PLAN_WIDTH: u16 = 32;
+/// The gutter between the plan's text and its border, so the column reads like
+/// the signals list rather than sitting on the divider.
+const PLAN_PADDING: u16 = 1;
 /// Below this the plan moves into the conversation pane as a tab.
 const PLAN_COLUMN_MIN: u16 = 112;
 /// The gutter between the list's rows and the frame, so the rows do not sit on
@@ -296,14 +299,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         draw_conversation(frame, conversation, app);
         // The divider at the plan's left edge is its border, so the clear
         // starts after it rather than erasing it.
-        frame.render_widget(
-            Clear,
-            Rect {
-                x: plan.x.saturating_add(1),
-                width: plan.width.saturating_sub(1),
-                ..plan
-            },
-        );
+        frame.render_widget(Clear, inset(plan, PLAN_PADDING));
         draw_plan(frame, plan, app);
     } else {
         let [tabs, _, pane] = Layout::vertical([
@@ -339,14 +335,19 @@ fn draw_plan_tabs(frame: &mut Frame, area: Rect, app: &App) {
     tabs::draw(frame, area, &tabs, selected);
 }
 
+/// Inset an area by `columns` on both sides.
+fn inset(area: Rect, columns: u16) -> Rect {
+    Rect {
+        x: area.x.saturating_add(columns),
+        width: area.width.saturating_sub(columns * 2),
+        ..area
+    }
+}
+
 /// The agent's plan, beside the conversation or in a narrow screen's tab.
 fn draw_plan(frame: &mut Frame, area: Rect, app: &App) {
-    let padded = Rect {
-        x: area.x.saturating_add(1),
-        width: area.width.saturating_sub(2),
-        ..area
-    };
-    let [title, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(padded);
+    let [title, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)])
+        .areas(inset(area, PLAN_PADDING));
     let plan = app.signal_plan();
     let done = plan
         .iter()
