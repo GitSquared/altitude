@@ -400,7 +400,7 @@ impl RemoteTracker {
                 &route.session_id,
                 &stable_id(&route.task_id, "stopped"),
                 AgentActivityContent::Response {
-                    body: "Stopped by the operator. The task's capsule was disposed.".to_owned(),
+                    body: "Stopped. Altitude ended this task and deleted its sandbox.".to_owned(),
                 },
             )
             .await
@@ -478,7 +478,7 @@ impl RemoteTracker {
                             &event.session_id,
                             &stable_id(&event.session_id, "routed"),
                             AgentActivityContent::Response {
-                                body: "This mention was routed to the task's existing Altitude session."
+                                body: "Added to the task already running for this issue."
                                     .to_owned(),
                             },
                         )
@@ -531,7 +531,7 @@ impl RemoteTracker {
         let redelegation = if let Some(existing) = self.route_for_issue(issue_id) {
             host.stop(existing.task_id.clone()).await?;
             self.config.automation.create_activity(&existing.session_id, &stable_id(&existing.task_id, "redelegated"), AgentActivityContent::Response {
-                body: "This delegation was replaced. Altitude stopped the previous task and disposed of its capsule.".into(),
+                body: "A newer delegation replaced this one, so Altitude stopped this task and deleted its sandbox.".into(),
             }).await.map_err(|error| error.to_string())?;
             self.retire_route(&existing)?;
             true
@@ -555,7 +555,7 @@ impl RemoteTracker {
                 session_id,
                 &stable_id(session_id, "starting"),
                 AgentActivityContent::Thought {
-                    body: format!("Starting work on this issue for {label}."),
+                    body: format!("Altitude is setting up this task for {label}."),
                 },
             )
             .await
@@ -599,9 +599,7 @@ impl RemoteTracker {
                     session_id,
                     &stable_id(&task_id, "redelegated"),
                     AgentActivityContent::Thought {
-                        body: format!(
-                            "Redelegated: this work now runs for operator {author} on remote {peer}."
-                        ),
+                        body: format!("Redelegated: this task now runs for {label}."),
                     },
                 )
                 .await
@@ -874,17 +872,10 @@ impl RemoteTracker {
 
     async fn boundary_reply(&self, operator_id: &str) -> String {
         let operator = self.operator_mention(operator_id).await;
-        if operator.starts_with("https://") {
-            format!(
-                "I can only take direction from {operator} on this task. Could you \
-                 confirm what you'd like me to do?"
-            )
-        } else {
-            format!(
-                "I can only take direction from {operator} on this task. I've flagged \
-                 this for them."
-            )
-        }
+        format!(
+            "This task belongs to {operator}, so Altitude only takes direction from them here. \
+             Ask them to reply if you want it changed."
+        )
     }
 
     /// `altitude / operator@host / harness`, the session's public title.
@@ -922,7 +913,7 @@ impl RemoteTracker {
             Ok(url) if !url.is_empty() => url,
             Ok(_) | Err(_) => {
                 tracing::warn!(user = user_id, "could not read the operator's profile URL");
-                "the task's operator".to_owned()
+                "the person who delegated it".to_owned()
             }
         }
     }
@@ -1006,7 +997,7 @@ impl RemoteTracker {
                 &route.session_id,
                 &stable_id(&route.task_id, "unhooked"),
                 AgentActivityContent::Response {
-                    body: "This issue is no longer delegated to Altitude; the task was stopped."
+                    body: "This issue isn't delegated to Altitude anymore, so the task was                            stopped."
                         .to_owned(),
                 },
             )
@@ -1083,9 +1074,7 @@ impl RemoteTracker {
                                 &route.session_id,
                                 &stable_id(&route.task_id, agent_run_id),
                                 AgentActivityContent::Thought {
-                                    body:
-                                        "Your reply was received. Altitude is continuing the work."
-                                            .into(),
+                                    body: "Got your reply. Altitude is continuing the task.".into(),
                                 },
                             )
                             .await
@@ -1170,7 +1159,7 @@ impl RemoteTracker {
                 &route.session_id,
                 &stable_id(&route.task_id, "transferred"),
                 AgentActivityContent::Response {
-                    body: "This work moved to another machine and continues there.".to_owned(),
+                    body: "This task moved to another remote and keeps running there.".to_owned(),
                 },
             )
             .await
@@ -1217,7 +1206,8 @@ impl RemoteTracker {
             TaskOperatorSignalKind::Blocked => {
                 let operator = self.operator_mention(&route.tracker_user_id).await;
                 let body = format!(
-                    "**? Needs you:** {}\n\n{}\n\n{operator}\n\nReply here to unblock the task.",
+                    "**? Needs you:** {}\n\n{}\n\n{operator}\n\nReply here and Altitude will \
+                     continue the task.",
                     title.trim(),
                     body.trim()
                 );
@@ -1242,7 +1232,7 @@ impl RemoteTracker {
                     format!("**◆ Ready to review:** {}\n\n{}", title.trim(), body.trim());
                 append_contributions(&mut body, contributions);
                 body.push_str(&format!(
-                    "\n\n{operator}\n\nReply here to accept, or send it back with changes."
+                    "\n\n{operator}\n\nReply here to accept, or describe the changes you want."
                 ));
                 self.config
                     .automation
@@ -1332,12 +1322,15 @@ impl RemoteTracker {
         let tracker = TrackerKind::Linear.label();
         let host = whoami::hostname().unwrap_or_else(|_| "this remote".to_owned());
         let body = format!(
-            "Altitude runs this issue as coding work and reports progress back here. No machine \
-             is synced to it yet. Make sure:\n\n\
-             1. You have Altitude set up, or download it.\n\
-             2. You have {tracker} connected in Altitude.\n\
-             3. You have synced to the remote running at {host}.\n\n\
-             Reply here once you have synced to try again."
+            "**This remote isn't set up for delegated work yet.**\n\n\
+             No one has added this remote to a project in Altitude, so it has no code, no \
+             agent, and no settings to run this issue with.\n\n\
+             On your computer:\n\n\
+             1. Open Altitude, or install it if you don't have it.\n\
+             2. In Settings → Remotes, add this remote: {host}\n\
+             3. Connect your {tracker} account, so Altitude knows whose work this is.\n\
+             4. Sync the remote.\n\n\
+             Reply here once you've synced, and Altitude will pick this issue up."
         );
         self.config
             .automation
@@ -1358,8 +1351,8 @@ impl RemoteTracker {
         refusal: &super::StartRefusal,
     ) -> Result<(), String> {
         let body = format!(
-            "Altitude did not start this work.\n\n{refusal}\n\n\
-             Reply here to try again once it is resolved."
+            "**Nothing was started.**\n\n{refusal}\n\n\
+             Reply here once that's sorted, and Altitude will try again."
         );
         self.config
             .automation
@@ -2353,7 +2346,7 @@ fn append_contributions(body: &mut String, contributions: &[String]) {
     if contributions.is_empty() {
         return;
     }
-    body.push_str("\n\nWork submitted:\n");
+    body.push_str("\n\nWhat was submitted:\n");
     for url in contributions {
         body.push_str("- ");
         body.push_str(url);
