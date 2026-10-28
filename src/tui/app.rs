@@ -1239,6 +1239,15 @@ impl App {
             .is_none_or(|file| file.settings().interface().animations)
     }
 
+    /// Whether the drifting field is drawn and advanced.
+    ///
+    /// A terminal repaints whenever its program writes, so moving the field
+    /// under those frames spends the output on the backdrop. It is left out of
+    /// the frame behind a terminal instead.
+    pub(in crate::tui) fn backdrop_animates(&self) -> bool {
+        self.animations() && self.open_shell().is_none()
+    }
+
     /// The frame counter that drives animated drawing, absent while animations
     /// are off. What is animated reads this rather than the counter itself, so
     /// there is one place that decides whether anything moves at all.

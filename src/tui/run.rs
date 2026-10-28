@@ -464,7 +464,7 @@ where
             if screen {
                 frame.render_widget(Clear, content);
             }
-            if app.animations() {
+            if app.backdrop_animates() {
                 app.terrain.mark(frame.buffer_mut(), content);
             }
             if !screen {
@@ -617,7 +617,7 @@ where
             // Paint the field into whatever every screen and modal left open.
             // Nothing has to tell it where those cells are: a widget that means to
             // be opaque writes them, and one that means to show the field does not.
-            if app.animations() {
+            if app.backdrop_animates() {
                 app.terrain.draw(frame.buffer_mut(), content);
             }
             // Keep the modal's last frame, ready to draw once more when it
@@ -763,7 +763,7 @@ where
                 app.expire_signal_linger();
                 redraw = true;
             }
-            _ = backdrop.tick(), if app.animations() && app.open_shell().is_none() => {
+            _ = backdrop.tick(), if app.backdrop_animates() => {
                 app.terrain.advance();
                 backdrop_moved = true;
             }
