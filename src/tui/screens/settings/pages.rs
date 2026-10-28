@@ -12,6 +12,7 @@ use ratatui::text::{Line, Span};
 
 use crate::{
     agent::AgentKind,
+    credentials::Credential as NamedCredential,
     isolation::EnvironmentDescription,
     project::Project,
     remote::{RemoteKey, TrackerConnection, TrackerReadiness},
@@ -211,6 +212,7 @@ pub(in crate::tui) fn remote_tracker_setup_lines(kind: TrackerKind) -> Vec<Line<
 pub(super) fn project_lines(
     project: &Project,
     base: Option<&EnvironmentDescription>,
+    credentials: &[NamedCredential],
     heading: impl Fn(String) -> Line<'static>,
 ) -> Vec<Line<'static>> {
     let mut lines = vec![heading(project.name.clone()), Line::from("")];
@@ -247,15 +249,46 @@ pub(super) fn project_lines(
             palette::accent(),
         ),
     ]));
+    let label = |id: Option<&str>, fallback: &str| {
+        id.and_then(|id| {
+            credentials
+                .iter()
+                .find(|credential| credential.id == id)
+                .map(|credential| credential.label.clone())
+        })
+        .unwrap_or_else(|| fallback.to_owned())
+    };
     lines.push(Line::from(vec![
         Span::styled("coding agent  ", palette::muted()),
         Span::styled(
-            project
-                .agent
-                .map_or_else(|| "the default".to_owned(), |agent| agent.to_string()),
+            label(
+                project.agent_credential.as_deref(),
+                &project
+                    .agent
+                    .map_or_else(|| "the default".to_owned(), |agent| agent.to_string()),
+            ),
             palette::accent(),
         ),
     ]));
+    lines.push(Line::from(vec![
+        Span::styled("version ctrl  ", palette::muted()),
+        Span::styled(
+            label(
+                project.vcs_credential.as_deref(),
+                "the installation's login",
+            ),
+            palette::accent(),
+        ),
+    ]));
+    if let Some(route) = &project.tracker {
+        lines.push(Line::from(vec![
+            Span::styled("task tracker  ", palette::muted()),
+            Span::styled(
+                label(route.credential.as_deref(), "the default"),
+                palette::accent(),
+            ),
+        ]));
+    }
     lines.push(Line::from(vec![
         Span::styled("commits     ", palette::muted()),
         Span::styled(
@@ -311,7 +344,12 @@ pub(super) fn project_lines(
     match &project.tracker {
         Some(route) => {
             let kind = TrackerKind::sole();
-            let mut spans = vec![Span::styled(kind.label(), palette::accent())];
+            let mut spans = vec![Span::styled(
+                label(route.credential.as_deref(), "the default tracker"),
+                palette::accent(),
+            )];
+            spans.push(Span::raw(" · "));
+            spans.push(Span::styled(kind.label(), palette::accent()));
             match &route.scope {
                 Some(scope) => {
                     spans.push(Span::raw(format!(" · {} ", kind.scope_noun())));

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use crate::{
     agent::AgentKind,
+    credentials::Credential as NamedCredential,
     isolation::EnvironmentDescription,
     project::Project,
     remote::{DiscoveredRemote, RemoteKey, TrackerConnection},
@@ -221,6 +222,8 @@ impl Row {
 /// remembered keys, and what the built base image is made of.
 pub struct View {
     pub rows: Vec<Row>,
+    /// The named identities the pages can label a project's bindings with.
+    pub credentials: Vec<NamedCredential>,
     /// What the base image is made of, once it has been built here.
     pub base: Option<EnvironmentDescription>,
     /// Where Linear keeps its sign-in profile, for the Trackers page.

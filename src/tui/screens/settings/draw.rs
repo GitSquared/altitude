@@ -193,7 +193,9 @@ fn detail(panel: &Panel, view: &View, tick: Option<usize>) -> Paragraph<'static>
     };
     let label = row.label.clone();
     let lines = match &row.kind {
-        RowKind::Project { project } => project_lines(project, view.base.as_ref(), heading),
+        RowKind::Project { project } => {
+            project_lines(project, view.base.as_ref(), &view.credentials, heading)
+        }
         RowKind::Agent { kind, credential } => match &credential.kind {
             CredentialKind::Profile {
                 profile,

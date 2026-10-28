@@ -164,6 +164,7 @@ impl App {
         };
         View {
             rows,
+            credentials: self.settings_credentials(),
             base: self.base_description.clone(),
             tracker_profile_dir: self.tracker_profile_dir(),
         }
