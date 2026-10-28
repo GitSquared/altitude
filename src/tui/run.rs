@@ -706,6 +706,7 @@ where
                     app.ask_setup_check(&task_service, &credential_reports);
                     changed = true;
                 }
+                changed |= app.prefetch_setup_repositories(&task_service, &repository_lists);
                 redraw |= changed;
             }
             Some(reply) = repositories_listed.recv() => {

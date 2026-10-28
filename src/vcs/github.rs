@@ -67,8 +67,10 @@ impl VcsProvider for GitHub {
     fn repository_list_command(&self) -> String {
         // One request for the set, with the fields a picker reads. `pushedAt` is
         // asked for only to order the list: the repository an operator means is
-        // almost always one they touched recently.
-        "gh repo list --limit 200 --json nameWithOwner,url,isPrivate,pushedAt".to_owned()
+        // almost always one they touched recently. NO_COLOR keeps gh from
+        // colouring the JSON, which it does whenever the command has a terminal
+        // (these commands run under one) and which would make it unreadable here.
+        "NO_COLOR=1 gh repo list --limit 200 --json nameWithOwner,url,isPrivate,pushedAt".to_owned()
     }
 
     fn repositories(&self, output: &str) -> Option<Vec<Repository>> {
@@ -78,10 +80,17 @@ impl VcsProvider for GitHub {
             name_with_owner: String,
             url: String,
             is_private: bool,
+            // An empty repository has never been pushed to, so it has no date.
             #[serde(default)]
-            pushed_at: String,
+            pushed_at: Option<String>,
         }
-        let mut rows: Vec<Row> = serde_json::from_str(output).ok()?;
+        let mut rows: Vec<Row> = match serde_json::from_str(output) {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(%error, "could not read the repository list");
+                return None;
+            }
+        };
         // ISO-8601 timestamps order as text, and the provider's own order is not
         // promised.
         rows.sort_by(|a, b| b.pushed_at.cmp(&a.pushed_at));
@@ -147,7 +156,9 @@ impl VcsProvider for GitHub {
             ));
         }
         query.push('}');
-        format!("gh api graphql -f query={}", shell_quote(&query))
+        // NO_COLOR for the same reason as the repository list: a terminal makes
+        // gh colour its JSON, and the reply is read as JSON.
+        format!("NO_COLOR=1 gh api graphql -f query={}", shell_quote(&query))
     }
 
     fn contribution_observations(

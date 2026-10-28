@@ -697,6 +697,9 @@ pub struct App {
     /// Whether a listing is on its way, so the card can say it is being asked
     /// for rather than sit still.
     repositories_listing: bool,
+    /// Whether this session has already asked for a listing, so a card that is
+    /// waiting for one does not ask again on every clock tick.
+    repositories_requested: bool,
     /// The profile a sign-in from the first screen was for, so it comes back
     /// there instead of to Settings and asks about that login again.
     setup_sign_in: Option<&'static str>,
@@ -840,6 +843,7 @@ impl App {
             base_description: None,
             repositories: None,
             repositories_listing: false,
+            repositories_requested: false,
             setup_sign_in: None,
             profiles: Vec::new(),
             tracker_state: TrackerState::NotConnected,
@@ -3455,6 +3459,7 @@ impl App {
         E: IsolationEngine + Clone + 'static,
     {
         self.repositories_listing = true;
+        self.repositories_requested = true;
         let service = task_service.clone();
         let replies = replies.clone();
         tokio::spawn(async move {
@@ -3464,6 +3469,39 @@ impl App {
                 .map_err(|error| error.to_string());
             let _ = replies.send(RepositoryListReply { result });
         });
+    }
+
+    /// Read the repositories the VCS login reaches before a picker asks for
+    /// them, so opening the card's list finds it already there.
+    pub(in crate::tui) fn prefetch_setup_repositories<E>(
+        &mut self,
+        task_service: &TaskService<E>,
+        replies: &mpsc::UnboundedSender<RepositoryListReply>,
+    ) -> bool
+    where
+        E: IsolationEngine + Clone + 'static,
+    {
+        if !self.wants_setup_repositories() {
+            return false;
+        }
+        self.spawn_repository_list(self.active_vcs(), task_service, replies);
+        true
+    }
+
+    /// Whether the first-run card is signed in to a provider whose repositories
+    /// nobody has asked for yet.
+    fn wants_setup_repositories(&self) -> bool {
+        matches!(self.foreground, Foreground::GetStarted(_))
+            && self.active_repository().is_none()
+            && !self.repositories_requested
+            && !self.repositories_listing
+            && signed_in(
+                &self
+                    .credential_status
+                    .get(self.active_vcs().profile())
+                    .cloned()
+                    .unwrap_or_default(),
+            )
     }
 
     /// Take a listing that arrived: the cache always, the open list when there is
@@ -4199,6 +4237,7 @@ impl App {
                 .cloned()
                 .unwrap_or_default(),
             repository: self.active_repository(),
+            vcs_listing: self.repositories_listing && self.active_repository().is_none(),
             host: self
                 .projects()
                 .into_iter()

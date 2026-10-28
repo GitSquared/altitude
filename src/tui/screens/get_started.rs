@@ -125,6 +125,8 @@ pub struct SetupState {
     pub agent_status: CredentialStatus,
     pub vcs: VcsProviderKind,
     pub vcs_status: CredentialStatus,
+    /// Whether the repositories behind the VCS login are still being read.
+    pub vcs_listing: bool,
     pub repository: Option<String>,
     /// The machine this project runs on, when it is not this one.
     pub host: Option<String>,
@@ -610,11 +612,12 @@ fn checklist(
     ));
 
     let vcs_signed_in = signed_in(&setup.vcs_status);
-    if panel
+    let listing = panel
         .repositories
         .as_ref()
         .is_some_and(Repositories::is_listing)
-    {
+        || (setup.vcs_listing && panel.repositories.is_none());
+    if listing {
         lines.push(row_spans(
             Marker::Blocking,
             "Version control",
