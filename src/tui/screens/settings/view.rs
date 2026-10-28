@@ -4,7 +4,7 @@
 
 use crate::{
     agent::AgentKind,
-    credentials::Slot,
+    credentials::{Service, Slot},
     isolation::ProfileSummary,
     tui::{
         App,
@@ -18,6 +18,10 @@ use super::{
     panel::{Section, Setting},
     rows::{Credential, CredentialKind, Row, RowKind, View, switch_row},
 };
+
+fn service_from(service: Option<Service>) -> Slot {
+    service.map(|service| service.slot()).unwrap_or(Slot::Agent)
+}
 
 impl App {
     /// Everything the panel draws, assembled from the settings file and from
@@ -74,9 +78,17 @@ impl App {
                             )
                         };
                     let service = service.map_or("unknown", |service| service.label());
+                    let is_default = self.settings_file.as_ref().is_some_and(|file| {
+                        file.settings()
+                            .default_credential(service_from(credential.service()))
+                            .is_some_and(|id| id == credential.id)
+                    });
                     rows.push(Row {
                         label: credential.label.clone(),
-                        detail: Some(format!("{service} · {status}")),
+                        detail: Some(format!(
+                            "{service} · {status}{}",
+                            if is_default { " · default" } else { "" }
+                        )),
                         kind: RowKind::Credential(Credential {
                             label: credential.label,
                             kind,

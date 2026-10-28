@@ -379,8 +379,38 @@ impl Settings {
         }
     }
 
-    #[allow(dead_code)]
+    /// Make an identity the default for its slot.
+    pub fn set_default_credential(&mut self, id: &str) -> Result<(), SettingsError> {
+        let Some(credential) = self.credential(id) else {
+            return Err(SettingsError::Invalid(format!("no credential {id:?}")));
+        };
+        match credential.service().map(|service| service.slot()) {
+            Some(Slot::Agent) => self.defaults.agent_credential = Some(id.to_owned()),
+            Some(Slot::VersionControl) => self.defaults.vcs_credential = Some(id.to_owned()),
+            Some(Slot::Tracker) => self.defaults.tracker_credential = Some(id.to_owned()),
+            None => {
+                return Err(SettingsError::Invalid(format!(
+                    "{id:?} is not a known service"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub fn remove_credential(&mut self, id: &str) -> Result<(), SettingsError> {
+        if [
+            self.defaults.agent_credential.as_deref(),
+            self.defaults.vcs_credential.as_deref(),
+            self.defaults.tracker_credential.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|default| default == id)
+        {
+            return Err(SettingsError::Invalid(
+                "this identity is a default; make another one the default first".to_owned(),
+            ));
+        }
         if self.projects.iter().any(|project| {
             project.agent_credential.as_deref() == Some(id)
                 || project.vcs_credential.as_deref() == Some(id)

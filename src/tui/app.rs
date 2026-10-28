@@ -1859,6 +1859,15 @@ impl App {
             self.say("A shell is already open");
             return;
         }
+        if self.ensure_credential(&profile, display)
+            && let Some(summary) = task_service.credentials().summary(&profile)
+            && !self
+                .profiles
+                .iter()
+                .any(|known| known.profile == summary.profile)
+        {
+            self.profiles.push(summary);
+        }
         let cancel = CredentialShellCancel::new();
         let id = credential_shell_id();
         // A built environment is a wait of a moment, so it gets no wait to look at:
@@ -2075,8 +2084,24 @@ impl App {
             KeyCode::Left | KeyCode::Char('h') => self.panel.depth = Depth::Rail,
             KeyCode::Down | KeyCode::Char('j') => self.panel.move_selection(true, rows),
             KeyCode::Up | KeyCode::Char('k') => self.panel.move_selection(false, rows),
+            KeyCode::Delete | KeyCode::Backspace
+                if self.panel.section == Section::Identities
+                    && self
+                        .selected_row()
+                        .is_some_and(|row| matches!(row.kind, RowKind::Credential(_))) =>
+            {
+                self.ask_to_forget_credentials()
+            }
             KeyCode::Delete | KeyCode::Backspace if self.selected_has_credentials() => {
                 self.ask_to_forget_credentials()
+            }
+            KeyCode::Char(' ')
+                if self.panel.section == Section::Identities
+                    && self
+                        .selected_row()
+                        .is_some_and(|row| matches!(row.kind, RowKind::Credential(_))) =>
+            {
+                self.set_default_identity()
             }
             KeyCode::Char(' ') if self.selected_row().is_some_and(|row| row.is_agent()) => {
                 self.edit_selected()
@@ -3459,11 +3484,43 @@ impl App {
                 .is_some_and(|row| row.forgets_credentials())
     }
 
+    fn set_default_identity(&mut self) {
+        let Some(row) = self.selected_row() else {
+            return;
+        };
+        let Some(id) = row.profile().map(str::to_owned) else {
+            return;
+        };
+        let Some(file) = self.settings_file.as_mut() else {
+            self.problem("Settings are unavailable; fix the file and reopen");
+            return;
+        };
+        let mut proposed = file.settings().clone();
+        match proposed.set_default_credential(&id) {
+            Ok(()) => match file.save(proposed) {
+                Ok(()) => self.say("Default identity updated"),
+                Err(error) => self.problem(error.to_string()),
+            },
+            Err(error) => self.problem(error.to_string()),
+        }
+    }
+
     fn ask_to_forget_credentials(&mut self) {
         let Some(row) = self.selected_row() else {
             return;
         };
         let (target, question) = match &row.kind {
+            RowKind::Credential(credential) if self.panel.section == Section::Identities => {
+                let Some(id) = credential.profile() else { return };
+                (
+                    CredentialTarget::Identity(id.to_owned()),
+                    format!(
+                        "Delete the {} identity? Its login is forgotten here. Projects and the \
+                         default must stop using it first.",
+                        credential.label
+                    ),
+                )
+            }
             RowKind::Agent { .. } | RowKind::Credential(_) => {
                 let Some(profile) = row.profile() else { return };
                 let scope = if profile == "agents/pi" {
@@ -3497,6 +3554,39 @@ impl App {
                 .credentials()
                 .forget(&profile)
                 .map_err(|error| error.to_string()),
+            CredentialTarget::Identity(id) => {
+                let Some(file) = self.settings_file.as_mut() else {
+                    self.problem("Settings are unavailable; fix the file and reopen");
+                    return;
+                };
+                let mut proposed = file.settings().clone();
+                if let Err(error) = proposed.remove_credential(&id) {
+                    self.problem(error.to_string());
+                    return;
+                }
+                let service_of = Service::from_id(&id);
+                let removed = if service_of.is_some_and(|service| service.is_mounted()) {
+                    service
+                        .credentials()
+                        .forget(&id)
+                        .map_err(|error| error.to_string())
+                } else {
+                    match service.tracker_connectable(&id) {
+                        Some(tracker) => tracker
+                            .clear_credentials()
+                            .await
+                            .map_err(|error| error.to_string()),
+                        None => Err("this tracker identity is unavailable".to_owned()),
+                    }
+                };
+                match removed {
+                    Ok(()) => match file.save(proposed) {
+                        Ok(()) => Ok(()),
+                        Err(error) => Err(error.to_string()),
+                    },
+                    Err(error) => Err(error),
+                }
+            }
             CredentialTarget::Linear => {
                 if let Some(handle) = self.tracker_connect.take() {
                     handle.abort();
