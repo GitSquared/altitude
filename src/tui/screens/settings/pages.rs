@@ -333,7 +333,9 @@ pub(super) fn project_lines(
             palette::muted(),
         ));
     } else {
-        lines.push(Line::from(project.setup_command.trim_end().to_owned()));
+        for command in project.setup_command.trim_end().lines() {
+            lines.push(Line::from(command.to_owned()));
+        }
     }
     if let Some(description) = view
         .base
@@ -352,10 +354,11 @@ pub(super) fn project_lines(
             Span::raw(" · built "),
             Span::styled(met_ago(description.built_at_ms), palette::accent()),
         ]));
-        lines.push(Line::from(vec![
-            Span::styled(format!("{:<LABEL$}", "packages"), palette::muted()),
-            Span::styled(description.packages.join(", "), palette::accent()),
-        ]));
+        lines.push(Line::styled("packages", palette::muted()));
+        lines.push(Line::styled(
+            description.packages.join(", "),
+            palette::accent(),
+        ));
     }
     if let Some(instructions) = &project.instructions {
         lines.push(Line::from(""));
