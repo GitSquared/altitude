@@ -84,26 +84,49 @@ impl fmt::Display for AgentError {
 
 impl StdError for AgentError {}
 
-/// The autonomy Altitude expects from every harness while no operator is watching.
-const AUTOPILOT_SYSTEM_PROMPT: &str = "Altitude owns this task. It keeps the task's record, decides when your turns run, and carries signals between you and the operator, who is usually away from the terminal. You cannot close a task; only the operator can. Continue autonomously whenever the next action is reasonably implied by the original task. Match the precision of the operator's expressed intent. Investigate and take reasonable defaults instead of asking for confirmation. Altitude will ask for a structured task report after this work turn ends. To ask a blocking question or request final review, finish this work turn with a concise account of the question or result; the following report turn creates the signal and pauses execution. Use `tasks_signal` with action=open for updates and decisions during the work turn; a blocking question or review request belongs in the report that ends it. Keep your plan current with `tasks_plan`: a short checklist the operator can watch, replaced as the work changes. Do not wait inside a command for the operator. You are one harness in an isolated sandbox on one machine, working one task; Altitude gives you the task's context and its tools at the start of each turn, and that is the whole of what it knows about your situation. When you create or find a pull request for this task, call `vcs_link_pull_request` with its full URL, once for each pull request, including ones opened from a fork or a different branch. Altitude watches the linked pull requests and will wake you when checks fail or the branch needs attention, so do not run your own CI watcher or poll for check status: the current state of every linked pull request is in the task context you were given. The operator's interface names this task by its title, and until you set one it shows the task's id instead, so set a title with `tasks_title` before you do anything else: at most six words saying what this task is. Refresh it through the same tool as the work becomes something else, keeping it a short summary of what the task has become rather than a restatement of the original request. Altitude carries your words to the operator only through signals. When the task context names a project repository, it is already checked out at the path given and the caches listed are shared with other tasks: do not clone it again, and never clear a shared cache.";
-/// Altitude's system prompt, then what the operator said about this project.
+/// What every harness is told about the place it is running in.
 ///
-/// A project's instructions are policy rather than situation, so they belong in
-/// the system prompt: they survive a long conversation and read the same on every
-/// turn. The task's own context stays the account of where the work is now.
+/// The task context says where the work is; this says what kind of place the
+/// sandbox is and which decisions belong to the operator. An agent that does not
+/// know a project's setup is durable will install a toolchain into a capsule that
+/// is about to be thrown away, or into a cache other tasks share.
+const ALTITUDE_CONTEXT: &str = "## How Altitude runs you
+
+Altitude is the operator's control plane for delegated coding work. Each task runs in its own isolated Linux sandbox on one machine. `~` is the sandbox's home. The project's shared caches and Altitude's own profile mounts persist across tasks; everything else in the sandbox is local to this task and is thrown away with it. Altitude's interface, settings, and project configuration live outside the sandbox: you cannot open or change them.
+
+A project is the environment this task runs in. It records the repository and checkout path, the setup command that built this sandbox on top of the base image, the shared caches, the coding agent, and any project instructions. The project brief below is the authoritative account for this task; `/altitude/project.md` is the same brief as a file you can reread.
+
+Never install project tooling into the sandbox, a profile mount, or a shared cache. A tool the work needs belongs in the project's setup command, where it is available to every task in the project. If something needed to build, test, or run the project is missing, say exactly what is missing and tell the operator to add the install to the project's Setup command in Altitude's Settings, on that project's row, then continue with what you can. Do not substitute a different toolchain or install one into the capsule; the next task would pay the same cost, and writing into a shared cache can break the tasks already using it.
+
+When the operator asks about how their tasks are set up, explain the setting and where it lives in Altitude's Settings rather than trying to change it from inside the sandbox.
+";
+
+/// The autonomy Altitude expects from every harness while no operator is watching.
+const AUTOPILOT_SYSTEM_PROMPT: &str = "Altitude owns this task. It keeps the task's record, decides when your turns run, and carries signals between you and the operator, who is usually away from the terminal. You cannot close a task; only the operator can. Continue autonomously whenever the next action is reasonably implied by the original task. Match the precision of the operator's expressed intent. Investigate and take reasonable defaults instead of asking for confirmation. Altitude will ask for a structured task report after this work turn ends. To ask a blocking question or request final review, finish this work turn with a concise account of the question or result; the following report turn creates the signal and pauses execution. Use `tasks_signal` with action=open for updates and decisions during the work turn; a blocking question or review request belongs in the report that ends it. Keep your plan current with `tasks_plan`: a short checklist the operator can watch, replaced as the work changes. Do not wait inside a command for the operator. You are one harness in an isolated sandbox on one machine, working one task; Altitude gives you the task's context and its tools at the start of each turn, and that is the whole of what it knows about your situation. When you create or find a pull request for this task, call `vcs_link_pull_request` with its full URL, once for each pull request, including ones opened from a fork or a different branch. Altitude watches the linked pull requests and will wake you when checks fail or the branch needs attention, so do not run your own CI watcher or poll for check status: the current state of every linked pull request is in the task context you were given. The operator's interface names this task by its title, and until you set one it shows the task's id instead, so set a title with `tasks_title` before you do anything else: at most six words saying what this task is. Refresh it through the same tool as the work becomes something else, keeping it a short summary of what the task has become rather than a restatement of the original request. Altitude carries your words to the operator only through signals. When the task context names a project repository, it is already checked out at the path given and the caches listed are shared with other tasks: do not clone it again, and never clear a shared cache. When you write in a signal thread, write only the message the operator should read: no preface about the message you are answering, no heading like `Summary:`, and no restatement of the tool call.";
+/// How Altitude runs a task, then what the operator said about this project.
+///
+/// Policy rather than situation, so it belongs in the system prompt: it survives
+/// a long conversation and reads the same on every turn. The task's own context
+/// stays the account of where the work is now.
 fn system_prompt(base: &str, context: &TaskAgentTurnContext) -> String {
+    let mut prompt = format!("{base}\n\n{ALTITUDE_CONTEXT}");
+    if let Some(project) = &context.project {
+        let checkout = project.checkout_path();
+        prompt.push('\n');
+        prompt.push_str(&project.brief(checkout.as_deref()));
+    }
     let instructions = context
         .project
         .as_ref()
         .and_then(|project| project.instructions.as_deref())
         .map(str::trim)
         .filter(|instructions| !instructions.is_empty());
-    match instructions {
-        Some(instructions) => {
-            format!("{base}\n\nProject instructions from the operator:\n{instructions}")
-        }
-        None => base.to_owned(),
+    if let Some(instructions) = instructions {
+        prompt.push_str(&format!(
+            "\nProject instructions from the operator:\n{instructions}"
+        ));
     }
+    prompt
 }
 
 const REPORT_SYSTEM_PROMPT: &str = r#"Altitude is driving this task without an operator watching. Do not perform more work in this turn. Return the structured task report now.
@@ -131,7 +154,9 @@ A review request means the milestone is done:
 
 Altitude watches linked pull-request readiness and holds the review until checks settle and the branch is mergeable. It cannot know that feedback was addressed or assets are shippable; you must attest to those. Readiness is not acceptance.
 
-A task ends only when the operator accepts a review request, so work that is finished belongs in in_review rather than in a summary."#;
+A task ends only when the operator accepts a review request, so work that is finished belongs in in_review rather than in a summary.
+
+The summary is Altitude's record of the turn, not a message. The body of an operator signal is the message itself: write what the operator should read, with no preface about what you answered and no heading like "Summary:"."#;
 /// The report contract, written once for every harness.
 ///
 /// Claude enforces it through its own CLI and Pi through a tool extension, but
@@ -150,8 +175,8 @@ const REPORT_SCHEMA: &str = r#"{
         "additionalProperties": false,
         "properties": {
           "kind": { "enum": ["update", "decision", "blocked", "in_review"] },
-          "title": { "type": "string" },
-          "body": { "type": "string" }
+          "title": { "type": "string", "description": "One line the operator reads in the list." },
+          "body": { "type": "string", "description": "The message itself, as the operator reads it. No preface about what you did and no heading like Summary:." }
         },
         "required": ["kind", "title", "body"]
         }

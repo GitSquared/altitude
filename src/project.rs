@@ -225,8 +225,9 @@ impl Project {
 
     /// What the agent is told about the project at the start of a turn.
     ///
-    /// Written into the sandbox rather than sent in every turn, so the prompt
-    /// stays about the work and the detail is one path away.
+    /// Written into the sandbox as a file and carried in the system prompt, so an
+    /// agent that never opens the file still knows what built its sandbox and
+    /// what the operator can change.
     pub fn brief(&self, checkout: Option<&str>) -> String {
         let mut brief = format!("# Project: {}\n\n", self.name);
         if let (Some(repository), Some(checkout)) = (&self.repository, checkout) {
@@ -249,12 +250,14 @@ impl Project {
         }
         if !self.caches.is_empty() {
             brief.push_str(
-                "\n## Shared caches\n\nThese directories are shared with every task in \
-                 this project on this machine. Another task may be using them, so read \
-                 and write them freely and never clear them.\n\n",
+                "\n## Shared caches\n\nThese are the complete set of directories shared \
+                 with every task in this project on this machine. Another task may be \
+                 using them, so read and write them freely and never clear them. Anything \
+                 not listed here is local to this task and disappears with it.\n\n",
             );
-            brief.push_str(&self.caches.join("\n"));
-            brief.push('\n');
+            for cache in &self.caches {
+                brief.push_str(&format!("- {cache}\n"));
+            }
         }
         brief
     }

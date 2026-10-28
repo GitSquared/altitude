@@ -387,7 +387,7 @@ impl AgentToolProvider for TaskAgentTools {
                         "signal_id": { "type": "string", "description": "The thread for read, reply, or resolve." },
                         "kind": { "enum": ["update", "decision"], "description": "For open: update is the log; decision is an assumption worth review." },
                         "title": { "type": "string", "description": "For open: one line the operator reads in the list." },
-                        "body": { "type": "string", "description": "For open or reply: what you are saying." },
+                        "body": { "type": "string", "description": "For open or reply: the message itself, as the operator reads it. Do not prefix it with status or a summary heading." },
                         "resolved": { "type": "boolean", "description": "For resolve: true to resolve, false to reopen. Defaults to true." },
                         "reason": { "type": "string", "description": "For resolve: optional final message in the thread." }
                     },
