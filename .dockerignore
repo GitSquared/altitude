@@ -8,6 +8,5 @@
 !src/**
 !migrations/
 !migrations/**
-!resources/
-!resources/**
+!assets/macos/Info.plist
 !install.sh
