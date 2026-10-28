@@ -405,7 +405,7 @@ impl Form {
     }
 }
 
-pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &mut Form) {
+pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &mut Form, tick: Option<usize>) {
     let project = !form.target.is_remote();
     let area = if project {
         chrome::centered_at_most(area, 80, 84, area.height.saturating_sub(2).clamp(10, 40))
@@ -467,7 +467,7 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &mut Form) {
     if let Some(anchor) = repository_anchor
         && let Some(browser) = form.repositories.as_mut()
     {
-        browser.draw(frame, fields, anchor);
+        browser.draw(frame, fields, anchor, tick);
     }
 
     // The actions sit at the bottom right, where the eye ends up.

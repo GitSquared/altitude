@@ -556,7 +556,10 @@ pub(super) async fn credential_reports(
     let Some(snapshot) = snapshot else {
         return Ok(None);
     };
-    let plan = SandboxPlan::compose(config, Project::profile_build(), recipes)?;
+    let mut plan = SandboxPlan::compose(config, Project::profile_build(), recipes)?;
+    // One command and nothing else, so it is sized like the provider watcher
+    // rather than like a task.
+    plan.options.size = SandboxSize::COMMAND;
     create(
         engine,
         config,

@@ -28,7 +28,7 @@ use crate::{
             palette,
             select::{Offer, Select},
             text::Field,
-            utils::truncate,
+            utils::{shimmer, truncate},
         },
     },
     vcs::{Repository, VcsProviderKind},
@@ -433,13 +433,19 @@ pub fn signed_in(status: &CredentialStatus) -> bool {
     )
 }
 
-pub fn draw(frame: &mut Frame, area: Rect, panel: &mut GetStarted, setup: &SetupState) {
+pub fn draw(
+    frame: &mut Frame,
+    area: Rect,
+    panel: &mut GetStarted,
+    setup: &SetupState,
+    tick: Option<usize>,
+) {
     let width = area.width.min(CARD_WIDTH);
     let x = area.x + area.width.saturating_sub(width) / 2;
 
     let subtitle = subtitle();
     let subtitle_height = wrapped_height(subtitle_plain(), width);
-    let rows = checklist(panel, setup, width);
+    let rows = checklist(panel, setup, width, tick);
     let rows_height = rows.len() as u16;
     let detail = if panel.commits.open {
         "Commits carry this name and email, and signing marks them as yours. The key lives in \
@@ -504,7 +510,7 @@ pub fn draw(frame: &mut Frame, area: Rect, panel: &mut GetStarted, setup: &Setup
             .tracker
             .draw_list_below(frame, area, row_anchor(areas[4], 4));
     } else if let Some(browser) = panel.repositories.as_mut() {
-        browser.draw(frame, area, row_anchor(areas[4], 2));
+        browser.draw(frame, area, row_anchor(areas[4], 2), tick);
     }
 }
 
@@ -529,7 +535,12 @@ fn subtitle_plain() -> &'static str {
      decisions that matter.\n\nlet's get you set up:"
 }
 
-fn checklist(panel: &GetStarted, setup: &SetupState, width: u16) -> Vec<Line<'static>> {
+fn checklist(
+    panel: &GetStarted,
+    setup: &SetupState,
+    width: u16,
+    tick: Option<usize>,
+) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let focused = panel.focus;
 
@@ -558,18 +569,37 @@ fn checklist(panel: &GetStarted, setup: &SetupState, width: u16) -> Vec<Line<'st
     // A negative answer never reaches here: the card has already put the row
     // back to the picker, so what remains is signed in, being checked, or a
     // check that has not answered yet.
-    let agent_value = match setup.agent {
-        None => "not chosen".to_owned(),
-        Some(kind) => format!("{kind} · {}", setup.agent_status.summary()),
+    let agent_tone = if focused == Focus::Agent {
+        palette::primary().bold()
+    } else {
+        palette::primary()
     };
-    lines.push(row(
+    // Once the login is there, the name is the whole answer: the row is about
+    // which agent a task runs, not how its login is kept.
+    let agent_value = match setup.agent {
+        None => vec![Span::styled("not chosen", agent_tone)],
+        Some(kind) if signed_in(&setup.agent_status) => {
+            vec![Span::styled(kind.to_string(), agent_tone)]
+        }
+        Some(kind) => {
+            let mut spans = vec![Span::styled(format!("{kind} · "), agent_tone)];
+            let status = setup.agent_status.summary();
+            if setup.agent_status == CredentialStatus::Checking {
+                spans.extend(shimmer(status, tick));
+            } else {
+                spans.push(Span::styled(status, agent_tone));
+            }
+            spans
+        }
+    };
+    lines.push(row_spans(
         match (setup.agent, signed_in(&setup.agent_status)) {
             (Some(_), true) => Marker::Done,
             (Some(_), false) => Marker::Blocking,
             (None, _) => Marker::Unset,
         },
         "Coding agent",
-        &agent_value,
+        agent_value,
         if setup.agent.is_some() {
             "enter sign in"
         } else {
@@ -580,7 +610,29 @@ fn checklist(panel: &GetStarted, setup: &SetupState, width: u16) -> Vec<Line<'st
     ));
 
     let vcs_signed_in = signed_in(&setup.vcs_status);
-    if vcs_signed_in {
+    if panel
+        .repositories
+        .as_ref()
+        .is_some_and(Repositories::is_listing)
+    {
+        lines.push(row_spans(
+            Marker::Blocking,
+            "Version control",
+            shimmer("listing repositories…", tick),
+            "",
+            focused == Focus::VersionControl,
+            width,
+        ));
+    } else if setup.vcs_status == CredentialStatus::Checking {
+        lines.push(row_spans(
+            Marker::Blocking,
+            "Version control",
+            shimmer(setup.vcs_status.summary(), tick),
+            "",
+            focused == Focus::VersionControl,
+            width,
+        ));
+    } else if vcs_signed_in {
         let prefix = 1 + 2 + LABEL_WIDTH + 2;
         let room = usize::from(width).saturating_sub(prefix + ACTION_WIDTH);
         let pill = panel
@@ -663,14 +715,14 @@ fn checklist(panel: &GetStarted, setup: &SetupState, width: u16) -> Vec<Line<'st
 
     let remote_value = match (&setup.host, &setup.offer) {
         (Some(host), _) => host.clone(),
-        (None, Some(offer)) => format!("{} · found on this network", offer.label),
+        (None, Some(offer)) => format!("found {}", offer.label),
         (None, None) => "none · runs here".to_owned(),
     };
     lines.push(row(
-        if setup.host.is_none() && setup.offer.is_some() {
-            Marker::Question
-        } else {
-            Marker::Done
+        match (&setup.host, &setup.offer) {
+            (Some(_), _) => Marker::Done,
+            (None, Some(_)) => Marker::Question,
+            (None, None) => Marker::Unset,
         },
         "Remote",
         &remote_value,
@@ -711,7 +763,8 @@ fn draw_footer(frame: &mut Frame, area: Rect, panel: &GetStarted, setup: &SetupS
     );
 }
 
-/// A row whose value is already spans, so a widget can print its own pill.
+/// A row whose value is already spans, so a widget can print its own pill or a
+/// status that moves.
 fn row_spans(
     marker: Marker,
     label: &str,

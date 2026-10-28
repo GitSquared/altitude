@@ -694,6 +694,9 @@ pub struct App {
     /// The last repository listing, so opening a picker shows something at once
     /// and a fresh list replaces it when it lands.
     repositories: Option<Vec<Repository>>,
+    /// Whether a listing is on its way, so the card can say it is being asked
+    /// for rather than sit still.
+    repositories_listing: bool,
     /// The profile a sign-in from the first screen was for, so it comes back
     /// there instead of to Settings and asks about that login again.
     setup_sign_in: Option<&'static str>,
@@ -836,6 +839,7 @@ impl App {
             remembered_keys: Vec::new(),
             base_description: None,
             repositories: None,
+            repositories_listing: false,
             setup_sign_in: None,
             profiles: Vec::new(),
             tracker_state: TrackerState::NotConnected,
@@ -1190,6 +1194,7 @@ impl App {
     /// nobody is waiting on.
     pub(in crate::tui) fn needs_shimmer(&self) -> bool {
         self.has_modal()
+            || self.repositories_listing
             || self.is_awaiting_progress()
             || !self.environment_builds.is_empty()
             || self
@@ -1762,7 +1767,12 @@ impl App {
                 self.alert = None;
             }
             CredentialShellEvent::Output { id, bytes } => {
-                self.process_shell_output(&ShellId::Credentials(id), bytes)
+                let replies = self.process_shell_output(&ShellId::Credentials(id), bytes);
+                for reply in replies {
+                    if let CredentialShellState::Open(shell) = &self.credential_shell {
+                        shell.input(reply);
+                    }
+                }
             }
             CredentialShellEvent::Exited { code, .. } => {
                 // Leaving the terminal is not an error: a cancelled sign-in and a
@@ -3437,13 +3447,14 @@ impl App {
 
     /// Ask for a listing; whoever has a browser open when it lands fills it.
     fn spawn_repository_list<E>(
-        &self,
+        &mut self,
         kind: VcsProviderKind,
         task_service: &TaskService<E>,
         replies: &mpsc::UnboundedSender<RepositoryListReply>,
     ) where
         E: IsolationEngine + Clone + 'static,
     {
+        self.repositories_listing = true;
         let service = task_service.clone();
         let replies = replies.clone();
         tokio::spawn(async move {
@@ -3458,6 +3469,7 @@ impl App {
     /// Take a listing that arrived: the cache always, the open list when there is
     /// one.
     pub(in crate::tui) fn repositories_listed(&mut self, reply: RepositoryListReply) {
+        self.repositories_listing = false;
         match reply.result {
             Ok(repositories) => {
                 if let Some(form) = self.panel.form.as_mut()
@@ -3785,6 +3797,10 @@ impl App {
                         .is_some_and(signed_in)
                     {
                         self.open_setup_repositories(&mut panel, task_service, repository_lists);
+                        // The card stays behind the list it just opened: taking the
+                        // foreground leaves the default (the task list) in front
+                        // unless it is put back.
+                        self.foreground = Foreground::GetStarted(panel);
                         return false;
                     }
                     // The provider list first, even with one provider in it: it
@@ -5023,6 +5039,28 @@ impl App {
         if let Some(composer) = self.signal_composer.as_mut() {
             composer.body.handle_key(key);
         }
+    }
+
+    /// Take a click on the first-run card's repository list.
+    ///
+    /// The list is the only thing on the card with rows of its own; a click on
+    /// one means the same thing as Enter on it, and a click anywhere else leaves
+    /// the card as it is.
+    pub(in crate::tui) fn get_started_mouse(&mut self, mouse: MouseEvent) {
+        let Foreground::GetStarted(mut panel) = mem::take(&mut self.foreground) else {
+            return;
+        };
+        let Some(browser) = panel.repositories.as_mut() else {
+            self.foreground = Foreground::GetStarted(panel);
+            return;
+        };
+        if let Some(repository) = browser.mouse(mouse) {
+            panel.repositories = None;
+            self.set_project_repository(&repository.url);
+            panel.set_repository(&repository);
+            panel.focus = SetupFocus::Ready;
+        }
+        self.foreground = Foreground::GetStarted(panel);
     }
 
     /// Send a key to the terminal in front, or leave it.
@@ -6527,7 +6565,10 @@ impl App {
                 bytes,
             } => {
                 let _ = stream;
-                self.process_shell_output(&ShellId::Task(task_id), bytes);
+                let id = ShellId::Task(task_id);
+                for reply in self.process_shell_output(&id, bytes) {
+                    self.send_shell_input(&id, reply, event_loop);
+                }
             }
             TaskExecutionUpdate::OperatorReady(task) => {
                 let id = task.id.clone();
@@ -6669,12 +6710,14 @@ impl App {
     /// asked for along the way.
     ///
     /// The same for a task's shell and a credential shell, because the terminal is
-    /// the same: only where the bytes came from differs.
-    fn process_shell_output(&mut self, id: &ShellId, bytes: Vec<u8>) {
+    /// the same: only where the bytes came from differs. Answers what the program
+    /// is waiting for, which the caller writes back to it.
+    fn process_shell_output(&mut self, id: &ShellId, bytes: Vec<u8>) -> Vec<Vec<u8>> {
         let mut asked_to_open = None;
+        let mut replies = Vec::new();
         {
             let Some(shell) = self.shells.get_mut(id) else {
-                return;
+                return replies;
             };
             for request in shell.process(bytes) {
                 match request {
@@ -6686,26 +6729,29 @@ impl App {
                         Err(error) => tracing::error!(%error, "could not copy terminal text"),
                     },
                     GuestRequest::Open(url) => asked_to_open = Some(url),
+                    GuestRequest::Reply(reply) => replies.push(reply),
                 }
             }
         }
-        let Some(url) = asked_to_open else {
-            return;
-        };
-        match Link::parse(&url) {
-            Some(link) => {
-                // The address is checked into a page; opening it is not a
-                // question the operator asked to be interrupted for.
-                match open_in_browser(link.url()) {
-                    Ok(()) => tracing::info!(%url, "opened a sandbox's link"),
-                    Err(error) => {
-                        tracing::warn!(%error, "could not open a sandbox's link");
-                        self.say(format!("Could not open {url}: {error}"));
+        if let Some(url) = asked_to_open {
+            match Link::parse(&url) {
+                Some(link) => {
+                    // The address is checked into a page; opening it is not a
+                    // question the operator asked to be interrupted for.
+                    match open_in_browser(link.url()) {
+                        Ok(()) => tracing::info!(%url, "opened a sandbox's link"),
+                        Err(error) => {
+                            tracing::warn!(%error, "could not open a sandbox's link");
+                            self.say(format!("Could not open {url}: {error}"));
+                        }
                     }
                 }
+                None => {
+                    tracing::debug!(%url, "a sandbox asked to open something that is not a page")
+                }
             }
-            None => tracing::debug!(%url, "a sandbox asked to open something that is not a page"),
         }
+        replies
     }
 
     /// Whether any task can currently be waiting on an environment build.

@@ -20,6 +20,7 @@ use crate::{
         widgets::{
             palette,
             select::{Offer, Select},
+            utils::shimmer,
         },
     },
     vcs::Repository,
@@ -85,6 +86,11 @@ impl Repositories {
         self.error = Some(error);
     }
 
+    /// Whether the list is still being asked for.
+    pub fn is_listing(&self) -> bool {
+        self.error.is_none() && self.select.is_empty()
+    }
+
     pub fn key(&mut self, key: KeyEvent) -> Key {
         if is_secondary(key) {
             return Key::Save;
@@ -118,7 +124,7 @@ impl Repositories {
     }
 
     /// Draw the list under the field it fills, or why it has not arrived.
-    pub fn draw(&mut self, frame: &mut Frame, area: Rect, anchor: Rect) {
+    pub fn draw(&mut self, frame: &mut Frame, area: Rect, anchor: Rect, tick: Option<usize>) {
         if !self.select.is_empty() {
             self.rows = self.select.draw_list_below(frame, area, anchor);
             return;
@@ -140,14 +146,11 @@ impl Repositories {
             .padding(Padding::horizontal(1));
         let inner = block.inner(popup);
         frame.render_widget(block, popup);
-        let (text, style) = match &self.error {
-            Some(error) => (error.as_str(), palette::attention()),
-            None => ("listing repositories…", palette::muted()),
+        let line = match &self.error {
+            Some(error) => Line::styled(error.as_str(), palette::attention()),
+            None => Line::from(shimmer("listing repositories…", tick)),
         };
-        frame.render_widget(
-            Paragraph::new(Line::styled(text, style)).wrap(Wrap { trim: true }),
-            inner,
-        );
+        frame.render_widget(Paragraph::new(line).wrap(Wrap { trim: true }), inner);
     }
 }
 

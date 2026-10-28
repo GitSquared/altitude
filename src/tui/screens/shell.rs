@@ -25,6 +25,8 @@ pub enum GuestRequest {
     Copy(String),
     /// Open this in a browser, which is on this side of the terminal.
     Open(String),
+    /// Answer a question the program asked its terminal, which lives here.
+    Reply(Vec<u8>),
 }
 
 pub struct Shell {
@@ -236,6 +238,40 @@ impl vt100::Callbacks for HostCallbacks {
             return;
         };
         let _ = self.host.send(GuestRequest::Copy(text));
+    }
+
+    /// A program asking its terminal where the cursor is waits for an answer on
+    /// its input. The host terminal never sees the question — this screen is
+    /// drawn here rather than passed through — so the screen answers for it.
+    fn unhandled_csi(
+        &mut self,
+        screen: &mut vt100::Screen,
+        intermediate: Option<u8>,
+        _: Option<u8>,
+        params: &[&[u16]],
+        c: char,
+    ) {
+        if c != 'n' {
+            return;
+        }
+        let Some(what) = params.first().and_then(|param| param.first()).copied() else {
+            return;
+        };
+        let reply = match what {
+            // A device status report: here, and ready.
+            5 => String::from("\x1b[0n"),
+            // A cursor position report. Prompt libraries ask before they will
+            // read a key, so no answer looks like a terminal that has stopped.
+            6 => {
+                let (row, col) = screen.cursor_position();
+                match intermediate {
+                    Some(b'?') => format!("\x1b[?{};{}R", row + 1, col + 1),
+                    _ => format!("\x1b[{};{}R", row + 1, col + 1),
+                }
+            }
+            _ => return,
+        };
+        let _ = self.host.send(GuestRequest::Reply(reply.into_bytes()));
     }
 
     /// Altitude's own sequence, written by the opener every sandbox is given. The

@@ -499,8 +499,9 @@ where
                 modal = Some(content);
             } else if first_run {
                 let setup = app.setup();
+                let tick = app.animation_tick();
                 if let Foreground::GetStarted(panel) = &mut app.foreground {
-                    screens::get_started::draw(frame, content, panel, &setup);
+                    screens::get_started::draw(frame, content, panel, &setup, tick);
                 }
                 if let super::app::CredentialShellState::Opening {
                     progress: Some(progress),
@@ -1016,6 +1017,10 @@ where
         }
         if matches!(app.foreground, Foreground::Panel) {
             app.panel_mouse(mouse);
+            return Ok(false);
+        }
+        if matches!(app.foreground, Foreground::GetStarted(_)) {
+            app.get_started_mouse(mouse);
             return Ok(false);
         }
         if let Some(id) = app.open_shell().cloned() {

@@ -52,7 +52,7 @@ pub fn draw(
     draw_columns(frame, body, panel, view, tick, is_discovering, targets);
     if let Some(form) = &mut panel.form {
         chrome::dim(frame, area);
-        draw_form(frame, area, form);
+        draw_form(frame, area, form, tick);
     }
     area
 }
