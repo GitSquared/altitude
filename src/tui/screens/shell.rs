@@ -122,6 +122,12 @@ impl Shell {
     }
 
     pub fn key_bytes(&mut self, key: KeyEvent) -> Option<Vec<u8>> {
+        // Terminals report shift-enter as its own key under the enhanced
+        // protocol, but the xterm encoding has no sequence for it. The programs
+        // in here read alt-enter as the same newline, which does have one.
+        if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT) {
+            return Some(b"\x1b\r".to_vec());
+        }
         if !self.parser.screen().alternate_screen() {
             match key.code {
                 KeyCode::PageUp => {
