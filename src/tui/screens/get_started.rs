@@ -63,8 +63,8 @@ const HELP_ROWS: u16 = 6;
 enum Marker {
     /// Settled: answered, chosen, or deliberately none.
     Done,
-    /// Chosen, but not usable until something else happens: an agent that is
-    /// signed out, where picking another would do.
+    /// Chosen, but whether it is usable is not known yet: a check is out, or no
+    /// answer came.
     Blocking,
     /// Nothing has been answered here yet. Whether anything depends on it is
     /// what the row's copy says.
@@ -371,7 +371,7 @@ impl GetStarted {
                         if signed_in(&setup.vcs_status) {
                             "choose repository"
                         } else {
-                            "sign in"
+                            "choose provider"
                         },
                     ),
                 );
@@ -555,13 +555,12 @@ fn checklist(panel: &GetStarted, setup: &SetupState, width: u16) -> Vec<Line<'st
         width,
     ));
 
+    // A negative answer never reaches here: the card has already put the row
+    // back to the picker, so what remains is signed in, being checked, or a
+    // check that has not answered yet.
     let agent_value = match setup.agent {
         None => "not chosen".to_owned(),
-        Some(kind) if matches!(setup.agent_status, CredentialStatus::Checking) => {
-            format!("{kind} · checking…")
-        }
-        Some(kind) if signed_in(&setup.agent_status) => format!("{kind} · signed in"),
-        Some(kind) => format!("{kind} · not signed in"),
+        Some(kind) => format!("{kind} · {}", setup.agent_status.summary()),
     };
     lines.push(row(
         match (setup.agent, signed_in(&setup.agent_status)) {
@@ -603,8 +602,8 @@ fn checklist(panel: &GetStarted, setup: &SetupState, width: u16) -> Vec<Line<'st
         lines.push(row(
             Marker::Unset,
             "Version control",
-            "not connected",
-            "enter sign in",
+            "not chosen",
+            "enter choose",
             focused == Focus::VersionControl,
             width,
         ));

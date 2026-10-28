@@ -3538,14 +3538,12 @@ impl App {
     pub(in crate::tui) fn setup_next_step(&self) -> Option<&'static str> {
         if self.active_project_name().trim().is_empty() {
             Some("name the project")
-        } else if self.active_agent().is_none() {
+        } else if self.setup_agent().is_none() {
             Some("choose an agent")
         } else if self.active_repository().is_none() {
             Some("choose a repository")
         } else if !self.git_identity.is_set() {
             Some("set the commit identity")
-        } else if self.signed_out_agent() {
-            Some("sign in to the agent")
         } else if self.signed_out_vcs() {
             Some("sign in to version control")
         } else {
@@ -3561,7 +3559,7 @@ impl App {
         let repositories = self.repositories.clone().unwrap_or_default();
         Box::new(GetStarted::new(
             &self.active_project_name(),
-            self.active_agent(),
+            self.setup_agent(),
             self.active_repository().as_deref(),
             &repositories,
             &self.git_identity,
@@ -3763,7 +3761,7 @@ impl App {
             KeyCode::Char(' ') if panel.focus == SetupFocus::Agent => panel.agent.open(),
             KeyCode::Enter => match panel.focus {
                 SetupFocus::Name => panel.name_editing = true,
-                SetupFocus::Agent => match self.active_agent() {
+                SetupFocus::Agent => match self.setup_agent() {
                     Some(kind) => {
                         // The card waits behind the shell, and comes back when it
                         // closes: this is the one sign-in that does not start at
@@ -4121,10 +4119,15 @@ impl App {
         self.spawn_repository_list(self.active_vcs(), task_service, replies);
     }
 
-    /// Whether the agent's own CLI has said it is signed out.
-    fn signed_out_agent(&self) -> bool {
+    /// The agent the first-run card treats as chosen.
+    ///
+    /// A profile whose check came back saying its login is not there is not a
+    /// choice: the row goes back to the picker, where another agent or another
+    /// attempt is the answer. Until a check has answered, the choice stands and
+    /// the row says the check is out.
+    fn setup_agent(&self) -> Option<AgentKind> {
         self.active_agent()
-            .is_some_and(|agent| self.signed_out(agent.profile()))
+            .filter(|agent| !self.signed_out(agent.profile()))
     }
 
     fn signed_out_vcs(&self) -> bool {
@@ -4154,6 +4157,7 @@ impl App {
 
     /// The installation as the first screen reads it.
     pub(in crate::tui) fn setup(&self) -> SetupState {
+        let agent = self.setup_agent();
         let vcs = self.active_vcs();
         let active = self.active_project_id();
         let configured = self.configured_remotes();
@@ -4167,9 +4171,8 @@ impl App {
                 address: remote.address.clone(),
             });
         SetupState {
-            agent: self.active_agent(),
-            agent_status: self
-                .active_agent()
+            agent,
+            agent_status: agent
                 .and_then(|agent| self.credential_status.get(agent.profile()))
                 .cloned()
                 .unwrap_or_default(),
@@ -4268,7 +4271,7 @@ impl App {
     /// The profiles the first screen has to ask about.
     fn setup_profiles(&self) -> Vec<&'static str> {
         let mut profiles = Vec::new();
-        if let Some(agent) = self.active_agent() {
+        if let Some(agent) = self.setup_agent() {
             profiles.push(agent.profile());
         }
         profiles.push(self.active_vcs().profile());
