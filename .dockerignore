@@ -1,0 +1,13 @@
+*
+!Cargo.toml
+!Cargo.lock
+!build.rs
+!LICENSE
+!README.md
+!src/
+!src/**
+!migrations/
+!migrations/**
+!resources/
+!resources/**
+!install.sh

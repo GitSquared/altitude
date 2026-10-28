@@ -1,0 +1,46 @@
+# Ubuntu/Debian host setup (Docker Engine + Compose with BuildKit required):
+# 1. Enable Intel VT-x / AMD-V in BIOS/UEFI. A VM host must expose nested virtualization.
+# 2. Check KVM: sudo apt-get install cpu-checker && sudo kvm-ok
+#    If /dev/kvm is missing on x86, load the module for your CPU:
+#      sudo modprobe kvm_intel   # Intel
+#      sudo modprobe kvm_amd     # AMD
+#    Stop here if KVM remains unavailable; Docker cannot enable host virtualization.
+# 3. This Compose file passes /dev/kvm and its numeric group into the container.
+#    Host kvm-group membership is only needed to run Altitude outside Docker:
+#      sudo usermod -aG kvm "$USER"   # then log out and back in
+# 4. Create ALTITUDE_HOME owned by UID 1000, for example:
+#      sudo install -d -o 1000 -g 1000 -m 0700 /srv/altitude
+# Altitude downloads its matching Microsandbox runtime on first startup.
+# No separate Microsandbox installation, QEMU, or libvirt service is required.
+#
+# Set KVM_GID=$(stat -c %g /dev/kvm), ALTITUDE_HOME to an absolute host directory,
+# and ALTITUDE_BIND_IP to your trusted network address (for example Tailscale).
+# BuildKit builds only the selected target: release downloads; main compiles.
+# Default: latest stable release; optionally pin ALTITUDE_VERSION.
+# Before the first release, pull main and set ALTITUDE_BUILD_TARGET=main.
+# Start with: docker compose -f compose.example.yaml up -d --build
+services:
+  altitude:
+    build:
+      context: .
+      target: "${ALTITUDE_BUILD_TARGET:-release}"
+      args:
+        ALTITUDE_VERSION: "${ALTITUDE_VERSION:-}"
+    image: altitude:local
+    hostname: "${ALTITUDE_HOSTNAME:-altitude}"
+    init: true
+    restart: unless-stopped
+    devices:
+      - /dev/kvm:/dev/kvm
+    group_add:
+      - "${KVM_GID:?Set KVM_GID from /dev/kvm}"
+    ports:
+      - "${ALTITUDE_BIND_IP:?Set a trusted host IP}:25848:25848/tcp"
+      - "${ALTITUDE_BIND_IP:?Set a trusted host IP}:25848:25848/udp"
+    volumes:
+      - type: bind
+        source: "${ALTITUDE_HOME:?Create a persistent home owned by UID 1000}"
+        target: /home/altitude
+        bind:
+          create_host_path: false
+    stop_grace_period: 60s
