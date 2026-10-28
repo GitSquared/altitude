@@ -18,9 +18,20 @@ pub(crate) struct Guide {
 }
 
 pub(crate) struct Step {
-    pub prose: &'static str,
-    /// Literal lines: toml, URLs, commands. Never formatted.
-    pub code: &'static [&'static str],
+    pub title: &'static str,
+    pub items: &'static [Item],
+}
+
+/// One line of a step, at the depth it is read at.
+pub(crate) enum Item {
+    /// A sentence under the step's title.
+    Text(&'static str),
+    /// A point at the step's own level.
+    Bullet(&'static str),
+    /// A point under the bullet above it.
+    Detail(&'static str),
+    /// A literal line: toml, a URL, a command. Never formatted.
+    Code(&'static str),
 }
 
 impl TrackerKind {
@@ -35,45 +46,93 @@ static LINEAR: Guide = Guide {
     title: "Set up Linear on a remote",
     intro: &[
         "A remote signs in as a shared Linear app, not as you. Its owner installs it once per \
-         workspace, and every task delegated there acts as that app. Your own Linear sign-in \
-         under Settings → Task tracker is separate: it decides which machine receives an issue \
-         delegated in Linear.",
+         workspace, and every task delegated there acts as that app.",
+        "Your own Linear sign-in under Settings → Task tracker is separate: it decides which \
+         machine receives an issue delegated in Linear.",
     ],
     steps: &[
         Step {
-            prose: "Create an OAuth application in Linear's API settings, named Altitude, with \
-                    the URL below as its icon. Enable webhooks, then select Agent session \
-                    events (required), Inbox notifications (required for comments and \
-                    mentions), and Permission changes. Select Issues too if this remote should \
-                    react to human status changes; without it Altitude still reports status \
-                    out, but does not notice an issue being completed or moved. Leave \
-                    unrelated data and OAuth authorization events off. The install asks for \
-                    read, write, app:assignable, and app:mentionable.",
-            code: &["https://raw.githubusercontent.com/GitSquared/altitude/main/assets/icon.png"],
+            title: "Choose the public URL",
+            items: &[Item::Text(
+                "Pick the HTTPS address that reaches this machine. It is public_url in \
+                     serve.toml, and the two URLs Linear needs are built from it.",
+            )],
         },
         Step {
-            prose: "Give the remote the application in its serve.toml. public_url is the HTTPS \
-                    address that reaches that machine; every callback and webhook URL is built \
-                    from it.",
-            code: &[
-                "[linear]",
-                "client_id = \"<the application's client ID>\"",
-                "public_url = \"<the HTTPS address that reaches the remote>\"",
-                "client_secret = \"<the application's client secret>\"",
-                "webhook_secret = \"<the application's webhook signing secret>\"",
+            title: "Create the Linear application",
+            items: &[
+                Item::Text(
+                    "In Linear's API settings, create an OAuth application. The form asks for:",
+                ),
+                Item::Bullet("Application icon: download this image and upload it."),
+                Item::Code(
+                    "https://raw.githubusercontent.com/GitSquared/altitude/main/assets/icon.png",
+                ),
+                Item::Bullet("Application name: Altitude."),
+                Item::Bullet("Developer name and URL: your own."),
+                Item::Bullet(
+                    "Redirect URIs: public_url followed by /altitude/linear/oauth/callback. \
+                     This command reports it as redirect URI.",
+                ),
+                Item::Bullet("Webhooks: on."),
+                Item::Bullet(
+                    "Webhook URL: public_url followed by /altitude/linear/webhook. This \
+                     command reports it as webhook URL.",
+                ),
+                Item::Bullet("Webhook signing secret: copy it into webhook_secret in serve.toml."),
+                Item::Bullet("App events: select these three."),
+                Item::Detail("Agent session events (required)"),
+                Item::Detail("Inbox notifications (required for comments and mentions)"),
+                Item::Detail("Permission changes"),
+                Item::Bullet(
+                    "Data change events: select Issues if this remote should react to human \
+                     status changes.",
+                ),
+                Item::Detail(
+                    "Without it Altitude still reports status out, but does not notice an \
+                     issue being completed or moved",
+                ),
+                Item::Bullet("Authorization events: leave OAuth authorization events off."),
+                Item::Text(
+                    "After creating it, copy the client ID and client secret into serve.toml. \
+                     The install asks for read, write, app:assignable, and app:mentionable.",
+                ),
             ],
         },
         Step {
-            prose: "Route /linear/oauth/callback and /linear/webhook from that address to the \
-                    webhook port in that machine's settings — 127.0.0.1:25849 unless it was \
-                    changed — then register both as the application's redirect and webhook \
-                    URLs.",
-            code: &[],
+            title: "Add the application to serve.toml",
+            items: &[
+                Item::Text(
+                    "Put those values in [linear] in the remote's serve.toml. public_url is the \
+                     address from step 1.",
+                ),
+                Item::Code("[linear]"),
+                Item::Code("client_id = \"<the application's client ID>\""),
+                Item::Code("public_url = \"<the HTTPS address that reaches the remote>\""),
+                Item::Code("client_secret = \"<the application's client secret>\""),
+                Item::Code("webhook_secret = \"<the application's webhook signing secret>\""),
+            ],
         },
         Step {
-            prose: "Run this on the remote. It prints the exact URLs to register, installs the \
-                    app, and saves the login there, which is the only machine that holds it.",
-            code: &["altitude serve connect linear"],
+            title: "Route the two URLs to the remote",
+            items: &[
+                Item::Text(
+                    "From public_url, route these paths to this machine's webhook port — \
+                     127.0.0.1:25849 unless it was changed:",
+                ),
+                Item::Bullet("/altitude/linear/oauth/callback, the redirect URI"),
+                Item::Bullet("/altitude/linear/webhook, the webhook URL"),
+            ],
+        },
+        Step {
+            title: "Install it on the remote",
+            items: &[
+                Item::Text(
+                    "Run this on the remote. It prints the URLs this machine expects, installs \
+                     the app, and saves the login there, which is the only machine that holds it.",
+                ),
+                Item::Code("altitude serve connect linear"),
+            ],
         },
     ],
     closing: &[

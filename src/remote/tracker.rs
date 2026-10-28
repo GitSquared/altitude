@@ -63,7 +63,7 @@ use super::{
 };
 
 /// One webhook request, and the one resource this coordinator handles.
-const WEBHOOK_ROUTE: &str = "/linear/webhook";
+const WEBHOOK_ROUTE: &str = "/altitude/linear/webhook";
 const MAX_WEBHOOK_BYTES: usize = 1024 * 1024;
 const SIGNATURE_HEADER: &str = "linear-signature";
 

@@ -15,12 +15,12 @@ use crate::{
     isolation::EnvironmentDescription,
     project::Project,
     remote::{RemoteKey, TrackerConnection, TrackerReadiness},
-    tracker::TrackerKind,
+    tracker::{TrackerKind, setup::Item},
     tui::{
         app::{CredentialStatus, RemoteStatus, TrackerState},
         widgets::{
             palette,
-            utils::{Dot, plain},
+            utils::{Dot, plain, shimmer},
         },
     },
 };
@@ -104,13 +104,16 @@ impl Connector {
     /// same dot the list uses; only the value beside it, if any, is accented.
     fn status_line(&self, tick: Option<usize>) -> Line<'static> {
         let mut spans = mark(self.reach == Reach::On, self.reach == Reach::Asking).spans(tick);
-        spans.push(Span::styled(
-            self.status.clone(),
-            match self.reach {
-                Reach::On => palette::primary().bold(),
-                Reach::Off | Reach::Asking => palette::muted().bold(),
-            },
-        ));
+        if self.reach == Reach::Asking {
+            spans.extend(shimmer(&self.status, tick));
+        } else {
+            let style = if self.reach == Reach::On {
+                palette::primary().bold()
+            } else {
+                palette::muted().bold()
+            };
+            spans.push(Span::styled(self.status.clone(), style));
+        }
         if let Some(value) = &self.status_value {
             spans.push(Span::raw(" "));
             spans.push(Span::styled(value.clone(), palette::accent()));
@@ -178,10 +181,20 @@ pub(in crate::tui) fn remote_tracker_setup_lines(kind: TrackerKind) -> Vec<Line<
     }
     for (index, step) in guide.steps.iter().enumerate() {
         lines.push(Line::from(""));
-        lines.push(step_line(&format!("{}.", index + 1), step.prose));
-        if !step.code.is_empty() {
-            lines.push(Line::from(""));
-            lines.extend(step.code.iter().map(|line| sample(line)));
+        lines.push(Line::from(vec![
+            Span::styled(format!("{}. ", index + 1), palette::accent()),
+            Span::styled(step.title, palette::primary().bold()),
+        ]));
+        for item in step.items {
+            lines.push(match item {
+                Item::Text(text) => Line::from(format!("   {text}")),
+                Item::Bullet(text) => Line::from(vec![Span::raw("   • "), Span::raw(*text)]),
+                Item::Detail(text) => Line::from(vec![Span::raw("     ◦ "), Span::raw(*text)]),
+                Item::Code(line) => Line::from(vec![
+                    Span::raw("     "),
+                    Span::styled(*line, palette::accent()),
+                ]),
+            });
         }
     }
     for paragraph in guide.closing {
@@ -191,16 +204,6 @@ pub(in crate::tui) fn remote_tracker_setup_lines(kind: TrackerKind) -> Vec<Line<
     lines
 }
 
-fn step_line(number: &str, text: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("{number} "), palette::accent()),
-        Span::raw(text.to_owned()),
-    ])
-}
-
-fn sample(text: &str) -> Line<'static> {
-    Line::styled(text.to_owned(), palette::accent())
-}
 /// A project's page: what the work is, and the machine state it runs in.
 ///
 /// Read here and edited in the form, so the page always says what the file says

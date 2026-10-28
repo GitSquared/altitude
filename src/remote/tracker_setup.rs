@@ -9,10 +9,13 @@ use std::{error::Error, io, path::Path, time::SystemTime};
 
 use crate::{
     config::{LinearSettings, ServeSettings},
-    tracker::{TrackerKind, oauth, setup::Guide, setup::Step},
+    tracker::{
+        TrackerKind, oauth,
+        setup::{Guide, Item, Step},
+    },
 };
 
-use super::console::{ask, field, has_terminal, paragraph, prose};
+use super::console::{ask, bold, field, has_terminal, paragraph, prose};
 
 pub async fn connect_linear(
     settings: &ServeSettings,
@@ -21,7 +24,6 @@ pub async fn connect_linear(
 ) -> Result<(), Box<dyn Error>> {
     let guide = TrackerKind::Linear.guide();
     let Some(linear) = settings.linear.clone() else {
-        println!("\n{}\n", guide.title);
         print_guide(guide);
         return Err(io::Error::other(format!(
             "{} has no [linear] section; the sample above is what it needs",
@@ -57,21 +59,25 @@ pub async fn connect_linear(
 /// read before being told what to write.
 fn print_report(linear: &LinearSettings, settings_path: &Path) -> Result<(), Box<dyn Error>> {
     let callback = linear
-        .endpoint("/linear/oauth/callback")
+        .endpoint("/altitude/linear/oauth/callback")
         .map_err(|error| io::Error::other(format!("serve.toml: {error}")))?;
     let webhook = linear
-        .endpoint("/linear/webhook")
+        .endpoint("/altitude/linear/webhook")
         .map_err(|error| io::Error::other(format!("serve.toml: {error}")))?;
 
     println!(
-        "\n{} · this machine's own app\n",
-        TrackerKind::Linear.label()
+        "\n{}",
+        bold(&format!(
+            "{} · this machine's own app",
+            TrackerKind::Linear.label()
+        ))
     );
+    println!();
     field("settings", settings_path.display());
-    field("address", &linear.public_url);
-    field("webhooks", &linear.listen);
-    field("callback", callback);
-    field("webhook", webhook);
+    field("public URL", &linear.public_url);
+    field("webhook port", &linear.listen);
+    field("redirect URI", callback);
+    field("webhook URL", webhook);
 
     // Presence only: the values are never printed, not even redacted ones, so
     // this output is safe to paste into a bug report.
@@ -116,7 +122,7 @@ async fn replace(
     credentials_path: &Path,
     installed: &oauth::Installed,
 ) -> Result<(), Box<dyn Error>> {
-    println!("Already installed on this machine:");
+    println!("{}", bold("Already installed on this machine:"));
     field("workspace", workspace(&installed.credentials));
     field("on", when(installed.installed_at));
     if !has_terminal() {
@@ -134,7 +140,7 @@ async fn replace(
 }
 
 fn print_installed(credentials: &oauth::AppCredentials, credentials_path: &Path) {
-    println!("\nInstalled:");
+    println!("\n{}", bold("Installed:"));
     field("workspace", workspace(credentials));
     field("saved", credentials_path.display());
     println!();
@@ -168,25 +174,33 @@ fn present(secret: &Result<String, String>) -> &'static str {
 }
 
 fn print_guide(guide: &Guide) {
+    println!("\n{}", bold(guide.title));
     for text in guide.intro {
-        paragraph(text);
         println!();
+        paragraph(text);
     }
     for (index, step) in guide.steps.iter().enumerate() {
+        println!();
         print_step(index + 1, step);
     }
     for text in guide.closing {
-        paragraph(text);
         println!();
+        paragraph(text);
     }
+    println!();
 }
 
 fn print_step(number: usize, step: &Step) {
-    let lead = format!("  {number}.  ");
-    let indent = " ".repeat(lead.len());
-    prose(step.prose, &lead, &indent);
-    for line in step.code {
-        println!("{indent}  {line}");
+    println!("  {} {}", bold(&format!("{number}.")), bold(step.title));
+    for item in step.items {
+        // The step sits at five spaces, a bullet one stop in, and a detail under
+        // a bullet one more. Wrapping follows the same stops so the steps stay a
+        // column rather than a run of paragraphs.
+        match item {
+            Item::Text(text) => prose(text, "     ", "     "),
+            Item::Bullet(text) => prose(text, "     • ", "       "),
+            Item::Detail(text) => prose(text, "       ◦ ", "         "),
+            Item::Code(line) => println!("       {line}"),
+        }
     }
-    println!();
 }

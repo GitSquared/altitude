@@ -244,7 +244,9 @@ async fn callback(
 
 async fn install(settings: &LinearSettings, code: &str) -> Result<AppCredentials, String> {
     let secret = settings.client_secret()?;
-    let redirect = settings.endpoint("/linear/oauth/callback")?.to_string();
+    let redirect = settings
+        .endpoint("/altitude/linear/oauth/callback")?
+        .to_string();
     let token = exchange(&[
         ("grant_type", "authorization_code"),
         ("code", code),
@@ -311,7 +313,7 @@ async fn install(settings: &LinearSettings, code: &str) -> Result<AppCredentials
 pub async fn connect(settings: LinearSettings, path: &Path) -> Result<AppCredentials, String> {
     settings.client_secret()?;
     settings.webhook_secret()?;
-    let redirect = settings.endpoint("/linear/oauth/callback")?;
+    let redirect = settings.endpoint("/altitude/linear/oauth/callback")?;
     let listener = TcpListener::bind(&settings.listen)
         .await
         .map_err(|error| format!("could not listen for Linear sign-in: {error}"))?;
@@ -337,7 +339,7 @@ pub async fn connect(settings: LinearSettings, path: &Path) -> Result<AppCredent
         result: Mutex::new(Some(result)),
     });
     let router = Router::new()
-        .route("/linear/oauth/callback", get(callback))
+        .route("/altitude/linear/oauth/callback", get(callback))
         .with_state(installation);
     println!("Open this as a workspace administrator:\n\n{authorize}\n");
     let (stop, stopped) = oneshot::channel::<()>();

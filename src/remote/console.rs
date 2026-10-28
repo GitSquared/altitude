@@ -6,7 +6,7 @@
 //! read the same way and a new guide inherits the shape.
 
 use std::{
-    fmt,
+    env, fmt,
     io::{self, IsTerminal, Write},
     mem,
 };
@@ -19,12 +19,27 @@ pub fn has_terminal() -> bool {
     io::stdin().is_terminal()
 }
 
+/// Whether this output can carry emphasis: a terminal on stdout, with colour not
+/// turned off the way the rest of the CLI turns it off.
+fn styled() -> bool {
+    io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none()
+}
+
+/// The text in bold, where the terminal can show it.
+pub fn bold(text: &str) -> String {
+    if styled() {
+        format!("\x1b[1m{text}\x1b[0m")
+    } else {
+        text.to_owned()
+    }
+}
+
 /// One answer, or nothing when there is no terminal to read it from.
 fn line(prompt: &str) -> io::Result<Option<String>> {
     if !has_terminal() {
         return Ok(None);
     }
-    print!("\n{prompt}  › ");
+    print!("\n{}  › ", bold(prompt));
     io::stdout().flush()?;
     let mut answer = String::new();
     if io::stdin().read_line(&mut answer)? == 0 {
@@ -63,7 +78,7 @@ pub fn choose(prompt: &str, count: usize, default: usize) -> io::Result<usize> {
 }
 
 pub fn field(label: &str, value: impl fmt::Display) {
-    println!("  {label:<10}{value}");
+    println!("  {}{value}", bold(&format!("{label:<12}")));
 }
 
 /// A wrapped paragraph.
@@ -74,7 +89,7 @@ pub fn paragraph(text: &str) {
 /// A wrapped paragraph whose first line is led by `lead` and whose other lines start
 /// with `indent`, for text that sits beside a number or a label.
 pub fn prose(text: &str, lead: &str, indent: &str) {
-    let mut lines = wrap(text, WIDTH.saturating_sub(lead.len())).into_iter();
+    let mut lines = wrap(text, WIDTH.saturating_sub(lead.chars().count())).into_iter();
     if let Some(first) = lines.next() {
         println!("{lead}{first}");
     }

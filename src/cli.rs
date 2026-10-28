@@ -62,6 +62,19 @@ each operator's own login.
 
 Set LOG_LEVEL=debug for detailed logs. Terminal colors are automatic; set NO_COLOR to disable them.";
 
+/// What `connect` asks the operator to do, in order, once per workspace.
+const CONNECT_AFTER_HELP: &str = "\
+The steps:
+\x20 1. Choose the HTTPS address that reaches the remote.
+\x20 2. Create the tracker's OAuth application with that address's redirect
+\x20    and webhook URLs.
+\x20 3. Put its client ID, secrets, and that address in serve.toml.
+\x20 4. Route the two URLs from that address to the remote.
+\x20 5. Run this command on the remote.
+
+Every fact it prints belongs to this machine: the steps are the same ones
+Altitude shows anywhere, but the addresses, ports and logins are this host's own.";
+
 #[derive(Debug, Args)]
 pub struct ServeArgs {
     /// Settings file to read instead of the default `~/.config/altitude/serve.toml`.
@@ -111,10 +124,9 @@ pub enum ServeCommand {
     Uninstall,
     /// Install a task tracker's shared app on this machine, then exit
     ///
-    /// Prints the URLs the application must register, what this machine's settings
-    /// and secrets are, and what it ended up installed as. Every fact it prints
-    /// belongs to this machine: the steps are the same ones Altitude shows
-    /// anywhere, but the addresses, ports and logins are this host's own.
+    /// Prints what this machine holds, walks through the application's setup steps,
+    /// and saves the login here.
+    #[command(after_help = CONNECT_AFTER_HELP)]
     Connect(ConnectArgs),
 }
 
