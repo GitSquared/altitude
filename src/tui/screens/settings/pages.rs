@@ -317,15 +317,12 @@ pub(super) fn project_lines(
     if let Some(description) = view
         .base
         .as_ref()
-        .filter(|description| !description.alpine_release.is_empty())
+        .filter(|description| !description.os_release.is_empty())
     {
         lines.push(Line::from(""));
         lines.push(Line::styled("base image", palette::muted()));
         lines.push(Line::from(vec![
-            Span::styled(
-                format!("Alpine Linux {}", description.alpine_release),
-                palette::accent(),
-            ),
+            Span::styled(description.os_release.clone(), palette::accent()),
             Span::raw(" · "),
             Span::styled(
                 format!("{} packages", description.packages.len()),

@@ -37,7 +37,9 @@ use super::{
     trust_host_roots,
 };
 
-const BASE_IMAGE: &str = "alpine";
+/// Ubuntu rather than Alpine: the Rust crates Altitude builds expect glibc, and
+/// Alpine's musl cannot link them. 24.04 is the current LTS.
+const BASE_IMAGE: &str = "ubuntu:24.04";
 
 /// How large a capsule's writable layer may grow.
 ///
@@ -55,25 +57,43 @@ const CAPSULE_DISK_MIB: u32 = 15 * 1_024;
 /// of every sandbox and tells an operator nothing.
 const WORKSPACE_PACKAGES: &[&str] = &[
     "bash",
+    "ca-certificates",
     "curl",
+    "gnupg",
     "python3",
-    "py3-pip",
+    "python3-pip",
     "jq",
     "coreutils",
     "findutils",
     "sed",
     "grep",
-    "nodejs",
-    "npm",
     "ripgrep",
-    "libgcc",
-    "libstdc++",
+    "libgcc-s1",
+    "libstdc++6",
+    "build-essential",
+    "pkg-config",
+    "libssl-dev",
+    "cmake",
+    "clang",
+    "perl",
+    "nodejs",
 ];
 
 /// What the workspace is built from, as the build runs it.
+///
+/// Pi needs a Node newer than the one Ubuntu 24.04 ships, so the distribution's
+/// package is replaced by NodeSource's current 22 before the rest is installed.
 fn workspace_setup() -> String {
     format!(
-        "set -eu\napk upgrade --no-cache\napk add --no-cache {}\ncat > /root/README.md <<'ALTITUDE_WORKSPACE_README'\n{}ALTITUDE_WORKSPACE_README\n",
+        "set -eu\n\
+         export DEBIAN_FRONTEND=noninteractive\n\
+         apt-get update\n\
+         apt-get install -y --no-install-recommends ca-certificates curl gnupg\n\
+         curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/nodesource.sh\n\
+         bash /tmp/nodesource.sh\n\
+         apt-get install -y --no-install-recommends {}\n\
+         cat > /root/README.md <<'ALTITUDE_WORKSPACE_README'\n\
+         {}ALTITUDE_WORKSPACE_README\n",
         WORKSPACE_PACKAGES.join(" "),
         include_str!("assets/workspace.md"),
     )
@@ -84,22 +104,20 @@ const PREPARATION_SANDBOX: &str = "altitude-base-image-setup";
 ///
 /// One command, so the answer is one round trip, and one `key<TAB>value` line
 /// each, so the manifest can hold them on lines of its own. Recorded rather than
-/// inferred: the base image is a rolling tag and the setup commands name no
-/// versions, so nothing outside the snapshot can say what an operator ended up
-/// with.
+/// inferred: the setup command names no versions, so nothing outside the
+/// snapshot can say what an operator ended up with.
 ///
 /// The packages are the ones the workspace asked for, with their versions,
 /// rather than everything present: the image's own plumbing is true of every
 /// sandbox and tells an operator nothing, while the version of Python they got
 /// is worth knowing.
 fn description_command() -> String {
-    // `apk info -v` with no arguments lists every installed package as
-    // `name-version`; the list is filtered to the ones the workspace asked for,
-    // because the image's own plumbing is true of every sandbox and tells an
-    // operator nothing.
+    // Asked package by package, because the list is the answer: scanning every
+    // installed package would include the image's plumbing, and matching names
+    // with a regex would lose ones like `libstdc++6`.
     format!(
-        "printf 'alpine\\t%s\\n' \"$(cat /etc/alpine-release 2>/dev/null || echo unknown)\"\nprintf 'packages\\t%s\\n' \"$(apk info -v 2>/dev/null | grep -E '^({})-[0-9]' | tr '\\n' ' ')\"\n",
-        WORKSPACE_PACKAGES.join("|"),
+        "printf 'os\\t%s\\n' \"$(. /etc/os-release && printf '%s %s' \"$NAME\" \"$VERSION_ID\")\"\nprintf 'packages\\t%s\\n' \"$(for package in {}; do version=$(dpkg-query -W -f='${{Version}}' \"$package\" 2>/dev/null) || continue; [ -n \"$version\" ] || continue; printf '%s-%s\\n' \"$package\" \"$version\"; done | tr '\\n' ' ')\"\n",
+        WORKSPACE_PACKAGES.join(" "),
     )
 }
 
@@ -337,7 +355,7 @@ impl MicrosandboxIsolation {
 
     /// Puts this machine's trusted roots into the sandbox's own store as well.
     ///
-    /// A tool that reads the system store — curl, apk, git — has no variable to be
+    /// A tool that reads the system store — curl, apt, git — has no variable to be
     /// told with, so the bundle is appended to the store the image already has. Done
     /// at creation rather than at build, because a snapshot can be moved to another
     /// machine and one host's inspection root must not travel with it.
@@ -442,7 +460,7 @@ impl MicrosandboxIsolation {
             }
             // Asked while the sandbox is still running, and before the snapshot
             // is taken, because it can only be asked of a live machine.
-            let (alpine_release, packages) = self.describe_snapshot(&sandbox_id).await;
+            let (os_release, packages) = self.describe_snapshot(&sandbox_id).await;
             let path = self.suspend(
                 sandbox_id.clone(),
                 format!("base-{created_at_ms}"),
@@ -451,7 +469,7 @@ impl MicrosandboxIsolation {
             let snapshot = BaseSandboxSnapshot {
                 path,
                 created_at_ms,
-                alpine_release,
+                os_release,
                 packages,
                 setup_command: recipe.setup_command(),
             };
@@ -546,19 +564,19 @@ impl MicrosandboxIsolation {
         let Ok((0, output)) = self.run_to_end(sandbox_id, &command).await else {
             return unreadable();
         };
-        let mut alpine = String::new();
+        let mut os = String::new();
         let mut packages = String::new();
         for line in output.lines() {
             match line.split_once('\t') {
-                Some(("alpine", value)) => alpine = value.trim().to_owned(),
+                Some(("os", value)) => os = value.trim().to_owned(),
                 Some(("packages", value)) => packages = value.trim().to_owned(),
                 _ => {}
             }
         }
-        if alpine.is_empty() && packages.is_empty() {
+        if os.is_empty() && packages.is_empty() {
             return unreadable();
         }
-        (alpine, packages)
+        (os, packages)
     }
 
     fn ensure_socket_safe_home(&self) -> Result<PathBuf, IsolationError> {
@@ -639,7 +657,7 @@ impl BaseSandboxSnapshotStore {
         Ok(Some(BaseSandboxSnapshot {
             path,
             created_at_ms,
-            alpine_release: fields.next().unwrap_or_default().to_owned(),
+            os_release: fields.next().unwrap_or_default().to_owned(),
             packages: fields.next().unwrap_or_default().to_owned(),
             setup_command: fields.next().unwrap_or_default().to_owned(),
         }))
@@ -675,7 +693,7 @@ impl BaseSandboxSnapshotStore {
             format!(
                 "{relative_path}\n{}\n{}\n{}\n{}",
                 snapshot.created_at_ms,
-                snapshot.alpine_release,
+                snapshot.os_release,
                 snapshot.packages,
                 snapshot.setup_command
             ),
@@ -934,7 +952,7 @@ impl IsolationEngine for MicrosandboxIsolation {
         let store = BaseSandboxSnapshotStore::at(self.config.base_snapshots_dir(), REFRESH_AFTER);
         let snapshot = store.current().ok().flatten()?;
         Some(EnvironmentDescription {
-            alpine_release: snapshot.alpine_release,
+            os_release: snapshot.os_release,
             packages: snapshot
                 .packages
                 .split_whitespace()

@@ -26,8 +26,7 @@ use super::{
     PORT_RELAY_GUEST_PORT, SandboxMount, SandboxOptions, SandboxSize, SetupStep, VsockRoute,
 };
 
-/// The current Alpine environment runs as root, so home-relative requirements
-/// resolve from here.
+/// The workspace runs as root, so home-relative requirements resolve from here.
 const GUEST_HOME: &str = "/root";
 /// Where the opener every sandbox is given lives, and what `$BROWSER` points at.
 const OPENER: &str = "/usr/local/bin/xdg-open";

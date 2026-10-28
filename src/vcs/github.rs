@@ -14,7 +14,7 @@ use crate::{
 /// clones through this machine's shared object cache instead of pulling a
 /// repository the machine already has. See `assets/git-shim.sh`.
 const SETUP_COMMAND: &str = concat!(
-    "apk add --no-cache git openssh-client-default github-cli gnupg\n",
+    "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git openssh-client gh gnupg\n",
     // The login this profile mounts is the GitHub CLI's, so git is pointed at the
     // same one. Without it an https clone of a private repository stops at a
     // username prompt, and the sandbox's own setup has nobody to answer it.

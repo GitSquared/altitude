@@ -143,7 +143,7 @@ pub struct BaseSandboxSnapshot {
     pub created_at_ms: i64,
     /// What the snapshot reported about its image and packages, empty when it
     /// could not be asked. See [`EnvironmentDescription`].
-    pub alpine_release: String,
+    pub os_release: String,
     pub packages: String,
     pub setup_command: String,
 }
@@ -209,8 +209,8 @@ pub struct CredentialCheck {
 /// versions.
 #[derive(Clone, Debug)]
 pub struct EnvironmentDescription {
-    /// The image's release, e.g. `3.21.3`.
-    pub alpine_release: String,
+    /// The image as it names itself, e.g. `Ubuntu 24.04`.
+    pub os_release: String,
     /// Installed packages as `name-version`, in the order the build listed them.
     pub packages: Vec<String>,
     pub built_at_ms: i64,
@@ -305,7 +305,7 @@ pub(crate) fn mount_git_cache(options: &mut SandboxOptions, cache_dir: &Path) {
 ///
 /// `NODE_EXTRA_CA_CERTS` adds to a store rather than replacing it, which is why it is
 /// safe here where `SSL_CERT_FILE` would not be. Tools that read the system store —
-/// curl, apk, git — need the bundle appended to that store, which a build step does.
+/// curl, apt, git — need the bundle appended to that store, which a build step does.
 pub(crate) fn trust_host_roots(options: &mut SandboxOptions, data_dir: &Path) -> bool {
     let roots: Vec<PathBuf> = ["NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "CURL_CA_BUNDLE"]
         .into_iter()
