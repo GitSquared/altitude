@@ -15,7 +15,7 @@ use std::{error::Error, fmt, path::PathBuf};
 
 use crate::vcs;
 
-pub use model::{Credential, Service, Slot};
+pub use model::{Credential, Service, Slot, new_id};
 pub use shell::{
     CredentialShell, CredentialShellCancel, CredentialShellEvent, credential_shell_id,
 };
@@ -93,6 +93,17 @@ impl<E> Credentials<E>
 where
     E: IsolationEngine + Clone,
 {
+    /// What a named credential looks like to the list and sign-in surfaces.
+    pub fn summary(&self, profile: &str) -> Option<ProfileSummary> {
+        let recipe = self.recipe(profile).ok()?;
+        Some(ProfileSummary {
+            profile: recipe.profile,
+            display: recipe.display,
+            sign_in: recipe.sign_in,
+            sign_in_command: recipe.sign_in_command,
+        })
+    }
+
     /// The one recipe a profile's sign-in needs.
     ///
     /// One rather than the set a task gets: a login is written by the CLI that owns it,

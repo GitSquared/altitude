@@ -424,6 +424,16 @@ pub(super) fn credential_connector(credential: &Credential) -> Connector {
                 ("state", tilde(data_dir)),
             ],
         },
+        CredentialKind::Tracker {
+            profile,
+            directory,
+            status,
+        } => {
+            let mut connector = tracker_connector(*status, Path::new(directory));
+            connector.title = credential.label.clone();
+            let _ = profile;
+            connector
+        }
         CredentialKind::Profile {
             profile,
             directory,

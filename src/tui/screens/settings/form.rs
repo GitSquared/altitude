@@ -14,9 +14,10 @@ use ratatui::{
 
 use crate::{
     agent::AgentKind,
+    credentials::{Credential, Service, Slot},
     project::{Project, ProjectCommits},
     tui::{
-        popups::{new_task::AGENTS, repositories::Repositories, scopes::Scopes},
+        popups::{repositories::Repositories, scopes::Scopes},
         widgets::{
             button, chrome, palette,
             text::{Field, FieldStyle, TextBox},
@@ -84,6 +85,8 @@ pub enum Focus {
     Instructions,
     Scope,
     Agent,
+    VcsIdentity,
+    TrackerIdentity,
     Identity,
     CommitName,
     CommitEmail,
@@ -184,6 +187,16 @@ fn groups(project: bool) -> Vec<Group> {
             kind: Kind::Choice,
         },
         Group {
+            focus: Focus::VcsIdentity,
+            label: "Version control",
+            kind: Kind::Choice,
+        },
+        Group {
+            focus: Focus::TrackerIdentity,
+            label: "Task tracker",
+            kind: Kind::Choice,
+        },
+        Group {
             focus: Focus::Identity,
             label: "Git identity",
             kind: Kind::Choice,
@@ -245,6 +258,10 @@ pub struct Form {
     /// The coding agent new tasks here use, or nothing for the installation's
     /// default.
     pub agent: Option<AgentKind>,
+    pub agent_credential: Option<String>,
+    pub vcs_credential: Option<String>,
+    pub tracker_credential: Option<String>,
+    credentials: Vec<Credential>,
     /// The installation's default agent, shown so "default" has a name.
     default_agent: Option<AgentKind>,
     /// Where this project's tasks run, or nothing for this machine.
@@ -266,13 +283,15 @@ pub struct Form {
 }
 
 /// Every focus a project form walks, in order.
-const PROJECT_FIELDS: [Focus; 15] = [
+const PROJECT_FIELDS: [Focus; 17] = [
     Focus::Primary,
     Focus::Repository,
     Focus::Setup,
     Focus::Caches,
     Focus::Instructions,
     Focus::Agent,
+    Focus::VcsIdentity,
+    Focus::TrackerIdentity,
     Focus::Identity,
     Focus::CommitName,
     Focus::CommitEmail,
@@ -295,6 +314,7 @@ impl Form {
         default_agent: Option<AgentKind>,
         default_commits: Option<ProjectCommits>,
         identities: Vec<ProjectCommits>,
+        credentials: Vec<Credential>,
     ) -> Self {
         let project = Project::new("");
         Self::for_project(
@@ -305,9 +325,11 @@ impl Form {
             default_agent,
             default_commits,
             identities,
+            credentials,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn for_project(
         target: Target,
         project: &Project,
@@ -316,6 +338,7 @@ impl Form {
         default_agent: Option<AgentKind>,
         default_commits: Option<ProjectCommits>,
         identities: Vec<ProjectCommits>,
+        credentials: Vec<Credential>,
     ) -> Self {
         let commits = project.commits.clone().or_else(|| default_commits.clone());
         let identity_at = project
@@ -358,6 +381,13 @@ impl Form {
             default_commits,
             identity_at,
             agent: project.agent,
+            agent_credential: project.agent_credential.clone(),
+            vcs_credential: project.vcs_credential.clone(),
+            tracker_credential: project
+                .tracker
+                .as_ref()
+                .and_then(|route| route.credential.clone()),
+            credentials,
             default_agent,
             host: project.host.clone(),
             host_choices,
@@ -389,6 +419,10 @@ impl Form {
             default_commits: None,
             identity_at: None,
             agent: None,
+            agent_credential: None,
+            vcs_credential: None,
+            tracker_credential: None,
+            credentials: Vec::new(),
             default_agent: None,
             host: None,
             host_choices: Vec::new(),
@@ -517,26 +551,85 @@ impl Form {
         }
     }
 
-    /// Move to the next agent on offer, wrapping. Nothing is the installation's
-    /// default, so a project only stores a choice when it differs.
+    /// Move to the next identity for a slot, wrapping. Nothing is the
+    /// installation's default, so a project only stores a choice when it differs.
     pub fn cycle_agent(&mut self) {
-        let mut options: Vec<Option<AgentKind>> = vec![None];
-        options.extend(AGENTS.iter().copied().map(Some));
+        let options = self.identities_for(Slot::Agent);
         let at = options
             .iter()
-            .position(|option| *option == self.agent)
+            .position(|option| option == &self.agent_credential)
             .unwrap_or(0);
-        self.agent = options[(at + 1) % options.len()];
+        self.agent_credential = options[(at + 1) % options.len()].clone();
+        self.agent = self
+            .agent_credential
+            .as_deref()
+            .and_then(Service::from_id)
+            .and_then(|service| match service {
+                Service::Agent(kind) => Some(kind),
+                _ => None,
+            });
     }
 
-    /// How the agent choice reads: the installation's default by name, or the
-    /// project's own choice.
-    fn agent_value(&self) -> String {
-        match (self.agent, self.default_agent) {
-            (Some(agent), _) => agent.to_string(),
-            (None, Some(default)) => format!("default · {default}"),
-            (None, None) => "not chosen".to_owned(),
+    pub fn cycle_vcs(&mut self) {
+        let options = self.identities_for(Slot::VersionControl);
+        let at = options
+            .iter()
+            .position(|option| option == &self.vcs_credential)
+            .unwrap_or(0);
+        self.vcs_credential = options[(at + 1) % options.len()].clone();
+    }
+
+    pub fn cycle_tracker(&mut self) {
+        let options = self.identities_for(Slot::Tracker);
+        let at = options
+            .iter()
+            .position(|option| option == &self.tracker_credential)
+            .unwrap_or(0);
+        self.tracker_credential = options[(at + 1) % options.len()].clone();
+        self.scope = Field::with("");
+    }
+
+    fn identities_for(&self, slot: Slot) -> Vec<Option<String>> {
+        let mut options = vec![None];
+        options.extend(
+            self.credentials
+                .iter()
+                .filter(|credential| {
+                    credential
+                        .service()
+                        .is_some_and(|service| service.slot() == slot)
+                })
+                .map(|credential| Some(credential.id.clone())),
+        );
+        options
+    }
+
+    fn identity_label(&self, id: Option<&str>, default: &str) -> String {
+        match id {
+            Some(id) => self
+                .credentials
+                .iter()
+                .find(|credential| credential.id == id)
+                .map(|credential| credential.label.clone())
+                .unwrap_or_else(|| default.to_owned()),
+            None => format!("default · {default}"),
         }
+    }
+
+    fn agent_value(&self) -> String {
+        let default = self
+            .default_agent
+            .map(|agent| agent.to_string())
+            .unwrap_or_else(|| "not chosen".to_owned());
+        self.identity_label(self.agent_credential.as_deref(), &default)
+    }
+
+    fn vcs_value(&self) -> String {
+        self.identity_label(self.vcs_credential.as_deref(), "the installation's login")
+    }
+
+    fn tracker_value(&self) -> String {
+        self.identity_label(self.tracker_credential.as_deref(), "none")
     }
 
     /// Move to the next machine on offer, wrapping.
@@ -726,6 +819,8 @@ fn draw_group(frame: &mut Frame, area: Rect, form: &Form, group: &Group) {
             draw_label(frame, area, group.label);
             let value = match group.focus {
                 Focus::Agent => form.agent_value(),
+                Focus::VcsIdentity => form.vcs_value(),
+                Focus::TrackerIdentity => form.tracker_value(),
                 Focus::Identity => form.identity_value(),
                 _ => form.host.as_deref().unwrap_or("this machine").to_owned(),
             };

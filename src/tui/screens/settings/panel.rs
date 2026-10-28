@@ -9,19 +9,23 @@ use crate::tui::widgets::list;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     Interface,
+    Identities,
+    // The service-specific lists are kept for the old pages they describe; the
+    // rail no longer shows them. Their rows are the identities list now.
+    #[allow(dead_code)]
     Agents,
+    #[allow(dead_code)]
     VersionControl,
+    #[allow(dead_code)]
     Trackers,
     Projects,
     Remotes,
 }
 
 impl Section {
-    pub const ALL: [Section; 6] = [
+    pub const ALL: [Section; 4] = [
         Self::Interface,
-        Self::Agents,
-        Self::VersionControl,
-        Self::Trackers,
+        Self::Identities,
         Self::Projects,
         Self::Remotes,
     ];
@@ -29,6 +33,7 @@ impl Section {
     pub fn title(self) -> &'static str {
         match self {
             Self::Interface => "Interface",
+            Self::Identities => "Identities",
             Self::Agents => "Agents",
             Self::VersionControl => "Version control",
             Self::Trackers => "Task tracker",
@@ -41,6 +46,7 @@ impl Section {
     pub fn description(self) -> &'static str {
         match self {
             Self::Interface => "Adjust look and feel",
+            Self::Identities => "Logins work runs with",
             Self::Agents => "Connect your favorite",
             Self::VersionControl => "Git and commit signing",
             Self::Trackers => "Keep your team in the loop",
@@ -54,7 +60,7 @@ impl Section {
     /// Only the projects and the remotes are the operator's to add and
     /// remove: the other lists are what the installation already holds.
     pub fn grows(self) -> bool {
-        matches!(self, Self::Projects | Self::Remotes)
+        matches!(self, Self::Identities | Self::Projects | Self::Remotes)
     }
 
     /// The credential profiles this section asks about, when it asks about any.

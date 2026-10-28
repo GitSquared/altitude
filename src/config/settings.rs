@@ -329,6 +329,56 @@ impl Settings {
         Ok(())
     }
 
+    /// Rename an identity, leaving its id and profile directory alone.
+    pub fn rename_credential(&mut self, id: &str, label: &str) -> Result<(), SettingsError> {
+        let label = label.trim();
+        if label.is_empty() || label.len() > 64 || label.chars().any(char::is_control) {
+            return Err(SettingsError::Invalid(
+                "a name needs one short line".to_owned(),
+            ));
+        }
+        if self
+            .credentials
+            .iter()
+            .any(|credential| credential.id != id && credential.label.eq_ignore_ascii_case(label))
+        {
+            return Err(SettingsError::Invalid(format!("{label:?} is already used")));
+        }
+        let Some(credential) = self
+            .credentials
+            .iter_mut()
+            .find(|credential| credential.id == id)
+        else {
+            return Err(SettingsError::Invalid(format!("no credential {id:?}")));
+        };
+        credential.label = label.to_owned();
+        credential.label_auto = false;
+        Ok(())
+    }
+
+    /// Update an auto-named identity when its service reports who it is.
+    pub fn suggest_credential_name(&mut self, id: &str, label: &str) {
+        let label = label.trim();
+        if label.is_empty() || label.len() > 64 || label.chars().any(char::is_control) {
+            return;
+        }
+        if self
+            .credentials
+            .iter()
+            .any(|credential| credential.id != id && credential.label.eq_ignore_ascii_case(label))
+        {
+            return;
+        }
+        if let Some(credential) = self
+            .credentials
+            .iter_mut()
+            .find(|credential| credential.id == id)
+            && credential.label_auto
+        {
+            credential.label = label.to_owned();
+        }
+    }
+
     #[allow(dead_code)]
     pub fn remove_credential(&mut self, id: &str) -> Result<(), SettingsError> {
         if self.projects.iter().any(|project| {

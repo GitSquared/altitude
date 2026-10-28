@@ -200,7 +200,9 @@ fn detail(panel: &Panel, view: &View, tick: Option<usize>) -> Paragraph<'static>
                 directory,
                 status,
             } => profile_connector(label, agent_purpose(*kind), profile, directory, status),
-            CredentialKind::Installation { .. } => credential_connector(credential),
+            CredentialKind::Installation { .. } | CredentialKind::Tracker { .. } => {
+                credential_connector(credential)
+            }
         }
         .lines(heading, tick),
         RowKind::GitIdentity(identity) => git_connector(identity).lines(heading, tick),

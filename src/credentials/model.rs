@@ -106,6 +106,14 @@ pub struct Credential {
     pub id: String,
     /// What an operator reads and binds by.
     pub label: String,
+    /// Whether the label is still the one the service or the fallback chose.
+    /// A rename turns this off, so a later account hint does not overwrite it.
+    #[serde(default = "default_true")]
+    pub label_auto: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Credential {
@@ -113,6 +121,7 @@ impl Credential {
         Self {
             id: id.into(),
             label: label.into(),
+            label_auto: true,
         }
     }
 

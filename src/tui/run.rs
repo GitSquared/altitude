@@ -223,7 +223,7 @@ where
     app.reload_remembered_keys().await;
     // What a profile is called where an operator reads it, and the first thing a
     // new installation is shown.
-    app.profiles = task_service.credentials().profiles();
+    app.reload_profiles(&task_service);
     app.refresh_tracker_state(&task_service);
     app.refresh_git_identity().await;
     // A task cannot run without these, so the list is not behind the card: the
@@ -497,6 +497,11 @@ where
                         progress,
                         app.animation_tick(),
                     ));
+                }
+                match &app.foreground {
+                    Foreground::IdentitySetup(setup) => setup.draw(frame, content),
+                    Foreground::RenameIdentity(rename) => rename.draw(frame, content, true),
+                    _ => {}
                 }
             } else if app.foreground.shows_signals() {
                 // Fullscreen too: it is the screen the operator is reading, not
@@ -1136,6 +1141,11 @@ where
             )
             .await
         }
+        Foreground::IdentitySetup(_) => {
+            app.identity_setup_key(key, task_service, credential_events, tracker_connects)
+                .await
+        }
+        Foreground::RenameIdentity(_) => app.rename_identity_key(key),
         Foreground::Setup(_) => app.setup_key(key),
         Foreground::SignIn(_) => app.sign_in_key(key, task_service, credential_events).await,
         Foreground::Signals => {

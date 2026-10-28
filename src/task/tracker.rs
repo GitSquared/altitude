@@ -29,6 +29,10 @@ use super::{Task, TaskExecutionPauseReason, TaskHistoryEvent, TaskService, TaskS
 /// so the answer depends on who owns the task.
 pub trait TrackerHost: Send + Sync + 'static {
     fn for_credential(&self, operator: &str, credential: &str) -> Option<Arc<dyn TrackerProvider>>;
+
+    /// A client for this identity even before it is signed in, which is what a
+    /// sign-in needs; reporting uses [`Self::for_credential`].
+    fn connectable(&self, operator: &str, credential: &str) -> Option<Arc<dyn TrackerProvider>>;
 }
 
 /// The tracker identities this machine holds for its own work.
@@ -56,6 +60,14 @@ impl OwnTrackers {
 }
 
 impl TrackerHost for OwnTrackers {
+    fn connectable(&self, _operator: &str, credential: &str) -> Option<Arc<dyn TrackerProvider>> {
+        if Service::from_id(credential)?.slot() != Slot::Tracker {
+            return None;
+        }
+        let tracker = Linear::from_directory(&self.config.profile_dir(credential)).ok()?;
+        Some(Arc::new(tracker) as Arc<dyn TrackerProvider>)
+    }
+
     fn for_credential(
         &self,
         _operator: &str,

@@ -146,7 +146,8 @@ impl Row {
         match &self.kind {
             RowKind::Agent { credential, .. } | RowKind::Credential(credential) => {
                 match &credential.kind {
-                    CredentialKind::Profile { profile, .. } => Some(profile.as_str()),
+                    CredentialKind::Profile { profile, .. }
+                    | CredentialKind::Tracker { profile, .. } => Some(profile.as_str()),
                     CredentialKind::Installation { .. } => None,
                 }
             }
@@ -178,6 +179,17 @@ impl Row {
                 CredentialKind::Profile { .. } => {
                     vec![chrome::Hint::new("enter", "sign in")]
                 }
+                CredentialKind::Tracker { .. } => vec![
+                    chrome::Hint::new(
+                        "enter",
+                        if connecting_tracker {
+                            "cancel sign-in"
+                        } else {
+                            "sign in"
+                        },
+                    ),
+                    chrome::Hint::new("e", "rename"),
+                ],
             },
             RowKind::Remote { status, .. } => vec![
                 chrome::Hint::new(
@@ -222,11 +234,23 @@ pub struct Credential {
 }
 
 impl Credential {
+    pub(in crate::tui) fn profile(&self) -> Option<&str> {
+        match &self.kind {
+            CredentialKind::Profile { profile, .. } | CredentialKind::Tracker { profile, .. } => {
+                Some(profile.as_str())
+            }
+            CredentialKind::Installation { .. } => None,
+        }
+    }
+
     pub(in crate::tui) fn is_pending(&self) -> bool {
         matches!(
             &self.kind,
             CredentialKind::Profile {
                 status: CredentialStatus::Unknown | CredentialStatus::Checking,
+                ..
+            } | CredentialKind::Tracker {
+                status: TrackerState::NotConnected,
                 ..
             }
         )
@@ -239,6 +263,7 @@ impl Credential {
     pub(super) fn dot(&self) -> Option<Dot> {
         match &self.kind {
             CredentialKind::Profile { status, .. } => Some(credential_mark(status)),
+            CredentialKind::Tracker { status, .. } => Some(tracker_mark(*status)),
             CredentialKind::Installation { .. } => Some(Dot::still('■', palette::muted())),
         }
     }
@@ -250,6 +275,7 @@ impl Credential {
     pub(super) fn summary(&self) -> &'static str {
         match &self.kind {
             CredentialKind::Profile { status, .. } => status.summary(),
+            CredentialKind::Tracker { status, .. } => status.summary(),
             CredentialKind::Installation { .. } => "this machine",
         }
     }
@@ -263,6 +289,12 @@ pub enum CredentialKind {
         label: String,
         key: String,
         data_dir: String,
+    },
+    /// A host-side tracker identity: a live session, not a mount.
+    Tracker {
+        profile: String,
+        directory: String,
+        status: TrackerState,
     },
     /// A profile a task mounts. Presence and place only: never the contents.
     Profile {

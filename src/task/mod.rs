@@ -260,6 +260,12 @@ where
     }
 
     /// The tracker identity a project route names, or the service default.
+    pub fn tracker_connectable(&self, credential: &str) -> Option<Arc<dyn TrackerProvider>> {
+        self.trackers
+            .as_ref()
+            .and_then(|host| host.connectable(&self.identity.id, credential))
+    }
+
     pub fn tracker_for(&self, credential: &str) -> Option<Arc<dyn TrackerProvider>> {
         self.trackers
             .as_ref()

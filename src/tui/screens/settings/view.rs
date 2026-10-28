@@ -4,6 +4,7 @@
 
 use crate::{
     agent::AgentKind,
+    credentials::Slot,
     isolation::ProfileSummary,
     tui::{
         App,
@@ -23,6 +24,67 @@ impl App {
     /// what was read back about each remote and about the built base image.
     pub(in crate::tui) fn settings_view(&self) -> View {
         let rows = match self.panel.section {
+            Section::Identities => {
+                let mut rows = vec![Row {
+                    label: "Git identity".to_owned(),
+                    detail: Some(
+                        if self.git_identity().is_set() {
+                            "set · used for commits"
+                        } else {
+                            "not set"
+                        }
+                        .to_owned(),
+                    ),
+                    kind: RowKind::GitIdentity(self.git_identity()),
+                }];
+                for credential in self.settings_credentials() {
+                    let service = credential.service();
+                    let (kind, status) =
+                        if service.is_some_and(|service| service.slot() == Slot::Tracker) {
+                            let state = self.tracker_state_for(&credential.id);
+                            (
+                                CredentialKind::Tracker {
+                                    profile: credential.id.clone(),
+                                    directory: self
+                                        .config
+                                        .profile_dir(&credential.id)
+                                        .display()
+                                        .to_string(),
+                                    status: state,
+                                },
+                                state.summary().to_owned(),
+                            )
+                        } else {
+                            let status = self
+                                .credential_status
+                                .get(&credential.id)
+                                .cloned()
+                                .unwrap_or_default();
+                            (
+                                CredentialKind::Profile {
+                                    profile: credential.id.clone(),
+                                    directory: self
+                                        .config
+                                        .profile_dir(&credential.id)
+                                        .display()
+                                        .to_string(),
+                                    status: status.clone(),
+                                },
+                                status.summary().to_owned(),
+                            )
+                        };
+                    let service = service.map_or("unknown", |service| service.label());
+                    rows.push(Row {
+                        label: credential.label.clone(),
+                        detail: Some(format!("{service} · {status}")),
+                        kind: RowKind::Credential(Credential {
+                            label: credential.label,
+                            kind,
+                        }),
+                    });
+                }
+                rows
+            }
             Section::Interface => vec![
                 switch_row(Setting::KeyboardHints, self.keyboard_hints()),
                 switch_row(Setting::Animations, self.animations()),

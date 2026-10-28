@@ -23,8 +23,8 @@ use crate::{
     agent::AgentKind,
     config::{Config, DEFAULT_PORT, SettingsError, SettingsFile},
     credentials::{
-        CredentialAnswer, CredentialShell, CredentialShellCancel, CredentialShellEvent,
-        credential_shell_id,
+        Credential, CredentialAnswer, CredentialShell, CredentialShellCancel, CredentialShellEvent,
+        Service, Slot, credential_shell_id, new_id,
     },
     isolation::{EnvironmentDescription, EnvironmentProgress, IsolationEngine, ProfileSummary},
     project::{Project, ProjectCommits, TrackerRoute, normalize_repository},
@@ -40,7 +40,9 @@ use crate::{
         TaskOperatorSignalMessage, TaskOperatorSignalThread, TaskPlanStep, TaskService,
         TaskServiceError,
     },
-    tracker::{IssueReference, IssueSnapshot, IssueSummary, ScopeSummary, TrackerKind},
+    tracker::{
+        IssueReference, IssueSnapshot, IssueSummary, ScopeSummary, TrackerAccount, TrackerKind,
+    },
     tui::keys::{is_dismiss, is_remove, is_secondary},
     tui::popups,
     tui::screens,
@@ -50,7 +52,7 @@ use crate::{
         pointer::Targets,
         select::{Offer, Select},
     },
-    tui::widgets::{palette, text::Field},
+    tui::widgets::{palette, text::Field, utils::plain},
     vcs::{Repository, VcsProviderKind},
 };
 
@@ -58,6 +60,7 @@ use super::background::terrain::Terrain;
 use super::links::Link;
 use super::widgets::{alert::Alert, list};
 use popups::confirm::{CredentialTarget, PendingConfirm};
+use popups::identity::{IdentitySetup, RenameDecision, RenameIdentity, SetupDecision};
 use popups::message::{Decision as MessageDecision, MessagePrompt};
 use popups::new_task::{AGENTS, Answer, Hit as NewTaskHit, Host, NewTask, SearchToken};
 use popups::repositories::{Key as RepositoriesKey, Repositories};
@@ -105,6 +108,9 @@ pub(in crate::tui) enum Foreground {
     /// The settings panel: projects, remotes, the interface, and the identity.
     Panel,
     Setup(Setup),
+    /// A question about an identity: which service, or what to call it.
+    IdentitySetup(Box<IdentitySetup>),
+    RenameIdentity(Box<RenameIdentity>),
     /// What a tool's own sign-in asks, before its terminal opens.
     SignIn(Box<SignIn>),
     /// The first screen a new installation shows: the one choice a task needs.
@@ -151,7 +157,11 @@ impl Foreground {
 
     pub(in crate::tui) fn shows_settings(&self) -> bool {
         match self {
-            Self::Panel | Self::Setup(_) | Self::SignIn(_) => true,
+            Self::Panel
+            | Self::Setup(_)
+            | Self::IdentitySetup(_)
+            | Self::RenameIdentity(_)
+            | Self::SignIn(_) => true,
             // A credential shell is opened from the settings list it is about, and
             // goes back to them, so the panel is the screen it sits on.
             Self::Shell(ShellId::Credentials(_)) => true,
@@ -302,6 +312,7 @@ pub(in crate::tui) struct TrackerConnectReply {
     /// Which attempt this answers, so a reply for one already given up on
     /// changes nothing.
     pub attempt: u64,
+    pub credential: String,
     pub result: Result<bool, String>,
 }
 
@@ -726,10 +737,14 @@ pub struct App {
     /// What the Linear tracker's session is doing, read when the panel opens
     /// and updated when a sign-in lands.
     pub(in crate::tui) tracker_state: TrackerState,
+    /// The live-session state of each host-side tracker identity.
+    tracker_states: HashMap<String, TrackerState>,
     /// The sign-in in flight, so a second enter can give up on it and leaving
     /// the interface can take it down with it. The provider owns the browser and
     /// the OAuth callback; dropping this future is what cancels them.
     tracker_connect: Option<JoinHandle<()>>,
+    /// The tracker credential whose sign-in is out, if any.
+    tracker_connecting: Option<String>,
     tracker_connect_attempt: u64,
 }
 
@@ -869,7 +884,9 @@ impl App {
             panel_from_setup: false,
             profiles: Vec::new(),
             tracker_state: TrackerState::NotConnected,
+            tracker_states: HashMap::new(),
             tracker_connect: None,
+            tracker_connecting: None,
             tracker_connect_attempt: 0,
             environment_builds: HashMap::new(),
             shimmer: 0,
@@ -1278,6 +1295,16 @@ impl App {
                 Hint::new("↑/↓ · j/k · pgup/pgdn", "scroll"),
                 Hint::new("esc / q", "close"),
             ],
+            Foreground::IdentitySetup(_) => vec![
+                Hint::new("j/k", "move"),
+                Hint::new("enter", "choose"),
+                Hint::new("esc", "close"),
+            ],
+            Foreground::RenameIdentity(_) => vec![
+                Hint::new("type", "the name"),
+                Hint::new("enter", "save"),
+                Hint::new("esc", "cancel"),
+            ],
             Foreground::Confirm(pending) => pending.hints(),
             Foreground::SendTask(sending) => sending.hints(),
             Foreground::NewTask(new_task) => new_task.hints(),
@@ -1635,6 +1662,124 @@ impl App {
     /// A command that signs in and exits needs no page: the terminal is the
     /// sign-in. A tool that has to be driven gets its instructions before its
     /// screen, so the operator arrives knowing what to do there.
+    /// Open the service picker for a new identity.
+    fn open_identity_setup(&mut self) {
+        self.foreground = Foreground::IdentitySetup(Box::new(IdentitySetup::new()));
+    }
+
+    pub(in crate::tui) async fn identity_setup_key<E>(
+        &mut self,
+        key: KeyEvent,
+        task_service: &TaskService<E>,
+        events: &mpsc::UnboundedSender<CredentialShellEvent>,
+        tracker_connects: &mpsc::UnboundedSender<TrackerConnectReply>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let Foreground::IdentitySetup(mut setup) = mem::take(&mut self.foreground) else {
+            return;
+        };
+        match setup.key(key) {
+            SetupDecision::Still => self.foreground = Foreground::IdentitySetup(setup),
+            SetupDecision::Closed => self.foreground = Foreground::Panel,
+            SetupDecision::Chosen(service) => {
+                self.create_identity(service, task_service, events, tracker_connects)
+            }
+        }
+    }
+
+    /// Create the identity, give it the fallback name, and start its sign-in.
+    /// A service that can name the account refines the label once it answers.
+    fn create_identity<E>(
+        &mut self,
+        service: Service,
+        task_service: &TaskService<E>,
+        events: &mpsc::UnboundedSender<CredentialShellEvent>,
+        tracker_connects: &mpsc::UnboundedSender<TrackerConnectReply>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let existing = self.settings_credentials();
+        let count = existing
+            .iter()
+            .filter(|credential| credential.service() == Some(service))
+            .count();
+        let label = if count == 0 {
+            service.label().to_owned()
+        } else {
+            format!("{} {}", service.label(), count + 1)
+        };
+        let id = new_id(service, &label, |candidate| {
+            existing.iter().any(|credential| credential.id == candidate)
+        });
+        let credential = Credential::new(id.clone(), label.clone());
+        let Some(file) = self.settings_file.as_mut() else {
+            self.problem("Settings are unavailable; fix the file and reopen");
+            return;
+        };
+        let mut proposed = file.settings().clone();
+        if let Err(error) = proposed.add_credential(credential) {
+            self.problem(error.to_string());
+            return;
+        }
+        if let Err(error) = file.save(proposed) {
+            self.problem(error.to_string());
+            return;
+        }
+        self.panel.section = Section::Identities;
+        self.foreground = Foreground::Panel;
+        self.tracker_states
+            .insert(id.clone(), TrackerState::NotConnected);
+        if service.is_mounted()
+            && let Some(summary) = task_service.credentials().summary(&id)
+        {
+            self.profiles.push(summary);
+        }
+        match service.slot() {
+            Slot::Tracker => self.connect_tracker_for(&id, task_service, tracker_connects),
+            _ => self.begin_sign_in(&label, &id, task_service, events),
+        }
+    }
+
+    fn open_rename_identity(&mut self) {
+        let Some(row) = self.selected_row() else {
+            return;
+        };
+        let RowKind::Credential(credential) = row.kind else {
+            self.say("Only a named identity can be renamed");
+            return;
+        };
+        let Some(id) = credential.profile().map(str::to_owned) else {
+            return;
+        };
+        self.foreground =
+            Foreground::RenameIdentity(Box::new(RenameIdentity::new(id, &credential.label)));
+    }
+
+    pub(in crate::tui) fn rename_identity_key(&mut self, key: KeyEvent) {
+        let Foreground::RenameIdentity(mut rename) = mem::take(&mut self.foreground) else {
+            return;
+        };
+        match rename.key(key) {
+            RenameDecision::Still => self.foreground = Foreground::RenameIdentity(rename),
+            RenameDecision::Closed => self.foreground = Foreground::Panel,
+            RenameDecision::Chosen(label) => {
+                let Some(file) = self.settings_file.as_mut() else {
+                    self.problem("Settings are unavailable; fix the file and reopen");
+                    return;
+                };
+                let mut proposed = file.settings().clone();
+                match proposed.rename_credential(&rename.id, &label) {
+                    Ok(()) => match file.save(proposed) {
+                        Ok(()) => self.foreground = Foreground::Panel,
+                        Err(error) => self.problem(error.to_string()),
+                    },
+                    Err(error) => self.problem(error.to_string()),
+                }
+            }
+        }
+    }
+
     fn begin_sign_in<E>(
         &mut self,
         display: &str,
@@ -1644,6 +1789,18 @@ impl App {
     ) where
         E: IsolationEngine + Clone + 'static,
     {
+        // A sign-in from the first screen names the built-in profile directly;
+        // that is an identity being created, so record it before the shell opens.
+        if self.ensure_credential(profile, display)
+            && Service::from_id(profile).is_some_and(|service| service.is_mounted())
+            && let Some(summary) = task_service.credentials().summary(profile)
+            && !self
+                .profiles
+                .iter()
+                .any(|known| known.profile == summary.profile)
+        {
+            self.profiles.push(summary);
+        }
         match self
             .profiles
             .iter()
@@ -1924,6 +2081,9 @@ impl App {
             KeyCode::Char(' ') if self.selected_row().is_some_and(|row| row.is_agent()) => {
                 self.edit_selected()
             }
+            KeyCode::Char('e') if self.panel.section == Section::Identities => {
+                self.open_rename_identity()
+            }
             KeyCode::Char('e') if self.panel.section.grows() => self.edit_selected(),
             KeyCode::Char('t')
                 if self
@@ -1936,18 +2096,20 @@ impl App {
                     self.foreground = Foreground::Setup(Setup::tracker_list(address));
                 }
             }
-            KeyCode::Char('n') if self.panel.section.grows() => {
-                self.panel.form = Some(match self.panel.section {
-                    Section::Remotes => Form::for_remote(Target::NewRemote, ""),
-                    _ => Form::new_project(
+            KeyCode::Char('n') if self.panel.section.grows() => match self.panel.section {
+                Section::Identities => self.open_identity_setup(),
+                Section::Remotes => self.panel.form = Some(Form::for_remote(Target::NewRemote, "")),
+                _ => {
+                    self.panel.form = Some(Form::new_project(
                         &self.scope_label(),
                         &self.remotes(),
                         self.agent(),
                         self.default_commits(),
                         self.saved_identities(),
-                    ),
-                });
-            }
+                        self.settings_credentials(),
+                    ))
+                }
+            },
             _ if is_remove(key) && self.selected_row().is_some_and(|row| row.is_removable()) => {
                 self.ask_to_delete()
             }
@@ -2042,16 +2204,20 @@ impl App {
             Some(RowKind::GitIdentity(_)) => {
                 self.begin_sign_in("Git identity", "vcs/github", task_service, events);
             }
-            Some(RowKind::Credential(credential)) => {
-                if let CredentialKind::Profile { profile, .. } = credential.kind {
+            Some(RowKind::Credential(credential)) => match credential.kind {
+                CredentialKind::Profile { profile, .. } => {
                     self.begin_sign_in(&credential.label, &profile, task_service, events);
-                } else {
+                }
+                CredentialKind::Tracker { profile, .. } => {
+                    self.connect_tracker_for(&profile, task_service, tracker_connects);
+                }
+                CredentialKind::Installation { .. } => {
                     self.foreground = Foreground::Setup(Setup::new(
                         SetupKind::Remote,
                         screens::settings::remote_setup_lines(),
                     ));
                 }
-            }
+            },
             _ => self.edit_selected(),
         }
     }
@@ -2953,7 +3119,7 @@ impl App {
         let showing = matches!(self.foreground, Foreground::Panel)
             && matches!(
                 self.panel.section,
-                Section::Agents | Section::VersionControl
+                Section::Identities | Section::Agents | Section::VersionControl
             );
         match (showing, self.credentials_visible_since) {
             (true, None) => {
@@ -2995,22 +3161,35 @@ impl App {
     /// An answer that came back is not asked again, and one that could not run waits
     /// out a backoff rather than being retried on the next tick.
     fn unasked_profiles(&self) -> Vec<String> {
-        let Some(prefix) = self.panel.section.profile_prefix() else {
+        let prefix = self.panel.section.profile_prefix();
+        if prefix.is_none() && self.panel.section != Section::Identities {
             return Vec::new();
-        };
+        }
         let retry_due = self
             .credential_retry_at
             .is_none_or(|at| Instant::now() >= at);
         self.profiles
             .iter()
             .map(|summary| summary.profile.clone())
-            .filter(|profile| profile.starts_with(prefix))
+            .filter(|profile| prefix.is_none_or(|prefix| profile.starts_with(prefix)))
             .filter(|profile| match self.credential_status.get(profile) {
                 None => true,
                 Some(CredentialStatus::Unanswered) => retry_due,
                 Some(_) => false,
             })
             .collect()
+    }
+
+    /// Read the mounted identities the settings file names into the check list.
+    pub(in crate::tui) fn reload_profiles<E>(&mut self, task_service: &TaskService<E>)
+    where
+        E: IsolationEngine + Clone + 'static,
+    {
+        self.profiles = self
+            .settings_credentials()
+            .iter()
+            .filter_map(|credential| task_service.credentials().summary(&credential.id))
+            .collect();
     }
 
     /// Ask this page's profiles about their logins in one sandbox, off the loop.
@@ -3074,9 +3253,23 @@ impl App {
             return;
         }
         let mut nothing_answered = false;
+        let mut suggested = None;
         for (profile, status) in reply.answers {
             nothing_answered |= matches!(status, CredentialStatus::Unanswered);
+            if let CredentialStatus::Checked {
+                signed_in: true,
+                output,
+            } = &status
+                && Service::from_id(&profile)
+                    == Some(Service::VersionControl(VcsProviderKind::GitHub))
+                && let Some(login) = github_login(output)
+            {
+                suggested = Some((profile.clone(), login));
+            }
             self.credential_status.insert(profile, status);
+        }
+        if let Some((id, login)) = suggested {
+            self.suggest_credential_name(&id, &login);
         }
         if nothing_answered {
             self.credential_retry_at = Some(Instant::now() + CHECK_RETRY_AFTER);
@@ -3247,6 +3440,7 @@ impl App {
                 self.agent(),
                 self.default_commits(),
                 self.saved_identities(),
+                self.settings_credentials(),
             ),
             RowKind::Discovered(_) => return,
             RowKind::Remote { address, .. } => Form::for_remote(
@@ -3457,6 +3651,12 @@ impl App {
                 KeyCode::Enter | KeyCode::Char(' ') if form.focus == Focus::Agent => {
                     form.cycle_agent();
                 }
+                KeyCode::Enter | KeyCode::Char(' ') if form.focus == Focus::VcsIdentity => {
+                    form.cycle_vcs();
+                }
+                KeyCode::Enter | KeyCode::Char(' ') if form.focus == Focus::TrackerIdentity => {
+                    form.cycle_tracker();
+                }
                 KeyCode::Enter | KeyCode::Char(' ') if form.focus == Focus::Identity => {
                     form.cycle_identity();
                 }
@@ -3528,11 +3728,13 @@ impl App {
         &mut self,
         task_service: &TaskService<E>,
         replies: &mpsc::UnboundedSender<TrackerScopesReply>,
+        credential: Option<String>,
     ) where
         E: IsolationEngine + Clone + 'static,
     {
-        let Some(tracker) = task_service.tracker() else {
-            self.say("Connect Linear in Settings → Trackers before choosing a team");
+        let credential = credential.unwrap_or_else(|| "trackers/linear".to_owned());
+        let Some(tracker) = task_service.tracker_for(&credential) else {
+            self.say("Connect that task tracker identity before choosing a team");
             return;
         };
         if let Some(form) = self.panel.form.as_mut() {
@@ -4320,10 +4522,43 @@ impl App {
     where
         E: IsolationEngine + Clone + 'static,
     {
-        self.tracker_state = match task_service.tracker() {
-            Some(tracker) if tracker.is_connected() => TrackerState::Connected,
-            _ => TrackerState::NotConnected,
-        };
+        self.tracker_states.clear();
+        for credential in self.settings_credentials() {
+            if credential
+                .service()
+                .is_some_and(|service| service.slot() == Slot::Tracker)
+            {
+                let state = match task_service.tracker_for(&credential.id) {
+                    Some(tracker) if tracker.is_connected() => TrackerState::Connected,
+                    _ => TrackerState::NotConnected,
+                };
+                self.tracker_states.insert(credential.id.clone(), state);
+            }
+        }
+        let default = self.settings_file.as_ref().and_then(|file| {
+            file.settings()
+                .default_credential(Slot::Tracker)
+                .map(str::to_owned)
+        });
+        self.tracker_state = default
+            .as_deref()
+            .and_then(|id| self.tracker_states.get(id).copied())
+            .unwrap_or(TrackerState::NotConnected);
+    }
+
+    /// The credentials the settings file names, in list order.
+    pub(in crate::tui) fn settings_credentials(&self) -> Vec<Credential> {
+        self.settings_file
+            .as_ref()
+            .map(|file| file.settings().credentials().to_vec())
+            .unwrap_or_default()
+    }
+
+    pub(in crate::tui) fn tracker_state_for(&self, id: &str) -> TrackerState {
+        self.tracker_states
+            .get(id)
+            .copied()
+            .unwrap_or(TrackerState::NotConnected)
     }
 
     /// The installation as the first screen reads it.
@@ -4551,6 +4786,16 @@ impl App {
                 project.repository = repository;
                 project.host = form.host_value();
                 project.agent = form.agent;
+                project.agent_credential = form.agent_credential.clone();
+                project.vcs_credential = form.vcs_credential.clone();
+                project.vcs = form
+                    .vcs_credential
+                    .as_deref()
+                    .and_then(Service::from_id)
+                    .and_then(|service| match service {
+                        Service::VersionControl(kind) => Some(kind),
+                        _ => None,
+                    });
                 project.commits = if form.commits_are_default() {
                     None
                 } else {
@@ -4565,9 +4810,12 @@ impl App {
                 let scope = form.scope.value().trim();
                 // A project that accepts the whole account is a route too, and
                 // says so; one that claims nothing is not.
+                let default_tracker = proposed
+                    .default_credential(Slot::Tracker)
+                    .map(str::to_owned);
                 project.tracker =
                     (!scope.is_empty() || form.accepts_delegated_work).then(|| TrackerRoute {
-                        credential: None,
+                        credential: form.tracker_credential.clone().or(default_tracker),
                         scope: (!scope.is_empty()).then(|| scope.to_owned()),
                         accepts_delegated_work: form.accepts_delegated_work,
                     });
@@ -5598,25 +5846,81 @@ impl App {
     ) where
         E: IsolationEngine + Clone + 'static,
     {
+        self.ensure_credential("trackers/linear", "Linear");
+        self.connect_tracker_for("trackers/linear", task_service, replies);
+    }
+
+    /// Add the built-in identity a first-screen sign-in names, once.
+    fn ensure_credential(&mut self, id: &str, label: &str) -> bool {
+        let Some(service) = Service::from_id(id) else {
+            return false;
+        };
+        if self
+            .settings_file
+            .as_ref()
+            .is_some_and(|file| file.settings().credential(id).is_some())
+        {
+            return false;
+        }
+        let label = if label.trim().is_empty() {
+            service.label().to_owned()
+        } else {
+            label.to_owned()
+        };
+        let Some(file) = self.settings_file.as_mut() else {
+            return false;
+        };
+        let mut proposed = file.settings().clone();
+        if proposed.add_credential(Credential::new(id, label)).is_err() {
+            return false;
+        }
+        if let Err(error) = file.save(proposed) {
+            tracing::warn!(%error, "could not record the identity a sign-in started");
+            return false;
+        }
+        true
+    }
+
+    fn connect_tracker_for<E>(
+        &mut self,
+        credential: &str,
+        task_service: &TaskService<E>,
+        replies: &mpsc::UnboundedSender<TrackerConnectReply>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
         if let Some(handle) = self.tracker_connect.take() {
             handle.abort();
             self.tracker_connect_attempt = self.tracker_connect_attempt.wrapping_add(1);
-            self.tracker_state = TrackerState::NotConnected;
-            self.say("Linear sign-in cancelled");
+            if let Some(previous) = self.tracker_connecting.take() {
+                self.tracker_states
+                    .insert(previous, TrackerState::NotConnected);
+            }
+            self.say("Tracker sign-in cancelled");
             return;
         }
-        let Some(tracker) = task_service.tracker() else {
-            self.problem("Linear is not available in this build");
+        let Some(tracker) = task_service.tracker_connectable(credential) else {
+            self.problem("This tracker identity is not available");
             return;
         };
         if tracker.is_connected() {
-            self.tracker_state = TrackerState::Connected;
-            self.say("Linear is already connected");
+            self.tracker_states
+                .insert(credential.to_owned(), TrackerState::Connected);
+            if self.is_default_tracker(credential) {
+                self.tracker_state = TrackerState::Connected;
+            }
+            self.say("This tracker is already connected");
             return;
         }
-        self.tracker_state = TrackerState::Connecting;
+        self.tracker_states
+            .insert(credential.to_owned(), TrackerState::Connecting);
+        if self.is_default_tracker(credential) {
+            self.tracker_state = TrackerState::Connecting;
+        }
+        self.tracker_connecting = Some(credential.to_owned());
         self.tracker_connect_attempt = self.tracker_connect_attempt.wrapping_add(1);
         let attempt = self.tracker_connect_attempt;
+        let credential = credential.to_owned();
         // Nothing is said while the browser is open: the row already reads as
         // connecting, and a message in front would have to be dismissed before
         // the operator could carry on.
@@ -5626,39 +5930,79 @@ impl App {
                 Ok(()) => Ok(tracker.is_connected()),
                 Err(error) => Err(error.to_string()),
             };
-            let _ = replies.send(TrackerConnectReply { attempt, result });
+            let _ = replies.send(TrackerConnectReply {
+                attempt,
+                credential,
+                result,
+            });
         }));
+    }
+
+    fn is_default_tracker(&self, credential: &str) -> bool {
+        self.settings_file
+            .as_ref()
+            .and_then(|file| file.settings().default_credential(Slot::Tracker))
+            == Some(credential)
     }
 
     /// Take what a sign-in ended in, and update the row without a restart.
     pub(in crate::tui) fn tracker_connect_resolved(&mut self, reply: TrackerConnectReply) {
-        // A reply that lands after this attempt was given up on is not the
-        // attempt the operator is watching, so it changes nothing.
-        if self.tracker_state != TrackerState::Connecting
+        if self.tracker_connecting.as_deref() != Some(reply.credential.as_str())
             || reply.attempt != self.tracker_connect_attempt
         {
             return;
         }
         self.tracker_connect = None;
+        self.tracker_connecting = None;
         let setup_open = matches!(&self.foreground, Foreground::Setup(setup) if matches!(setup.kind, SetupKind::Linear));
         if setup_open {
             self.foreground = Foreground::Panel;
         }
-        match reply.result {
+        let state = match reply.result {
             Ok(true) => {
-                self.tracker_state = TrackerState::Connected;
-                self.say("Linear is connected");
+                self.say("Tracker identity connected");
+                if let Some(name) = self.tracker_account_name(&reply.credential) {
+                    self.suggest_credential_name(&reply.credential, &name);
+                }
+                TrackerState::Connected
             }
             // The provider answered but reports no live session, which is not a
             // connection whatever else it may have kept.
             Ok(false) => {
-                self.tracker_state = TrackerState::NotConnected;
-                self.say("Linear did not report a session");
+                self.say("The tracker did not report a session");
+                TrackerState::NotConnected
             }
             Err(error) => {
-                self.tracker_state = TrackerState::NotConnected;
-                self.problem(format!("Linear sign-in did not finish: {error}"));
+                self.problem(format!("Tracker sign-in did not finish: {error}"));
+                TrackerState::NotConnected
             }
+        };
+        self.tracker_states.insert(reply.credential.clone(), state);
+        if self.is_default_tracker(&reply.credential) {
+            self.tracker_state = state;
+        }
+    }
+
+    /// The account a tracker profile last recorded, for a name the operator does
+    /// not have to invent.
+    fn tracker_account_name(&self, credential: &str) -> Option<String> {
+        let text =
+            fs::read_to_string(self.config.profile_dir(credential).join("identity.json")).ok()?;
+        let account: TrackerAccount = serde_json::from_str(&text).ok()?;
+        let name = account.display_name.trim();
+        (!name.is_empty()).then(|| name.to_owned())
+    }
+
+    fn suggest_credential_name(&mut self, id: &str, label: &str) {
+        let Some(file) = self.settings_file.as_mut() else {
+            return;
+        };
+        let mut proposed = file.settings().clone();
+        proposed.suggest_credential_name(id, label);
+        if proposed.credentials() != file.settings().credentials()
+            && let Err(error) = file.save(proposed)
+        {
+            tracing::warn!(%error, "could not keep a suggested identity name");
         }
     }
 
@@ -5707,15 +6051,26 @@ impl App {
                 self.begin_repository_listing(task_service, repository_lists);
                 return;
             }
+            let scope_credential = self.panel.form.as_ref().and_then(|form| {
+                form.tracker_credential.clone().or_else(|| {
+                    self.settings_file.as_ref().and_then(|file| {
+                        file.settings()
+                            .default_credential(Slot::Tracker)
+                            .map(str::to_owned)
+                    })
+                })
+            });
             let wants_scopes = key.code == KeyCode::Enter
-                && self.tracker_state == TrackerState::Connected
                 && self
                     .panel
                     .form
                     .as_ref()
-                    .is_some_and(|form| form.focus == Focus::Scope && form.scopes.is_none());
+                    .is_some_and(|form| form.focus == Focus::Scope && form.scopes.is_none())
+                && scope_credential
+                    .as_deref()
+                    .is_some_and(|id| self.tracker_state_for(id) == TrackerState::Connected);
             if wants_scopes {
-                self.begin_scope_listing(task_service, tracker_scopes);
+                self.begin_scope_listing(task_service, tracker_scopes, scope_credential);
                 return;
             }
             self.panel_form_key(key).await;
@@ -7028,6 +7383,31 @@ impl App {
     }
 }
 
+/// The account a GitHub CLI check reports, for a default identity name.
+fn github_login(output: &str) -> Option<String> {
+    const MARKERS: [&str; 2] = [
+        "Logged in to github.com as ",
+        "Logged in to github.com account ",
+    ];
+    for line in plain(output).lines() {
+        for marker in MARKERS {
+            let Some((_, rest)) = line.split_once(marker) else {
+                continue;
+            };
+            let Some(name) = rest.split_whitespace().next() else {
+                continue;
+            };
+            if name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                return Some(name.to_owned());
+            }
+        }
+    }
+    None
+}
+
 /// What one profile's login came to, as the list shows it.
 fn credential_status(answer: CredentialAnswer) -> CredentialStatus {
     match (answer.is_verified, answer.signed_in) {
@@ -7120,7 +7500,7 @@ where
         return;
     }
     app.base_description = task_service.base_description();
-    app.profiles = task_service.credentials().profiles();
+    app.reload_profiles(task_service);
     app.refresh_tracker_state(task_service);
     match app.remote_keys.list().await {
         Ok(keys) => app.remembered_keys = keys,

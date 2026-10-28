@@ -1500,6 +1500,16 @@ impl PushedTrackers {
 }
 
 impl TrackerHost for PushedTrackers {
+    fn connectable(&self, operator: &str, credential: &str) -> Option<Arc<dyn TrackerProvider>> {
+        let directory = self
+            .config
+            .for_operator(operator)
+            .ok()?
+            .profile_dir(credential);
+        let tracker = Linear::from_directory(&directory).ok()?;
+        Some(Arc::new(tracker) as Arc<dyn TrackerProvider>)
+    }
+
     fn for_credential(&self, operator: &str, credential: &str) -> Option<Arc<dyn TrackerProvider>> {
         let key = (operator.to_owned(), credential.to_owned());
         if let Some(opened) = self.opened.lock().ok()?.get(&key)
