@@ -104,8 +104,10 @@ const ROWS: [Focus; 8] = [
     Focus::Commits,
     Focus::Tracker,
     Focus::Remote,
-    Focus::Ready,
+    // The footer reads left to right: Settings is the left button and starts the
+    // work is the right one, whatever the primary weight says.
     Focus::Settings,
+    Focus::Ready,
 ];
 
 /// A remote announcing on this network that this installation does not know yet.
