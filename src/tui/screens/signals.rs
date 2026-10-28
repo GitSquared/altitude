@@ -204,11 +204,12 @@ pub fn secondary_action(thread: &TaskOperatorSignalThread) -> Option<SignalActio
     (thread.kind != TaskOperatorSignalKind::Blocked).then_some(SignalAction::Reply)
 }
 
-/// The actions available on a thread, in footer order.
+/// The actions available on a thread, in footer order: the secondary answer on
+/// the left and the primary one at the right edge.
 pub fn actions(thread: &TaskOperatorSignalThread) -> Vec<SignalAction> {
-    primary_action(thread)
+    secondary_action(thread)
         .into_iter()
-        .chain(secondary_action(thread))
+        .chain(primary_action(thread))
         .collect()
 }
 
@@ -293,7 +294,16 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         surface::vertical_divider(frame, inner, conversation.right());
         frame.render_widget(Clear, conversation);
         draw_conversation(frame, conversation, app);
-        frame.render_widget(Clear, plan);
+        // The divider at the plan's left edge is its border, so the clear
+        // starts after it rather than erasing it.
+        frame.render_widget(
+            Clear,
+            Rect {
+                x: plan.x.saturating_add(1),
+                width: plan.width.saturating_sub(1),
+                ..plan
+            },
+        );
         draw_plan(frame, plan, app);
     } else {
         let [tabs, _, pane] = Layout::vertical([
@@ -363,23 +373,45 @@ fn draw_plan(frame: &mut Frame, area: Rect, app: &App) {
         );
         return;
     }
-    let width = usize::from(body.width);
-    let lines = plan
-        .iter()
-        .map(|step| {
-            let (symbol, tone) = match step.status {
-                TaskPlanStatus::Pending => ('○', palette::muted()),
-                TaskPlanStatus::InProgress => ('◐', palette::accent()),
-                TaskPlanStatus::Completed => ('●', palette::good()),
-                TaskPlanStatus::Canceled => ('✕', palette::bad()),
-            };
-            Line::from(vec![
-                Span::styled(format!("{symbol} "), tone),
-                Span::styled(truncate(&step.content, width.saturating_sub(2)), tone),
-            ])
-        })
-        .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), body);
+    // The icon gets its own column so a wrapped step stays aligned under itself
+    // rather than under the mark. Completed and canceled steps are the past, so
+    // they are the quiet ones; what is still ahead stays at full strength.
+    let icon_width = 2u16;
+    let text_width = body.width.saturating_sub(icon_width).max(1);
+    let mut y = body.y;
+    for step in &plan {
+        let (symbol, tone) = match step.status {
+            TaskPlanStatus::Pending => ('○', palette::primary()),
+            TaskPlanStatus::InProgress => ('◐', palette::heading()),
+            TaskPlanStatus::Completed => ('✓', palette::muted()),
+            TaskPlanStatus::Canceled => ('✕', palette::muted()),
+        };
+        let content = Paragraph::new(step.content.clone()).wrap(Wrap { trim: true });
+        let height = u16::try_from(content.line_count(text_width))
+            .unwrap_or(u16::MAX)
+            .max(1);
+        if y.saturating_add(height) > body.bottom() {
+            break;
+        }
+        frame.render_widget(
+            Paragraph::new(Line::styled(format!("{symbol} "), tone)),
+            Rect {
+                y,
+                height: 1,
+                ..body
+            },
+        );
+        frame.render_widget(
+            content.style(tone),
+            Rect {
+                x: body.x.saturating_add(icon_width),
+                y,
+                width: text_width,
+                height,
+            },
+        );
+        y = y.saturating_add(height);
+    }
 }
 
 /// The filter and sort pills at the top of the list.
@@ -619,16 +651,24 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
             palette::muted(),
         )
     });
-    let messages = draw_messages(
+    let working = app.signal_agent_working();
+    let conversation = draw_messages(
         frame,
         cards,
-        &thread,
-        &agent,
+        Conversation {
+            thread: &thread,
+            agent: &agent,
+            selected: selected_message,
+            status,
+            working,
+            tick: app.animation_tick(),
+        },
         &mut scroll,
-        selected_message,
-        status,
     );
-    for (rect, index) in messages {
+    app.signal_message_rows = conversation.rows;
+    app.signal_scroll_max = conversation.scroll_max;
+    app.signal_viewport_rows = cards.height;
+    for (rect, index) in conversation.hitboxes {
         app.signal_targets.add(rect, SignalHit::Message(index));
     }
     if composing {
@@ -636,31 +676,34 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
             Layout::vertical([Constraint::Length(COMPOSER_HEIGHT), Constraint::Length(2)])
                 .areas(tail);
         draw_composer(frame, box_area, app, &agent);
+        // Secondary first, primary at the right edge: the answer the surface
+        // exists for is the one under the operator's hand.
         let buttons = draw_buttons(
             frame,
             area,
             actions_area,
             &[
-                button::Action::primary("send").focused(true),
                 button::Action::secondary("cancel"),
+                button::Action::primary("send").focused(true),
             ],
             None,
         );
         if let Some(rect) = buttons.first() {
-            app.signal_targets.add(*rect, SignalHit::ComposerSend);
+            app.signal_targets.add(*rect, SignalHit::ComposerCancel);
         }
         if let Some(rect) = buttons.get(1) {
-            app.signal_targets.add(*rect, SignalHit::ComposerCancel);
+            app.signal_targets.add(*rect, SignalHit::ComposerSend);
         }
     } else {
         let actions = actions(&thread);
+        let primary = primary_action(&thread);
         let buttons: Vec<_> = actions
             .iter()
             .enumerate()
             .map(|(index, action)| {
                 let label = action.label(thread.kind, thread.is_resolved());
                 let focused = app.signal_focus == SignalFocus::Action(index);
-                if index == 0 {
+                if Some(*action) == primary {
                     button::Action::primary(label).focused(focused)
                 } else {
                     button::Action::secondary(label).focused(focused)
@@ -684,77 +727,144 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
     app.signal_scroll = scroll;
 }
 
-/// The cards of the thread, scrolled by whole messages.
+/// One thread's conversation, as the screen draws it.
+struct Conversation<'a> {
+    thread: &'a TaskOperatorSignalThread,
+    agent: &'a str,
+    selected: Option<usize>,
+    status: Option<Line<'static>>,
+    working: bool,
+    tick: Option<usize>,
+}
+
+/// What the frame learned about the conversation, for the keys and the wheel.
+struct ConversationLayout {
+    hitboxes: Vec<(Rect, usize)>,
+    rows: Vec<(u16, u16)>,
+    scroll_max: u16,
+}
+
+/// The cards of the thread, scrolled by the row.
 ///
-/// Scrolling by the card rather than the line keeps the conversation readable:
-/// there is no state in which the top of a message is missing with its body
-/// underneath. `scroll` is the first message shown, and it is clamped here so
-/// asking for the end is asking for the newest messages that fit.
+/// The conversation lays every card out whether or not it fits, then copies the
+/// rows the viewport can hold. `scroll` is a row offset from the top of the
+/// conversation, or [`u16::MAX`] for the bottom, and it is clamped here so a
+/// resize cannot leave the view past the end.
 fn draw_messages(
     frame: &mut Frame,
     area: Rect,
-    thread: &TaskOperatorSignalThread,
-    agent: &str,
+    conversation: Conversation<'_>,
     scroll: &mut u16,
-    selected: Option<usize>,
-    status: Option<Line<'static>>,
-) -> Vec<(Rect, usize)> {
+) -> ConversationLayout {
+    let Conversation {
+        thread,
+        agent,
+        selected,
+        status,
+        working,
+        tick,
+    } = conversation;
     let width = area.width;
     let now = Utc::now().timestamp_millis();
-    let mut used = 0;
-    let mut latest_first = thread.messages.len();
-    for index in (0..thread.messages.len()).rev() {
-        let height = card::height(width, &thread.messages[index].body);
-        let gap = u16::from(index + 1 < thread.messages.len());
-        if latest_first < thread.messages.len() && used + height + gap > area.height {
-            break;
-        }
-        used += height + gap;
-        latest_first = index;
-    }
-    let first = usize::from(*scroll).min(latest_first);
-    *scroll = u16::try_from(first).unwrap_or(u16::MAX);
-    let mut y = area.y;
-    let mut hitboxes = Vec::new();
-    for (index, message) in thread.messages.iter().enumerate().skip(first) {
+    let mut rows = Vec::with_capacity(thread.messages.len());
+    let mut cursor = 0u32;
+    for message in &thread.messages {
         let height = card::height(width, &message.body);
-        if y + height > area.bottom() {
-            break;
+        rows.push((u16::try_from(cursor).unwrap_or(u16::MAX), height));
+        // A blank row after every card, which is what makes the last card's
+        // following line sit a line below it.
+        cursor = cursor.saturating_add(u32::from(height)).saturating_add(1);
+    }
+    let tail = status.is_some() || working;
+    let content = if tail {
+        cursor.saturating_add(1)
+    } else {
+        cursor.saturating_sub(1)
+    };
+    let scroll_max =
+        u16::try_from(content.saturating_sub(u32::from(area.height))).unwrap_or(u16::MAX);
+    let offset = if *scroll == u16::MAX {
+        scroll_max
+    } else {
+        (*scroll).min(scroll_max)
+    };
+    *scroll = offset;
+
+    let last_operator = thread
+        .messages
+        .iter()
+        .rposition(|message| message.author == TaskOperatorSignalAuthor::Operator);
+    let last_agent = thread
+        .messages
+        .iter()
+        .rposition(|message| message.author == TaskOperatorSignalAuthor::Agent);
+    let viewport_top = i32::from(area.y);
+    let viewport_bottom = i32::from(area.bottom());
+    let mut hitboxes = Vec::new();
+    for (index, message) in thread.messages.iter().enumerate() {
+        let (top, height) = rows[index];
+        let card_top = i32::from(area.y) + i32::from(top) - i32::from(offset);
+        let card_bottom = card_top + i32::from(height);
+        let visible_top = card_top.max(viewport_top);
+        let visible_bottom = card_bottom.min(viewport_bottom);
+        if visible_bottom <= visible_top {
+            continue;
         }
-        let rect = Rect { y, height, ..area };
+        let visible = Rect {
+            y: u16::try_from(visible_top).unwrap_or(0),
+            height: u16::try_from(visible_bottom - visible_top).unwrap_or(0),
+            ..area
+        };
         let from_operator = message.author == TaskOperatorSignalAuthor::Operator;
-        card::draw(
+        let tick = from_operator.then(|| {
+            if last_agent.is_some_and(|agent| agent > index) {
+                card::Tick::Read
+            } else if last_operator == Some(index) && working {
+                card::Tick::Delivered
+            } else {
+                card::Tick::Sent
+            }
+        });
+        card::draw_clipped(
             frame,
-            rect,
+            visible,
+            height,
+            u16::try_from(visible_top - card_top).unwrap_or(0),
             &card::Message {
                 author: if from_operator { "you" } else { agent },
                 when: &ago(message.at_ms, now),
                 body: &message.body,
                 from_operator,
                 focused: selected == Some(index),
+                tick,
             },
         );
-        hitboxes.push((rect, index));
-        y += height + 1;
+        hitboxes.push((visible, index));
     }
-    if let Some(status) = status
-        && y < area.bottom()
-    {
-        // The gap after the last card is the blank line; the status takes the
-        // next one.
-        let y = y.saturating_add(1);
-        if y < area.bottom() {
+
+    let line_top =
+        i32::from(area.y) + i32::try_from(cursor).unwrap_or(i32::MAX) - i32::from(offset);
+    if tail && line_top >= viewport_top && line_top < viewport_bottom {
+        let line = Rect {
+            x: area.x.saturating_add(1),
+            y: u16::try_from(line_top).unwrap_or(0),
+            width: area.width.saturating_sub(2),
+            height: 1,
+        };
+        if let Some(status) = status {
+            frame.render_widget(Paragraph::new(status), line);
+        } else if working {
             frame.render_widget(
-                Paragraph::new(status),
-                Rect {
-                    y,
-                    height: 1,
-                    ..area
-                },
+                Paragraph::new(Line::from(shimmer(&format!("{agent} is working…"), tick))),
+                line,
             );
         }
     }
-    hitboxes
+    ConversationLayout {
+        hitboxes,
+        rows,
+        scroll_max,
+    }
 }
 
 /// The reply being written, where the conversation is, rather than in a box over

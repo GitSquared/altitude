@@ -88,8 +88,8 @@ pub fn draw(frame: &mut Frame, area: Rect, prompt: &MessagePrompt) -> Rect {
         popup,
         actions,
         &[
-            button::Action::primary("send").focused(true),
             button::Action::secondary("cancel"),
+            button::Action::primary("send").focused(true),
         ],
     );
     popup

@@ -600,8 +600,18 @@ pub struct App {
     pub(in crate::tui) signal_filter: Select<SignalFilter>,
     pub(in crate::tui) signal_sort: Select<SignalSort>,
     pub(in crate::tui) signals_cursor: list::Cursor,
-    /// The first message of the selected thread on screen.
+    /// How many rows the selected thread's conversation is scrolled down.
+    ///
+    /// `u16::MAX` means the bottom, so a new message arrives without the screen
+    /// having to know how tall the conversation is.
     pub(in crate::tui) signal_scroll: u16,
+    /// Where each message starts and how tall it is in the conversation, from
+    /// the last frame. The keys use it to bring a message into view.
+    pub(in crate::tui) signal_message_rows: Vec<(u16, u16)>,
+    /// The furthest the conversation could scroll in the last frame.
+    pub(in crate::tui) signal_scroll_max: u16,
+    /// How many rows the conversation had in the last frame.
+    pub(in crate::tui) signal_viewport_rows: u16,
     /// The reply being written, if one is.
     pub(in crate::tui) signal_composer: Option<Composer>,
     /// Whether a narrow screen is showing the plan instead of the conversation.
@@ -808,6 +818,9 @@ impl App {
             ),
             signals_cursor: list::Cursor::default(),
             signal_scroll: 0,
+            signal_message_rows: Vec::new(),
+            signal_scroll_max: 0,
+            signal_viewport_rows: 0,
             signal_composer: None,
             signal_plan_open: false,
             signal_plan_tabs: false,
@@ -1219,6 +1232,7 @@ impl App {
                 .remote_tasks
                 .iter()
                 .any(|held| held.summary.status == TaskExecutionStatus::Pending)
+            || self.signal_agent_working()
     }
 
     /// The few actions worth keeping visible below the current screen.
@@ -4706,6 +4720,76 @@ impl App {
         self.tasks.iter().find(|task| task.id == id)
     }
 
+    /// Whether the selected thread is waiting on an agent that is running.
+    ///
+    /// The agent is given the reply when the task is idle and a run starts; if
+    /// the task was already running, the reply is queued for the run after it.
+    /// Either way its last message is the operator's, and the task says it is
+    /// running.
+    pub(in crate::tui) fn signal_agent_working(&self) -> bool {
+        let Some(thread) = self.signal_thread() else {
+            return false;
+        };
+        if thread.is_resolved()
+            || thread.messages.last().map(|message| message.author)
+                != Some(TaskOperatorSignalAuthor::Operator)
+        {
+            return false;
+        }
+        self.signal_task_running()
+    }
+
+    fn signal_task_running(&self) -> bool {
+        if let Some(task) = self.signal_task() {
+            return task.facts.execution_status == TaskExecutionStatus::Running;
+        }
+        self.signal_held()
+            .is_some_and(|held| held.summary.status == TaskExecutionStatus::Running)
+    }
+
+    /// Scroll the conversation by a number of rows, clamped to what exists.
+    fn scroll_signal(&mut self, rows: i32) {
+        let current = if self.signal_scroll == u16::MAX {
+            self.signal_scroll_max
+        } else {
+            self.signal_scroll
+        };
+        let next = (i32::from(current) + rows).clamp(0, i32::from(self.signal_scroll_max));
+        self.signal_scroll = u16::try_from(next).unwrap_or(0);
+    }
+
+    /// Scroll by one conversation page.
+    pub(in crate::tui) fn page_signal(&mut self, up: bool) {
+        let page = i32::from(self.signal_viewport_rows.max(1));
+        self.scroll_signal(if up { -page } else { page });
+    }
+
+    /// Bring the selected message into view, moving no further than it has to.
+    fn reveal_signal_message(&mut self) {
+        let Some((top, height)) = self
+            .signal_message_rows
+            .get(self.signal_message_cursor)
+            .copied()
+        else {
+            return;
+        };
+        let current = if self.signal_scroll == u16::MAX {
+            self.signal_scroll_max
+        } else {
+            self.signal_scroll
+        };
+        let viewport = self.signal_viewport_rows;
+        let bottom = top.saturating_add(height);
+        let next = if top < current {
+            top
+        } else if bottom > current.saturating_add(viewport) {
+            bottom.saturating_sub(viewport).min(top)
+        } else {
+            return;
+        };
+        self.signal_scroll = next.min(self.signal_scroll_max);
+    }
+
     /// The task the signals screen is about, when another machine holds it.
     fn signal_held(&self) -> Option<&HeldTask> {
         let remote = self.remote_signals.as_ref()?;
@@ -4777,11 +4861,7 @@ impl App {
                 .signal_thread()
                 .map_or(0, |thread| thread.messages.len());
             self.signal_message_cursor = self.signal_message_cursor.min(len.saturating_sub(1));
-            self.signal_scroll = if self.signal_message_cursor + 1 == len {
-                u16::MAX
-            } else {
-                u16::try_from(self.signal_message_cursor).unwrap_or(u16::MAX)
-            };
+            self.reveal_signal_message();
         }
     }
 
@@ -4808,11 +4888,7 @@ impl App {
         } else {
             (self.signal_message_cursor + len - 1) % len
         };
-        self.signal_scroll = if self.signal_message_cursor + 1 == len {
-            u16::MAX
-        } else {
-            u16::try_from(self.signal_message_cursor).unwrap_or(u16::MAX)
-        };
+        self.reveal_signal_message();
     }
 
     /// Keep a focus that a changed thread made impossible from sticking around.
@@ -4826,11 +4902,7 @@ impl App {
                 .signal_thread()
                 .map_or(0, |thread| thread.messages.len());
             self.signal_message_cursor = self.signal_message_cursor.min(len.saturating_sub(1));
-            self.signal_scroll = if self.signal_message_cursor + 1 == len {
-                u16::MAX
-            } else {
-                u16::try_from(self.signal_message_cursor).unwrap_or(u16::MAX)
-            };
+            self.reveal_signal_message();
         }
     }
 
@@ -5683,7 +5755,7 @@ impl App {
                     ) => {}
                     _ => {
                         self.signal_focus = SignalFocus::Detail;
-                        self.move_signal_message(!up);
+                        self.scroll_signal(if up { -3 } else { 3 });
                     }
                 }
             }
@@ -5717,14 +5789,6 @@ impl App {
                     SignalHit::Message(index) => {
                         self.signal_focus = SignalFocus::Detail;
                         self.signal_message_cursor = index;
-                        self.signal_scroll = if self
-                            .signal_thread()
-                            .is_some_and(|thread| index + 1 == thread.messages.len())
-                        {
-                            u16::MAX
-                        } else {
-                            u16::try_from(index).unwrap_or(u16::MAX)
-                        };
                     }
                     SignalHit::Action(index) => {
                         self.signal_focus = SignalFocus::Action(index);
@@ -5858,8 +5922,8 @@ impl App {
             return;
         }
         match key.code {
-            KeyCode::PageDown => self.signal_scroll = self.signal_scroll.saturating_add(1),
-            KeyCode::PageUp => self.signal_scroll = self.signal_scroll.saturating_sub(1),
+            KeyCode::PageDown => self.page_signal(false),
+            KeyCode::PageUp => self.page_signal(true),
             KeyCode::Home => self.signal_scroll = 0,
             KeyCode::End => self.signal_scroll = u16::MAX,
             _ if is_dismiss(key) || key.code == KeyCode::Char('q') => {
@@ -6492,6 +6556,9 @@ impl App {
         self.signal_focus = SignalFocus::List;
         self.signal_message_cursor = 0;
         self.signal_scroll = 0;
+        self.signal_message_rows.clear();
+        self.signal_scroll_max = 0;
+        self.signal_viewport_rows = 0;
     }
 
     /// What the screen says when there is no thread to read: the wait while a
