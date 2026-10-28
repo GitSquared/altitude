@@ -6,6 +6,10 @@ dev:
 build:
     cargo build --release --locked
 
+# Run a built release binary
+run:
+    ./target/release/altitude
+
 # Regenerate Formula/altitude.rb from a released tag's published checksums.
 bump-formula tag:
     #!/usr/bin/env bash
