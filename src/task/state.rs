@@ -10,13 +10,27 @@ use crate::vcs::{CodeContribution, ContributionObservation};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskAgentTurnReport {
-    pub requested_action: TaskAgentRequestedAction,
     pub summary: String,
     #[serde(default)]
     pub operator_signal: Option<TaskOperatorSignalDraft>,
     /// The model the harness actually used, when its output named one.
     #[serde(default)]
     pub model: Option<String>,
+}
+
+impl TaskAgentTurnReport {
+    /// What this report asks for next, read from the signal it raises.
+    ///
+    /// The model used to send this as its own field and could contradict the
+    /// signal beside it; the signal already says whether the run waits.
+    pub fn requested_action(&self) -> TaskAgentRequestedAction {
+        match self.operator_signal.as_ref().map(|signal| signal.kind) {
+            Some(TaskOperatorSignalKind::Blocked | TaskOperatorSignalKind::InReview) => {
+                TaskAgentRequestedAction::AwaitOperator
+            }
+            _ => TaskAgentRequestedAction::Continue,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

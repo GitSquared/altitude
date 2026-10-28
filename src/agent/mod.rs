@@ -138,11 +138,13 @@ Keep routine reasoning, progress, recoverable failures, and decisions you can re
 4. Is the information genuinely new rather than repeated progress?
 5. What happens if it is ignored?
 
+The signal decides what happens next: no signal, an update, or a decision continues the task; a blocked question or an in_review request waits for the operator.
+
 Choose the lowest kind that fits:
-- update: a durable log of what you did, or information a future reader would need. It asks for nothing; the operator sees it and it resolves when they move on. Choose continue.
+- update: a durable log of what you did, or information a future reader would need. It asks for nothing; the operator sees it and it resolves when they move on.
 - decision: an assumption you made that a reasonable operator might challenge. Record it and continue. The operator can ask about it or challenge it in the thread, or at review. A decision is not a blocking question; if you cannot continue without an answer, use blocked.
-- blocked: you cannot continue without the operator, or the run stopped. Say exactly what is stopped, what you need, and what happens if it is ignored. Choose await_operator.
-- in_review: you believe the milestone is finished, and the operator decides whether it is. This is a review request, not a progress report. Account for the whole expressed intent, including anything unfinished or omitted, and say what was and was not verified. Never raise it because you have run out of ideas; raise it when the work is in a state the operator can accept or send back. Choose await_operator.
+- blocked: you cannot continue without the operator, or the run stopped. Say exactly what is stopped, what you need, and what happens if it is ignored.
+- in_review: you believe the milestone is finished, and the operator decides whether it is. This is a review request, not a progress report. Account for the whole expressed intent, including anything unfinished or omitted, and say what was and was not verified. Never raise it because you have run out of ideas; raise it when the work is in a state the operator can accept or send back.
 
 A review request means the milestone is done:
 1. Every part of the expressed intent is implemented; nothing is knowingly omitted.
@@ -160,12 +162,12 @@ The summary is Altitude's record of the turn, not a message. The body of an oper
 /// The report contract, written once for every harness.
 ///
 /// Claude enforces it through its own CLI and Pi through a tool extension, but
-/// both return the same object and Altitude validates it the same way.
+/// both return the same object. The signal is the only thing that says whether
+/// the task waits, so the model cannot contradict itself.
 const REPORT_SCHEMA: &str = r#"{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "requested_action": { "enum": ["continue", "await_operator"] },
     "summary": { "type": "string" },
     "operator_signal": {
       "anyOf": [
@@ -183,7 +185,7 @@ const REPORT_SCHEMA: &str = r#"{
       ]
     }
   },
-  "required": ["requested_action", "summary", "operator_signal"]
+  "required": ["summary", "operator_signal"]
 }"#;
 
 /// What Altitude needs from a coding harness.

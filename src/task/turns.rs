@@ -13,8 +13,8 @@ use super::{
     IsolationError, Task, TaskAgentRequestedAction, TaskAgentRun, TaskAgentRunOutcome,
     TaskAgentTurnReport, TaskError, TaskExecutionMode, TaskExecutionPauseReason,
     TaskExecutionStatus, TaskHistoryEvent, TaskOperatorAttentionLevel, TaskOperatorSignalAuthor,
-    TaskOperatorSignalDraft, TaskOperatorSignalKind, TaskService, TaskServiceError, run_ended,
-    snapshot_name, store::ReviewRequest,
+    TaskOperatorSignalKind, TaskService, TaskServiceError, run_ended, snapshot_name,
+    store::ReviewRequest,
 };
 
 impl<E> TaskService<E>
@@ -42,28 +42,12 @@ where
         agent_run: &TaskAgentRun,
         report: &TaskAgentTurnReport,
     ) -> Result<(Task, TaskAgentRequestedAction), TaskServiceError> {
-        let attention = match (&report.requested_action, &report.operator_signal) {
-            (TaskAgentRequestedAction::Continue, None)
-            | (
-                TaskAgentRequestedAction::Continue,
-                Some(TaskOperatorSignalDraft {
-                    kind: TaskOperatorSignalKind::Update | TaskOperatorSignalKind::Decision,
-                    ..
-                }),
-            ) => TaskOperatorAttentionLevel::Nominal,
-            (
-                TaskAgentRequestedAction::AwaitOperator,
-                Some(TaskOperatorSignalDraft {
-                    kind: TaskOperatorSignalKind::Blocked | TaskOperatorSignalKind::InReview,
-                    ..
-                }),
-            ) => TaskOperatorAttentionLevel::Requested,
-            _ => {
-                return Err(TaskServiceError::InvalidReport(
-                    "updates and decisions continue; blocked questions and review requests await the operator"
-                        .into(),
-                ));
+        let action = report.requested_action();
+        let attention = match report.operator_signal.as_ref().map(|signal| signal.kind) {
+            Some(TaskOperatorSignalKind::Blocked | TaskOperatorSignalKind::InReview) => {
+                TaskOperatorAttentionLevel::Requested
             }
+            _ => TaskOperatorAttentionLevel::Nominal,
         };
         // Links are recorded by the vcs_link_pull_request tool during the work
         // turn, so the task this run started from may predate them. Read the
@@ -97,7 +81,7 @@ where
             .record_report(&task.id, agent_run, report, attention, review)
             .await
             .map_err(TaskServiceError::Task)?;
-        Ok((task, report.requested_action.clone()))
+        Ok((task, action))
     }
     pub async fn continue_autopilot(
         &self,
