@@ -28,11 +28,12 @@ use tokio::{
 
 use super::{
     ACCOUNT_FILE, IssueComment, IssueReader, IssueReference, IssueScope, IssueSnapshot,
-    IssueSummary, TrackerAccount, TrackerError, TrackerFuture, TrackerKind, TrackerProvider,
-    TrackerStatus, linear_auth,
+    IssueSummary, ScopeSummary, TrackerAccount, TrackerError, TrackerFuture, TrackerKind,
+    TrackerProvider, TrackerStatus, linear_auth,
 };
 
 const LIST_ISSUES: &str = "list_issues";
+const LIST_TEAMS: &str = "list_teams";
 const GET_ISSUE: &str = "get_issue";
 const LIST_COMMENTS: &str = "list_comments";
 const LIST_ISSUE_STATUSES: &str = "list_issue_statuses";
@@ -370,6 +371,26 @@ impl Linear {
         Ok(results)
     }
 
+    async fn scopes_impl(&self) -> Result<Vec<ScopeSummary>, TrackerError> {
+        let session = self.session_or_reconnect().await?;
+        if !session.has(LIST_TEAMS) {
+            return Err(TrackerError::new(
+                "this Linear connection cannot list teams; type the team key instead",
+            ));
+        }
+        let data = session.call(LIST_TEAMS, Map::new()).await?;
+        let teams = object_list(&data, "teams")?;
+        let mut scopes = Vec::with_capacity(teams.len());
+        for team in &teams {
+            scopes.push(ScopeSummary {
+                id: string_field(team, "id")?,
+                key: string_field(team, "key")?,
+                name: string_field(team, "name")?,
+            });
+        }
+        Ok(scopes)
+    }
+
     async fn read_impl(&self, reference: &IssueReference) -> Result<IssueSnapshot, TrackerError> {
         let session = self.session_or_reconnect().await?;
         let issue = fetch_issue(&session, &reference.id).await?;
@@ -455,6 +476,10 @@ impl TrackerProvider for Linear {
         Box::pin(self.search_impl(query))
     }
 
+    fn scopes<'a>(&'a self) -> TrackerFuture<'a, Vec<ScopeSummary>> {
+        Box::pin(self.scopes_impl())
+    }
+
     fn status<'a>(
         &'a self,
         reference: &'a IssueReference,
@@ -514,16 +539,20 @@ fn issue_object(value: Value) -> Value {
 }
 
 fn issue_list(value: &Value) -> Result<Vec<Value>, TrackerError> {
+    object_list(value, "issues")
+}
+
+/// A list a tool returned, either as the array itself or under its own name.
+fn object_list(value: &Value, name: &str) -> Result<Vec<Value>, TrackerError> {
     let array = match value {
         Value::Array(items) => items,
-        Value::Object(map) => map
-            .get("issues")
-            .and_then(Value::as_array)
-            .ok_or_else(|| TrackerError::new("the Linear issue list had an unexpected shape"))?,
+        Value::Object(map) => map.get(name).and_then(Value::as_array).ok_or_else(|| {
+            TrackerError::new(format!("the Linear {name} list had an unexpected shape"))
+        })?,
         _ => {
-            return Err(TrackerError::new(
-                "the Linear issue list had an unexpected shape",
-            ));
+            return Err(TrackerError::new(format!(
+                "the Linear {name} list had an unexpected shape"
+            )));
         }
     };
     Ok(array.clone())

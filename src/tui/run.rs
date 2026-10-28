@@ -40,7 +40,7 @@ use super::App;
 use super::app::{
     ConfigPushReply, Foreground, IssueReadReply, IssueSearchReply, NO_LINEAR, RemoteSignalsReply,
     RemoveTaskReply, RepositoryListReply, SendTaskReply, TaskDelegationReply, TrackerConnectReply,
-    WatchedTasks,
+    TrackerScopesReply, WatchedTasks,
 };
 use super::background::terrain;
 use super::keys::{is_dismiss, is_help};
@@ -152,6 +152,7 @@ struct EventReplies<'a> {
     sends: &'a mpsc::Sender<SendTaskReply>,
     removals: &'a mpsc::Sender<RemoveTaskReply>,
     repositories: &'a mpsc::UnboundedSender<RepositoryListReply>,
+    tracker_scopes: &'a mpsc::UnboundedSender<TrackerScopesReply>,
 }
 
 /// What the loop hears from outside the terminal: the work changing, and what the
@@ -275,6 +276,7 @@ where
     // Listing repositories runs in the login's own sandbox, which may have to be
     // installed the first time, so it is off this loop like every other wait.
     let (repository_lists, mut repositories_listed) = mpsc::unbounded_channel();
+    let (tracker_scopes, mut tracker_scopes_replied) = mpsc::unbounded_channel();
     // Searching Linear and reading one issue are network calls, so they happen on
     // their own clock and away from this loop. Each reply carries the popup and
     // query it answers, so a late one is dropped rather than shown under the
@@ -722,6 +724,10 @@ where
                 app.credential_checked(reply);
                 redraw = true;
             }
+            Some(reply) = tracker_scopes_replied.recv() => {
+                app.tracker_scopes_listed(reply);
+                redraw = true;
+            }
             Some(event) = watched.recv() => {
                 app.tasks_watched(event).await;
                 redraw = true;
@@ -903,6 +909,7 @@ where
                         sends: &sends,
                         removals: &removals,
                         repositories: &repository_lists,
+                        tracker_scopes: &tracker_scopes,
                     },
                 )
                 .await?;
@@ -944,6 +951,7 @@ where
         sends,
         removals,
         repositories,
+        tracker_scopes,
     } = replies;
     if let Event::Resize(_, _) = event
         && app.open_shell().is_some()
@@ -1126,6 +1134,7 @@ where
                 credential_events,
                 tracker_connects,
                 repositories,
+                tracker_scopes,
             )
             .await
         }

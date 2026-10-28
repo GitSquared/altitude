@@ -218,7 +218,12 @@ pub(super) fn project_lines(
         Some(repository) => {
             lines.push(Line::from(vec![
                 Span::styled("repository  ", palette::muted()),
-                Span::styled(repository.clone(), palette::accent()),
+                Span::styled(
+                    project
+                        .repository_label()
+                        .unwrap_or_else(|| repository.clone()),
+                    palette::accent(),
+                ),
             ]));
             if let Some(checkout) = project.checkout_path() {
                 lines.push(Line::from(vec![
@@ -233,12 +238,21 @@ pub(super) fn project_lines(
         )),
     }
     lines.push(Line::from(vec![
-        Span::styled("runs on     ", palette::muted()),
+        Span::styled("start new tasks on  ", palette::muted()),
         Span::styled(
             project
                 .host
                 .clone()
                 .unwrap_or_else(|| "this machine".to_owned()),
+            palette::accent(),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("coding agent  ", palette::muted()),
+        Span::styled(
+            project
+                .agent
+                .map_or_else(|| "the default".to_owned(), |agent| agent.to_string()),
             palette::accent(),
         ),
     ]));
@@ -268,21 +282,10 @@ pub(super) fn project_lines(
             Span::raw(" · built "),
             Span::styled(met_ago(description.built_at_ms), palette::accent()),
         ]));
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::styled(
-        "caches shared by every task here on this machine",
-        palette::muted(),
-    ));
-    if project.caches.is_empty() {
-        lines.push(Line::styled("none", palette::muted()));
-    } else {
-        lines.extend(
-            project
-                .caches
-                .iter()
-                .map(|cache| Line::styled(cache.clone(), palette::accent())),
-        );
+        lines.push(Line::from(vec![
+            Span::styled("packages    ", palette::muted()),
+            Span::styled(description.packages.join(", "), palette::accent()),
+        ]));
     }
     lines.push(Line::from(""));
     lines.push(Line::styled("work arrives from", palette::muted()));

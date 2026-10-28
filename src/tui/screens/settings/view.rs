@@ -77,8 +77,7 @@ impl App {
                 .into_iter()
                 .map(|project| {
                     let detail = project
-                        .repository
-                        .clone()
+                        .repository_label()
                         .unwrap_or_else(|| "no repository".to_owned());
                     Row {
                         label: project.name.clone(),

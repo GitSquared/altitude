@@ -76,6 +76,15 @@ pub const ACCOUNT_FILE: &str = "identity.json";
 /// This is what lets a remote route an issue delegated in the tracker to the
 /// machine that owns it, so a machine's account is a fact a remote keeps rather
 /// than something it infers.
+/// One container a tracker route can claim, as a picker lists it.
+#[derive(Clone, Debug)]
+pub struct ScopeSummary {
+    pub id: String,
+    /// What a person types for it, and what a route usually stores.
+    pub key: String,
+    pub name: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TrackerAccount {
     pub provider: TrackerKind,
@@ -228,6 +237,10 @@ pub trait TrackerProvider: IssueReader {
     fn is_connected(&self) -> bool;
 
     fn search<'a>(&'a self, query: &'a str) -> TrackerFuture<'a, Vec<IssueSummary>>;
+
+    /// The containers a route can claim, for a picker. A server that does not
+    /// offer them is a server the operator types a key into.
+    fn scopes<'a>(&'a self) -> TrackerFuture<'a, Vec<ScopeSummary>>;
     fn status<'a>(
         &'a self,
         reference: &'a IssueReference,

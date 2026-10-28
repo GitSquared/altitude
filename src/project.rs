@@ -179,6 +179,17 @@ impl Project {
         self.name.to_ascii_lowercase()
     }
 
+    /// The repository as a list row reads it: `owner/name` rather than a URL.
+    pub fn repository_label(&self) -> Option<String> {
+        let repository = self.repository.as_deref()?;
+        let short = repository
+            .strip_prefix("https://github.com/")
+            .or_else(|| repository.strip_prefix("http://github.com/"))
+            .or_else(|| repository.strip_prefix("git@github.com:"))
+            .unwrap_or(repository);
+        Some(short.strip_suffix(".git").unwrap_or(short).to_owned())
+    }
+
     /// The directory the repository is cloned into, when there is one.
     ///
     /// Derived from the repository rather than configured: one less thing to

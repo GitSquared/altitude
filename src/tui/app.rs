@@ -40,17 +40,17 @@ use crate::{
         TaskOperatorSignalMessage, TaskOperatorSignalThread, TaskPlanStep, TaskService,
         TaskServiceError,
     },
-    tracker::{IssueReference, IssueSnapshot, IssueSummary, TrackerKind},
+    tracker::{IssueReference, IssueSnapshot, IssueSummary, ScopeSummary, TrackerKind},
     tui::keys::{is_dismiss, is_remove, is_secondary},
     tui::popups,
     tui::screens,
-    tui::widgets::palette,
     tui::widgets::{
         chrome::Hint,
         layers::Behind,
         pointer::Targets,
         select::{Offer, Select},
     },
+    tui::widgets::{palette, text::Field},
     vcs::{Repository, VcsProviderKind},
 };
 
@@ -61,6 +61,7 @@ use popups::confirm::{CredentialTarget, PendingConfirm};
 use popups::message::{Decision as MessageDecision, MessagePrompt};
 use popups::new_task::{AGENTS, Answer, Hit as NewTaskHit, Host, NewTask, SearchToken};
 use popups::repositories::{Key as RepositoriesKey, Repositories};
+use popups::scopes::{Key as ScopesKey, Scopes};
 use popups::send_task::{Decision as SendDecision, SendTask};
 use popups::setup::{Setup, SetupKind};
 use popups::sign_in::{Decision as SignInDecision, SignIn};
@@ -240,6 +241,10 @@ pub(in crate::tui) struct CredentialCheckReply {
 }
 
 /// A repository listing that arrived while the interface was drawing.
+pub(in crate::tui) struct TrackerScopesReply {
+    pub result: Result<Vec<ScopeSummary>, String>,
+}
+
 pub(in crate::tui) struct RepositoryListReply {
     pub result: Result<Vec<Repository>, String>,
 }
@@ -1002,12 +1007,12 @@ impl App {
         {
             Some(host) if host.ready => Ok(Some(address.clone())),
             Some(host) => Err(format!(
-                "This project runs on {}. It cannot take work yet.",
+                "New tasks for this project start on {}. It cannot take work yet.",
                 host.label
             )),
             None => Err(format!(
-                "This project runs on {address}, which is not a configured remote. Add it in \
-                 Settings → Remotes, or change the project's machine."
+                "New tasks for this project start on {address}, which is not a configured \
+                 remote. Add it in Settings → Remotes, or change the project's machine."
             )),
         }
     }
@@ -1026,8 +1031,7 @@ impl App {
     fn scope_label(&self) -> String {
         let kind = TrackerKind::sole();
         format!(
-            "{} {} (optional; empty claims the whole account)",
-            kind.label(),
+            "Task tracker {} (optional; empty claims the whole account)",
             kind.scope_noun()
         )
     }
@@ -1203,6 +1207,12 @@ impl App {
     pub(in crate::tui) fn needs_shimmer(&self) -> bool {
         self.has_modal()
             || self.repositories_listing
+            || self
+                .panel
+                .form
+                .as_ref()
+                .and_then(|form| form.scopes.as_ref())
+                .is_some_and(Scopes::is_listing)
             || self.is_awaiting_progress()
             || !self.environment_builds.is_empty()
             || self
@@ -1915,7 +1925,7 @@ impl App {
             KeyCode::Char('n') if self.panel.section.grows() => {
                 self.panel.form = Some(match self.panel.section {
                     Section::Remotes => Form::for_remote(Target::NewRemote, ""),
-                    _ => Form::new_project(&self.scope_label(), &self.remotes()),
+                    _ => Form::new_project(&self.scope_label(), &self.remotes(), self.agent()),
                 });
             }
             _ if is_remove(key) && self.selected_row().is_some_and(|row| row.is_removable()) => {
@@ -3214,6 +3224,7 @@ impl App {
                 &project,
                 &self.scope_label(),
                 &self.remotes(),
+                self.agent(),
             ),
             RowKind::Discovered(_) => return,
             RowKind::Remote { address, .. } => Form::for_remote(
@@ -3354,6 +3365,32 @@ impl App {
         };
         let mut keep = true;
         let mut save = false;
+        if let Some(mut scopes) = form.scopes.take() {
+            match scopes.key(key) {
+                ScopesKey::Still => {
+                    form.scopes = Some(scopes);
+                    self.panel.form = Some(form);
+                    return;
+                }
+                ScopesKey::Closed => {
+                    self.panel.form = Some(form);
+                    return;
+                }
+                ScopesKey::Chosen(scope) => {
+                    let key = if scope.key.is_empty() {
+                        scope.id.as_str()
+                    } else {
+                        scope.key.as_str()
+                    };
+                    form.scope = Field::with(key);
+                    self.panel.form = Some(form);
+                    return;
+                }
+                // A save while the list is open means the form is finished with
+                // its choice, so the list closes and the save proceeds.
+                ScopesKey::Save => save = true,
+            }
+        }
         if let Some(browser) = form.repositories.as_mut() {
             match browser.key(key) {
                 RepositoriesKey::Still => {
@@ -3394,6 +3431,9 @@ impl App {
                 }
                 KeyCode::Enter | KeyCode::Char(' ') if form.focus == Focus::Host => {
                     form.cycle_host();
+                }
+                KeyCode::Enter | KeyCode::Char(' ') if form.focus == Focus::Agent => {
+                    form.cycle_agent();
                 }
                 KeyCode::Enter if form.enters_newline() => form.handle_text(key),
                 KeyCode::Enter => match form.focus {
@@ -3455,6 +3495,42 @@ impl App {
             (!current.is_empty()).then_some(current),
         ));
         self.spawn_repository_list(kind, task_service, replies);
+    }
+
+    /// Ask the tracker for its teams, and show them under the form's scope
+    /// field. A connection that cannot answer leaves the field as text.
+    fn begin_scope_listing<E>(
+        &mut self,
+        task_service: &TaskService<E>,
+        replies: &mpsc::UnboundedSender<TrackerScopesReply>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let Some(tracker) = task_service.tracker() else {
+            self.say("Connect Linear in Settings → Trackers before choosing a team");
+            return;
+        };
+        if let Some(form) = self.panel.form.as_mut() {
+            form.scopes = Some(Scopes::new());
+        }
+        let replies = replies.clone();
+        tokio::spawn(async move {
+            let result = tracker.scopes().await.map_err(|error| error.to_string());
+            let _ = replies.send(TrackerScopesReply { result });
+        });
+    }
+
+    pub(in crate::tui) fn tracker_scopes_listed(&mut self, reply: TrackerScopesReply) {
+        let Some(form) = self.panel.form.as_mut() else {
+            return;
+        };
+        let Some(scopes) = form.scopes.as_mut() else {
+            return;
+        };
+        match reply.result {
+            Ok(scopes_list) => scopes.fill(&scopes_list),
+            Err(error) => scopes.failed(error),
+        }
     }
 
     /// Ask for a listing; whoever has a browser open when it lands fills it.
@@ -4444,6 +4520,7 @@ impl App {
                 project.name = name;
                 project.repository = repository;
                 project.host = form.host_value();
+                project.agent = form.agent;
                 project.setup_command = form.setup.value();
                 project.caches = form.cache_paths();
                 project.instructions = form.instruction_text();
@@ -5510,6 +5587,7 @@ impl App {
         events: &mpsc::UnboundedSender<CredentialShellEvent>,
         tracker_connects: &mpsc::UnboundedSender<TrackerConnectReply>,
         repository_lists: &mpsc::UnboundedSender<RepositoryListReply>,
+        tracker_scopes: &mpsc::UnboundedSender<TrackerScopesReply>,
     ) where
         E: IsolationEngine + Clone + 'static,
     {
@@ -5530,6 +5608,17 @@ impl App {
                     });
             if wants_repositories {
                 self.begin_repository_listing(task_service, repository_lists);
+                return;
+            }
+            let wants_scopes = key.code == KeyCode::Enter
+                && self.tracker_state == TrackerState::Connected
+                && self
+                    .panel
+                    .form
+                    .as_ref()
+                    .is_some_and(|form| form.focus == Focus::Scope && form.scopes.is_none());
+            if wants_scopes {
+                self.begin_scope_listing(task_service, tracker_scopes);
                 return;
             }
             self.panel_form_key(key).await;
@@ -6078,8 +6167,8 @@ impl App {
                         .collect::<Vec<_>>(),
                     Ok(None) => {
                         self.say(
-                            "This project runs on this machine. Set its machine in Settings → \
-                             Projects to delegate it.",
+                            "New tasks for this project start on this machine. Set their machine \
+                             in Settings → Projects to delegate them.",
                         );
                         return Ok(false);
                     }

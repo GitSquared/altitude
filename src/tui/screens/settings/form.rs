@@ -9,13 +9,14 @@ use ratatui::{
     Frame,
     layout::Rect,
     text::Line,
-    widgets::{Block, BorderType, Clear, Padding, Paragraph},
+    widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap},
 };
 
 use crate::{
+    agent::AgentKind,
     project::Project,
     tui::{
-        popups::repositories::Repositories,
+        popups::{new_task::AGENTS, repositories::Repositories, scopes::Scopes},
         widgets::{
             button, chrome, palette,
             text::{Field, FieldStyle, TextBox},
@@ -82,6 +83,7 @@ pub enum Focus {
     Caches,
     Instructions,
     Scope,
+    Agent,
     Host,
     Accept,
     Cancel,
@@ -123,7 +125,7 @@ impl Kind {
         match self {
             Self::Single => 4,
             Self::Multi => 6,
-            Self::Toggle => 1,
+            Self::Toggle => 8,
             Self::Choice => 3,
         }
     }
@@ -170,14 +172,19 @@ fn groups(project: bool) -> Vec<Group> {
             kind: Kind::Multi,
         },
         Group {
+            focus: Focus::Agent,
+            label: "Coding agent",
+            kind: Kind::Choice,
+        },
+        Group {
             focus: Focus::Scope,
             // Overridden with the provider's own word when the form is drawn.
-            label: "Tracker scope",
+            label: "Task tracker team",
             kind: Kind::Single,
         },
         Group {
             focus: Focus::Host,
-            label: "Runs on",
+            label: "Start new tasks on",
             kind: Kind::Choice,
         },
         Group {
@@ -198,6 +205,11 @@ pub struct Form {
     pub caches: TextBox,
     pub instructions: TextBox,
     pub scope: Field,
+    /// The coding agent new tasks here use, or nothing for the installation's
+    /// default.
+    pub agent: Option<AgentKind>,
+    /// The installation's default agent, shown so "default" has a name.
+    default_agent: Option<AgentKind>,
     /// Where this project's tasks run, or nothing for this machine.
     pub host: Option<String>,
     /// The machines offered, besides this one. A stale address already on the
@@ -212,15 +224,18 @@ pub struct Form {
     scope_label: String,
     /// The repository list, while it is open over the form.
     pub repositories: Option<Repositories>,
+    /// The tracker's teams, while its picker is open over the form.
+    pub scopes: Option<Scopes>,
 }
 
 /// Every focus a project form walks, in order.
-const PROJECT_FIELDS: [Focus; 10] = [
+const PROJECT_FIELDS: [Focus; 11] = [
     Focus::Primary,
     Focus::Repository,
     Focus::Setup,
     Focus::Caches,
     Focus::Instructions,
+    Focus::Agent,
     Focus::Scope,
     Focus::Host,
     Focus::Accept,
@@ -233,9 +248,19 @@ const REMOTE_FIELDS: [Focus; 3] = [Focus::Primary, Focus::Cancel, Focus::Save];
 impl Form {
     /// The form for a project that does not exist yet, with the caches a new
     /// project starts with already filled in.
-    pub fn new_project(scope_label: &str, remotes: &[String]) -> Self {
+    pub fn new_project(
+        scope_label: &str,
+        remotes: &[String],
+        default_agent: Option<AgentKind>,
+    ) -> Self {
         let project = Project::new("");
-        Self::for_project(Target::NewProject, &project, scope_label, remotes)
+        Self::for_project(
+            Target::NewProject,
+            &project,
+            scope_label,
+            remotes,
+            default_agent,
+        )
     }
 
     pub fn for_project(
@@ -243,6 +268,7 @@ impl Form {
         project: &Project,
         scope_label: &str,
         remotes: &[String],
+        default_agent: Option<AgentKind>,
     ) -> Self {
         let mut host_choices = remotes.to_vec();
         if let Some(host) = &project.host
@@ -264,6 +290,8 @@ impl Form {
                     .and_then(|route| route.scope.as_deref())
                     .unwrap_or_default(),
             ),
+            agent: project.agent,
+            default_agent,
             host: project.host.clone(),
             host_choices,
             accepts_delegated_work: project
@@ -274,6 +302,7 @@ impl Form {
             first_group: 0,
             scope_label: scope_label.to_owned(),
             repositories: None,
+            scopes: None,
         }
     }
 
@@ -286,6 +315,8 @@ impl Form {
             caches: TextBox::new(""),
             instructions: TextBox::new(""),
             scope: Field::with(""),
+            agent: None,
+            default_agent: None,
             host: None,
             host_choices: Vec::new(),
             accepts_delegated_work: false,
@@ -293,6 +324,7 @@ impl Form {
             first_group: 0,
             scope_label: String::new(),
             repositories: None,
+            scopes: None,
         }
     }
 
@@ -348,6 +380,28 @@ impl Form {
     /// Where the project runs, or nothing for this machine.
     pub fn host_value(&self) -> Option<String> {
         self.host.clone()
+    }
+
+    /// Move to the next agent on offer, wrapping. Nothing is the installation's
+    /// default, so a project only stores a choice when it differs.
+    pub fn cycle_agent(&mut self) {
+        let mut options: Vec<Option<AgentKind>> = vec![None];
+        options.extend(AGENTS.iter().copied().map(Some));
+        let at = options
+            .iter()
+            .position(|option| *option == self.agent)
+            .unwrap_or(0);
+        self.agent = options[(at + 1) % options.len()];
+    }
+
+    /// How the agent choice reads: the installation's default by name, or the
+    /// project's own choice.
+    fn agent_value(&self) -> String {
+        match (self.agent, self.default_agent) {
+            (Some(agent), _) => agent.to_string(),
+            (None, Some(default)) => format!("default · {default}"),
+            (None, None) => "not chosen".to_owned(),
+        }
     }
 
     /// Move to the next machine on offer, wrapping.
@@ -448,6 +502,7 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &mut Form, tick: Op
 
     let mut y = fields.y;
     let mut repository_anchor = None;
+    let mut scope_anchor = None;
     for candidate in groups.iter().skip(form.first_group) {
         let height = candidate.kind.rows();
         if y + height > fields.bottom() {
@@ -461,6 +516,9 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &mut Form, tick: Op
         if candidate.focus == Focus::Repository {
             repository_anchor = Some(rect);
         }
+        if candidate.focus == Focus::Scope {
+            scope_anchor = Some(rect);
+        }
         draw_group(frame, rect, form, candidate);
         y += height + 1;
     }
@@ -468,6 +526,11 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &mut Form, tick: Op
         && let Some(browser) = form.repositories.as_mut()
     {
         browser.draw(frame, fields, anchor, tick);
+    }
+    if let Some(anchor) = scope_anchor
+        && let Some(scopes) = form.scopes.as_mut()
+    {
+        scopes.draw(frame, fields, anchor, tick);
     }
 
     // The actions sit at the bottom right, where the eye ends up.
@@ -520,7 +583,10 @@ fn draw_group(frame: &mut Frame, area: Rect, form: &Form, group: &Group) {
         }
         Kind::Choice => {
             draw_label(frame, area, group.label);
-            let value = form.host.as_deref().unwrap_or("this machine");
+            let value = match group.focus {
+                Focus::Agent => form.agent_value(),
+                _ => form.host.as_deref().unwrap_or("this machine").to_owned(),
+            };
             let style = if focused {
                 palette::primary().bold()
             } else {
@@ -544,8 +610,30 @@ fn draw_group(frame: &mut Frame, area: Rect, form: &Form, group: &Group) {
             };
             frame.render_widget(
                 Paragraph::new(Line::styled(format!("{mark} {}", group.label), style)),
-                area,
+                Rect { height: 1, ..area },
             );
+            if area.height > 2 {
+                frame.render_widget(
+                    Paragraph::new(vec![
+                        Line::styled(
+                            "If a remote and task tracker are connected, turn this on to let \
+                             your task tracker start altitude agents on @mention and delegation.",
+                            palette::muted(),
+                        ),
+                        Line::from(""),
+                        Line::styled(
+                            "This enables you to pilot your task entirely from your task tracker.",
+                            palette::muted(),
+                        ),
+                    ])
+                    .wrap(Wrap { trim: true }),
+                    Rect {
+                        y: area.y.saturating_add(2),
+                        height: area.height.saturating_sub(2),
+                        ..area
+                    },
+                );
+            }
         }
     }
 }

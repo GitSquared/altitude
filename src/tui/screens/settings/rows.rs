@@ -96,6 +96,9 @@ impl Row {
                 ..
             } => Some(mark(false, true)),
             RowKind::Remote { status, .. } => Some(remote_mark(status)),
+            // The same question mark the first screen gives a machine found on
+            // the network: it is an offer, not something this client holds.
+            RowKind::Discovered(_) => Some(Dot::still('?', palette::muted())),
             RowKind::Agent { credential, .. } => credential.dot(),
             RowKind::Credential(credential) => credential.dot(),
             RowKind::GitIdentity(identity) => Some(mark(identity.is_set(), false)),
