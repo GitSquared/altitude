@@ -3,8 +3,8 @@ use crate::{
     config::{Config, InstallationIdentity},
     credentials::Credentials,
     isolation::{
-        EnvironmentDescription, EnvironmentProgress, IsolationEngine, IsolationError, PortRelays,
-        VsockRoute,
+        EnvironmentDescription, EnvironmentProgress, IsolationEngine, IsolationError, PortNotice,
+        PortRelays, VsockRoute,
     },
     project::Project,
     tracker::{IssueReader, TrackerProvider},
@@ -192,12 +192,13 @@ where
         agents: AgentEngines,
         identity: InstallationIdentity,
     ) -> Self {
+        let port_relays = PortRelays::new(config.agent_channel_dir());
         Self {
             store,
             snapshots_dir: config.task_snapshots_dir(),
             agent_channels: AgentChannels::new(config.agent_channel_dir()),
-            port_relays: PortRelays::new(config.agent_channel_dir()),
-            credentials: Credentials::new(isolation.clone(), config, agents.clone()),
+            port_relays: port_relays.clone(),
+            credentials: Credentials::new(isolation.clone(), config, agents.clone(), port_relays),
             isolation,
             agents,
             identity,
@@ -312,6 +313,11 @@ where
             .bind(sandbox_id)
             .map(|_| ())
             .map_err(|error| TaskServiceError::Isolation(IsolationError::new(error.to_string())))
+    }
+
+    /// Hear about each port that becomes reachable, for an interface to show.
+    pub fn port_notices(&self) -> broadcast::Receiver<PortNotice> {
+        self.port_relays.subscribe()
     }
 
     /// Close the relay a task's terminal held, answering nothing when it held none.

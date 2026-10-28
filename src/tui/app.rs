@@ -6643,7 +6643,23 @@ impl App {
     pub(in crate::tui) fn shell_has_active_notice(&self) -> bool {
         self.open_shell()
             .and_then(|id| self.shells.get(id))
-            .is_some_and(Shell::has_active_notice)
+            .is_some_and(|shell| shell.has_active_notice() || shell.has_reachable_ports())
+    }
+
+    /// Say that a sandbox's port is reachable here, on the terminal it belongs to.
+    ///
+    /// Nothing else changes: the port just works, and the border says so for a
+    /// moment on whichever terminal is the one it came from.
+    pub(in crate::tui) fn port_is_reachable(&mut self, sandbox: &str, port: u16) {
+        let id = self
+            .tasks
+            .iter()
+            .find(|task| task.facts.sandbox_id.as_deref() == Some(sandbox))
+            .map(|task| ShellId::Task(task.id.clone()))
+            .unwrap_or_else(|| ShellId::Credentials(sandbox.to_owned()));
+        if let Some(shell) = self.shells.get_mut(&id) {
+            shell.show_reachable_port(port);
+        }
     }
 
     /// Feed one terminal's bytes to the shell that draws it, and do what its program

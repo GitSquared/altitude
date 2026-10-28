@@ -19,8 +19,8 @@ mod relay;
 mod sandbox;
 
 pub use microsandbox::MicrosandboxIsolation;
-pub use relay::PortRelays;
 pub(crate) use relay::{PORT_RELAY_GUEST_PORT, install_script, with_helper};
+pub use relay::{PortNotice, PortRelays};
 pub(crate) use sandbox::private_directory;
 pub(crate) use sandbox::run_collecting;
 /// Shared with the VCS providers so capsule commands are quoted one way.

@@ -234,6 +234,9 @@ where
         task_execution: mut task_execution_updates,
         watched_tasks: mut watched,
     } = feeds;
+    // Ports a sandbox makes reachable while its terminal is open are said on that
+    // terminal's border, for a moment.
+    let mut port_notices = task_service.port_notices();
     let mut events = EventStream::new();
     let mut refresh = time::interval(Duration::from_secs(2));
     let mut shell_notice = time::interval(Duration::from_millis(100));
@@ -735,7 +738,10 @@ where
                 }
                 redraw = true;
             }
-            _ = shell_notice.tick(), if app.shell_has_active_notice() => {}
+            _ = shell_notice.tick(), if app.shell_has_active_notice() => {
+                // A notice that has run its course is cleared by this frame.
+                redraw = true;
+            }
             _ = signal_linger_clock.tick(), if app.has_lingering_signals() => {
                 app.expire_signal_linger();
                 redraw = true;
@@ -771,6 +777,12 @@ where
             Some(update) = task_execution_updates.recv() => {
                 app.apply(update, terminal, &event_loop).await?;
                 redraw = true;
+            }
+            notice = port_notices.recv() => {
+                if let Ok(notice) = notice {
+                    app.port_is_reachable(&notice.sandbox, notice.port);
+                    redraw = true;
+                }
             }
             Some(event) = credential_shell_events.recv() => {
                 app.credential_shell_event(event, terminal, &task_service).await;

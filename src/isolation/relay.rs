@@ -22,7 +22,7 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional},
     net::{TcpListener, TcpSocket, TcpStream, UnixListener, UnixStream},
-    sync::mpsc,
+    sync::{broadcast, mpsc},
     task::JoinHandle,
     time::sleep,
 };
@@ -68,11 +68,20 @@ const CLIENT_PATIENCE: Duration = Duration::from_secs(10);
 /// an operator started.
 const FIRST_FORWARDED_PORT: u16 = 1024;
 
+/// A sandbox port this machine can now reach, for whoever wants to say so.
+#[derive(Clone, Debug)]
+pub struct PortNotice {
+    pub sandbox: String,
+    pub port: u16,
+}
+
 /// The relay channels this process holds open, by sandbox id.
 #[derive(Clone)]
 pub struct PortRelays {
     directory: PathBuf,
     relays: Arc<Mutex<HashMap<String, Relay>>>,
+    /// Told once each time a port becomes reachable, for an interface to show.
+    notices: broadcast::Sender<PortNotice>,
 }
 
 struct Relay {
@@ -81,8 +90,8 @@ struct Relay {
     listening: Vec<JoinHandle<()>>,
 }
 
-#[derive(Default)]
 struct RelayState {
+    notices: broadcast::Sender<PortNotice>,
     forwarded: HashMap<u16, Forwarded>,
     /// Clients waiting for the sandbox to dial back, oldest first per port.
     pending: HashMap<u16, VecDeque<Pending>>,
@@ -112,7 +121,13 @@ impl PortRelays {
         Self {
             directory,
             relays: Arc::new(Mutex::new(HashMap::new())),
+            notices: broadcast::channel(64).0,
         }
+    }
+
+    /// Hear about each port that becomes reachable, once.
+    pub fn subscribe(&self) -> broadcast::Receiver<PortNotice> {
+        self.notices.subscribe()
     }
 
     /// The relay channel a sandbox is made with.
@@ -136,7 +151,14 @@ impl PortRelays {
         let path = route.host_socket.clone();
         let _ = fs::remove_file(&path);
         let listener = UnixListener::bind(&path)?;
-        let state = Arc::new(Mutex::new(RelayState::default()));
+        let state = Arc::new(Mutex::new(RelayState {
+            notices: self.notices.clone(),
+            forwarded: HashMap::new(),
+            pending: HashMap::new(),
+            refused: HashSet::new(),
+            last_token: 0,
+            last_announcement: 0,
+        }));
         let mut listening = Vec::new();
         {
             let state = state.clone();
@@ -267,11 +289,15 @@ async fn announce(mut stream: UnixStream, port: u16, state: Arc<Mutex<RelayState
             return;
         }
     };
-    state
-        .lock()
-        .expect("relay state lock poisoned")
-        .refused
-        .remove(&port);
+    let notices = {
+        let mut state = state.lock().expect("relay state lock poisoned");
+        state.refused.remove(&port);
+        state.notices.clone()
+    };
+    let _ = notices.send(PortNotice {
+        sandbox: id.clone(),
+        port,
+    });
     tracing::info!(port, sandbox = %id, "a sandbox port is reachable here");
 
     let (read_half, write_half) = stream.into_split();

@@ -31,6 +31,10 @@ pub struct Shell {
     parser: vt100::Parser<HostCallbacks>,
     requests: Receiver<GuestRequest>,
     clipboard_notice_until: Option<Instant>,
+    /// Ports this sandbox has lately made reachable here, so the border can say
+    /// so without taking a line from the terminal.
+    reachable_ports: Vec<u16>,
+    ports_notice_until: Option<Instant>,
     /// What this terminal is, on its frame: a task's run, or the shell opened to set
     /// up credentials.
     title: String,
@@ -51,6 +55,8 @@ impl Shell {
             parser,
             requests,
             clipboard_notice_until: None,
+            reachable_ports: Vec::new(),
+            ports_notice_until: None,
             title,
         }
     }
@@ -69,6 +75,44 @@ impl Shell {
     pub fn has_active_notice(&self) -> bool {
         self.clipboard_notice_until
             .is_some_and(|until| Instant::now() < until)
+    }
+
+    /// Say that a port in this terminal's sandbox can be reached from here.
+    ///
+    /// A second port arriving while the first is still being shown is the same
+    /// fact repeated, so they are read out together.
+    pub fn show_reachable_port(&mut self, port: u16) {
+        if !self.has_reachable_ports() {
+            self.reachable_ports.clear();
+        }
+        if !self.reachable_ports.contains(&port) {
+            self.reachable_ports.push(port);
+        }
+        self.ports_notice_until = Some(Instant::now() + Duration::from_secs(2));
+    }
+
+    pub fn has_reachable_ports(&self) -> bool {
+        self.ports_notice_until
+            .is_some_and(|until| Instant::now() < until)
+    }
+
+    fn reachable_ports_notice(&self) -> Option<String> {
+        if !self.has_reachable_ports() {
+            return None;
+        }
+        let mut ports = self.reachable_ports.clone();
+        ports.sort_unstable();
+        match ports.as_slice() {
+            [port] => Some(format!("agent listening on port {port}")),
+            ports => Some(format!(
+                "agent listening on ports {}",
+                ports
+                    .iter()
+                    .map(u16::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        }
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
@@ -165,6 +209,12 @@ impl Shell {
             block.title_bottom(Line::styled(" copied to clipboard ", palette::accent()))
         } else {
             block
+        };
+        let block = match self.reachable_ports_notice() {
+            Some(notice) => block.title_bottom(
+                Line::styled(format!(" {notice} "), palette::accent()).right_aligned(),
+            ),
+            None => block,
         };
         frame.render_widget(Clear, area);
         frame.render_widget(PseudoTerminal::new(self.parser.screen()).block(block), area);

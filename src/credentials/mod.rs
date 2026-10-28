@@ -74,11 +74,11 @@ impl<E> Credentials<E>
 where
     E: IsolationEngine + Clone,
 {
-    pub fn new(isolation: E, config: Config, agents: AgentEngines) -> Self {
+    pub fn new(isolation: E, config: Config, agents: AgentEngines, relays: PortRelays) -> Self {
         Self {
             isolation,
             channels: AgentChannels::new(config.agent_channel_dir()),
-            relays: PortRelays::new(config.agent_channel_dir()),
+            relays,
             config,
             agents,
         }
