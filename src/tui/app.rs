@@ -60,7 +60,10 @@ use super::background::terrain::Terrain;
 use super::links::Link;
 use super::widgets::{alert::Alert, list};
 use popups::confirm::PendingConfirm;
-use popups::identity::{IdentitySetup, RenameDecision, RenameIdentity, SetupDecision};
+use popups::identity::{
+    GitIdentityDecision, GitIdentitySetup, IdentityChoice, IdentitySetup, RenameDecision,
+    RenameIdentity, SetupDecision,
+};
 use popups::message::{Decision as MessageDecision, MessagePrompt};
 use popups::new_task::{AGENTS, Answer, Hit as NewTaskHit, Host, NewTask, SearchToken};
 use popups::repositories::{Key as RepositoriesKey, Repositories};
@@ -111,6 +114,8 @@ pub(in crate::tui) enum Foreground {
     /// A question about an identity: which service, or what to call it.
     IdentitySetup(Box<IdentitySetup>),
     RenameIdentity(Box<RenameIdentity>),
+    /// The name, email, and signing commits carry.
+    GitIdentity(Box<GitIdentitySetup>),
     /// What a tool's own sign-in asks, before its terminal opens.
     SignIn(Box<SignIn>),
     /// The first screen a new installation shows: the one choice a task needs.
@@ -161,6 +166,7 @@ impl Foreground {
             | Self::Setup(_)
             | Self::IdentitySetup(_)
             | Self::RenameIdentity(_)
+            | Self::GitIdentity(_)
             | Self::SignIn(_) => true,
             // A credential shell is opened from the settings list it is about, and
             // goes back to them, so the panel is the screen it sits on.
@@ -328,6 +334,10 @@ pub(in crate::tui) const NO_LINEAR: &str = "Linear support is not available in t
 /// How long the list is shown before its addresses are dialled, so moving through
 /// the sections does not reach anything.
 const ASK_AFTER: Duration = Duration::from_millis(400);
+
+/// How far a j/k step moves a conversation. One row, so a message taller than
+/// the screen can be read in pieces rather than jumped over.
+const SIGNAL_SCROLL_STEP: i32 = 1;
 
 /// How long after nothing could check a login the section tries again, so a sandbox
 /// that will not start is not asked on every tick.
@@ -741,9 +751,9 @@ pub struct App {
     /// Whether this session has already asked for a listing, so a card that is
     /// waiting for one does not ask again on every clock tick.
     repositories_requested: bool,
-    /// The profile a sign-in from the first screen was for, so it comes back
-    /// there instead of to Settings and asks about that login again.
-    setup_sign_in: Option<String>,
+    /// The profile the credential shell is signing in, so closing it asks
+    /// about that login again rather than showing what it said before.
+    signing_in: Option<String>,
     /// Whether Settings was opened from the first screen, so leaving it returns
     /// there rather than to the task list behind it.
     panel_from_setup: bool,
@@ -897,7 +907,7 @@ impl App {
             repositories: None,
             repositories_listing: false,
             repositories_requested: false,
-            setup_sign_in: None,
+            signing_in: None,
             panel_from_setup: false,
             profiles: Vec::new(),
             tracker_state: TrackerState::NotConnected,
@@ -1331,6 +1341,12 @@ impl App {
                 Hint::new("enter", "save"),
                 Hint::new("esc", "cancel"),
             ],
+            Foreground::GitIdentity(_) => vec![
+                Hint::new("tab", "field"),
+                Hint::new("space", "toggle signing"),
+                Hint::new("enter", "save"),
+                Hint::new("esc", "cancel"),
+            ],
             Foreground::Confirm(pending) => pending.hints(),
             Foreground::SendTask(sending) => sending.hints(),
             Foreground::NewTask(new_task) => new_task.hints(),
@@ -1433,7 +1449,7 @@ impl App {
                         "j/k",
                         match self.signal_focus {
                             SignalFocus::List => "thread",
-                            SignalFocus::Detail => "message",
+                            SignalFocus::Detail => "scroll",
                             SignalFocus::Action(_) => "button",
                             SignalFocus::Filter | SignalFocus::Sort => "control",
                         },
@@ -1442,6 +1458,9 @@ impl App {
                     Hint::new("s", "sort"),
                 ];
                 hints.push(Hint::new("n", "message agent"));
+                if self.signal_focus == SignalFocus::Detail {
+                    hints.push(Hint::new("y", "copy message"));
+                }
                 if matches!(self.signal_focus, SignalFocus::Filter | SignalFocus::Sort) {
                     hints.push(Hint::new("enter", "open"));
                 } else if let Some(thread) = self.signal_thread() {
@@ -1531,6 +1550,7 @@ impl App {
         match &self.foreground {
             Foreground::NewTask(new_task) => new_task.is_typing(),
             Foreground::GetStarted(panel) => panel.is_typing(),
+            Foreground::GitIdentity(identity) => identity.is_typing(),
             Foreground::Message(_) => true,
             _ => {
                 self.signal_composer.is_some()
@@ -1543,11 +1563,8 @@ impl App {
         }
     }
 
-    /// The terminal in front, if one is. A question a sandbox asked is asked over
-    /// the terminal it asked from, which goes on running behind it.
     /// Whether the terminal in front was opened from the first screen, which is
-    /// the screen that has to be behind it. `setup_sign_in` is set for exactly
-    /// that: the sign-in a card row asked for.
+    /// the screen that has to be behind it.
     pub(in crate::tui) fn credentials_over_card(&self) -> bool {
         matches!(self.foreground, Foreground::Shell(ShellId::Credentials(_)))
             && self
@@ -1691,9 +1708,16 @@ impl App {
     /// Open the service picker for a new identity, limited to the section's
     /// services so adding from a section stays in that section.
     fn open_identity_setup(&mut self, section: Section) {
-        let services = section.services();
-        if !services.is_empty() {
-            self.foreground = Foreground::IdentitySetup(Box::new(IdentitySetup::new(services)));
+        let mut choices: Vec<IdentityChoice> = section
+            .services()
+            .into_iter()
+            .map(IdentityChoice::Service)
+            .collect();
+        if section == Section::VersionControl {
+            choices.push(IdentityChoice::GitIdentity);
+        }
+        if !choices.is_empty() {
+            self.foreground = Foreground::IdentitySetup(Box::new(IdentitySetup::new(choices)));
         }
     }
 
@@ -1712,8 +1736,12 @@ impl App {
         match setup.key(key) {
             SetupDecision::Still => self.foreground = Foreground::IdentitySetup(setup),
             SetupDecision::Closed => self.foreground = Foreground::Panel,
-            SetupDecision::Chosen(service) => {
+            SetupDecision::Chosen(IdentityChoice::Service(service)) => {
                 self.create_identity(service, task_service, events, tracker_connects)
+            }
+            SetupDecision::Chosen(IdentityChoice::GitIdentity) => {
+                self.foreground = Foreground::Panel;
+                self.open_git_identity();
             }
         }
     }
@@ -1769,6 +1797,46 @@ impl App {
         match service.slot() {
             Slot::Tracker => self.connect_tracker_for(&id, task_service, tracker_connects),
             _ => self.begin_sign_in(&label, &id, task_service, events),
+        }
+    }
+
+    fn open_git_identity(&mut self) {
+        let identity = self.git_identity();
+        self.foreground = Foreground::GitIdentity(Box::new(GitIdentitySetup::new(
+            identity.name.as_deref().unwrap_or_default(),
+            identity.email.as_deref().unwrap_or_default(),
+            identity.signs_commits,
+        )));
+    }
+
+    /// Save the identity the editor holds, or keep it open with what was typed
+    /// when it cannot be saved.
+    pub(in crate::tui) async fn git_identity_key(&mut self, key: KeyEvent) {
+        let Foreground::GitIdentity(mut identity) = mem::take(&mut self.foreground) else {
+            return;
+        };
+        match identity.key(key) {
+            GitIdentityDecision::Still => {
+                self.foreground = Foreground::GitIdentity(identity);
+            }
+            GitIdentityDecision::Closed => self.foreground = Foreground::Panel,
+            GitIdentityDecision::Save { name, email, signs } => {
+                if name.is_empty() || email.is_empty() {
+                    self.say("A commit needs a name and an email");
+                    self.foreground = Foreground::GitIdentity(Box::new(GitIdentitySetup::new(
+                        &name, &email, signs,
+                    )));
+                    return;
+                }
+                if self.save_commit_identity(&name, &email, signs).await {
+                    self.foreground = Foreground::Panel;
+                    self.say("Git identity updated");
+                } else {
+                    self.foreground = Foreground::GitIdentity(Box::new(GitIdentitySetup::new(
+                        &name, &email, signs,
+                    )));
+                }
+            }
         }
     }
 
@@ -1890,6 +1958,7 @@ impl App {
             self.say("A shell is already open");
             return;
         }
+        self.signing_in = Some(profile.clone());
         if self.ensure_credential(&profile, display)
             && let Some(summary) = task_service.credentials().summary(&profile)
             && !self
@@ -2019,14 +2088,21 @@ impl App {
                 // A sign-in that never started is not an answer about the login
                 // that was there before: ask again rather than leave the row
                 // saying what it said before the attempt.
-                if let Some(profile) = self.setup_sign_in.take() {
-                    self.credential_status.remove(&profile);
-                    self.credential_checked_at.remove(&profile);
-                    self.credential_checking.remove(&profile);
-                }
+                self.recheck_signed_in_profile();
                 self.problem(format!("No shell: {reason}"));
             }
         }
+    }
+
+    /// Forget what the last check said about the profile a shell just signed in,
+    /// so the row asks again instead of repeating its pre-sign-in answer.
+    fn recheck_signed_in_profile(&mut self) {
+        let Some(profile) = self.signing_in.take() else {
+            return;
+        };
+        self.credential_status.remove(&profile);
+        self.credential_checked_at.remove(&profile);
+        self.credential_checking.remove(&profile);
     }
 
     /// Throw a credential shell away, and go back to where it was opened from.
@@ -2046,17 +2122,13 @@ impl App {
             // The same answer as closing an open shell: cancelling before the
             // terminal appears still means the row has to be checked again, or
             // it goes on reporting the login the attempt was meant to replace.
-            if let Some(profile) = self.setup_sign_in.take() {
-                self.credential_status.remove(&profile);
-            }
+            self.recheck_signed_in_profile();
             return;
         };
         let id = ShellId::Credentials(shell.id().to_owned());
         self.shells.remove(&id);
         if self.open_shell() == Some(&id) {
-            if let Some(profile) = mem::take(&mut self.setup_sign_in) {
-                self.credential_status.remove(&profile);
-            }
+            self.recheck_signed_in_profile();
             // Back to the screen that asked, with the row that asked still on it.
             self.foreground = self.shell_behind.uncover().unwrap_or(Foreground::Panel);
         }
@@ -2160,7 +2232,9 @@ impl App {
                 Section::Agents | Section::VersionControl | Section::Trackers => {
                     let services = self.panel.section.services();
                     match services.as_slice() {
-                        [service] => {
+                        // A version-control section also offers the Git identity,
+                        // so even one provider has more than one thing to add.
+                        [service] if self.panel.section != Section::VersionControl => {
                             self.create_identity(*service, task_service, events, tracker_connects)
                         }
                         _ => self.open_identity_setup(self.panel.section),
@@ -2241,9 +2315,7 @@ impl App {
                     }
                 }
             }
-            Some(RowKind::GitIdentity(_)) => {
-                self.begin_sign_in("Git identity", "vcs/github", task_service, events);
-            }
+            Some(RowKind::GitIdentity(_)) => self.open_git_identity(),
             Some(RowKind::Credential(credential)) => match credential.kind {
                 CredentialKind::Profile { profile, .. } => {
                     self.begin_sign_in(&credential.label, &profile, task_service, events);
@@ -3472,7 +3544,7 @@ impl App {
             // The installation's key is made, not signed in to, so there is no
             // terminal to open for it.
             RowKind::GitIdentity(_) => {
-                self.say("Press enter to configure Git identity and signing");
+                self.open_git_identity();
                 return;
             }
             RowKind::Credential(_) => {
@@ -4119,7 +4191,6 @@ impl App {
                     .get(chosen.profile())
                     .is_some_and(signed_in);
                 if needs_sign_in {
-                    self.setup_sign_in = Some(chosen.profile().to_owned());
                     self.open_credential_shell(
                         &chosen.to_string(),
                         chosen.profile().to_owned(),
@@ -4144,7 +4215,6 @@ impl App {
                 // Choosing a provider is choosing the sign-in that makes it
                 // usable: the repository list comes after it, never before.
                 self.foreground = Foreground::GetStarted(panel);
-                self.setup_sign_in = Some(chosen.profile().to_owned());
                 self.open_credential_shell(
                     chosen.label(),
                     chosen.profile().to_owned(),
@@ -4212,7 +4282,6 @@ impl App {
                         // closes: this is the one sign-in that does not start at
                         // Settings.
                         self.foreground = Foreground::GetStarted(panel);
-                        self.setup_sign_in = Some(kind.profile().to_owned());
                         self.open_credential_shell(
                             &kind.to_string(),
                             kind.profile().to_owned(),
@@ -4394,19 +4463,25 @@ impl App {
     async fn save_commits(&mut self, panel: &mut GetStarted) -> bool {
         let name = panel.commits.name.value().trim().to_owned();
         let email = panel.commits.email.value().trim().to_owned();
+        let signs = panel.commits.signs;
+        self.save_commit_identity(&name, &email, signs).await
+    }
+
+    async fn save_commit_identity(&mut self, name: &str, email: &str, signs: bool) -> bool {
+        let name = name.trim();
+        let email = email.trim();
         if name.is_empty() || email.is_empty() {
             self.say("A commit needs a name and an email");
             return false;
         }
-        let signs = panel.commits.signs;
         // Read or make the key, and rewrite the signers with the email as it is
         // now: a rename must not leave signatures that verify against a name the
         // commit no longer carries.
-        if signs && let Err(error) = self.make_signing_key(&email).await {
+        if signs && let Err(error) = self.make_signing_key(email).await {
             self.problem(error);
             return false;
         }
-        if let Err(error) = self.write_commits(&name, &email, signs).await {
+        if let Err(error) = self.write_commits(name, email, signs).await {
             self.problem(error);
             return false;
         }
@@ -4791,9 +4866,7 @@ impl App {
 
     /// Leave a credential shell for wherever the sign-in was started.
     fn leave_credentials(&mut self) {
-        if let Some(profile) = mem::take(&mut self.setup_sign_in) {
-            self.credential_status.remove(&profile);
-        }
+        self.recheck_signed_in_profile();
         self.foreground = self.shell_behind.uncover().unwrap_or(Foreground::Panel);
     }
 
@@ -5081,6 +5154,9 @@ impl App {
     }
 
     /// Scroll the conversation by a number of rows, clamped to what exists.
+    ///
+    /// The focused message follows the top of the viewport, so `y` copies the
+    /// message being read rather than whichever one was last clicked.
     fn scroll_signal(&mut self, rows: i32) {
         let current = if self.signal_scroll == u16::MAX {
             self.signal_scroll_max
@@ -5089,6 +5165,24 @@ impl App {
         };
         let next = (i32::from(current) + rows).clamp(0, i32::from(self.signal_scroll_max));
         self.signal_scroll = u16::try_from(next).unwrap_or(0);
+        self.select_signal_message_at_scroll();
+    }
+
+    /// Put the message cursor on the message at the top of the viewport.
+    fn select_signal_message_at_scroll(&mut self) {
+        if self.signal_message_rows.is_empty() {
+            return;
+        }
+        let current = if self.signal_scroll == u16::MAX {
+            self.signal_scroll_max
+        } else {
+            self.signal_scroll
+        };
+        self.signal_message_cursor = self
+            .signal_message_rows
+            .iter()
+            .position(|&(top, height)| current < top.saturating_add(height))
+            .unwrap_or(self.signal_message_rows.len() - 1);
     }
 
     /// Scroll by one conversation page.
@@ -5206,22 +5300,19 @@ impl App {
         self.signal_scroll = u16::MAX;
     }
 
-    /// Move the focused message by one, scrolling the conversation to it.
-    pub(in crate::tui) fn move_signal_message(&mut self, forward: bool) {
-        let Some(thread) = self.signal_thread() else {
+    /// Put the focused message on this machine's clipboard.
+    fn copy_signal_message(&mut self) {
+        let Some(body) = self
+            .signal_thread()
+            .and_then(|thread| thread.messages.get(self.signal_message_cursor))
+            .map(|message| message.body.clone())
+        else {
             return;
         };
-        let len = thread.messages.len();
-        if len == 0 {
-            self.signal_message_cursor = 0;
-            return;
+        match copy_to_clipboard(body) {
+            Ok(()) => self.say("Message copied"),
+            Err(error) => self.problem(format!("Could not copy the message: {error}")),
         }
-        self.signal_message_cursor = if forward {
-            (self.signal_message_cursor + 1) % len
-        } else {
-            (self.signal_message_cursor + len - 1) % len
-        };
-        self.reveal_signal_message();
     }
 
     /// Keep a focus that a changed thread made impossible from sticking around.
@@ -6441,30 +6532,48 @@ impl App {
         match key.code {
             KeyCode::PageDown => self.page_signal(false),
             KeyCode::PageUp => self.page_signal(true),
-            KeyCode::Home => self.signal_scroll = 0,
-            KeyCode::End => self.signal_scroll = u16::MAX,
+            KeyCode::Home => {
+                self.signal_scroll = 0;
+                self.select_signal_message_at_scroll();
+            }
+            KeyCode::End => {
+                self.signal_scroll = u16::MAX;
+                self.select_signal_message_at_scroll();
+            }
             _ if is_dismiss(key) || key.code == KeyCode::Char('q') => {
                 self.read_selected_info(task_service, remote_signals).await;
                 self.leave_signals();
             }
             KeyCode::Down | KeyCode::Char('j') => match self.signal_focus {
                 SignalFocus::List => {
-                    self.move_signal_cursor(true, task_service, remote_signals)
-                        .await
+                    let len = self.signal_threads.len();
+                    if self.signals_cursor.selected() + 1 < len {
+                        self.move_signal_cursor(true, task_service, remote_signals)
+                            .await;
+                    }
                 }
-                SignalFocus::Detail => self.move_signal_message(true),
+                SignalFocus::Detail => self.scroll_signal(SIGNAL_SCROLL_STEP),
                 SignalFocus::Action(_) => self.move_signal_focus(true),
-                SignalFocus::Filter | SignalFocus::Sort => {}
+                SignalFocus::Filter | SignalFocus::Sort => {
+                    self.signal_focus = SignalFocus::List;
+                }
             },
             KeyCode::Up | KeyCode::Char('k') => match self.signal_focus {
                 SignalFocus::List => {
-                    self.move_signal_cursor(false, task_service, remote_signals)
-                        .await
+                    if self.signals_cursor.selected() == 0 {
+                        self.signal_focus = SignalFocus::Filter;
+                    } else {
+                        self.move_signal_cursor(false, task_service, remote_signals)
+                            .await;
+                    }
                 }
-                SignalFocus::Detail => self.move_signal_message(false),
+                SignalFocus::Detail => self.scroll_signal(-SIGNAL_SCROLL_STEP),
                 SignalFocus::Action(_) => self.move_signal_focus(false),
                 SignalFocus::Filter | SignalFocus::Sort => {}
             },
+            KeyCode::Char('y') if self.signal_focus == SignalFocus::Detail => {
+                self.copy_signal_message();
+            }
             KeyCode::Char('f') => {
                 self.signal_focus = SignalFocus::Filter;
                 self.signal_filter.open();
@@ -6577,7 +6686,7 @@ impl App {
                     return;
                 }
                 let question = "Accept this work and close the task?\n\
-                    The agent will be shut down and its capsule cleared up."
+                    The agent will be shut down and its sandbox cleared up."
                     .to_owned();
                 self.foreground = Foreground::Confirm(PendingConfirm::confirming_signal(
                     thread.task_id,

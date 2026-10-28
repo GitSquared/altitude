@@ -169,6 +169,13 @@ fn draw_columns(
         );
     }
 
+    // An empty list has nothing to describe, so the description column says how
+    // to put something in it instead of sitting blank.
+    if view.rows.is_empty() {
+        draw_empty_detail(frame, detail_area, panel.section);
+        return;
+    }
+
     // The third column follows the selection rather than the focus, so it is
     // drawn at full strength whether or not the list is being used.
     let pane = detail(panel, view, tick);
@@ -182,6 +189,28 @@ fn draw_columns(
         0,
     ));
     frame.render_widget(pane, detail_area);
+}
+
+/// What the description column says when there is no row to describe.
+fn draw_empty_detail(frame: &mut Frame, area: Rect, section: Section) {
+    let message = match section {
+        Section::Agents | Section::VersionControl | Section::Trackers => {
+            "No credentials found, press n to connect one"
+        }
+        Section::Projects => "No projects yet, press n to add one",
+        Section::Remotes => "No remotes yet, press n to add one",
+        Section::Interface => return,
+    };
+    let [_, row, _] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+    ])
+    .areas(area);
+    frame.render_widget(
+        Paragraph::new(message).style(palette::muted()).centered(),
+        row,
+    );
 }
 
 /// The third column: what is known about the row the list has selected.

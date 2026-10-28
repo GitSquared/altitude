@@ -17,35 +17,53 @@ use crate::{
     },
 };
 
+/// One thing a service section can add. A version-control section has a Git
+/// identity as well as its provider logins, because the two answer different
+/// questions: who signed in, and who the commits are from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdentityChoice {
+    Service(Service),
+    GitIdentity,
+}
+
+impl IdentityChoice {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Service(service) => service.label(),
+            Self::GitIdentity => "Git identity",
+        }
+    }
+}
+
 pub struct IdentitySetup {
-    services: Vec<Service>,
+    choices: Vec<IdentityChoice>,
     at: usize,
 }
 
 pub enum SetupDecision {
     Still,
     Closed,
-    Chosen(Service),
+    Chosen(IdentityChoice),
 }
 
 impl IdentitySetup {
-    pub fn new(services: Vec<Service>) -> Self {
-        Self { services, at: 0 }
+    pub fn new(choices: Vec<IdentityChoice>) -> Self {
+        Self { choices, at: 0 }
     }
 
     pub fn key(&mut self, key: KeyEvent) -> SetupDecision {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => SetupDecision::Closed,
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab if !self.services.is_empty() => {
-                self.at = (self.at + 1) % self.services.len();
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab if !self.choices.is_empty() => {
+                self.at = (self.at + 1) % self.choices.len();
                 SetupDecision::Still
             }
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab if !self.services.is_empty() => {
-                self.at = (self.at + self.services.len() - 1) % self.services.len();
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab if !self.choices.is_empty() => {
+                self.at = (self.at + self.choices.len() - 1) % self.choices.len();
                 SetupDecision::Still
             }
             KeyCode::Enter => self
-                .services
+                .choices
                 .get(self.at)
                 .copied()
                 .map_or(SetupDecision::Still, SetupDecision::Chosen),
@@ -54,7 +72,7 @@ impl IdentitySetup {
     }
 
     pub fn draw(&self, frame: &mut Frame, area: Rect) {
-        let height = u16::try_from(self.services.len()).unwrap_or(4) + 2;
+        let height = u16::try_from(self.choices.len()).unwrap_or(4) + 2;
         let popup = centered(area, 44, height);
         frame.render_widget(Clear, popup);
         let block = Block::bordered()
@@ -64,10 +82,10 @@ impl IdentitySetup {
             .padding(Padding::horizontal(1));
         let inner = block.inner(popup);
         frame.render_widget(block, popup);
-        let lines = self.services.iter().enumerate().map(|(index, service)| {
+        let lines = self.choices.iter().enumerate().map(|(index, choice)| {
             let selected = index == self.at;
             Line::styled(
-                format!("{}{}", if selected { "› " } else { "  " }, service.label()),
+                format!("{}{}", if selected { "› " } else { "  " }, choice.label()),
                 if selected {
                     palette::primary().bold()
                 } else {
@@ -76,6 +94,154 @@ impl IdentitySetup {
             )
         });
         frame.render_widget(Paragraph::new(lines.collect::<Vec<_>>()), inner);
+    }
+}
+
+/// The name, email, and signing choice commits carry.
+///
+/// It lives here rather than in the first-run card because the same question is
+/// asked from Settings, where the card is not on screen.
+pub struct GitIdentitySetup {
+    name: Field,
+    email: Field,
+    signs: bool,
+    focus: GitIdentityField,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GitIdentityField {
+    Name,
+    Email,
+    Sign,
+}
+
+pub enum GitIdentityDecision {
+    Still,
+    Closed,
+    Save {
+        name: String,
+        email: String,
+        signs: bool,
+    },
+}
+
+impl GitIdentitySetup {
+    pub fn new(name: &str, email: &str, signs: bool) -> Self {
+        Self {
+            name: Field::with(name),
+            email: Field::with(email),
+            signs,
+            focus: GitIdentityField::Name,
+        }
+    }
+
+    pub fn is_typing(&self) -> bool {
+        matches!(self.focus, GitIdentityField::Name | GitIdentityField::Email)
+    }
+
+    pub fn key(&mut self, key: KeyEvent) -> GitIdentityDecision {
+        match key.code {
+            KeyCode::Esc => GitIdentityDecision::Closed,
+            KeyCode::Tab | KeyCode::Down => {
+                self.move_focus(true);
+                GitIdentityDecision::Still
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                self.move_focus(false);
+                GitIdentityDecision::Still
+            }
+            KeyCode::Char(' ') if self.focus == GitIdentityField::Sign => {
+                self.signs = !self.signs;
+                GitIdentityDecision::Still
+            }
+            KeyCode::Enter => GitIdentityDecision::Save {
+                name: self.name.value().trim().to_owned(),
+                email: self.email.value().trim().to_owned(),
+                signs: self.signs,
+            },
+            _ => {
+                match self.focus {
+                    GitIdentityField::Name => self.name.handle_key(key),
+                    GitIdentityField::Email => self.email.handle_key(key),
+                    GitIdentityField::Sign => {}
+                }
+                GitIdentityDecision::Still
+            }
+        }
+    }
+
+    fn move_focus(&mut self, forward: bool) {
+        const FIELDS: [GitIdentityField; 3] = [
+            GitIdentityField::Name,
+            GitIdentityField::Email,
+            GitIdentityField::Sign,
+        ];
+        let at = FIELDS
+            .iter()
+            .position(|field| *field == self.focus)
+            .unwrap_or(0);
+        self.focus = if forward {
+            FIELDS[(at + 1) % FIELDS.len()]
+        } else {
+            FIELDS[(at + FIELDS.len() - 1) % FIELDS.len()]
+        };
+    }
+
+    pub fn draw(&self, frame: &mut Frame, area: Rect) {
+        let popup = centered(area, 58, 12);
+        frame.render_widget(Clear, popup);
+        let block = Block::bordered()
+            .title(" Git identity ")
+            .border_type(BorderType::Rounded)
+            .border_style(palette::primary())
+            .padding(Padding::horizontal(2));
+        let inner = block.inner(popup);
+        frame.render_widget(block, popup);
+        let [name, _, email, _, sign, hint] = Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
+        self.name.draw(
+            frame,
+            name,
+            &FieldStyle {
+                focused: self.focus == GitIdentityField::Name,
+                title: Some("Name"),
+                prefix: "",
+            },
+        );
+        self.email.draw(
+            frame,
+            email,
+            &FieldStyle {
+                focused: self.focus == GitIdentityField::Email,
+                title: Some("Email"),
+                prefix: "",
+            },
+        );
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                format!("{} Sign commits", if self.signs { "[x]" } else { "[ ]" }),
+                if self.focus == GitIdentityField::Sign {
+                    palette::accent().bold()
+                } else {
+                    palette::primary()
+                },
+            )),
+            sign,
+        );
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                "space toggles signing · enter saves · esc cancels",
+                palette::muted(),
+            )),
+            hint,
+        );
     }
 }
 

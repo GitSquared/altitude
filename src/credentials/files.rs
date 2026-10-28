@@ -9,21 +9,26 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::{agent::AgentKind, credentials::Service};
+
 /// The login files a profile's CLI writes, relative to its host directory.
 ///
 /// Only a sign-in: settings, models, managed MCP files, and environment setup are not
 /// credentials and stay. A profile absent here has no login Altitude knows how to
 /// recognise or remove.
 pub(super) fn login_files(profile: &str) -> Option<&'static [&'static str]> {
-    match profile {
+    // A named identity has a suffix after the service it belongs to, but it
+    // keeps that service's login file in its own directory.
+    match Service::from_id(profile)? {
         // Pi keeps one credential per provider here, and nothing else.
-        "agents/pi" => Some(&["auth.json"]),
+        Service::Agent(AgentKind::Pi) => Some(&["auth.json"]),
         // Claude Code's own login file; its settings and MCP files stay.
-        "agents/claude" => Some(&[".credentials.json"]),
+        Service::Agent(AgentKind::Claude) => Some(&[".credentials.json"]),
         // The GitHub CLI's host sign-in. The git identity, SSH keys, and signing keys
         // are separate material and are deliberately not touched.
-        "vcs/github" => Some(&["gh/hosts.yml"]),
-        _ => None,
+        Service::VersionControl(_) => Some(&["gh/hosts.yml"]),
+        // A tracker's session is host-side, not a mounted profile.
+        Service::Tracker(_) => None,
     }
 }
 

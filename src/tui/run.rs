@@ -502,6 +502,7 @@ where
                 match &app.foreground {
                     Foreground::IdentitySetup(setup) => setup.draw(frame, content),
                     Foreground::RenameIdentity(rename) => rename.draw(frame, content, true),
+                    Foreground::GitIdentity(identity) => identity.draw(frame, content),
                     _ => {}
                 }
             } else if app.foreground.shows_signals() {
@@ -1149,6 +1150,7 @@ where
                 .await
         }
         Foreground::RenameIdentity(_) => app.rename_identity_key(key),
+        Foreground::GitIdentity(_) => app.git_identity_key(key).await,
         Foreground::Setup(_) => app.setup_key(key),
         Foreground::SignIn(_) => app.sign_in_key(key, task_service, credential_events).await,
         Foreground::Signals => {

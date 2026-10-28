@@ -298,9 +298,15 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         frame.render_widget(Clear, conversation);
         draw_conversation(frame, conversation, app);
         // The divider at the plan's left edge is its border, so the clear
-        // starts after it rather than erasing it.
+        // starts after it rather than erasing it. The text starts one column
+        // further in: padding alone would leave it against the divider.
         frame.render_widget(Clear, inset(plan, PLAN_PADDING));
-        draw_plan(frame, plan, app);
+        let text = Rect {
+            x: plan.x.saturating_add(1),
+            width: plan.width.saturating_sub(1),
+            ..plan
+        };
+        draw_plan(frame, text, app);
     } else {
         let [tabs, _, pane] = Layout::vertical([
             Constraint::Length(1),

@@ -141,7 +141,7 @@ impl Row {
     pub fn hints(&self, connecting_tracker: bool) -> Vec<chrome::Hint> {
         match &self.kind {
             RowKind::Project { .. } => vec![chrome::Hint::new("enter", "edit")],
-            RowKind::GitIdentity(_) => vec![chrome::Hint::new("enter", "sign in")],
+            RowKind::GitIdentity(_) => vec![chrome::Hint::new("enter", "edit")],
             RowKind::Credential(credential) => match &credential.kind {
                 CredentialKind::Installation { .. } => {
                     vec![chrome::Hint::new("enter", "remote guide")]
