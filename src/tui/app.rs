@@ -3539,10 +3539,15 @@ impl App {
         let Some(id) = credential.profile().map(str::to_owned) else {
             return;
         };
+        let tracker = Service::from_id(&id).is_some_and(|service| service.slot() == Slot::Tracker);
         let question = format!(
-            "Delete the {} identity? Its login and profile are forgotten here. Projects and \
-             the default must stop using it first.",
-            credential.label
+            "Delete the {} identity? Its login and profile are forgotten here. {}",
+            credential.label,
+            if tracker {
+                "Projects must stop using it first."
+            } else {
+                "Projects and the default must stop using it first."
+            }
         );
         self.foreground = Foreground::Confirm(PendingConfirm::forgetting_credentials(id, question));
     }

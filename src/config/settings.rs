@@ -442,19 +442,6 @@ impl Settings {
     }
 
     pub fn remove_credential(&mut self, id: &str) -> Result<(), SettingsError> {
-        if [
-            self.defaults.agent_credential.as_deref(),
-            self.defaults.vcs_credential.as_deref(),
-            self.defaults.tracker_credential.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .any(|default| default == id)
-        {
-            return Err(SettingsError::Invalid(
-                "this identity is a default; make another one the default first".to_owned(),
-            ));
-        }
         if self.projects.iter().any(|project| {
             project.agent_credential.as_deref() == Some(id)
                 || project.vcs_credential.as_deref() == Some(id)
@@ -466,6 +453,23 @@ impl Settings {
         }) {
             return Err(SettingsError::Invalid(
                 "a project still binds this identity".to_owned(),
+            ));
+        }
+        // A tracker is optional, so its default may go with its last identity.
+        // An agent and a version-control login are what a task runs with, so
+        // those keep the default until another identity takes it over.
+        if self.defaults.tracker_credential.as_deref() == Some(id) {
+            self.defaults.tracker_credential = None;
+        } else if [
+            self.defaults.agent_credential.as_deref(),
+            self.defaults.vcs_credential.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|default| default == id)
+        {
+            return Err(SettingsError::Invalid(
+                "this identity is a default; make another one the default first".to_owned(),
             ));
         }
         self.credentials.retain(|credential| credential.id != id);
