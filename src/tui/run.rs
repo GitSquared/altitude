@@ -81,26 +81,14 @@ impl Leaving {
     }
 }
 
-/// How the panel arrives: drawn down from the top, the way the rail above it is
-/// read.
-///
-/// A dissolve clears the cells it has not reached, so the area it has still to
-/// cover shows the terminal behind it. A sweep would paint those cells, which is
-/// a colour this interface cannot know.
-fn panel_entry(area: Rect) -> Effect {
-    fx::dissolve((90, Interpolation::QuadOut))
-        .with_pattern(InvertedPattern::new(SweepPattern::up_to_down(12)))
-        .with_area(area)
-}
-
 /// How a modal leaves. A pop-up reverses the dissolve it would have arrived
 /// with; the panel slides back up the way it came down.
 fn exit(panel: bool, area: Rect) -> Effect {
     if panel {
-        fx::coalesce((160, Interpolation::QuadOut))
+        fx::coalesce((110, Interpolation::QuadOut))
             .with_pattern(InvertedPattern::new(SweepPattern::down_to_up(12)))
     } else {
-        fx::coalesce((140, Interpolation::QuadOut))
+        fx::coalesce((110, Interpolation::QuadOut))
             .with_pattern(InvertedPattern::new(RadialPattern::center()))
     }
     .with_area(area)
@@ -309,7 +297,6 @@ where
     // what makes the last second happen without waiting for another key.
     let mut signal_linger_clock = time::interval(Duration::from_millis(250));
     let mut effects: EffectManager<()> = EffectManager::default();
-    let mut previous_foreground = mem::discriminant(&app.foreground);
     let mut last_frame = Instant::now();
     // A modal that has just been dismissed, held as its last frame so it can be
     // drawn once more while it leaves, and the last frame of whatever modal is in
@@ -411,9 +398,6 @@ where
                 execute!(io::stdout(), PopKeyboardEnhancementFlags)?;
             }
         }
-        let foreground = mem::discriminant(&app.foreground);
-        let entering = foreground != previous_foreground;
-        previous_foreground = foreground;
         let elapsed = last_frame.elapsed().min(Duration::from_millis(80));
         last_frame = Instant::now();
         // A modal that has just gone keeps its last frame for a moment, so it can
@@ -431,6 +415,7 @@ where
             }
         } else if is_modal && !was_modal {
             leaving = None;
+            effects = EffectManager::default();
         }
         was_modal = is_modal;
         was_panel = is_panel;
@@ -635,12 +620,6 @@ where
                 && let Some(area) = modal
             {
                 modal_cells = Some(Leaving::take(frame.buffer_mut(), area));
-            }
-            if entering && app.animations() && is_panel {
-                effects = EffectManager::default();
-                if let Some(area) = modal {
-                    effects.add_effect(panel_entry(area));
-                }
             }
             if let Some(cells) = &leaving {
                 cells.draw(frame.buffer_mut());

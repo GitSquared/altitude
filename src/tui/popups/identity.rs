@@ -297,7 +297,7 @@ impl RenameIdentity {
     }
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, focused: bool) {
-        let popup = centered(area, 50, 5);
+        let popup = centered(area, 50, 7);
         frame.render_widget(Clear, popup);
         let block = Block::bordered()
             .title(" Name this identity ")
@@ -310,7 +310,7 @@ impl RenameIdentity {
             frame,
             Rect {
                 y: inner.y.saturating_add(1),
-                height: 1,
+                height: 3,
                 ..inner
             },
             &FieldStyle {
