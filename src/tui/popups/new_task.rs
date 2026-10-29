@@ -5,7 +5,8 @@
 //! and it is the only thing here that is written rather than chosen. The choices
 //! below it are named, because two values on a line say nothing about which is
 //! which. Where the task runs is not one of them: its project names a machine, and
-//! a task does not choose.
+//! a task does not choose, so the machine is said under the pills as the answer
+//! the project has already given.
 //!
 //! The same page can also bind a Linear issue instead of writing an intent. The
 //! prompt becomes the search box, the results take the room the prompt had, and
@@ -46,14 +47,14 @@ use std::{
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     Frame,
-    layout::{Constraint, Flex, Layout, Rect},
+    layout::{Alignment, Constraint, Flex, Layout, Rect},
     text::{Line, Span},
     widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
 use crate::tui::keys;
 use crate::tui::widgets::{
-    button, chrome, palette,
+    button, chrome, empty, palette,
     pointer::Targets,
     select::{Offer, Select},
     text::TextBox,
@@ -75,9 +76,9 @@ const WIDTH_PERCENT: u16 = 70;
 /// How wide it may get. The prompt is read a line at a time, so past a legible
 /// measure a wider window only makes the line harder to follow.
 const MAX_WIDTH: u16 = 88;
-/// Its height, which is the prompt's room plus the spacing, the pills and the
-/// actions. The prompt takes what is left of it.
-const HEIGHT: u16 = 17;
+/// Its height, which is the prompt's room plus the spacing, the pills, the machine
+/// they run on and the actions. The prompt takes what is left of it.
+const HEIGHT: u16 = 18;
 const PILL_GAP: u16 = 2;
 /// How long a query rests before it is searched, so a word typed a letter at a
 /// time is one search rather than ten.
@@ -153,6 +154,9 @@ pub struct NewTask {
     task: TextBox,
     project: Select<Project>,
     agent: Select<AgentKind>,
+    /// The machines this installation delegates to, so the one the chosen
+    /// project runs on can be named rather than its address shown.
+    hosts: Vec<Host>,
     /// Whether the agent had never been chosen, in which case this answer is the
     /// one to keep.
     agent_unchosen: bool,
@@ -206,6 +210,7 @@ impl NewTask {
         projects: Vec<Project>,
         default_project: &str,
         default_agent: Option<AgentKind>,
+        hosts: Vec<Host>,
     ) -> Self {
         let chosen = projects
             .iter()
@@ -237,6 +242,7 @@ impl NewTask {
             task: TextBox::new(""),
             project,
             agent,
+            hosts,
             agent_unchosen: default_agent.is_none(),
             refused: false,
             focus: Focus::Task,
@@ -255,6 +261,29 @@ impl NewTask {
         }
     }
 
+    /// Where the chosen project's tasks start, and whether that machine can take
+    /// one now.
+    ///
+    /// The page does not choose a machine, so this is not a setting: it is what
+    /// the answer already implies, said where the operator can see it before
+    /// pressing create.
+    fn machine(&self) -> (String, bool) {
+        let Some(project) = self.project.chosen_value() else {
+            return ("this machine".to_owned(), true);
+        };
+        let Some(address) = &project.host else {
+            return ("this machine".to_owned(), true);
+        };
+        match self
+            .hosts
+            .iter()
+            .find(|host| host.address.as_deref() == Some(address.as_str()))
+        {
+            Some(host) => (host.label.clone(), host.ready),
+            None => (format!("{address} (not a remote here)"), false),
+        }
+    }
+
     /// Ask the issue page instead of the prompt: the same question, reached from
     /// a task that wants a tracker link rather than a free intent.
     pub(in crate::tui) fn linking(mut self) -> Self {
@@ -262,8 +291,6 @@ impl NewTask {
         self
     }
 
-    /// Put the machines back in step with what the remotes have answered, keeping
-    /// the one the operator chose where it is still offered.
     /// Whether something here is taking characters, in which case `?` and `q`
     /// are characters too.
     pub(in crate::tui) fn is_typing(&self) -> bool {
@@ -753,7 +780,7 @@ impl NewTask {
         if self.issue {
             // A search that is still resting or out is not a lost answer: the
             // submission waits for the first result, keeping the choices made
-            // for the project, the agent and the machine.
+            // for the project and the agent.
             if self.queued_submit {
                 return None;
             }
@@ -848,9 +875,10 @@ pub fn draw(
     // answers close the window under a rule: the prompt is the question, what it
     // will run as qualifies it, and the two answers end it.
     let body = chrome::body(inner);
-    let [label, prompt, pills] = Layout::vertical([
+    let [label, prompt, pills, machine] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(4),
+        Constraint::Length(1),
         Constraint::Length(1),
     ])
     .areas(body.content);
@@ -866,6 +894,22 @@ pub fn draw(
     for (pill, anchor) in [Focus::Project, Focus::Agent].into_iter().zip(anchors) {
         targets.add(anchor, Hit::Pill(pill));
     }
+
+    // Under the pills, right-aligned with them: a caption to the answer above it
+    // rather than a third thing to choose.
+    let (machine_label, reachable) = new_task.machine();
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            format!("runs on {machine_label}"),
+            if reachable {
+                palette::muted()
+            } else {
+                palette::attention()
+            },
+        ))
+        .alignment(Alignment::Right),
+        machine,
+    );
 
     let prompt_area = if new_task.issue {
         let [query, results] =
@@ -957,10 +1001,9 @@ fn draw_issue(frame: &mut Frame, area: Rect, new_task: &NewTask, tick: Option<us
             Paragraph::new(Line::styled(message.clone(), palette::bad())).wrap(Wrap { trim: true }),
             body,
         ),
-        IssuePhase::Ready if new_task.results.is_empty() => frame.render_widget(
-            Paragraph::new(Line::styled("No matching issues.", palette::muted())),
-            body,
-        ),
+        IssuePhase::Ready if new_task.results.is_empty() => {
+            empty::draw(frame, body, "No matching issues")
+        }
         IssuePhase::Ready => {
             let width = usize::from(body.width);
             let items: Vec<ListItem> = new_task

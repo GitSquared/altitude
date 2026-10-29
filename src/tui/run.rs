@@ -671,7 +671,21 @@ where
             _ = configuration_clock.tick(), if !reading_configuration => {
                 reading_configuration = true;
                 let config = app.config.clone();
-                let addresses = app.configured_remotes();
+                // A machine no project runs on is not spoken to: there is nothing
+                // there to keep in step, and what a bundle would carry for it is a
+                // revocation. One this session gave something still hears it, so
+                // unbinding a project takes its logins back.
+                let addresses: Vec<String> = app
+                    .configured_remotes()
+                    .into_iter()
+                    .filter(|address| {
+                        app.remote_runs_projects(address) || app.remote_was_given_config(address)
+                    })
+                    .collect();
+                if addresses.is_empty() {
+                    reading_configuration = false;
+                    continue;
+                }
                 let reports = configuration_reads.clone();
                 tokio::spawn(async move {
                     let result = spawn_blocking(move || {

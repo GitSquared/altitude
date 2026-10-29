@@ -11,7 +11,7 @@ use ratatui::{
 use crate::tui::widgets::{
     chrome,
     columns::Columns,
-    header,
+    empty, header,
     list::{self, Row},
     palette,
     pointer::Targets,
@@ -202,16 +202,7 @@ fn draw_empty_detail(frame: &mut Frame, area: Rect, section: Section) {
         Section::Remotes => "No remotes yet, press n to add one",
         Section::Interface => return,
     };
-    let [_, row, _] = Layout::vertical([
-        Constraint::Fill(1),
-        Constraint::Length(1),
-        Constraint::Fill(1),
-    ])
-    .areas(area);
-    frame.render_widget(
-        Paragraph::new(message).style(palette::muted()).centered(),
-        row,
-    );
+    empty::draw(frame, area, message);
 }
 
 fn detail(panel: &Panel, view: &View, tick: Option<usize>) -> Paragraph<'static> {

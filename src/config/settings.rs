@@ -461,36 +461,34 @@ impl Settings {
         Ok(())
     }
 
-    /// The credential ids the projects and defaults in this file name.
+    /// The credential ids this file's projects run with, which is what a remote
+    /// is sent.
     ///
-    /// This is what a remote is sent: the identities its own projects use, and the
-    /// defaults a project without a binding inherits.
+    /// The installation's defaults are deliberately not part of this: they are
+    /// templates a new project is written from, not identities a task reads. A
+    /// machine is sent the logins of the work it runs, so a default that no
+    /// project here names would be a key in someone else's hand for no task.
+    ///
+    /// A project that names no identity falls back to what its harness or
+    /// provider implies, because that is what the task will resolve to.
     pub fn used_credential_ids(&self) -> Vec<String> {
         let mut used = Vec::new();
-        for id in [
-            self.defaults.agent_credential.as_deref(),
-            self.defaults.vcs_credential.as_deref(),
-            self.defaults.tracker_credential.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            used.push(id.to_owned());
-        }
         for project in &self.projects {
-            for id in [
-                project.agent_credential.as_deref(),
-                project.vcs_credential.as_deref(),
+            let agent = project.agent_credential.clone().or_else(|| {
                 project
-                    .tracker
-                    .as_ref()
-                    .and_then(|route| route.credential.as_deref()),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                used.push(id.to_owned());
-            }
+                    .agent
+                    .or(self.defaults.agent)
+                    .map(|kind| kind.profile().to_owned())
+            });
+            let vcs = project
+                .vcs_credential
+                .clone()
+                .or_else(|| project.vcs.map(|kind| kind.profile().to_owned()));
+            let tracker = project
+                .tracker
+                .as_ref()
+                .and_then(|route| route.credential.clone());
+            used.extend(agent.into_iter().chain(vcs).chain(tracker));
         }
         used.sort_unstable();
         used.dedup();

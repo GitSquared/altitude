@@ -1055,6 +1055,28 @@ impl App {
         }
     }
 
+    /// Whether any project runs on this machine, which is what makes it a machine
+    /// Altitude has anything to say to.
+    pub(in crate::tui) fn remote_runs_projects(&self, address: &str) -> bool {
+        self.projects()
+            .iter()
+            .any(|project| project.host.as_deref() == Some(address))
+    }
+
+    /// Whether this session has already sent this machine something, in which
+    /// case its last project leaving is a revocation it is owed.
+    pub(in crate::tui) fn remote_was_given_config(&self, address: &str) -> bool {
+        self.remote_synced.contains_key(address)
+    }
+
+    /// Whether the selected task's project runs on another machine, which is the
+    /// only case where a task has somewhere to be pushed to.
+    fn selected_project_runs_remotely(&self) -> bool {
+        self.selected_task()
+            .and_then(|task| task.project().map(|project| project.host.is_some()))
+            .unwrap_or(false)
+    }
+
     /// The machines this installation delegates to, as the project form offers
     /// them.
     fn remotes(&self) -> Vec<String> {
@@ -1500,7 +1522,13 @@ impl App {
                 } else {
                     if !self.tasks.is_empty() {
                         hints.push(Hint::new("d", "delete"));
-                        hints.push(Hint::new("p", "push to remote"));
+                        // A task goes where its project runs, so there is a move
+                        // to offer only when the project names a machine. A
+                        // project that runs here has nothing to push to, and the
+                        // key would offer a question with one possible answer.
+                        if self.selected_project_runs_remotely() {
+                            hints.push(Hint::new("p", "push to remote"));
+                        }
                     }
                     if self
                         .selected_task()
@@ -4159,6 +4187,7 @@ impl App {
             self.projects(),
             &self.active_project_id(),
             self.active_agent(),
+            self.task_hosts(),
         );
         self.foreground = Foreground::NewTask(Box::new(if linking {
             question.linking()
@@ -6925,10 +6954,13 @@ impl App {
             // because `l` is navigation wherever there is a column to its right.
             KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if self.reload_settings() {
-                    self.foreground = Foreground::NewTask(Box::new(
-                        NewTask::new(self.projects(), &self.active_project_id(), self.agent())
-                            .linking(),
-                    ));
+                    let question = NewTask::new(
+                        self.projects(),
+                        &self.active_project_id(),
+                        self.agent(),
+                        self.task_hosts(),
+                    );
+                    self.foreground = Foreground::NewTask(Box::new(question.linking()));
                 }
             }
             KeyCode::Char('s') => {

@@ -113,8 +113,10 @@ impl ConfigBundle {
     ///
     /// `held` is what the remote said it has. A profile is sent when it is not there
     /// at all, or when its contents differ.
+    ///
     /// `host` is the machine this bundle is for: only the projects it runs travel,
-    /// so a remote never learns about work that belongs somewhere else.
+    /// and only the profiles those projects run with, so a remote never learns
+    /// about work that belongs somewhere else and holds no key to it.
     pub fn of(
         settings: &str,
         data_dir: &Path,

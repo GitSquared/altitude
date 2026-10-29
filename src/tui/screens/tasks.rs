@@ -4,7 +4,7 @@ use crate::{
     tui::{
         App,
         widgets::{
-            palette, signal,
+            empty, palette, signal,
             surface::{self, Surface},
             tabs::{self, Tab},
         },
@@ -104,10 +104,7 @@ fn draw_tasks(
     let cards = cards(app);
     let total = cards.len();
     if total == 0 {
-        frame.render_widget(
-            Paragraph::new(Line::styled("No tasks yet", palette::muted())),
-            area,
-        );
+        empty::draw(frame, area, "No tasks yet");
         return;
     }
     let rows = (area.height / (height + 1)).max(1) as usize;

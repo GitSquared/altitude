@@ -33,7 +33,7 @@ use crate::{
         widgets::{
             button, card,
             columns::Columns,
-            header,
+            empty, header,
             list::{self, Row},
             palette, signal,
             surface::{self, Surface},
@@ -371,10 +371,7 @@ fn draw_plan(frame: &mut Frame, area: Rect, app: &App) {
         title,
     );
     if plan.is_empty() {
-        frame.render_widget(
-            Paragraph::new(Line::styled("No plan yet.", palette::muted())),
-            body,
-        );
+        empty::draw(frame, body, "No plan yet");
         return;
     }
     // The icon gets its own column so a wrapped step stays aligned under itself
@@ -1024,12 +1021,6 @@ fn draw_buttons(
 }
 
 fn draw_empty(frame: &mut Frame, area: Rect, app: &App) {
-    let [_, row, _] = Layout::vertical([
-        Constraint::Fill(1),
-        Constraint::Length(1),
-        Constraint::Fill(1),
-    ])
-    .areas(area);
     if app.remote_signals_loading {
         let asking = app
             .remote_signals
@@ -1038,16 +1029,11 @@ fn draw_empty(frame: &mut Frame, area: Rect, app: &App) {
             .unwrap_or_default();
         frame.render_widget(
             Paragraph::new(Line::from(shimmer(&asking, app.animation_tick()))).centered(),
-            row,
+            empty::row(area),
         );
         return;
     }
-    frame.render_widget(
-        Paragraph::new("Agent hasn't raised any signals yet")
-            .style(palette::muted())
-            .centered(),
-        row,
-    );
+    empty::draw(frame, area, "Agent hasn't raised any signals yet");
 }
 
 /// What the agent's message reads as on one line: its first line, so a list row
