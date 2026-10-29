@@ -170,7 +170,7 @@ pub fn help_sections() -> Vec<HelpSection> {
                 ("j/k · ↓/↑", "Move between signal threads"),
                 (
                     "Enter",
-                    "Take the primary action: mark a log read, acknowledge a decision, accept a review, or reply where that is all there is",
+                    "Take the primary action: acknowledge a decision, accept a review, resolve a log the agent finished, or reply where that is all there is",
                 ),
                 (
                     "Ctrl-Enter",

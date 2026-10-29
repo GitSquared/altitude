@@ -5520,81 +5520,19 @@ impl App {
         }
     }
 
-    /// Mark the thread the operator is leaving behind as read, when it is one of
-    /// the agent's logs. Reading is navigation, not appearance: the log stays
-    /// unresolved until the operator has had the screen on it and moved on.
-    async fn read_info_thread<E>(
-        &mut self,
-        thread: TaskOperatorSignalThread,
-        task_service: &TaskService<E>,
-        remote_signals: &mpsc::Sender<RemoteSignalsReply>,
-    ) where
-        E: IsolationEngine + Clone + 'static,
-    {
-        if thread.kind != TaskOperatorSignalKind::Update || thread.is_resolved() {
-            return;
-        }
-        if self.remote_signals.is_some() {
-            self.act_on_remote_signal(
-                thread.id,
-                RemoteSignalAction::Resolve(true),
-                None,
-                remote_signals,
-            );
-            return;
-        }
-        match task_service
-            .resolve_signal(&thread.task_id, &thread.id, true)
-            .await
-        {
-            Ok(task) => {
-                self.resolve_signal_locally(&thread.id, true);
-                self.replace_task(task);
-            }
-            Err(error) => self.problem(error.to_string()),
-        }
-    }
-
     /// Move between threads, and start the one now selected at its newest
     /// message.
-    pub(in crate::tui) async fn move_signal_cursor<E>(
-        &mut self,
-        forward: bool,
-        task_service: &TaskService<E>,
-        remote_signals: &mpsc::Sender<RemoteSignalsReply>,
-    ) where
-        E: IsolationEngine + Clone + 'static,
-    {
-        // Move first, then resolve what was left behind: resolving changes which
-        // group the old row belongs to, and the cursor should not be following a
-        // row that is moving under it.
-        let previous = self.signal_thread().cloned();
+    pub(in crate::tui) fn move_signal_cursor(&mut self, forward: bool) {
         self.signals_cursor
             .move_by(forward, self.signal_threads.len());
         self.reset_signal_message();
-        if let Some(thread) = previous {
-            self.read_info_thread(thread, task_service, remote_signals)
-                .await;
-        }
     }
 
     /// Move between threads by a screen at a time, with the same bookkeeping as
     /// moving between them one at a time.
-    pub(in crate::tui) async fn page_signal_cursor<E>(
-        &mut self,
-        forward: bool,
-        task_service: &TaskService<E>,
-        remote_signals: &mpsc::Sender<RemoteSignalsReply>,
-    ) where
-        E: IsolationEngine + Clone + 'static,
-    {
-        let previous = self.signal_thread().cloned();
+    pub(in crate::tui) fn page_signal_cursor(&mut self, forward: bool) {
         self.signals_cursor.page_by(forward, &self.signals_layout);
         self.reset_signal_message();
-        if let Some(thread) = previous {
-            self.read_info_thread(thread, task_service, remote_signals)
-                .await;
-        }
     }
 
     /// Mark a thread resolved locally; the filter decides whether it stays on
@@ -6484,8 +6422,7 @@ impl App {
                 }
                 match target {
                     Some(SignalHit::List | SignalHit::Thread(_)) => {
-                        self.move_signal_cursor(!up, task_service, remote_signals)
-                            .await;
+                        self.move_signal_cursor(!up);
                     }
                     Some(
                         SignalHit::Action(_)
@@ -6517,14 +6454,9 @@ impl App {
                 match target {
                     SignalHit::List => self.signal_focus = SignalFocus::List,
                     SignalHit::Thread(index) => {
-                        let previous = self.signal_thread().cloned();
                         self.signals_cursor.select(index);
                         self.signal_focus = SignalFocus::List;
                         self.reset_signal_message();
-                        if let Some(thread) = previous {
-                            self.read_info_thread(thread, task_service, remote_signals)
-                                .await;
-                        }
                     }
                     SignalHit::Detail => self.signal_focus = SignalFocus::Detail,
                     SignalHit::Message(index) => {
@@ -6555,17 +6487,9 @@ impl App {
                         self.signal_sort.open();
                     }
                     SignalHit::FilterOffer(index) => {
-                        let before = self.signal_filter.chosen_value().copied();
-                        let previous = self.signal_thread().cloned();
                         self.signal_filter.choose(index);
                         self.signal_filter.close();
                         self.apply_signal_view();
-                        if self.signal_filter.chosen_value().copied() != before
-                            && let Some(thread) = previous
-                        {
-                            self.read_info_thread(thread, task_service, remote_signals)
-                                .await;
-                        }
                     }
                     SignalHit::SortOffer(index) => {
                         self.signal_sort.choose(index);
@@ -6627,16 +6551,8 @@ impl App {
         }
         // A dropdown owns every key while it is open, escape included.
         if self.signal_filter.is_open() {
-            let before = self.signal_filter.chosen_value().copied();
-            let leaving = self.signal_thread().cloned();
             self.signal_filter.handle_key(key);
             self.apply_signal_view();
-            if self.signal_filter.chosen_value().copied() != before
-                && let Some(thread) = leaving
-            {
-                self.read_info_thread(thread, task_service, remote_signals)
-                    .await;
-            }
             return;
         }
         if self.signal_sort.is_open() {
@@ -6664,15 +6580,13 @@ impl App {
         match key.code {
             KeyCode::PageDown => match self.signal_focus {
                 SignalFocus::List => {
-                    self.page_signal_cursor(true, task_service, remote_signals)
-                        .await
+                    self.page_signal_cursor(true);
                 }
                 _ => self.page_signal(false),
             },
             KeyCode::PageUp => match self.signal_focus {
                 SignalFocus::List => {
-                    self.page_signal_cursor(false, task_service, remote_signals)
-                        .await
+                    self.page_signal_cursor(false);
                 }
                 _ => self.page_signal(true),
             },
@@ -6684,18 +6598,12 @@ impl App {
                 self.signal_scroll = u16::MAX;
                 self.select_signal_message_at_scroll();
             }
-            _ if is_dismiss(key) || key.code == KeyCode::Char('q') => {
-                // Leaving the screen is not moving past a thread: the one under the
-                // cursor is the one being read, and closing the screen does not say
-                // it has been seen. Moving off it still marks an update read.
-                self.leave_signals();
-            }
+            _ if is_dismiss(key) || key.code == KeyCode::Char('q') => self.leave_signals(),
             KeyCode::Down | KeyCode::Char('j') => match self.signal_focus {
                 SignalFocus::List => {
                     let len = self.signal_threads.len();
                     if self.signals_cursor.selected() + 1 < len {
-                        self.move_signal_cursor(true, task_service, remote_signals)
-                            .await;
+                        self.move_signal_cursor(true);
                     }
                 }
                 SignalFocus::Detail => self.scroll_signal(SIGNAL_SCROLL_STEP),
@@ -6709,8 +6617,7 @@ impl App {
                     if self.signals_cursor.selected() == 0 {
                         self.signal_focus = SignalFocus::Filter;
                     } else {
-                        self.move_signal_cursor(false, task_service, remote_signals)
-                            .await;
+                        self.move_signal_cursor(false);
                     }
                 }
                 SignalFocus::Detail => self.scroll_signal(-SIGNAL_SCROLL_STEP),

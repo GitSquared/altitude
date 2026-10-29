@@ -7,9 +7,9 @@
 //! between rows; the conversation is an opaque pane.
 //!
 //! A thread has one state: unresolved or resolved. Reading is not a separate
-//! fact. An info log stays unresolved until the operator leaves the thread it
-//! was reading, so it cannot disappear before it has been seen. Accepting a
-//! review is a resolve that also ends the task, behind a confirmation.
+//! fact, and it is not one either: nothing is resolved by having been looked at,
+//! which would take a log away mid-sentence. Accepting a review is a resolve
+//! that also ends the task, behind a confirmation.
 
 use std::{collections::HashMap, time::Duration};
 
@@ -169,7 +169,7 @@ impl SignalAction {
             Self::Accept => "accept",
             Self::Apply => "apply change",
             Self::Resolve => match (kind, resolved) {
-                (TaskOperatorSignalKind::Update, _) => "mark read",
+                (TaskOperatorSignalKind::Update, _) => "resolve",
                 (TaskOperatorSignalKind::Decision, true) => "reopen",
                 (TaskOperatorSignalKind::Decision, false) => "acknowledge",
                 _ => "resolve",
