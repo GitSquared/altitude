@@ -147,8 +147,8 @@ fn groups(project: bool) -> Vec<Group> {
         },
         Group {
             focus: Focus::Repository,
-            label: "Repository (host/owner/repo)",
-            kind: Kind::Single,
+            label: "Repository",
+            kind: Kind::Choice,
         },
         Group {
             focus: Focus::Setup,
@@ -424,7 +424,6 @@ impl Form {
     pub fn handle_text(&mut self, key: KeyEvent) {
         match self.focus {
             Focus::Primary => self.primary.handle_key(key),
-            Focus::Repository => self.repository.handle_key(key),
             Focus::Setup => self.setup.handle_key(key),
             Focus::Caches => self.caches.handle_key(key),
             Focus::Instructions => self.instructions.handle_key(key),
@@ -566,7 +565,6 @@ impl Form {
     pub fn paste(&mut self, text: &str) {
         match self.focus {
             Focus::Primary => self.primary.paste(text),
-            Focus::Repository => self.repository.paste(text),
             Focus::Setup => self.setup.paste(text),
             Focus::Caches => self.caches.paste(text),
             Focus::Instructions => self.instructions.paste(text),
@@ -745,8 +743,6 @@ fn draw_group(buffer: &mut Buffer, area: Rect, form: &Form, group: &Group) -> Op
             draw_label(buffer, area, label, focused);
             let field = match group.focus {
                 Focus::Primary => &form.primary,
-                Focus::Repository => &form.repository,
-                Focus::Scope => &form.scope,
                 _ => return None,
             };
             field.render(
@@ -777,6 +773,14 @@ fn draw_group(buffer: &mut Buffer, area: Rect, form: &Form, group: &Group) -> Op
             };
             draw_label(buffer, area, label, focused);
             let value = match group.focus {
+                Focus::Repository => {
+                    let value = form.repository.value();
+                    if value.trim().is_empty() {
+                        "not chosen".to_owned()
+                    } else {
+                        value.to_owned()
+                    }
+                }
                 Focus::Agent => form.agent_value(),
                 Focus::VcsIdentity => form.vcs_value(),
                 Focus::TrackerIdentity => form.tracker_value(),

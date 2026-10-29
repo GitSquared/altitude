@@ -139,7 +139,10 @@ impl Row {
         match &self.kind {
             RowKind::Project { .. } => vec![chrome::Hint::new("enter", "edit")],
             RowKind::GitIdentity(identity) => {
-                let mut hints = vec![chrome::Hint::new("enter", "edit")];
+                let mut hints = vec![
+                    chrome::Hint::new("enter", "edit"),
+                    chrome::Hint::new("r", "rename"),
+                ];
                 if identity.saved.is_some() {
                     hints.push(chrome::Hint::new("d", "delete"));
                 }
@@ -150,11 +153,11 @@ impl Row {
                     vec![chrome::Hint::new("enter", "remote guide")]
                 }
                 CredentialKind::Profile { .. } if credential.is_pending() => {
-                    vec![chrome::Hint::new("e", "rename")]
+                    vec![chrome::Hint::new("r", "rename")]
                 }
                 CredentialKind::Profile { .. } => vec![
                     chrome::Hint::new("enter", "sign in"),
-                    chrome::Hint::new("e", "rename"),
+                    chrome::Hint::new("r", "rename"),
                 ],
                 CredentialKind::Tracker { .. } => vec![
                     chrome::Hint::new(
@@ -165,7 +168,7 @@ impl Row {
                             "sign in"
                         },
                     ),
-                    chrome::Hint::new("e", "rename"),
+                    chrome::Hint::new("r", "rename"),
                 ],
             },
             RowKind::Remote { status, .. } => vec![

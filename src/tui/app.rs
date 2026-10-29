@@ -1768,7 +1768,6 @@ impl App {
         self.commit_edit = Some(CommitIdentityEdit::Installation);
         self.git_identity_over_card = false;
         self.foreground = Foreground::GitIdentity(Box::new(GitIdentitySetup::new(
-            identity.name.as_deref().unwrap_or("Git identity"),
             identity.name.as_deref().unwrap_or_default(),
             identity.email.as_deref().unwrap_or_default(),
             identity.signs_commits,
@@ -1780,7 +1779,6 @@ impl App {
         self.commit_edit = Some(CommitIdentityEdit::Installation);
         self.git_identity_over_card = true;
         self.foreground = Foreground::GitIdentity(Box::new(GitIdentitySetup::new(
-            identity.name.as_deref().unwrap_or("Git identity"),
             identity.name.as_deref().unwrap_or_default(),
             identity.email.as_deref().unwrap_or_default(),
             identity.signs_commits,
@@ -1790,23 +1788,13 @@ impl App {
     fn open_new_commit_identity(&mut self) {
         self.commit_edit = Some(CommitIdentityEdit::New);
         self.git_identity_over_card = false;
-        self.foreground = Foreground::GitIdentity(Box::new(GitIdentitySetup::new(
-            "Git identity",
-            "",
-            "",
-            false,
-        )));
+        self.foreground = Foreground::GitIdentity(Box::new(GitIdentitySetup::new("", "", false)));
     }
 
     fn open_saved_commit_identity(&mut self, commits: ProjectCommits) {
         self.commit_edit = Some(CommitIdentityEdit::Saved(commits.clone()));
         self.git_identity_over_card = false;
         self.foreground = Foreground::GitIdentity(Box::new(GitIdentitySetup::new(
-            if commits.label.is_empty() {
-                &commits.name
-            } else {
-                &commits.label
-            },
             &commits.name,
             &commits.email,
             commits.signing_key.is_some(),
@@ -1839,21 +1827,22 @@ impl App {
                 self.commit_edit = None;
                 self.close_git_identity();
             }
-            GitIdentityDecision::Save {
-                label,
-                name,
-                email,
-                signs,
-            } => {
-                if label.is_empty() || name.is_empty() || email.is_empty() {
-                    self.say("An identity needs a name, a commit name, and an email");
+            GitIdentityDecision::Save { name, email, signs } => {
+                if name.is_empty() || email.is_empty() {
+                    self.say("A commit needs a name and an email");
                     self.foreground = Foreground::GitIdentity(Box::new(GitIdentitySetup::new(
-                        &label, &name, &email, signs,
+                        &name, &email, signs,
                     )));
                     return;
                 }
                 let edit = self.commit_edit.clone();
                 let was_installation = matches!(edit, Some(CommitIdentityEdit::Installation));
+                let label = match &edit {
+                    Some(CommitIdentityEdit::Saved(commits)) if !commits.label.is_empty() => {
+                        commits.label.clone()
+                    }
+                    _ => name.clone(),
+                };
                 if self
                     .save_commit_identity(&label, &name, &email, signs, was_installation)
                     .await
@@ -1863,7 +1852,7 @@ impl App {
                     self.say("Git identity saved");
                 } else {
                     self.foreground = Foreground::GitIdentity(Box::new(GitIdentitySetup::new(
-                        &label, &name, &email, signs,
+                        &name, &email, signs,
                     )));
                 }
             }
@@ -1885,6 +1874,29 @@ impl App {
             Foreground::RenameIdentity(Box::new(RenameIdentity::new(id, &credential.label)));
     }
 
+    fn open_rename_commit_identity(&mut self) {
+        let Some(RowKind::GitIdentity(identity)) = self.selected_row().map(|row| row.kind) else {
+            return;
+        };
+        let commits = identity.saved.unwrap_or_else(|| ProjectCommits {
+            label: identity.label.clone(),
+            name: identity.name.clone().unwrap_or_default(),
+            email: identity.email.clone().unwrap_or_default(),
+            signing_key: identity.signing_key.clone(),
+        });
+        if commits.name.is_empty() || commits.email.is_empty() {
+            self.say("Set a commit name and email before renaming this identity");
+            return;
+        }
+        let label = if commits.label.is_empty() {
+            commits.name.clone()
+        } else {
+            commits.label.clone()
+        };
+        self.foreground =
+            Foreground::RenameIdentity(Box::new(RenameIdentity::for_commit(commits, &label)));
+    }
+
     pub(in crate::tui) fn rename_identity_key(&mut self, key: KeyEvent) {
         let Foreground::RenameIdentity(mut rename) = mem::take(&mut self.foreground) else {
             return;
@@ -1898,7 +1910,15 @@ impl App {
                     return;
                 };
                 let mut proposed = file.settings().clone();
-                match proposed.rename_credential(&rename.id, &label) {
+                let result = if let Some(commits) = rename.commits.clone() {
+                    let mut renamed = commits.clone();
+                    renamed.label = label;
+                    proposed.replace_identity(&commits, renamed);
+                    Ok(())
+                } else {
+                    proposed.rename_credential(&rename.id, &label)
+                };
+                match result {
                     Ok(()) => match file.save(proposed) {
                         Ok(()) => self.foreground = Foreground::Panel,
                         Err(error) => self.problem(error.to_string()),
@@ -2236,13 +2256,20 @@ impl App {
             {
                 self.set_default_identity()
             }
-            KeyCode::Char('e')
+            KeyCode::Char('r')
                 if self.panel.section.slot().is_some()
                     && self
                         .selected_row()
                         .is_some_and(|row| matches!(row.kind, RowKind::Credential(_))) =>
             {
                 self.open_rename_identity()
+            }
+            KeyCode::Char('r')
+                if self
+                    .selected_row()
+                    .is_some_and(|row| matches!(row.kind, RowKind::GitIdentity(_))) =>
+            {
+                self.open_rename_commit_identity()
             }
             KeyCode::Char('e') if self.panel.section.grows() => self.edit_selected(),
             KeyCode::Char('t')
@@ -2258,15 +2285,7 @@ impl App {
             }
             KeyCode::Char('n') if self.panel.section.grows() => match self.panel.section {
                 Section::Agents | Section::VersionControl | Section::Trackers => {
-                    let services = self.panel.section.services();
-                    match services.as_slice() {
-                        // A version-control section also offers the Git identity,
-                        // so even one provider has more than one thing to add.
-                        [service] if self.panel.section != Section::VersionControl => {
-                            self.create_identity(*service, task_service, events, tracker_connects)
-                        }
-                        _ => self.open_identity_setup(self.panel.section),
-                    }
+                    self.open_identity_setup(self.panel.section)
                 }
                 Section::Remotes => self.panel.form = Some(Form::for_remote(Target::NewRemote, "")),
                 Section::Projects => {
@@ -4438,8 +4457,8 @@ impl App {
                         self.say("A commit needs a name and an email");
                         return false;
                     }
-                    match self.make_signing_key(&email).await {
-                        Ok(pubkey) => {
+                    match self.make_signing_key(&email, "id_ed25519_signing").await {
+                        Ok((pubkey, _)) => {
                             panel.commits.signs = true;
                             if self.save_commits(panel).await {
                                 self.open_signing_key(pubkey);
@@ -4471,8 +4490,8 @@ impl App {
                     if !self.save_commits(panel).await {
                         return false;
                     }
-                    match self.make_signing_key(&email).await {
-                        Ok(pubkey) => {
+                    match self.make_signing_key(&email, "id_ed25519_signing").await {
+                        Ok((pubkey, _)) => {
                             if self.save_commits(panel).await {
                                 self.open_signing_key(pubkey);
                                 return true;
@@ -4522,16 +4541,32 @@ impl App {
             self.say("An identity needs a name, a commit name, and an email");
             return false;
         }
-        // Read or make the key, and rewrite the signers with the email as it is
-        // now: a rename must not leave signatures that verify against a name the
-        // commit no longer carries.
-        if signs
-            && self.signing_key_path().is_none()
-            && let Err(error) = self.make_signing_key(email).await
-        {
-            self.problem(error);
-            return false;
-        }
+        let existing_key = match &self.commit_edit {
+            Some(CommitIdentityEdit::Saved(commits)) => commits.signing_key.clone(),
+            Some(CommitIdentityEdit::Installation) | Some(CommitIdentityEdit::New) | None => None,
+        };
+        let signing_key = if signs {
+            if write_default {
+                if let Err(error) = self.make_signing_key(email, "id_ed25519_signing").await {
+                    self.problem(error);
+                    return false;
+                }
+                Some("/root/.ssh/id_ed25519_signing.pub".to_owned())
+            } else if let Some(key) = existing_key {
+                Some(key)
+            } else {
+                let name = Self::signing_key_name(label, email);
+                match self.make_signing_key(email, &name).await {
+                    Ok((_, path)) => Some(path),
+                    Err(error) => {
+                        self.problem(error);
+                        return false;
+                    }
+                }
+            }
+        } else {
+            None
+        };
         if write_default {
             if let Err(error) = self.write_commits(name, email, signs).await {
                 self.problem(error);
@@ -4547,14 +4582,7 @@ impl App {
             label: label.to_owned(),
             name: name.to_owned(),
             email: email.to_owned(),
-            signing_key: signs
-                .then(|| {
-                    self.git_identity
-                        .signing_key
-                        .clone()
-                        .or_else(|| Some("/root/.ssh/id_ed25519_signing.pub".to_owned()))
-                })
-                .flatten(),
+            signing_key,
         };
         let mut proposed = file.settings().clone();
         if let Some(CommitIdentityEdit::Saved(old)) = self.commit_edit.clone() {
@@ -4614,15 +4642,41 @@ impl App {
         Ok(())
     }
 
-    async fn make_signing_key(&self, email: &str) -> Result<String, String> {
+    fn signing_key_name(label: &str, email: &str) -> String {
+        let source = if label.trim().is_empty() {
+            email
+        } else {
+            label
+        };
+        let slug: String = source
+            .trim()
+            .to_ascii_lowercase()
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() {
+                    character
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>()
+            .split('-')
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("-");
+        let slug = if slug.is_empty() { "identity" } else { &slug };
+        format!("id_ed25519_signing_{}", &slug[..slug.len().min(40)])
+    }
+
+    async fn make_signing_key(&self, email: &str, name: &str) -> Result<(String, String), String> {
         let directory = self
             .config
             .profile_dir(self.active_vcs().profile())
             .join("ssh");
         fs::create_dir_all(&directory)
             .map_err(|error| format!("could not make {}: {error}", directory.display()))?;
-        let key = directory.join("id_ed25519_signing");
-        let public = directory.join("id_ed25519_signing.pub");
+        let key = directory.join(name);
+        let public = directory.join(format!("{name}.pub"));
         if !public.is_file() {
             // No passphrase: this key signs from inside a sandbox where nothing
             // can answer a prompt, so a key that asked for one would fail at the
@@ -4641,14 +4695,19 @@ impl App {
         let text = fs::read_to_string(&public)
             .map_err(|error| format!("could not read {}: {error}", public.display()))?;
         let text = text.trim().to_owned();
-        // The signer file is what makes a signature verifiable here; it names the
-        // email the commit carries, so it follows the email as it is edited.
-        fs::write(
-            directory.join("allowed_signers"),
-            format!("{email} {text}\n"),
-        )
-        .map_err(|error| format!("could not write the allowed signers: {error}"))?;
-        Ok(text)
+        // The signer file is what makes a signature verifiable here; keep every
+        // identity's line and replace only this email's.
+        let signers = directory.join("allowed_signers");
+        let mut lines: Vec<String> = fs::read_to_string(&signers)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| !line.starts_with(&format!("{email} ")))
+            .map(str::to_owned)
+            .collect();
+        lines.push(format!("{email} {text}"));
+        fs::write(&signers, format!("{}\n", lines.join("\n")))
+            .map_err(|error| format!("could not write the allowed signers: {error}"))?;
+        Ok((text, format!("/root/.ssh/{name}.pub")))
     }
 
     fn signing_key_path(&self) -> Option<PathBuf> {
@@ -6160,6 +6219,11 @@ impl App {
                     if moved != reply.credential {
                         self.tracker_states
                             .insert(reply.credential.clone(), TrackerState::NotConnected);
+                        self.tracker_states
+                            .insert(moved.clone(), TrackerState::Connected);
+                        if self.is_default_tracker(&moved) {
+                            self.tracker_state = TrackerState::Connected;
+                        }
                         return;
                     }
                 }
@@ -6327,12 +6391,14 @@ impl App {
         if self.panel.form.is_some() {
             // The list is a shortcut into the field, so it opens from the chord
             // wherever the caret is, rather than making the field a special case.
-            let wants_repositories =
-                key.code == KeyCode::Char('r')
-                    && key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.panel.form.as_ref().is_some_and(|form| {
-                        !form.target.is_remote() && form.repositories.is_none()
-                    });
+            let wants_repositories = self.panel.form.as_ref().is_some_and(|form| {
+                !form.target.is_remote()
+                    && form.repositories.is_none()
+                    && (key.code == KeyCode::Char('r')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                        || (matches!(key.code, KeyCode::Enter | KeyCode::Char(' '))
+                            && form.focus == Focus::Repository))
+            });
             if wants_repositories {
                 self.begin_repository_listing(task_service, repository_lists);
                 return;

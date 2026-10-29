@@ -11,6 +11,7 @@ use ratatui::{
 
 use crate::{
     credentials::Service,
+    project::ProjectCommits,
     tui::widgets::{
         palette,
         text::{Field, FieldStyle},
@@ -102,7 +103,6 @@ impl IdentitySetup {
 /// It lives here rather than in the first-run card because the same question is
 /// asked from Settings, where the card is not on screen.
 pub struct GitIdentitySetup {
-    label: Field,
     name: Field,
     email: Field,
     signs: bool,
@@ -111,7 +111,6 @@ pub struct GitIdentitySetup {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GitIdentityField {
-    Label,
     Name,
     Email,
     Sign,
@@ -121,7 +120,6 @@ pub enum GitIdentityDecision {
     Still,
     Closed,
     Save {
-        label: String,
         name: String,
         email: String,
         signs: bool,
@@ -129,21 +127,17 @@ pub enum GitIdentityDecision {
 }
 
 impl GitIdentitySetup {
-    pub fn new(label: &str, name: &str, email: &str, signs: bool) -> Self {
+    pub fn new(name: &str, email: &str, signs: bool) -> Self {
         Self {
-            label: Field::with(label),
             name: Field::with(name),
             email: Field::with(email),
             signs,
-            focus: GitIdentityField::Label,
+            focus: GitIdentityField::Name,
         }
     }
 
     pub fn is_typing(&self) -> bool {
-        matches!(
-            self.focus,
-            GitIdentityField::Label | GitIdentityField::Name | GitIdentityField::Email
-        )
+        matches!(self.focus, GitIdentityField::Name | GitIdentityField::Email)
     }
 
     pub fn key(&mut self, key: KeyEvent) -> GitIdentityDecision {
@@ -162,14 +156,12 @@ impl GitIdentitySetup {
                 GitIdentityDecision::Still
             }
             KeyCode::Enter => GitIdentityDecision::Save {
-                label: self.label.value().trim().to_owned(),
                 name: self.name.value().trim().to_owned(),
                 email: self.email.value().trim().to_owned(),
                 signs: self.signs,
             },
             _ => {
                 match self.focus {
-                    GitIdentityField::Label => self.label.handle_key(key),
                     GitIdentityField::Name => self.name.handle_key(key),
                     GitIdentityField::Email => self.email.handle_key(key),
                     GitIdentityField::Sign => {}
@@ -180,8 +172,7 @@ impl GitIdentitySetup {
     }
 
     fn move_focus(&mut self, forward: bool) {
-        const FIELDS: [GitIdentityField; 4] = [
-            GitIdentityField::Label,
+        const FIELDS: [GitIdentityField; 3] = [
             GitIdentityField::Name,
             GitIdentityField::Email,
             GitIdentityField::Sign,
@@ -198,7 +189,7 @@ impl GitIdentitySetup {
     }
 
     pub fn draw(&self, frame: &mut Frame, area: Rect) {
-        let popup = centered(area, 58, 16);
+        let popup = centered(area, 58, 12);
         frame.render_widget(Clear, popup);
         let block = Block::bordered()
             .title(" Git identity ")
@@ -207,9 +198,7 @@ impl GitIdentitySetup {
             .padding(Padding::horizontal(2));
         let inner = block.inner(popup);
         frame.render_widget(block, popup);
-        let [label, _, name, _, email, _, sign, hint] = Layout::vertical([
-            Constraint::Length(3),
-            Constraint::Length(1),
+        let [name, _, email, _, sign, hint] = Layout::vertical([
             Constraint::Length(3),
             Constraint::Length(1),
             Constraint::Length(3),
@@ -218,15 +207,6 @@ impl GitIdentitySetup {
             Constraint::Length(1),
         ])
         .areas(inner);
-        self.label.draw(
-            frame,
-            label,
-            &FieldStyle {
-                focused: self.focus == GitIdentityField::Label,
-                title: Some("Name this identity"),
-                prefix: "",
-            },
-        );
         self.name.draw(
             frame,
             name,
@@ -268,6 +248,7 @@ impl GitIdentitySetup {
 
 pub struct RenameIdentity {
     pub id: String,
+    pub commits: Option<ProjectCommits>,
     field: Field,
 }
 
@@ -281,6 +262,15 @@ impl RenameIdentity {
     pub fn new(id: String, label: &str) -> Self {
         Self {
             id,
+            commits: None,
+            field: Field::with(label),
+        }
+    }
+
+    pub fn for_commit(commits: ProjectCommits, label: &str) -> Self {
+        Self {
+            id: commits.email.clone(),
+            commits: Some(commits),
             field: Field::with(label),
         }
     }
