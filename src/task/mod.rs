@@ -75,6 +75,7 @@ fn failure_events(task: &Task, error: String, signal_id: String) -> [TaskHistory
             "{error}\n\nAltitude cannot continue this task. If ignored, it stays stopped.\n\nFix the problem first; take over the task with ctrl-enter if needed. Then reply here to retry with your instructions."
         ),
         raised_at_ms: chrono::Utc::now().timestamp_millis(),
+        proposal: None,
     };
     [
         TaskHistoryEvent::ExecutionFailed {

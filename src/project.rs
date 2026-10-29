@@ -398,7 +398,7 @@ pub fn normalize_repository(value: &str) -> Result<String, ProjectError> {
     Ok(repository)
 }
 
-fn validate_cache(value: &str) -> Result<(), ProjectError> {
+pub(crate) fn validate_cache(value: &str) -> Result<(), ProjectError> {
     let trimmed = value.trim().trim_end_matches('/');
     let invalid = |why: &str| Err(ProjectError(format!("cache {value:?} {why}")));
     let rest = if let Some(rest) = trimmed.strip_prefix("~/") {

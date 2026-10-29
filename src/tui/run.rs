@@ -32,7 +32,7 @@ use tokio::{
 
 use crate::{
     isolation::IsolationEngine,
-    remote::{ConfigBundle, Logins, transfer},
+    remote::{ConfigBundle, Logins, Scan, transfer},
     task::{TaskEventLoop, TaskExecutionUpdate, TaskService},
 };
 
@@ -244,6 +244,13 @@ where
     let (configuration_reads, mut configuration_read) = mpsc::unbounded_channel();
     let mut scan = None;
     let mut discovering = false;
+    // A scan is a moment rather than a subscription: it ends when every source
+    // has answered. On a page that stays open that would be the last thing
+    // discovery ever did, so it is asked again while the page is there — the
+    // network a remote is on can change under a screen nobody left.
+    let mut discovery_failed = false;
+    let mut discovery_clock = time::interval(Duration::from_secs(3));
+    discovery_clock.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
 
     let mut mouse_captured = false;
     // Whether the terminal is reporting the keys the creation question needs.
@@ -354,16 +361,11 @@ where
         if wants_discovery != discovering {
             discovering = wants_discovery;
             scan = None;
+            discovery_failed = false;
             if discovering {
                 app.discovered_remotes.clear();
-                scan = match app.link.scan_remotes().await {
-                    Ok(scan) => Some(scan),
-                    Err(error) => {
-                        tracing::warn!(%error, "Network discovery unavailable");
-                        app.say("Network discovery unavailable · add a remote by hostname");
-                        None
-                    }
-                };
+                scan = start_scan(&mut app).await;
+                discovery_failed = scan.is_none();
             }
         }
         let wants_mouse = app.wants_mouse();
@@ -657,6 +659,13 @@ where
                     Some(event) => app.discovery_observed(event),
                     None => scan = None,
                 }
+                redraw = true;
+            }
+            _ = discovery_clock.tick(), if discovering && scan.is_none() && !discovery_failed => {
+                // Only rescans while there is nothing to show from the last one: the
+                // rows already found stay on screen rather than blinking away.
+                scan = start_scan(&mut app).await;
+                discovery_failed = scan.is_none();
                 redraw = true;
             }
             _ = configuration_clock.tick(), if !reading_configuration => {
@@ -1152,4 +1161,16 @@ where
         }
     }
     Ok(false)
+}
+
+/// Starts one pass of network discovery, reporting why there is none.
+async fn start_scan(app: &mut App) -> Option<Scan> {
+    match app.link.scan_remotes().await {
+        Ok(scan) => Some(scan),
+        Err(error) => {
+            tracing::warn!(%error, "Network discovery unavailable");
+            app.say("Network discovery unavailable · add a remote by hostname");
+            None
+        }
+    }
 }

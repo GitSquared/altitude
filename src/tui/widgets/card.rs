@@ -54,15 +54,39 @@ pub struct Message<'a> {
     /// What the operator's message says about its journey. Absent for the
     /// agent's side, which is not waiting on anyone.
     pub tick: Option<Tick>,
+    /// Something the message carries besides its words — a change the agent is
+    /// asking for — drawn inside the same card so it reads as part of what was
+    /// said rather than as a second message.
+    pub nested: Option<Nested<'a>>,
 }
 
-pub fn height(width: u16, body: &str) -> u16 {
+/// A block inside a card: the machine-readable part of a message.
+///
+/// The lines are already fitted to the width by whoever built them, because the
+/// card lays itself out by counting rows rather than by wrapping what it is
+/// given.
+pub struct Nested<'a> {
+    pub title: &'a str,
+    pub lines: Vec<Line<'a>>,
+}
+
+pub fn height(width: u16, body: &str, nested: Option<&Nested<'_>>) -> u16 {
     // The border takes two columns and the padding takes two more.
     let text_width = width.saturating_sub(4).max(1);
     let rows = Paragraph::new(body)
         .wrap(Wrap { trim: true })
         .line_count(text_width);
-    u16::try_from(rows).unwrap_or(u16::MAX).saturating_add(2)
+    let nested = nested.map_or(0, |nested| {
+        u16::try_from(nested.lines.len())
+            .unwrap_or(u16::MAX)
+            // A blank line between the words and the block, and the block's own
+            // two borders.
+            .saturating_add(3)
+    });
+    u16::try_from(rows)
+        .unwrap_or(u16::MAX)
+        .saturating_add(2)
+        .saturating_add(nested)
 }
 
 /// Draw a card into its own buffer, copying only the rows that meet `visible`.
@@ -98,14 +122,42 @@ pub fn draw_clipped(
             style,
         ));
     let inner = block.inner(buffer.area);
+    let nested_style = if message.focused {
+        palette::accent()
+    } else {
+        palette::muted()
+    };
     block.render(buffer.area, &mut buffer);
     if let Some(tick) = message.tick.filter(|_| message.from_operator) {
         stamp_tick(&mut buffer, tick);
     }
-    Paragraph::new(message.body)
+    let body = Paragraph::new(message.body)
         .style(palette::primary())
-        .wrap(Wrap { trim: true })
-        .render(inner, &mut buffer);
+        .wrap(Wrap { trim: true });
+    let rows = u16::try_from(
+        Paragraph::new(message.body)
+            .wrap(Wrap { trim: true })
+            .line_count(inner.width.max(1)),
+    )
+    .unwrap_or(u16::MAX);
+    body.render(inner, &mut buffer);
+    if let Some(nested) = &message.nested {
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(nested_style)
+            .title(Line::styled(format!(" {} ", nested.title), nested_style));
+        let area = Rect {
+            x: inner.x,
+            y: inner.y.saturating_add(rows).saturating_add(1),
+            width: inner.width,
+            height: u16::try_from(nested.lines.len())
+                .unwrap_or(u16::MAX)
+                .saturating_add(2),
+        };
+        let inside = block.inner(area);
+        block.render(area, &mut buffer);
+        Paragraph::new(nested.lines.clone()).render(inside, &mut buffer);
+    }
 
     let target = frame.buffer_mut();
     for row in 0..visible.height {

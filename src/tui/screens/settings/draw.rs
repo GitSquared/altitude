@@ -139,10 +139,10 @@ fn draw_columns(
             line
         })
         .collect::<Vec<_>>();
-    let visible = list::Cursor::visible(list_area.height, list::row_height(&list_rows));
+    let visible = list::content_lines(&list_rows);
     panel
         .cursor
-        .follow(list_rows.len(), visible, tick.is_some());
+        .follow(&list_rows, list_area.height, tick.is_some());
     for (rect, index) in list::draw(
         frame,
         list_area,
@@ -156,7 +156,10 @@ fn draw_columns(
     }
     if panel.section == Section::Remotes && is_discovering {
         // A scan has no row yet, so it is said under the rows rather than in one.
-        let y = (list_area.y + list::row_height(&list_rows) * list_rows.len() as u16 + 1)
+        let below = visible.saturating_sub(panel.cursor.offset());
+        let y = list_area
+            .y
+            .saturating_add(u16::try_from(below + 1).unwrap_or(u16::MAX))
             .min(list_area.bottom().saturating_sub(1));
         frame.render_widget(
             Paragraph::new(Line::from(shimmer("scanning…", tick)).centered()),

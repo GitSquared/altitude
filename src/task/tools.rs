@@ -10,8 +10,8 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use super::{
-    TaskHistoryEvent, TaskOperatorSignalAuthor, TaskOperatorSignalKind, TaskOperatorSignalThread,
-    TaskPlanStatus, TaskPlanStep, TaskStore, normalize_title,
+    ProjectProposal, TaskHistoryEvent, TaskOperatorSignalAuthor, TaskOperatorSignalKind,
+    TaskOperatorSignalThread, TaskPlanStatus, TaskPlanStep, TaskStore, normalize_title,
 };
 use crate::agent::tools::{AgentTool, AgentToolError, AgentToolFuture, AgentToolProvider};
 use crate::tracker::IssueReader;
@@ -237,7 +237,7 @@ impl TaskAgentTools {
         };
         let (_, signal_id) = self
             .store
-            .open_signal(&self.task_id, kind, title, body)
+            .open_signal(&self.task_id, kind, title, body, None)
             .await
             .map_err(tool_failure)?;
         self.announce();
@@ -307,6 +307,66 @@ impl TaskAgentTools {
         }
     }
 
+    /// Ask the operator to change the project this task runs in.
+    ///
+    /// The change is theirs to make: the project lives in Altitude's settings on
+    /// their machine, and applying it rebuilds the environment this task started
+    /// from. So this asks rather than does, and it asks in the form the operator
+    /// can act on: a blocked thread carrying the change itself.
+    async fn propose_project(&self, arguments: &Value) -> Result<Value, AgentToolError> {
+        let reason = argument(arguments, "reason")?;
+        let setup_command = arguments
+            .get("setup_command")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
+            .map(str::to_owned);
+        let caches = match arguments.get("caches") {
+            Some(value) => {
+                let listed = value.as_array().ok_or_else(|| {
+                    AgentToolError::new("caches must be a list of paths, as a list of strings")
+                })?;
+                let mut paths = Vec::with_capacity(listed.len());
+                for entry in listed {
+                    let path = entry.as_str().ok_or_else(|| {
+                        AgentToolError::new("every cache must be a path, as a string")
+                    })?;
+                    super::super::project::validate_cache(path)
+                        .map_err(|error| AgentToolError::new(error.to_string()))?;
+                    paths.push(path.trim().to_owned());
+                }
+                Some(paths)
+            }
+            None => None,
+        };
+        let proposal = ProjectProposal {
+            setup_command,
+            caches,
+        };
+        if proposal.is_empty() {
+            return Err(AgentToolError::new(
+                "a proposal needs setup_command, caches, or both",
+            ));
+        }
+        let (_, signal_id) = self
+            .store
+            .open_signal(
+                &self.task_id,
+                TaskOperatorSignalKind::Blocked,
+                "The project setup needs a change",
+                reason,
+                Some(proposal),
+            )
+            .await
+            .map_err(tool_failure)?;
+        self.announce();
+        let thread = self.thread(&signal_id).await?;
+        Ok(json!({
+            "signal": thread_json(&thread),
+            "note": "This task is now waiting on the operator: nothing is applied until they accept the change, and this turn is your last one until they answer.",
+        }))
+    }
+
     async fn thread(&self, signal_id: &str) -> Result<TaskOperatorSignalThread, AgentToolError> {
         self.store
             .signal_thread(&self.task_id, signal_id)
@@ -348,6 +408,7 @@ fn thread_json(thread: &TaskOperatorSignalThread) -> Value {
         "resolved_by": thread.resolved_by,
         "resolved_at_ms": thread.resolved_at_ms,
         "messages": thread.messages,
+        "proposal": thread.proposal,
     })
 }
 
@@ -373,7 +434,7 @@ impl AgentToolProvider for TaskAgentTools {
             ),
             AgentTool::new(
                 "tasks_signal",
-                "Read and change this task's conversations with the operator. A thread has a kind, messages, and one state: unresolved or resolved. action=list returns every thread; action=read needs signal_id; action=open needs kind, title and body and records an update or a decision; action=reply needs signal_id and body; action=resolve needs signal_id, defaults resolved=true, and accepts an optional reason; a review request cannot be resolved here, because only the operator accepts it. A reply is a message, not a new question, and reopens a resolved thread. Messages carry ids m1, m2, ... inside their thread. A blocking question or a review request belongs in the turn report, not here.",
+                "Read and change this task's conversations with the operator. A thread has a kind, messages, and one state: unresolved or resolved. action=list returns every thread; action=read needs signal_id; action=open needs kind, title and body and records an update or a decision; action=reply needs signal_id and body; action=resolve needs signal_id, defaults resolved=true, and accepts an optional reason. A reply is a message, not a new question, and reopens a resolved thread. Messages carry ids m1, m2, ... inside their thread. A blocking question or a review request belongs in the turn report, not here.\n\nResolving a thread means it needs nothing more from the operator. It does not mean you have said your part, and it does not mean your last reply was answered: it means the reason the thread exists is over and this task is not waiting on anything in it. Resolve a blocked thread only once the operator has given you what you were blocked on and your next step does not depend on them; if their message asks you something, or you still need a decision from them, it stays unresolved. Only the operator accepts a review.",
                 json!({
                     "type": "object",
                     "additionalProperties": false,
@@ -387,6 +448,20 @@ impl AgentToolProvider for TaskAgentTools {
                         "reason": { "type": "string", "description": "For resolve: optional final message in the thread." }
                     },
                     "required": ["action"]
+                }),
+            ),
+            AgentTool::new(
+                "tasks_project_propose",
+                "Ask the operator to change the project this task runs in: its setup command, its shared caches, or both. Use it when the work needs software, a service, or a cache that the environment does not have; a tool you install yourself is gone with this sandbox. This opens a blocked thread that carries the change, so the task stops and waits: the operator sees your reason and the change, applies it or not, and replies. Applying rebuilds the project's environment on the machine that runs it, so the new setup command is what every task of this project starts from next time. Fields you leave out are left as they are. Do not open one of these for a change you have not tried to justify in `reason`, and do not open a second one for the same change while the first is open.",
+                json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "reason": { "type": "string", "description": "Why the change is needed, as the operator reads it, and what it unblocks. No heading, no summary label." },
+                        "setup_command": { "type": "string", "description": "The complete setup command the project should run, replacing the current one. A shell script, run as root while the environment is built." },
+                        "caches": { "type": "array", "items": { "type": "string" }, "description": "The complete list of shared cache paths the project should mount, replacing the current list. Absolute paths or ones starting with ~/." }
+                    },
+                    "required": ["reason"]
                 }),
             ),
             AgentTool::new(
@@ -430,6 +505,7 @@ impl AgentToolProvider for TaskAgentTools {
                 "tasks_signal" => self.signals(&arguments).await,
                 "tasks_plan" => self.plan(&arguments).await,
                 "tasks_read_issue" => self.read_issue().await,
+                "tasks_project_propose" => self.propose_project(&arguments).await,
                 other => Err(AgentToolError::new(format!("unknown tasks tool {other}"))),
             }
         })

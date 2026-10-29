@@ -85,10 +85,12 @@ fn draw_tabs(frame: &mut Frame, area: Rect, pane: Rect, app: &mut App) {
         .iter()
         .position(|project| project.id == active)
         .unwrap_or(0);
+    // The rule under the tabs is drawn first, so the separators between tabs end
+    // on it rather than stopping a row short of it.
+    surface::horizontal_divider(frame, pane, area.y.saturating_add(1));
     for (rect, index) in tabs::draw(frame, area, &tabs, selected) {
         app.project_targets.add(rect, index);
     }
-    surface::horizontal_divider(frame, pane, area.y.saturating_add(1));
 }
 
 fn draw_tasks(

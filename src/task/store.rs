@@ -4,8 +4,8 @@ use sqlx::{FromRow, Sqlite, SqlitePool, Transaction, types::Json};
 use uuid::Uuid;
 
 use super::{
-    Task, TaskAgentRun, TaskAgentTurnReport, TaskError, TaskExecutionMode, TaskExecutionStatus,
-    TaskFacts, TaskHistoryEvent, TaskInput, TaskInputAuthor, TaskInputSource,
+    ProjectProposal, Task, TaskAgentRun, TaskAgentTurnReport, TaskError, TaskExecutionMode,
+    TaskExecutionStatus, TaskFacts, TaskHistoryEvent, TaskInput, TaskInputAuthor, TaskInputSource,
     TaskOperatorAttentionLevel, TaskOperatorSignal, TaskOperatorSignalAuthor,
     TaskOperatorSignalDraft, TaskOperatorSignalKind, TaskOperatorSignalMessage,
     TaskOperatorSignalThread, TaskPlanStep,
@@ -447,6 +447,7 @@ impl TaskStore {
             title: draft.title.clone(),
             body: draft.body.clone(),
             raised_at_ms: now_ms(),
+            proposal: None,
         };
         match review {
             // A held request is not raised now; the host raises it later, once
@@ -666,6 +667,7 @@ impl TaskStore {
                             thread.kind = signal.kind;
                             thread.title = signal.title.clone();
                             thread.last_raised_at_ms = at_ms;
+                            thread.proposal = signal.proposal.clone();
                             thread.resolved = false;
                             thread.resolved_by = None;
                             thread.resolved_at_ms = None;
@@ -692,6 +694,7 @@ impl TaskStore {
                             resolved: false,
                             resolved_by: None,
                             resolved_at_ms: None,
+                            proposal: signal.proposal,
                         }),
                     }
                 }
@@ -812,7 +815,9 @@ impl TaskStore {
     /// Add an operator message to a thread, reopening it if it was resolved.
     ///
     /// The meaning is the agent's to read. The caller decides whether the task
-    /// needs a run to read it.
+    /// needs a run to read it. A reply does not resolve anything: it may be the
+    /// answer, or the next question, and only the two sides' reading of it says
+    /// which.
     pub async fn message_operator_signal(
         &self,
         task_id: &str,
@@ -916,11 +921,20 @@ impl TaskStore {
         kind: TaskOperatorSignalKind,
         title: &str,
         body: &str,
+        proposal: Option<ProjectProposal>,
     ) -> Result<(Task, String), TaskError> {
+        // A blocked thread raised mid-turn is a request the operator can act on
+        // here, rather than a question only the report can ask: the proposal is
+        // what they would apply.
+        let actionable = kind == TaskOperatorSignalKind::Blocked
+            && proposal
+                .as_ref()
+                .is_some_and(|proposal| !proposal.is_empty());
         if !matches!(
             kind,
             TaskOperatorSignalKind::Update | TaskOperatorSignalKind::Decision
-        ) {
+        ) && !actionable
+        {
             return Err(TaskError::OperationRejected(
                 "only updates and decisions can be opened mid-turn",
             ));
@@ -943,6 +957,7 @@ impl TaskStore {
             title: title.to_owned(),
             body: body.to_owned(),
             raised_at_ms: now_ms(),
+            proposal,
         };
         let id = signal.id.clone();
         let task = self

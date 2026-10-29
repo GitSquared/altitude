@@ -592,6 +592,8 @@ pub struct App {
     pub(in crate::tui) signal_filter: Select<SignalFilter>,
     pub(in crate::tui) signal_sort: Select<SignalSort>,
     pub(in crate::tui) signals_cursor: list::Cursor,
+    /// What the thread list measured when it last drew, so a key can page it.
+    pub(in crate::tui) signals_layout: list::Layout,
     /// How many rows the selected thread's conversation is scrolled down.
     ///
     /// `u16::MAX` means the bottom, so a new message arrives without the screen
@@ -795,6 +797,7 @@ impl App {
                 0,
             ),
             signals_cursor: list::Cursor::default(),
+            signals_layout: list::Layout::default(),
             signal_scroll: 0,
             signal_message_rows: Vec::new(),
             signal_scroll_max: 0,
@@ -4818,9 +4821,11 @@ impl App {
                 .service()
                 .is_some_and(|service| service.slot() == Slot::Tracker)
             {
+                // A tracker that answers at all is one with a saved sign-in: that is
+                // what this row says, and it does not wait for a session to be opened.
                 let state = match task_service.tracker_for(&credential.id) {
-                    Some(tracker) if tracker.is_connected() => TrackerState::Connected,
-                    _ => TrackerState::NotConnected,
+                    Some(_) => TrackerState::Connected,
+                    None => TrackerState::NotConnected,
                 };
                 self.tracker_states.insert(credential.id.clone(), state);
             }
@@ -5550,19 +5555,6 @@ impl App {
         }
     }
 
-    async fn read_selected_info<E>(
-        &mut self,
-        task_service: &TaskService<E>,
-        remote_signals: &mpsc::Sender<RemoteSignalsReply>,
-    ) where
-        E: IsolationEngine + Clone + 'static,
-    {
-        if let Some(thread) = self.signal_thread().cloned() {
-            self.read_info_thread(thread, task_service, remote_signals)
-                .await;
-        }
-    }
-
     /// Move between threads, and start the one now selected at its newest
     /// message.
     pub(in crate::tui) async fn move_signal_cursor<E>(
@@ -5579,6 +5571,25 @@ impl App {
         let previous = self.signal_thread().cloned();
         self.signals_cursor
             .move_by(forward, self.signal_threads.len());
+        self.reset_signal_message();
+        if let Some(thread) = previous {
+            self.read_info_thread(thread, task_service, remote_signals)
+                .await;
+        }
+    }
+
+    /// Move between threads by a screen at a time, with the same bookkeeping as
+    /// moving between them one at a time.
+    pub(in crate::tui) async fn page_signal_cursor<E>(
+        &mut self,
+        forward: bool,
+        task_service: &TaskService<E>,
+        remote_signals: &mpsc::Sender<RemoteSignalsReply>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let previous = self.signal_thread().cloned();
+        self.signals_cursor.page_by(forward, &self.signals_layout);
         self.reset_signal_message();
         if let Some(thread) = previous {
             self.read_info_thread(thread, task_service, remote_signals)
@@ -5727,6 +5738,24 @@ impl App {
         if let Foreground::Keys(behind) = mem::take(&mut self.foreground) {
             self.foreground = *behind;
         }
+    }
+
+    /// The project the task on screen runs in, as this machine's settings hold
+    /// it: what a proposed change to it is measured against.
+    pub(in crate::tui) fn signal_task_project(&self) -> Option<Project> {
+        let task_id = self.signal_task_id.as_deref()?;
+        let project_id = self
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)?
+            .project()?
+            .id
+            .clone();
+        self.settings_file
+            .as_ref()?
+            .settings()
+            .project(&project_id)
+            .cloned()
     }
 
     /// The keys of the inline reply box.
@@ -6505,7 +6534,7 @@ impl App {
                     SignalHit::Action(index) => {
                         self.signal_focus = SignalFocus::Action(index);
                         if let Some(action) = self.signal_actions().get(index).copied() {
-                            self.act_on_signal(action, task_service, remote_signals)
+                            self.act_on_signal(action, task_service, remote_signals, event_loop)
                                 .await;
                         }
                     }
@@ -6633,8 +6662,20 @@ impl App {
             return;
         }
         match key.code {
-            KeyCode::PageDown => self.page_signal(false),
-            KeyCode::PageUp => self.page_signal(true),
+            KeyCode::PageDown => match self.signal_focus {
+                SignalFocus::List => {
+                    self.page_signal_cursor(true, task_service, remote_signals)
+                        .await
+                }
+                _ => self.page_signal(false),
+            },
+            KeyCode::PageUp => match self.signal_focus {
+                SignalFocus::List => {
+                    self.page_signal_cursor(false, task_service, remote_signals)
+                        .await
+                }
+                _ => self.page_signal(true),
+            },
             KeyCode::Home => {
                 self.signal_scroll = 0;
                 self.select_signal_message_at_scroll();
@@ -6644,7 +6685,9 @@ impl App {
                 self.select_signal_message_at_scroll();
             }
             _ if is_dismiss(key) || key.code == KeyCode::Char('q') => {
-                self.read_selected_info(task_service, remote_signals).await;
+                // Leaving the screen is not moving past a thread: the one under the
+                // cursor is the one being read, and closing the screen does not say
+                // it has been seen. Moving off it still marks an update read.
                 self.leave_signals();
             }
             KeyCode::Down | KeyCode::Char('j') => match self.signal_focus {
@@ -6695,7 +6738,7 @@ impl App {
             }
             KeyCode::Enter if is_secondary(key) => {
                 if let Some(action) = self.signal_thread().and_then(secondary_action) {
-                    self.act_on_signal(action, task_service, remote_signals)
+                    self.act_on_signal(action, task_service, remote_signals, event_loop)
                         .await
                 }
             }
@@ -6704,13 +6747,13 @@ impl App {
                 SignalFocus::Sort => self.signal_sort.open(),
                 SignalFocus::Action(index) => {
                     if let Some(action) = self.signal_actions().get(index).copied() {
-                        self.act_on_signal(action, task_service, remote_signals)
+                        self.act_on_signal(action, task_service, remote_signals, event_loop)
                             .await
                     }
                 }
                 SignalFocus::List | SignalFocus::Detail => {
                     if let Some(action) = self.signal_thread().and_then(primary_action) {
-                        self.act_on_signal(action, task_service, remote_signals)
+                        self.act_on_signal(action, task_service, remote_signals, event_loop)
                             .await
                     }
                 }
@@ -6724,6 +6767,7 @@ impl App {
         action: SignalAction,
         task_service: &TaskService<E>,
         remote_signals: &mpsc::Sender<RemoteSignalsReply>,
+        event_loop: &TaskEventLoop<E>,
     ) where
         E: IsolationEngine + Clone + 'static,
     {
@@ -6783,6 +6827,10 @@ impl App {
                     }
                 }
             }
+            SignalAction::Apply => {
+                self.apply_project_proposal(&thread, remote_signals, event_loop)
+                    .await;
+            }
             SignalAction::Accept => {
                 if thread.kind != TaskOperatorSignalKind::InReview || thread.resolved {
                     return;
@@ -6796,6 +6844,78 @@ impl App {
                     question,
                 ));
             }
+        }
+    }
+
+    /// Make the change a blocked thread is asking for.
+    ///
+    /// The project lives in this machine's settings, so applying lands there and
+    /// the machine running the task is sent the new configuration the same way it
+    /// is sent any other change. The thread is then answered and resolved: the
+    /// operator did the thing it was waiting on, so it stops asking.
+    async fn apply_project_proposal<E>(
+        &mut self,
+        thread: &TaskOperatorSignalThread,
+        remote_signals: &mpsc::Sender<RemoteSignalsReply>,
+        event_loop: &TaskEventLoop<E>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let Some(proposal) = thread.proposal.clone() else {
+            return;
+        };
+        let Some(project_id) = self
+            .tasks
+            .iter()
+            .find(|task| task.id == thread.task_id)
+            .and_then(|task| task.project())
+            .map(|project| project.id.clone())
+        else {
+            self.say("This task's project is not in this machine's settings");
+            return;
+        };
+        let Some(file) = self.settings_file.as_mut() else {
+            self.problem("Settings are unavailable; fix the file and reopen");
+            return;
+        };
+        let mut settings = file.settings().clone();
+        let Some(mut project) = settings.project(&project_id).cloned() else {
+            self.say("That project is no longer in the settings file");
+            return;
+        };
+        if let Some(command) = &proposal.setup_command {
+            project.setup_command = command.clone();
+        }
+        if let Some(caches) = &proposal.caches {
+            project.caches = caches.clone();
+        }
+        if let Err(error) = project.validate() {
+            self.say(error.to_string());
+            return;
+        }
+        settings.add_project(project);
+        if let Err(error) = file.save(settings) {
+            self.problem(error.to_string());
+            return;
+        }
+        self.say("Applied the project change · the environment rebuilds on the next task");
+        let answer = "Applied the change to the project's setup here.".to_owned();
+        if self.remote_signals.is_some() {
+            self.act_on_remote_signal(
+                thread.id.clone(),
+                RemoteSignalAction::Reply,
+                Some(answer),
+                remote_signals,
+            );
+            self.act_on_remote_signal(
+                thread.id.clone(),
+                RemoteSignalAction::Resolve(true),
+                None,
+                remote_signals,
+            );
+        } else {
+            event_loop.settle_signal(thread.task_id.clone(), thread.id.clone(), answer);
+            self.resolve_signal_locally(&thread.id, true);
         }
     }
 

@@ -631,6 +631,40 @@ where
         });
     }
 
+    /// Answer a thread and close it in one act.
+    ///
+    /// For the case where the operator's answer *is* the thing the thread asked
+    /// for: they applied the change it carried. Sent in this order because a
+    /// message reopens a thread, so the closing has to be the last word — and
+    /// sent here rather than as two calls from the screen, which would race.
+    pub fn settle_signal(&self, task_id: String, signal_id: String, body: String) {
+        let event_loop = self.clone();
+        tokio::spawn(async move {
+            let run = match event_loop
+                .service
+                .reply_operator_signal(&task_id, &signal_id, body)
+                .await
+            {
+                Ok(run) => run,
+                Err(error) => {
+                    event_loop.watch_agent_run(Err(error));
+                    return;
+                }
+            };
+            if let Err(error) = event_loop
+                .service
+                .resolve_signal(&task_id, &signal_id, true)
+                .await
+            {
+                event_loop.watch_agent_run(Err(error));
+                return;
+            }
+            if let Some(run) = run {
+                event_loop.watch_agent_run(Ok(run));
+            }
+        });
+    }
+
     fn detach_task(&self, task_id: &str) {
         self.terminal_output
             .lock()

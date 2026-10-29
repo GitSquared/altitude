@@ -822,6 +822,13 @@ fn project_scripts(project: &Project) -> Result<String, IsolationError> {
         "printf '%s' {} > /altitude/project.md\n",
         shell_quote(&project.brief(checkout.as_deref()))
     ));
+    // What Altitude itself does, as opposed to what this project is: the same file
+    // for every task, so a project brief never has to carry harness knowledge and
+    // harness knowledge never drifts per project.
+    script.push_str(&format!(
+        "printf '%s' {} > /altitude/harness.md\n",
+        shell_quote(include_str!("assets/harness.md"))
+    ));
     if let (Some(repository), Some(checkout)) = (&project.repository, &checkout) {
         let parent = Path::new(checkout)
             .parent()

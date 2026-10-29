@@ -23,8 +23,10 @@ use ratatui::{
 };
 
 use crate::{
+    project::Project,
     task::{
-        TaskOperatorSignalAuthor, TaskOperatorSignalKind, TaskOperatorSignalThread, TaskPlanStatus,
+        ProjectProposal, TaskOperatorSignalAuthor, TaskOperatorSignalKind,
+        TaskOperatorSignalThread, TaskPlanStatus,
     },
     tui::{
         App,
@@ -156,6 +158,8 @@ pub enum SignalAction {
     Reply,
     Resolve,
     Accept,
+    /// Apply the project change a blocked thread is carrying.
+    Apply,
 }
 
 impl SignalAction {
@@ -163,6 +167,7 @@ impl SignalAction {
         match self {
             Self::Reply => "reply",
             Self::Accept => "accept",
+            Self::Apply => "apply change",
             Self::Resolve => match (kind, resolved) {
                 (TaskOperatorSignalKind::Update, _) => "mark read",
                 (TaskOperatorSignalKind::Decision, true) => "reopen",
@@ -176,6 +181,11 @@ impl SignalAction {
 pub fn primary_action(thread: &TaskOperatorSignalThread) -> Option<SignalAction> {
     if thread.is_resolved() {
         return (thread.kind == TaskOperatorSignalKind::Decision).then_some(SignalAction::Resolve);
+    }
+    // A blocked thread that carries a change is answered by making it: the
+    // operator's other option, replying, is still there beside it.
+    if thread.proposal.is_some() {
+        return Some(SignalAction::Apply);
     }
     Some(match thread.kind {
         TaskOperatorSignalKind::Blocked => SignalAction::Reply,
@@ -194,7 +204,8 @@ pub fn secondary_action(thread: &TaskOperatorSignalThread) -> Option<SignalActio
         )
         .then_some(SignalAction::Reply);
     }
-    (thread.kind != TaskOperatorSignalKind::Blocked).then_some(SignalAction::Reply)
+    (thread.kind != TaskOperatorSignalKind::Blocked || thread.proposal.is_some())
+        .then_some(SignalAction::Reply)
 }
 
 /// The actions available on a thread, in footer order: the secondary answer on
@@ -297,14 +308,12 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         };
         draw_plan(frame, text, app);
     } else {
-        let [tabs, _, pane] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(0),
-        ])
-        .areas(detail);
-        draw_plan_tabs(frame, tabs, app);
-        surface::horizontal_divider(frame, detail, tabs.y.saturating_add(1));
+        // The tabs and the rule under them are one band, so the separators
+        // between the tabs run down onto that rule.
+        let [band, pane] =
+            Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(detail);
+        surface::horizontal_divider(frame, detail, band.y.saturating_add(1));
+        draw_plan_tabs(frame, band, app);
         frame.render_widget(Clear, pane);
         if app.signal_plan_open {
             draw_plan(frame, pane, app);
@@ -323,7 +332,9 @@ fn draw_plan_tabs(frame: &mut Frame, area: Rect, app: &App) {
     if area.height == 0 {
         return;
     }
-    frame.render_widget(Clear, area);
+    // Only the labels are the tabs' to clear: the rule under them is the pane's,
+    // and the separators between tabs are drawn onto it.
+    frame.render_widget(Clear, Rect { height: 1, ..area });
     let tabs = [Tab::new("Signals"), Tab::new("Plan")];
     let selected = usize::from(app.signal_plan_open);
     tabs::draw(frame, area, &tabs, selected);
@@ -522,9 +533,9 @@ fn draw_threads(frame: &mut Frame, area: Rect, app: &mut App) {
             row
         })
         .collect::<Vec<_>>();
-    let visible = list::visible(area.height, &rows);
+    app.signals_layout = list::Layout::of(&rows, area.height);
     app.signals_cursor
-        .follow(rows.len(), visible, app.animations());
+        .follow(&rows, area.height, app.animations());
     let selected = (!rows.is_empty()).then(|| app.signals_cursor.selected());
     let focused = (app.signal_focus == SignalFocus::List)
         .then_some(selected)
@@ -644,11 +655,13 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
         )
     });
     let working = app.signal_agent_working();
+    let project = app.signal_task_project();
     let conversation = draw_messages(
         frame,
         cards,
         Conversation {
             thread: &thread,
+            project: project.as_ref(),
             agent: &agent,
             selected: selected_message,
             status,
@@ -721,6 +734,9 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
 
 struct Conversation<'a> {
     thread: &'a TaskOperatorSignalThread,
+    /// The project as this machine's settings hold it, which is what a proposed
+    /// change is measured against. Absent for a task whose project is elsewhere.
+    project: Option<&'a Project>,
     agent: &'a str,
     selected: Option<usize>,
     status: Option<Line<'static>>,
@@ -740,6 +756,95 @@ struct ConversationLayout {
 /// rows the viewport can hold. `scroll` is a row offset from the top of the
 /// conversation, or [`u16::MAX`] for the bottom, and it is clamped here so a
 /// resize cannot leave the view past the end.
+/// The change a thread is asking for, as lines inside its card.
+///
+/// The words are the agent's; this is the part the operator acts on, so it is
+/// shown as a change against what the project is now rather than described.
+fn proposal_lines(
+    proposal: &ProjectProposal,
+    project: Option<&Project>,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if let Some(command) = &proposal.setup_command {
+        lines.push(Line::styled("setup command", palette::heading()));
+        field_diff(
+            &mut lines,
+            project.map(|project| project.setup_command.as_str()),
+            command,
+            width,
+        );
+    }
+    if let Some(caches) = &proposal.caches {
+        if !lines.is_empty() {
+            lines.push(Line::default());
+        }
+        lines.push(Line::styled("shared caches", palette::heading()));
+        let before = project.map(|project| project.caches.join("\n"));
+        field_diff(&mut lines, before.as_deref(), &caches.join("\n"), width);
+    }
+    lines
+}
+
+/// Lines that left, then lines that arrived, and nothing for a field that is
+/// already what it would become.
+fn field_diff(out: &mut Vec<Line<'static>>, before: Option<&str>, after: &str, width: usize) {
+    let old: Vec<&str> = before
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let new: Vec<&str> = after
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let mut changed = false;
+    for line in &old {
+        if !new.contains(line) {
+            changed = true;
+            out.extend(diff_line('-', line, width, palette::muted()));
+        }
+    }
+    for line in &new {
+        if !old.contains(line) {
+            changed = true;
+            out.extend(diff_line('+', line, width, palette::accent()));
+        }
+    }
+    if before.is_some() && !changed {
+        out.push(Line::styled("unchanged", palette::muted()));
+    }
+}
+
+/// One side of a change, wrapped inside the card it lives in.
+fn diff_line(marker: char, text: &str, width: usize, tone: Style) -> Vec<Line<'static>> {
+    let indent = "  ";
+    let lead = format!("{indent}{marker} ");
+    let room = width.saturating_sub(lead.chars().count()).max(1);
+    let mut lines = Vec::new();
+    let mut rest = text.trim();
+    loop {
+        let take = rest
+            .char_indices()
+            .nth(room)
+            .map_or(rest.len(), |(index, _)| index);
+        let (chunk, tail) = rest.split_at(take);
+        let prefix = if lines.is_empty() {
+            lead.clone()
+        } else {
+            " ".repeat(lead.chars().count())
+        };
+        lines.push(Line::styled(format!("{prefix}{chunk}"), tone));
+        if tail.is_empty() {
+            break;
+        }
+        rest = tail;
+    }
+    lines
+}
+
 fn draw_messages(
     frame: &mut Frame,
     area: Rect,
@@ -748,6 +853,7 @@ fn draw_messages(
 ) -> ConversationLayout {
     let Conversation {
         thread,
+        project,
         agent,
         selected,
         status,
@@ -756,10 +862,23 @@ fn draw_messages(
     } = conversation;
     let width = area.width;
     let now = Utc::now().timestamp_millis();
+    let last_operator = thread
+        .messages
+        .iter()
+        .rposition(|message| message.author == TaskOperatorSignalAuthor::Operator);
+    let last_agent = thread
+        .messages
+        .iter()
+        .rposition(|message| message.author == TaskOperatorSignalAuthor::Agent);
+    let proposed = thread.proposal.as_ref().map(|proposal| card::Nested {
+        title: "proposed change",
+        lines: proposal_lines(proposal, project, usize::from(width.saturating_sub(6))),
+    });
     let mut rows = Vec::with_capacity(thread.messages.len());
     let mut cursor = 0u32;
-    for message in &thread.messages {
-        let height = card::height(width, &message.body);
+    for (index, message) in thread.messages.iter().enumerate() {
+        let nested = proposed.as_ref().filter(|_| Some(index) == last_agent);
+        let height = card::height(width, &message.body, nested);
         rows.push((u16::try_from(cursor).unwrap_or(u16::MAX), height));
         // A blank row after every card, which is what makes the last card's
         // following line sit a line below it.
@@ -780,14 +899,6 @@ fn draw_messages(
     };
     *scroll = offset;
 
-    let last_operator = thread
-        .messages
-        .iter()
-        .rposition(|message| message.author == TaskOperatorSignalAuthor::Operator);
-    let last_agent = thread
-        .messages
-        .iter()
-        .rposition(|message| message.author == TaskOperatorSignalAuthor::Agent);
     let viewport_top = i32::from(area.y);
     let viewport_bottom = i32::from(area.bottom());
     let mut hitboxes = Vec::new();
@@ -827,6 +938,13 @@ fn draw_messages(
                 from_operator,
                 focused: selected == Some(index),
                 tick,
+                nested: proposed
+                    .as_ref()
+                    .filter(|_| Some(index) == last_agent)
+                    .map(|nested| card::Nested {
+                        title: nested.title,
+                        lines: nested.lines.clone(),
+                    }),
             },
         );
         hitboxes.push((visible, index));

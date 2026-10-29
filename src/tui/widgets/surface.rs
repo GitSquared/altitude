@@ -144,6 +144,24 @@ pub fn vertical_divider(frame: &mut Frame, inner: Rect, x: u16) {
     }
 }
 
+/// Run a vertical stroke down a band, joining whatever is already in its cells.
+///
+/// A tab bar's separators belong to the band they sit in rather than to the row
+/// the labels are on: they end on the rule the caller drew under the tabs, so
+/// the bar reads as one piece instead of a pipe floating above a line. The rule
+/// is drawn first, which is what leaves a tee where they meet.
+pub fn join_down(frame: &mut Frame, x: u16, y: u16, rows: u16) {
+    let buffer = frame.buffer_mut();
+    for row in 0..rows {
+        // The last row is the rule the caller drew, so the stroke arrives there
+        // from above and does not continue past it.
+        let added = if row + 1 == rows { UP } else { UP | DOWN };
+        if !join(buffer, x, y.saturating_add(row), added) {
+            return;
+        }
+    }
+}
+
 pub struct Surface {
     block: Block<'static>,
     opaque: bool,

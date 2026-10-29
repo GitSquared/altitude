@@ -181,11 +181,15 @@ impl Row {
     }
 }
 
-/// Where the cursor is, and which row the list starts at.
+/// Where the cursor is, and which line the list starts at.
 ///
 /// The two are separate because the view moves on its own clock: the selection
 /// changes on a key, and the rows follow it one frame at a time, so a jump reads
 /// as the list moving rather than the content changing.
+///
+/// The view is measured in lines rather than in rows, so a row taller than the
+/// view can be read by scrolling through it, and the last row is reached in full
+/// instead of stopping where the rows above it happen to end.
 #[derive(Default)]
 pub struct Cursor {
     selected: usize,
@@ -198,6 +202,7 @@ impl Cursor {
         self.selected
     }
 
+    /// The line the view starts at, counted from the top of the list.
     pub fn offset(&self) -> usize {
         self.offset
     }
@@ -216,34 +221,77 @@ impl Cursor {
         self.target = 0;
     }
 
+    /// Move one row, and stop at the ends rather than returning to the other.
+    ///
+    /// A list that loops makes a wheel that keeps turning impossible to read: the
+    /// row under the pointer is replaced by one from the far end of the list.
     pub fn move_by(&mut self, forward: bool, len: usize) {
         if len == 0 {
             self.selected = 0;
             return;
         }
         self.selected = if forward {
-            (self.selected + 1) % len
+            (self.selected + 1).min(len - 1)
         } else {
-            (self.selected + len - 1) % len
+            self.selected.saturating_sub(1)
         };
     }
 
-    /// Point the view at the row it should start from so the selection is inside
-    /// `visible` rows.
+    /// Move the selection one screen of rows, stopping at the ends.
+    ///
+    /// `layout` is what the list measured when it last drew itself: the keys
+    /// cannot measure the rows again without drawing them.
+    pub fn page_by(&mut self, forward: bool, layout: &Layout) {
+        let len = layout.heights.len();
+        if len == 0 {
+            self.selected = 0;
+            return;
+        }
+        let band = usize::from(layout.height).max(1);
+        let mut used = 0;
+        let mut index = self.selected.min(len - 1);
+        while used < band {
+            if forward {
+                if index + 1 >= len {
+                    break;
+                }
+                index += 1;
+            } else {
+                if index == 0 {
+                    break;
+                }
+                index -= 1;
+            }
+            used += usize::from(layout.heights[index]) + 1;
+        }
+        self.selected = index;
+    }
+
+    /// Point the view at the line it should start from, so the whole selected
+    /// row is on screen and the view stops at the end of the content.
     ///
     /// With animations off there is no clock to glide on, so the view is put
     /// there at once.
-    pub fn follow(&mut self, len: usize, visible: usize, animate: bool) {
-        self.selected = self.selected.min(len.saturating_sub(1));
-        let visible = visible.max(1);
-        self.target = if self.selected < self.offset {
-            self.selected
-        } else if self.selected >= self.offset + visible {
-            self.selected + 1 - visible
+    pub fn follow(&mut self, rows: &[Row], height: u16, animate: bool) {
+        let band = usize::from(height).max(1);
+        if rows.is_empty() {
+            self.selected = 0;
+            self.target = 0;
+            self.offset = 0;
+            return;
+        }
+        self.selected = self.selected.min(rows.len() - 1);
+        let top = start_line(rows, self.selected);
+        let content = usize::from(rows[self.selected].height()).max(1);
+        let last = content_lines(rows).saturating_sub(band);
+        self.target = if content >= band || top < self.offset {
+            top
+        } else if top + content > self.offset + band {
+            (top + content).saturating_sub(band)
         } else {
             self.offset
         }
-        .min(len.saturating_sub(visible));
+        .min(last);
         if !animate {
             self.offset = self.target;
         }
@@ -272,33 +320,44 @@ impl Cursor {
         };
         true
     }
-
-    /// How many rows of one uniform height fit in the area. Used by lists whose
-    /// rows all have the same shape; see [`visible`] for mixed ones.
-    pub fn visible(height: u16, row_height: u16) -> usize {
-        usize::from((height / row_height.max(1)).max(1))
-    }
 }
 
-pub fn row_height(rows: &[Row]) -> u16 {
-    rows.first().map_or(2, |row| row.height() + 1)
+/// How many lines a row occupies, including the blank one under it.
+fn block(row: &Row) -> usize {
+    usize::from(row.height()) + 1
 }
 
-pub fn visible(height: u16, rows: &[Row]) -> usize {
-    let mut used = 0;
-    let mut count = 0;
-    for row in rows {
-        let row_height = row.height() + 1;
-        if used + row_height > height {
-            break;
+/// The line a row starts at, counted from the top of the list.
+fn start_line(rows: &[Row], index: usize) -> usize {
+    rows[..index.min(rows.len())].iter().map(block).sum()
+}
+
+/// Every line the rows occupy, which is what the view stops at.
+pub fn content_lines(rows: &[Row]) -> usize {
+    rows.iter().map(block).sum()
+}
+
+/// What a list measured when it last drew itself.
+///
+/// A key that pages the list needs the shape of the rows it is paging, and only
+/// the draw knows it: the rows are built from the contents of the screen rather
+/// than held anywhere the keys can reach.
+#[derive(Clone, Default)]
+pub struct Layout {
+    heights: Vec<u16>,
+    height: u16,
+}
+
+impl Layout {
+    pub fn of(rows: &[Row], height: u16) -> Self {
+        Self {
+            heights: rows.iter().map(Row::height).collect(),
+            height,
         }
-        used += row_height;
-        count += 1;
     }
-    count.max(1)
 }
 
-/// Draw the rows from `offset` down.
+/// Draw the rows from the line `offset` down.
 ///
 /// `selected` is the row the detail follows, which keeps an inactive bar when
 /// the focus is elsewhere; `focused` is the row the keys are on. `gutter` is the
@@ -323,22 +382,22 @@ pub fn draw(
     // The field is under the list. Clear each row's block so the contours stay
     // out of the text; they remain visible in the gaps between rows and below
     // the list, which is where a backdrop belongs.
-    let mut top = area.y;
     let mut hitboxes = Vec::new();
-    for (index, row) in rows.iter().enumerate().skip(offset) {
-        if top >= area.bottom() {
-            break;
-        }
-        let height = row.height().min(area.bottom() - top);
+    for (index, _) in rows.iter().enumerate() {
+        let Some((top, visible)) = on_screen(rows, index, offset, area) else {
+            if start_line(rows, index) >= offset.saturating_add(usize::from(area.height)) {
+                break;
+            }
+            continue;
+        };
         let rect = Rect {
             x: area.x,
             y: top,
             width: area.width,
-            height,
+            height: visible,
         };
         frame.render_widget(Clear, rect);
         hitboxes.push((rect, index));
-        top = top.saturating_add(row.height() + 1);
     }
     if let Some(index) = selected.filter(|index| focused != Some(*index)) {
         bar(
@@ -354,45 +413,80 @@ pub fn draw(
         bar(frame, area, rows, offset, index, palette::focus());
     }
     let width = usize::from(list_area.width);
+    // The view can start part-way through a row, so the first one drawn gives up
+    // the lines that are already above it.
+    let mut skipped = false;
     let items = rows
         .iter()
         .enumerate()
-        .skip(offset)
-        .map(|(index, row)| {
+        .filter_map(|(index, row)| {
+            let start = start_line(rows, index);
+            if start + block(row) <= offset {
+                return None;
+            }
+            if start >= offset.saturating_add(usize::from(area.height)) {
+                return None;
+            }
             let mut lines = Vec::new();
             if let Some(heading) = &row.heading {
                 lines.push(heading_line(heading, width));
             }
             lines.extend(row.lines(width, focused == Some(index), selected == Some(index)));
             lines.push(Line::default());
-            ListItem::new(lines)
+            if !skipped {
+                skipped = true;
+                lines.drain(..offset.saturating_sub(start).min(lines.len()));
+            }
+            Some(ListItem::new(lines))
         })
         .collect::<Vec<_>>();
     frame.render_widget(List::new(items), list_area);
     hitboxes
 }
 
+/// Where a row sits on screen, and how much of it is left to draw.
+///
+/// A row that is scrolled past, or one that starts below the area, has none.
+fn on_screen(rows: &[Row], index: usize, offset: usize, area: Rect) -> Option<(u16, u16)> {
+    let start = start_line(rows, index);
+    let first = start.max(offset);
+    let last = (start + block(&rows[index])).min(offset.saturating_add(usize::from(area.height)));
+    let content = start + usize::from(rows[index].height());
+    // The blank line under a row is not the row, so a row scrolled down to its
+    // last line has nothing left to show a bar over.
+    let last = last.min(content);
+    if first >= last {
+        return None;
+    }
+    let top = area
+        .y
+        .saturating_add(u16::try_from(first - offset).unwrap_or(u16::MAX));
+    let height = u16::try_from(last - first).unwrap_or(u16::MAX);
+    Some((top, height))
+}
+
 fn bar(frame: &mut Frame, area: Rect, rows: &[Row], offset: usize, index: usize, style: Style) {
-    if index < offset || index >= rows.len() {
+    if index >= rows.len() {
         return;
     }
     let heading = u16::from(rows[index].heading.is_some());
     let content_height = rows[index].height().saturating_sub(heading).max(1);
-    let top = area.y.saturating_add(
-        rows[offset..index]
-            .iter()
-            .map(|row| row.height() + 1)
-            .sum::<u16>(),
-    ) + heading;
-    let bottom = top.saturating_add(content_height).min(area.bottom());
-    if top >= bottom {
+    let start = start_line(rows, index) + usize::from(heading);
+    // A bar is clipped by the view the same way the row under it is, so a row
+    // scrolled half out of sight does not paint over the lines above it.
+    let first = start.max(offset);
+    let last =
+        (start + usize::from(content_height)).min(offset.saturating_add(usize::from(area.height)));
+    if first >= last {
         return;
     }
     let bar = Rect {
         x: area.x,
-        y: top,
+        y: area
+            .y
+            .saturating_add(u16::try_from(first - offset).unwrap_or(u16::MAX)),
         width: area.width,
-        height: bottom - top,
+        height: u16::try_from(last - first).unwrap_or(u16::MAX),
     };
     frame.render_widget(Clear, bar);
     frame.render_widget(Block::default().style(style), bar);

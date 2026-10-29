@@ -7,7 +7,9 @@
 //!
 //! A bar that belongs to a whole pane sits in its header: the tabs on the first
 //! row inside the border, and the pane's divider under them, so the content
-//! starts at a line rather than under a row that belongs to the tabs.
+//! starts at a line rather than under a row that belongs to the tabs. The
+//! separators between tabs run down through that band and end on the divider,
+//! so the caller draws the divider first.
 
 use ratatui::{
     Frame,
@@ -16,7 +18,7 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-use super::palette;
+use super::{palette, surface};
 
 pub struct Tab {
     pub label: String,
@@ -39,16 +41,21 @@ impl Tab {
 
 /// Draws the tabs, and answers with where each was drawn so a click can choose
 /// one. A selection past the end draws every tab quiet.
+///
+/// `area` is the whole band: the labels on its first row, and whatever the caller
+/// drew under them on the rest.
 pub fn draw(frame: &mut Frame, area: Rect, tabs: &[Tab], selected: usize) -> Vec<(Rect, usize)> {
     if area.height == 0 {
         return Vec::new();
     }
     let mut spans = Vec::new();
     let mut targets = Vec::new();
+    let mut separators = Vec::new();
     let mut x = area.x;
     for (index, tab) in tabs.iter().enumerate() {
         if index > 0 {
             spans.push(Span::styled("│", palette::muted()));
+            separators.push(x);
             x = x.saturating_add(1);
         }
         let label = format!(" {} ", tab.label);
@@ -77,5 +84,8 @@ pub fn draw(frame: &mut Frame, area: Rect, tabs: &[Tab], selected: usize) -> Vec
         x = x.saturating_add(total);
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    for x in separators {
+        surface::join_down(frame, x, area.y, area.height);
+    }
     targets
 }

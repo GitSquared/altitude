@@ -179,6 +179,29 @@ pub struct TaskOperatorSignal {
     pub title: String,
     pub body: String,
     pub raised_at_ms: i64,
+    /// A change to the project this task runs in, offered for the operator to
+    /// apply. Absent for every thread that is only words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<ProjectProposal>,
+}
+
+/// A change to a project, as its task's agent would have it.
+///
+/// Only what an agent can know from inside a task: the setup command and the
+/// shared caches. A field left out is one the proposal does not touch, so
+/// applying it writes nothing back for that field.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectProposal {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caches: Option<Vec<String>>,
+}
+
+impl ProjectProposal {
+    pub fn is_empty(&self) -> bool {
+        self.setup_command.is_none() && self.caches.is_none()
+    }
 }
 
 /// One signal thread as it reads now: what the agent raised, and every message
@@ -198,6 +221,11 @@ pub struct TaskOperatorSignalThread {
     pub resolved: bool,
     pub resolved_by: Option<TaskOperatorSignalAuthor>,
     pub resolved_at_ms: Option<i64>,
+    /// The change this thread is asking the operator to make, when it is asking
+    /// for one. It travels with the thread rather than inside a message, so the
+    /// operator's screen can read it as a change and not only as prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<ProjectProposal>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -600,7 +628,10 @@ impl fmt::Display for TaskAgentTurnContext {
             if let Some(checkout) = project.checkout_path() {
                 write!(formatter, "checkout={checkout}; ")?;
             }
-            writeln!(formatter, "project_brief=/altitude/project.md")?;
+            writeln!(
+                formatter,
+                "project_brief=/altitude/project.md; harness=/altitude/harness.md"
+            )?;
         }
         writeln!(
             formatter,
