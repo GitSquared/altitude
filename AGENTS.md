@@ -118,6 +118,15 @@ name a mechanism rather than a job — `run_future`, `handle_data`, `process_inf
 they cannot see. If a name needs a paragraph to explain it, the name is the bug
 and the paragraph is the fix.
 
+A word that already means something here is not a name for a new thing. "Route"
+was a project's tracker binding, a remote's record of reporting on an issue, an
+HTTP path and a vsock channel at once, and every reader had to work out which
+from the file they were in. When one word would fit two things, one of them may
+have it and the other takes the name of the job it does: `TrackerBinding`,
+`IssueReport`. Length is not the cost to weigh — `OperatorSignalConfirmed` says
+what happened, and a short name that needs a paragraph of context is longer than
+that. Renaming to get there is part of the work, not a chore that follows it.
+
 ## Tooling
 
 - Use Rust for the active core, with Ratatui, Microsandbox, and Iroh as the
