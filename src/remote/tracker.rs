@@ -1143,6 +1143,41 @@ impl RemoteTracker {
                         tracing::warn!(task = %report.task_id, %error, "could not update the session model label");
                     }
                 }
+                // A pause is why the session stops looking like it is thinking. The
+                // tracker shows the last thing told to it, and a machine that
+                // restarted or an agent waiting on a reply used to leave it saying
+                // "working" forever.
+                TaskHistoryEvent::ExecutionPaused {
+                    execution_pause_reason,
+                    ..
+                } => {
+                    let said = match execution_pause_reason {
+                        TaskExecutionPauseReason::AwaitingOperator => {
+                            "Waiting for your reply on this task."
+                        }
+                        TaskExecutionPauseReason::AwaitingReviewChecks => {
+                            "Waiting for the pull request checks to settle."
+                        }
+                        TaskExecutionPauseReason::ApplicationShutdown => {
+                            "The machine running this task restarted. The task resumes when it is \
+                             back."
+                        }
+                        TaskExecutionPauseReason::Transfer => {
+                            "This task is moving to another machine and keeps running there."
+                        }
+                    };
+                    self.config
+                        .automation
+                        .create_activity(
+                            &report.tracker_session_id,
+                            &stable_id(&report.task_id, "paused"),
+                            AgentActivityContent::Response {
+                                body: said.to_owned(),
+                            },
+                        )
+                        .await
+                        .map_err(|error| error.to_string())?;
+                }
                 TaskHistoryEvent::PlanUpdated { steps } => {
                     self.config
                         .automation
