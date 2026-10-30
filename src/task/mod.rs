@@ -250,10 +250,6 @@ where
         self
     }
 
-    pub fn tracker(&self) -> Option<Arc<dyn TrackerProvider>> {
-        self.tracker_for("trackers/linear")
-    }
-
     pub fn tracker_connectable(&self, credential: &str) -> Option<Arc<dyn TrackerProvider>> {
         self.trackers
             .as_ref()

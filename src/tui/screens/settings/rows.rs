@@ -7,7 +7,7 @@ use crate::{
     credentials::Credential as NamedCredential,
     isolation::EnvironmentDescription,
     project::{Project, ProjectCommits},
-    remote::{DiscoveredRemote, RemoteKey, TrackerConnection},
+    remote::{DiscoveredRemote, RemoteKey, TrackerConnection, TrackerReadiness},
     tui::{
         app::{CredentialStatus, RemoteStatus, TrackerState},
         widgets::{chrome, palette, utils::Dot},
@@ -32,6 +32,33 @@ pub struct Row {
     pub kind: RowKind,
 }
 
+/// What this machine gives a remote's tracker work.
+///
+/// The remote holds the app; the login that travels with the projects running
+/// there, and the team each of them claims, are this machine's to know. Printed
+/// together, because either alone leaves the operator guessing which account and
+/// which work a remote was given.
+pub struct TrackerBinding {
+    /// The workspace the login is for, when the provider named one.
+    pub workspace: Option<String>,
+    /// The logins the projects there run with, as the provider named them.
+    pub identities: Vec<String>,
+    /// Each team a project claims, and the project's name.
+    pub teams: Vec<(String, String)>,
+}
+
+/// Whether the remote has a tracker it can already act with.
+///
+/// A guide to setting one up is only worth a line while there is nothing set up:
+/// an answered remote with a ready tracker is being used, not explained.
+pub(super) fn tracker_is_set_up(trackers: Option<&[TrackerConnection]>) -> bool {
+    trackers.is_some_and(|connections| {
+        connections
+            .iter()
+            .any(|connection| connection.state == TrackerReadiness::Ready)
+    })
+}
+
 pub enum RowKind {
     Project {
         project: Project,
@@ -48,10 +75,10 @@ pub enum RowKind {
         /// What its last announcement said its shared trackers are, when it has
         /// answered. Absent while it has not, which is unknown rather than empty.
         trackers: Option<Vec<TrackerConnection>>,
-        /// The project here that takes the work such a tracker delegates. A remote
-        /// can have the app installed and still have nowhere for its issues to go,
-        /// so this is the other half of the answer.
-        delegate_target: Option<String>,
+        /// What this machine would pilot the remote's work with: the login that
+        /// travels there, and the team each project claims. Absent when no
+        /// project here runs on it.
+        binding: Option<TrackerBinding>,
     },
     Discovered(DiscoveredRemote),
     Switch {
@@ -175,18 +202,25 @@ impl Row {
                     chrome::Hint::new("r", "rename"),
                 ],
             },
-            RowKind::Remote { status, .. } => vec![
-                chrome::Hint::new(
-                    "enter",
-                    if *status == RemoteStatus::Changed {
-                        "accept identity"
-                    } else {
-                        "connect"
-                    },
-                ),
-                chrome::Hint::new("t", "tracker guide"),
-                chrome::Hint::new("e", "edit"),
-            ],
+            RowKind::Remote {
+                status, trackers, ..
+            } => {
+                let mut hints = vec![
+                    chrome::Hint::new(
+                        "enter",
+                        if *status == RemoteStatus::Changed {
+                            "accept identity"
+                        } else {
+                            "connect"
+                        },
+                    ),
+                    chrome::Hint::new("e", "edit"),
+                ];
+                if !tracker_is_set_up(trackers.as_deref()) {
+                    hints.insert(1, chrome::Hint::new("t", "set up guide"));
+                }
+                hints
+            }
             RowKind::Discovered(_) => vec![chrome::Hint::new("enter", "use remote")],
             RowKind::Switch { .. } => vec![chrome::Hint::new("enter", "toggle")],
         }

@@ -15,7 +15,8 @@ use super::{
     pages::{hostname, public_identity},
     panel::{Section, Setting},
     rows::{
-        Credential, CredentialKind, GitIdentity, ProjectDefaults, Row, RowKind, View, switch_row,
+        Credential, CredentialKind, GitIdentity, ProjectDefaults, Row, RowKind, TrackerBinding,
+        View, switch_row,
     },
 };
 
@@ -285,20 +286,11 @@ impl App {
                 .cloned()
                 .unwrap_or(RemoteStatus::Unknown);
             let trackers = self.remote_trackers.get(&address).cloned();
-            // Which of this operator's projects would receive an issue the
-            // remote's tracker delegates: bound to this machine, and accepting
-            // delegated work.
-            let delegate_target = self
-                .projects()
-                .into_iter()
-                .find(|project| {
-                    project.host.as_deref() == Some(address.as_str())
-                        && project
-                            .tracker
-                            .as_ref()
-                            .is_some_and(|route| route.accepts_delegated_work)
-                })
-                .map(|project| project.name.clone());
+            // What this machine gives the remote's tracker work: the login that
+            // travels with the projects running there, and the team each project
+            // claims. The remote holds the app; these are the other half of the
+            // answer, and they are this machine's to know.
+            let binding = self.tracker_binding(&address);
             Row {
                 // A name is what the remote called itself, so an address
                 // that has never answered shows itself instead.
@@ -313,12 +305,80 @@ impl App {
                     remembered,
                     status,
                     trackers,
-                    delegate_target,
+                    binding,
                 },
             }
         }));
         rows.extend(self.discovered_rows());
         rows
+    }
+
+    /// The tracker work this machine has bound to one remote.
+    ///
+    /// Read from the projects that run there: the login each one's route names,
+    /// and the team it claims. A remote with the app and no project of ours is
+    /// bound to nothing, which is a different answer from a remote without the
+    /// app.
+    fn tracker_binding(&self, address: &str) -> Option<TrackerBinding> {
+        let projects: Vec<_> = self
+            .projects()
+            .into_iter()
+            .filter(|project| project.host.as_deref() == Some(address))
+            .collect();
+        let default = self
+            .settings_file
+            .as_ref()
+            .and_then(|file| file.settings().default_credential(Slot::Tracker))
+            .map(str::to_owned);
+        let mut identities: Vec<String> = Vec::new();
+        let mut workspace = None;
+        let mut teams = Vec::new();
+        for project in &projects {
+            let Some(route) = &project.tracker else {
+                continue;
+            };
+            if let Some(credential) = route.credential.clone().or_else(|| default.clone()) {
+                // The account says whose login it is and which workspace it is
+                // in; the label says what the operator called it. Both are read
+                // here rather than asked over the network.
+                let label = self
+                    .settings_file
+                    .as_ref()
+                    .and_then(|file| file.settings().credential(&credential))
+                    .map(|credential| credential.label.clone())
+                    .unwrap_or_else(|| credential.clone());
+                let account = self.tracker_account(&credential);
+                let identity = account
+                    .as_ref()
+                    .map(|account| account.display_name.clone())
+                    .unwrap_or_else(|| label.clone());
+                if !identities.contains(&identity) {
+                    identities.push(identity);
+                }
+                // A name the login adopted carries its own workspace —
+                // `gaby@acme` — so it answers the question an account recorded
+                // before workspaces were fetched cannot.
+                if workspace.is_none() {
+                    workspace = account.and_then(|account| account.workspace).or_else(|| {
+                        label
+                            .split_once('@')
+                            .map(|(_, workspace)| workspace.to_owned())
+                    });
+                }
+            }
+            teams.push((
+                route
+                    .scope
+                    .clone()
+                    .unwrap_or_else(|| "whole account".to_owned()),
+                project.name.clone(),
+            ));
+        }
+        (!identities.is_empty() || !teams.is_empty()).then_some(TrackerBinding {
+            workspace,
+            identities,
+            teams,
+        })
     }
 
     /// Discovered remotes, ordered by the name they announce so the list does

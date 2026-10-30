@@ -303,7 +303,8 @@ pub(in crate::tui) struct TrackerConnectReply {
     pub result: Result<bool, String>,
 }
 
-pub(in crate::tui) const NO_LINEAR: &str = "Linear support is not available in this build.";
+pub(in crate::tui) const NO_TRACKER: &str =
+    "No task tracker is signed in; connect one in Settings.";
 
 /// How long the list is shown before its addresses are dialled, so moving through
 /// the sections does not reach anything.
@@ -4876,6 +4877,31 @@ impl App {
             .unwrap_or_default()
     }
 
+    /// The tracker login this installation asks about issues with.
+    ///
+    /// The one it defaults to, or the only one it has: a single connected login
+    /// is an answer rather than a choice somebody still has to make, and asking
+    /// for a default nobody set is what made a connected tracker look unsupported.
+    pub(in crate::tui) fn tracker_credential(&self) -> Option<String> {
+        let settings = self.settings_file.as_ref()?.settings();
+        if let Some(default) = settings.default_credential(Slot::Tracker) {
+            return Some(default.to_owned());
+        }
+        let mut trackers = settings
+            .credentials()
+            .iter()
+            .filter(|credential| {
+                credential
+                    .service()
+                    .is_some_and(|service| service.slot() == Slot::Tracker)
+            })
+            .map(|credential| credential.id.clone());
+        match (trackers.next(), trackers.next()) {
+            (Some(only), None) => Some(only),
+            _ => None,
+        }
+    }
+
     pub(in crate::tui) fn tracker_state_for(&self, id: &str) -> TrackerState {
         self.tracker_states
             .get(id)
@@ -5973,9 +5999,12 @@ impl App {
         let Some(reference) = self.issue_submission_reference(token) else {
             return;
         };
-        let Some(tracker) = task_service.tracker() else {
+        let tracker = self
+            .tracker_credential()
+            .and_then(|credential| task_service.tracker_for(&credential));
+        let Some(tracker) = tracker else {
             if let Foreground::NewTask(question) = &mut self.foreground {
-                question.read_failed(token, NO_LINEAR.to_owned());
+                question.read_failed(token, NO_TRACKER.to_owned());
             }
             return;
         };
@@ -6214,9 +6243,7 @@ impl App {
     /// `user@workspace` when the provider named the workspace, which is what
     /// tells two logins to the same tracker apart.
     fn tracker_account_name(&self, credential: &str) -> Option<String> {
-        let text =
-            fs::read_to_string(self.config.profile_dir(credential).join("identity.json")).ok()?;
-        let account: TrackerAccount = serde_json::from_str(&text).ok()?;
+        let account = self.tracker_account(credential)?;
         let name = account.display_name.trim();
         if name.is_empty() {
             return None;
@@ -6225,6 +6252,16 @@ impl App {
             Some(workspace) if !workspace.is_empty() => format!("{name}@{workspace}"),
             _ => name.to_owned(),
         })
+    }
+
+    /// The account a tracker profile last recorded, as it recorded it.
+    ///
+    /// Read rather than asked: the file is written when the login is made, and a
+    /// page that names a login should not wait on a network for its name.
+    pub(in crate::tui) fn tracker_account(&self, credential: &str) -> Option<TrackerAccount> {
+        let text =
+            fs::read_to_string(self.config.profile_dir(credential).join("identity.json")).ok()?;
+        serde_json::from_str(&text).ok()
     }
 
     /// Move a freshly checked identity to the id its account name implies,

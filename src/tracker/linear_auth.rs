@@ -31,7 +31,7 @@ use tokio::{
 use super::TrackerError;
 
 pub(super) const MCP_URL: &str = "https://mcp.linear.app/mcp";
-const GRANT_FILE: &str = "grant.json";
+pub(super) const GRANT_FILE: &str = "grant.json";
 
 pub(super) struct Grant(PathBuf);
 

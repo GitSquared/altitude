@@ -15,7 +15,7 @@ use ratatui::{
 
 use crate::{
     agent::AgentKind,
-    credentials::{Credential, Service, Slot, agent_of},
+    credentials::{Credential, Slot, agent_of},
     project::{Project, ProjectCommits},
     tui::{
         popups::{repositories::Repositories, scopes::Scopes},
@@ -480,46 +480,20 @@ impl Form {
 
     pub fn cycle_agent(&mut self) {
         let options = self.identities_for(Slot::Agent);
-        if options.is_empty() {
-            return;
-        }
-        let at = options
-            .iter()
-            .position(|option| self.agent_credential.as_ref() == Some(option))
-            .unwrap_or(0);
-        self.agent_credential = Some(options[(at + 1) % options.len()].clone());
-        self.agent = self
-            .agent_credential
-            .as_deref()
-            .and_then(Service::from_id)
-            .and_then(|service| match service {
-                Service::Agent(kind) => Some(kind),
-                _ => None,
-            });
+        self.agent_credential = next_choice(&options, self.agent_credential.as_deref());
+        self.agent = agent_of(self.agent_credential.as_deref());
     }
 
     pub fn cycle_vcs(&mut self) {
         let options = self.identities_for(Slot::VersionControl);
-        if options.is_empty() {
-            return;
-        }
-        let at = options
-            .iter()
-            .position(|option| self.vcs_credential.as_ref() == Some(option))
-            .unwrap_or(0);
-        self.vcs_credential = Some(options[(at + 1) % options.len()].clone());
+        self.vcs_credential = next_choice(&options, self.vcs_credential.as_deref());
     }
 
     pub fn cycle_tracker(&mut self) {
         let options = self.identities_for(Slot::Tracker);
-        if options.is_empty() {
-            return;
-        }
-        let at = options
-            .iter()
-            .position(|option| self.tracker_credential.as_ref() == Some(option))
-            .unwrap_or(0);
-        self.tracker_credential = Some(options[(at + 1) % options.len()].clone());
+        self.tracker_credential = next_choice(&options, self.tracker_credential.as_deref());
+        // A team belongs to the tracker it came from, so changing which one is
+        // chosen — or choosing none — leaves no team behind.
         self.scope = Field::with("");
     }
 
@@ -603,6 +577,23 @@ impl Form {
         let text = self.instructions.value();
         (!text.trim().is_empty()).then(|| text.trim_end().to_owned())
     }
+}
+
+/// The choice after this one, with "nothing chosen" as the first stop.
+///
+/// Every one of these could once be set and never emptied: with a single
+/// identity on offer, one press of enter chose it for good. The stop before the
+/// first identity is what makes the field reversible, and it is what an unset
+/// field already means — the installation's answer underneath.
+fn next_choice(options: &[String], current: Option<&str>) -> Option<String> {
+    let mut stops = Vec::with_capacity(options.len() + 1);
+    stops.push(None);
+    stops.extend(options.iter().cloned().map(Some));
+    let at = stops
+        .iter()
+        .position(|stop| stop.as_deref() == current)
+        .unwrap_or(0);
+    stops[(at + 1) % stops.len()].clone()
 }
 
 pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &mut Form, tick: Option<usize>) {

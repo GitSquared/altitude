@@ -38,7 +38,7 @@ use crate::{
 
 use super::App;
 use super::app::{
-    ConfigPushReply, Foreground, IssueReadReply, IssueSearchReply, NO_LINEAR, RemoteSignalsReply,
+    ConfigPushReply, Foreground, IssueReadReply, IssueSearchReply, NO_TRACKER, RemoteSignalsReply,
     RemoveTaskReply, RepositoryListReply, SendTaskReply, TaskDelegationReply, TrackerConnectReply,
     TrackerScopesReply, WatchedTasks,
 };
@@ -813,7 +813,10 @@ where
             // run while it is the thing in front.
             _ = issue_search_clock.tick(), if matches!(app.foreground, Foreground::NewTask(_)) => {
                 if let Some((token, query)) = app.due_issue_search() {
-                    match task_service.tracker() {
+                    let tracker = app
+                        .tracker_credential()
+                        .and_then(|credential| task_service.tracker_for(&credential));
+                    match tracker {
                         Some(tracker) => {
                             let replies = issue_search_replies.clone();
                             tokio::spawn(async move {
@@ -824,8 +827,9 @@ where
                                 let _ = replies.send(IssueSearchReply { token, result });
                             });
                         }
-                        // No provider at all is a property of the build.
-                        None => app.issue_search_unavailable(token, NO_LINEAR),
+                        // Nothing is signed in to ask: the operator's to fix, and
+                        // the page says so rather than blaming the build.
+                        None => app.issue_search_unavailable(token, NO_TRACKER),
                     }
                     redraw = true;
                 }

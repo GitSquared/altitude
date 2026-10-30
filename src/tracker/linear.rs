@@ -54,6 +54,7 @@ const MAX_COMMENT_PAGES: usize = 20;
 /// saved.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(180);
 const TOOL_TIMEOUT: Duration = Duration::from_secs(30);
+const WORKSPACE_TIMEOUT: Duration = Duration::from_secs(15);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(3);
 
 struct Session {
@@ -254,7 +255,11 @@ impl Linear {
     }
 
     async fn record_account(&self, session: &Session) -> Result<(), TrackerError> {
-        let account = read_account(session).await?;
+        let mut account = read_account(session).await?;
+        // The account the MCP server reports does not say which workspace it is
+        // in, and two logins are told apart by exactly that. Asked once, here,
+        // with the token this sign-in produced.
+        account.workspace = account.workspace.or(workspace_name(&self.profile).await);
         let bytes = serde_json::to_vec_pretty(&account)
             .map_err(|_| TrackerError::new("could not encode the Linear account"))?;
         fs::write(self.profile.join(ACCOUNT_FILE), bytes)
@@ -456,11 +461,47 @@ async fn read_account(session: &Session) -> Result<TrackerAccount, TrackerError>
     })
 }
 
-/// The workspace the account is in, from whichever shape the provider sent.
+/// What Linear calls the workspace this login is for.
 ///
-/// Asked of the account rather than fetched separately: it is one fact about one
-/// login, and a provider that does not name it leaves it absent rather than
-/// guessed.
+/// The MCP server's account answer names the person and not the workspace, so it
+/// is asked of Linear's own API with the token the sign-in produced. A token that
+/// cannot answer, or an answer without a workspace, leaves it absent rather than
+/// guessed: `gaby` is a worse name than `gaby@acme`, and a wrong workspace is
+/// worse than either.
+async fn workspace_name(profile: &Path) -> Option<String> {
+    let token = grant_token(profile)?;
+    let client = reqwest::Client::builder()
+        .timeout(WORKSPACE_TIMEOUT)
+        .build()
+        .ok()?;
+    let response = client
+        .post("https://api.linear.app/graphql")
+        .bearer_auth(token)
+        .json(&json!({ "query": "{ viewer { organization { name urlKey } } }" }))
+        .send()
+        .await
+        .ok()?;
+    let body: Value = response.json().await.ok()?;
+    let organization = body.pointer("/data/viewer/organization")?;
+    let named = organization
+        .get("urlKey")
+        .or_else(|| organization.get("name"))
+        .and_then(Value::as_str)?
+        .trim();
+    (!named.is_empty()).then(|| named.to_owned())
+}
+
+/// The access token the sign-in stored, which is what can answer for it.
+fn grant_token(profile: &Path) -> Option<String> {
+    let text = fs::read_to_string(profile.join(super::linear_auth::GRANT_FILE)).ok()?;
+    let grant: Value = serde_json::from_str(&text).ok()?;
+    grant
+        .pointer("/token_response/access_token")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// The workspace the account itself named, when it named one.
 fn workspace_of(user: &Value) -> Option<String> {
     let workspace = user
         .get("organization")

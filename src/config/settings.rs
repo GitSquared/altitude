@@ -286,6 +286,27 @@ impl Settings {
                 .or(agent_of(project.agent_credential.as_deref()));
             project.agent = project.agent.or(installation);
         }
+        // One login for a slot is that slot's default: there is nothing to choose
+        // between, and a default nobody set is what makes a connected tracker look
+        // like a feature the build does not have.
+        for slot in [Slot::Agent, Slot::VersionControl, Slot::Tracker] {
+            if self.default_credential(slot).is_some() {
+                continue;
+            }
+            let only: Vec<String> = self
+                .credentials
+                .iter()
+                .filter(|credential| {
+                    credential
+                        .service()
+                        .is_some_and(|service| service.slot() == slot)
+                })
+                .map(|credential| credential.id.clone())
+                .collect();
+            if let [id] = only.as_slice() {
+                let _ = self.set_default_credential(id);
+            }
+        }
     }
 
     pub fn credentials(&self) -> &[Credential] {

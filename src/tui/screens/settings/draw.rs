@@ -26,7 +26,7 @@ use super::{
         tracker_summary,
     },
     panel::{Depth, Panel, Section},
-    rows::{RowKind, View, mark},
+    rows::{RowKind, TrackerBinding, View, mark, tracker_is_set_up},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -205,6 +205,34 @@ fn draw_empty_detail(frame: &mut Frame, area: Rect, section: Section) {
     empty::draw(frame, area, message);
 }
 
+/// The tracker work this machine gives a remote, as settings rather than prose.
+///
+/// One label column so the page reads down instead of across, and every value in
+/// the accent: these are the names the operator came to the page to read.
+fn tracker_setting_lines(binding: &TrackerBinding) -> Vec<Line<'static>> {
+    const COLUMN: usize = 10;
+    let setting = |label: &str, value: String| {
+        Line::from(vec![
+            Span::styled(format!("{label:<COLUMN$}"), palette::muted()),
+            Span::styled(value, palette::accent()),
+        ])
+    };
+    let mut lines = Vec::new();
+    if let Some(workspace) = &binding.workspace {
+        lines.push(setting("workspace", workspace.clone()));
+    }
+    if !binding.identities.is_empty() {
+        lines.push(setting("identity", binding.identities.join(", ")));
+    }
+    // The label is repeated rather than left blank on the lines under it: the
+    // paragraph trims leading whitespace, so an aligned column of blanks would
+    // not survive the wrap.
+    for (team, project) in &binding.teams {
+        lines.push(setting("team", format!("{team} → {project}")));
+    }
+    lines
+}
+
 fn detail(panel: &Panel, view: &View, tick: Option<usize>) -> Paragraph<'static> {
     let heading = move |text: String| Line::styled(text, palette::heading());
     let Some(row) = panel.selected_row(view) else {
@@ -241,7 +269,7 @@ fn detail(panel: &Panel, view: &View, tick: Option<usize>) -> Paragraph<'static>
             status,
             needs_config,
             trackers,
-            delegate_target,
+            binding,
         } => {
             let mut lines =
                 remote_connector(label, address, remembered.as_ref(), status, *needs_config)
@@ -249,28 +277,19 @@ fn detail(panel: &Panel, view: &View, tick: Option<usize>) -> Paragraph<'static>
             lines.push(Line::from(""));
             lines.push(section_heading("Task tracker"));
             lines.push(tracker_summary(trackers.as_deref(), tick));
-            // Nothing here is a choice of this client's: the app belongs to the
-            // machine that runs it. An answered remote says what it has and where
-            // its work lands; one that has none is offered the guide instead of a
-            // menu.
-            match trackers.as_deref() {
-                Some([]) => lines.push(Line::styled(
-                    "Press t to learn how to pilot tasks from your tracker.",
+            // Everything this machine gives the remote's tracker work, named: the
+            // remote holds the app, this side holds the login and the teams. The
+            // values are the accent because they are what is being pointed at;
+            // nothing here is a choice of this client's, since the app belongs to
+            // the machine that runs it.
+            if let Some(binding) = binding {
+                lines.extend(tracker_setting_lines(binding));
+            }
+            if !tracker_is_set_up(trackers.as_deref()) {
+                lines.push(Line::styled(
+                    "Press t for the set up guide.",
                     palette::accent(),
-                )),
-                _ => {
-                    if let Some(project) = delegate_target {
-                        lines.push(Line::from(format!(
-                            "Issues it delegates start tasks in {project}."
-                        )));
-                    } else if trackers.is_some() {
-                        lines.push(Line::styled(
-                            "Its delegated issues start nothing: no project here accepts them.",
-                            palette::muted(),
-                        ));
-                    }
-                    lines.push(Line::styled("Press t for the guide.", palette::accent()));
-                }
+                ));
             }
             lines
         }
