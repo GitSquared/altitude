@@ -634,6 +634,28 @@ impl TaskStore {
         Ok(inputs)
     }
 
+    /// Whether the task is waiting on an answer only the operator can give.
+    ///
+    /// A thread counts while it is unresolved and holds nothing from them: once
+    /// they reply, the reply is the answer to wake for, and a thread they left
+    /// open is a conversation rather than a stop. This is what keeps a report
+    /// from having to raise a second question to say the task is stopped.
+    pub async fn has_unanswered_question(&self, task_id: &str) -> Result<bool, TaskError> {
+        Ok(self
+            .unresolved_signal_threads(task_id)
+            .await?
+            .iter()
+            .any(|thread| {
+                matches!(
+                    thread.kind,
+                    TaskOperatorSignalKind::Blocked | TaskOperatorSignalKind::InReview
+                ) && !thread
+                    .messages
+                    .iter()
+                    .any(|message| message.author == TaskOperatorSignalAuthor::Operator)
+            }))
+    }
+
     /// The signal threads a task still has unresolved, with every message on
     /// them.
     pub async fn unresolved_signal_threads(

@@ -363,7 +363,7 @@ impl TaskAgentTools {
         let thread = self.thread(&signal_id).await?;
         Ok(json!({
             "signal": thread_json(&thread),
-            "note": "This task is now waiting on the operator: nothing is applied until they accept the change, and this turn is your last one until they answer.",
+            "note": "This task is now waiting on the operator on this thread: nothing is applied until they accept the change, and this turn is your last one until they answer. Raise nothing more in your report; the wait is already recorded.",
         }))
     }
 
@@ -452,7 +452,7 @@ impl AgentToolProvider for TaskAgentTools {
             ),
             AgentTool::new(
                 "tasks_project_propose",
-                "Ask the operator to change the project this task runs in: its setup command, its shared caches, or both. Use it when the work needs software, a service, or a cache that the environment does not have; a tool you install yourself is gone with this sandbox. This opens a blocked thread that carries the change, so the task stops and waits: the operator sees your reason and the change, applies it or not, and replies. Applying rebuilds the project's environment on the machine that runs it, so the new setup command is what every task of this project starts from next time. Fields you leave out are left as they are. Do not open one of these for a change you have not tried to justify in `reason`, and do not open a second one for the same change while the first is open.",
+                "Ask the operator to change the project this task runs in: its setup command, its shared caches, or both. Use it when the work needs software, a service, or a cache that the environment does not have; a tool you install yourself is gone with this sandbox. This opens a blocked thread that carries the change, so the task stops and waits: the operator sees your reason and the change, applies it or not, and replies. That thread is your report for this turn: raise nothing more, and do not raise a second blocked signal saying you are waiting. Applying rebuilds the project's environment on the machine that runs it, so the new setup command is what every task of this project starts from next time. Fields you leave out are left as they are. Do not open one of these for a change you have not tried to justify in `reason`, and do not open a second one for the same change while the first is open.",
                 json!({
                     "type": "object",
                     "additionalProperties": false,

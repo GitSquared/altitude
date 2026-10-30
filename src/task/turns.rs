@@ -42,12 +42,27 @@ where
         agent_run: &TaskAgentRun,
         report: &TaskAgentTurnReport,
     ) -> Result<(Task, TaskAgentRequestedAction), TaskServiceError> {
-        let action = report.requested_action();
-        let attention = match report.operator_signal.as_ref().map(|signal| signal.kind) {
-            Some(TaskOperatorSignalKind::Blocked | TaskOperatorSignalKind::InReview) => {
-                TaskOperatorAttentionLevel::Requested
+        // A report that asks for nothing still waits when the task already has a
+        // question with the operator they have not answered: the thread the agent
+        // opened is the wait, so the report does not have to raise another one to
+        // keep the task stopped.
+        let action = match report.requested_action() {
+            TaskAgentRequestedAction::Continue
+                if self
+                    .store
+                    .has_unanswered_question(&task.id)
+                    .await
+                    .map_err(TaskServiceError::Task)? =>
+            {
+                TaskAgentRequestedAction::AwaitOperator
             }
-            _ => TaskOperatorAttentionLevel::Nominal,
+            action => action,
+        };
+        // Whatever stopped the task, the operator is the one who looks at it: the
+        // wait may be this report's question or a thread it already opened.
+        let attention = match action {
+            TaskAgentRequestedAction::AwaitOperator => TaskOperatorAttentionLevel::Requested,
+            TaskAgentRequestedAction::Continue => TaskOperatorAttentionLevel::Nominal,
         };
         // Links are recorded by the vcs_link_pull_request tool during the work
         // turn, so the task this run started from may predate them. Read the

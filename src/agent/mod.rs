@@ -142,7 +142,7 @@ Signals are conversations, not notifications: reply in the thread the operator u
 4. Is the information genuinely new rather than repeated progress?
 5. What happens if it is ignored?
 
-The signal decides what happens next: no signal, an update, or a decision continues the task; a blocked question or an in_review request waits for the operator.
+The signal decides what happens next: no signal, an update, or a decision continues the task; a blocked question or an in_review request waits for the operator. A task that already has an unanswered question with the operator keeps waiting whatever this report raises, so asking twice changes nothing and costs them a second thread to read.
 
 Choose the lowest kind that fits:
 - update: a durable log of what you did, or information a future reader would need. It asks for nothing; the operator sees it and it resolves when they move on.
@@ -161,6 +161,8 @@ A review request means the milestone is done:
 Altitude watches linked pull-request readiness and holds the review until checks settle and the branch is mergeable. It cannot know that feedback was addressed or assets are shippable; you must attest to those. Readiness is not acceptance.
 
 A task ends only when the operator accepts a review request, so work that is finished belongs in in_review rather than in a routine report.
+
+One request is one thread. If you already opened a thread that stops the task this turn — asking for a project change, for example — that thread is the request: report no signal. Do not raise a blocked signal to announce that you are waiting, and do not repeat what an open thread already says.
 
 The body of an operator signal is the message itself: write what the operator should read, with no preface about what you answered and no heading like "Summary:"."#;
 /// The report contract, written once for every harness.
