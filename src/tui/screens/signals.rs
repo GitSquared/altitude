@@ -298,15 +298,16 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         frame.render_widget(Clear, conversation);
         draw_conversation(frame, conversation, app);
         // The divider at the plan's left edge is its border, so the clear
-        // starts after it rather than erasing it. The text starts one column
-        // further in: padding alone would leave it against the divider.
-        frame.render_widget(Clear, inset(plan, PLAN_PADDING));
-        let text = Rect {
+        // starts after it rather than erasing it, and runs all the way to the
+        // surface's own right edge: the padding is part of the column, and a
+        // column cleared only as far as its text leaves the field showing.
+        let column = Rect {
             x: plan.x.saturating_add(1),
             width: plan.width.saturating_sub(1),
             ..plan
         };
-        draw_plan(frame, text, app);
+        frame.render_widget(Clear, column);
+        draw_plan(frame, column, app);
     } else {
         // The tabs and the rule under them are one band, so the separators
         // between the tabs run down onto that rule.
