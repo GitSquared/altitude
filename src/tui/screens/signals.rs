@@ -61,9 +61,7 @@ const COMPOSER_HEIGHT: u16 = 5;
 /// Which threads the list shows.
 ///
 /// The groups are the filters: a kind has one heading, and choosing that heading
-/// is how the operator asks for the whole history of that kind. `Unresolved`
-/// keeps a just-resolved thread for a moment so it can be seen leaving rather
-/// than vanishing under the cursor.
+/// is how the operator asks for the whole history of that kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignalFilter {
     All,
@@ -77,11 +75,11 @@ pub enum SignalFilter {
 
 impl SignalFilter {
     /// Whether a thread belongs in this view. The kind filters keep that kind's
-    /// history; the unresolved view adds a just-resolved thread for its linger.
-    pub fn matches(self, thread: &TaskOperatorSignalThread, now_ms: i64) -> bool {
+    /// history, and the unresolved view is what still needs an answer.
+    pub fn matches(self, thread: &TaskOperatorSignalThread) -> bool {
         match self {
             Self::All => true,
-            Self::Unresolved => thread.is_unresolved() || is_lingering(thread, now_ms),
+            Self::Unresolved => thread.is_unresolved(),
             Self::Resolved => thread.is_resolved(),
             Self::NeedsYou => thread.kind == TaskOperatorSignalKind::Blocked,
             Self::Review => thread.kind == TaskOperatorSignalKind::InReview,
@@ -89,15 +87,6 @@ impl SignalFilter {
             Self::Info => thread.kind == TaskOperatorSignalKind::Update,
         }
     }
-}
-
-pub const LINGER_MS: i64 = 5_000;
-
-pub fn is_lingering(thread: &TaskOperatorSignalThread, now_ms: i64) -> bool {
-    thread.is_resolved()
-        && thread
-            .resolved_at_ms
-            .is_some_and(|at| now_ms.saturating_sub(at) < LINGER_MS)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -223,8 +212,8 @@ struct Group {
     tone: Style,
 }
 
-fn group_of(thread: &TaskOperatorSignalThread, linger: bool) -> Group {
-    if thread.is_resolved() && !linger {
+fn group_of(thread: &TaskOperatorSignalThread) -> Group {
+    if thread.is_resolved() {
         return Group {
             title: "RESOLVED",
             symbol: '✓',
@@ -457,19 +446,16 @@ fn draw_threads(frame: &mut Frame, area: Rect, app: &mut App) {
     app.signal_targets.add(area, SignalHit::List);
     let agent = app.signal_agent_label();
     let now = Utc::now().timestamp_millis();
-    let keeping = app.signal_filter.chosen_value() == Some(&SignalFilter::Unresolved);
     let mut counts: HashMap<&'static str, usize> = HashMap::new();
     for thread in &app.signal_threads {
-        let linger = keeping && is_lingering(thread, now);
-        *counts.entry(group_of(thread, linger).title).or_default() += 1;
+        *counts.entry(group_of(thread).title).or_default() += 1;
     }
     let mut previous: Option<&'static str> = None;
     let rows = app
         .signal_threads
         .iter()
         .map(|thread| {
-            let linger = keeping && is_lingering(thread, now);
-            let group = group_of(thread, linger);
+            let group = group_of(thread);
             let starts = previous != Some(group.title);
             previous = Some(group.title);
             let view = signal::view(thread.kind);

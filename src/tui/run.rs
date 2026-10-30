@@ -300,9 +300,6 @@ where
     // Acknowledgements identify the exact content sent while local edits continue.
     let (config_pushes, mut config_pushed) = mpsc::channel::<ConfigPushReply>(8);
     let mut issue_search_clock = time::interval(Duration::from_millis(80));
-    // A resolved thread stays on the signals list for five seconds. The clock is
-    // what makes the last second happen without waiting for another key.
-    let mut signal_linger_clock = time::interval(Duration::from_millis(250));
     let mut effects: EffectManager<()> = EffectManager::default();
     let mut last_frame = Instant::now();
     // A modal that has just been dismissed, held as its last frame so it can be
@@ -768,10 +765,6 @@ where
             }
             _ = shell_notice.tick(), if app.shell_has_active_notice() => {
                 // A notice that has run its course is cleared by this frame.
-                redraw = true;
-            }
-            _ = signal_linger_clock.tick(), if app.has_lingering_signals() => {
-                app.expire_signal_linger();
                 redraw = true;
             }
             _ = backdrop.tick(), if app.backdrop_animates() => {

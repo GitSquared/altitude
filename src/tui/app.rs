@@ -82,7 +82,7 @@ use screens::settings::{
 use screens::shell::{GuestRequest, Shell};
 use screens::signals::{
     Composer, SignalAction, SignalFilter, SignalFocus, SignalHit, SignalSort, actions,
-    is_lingering, primary_action, secondary_action,
+    primary_action, secondary_action,
 };
 
 /// What the keyboard is answering to, most immediate first.
@@ -5488,20 +5488,15 @@ impl App {
             .chosen_value()
             .copied()
             .unwrap_or(SignalSort::Oldest);
-        let now = chrono::Utc::now().timestamp_millis();
         let mut threads: Vec<_> = self
             .signal_all_threads
             .iter()
-            .filter(|thread| filter.matches(thread, now))
+            .filter(|thread| filter.matches(thread))
             .cloned()
             .collect();
-        // A resolved thread that is still lingering in the unresolved view
-        // keeps the place it had: the point of the five seconds is that it does
-        // not move out from under the operator before they have seen it end.
-        let keeping = filter == SignalFilter::Unresolved;
         threads.sort_by(|left, right| {
             let group = |thread: &TaskOperatorSignalThread| {
-                let settled = thread.is_resolved() && !(keeping && is_lingering(thread, now));
+                let settled = thread.is_resolved();
                 // Resolved threads share one RESOLVED heading, so their kind's
                 // tier is not a visible group; ordering them by it would put a
                 // newer update below an older decision for no reason.
@@ -5528,25 +5523,6 @@ impl App {
             None => self.signals_cursor.select(0),
         }
         self.normalise_signal_focus();
-    }
-
-    /// Whether a resolved thread is still being shown in the unresolved view,
-    /// either because its five seconds have not run out or because it has not yet
-    /// been removed after they did.
-    pub(in crate::tui) fn has_lingering_signals(&self) -> bool {
-        self.signal_filter.chosen_value() == Some(&SignalFilter::Unresolved)
-            && self
-                .signal_threads
-                .iter()
-                .any(TaskOperatorSignalThread::is_resolved)
-    }
-
-    /// Rebuild the view once a linger has run out, so the row leaves on time
-    /// instead of waiting for the next event.
-    pub(in crate::tui) fn expire_signal_linger(&mut self) {
-        if self.has_lingering_signals() {
-            self.apply_signal_view();
-        }
     }
 
     /// Move between threads, and start the one now selected at its newest
