@@ -834,28 +834,26 @@ fn project_scripts(project: &Project) -> Result<String, IsolationError> {
             .parent()
             .map(|parent| parent.to_string_lossy().into_owned())
             .unwrap_or_else(|| GUEST_HOME.to_owned());
-        // A cache mounted inside the checkout — `~/altitude/target`, say — is made
-        // before this runs, so the directory exists and is not empty. Git is
-        // started in place for that case instead of cloned into an empty one,
-        // which git refuses.
+        // No emptiness test: a cache mounted inside the checkout —
+        // `~/altitude/target`, say — has already made the directory, and a shell
+        // asked whether a directory is empty answers "yes" both when it is and
+        // when it may not read it, while git, a line later, disagrees. What the
+        // question stood for is whether git has started here, which git answers
+        // itself: where it has, this is a task resuming into its own tree and is
+        // left alone.
         script.push_str(&format!(
-            r#"if [ ! -d {checkout}/.git ]; then
-  mkdir -p {parent}
-  if [ -n "$(ls -A {checkout} 2>/dev/null)" ]; then
-    if ! git -C {checkout} init -q \
-      || ! git -C {checkout} remote add origin {repository} \
-      || ! git -C {checkout} fetch -q origin; then
-      echo "altitude: the project's repository could not be fetched" >&2
-      exit 1
-    fi
-    git -C {checkout} remote set-head origin --auto >/dev/null 2>&1 || true
-    branch=$(git -C {checkout} symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || echo origin/main)
-    if ! git -C {checkout} checkout -q -f -B "${{branch#origin/}}" "$branch"; then
-      echo "altitude: the project's repository could not be checked out" >&2
-      exit 1
-    fi
-  elif ! git clone {repository} {checkout}; then
-    echo "altitude: the project's repository could not be cloned" >&2
+            r#"mkdir -p {parent} {checkout}
+if ! git -C {checkout} rev-parse --git-dir >/dev/null 2>&1; then
+  git -C {checkout} init -q
+  if ! git -C {checkout} remote add origin {repository} \
+    || ! git -C {checkout} fetch -q origin; then
+    echo "altitude: the project's repository could not be fetched" >&2
+    exit 1
+  fi
+  git -C {checkout} remote set-head origin --auto >/dev/null 2>&1 || true
+  branch=$(git -C {checkout} symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || echo origin/main)
+  if ! git -C {checkout} checkout -q -f -B "${{branch#origin/}}" "$branch"; then
+    echo "altitude: the project's repository could not be checked out" >&2
     exit 1
   fi
 fi
