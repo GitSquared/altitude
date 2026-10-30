@@ -43,10 +43,12 @@ pub struct Project {
     /// of its system prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
-    /// The harness a task here runs unless one is picked.
+    /// The harness a task here runs.
     ///
-    /// Kept as the service a legacy project named; `agent_credential` is what new
-    /// work reads.
+    /// Settings settle it from the identity the project names, so a project that
+    /// has been stored or read always answers what it runs; `agent_credential` is
+    /// the login that answer needs. It is absent only on a project that has not
+    /// reached the file yet, and on the throwaway builds that are not projects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentKind>,
     /// The coding-agent identity new tasks here use. Absent is the installation's

@@ -1,6 +1,6 @@
 use crate::{
     agent::AgentKind,
-    credentials::{Credential, Service, Slot},
+    credentials::{Credential, Service, Slot, agent_of},
     project::{Project, ProjectCommits},
 };
 use serde::{Deserialize, Serialize};
@@ -276,6 +276,16 @@ impl Settings {
                 route.credential = self.defaults.tracker_credential.clone();
             }
         }
+        // A project answers what it runs as soon as it is read, so no screen has
+        // to work out an answer the file could have said. The identity decides
+        // it: a login for Pi is a project that runs Pi.
+        let installation = self.defaults.agent;
+        for project in &mut self.projects {
+            project.agent = project
+                .agent
+                .or(agent_of(project.agent_credential.as_deref()));
+            project.agent = project.agent.or(installation);
+        }
     }
 
     pub fn credentials(&self) -> &[Credential] {
@@ -474,12 +484,10 @@ impl Settings {
     pub fn used_credential_ids(&self) -> Vec<String> {
         let mut used = Vec::new();
         for project in &self.projects {
-            let agent = project.agent_credential.clone().or_else(|| {
-                project
-                    .agent
-                    .or(self.defaults.agent)
-                    .map(|kind| kind.profile().to_owned())
-            });
+            let agent = project
+                .agent_credential
+                .clone()
+                .or_else(|| project.agent.map(|kind| kind.profile().to_owned()));
             let vcs = project
                 .vcs_credential
                 .clone()
@@ -600,7 +608,13 @@ impl Settings {
         self.interface.animations = on;
     }
 
-    pub fn add_project(&mut self, project: Project) {
+    pub fn add_project(&mut self, mut project: Project) {
+        // The same answer the file would settle on load, so a project is never
+        // stored in a state the next start has to correct.
+        project.agent = project
+            .agent
+            .or(agent_of(project.agent_credential.as_deref()));
+        project.agent = project.agent.or(self.defaults.agent);
         self.projects.retain(|existing| existing.id != project.id);
         self.projects.push(project);
     }

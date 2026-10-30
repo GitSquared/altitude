@@ -75,6 +75,18 @@ impl Service {
     }
 }
 
+/// The coding agent an identity is a login for, when it is one.
+///
+/// A project names a harness and an identity separately; the harness is what the
+/// identity's tools are, so a project that names only the identity is answered by
+/// this rather than left without one.
+pub fn agent_of(credential: Option<&str>) -> Option<AgentKind> {
+    match credential.and_then(Service::from_id) {
+        Some(Service::Agent(kind)) => Some(kind),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Credential {
     pub id: String,

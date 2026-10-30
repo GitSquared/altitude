@@ -4186,7 +4186,6 @@ impl App {
         let question = NewTask::new(
             self.projects(),
             &self.active_project_id(),
-            self.active_agent(),
             self.task_hosts(),
         );
         self.foreground = Foreground::NewTask(Box::new(if linking {
@@ -6924,7 +6923,6 @@ impl App {
                     let question = NewTask::new(
                         self.projects(),
                         &self.active_project_id(),
-                        self.agent(),
                         self.task_hosts(),
                     );
                     self.foreground = Foreground::NewTask(Box::new(question.linking()));

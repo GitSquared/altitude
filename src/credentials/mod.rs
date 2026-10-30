@@ -15,7 +15,7 @@ use std::{error::Error, fmt, path::PathBuf};
 
 use crate::vcs;
 
-pub use model::{Credential, Service, Slot, new_id};
+pub use model::{Credential, Service, Slot, agent_of, new_id};
 pub use shell::{
     CredentialShell, CredentialShellCancel, CredentialShellEvent, credential_shell_id,
 };

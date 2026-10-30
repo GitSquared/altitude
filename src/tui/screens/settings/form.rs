@@ -15,7 +15,7 @@ use ratatui::{
 
 use crate::{
     agent::AgentKind,
-    credentials::{Credential, Service, Slot},
+    credentials::{Credential, Service, Slot, agent_of},
     project::{Project, ProjectCommits},
     tui::{
         popups::{repositories::Repositories, scopes::Scopes},
@@ -213,8 +213,7 @@ pub struct Form {
     pub scope: Field,
     identity_choices: Vec<ProjectCommits>,
     identity_at: Option<usize>,
-    /// The coding agent new tasks here use, or nothing for the installation's
-    /// default.
+    /// The coding agent new tasks here use, which is what its identity is for.
     pub agent: Option<AgentKind>,
     pub agent_credential: Option<String>,
     pub vcs_credential: Option<String>,
@@ -324,7 +323,13 @@ impl Form {
             ),
             identity_choices: identities,
             identity_at,
-            agent: project.agent,
+            // A project that names no harness yet runs the one the identity it
+            // is choosing is a login for, so saving the form cannot leave it
+            // without one.
+            agent: project
+                .agent
+                .or(agent_of(project.agent_credential.as_deref()))
+                .or(agent_of(defaults.agent.as_deref())),
             agent_credential: project.agent_credential.clone().or(defaults.agent),
             vcs_credential: project.vcs_credential.clone().or(defaults.vcs),
             tracker_credential: project

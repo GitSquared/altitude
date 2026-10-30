@@ -137,9 +137,6 @@ pub(in crate::tui) struct Submission {
 pub struct NewTask {
     task: TextBox,
     project: Select<Project>,
-    /// What the installation runs when a project names no harness of its own.
-    /// The project is asked first, and it is the project that answers.
-    default_agent: Option<AgentKind>,
     /// The machines this installation delegates to, so the one the chosen
     /// project runs on can be named rather than its address shown.
     hosts: Vec<Host>,
@@ -188,12 +185,7 @@ impl NewTask {
     ///
     /// `default_project` is the project in front: the tabs are the context a task
     /// is created in, so the question opens on the one being looked at.
-    pub fn new(
-        projects: Vec<Project>,
-        default_project: &str,
-        default_agent: Option<AgentKind>,
-        hosts: Vec<Host>,
-    ) -> Self {
+    pub fn new(projects: Vec<Project>, default_project: &str, hosts: Vec<Host>) -> Self {
         let chosen = projects
             .iter()
             .position(|candidate| candidate.id == default_project)
@@ -212,7 +204,6 @@ impl NewTask {
         Self {
             task: TextBox::new(""),
             project,
-            default_agent,
             hosts,
             refused: false,
             focus: Focus::Task,
@@ -405,10 +396,10 @@ impl NewTask {
         if self.submission.is_some() || self.queued_submit {
             return None;
         }
-        // A task runs as its project's harness, so there is nothing to create
-        // until the project has one and the installation has a default under it.
+        // Only an installation that has not been set up has no harness to run a
+        // task as; a project always names one.
         if self.project.chosen_value().is_some() && self.agent().is_none() {
-            return Some("this project runs no agent; set one in Settings");
+            return Some("no coding agent is set up yet");
         }
         if self.issue {
             return match self.phase {
@@ -777,11 +768,11 @@ impl NewTask {
         Some((project, agent))
     }
 
-    /// The harness the chosen project runs: its own answer, or the installation
-    /// default underneath it for a project that names none.
+    /// The harness the chosen project runs, which the project answers itself.
     fn agent(&self) -> Option<AgentKind> {
-        let project = self.project.chosen_value()?;
-        project.agent.or(self.default_agent)
+        self.project
+            .chosen_value()
+            .and_then(|project| project.agent)
     }
 
     /// The open list, over the prompt above the pill it belongs to, and where
