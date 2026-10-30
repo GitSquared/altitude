@@ -7620,7 +7620,15 @@ impl App {
                             }
                         }
                         RemoteSignalAction::Accept => {
-                            self.resolve_signal_locally(&signal_id, true);
+                            // Accepting is the end of the task on the machine that
+                            // ran it, so the card goes here too, and the list is
+                            // where the next one is.
+                            self.remote_tasks.retain(|held| {
+                                !(held.address == remote.address
+                                    && held.summary.id == remote.task_id)
+                            });
+                            self.clamp_selection();
+                            self.leave_signals();
                             self.say("Task completed");
                         }
                     },
