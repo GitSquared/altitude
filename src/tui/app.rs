@@ -2668,10 +2668,12 @@ impl App {
                 self.settle_selection();
             }
             // Its tasks are its own, and there is no copy here to fall back on.
+            // They stay on screen anyway: a machine that restarts still holds the
+            // work it was running, and a card that vanishes and comes back reads as
+            // a task that ended. The machine's own row is what says it is silent.
             WatchedTasks::Ended { address, reason } => {
                 self.clear_remote_trackers(&address);
                 self.remote_synced.remove(&address);
-                self.remote_tasks.retain(|held| held.address != address);
                 self.remote_status
                     .insert(address, RemoteStatus::Silent(reason));
                 self.settle_selection();
