@@ -834,14 +834,35 @@ fn project_scripts(project: &Project) -> Result<String, IsolationError> {
             .parent()
             .map(|parent| parent.to_string_lossy().into_owned())
             .unwrap_or_else(|| GUEST_HOME.to_owned());
+        // A cache mounted inside the checkout — `~/altitude/target`, say — is made
+        // before this runs, so the directory exists and is not empty. Git is
+        // started in place for that case instead of cloned into an empty one,
+        // which git refuses.
         script.push_str(&format!(
-            "if [ ! -d {}/.git ]; then\n  mkdir -p {}\n  \
-             if ! git clone {} {}; then\n    \
-             echo \"altitude: the project's repository could not be cloned\" >&2\n    exit 1\n  fi\nfi\n",
-            shell_quote(checkout),
-            shell_quote(&parent),
-            shell_quote(repository),
-            shell_quote(checkout),
+            r#"if [ ! -d {checkout}/.git ]; then
+  mkdir -p {parent}
+  if [ -n "$(ls -A {checkout} 2>/dev/null)" ]; then
+    if ! git -C {checkout} init -q \
+      || ! git -C {checkout} remote add origin {repository} \
+      || ! git -C {checkout} fetch -q origin; then
+      echo "altitude: the project's repository could not be fetched" >&2
+      exit 1
+    fi
+    git -C {checkout} remote set-head origin --auto >/dev/null 2>&1 || true
+    branch=$(git -C {checkout} symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || echo origin/main)
+    if ! git -C {checkout} checkout -q -f -B "${{branch#origin/}}" "$branch"; then
+      echo "altitude: the project's repository could not be checked out" >&2
+      exit 1
+    fi
+  elif ! git clone {repository} {checkout}; then
+    echo "altitude: the project's repository could not be cloned" >&2
+    exit 1
+  fi
+fi
+"#,
+            checkout = shell_quote(checkout),
+            parent = shell_quote(&parent),
+            repository = shell_quote(repository),
         ));
     }
     Ok(script)
