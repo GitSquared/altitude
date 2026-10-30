@@ -1246,21 +1246,15 @@ impl RemoteTracker {
                     .map_err(|error| error.to_string())
             }
             TaskOperatorSignalKind::Blocked => {
+                // A question is not a review: the work is still in progress, and
+                // moving the issue would tell a reader the milestone is finished.
+                // The comment is what asks for attention.
                 let body = format!("**? Needs you:** {}\n\n{}", title.trim(), body.trim());
                 self.config
                     .automation
                     .comment_on_issue(&report.issue_id, &body, &comment_id)
                     .await
-                    .map_err(|error| error.to_string())?;
-                if let Err(error) = self
-                    .config
-                    .automation
-                    .status(&reference, TrackerStatus::InReview)
-                    .await
-                {
-                    tracing::warn!(issue = %report.issue_id, %error, "signal comment posted without an attention status");
-                }
-                Ok(())
+                    .map_err(|error| error.to_string())
             }
             TaskOperatorSignalKind::InReview => {
                 let mut body =
