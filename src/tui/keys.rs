@@ -115,10 +115,6 @@ pub fn help_sections() -> Vec<HelpSection> {
                     "Delete / Backspace",
                     "Remove saved credentials, after confirmation",
                 ),
-                (
-                    "Ctrl-R (project)",
-                    "List repositories your version-control login can reach",
-                ),
                 ("n", "Add a project or remote"),
                 ("e", "Edit a project or remote"),
                 (

@@ -75,6 +75,37 @@ impl Service {
     }
 }
 
+/// How a login reads wherever it is shown: `service:group/identity`.
+///
+/// The service says which tool, the group says where it lives — a workspace, an
+/// organisation — and the identity says whose it is. A part the provider does
+/// not name is left out rather than borrowed from somewhere else, and an
+/// identity that only repeats the service is not printed twice: `linear:` +
+/// `carbonfact` + `gaby` is `linear:carbonfact/gaby`, a GitHub login whose
+/// organisation nobody reports is `github:gitsquared`, and an agent login that
+/// is nothing but its tool is `pi`.
+pub fn describe(service: Service, group: Option<&str>, identity: &str) -> String {
+    let name = match service {
+        Service::Agent(AgentKind::Claude) => "claude",
+        Service::Agent(AgentKind::Pi) => "pi",
+        Service::VersionControl(VcsProviderKind::GitHub) => "github",
+        Service::Tracker(TrackerKind::Linear) => "linear",
+    };
+    let identity = identity.trim();
+    let identity = if identity.eq_ignore_ascii_case(name) {
+        ""
+    } else {
+        identity
+    };
+    let group = group.map(str::trim).filter(|group| !group.is_empty());
+    match (group, identity.is_empty()) {
+        (Some(group), false) => format!("{name}:{group}/{identity}"),
+        (Some(group), true) => format!("{name}:{group}"),
+        (None, false) => format!("{name}:{identity}"),
+        (None, true) => name.to_owned(),
+    }
+}
+
 /// The coding agent an identity is a login for, when it is one.
 ///
 /// A project names a harness and an identity separately; the harness is what the

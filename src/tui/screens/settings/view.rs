@@ -37,7 +37,7 @@ impl App {
                 .into_iter()
                 .map(|project| {
                     let detail = project
-                        .repository_label()
+                        .repository_display()
                         .unwrap_or_else(|| "no repository".to_owned());
                     Row {
                         label: project.name.clone(),
@@ -187,8 +187,8 @@ impl App {
     /// what its own check last said. The label is the operator's; the service is
     /// the fallback that keeps two same-named identities readable.
     fn identity_row(&self, credential: NamedCredential, service: Service) -> Row {
+        let label = self.credential_label(&credential);
         let id = credential.id;
-        let label = credential.label;
         let (kind, status) = if service.slot() == Slot::Tracker {
             let state = self.tracker_state_for(&id);
             (
@@ -347,7 +347,7 @@ impl App {
                     .and_then(|file| file.settings().credential(&credential))
                     .map(|credential| credential.label.clone())
                     .unwrap_or_else(|| credential.clone());
-                let account = self.tracker_account(&credential);
+                let account = self.profile_account(&credential);
                 let identity = account
                     .as_ref()
                     .map(|account| account.display_name.clone())

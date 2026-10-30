@@ -301,8 +301,7 @@ pub(super) fn project_lines(
     lines.push(tag(
         "repository",
         project
-            .repository_label()
-            .or_else(|| project.repository.clone())
+            .repository_display()
             .unwrap_or_else(|| "not set".to_owned()),
     ));
     let commits = project.commits.as_ref().or(defaults.commits.as_ref());

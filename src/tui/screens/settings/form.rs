@@ -17,8 +17,8 @@ use ratatui::{
 
 use crate::{
     agent::AgentKind,
-    credentials::{Credential, Slot, agent_of},
-    project::{Project, ProjectCommits},
+    credentials::{Credential, Service, Slot, agent_of},
+    project::{self, Project, ProjectCommits},
     tui::{
         popups::{repositories::Repositories, scopes::Scopes},
         screens::settings::rows::ProjectDefaults,
@@ -30,6 +30,7 @@ use crate::{
         },
     },
     vcs::Repository,
+    vcs::VcsProviderKind,
 };
 
 /// What an action applies to: the list it saves into, and what it replaces.
@@ -105,7 +106,9 @@ impl Focus {
         )
     }
 
-    fn is_multiline(self) -> bool {
+    /// Whether this field holds several lines, in which case the vertical arrows
+    /// are its own: they move the caret rather than the page.
+    pub fn is_multiline(self) -> bool {
         matches!(self, Self::Setup | Self::Caches | Self::Instructions)
     }
 
@@ -155,31 +158,15 @@ fn groups(project: bool) -> Vec<Group> {
             kind: Kind::Single,
         }];
     }
+    // The order is the order the work is decided in: what it is called and what
+    // runs it, then the code it changes and who commits it, then where its issues
+    // come from and whether it takes them, then what the agent is told, and last
+    // the two that only matter once a build has to happen.
     vec![
         Group {
             focus: Focus::Primary,
             label: "Name",
             kind: Kind::Single,
-        },
-        Group {
-            focus: Focus::Repository,
-            label: "Repository",
-            kind: Kind::Choice,
-        },
-        Group {
-            focus: Focus::Setup,
-            label: "Setup command",
-            kind: Kind::Multi,
-        },
-        Group {
-            focus: Focus::Caches,
-            label: "Caches, one path per line",
-            kind: Kind::Multi,
-        },
-        Group {
-            focus: Focus::Instructions,
-            label: "Instructions for the agent",
-            kind: Kind::Multi,
         },
         Group {
             focus: Focus::Agent,
@@ -192,13 +179,18 @@ fn groups(project: bool) -> Vec<Group> {
             kind: Kind::Choice,
         },
         Group {
-            focus: Focus::TrackerIdentity,
-            label: "Task tracker",
+            focus: Focus::Repository,
+            label: "Repository",
             kind: Kind::Choice,
         },
         Group {
             focus: Focus::Identity,
             label: "Commit identity",
+            kind: Kind::Choice,
+        },
+        Group {
+            focus: Focus::TrackerIdentity,
+            label: "Task tracker",
             kind: Kind::Choice,
         },
         Group {
@@ -215,6 +207,21 @@ fn groups(project: bool) -> Vec<Group> {
             focus: Focus::Accept,
             label: "Accept delegated work",
             kind: Kind::Toggle,
+        },
+        Group {
+            focus: Focus::Instructions,
+            label: "Instructions for the agent",
+            kind: Kind::Multi,
+        },
+        Group {
+            focus: Focus::Setup,
+            label: "Setup command",
+            kind: Kind::Multi,
+        },
+        Group {
+            focus: Focus::Caches,
+            label: "Caches, one path per line",
+            kind: Kind::Multi,
         },
     ]
 }
@@ -255,17 +262,17 @@ pub struct Form {
 
 const PROJECT_FIELDS: [Focus; 14] = [
     Focus::Primary,
-    Focus::Repository,
-    Focus::Setup,
-    Focus::Caches,
-    Focus::Instructions,
     Focus::Agent,
     Focus::VcsIdentity,
-    Focus::TrackerIdentity,
+    Focus::Repository,
     Focus::Identity,
+    Focus::TrackerIdentity,
     Focus::Scope,
     Focus::Host,
     Focus::Accept,
+    Focus::Instructions,
+    Focus::Setup,
+    Focus::Caches,
     Focus::Cancel,
     Focus::Save,
 ];
@@ -493,6 +500,18 @@ impl Form {
 
     pub fn vcs_credential(&self) -> Option<String> {
         self.vcs.chosen_value().cloned().flatten()
+    }
+
+    /// The provider the repository belongs to, which is the one its login is for.
+    fn vcs_provider(&self) -> VcsProviderKind {
+        self.vcs_credential()
+            .as_deref()
+            .and_then(Service::from_id)
+            .and_then(|service| match service {
+                Service::VersionControl(kind) => Some(kind),
+                _ => None,
+            })
+            .unwrap_or_else(VcsProviderKind::sole)
     }
 
     pub fn tracker_credential(&self) -> Option<String> {
@@ -905,10 +924,9 @@ fn draw_group(buffer: &mut Buffer, area: Rect, form: &Form, group: &Group) -> Op
             let value = match group.focus {
                 Focus::Repository => {
                     let value = form.repository.value();
-                    if value.trim().is_empty() {
-                        "not chosen".to_owned()
-                    } else {
-                        value.to_owned()
+                    match project::repository_display(form.vcs_provider(), value) {
+                        Some(display) => display,
+                        None => "not chosen".to_owned(),
                     }
                 }
                 Focus::Scope => {

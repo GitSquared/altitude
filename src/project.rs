@@ -6,7 +6,11 @@
 //! was started with. Storage is keyed by the id; the name is what an operator
 //! reads, and renaming one changes nothing about the work in flight.
 
-use crate::{agent::AgentKind, vcs::VcsProviderKind};
+use crate::{
+    agent::AgentKind,
+    credentials::{Service, describe},
+    vcs::VcsProviderKind,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     error::Error,
@@ -196,14 +200,12 @@ impl Project {
         self.name.to_ascii_lowercase()
     }
 
-    pub fn repository_label(&self) -> Option<String> {
-        let repository = self.repository.as_deref()?;
-        let short = repository
-            .strip_prefix("https://github.com/")
-            .or_else(|| repository.strip_prefix("http://github.com/"))
-            .or_else(|| repository.strip_prefix("git@github.com:"))
-            .unwrap_or(repository);
-        Some(short.strip_suffix(".git").unwrap_or(short).to_owned())
+    /// How the repository reads: the provider, then the owner and the name.
+    ///
+    /// `github:gitsquared/altitude` rather than a URL: the protocol is not the
+    /// fact, and where a repository lives is not worth a line of `https://`.
+    pub fn repository_display(&self) -> Option<String> {
+        repository_display(self.vcs_provider(), self.repository.as_deref()?)
     }
 
     /// The directory the repository is cloned into, when there is one.
@@ -350,6 +352,31 @@ impl Project {
 ///
 /// A trailing slash and a `.git` suffix name the same repository as the URL
 /// without them, and a task's history should not record which spelling was typed.
+/// How a repository reads, for a URL that has not been saved yet.
+///
+/// The same words `Project::repository_display` uses, so the form shows what the
+/// list will show once the form is saved.
+pub fn repository_display(provider: VcsProviderKind, repository: &str) -> Option<String> {
+    let short = short_repository(repository)?;
+    let (owner, name) = short.split_once('/')?;
+    Some(describe(
+        Service::VersionControl(provider),
+        Some(owner),
+        name,
+    ))
+}
+
+/// The owner and the name, with the URL and the suffix taken off.
+fn short_repository(repository: &str) -> Option<String> {
+    let short = repository
+        .strip_prefix("https://github.com/")
+        .or_else(|| repository.strip_prefix("http://github.com/"))
+        .or_else(|| repository.strip_prefix("git@github.com:"))
+        .unwrap_or(repository);
+    let short = short.strip_suffix(".git").unwrap_or(short);
+    (!short.trim().is_empty()).then(|| short.trim().to_owned())
+}
+
 pub fn normalize_repository(value: &str) -> Result<String, ProjectError> {
     let trimmed = value.trim().trim_end_matches('/');
     let trimmed = trimmed.strip_suffix(".git").unwrap_or(trimmed);

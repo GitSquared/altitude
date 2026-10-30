@@ -24,7 +24,7 @@ use crate::{
     config::{Config, DEFAULT_PORT, SettingsError, SettingsFile},
     credentials::{
         Credential, CredentialAnswer, CredentialShell, CredentialShellCancel, CredentialShellEvent,
-        Service, Slot, credential_shell_id, new_id,
+        Service, Slot, credential_shell_id, describe, new_id,
     },
     isolation::{EnvironmentDescription, EnvironmentProgress, IsolationEngine, ProfileSummary},
     project::{Project, ProjectCommits, TrackerRoute, normalize_repository},
@@ -1380,15 +1380,12 @@ impl App {
                     if let Some(hints) = form.list_hints() {
                         return hints;
                     }
-                    let mut hints = vec![
+                    let hints = vec![
                         Hint::new("tab", "next"),
                         Hint::new("ctrl-enter", "save"),
                         Hint::new("enter", "next, or add a line"),
                         Hint::new("esc", "leave the box, then the page"),
                     ];
-                    if !form.target.is_remote() {
-                        hints.push(Hint::new("ctrl-r", "repositories"));
-                    }
                     return hints;
                 }
                 if self.panel.depth == Depth::Rail {
@@ -2341,7 +2338,7 @@ impl App {
                         &self.remotes(),
                         self.project_defaults(),
                         self.saved_identities(),
-                        self.settings_credentials(),
+                        self.described_credentials(),
                     ))
                 }
                 Section::Interface => {}
@@ -2943,15 +2940,14 @@ impl App {
     }
 
     pub(in crate::tui) fn task_delegation_resolved(&mut self, reply: TaskDelegationReply) {
-        match reply.result {
-            Ok(()) => self.say(format!(
-                "{} took the task",
-                self.remote_name(&reply.address)
-            )),
-            Err(error) => self.problem(format!(
+        // Nothing is said when it works: the task the remote founded is in the
+        // list, so a modal saying so is a keypress to dismiss what is already on
+        // the screen. A refusal is the operator's to act on.
+        if let Err(error) = reply.result {
+            self.problem(format!(
                 "{} did not take it: {error}",
                 self.remote_name(&reply.address)
-            )),
+            ));
         }
     }
 
@@ -3067,10 +3063,6 @@ impl App {
         self.transfer = None;
         match reply.result {
             Ok(task_id) => {
-                self.say(format!(
-                    "{} took the task",
-                    self.remote_name(&reply.address)
-                ));
                 // It just answered, so it is reachable; recording that lets the
                 // read below dial it rather than skip an address the panel had
                 // never checked.
@@ -3644,7 +3636,7 @@ impl App {
                 &self.remotes(),
                 self.project_defaults(),
                 self.saved_identities(),
-                self.settings_credentials(),
+                self.described_credentials(),
             ),
             RowKind::Discovered(_) => return,
             RowKind::Remote { address, .. } => Form::for_remote(
@@ -3909,6 +3901,22 @@ impl App {
                 _ if is_secondary(key) => save = true,
                 KeyCode::BackTab => form.move_focus(false),
                 KeyCode::Tab => form.move_focus(true),
+                // A field that is a pill has no caret to move, so the arrows and
+                // the vim keys are travel: they go where tab goes. A one-line box
+                // keeps left and right for its text but lets the vertical arrows
+                // out; a box with several lines keeps all of them.
+                KeyCode::Down if !form.focus.is_multiline() => form.move_focus(true),
+                KeyCode::Up if !form.focus.is_multiline() => form.move_focus(false),
+                KeyCode::Down | KeyCode::Right | KeyCode::Char('j') | KeyCode::Char('l')
+                    if !form.focus.takes_text() =>
+                {
+                    form.move_focus(true)
+                }
+                KeyCode::Up | KeyCode::Left | KeyCode::Char('k') | KeyCode::Char('h')
+                    if !form.focus.takes_text() =>
+                {
+                    form.move_focus(false)
+                }
                 KeyCode::Enter | KeyCode::Char(' ') if form.focus == Focus::Accept => {
                     form.accepts_delegated_work = !form.accepts_delegated_work;
                 }
@@ -4881,6 +4889,40 @@ impl App {
             .as_deref()
             .and_then(|id| self.tracker_states.get(id).copied())
             .unwrap_or(TrackerState::NotConnected);
+    }
+
+    /// How a login reads: `service:group/identity`, with a part left out when
+    /// the provider names none.
+    ///
+    /// The account a tracker login recorded is where the group comes from — the
+    /// workspace — and an agent login that was never renamed is only its tool:
+    /// `pi`, not `pi:pi`.
+    pub(in crate::tui) fn credential_label(&self, credential: &Credential) -> String {
+        let Some(service) = credential.service() else {
+            return credential.label.clone();
+        };
+        let account = self.profile_account(&credential.id);
+        let group = account
+            .as_ref()
+            .and_then(|account| account.workspace.as_deref());
+        let identity = match &account {
+            Some(account) => account.display_name.clone(),
+            // An identity that is only the tool's name is not worth repeating,
+            // and `describe` drops it: the served name is what an operator renamed.
+            None => credential.label.clone(),
+        };
+        describe(service, group, &identity)
+    }
+
+    /// The identities this installation holds, as the pages name them.
+    pub(in crate::tui) fn described_credentials(&self) -> Vec<Credential> {
+        self.settings_credentials()
+            .into_iter()
+            .map(|mut credential| {
+                credential.label = self.credential_label(&credential);
+                credential
+            })
+            .collect()
     }
 
     pub(in crate::tui) fn settings_credentials(&self) -> Vec<Credential> {
@@ -6256,7 +6298,7 @@ impl App {
     /// `user@workspace` when the provider named the workspace, which is what
     /// tells two logins to the same tracker apart.
     fn tracker_account_name(&self, credential: &str) -> Option<String> {
-        let account = self.tracker_account(credential)?;
+        let account = self.profile_account(credential)?;
         let name = account.display_name.trim();
         if name.is_empty() {
             return None;
@@ -6267,11 +6309,14 @@ impl App {
         })
     }
 
-    /// The account a tracker profile last recorded, as it recorded it.
+    /// The account a profile last recorded, as it recorded it.
     ///
     /// Read rather than asked: the file is written when the login is made, and a
-    /// page that names a login should not wait on a network for its name.
-    pub(in crate::tui) fn tracker_account(&self, credential: &str) -> Option<TrackerAccount> {
+    /// page that names a login should not wait on a network for its name. A
+    /// tracker records one today; any service that learns whose login it holds —
+    /// and which workspace or organisation that login is in — writes the same
+    /// file, and the name it reads by gains the group.
+    pub(in crate::tui) fn profile_account(&self, credential: &str) -> Option<TrackerAccount> {
         let text =
             fs::read_to_string(self.config.profile_dir(credential).join("identity.json")).ok()?;
         serde_json::from_str(&text).ok()
@@ -6410,15 +6455,14 @@ impl App {
             return;
         }
         if self.panel.form.is_some() {
-            // The list is a shortcut into the field, so it opens from the chord
-            // wherever the caret is, rather than making the field a special case.
+            // The repository field opens its list from its own keys. A page this
+            // long does not get a chord per field: reaching one is what tabbing
+            // and the arrows are for.
             let wants_repositories = self.panel.form.as_ref().is_some_and(|form| {
                 !form.target.is_remote()
                     && form.repositories.is_none()
-                    && (key.code == KeyCode::Char('r')
-                        && key.modifiers.contains(KeyModifiers::CONTROL)
-                        || (matches!(key.code, KeyCode::Enter | KeyCode::Char(' '))
-                            && form.focus == Focus::Repository))
+                    && matches!(key.code, KeyCode::Enter | KeyCode::Char(' '))
+                    && form.focus == Focus::Repository
             });
             if wants_repositories {
                 self.begin_repository_listing(task_service, repository_lists);
