@@ -135,7 +135,7 @@ impl App {
             }
         }
         rows.extend(
-            self.settings_credentials()
+            self.described_credentials()
                 .into_iter()
                 .filter_map(|credential| {
                     let service = credential.service()?;
@@ -189,7 +189,7 @@ impl App {
     /// what its own check last said. The label is the operator's; the service is
     /// the fallback that keeps two same-named identities readable.
     fn identity_row(&self, credential: NamedCredential, service: Service) -> Row {
-        let label = self.credential_label(&credential);
+        let label = credential.label.clone();
         let id = credential.id;
         let (kind, status) = if service.slot() == Slot::Tracker {
             let state = self.tracker_state_for(&id);

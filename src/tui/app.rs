@@ -4903,8 +4903,9 @@ impl App {
     ///
     /// The account a tracker login recorded is where the group comes from — the
     /// workspace — and an agent login that was never renamed is only its tool:
-    /// `pi`, not `pi:pi`.
-    pub(in crate::tui) fn credential_label(&self, credential: &Credential) -> String {
+    /// `pi`, not `pi:pi`. Two logins that read the same are told apart by
+    /// [`Self::described_credentials`]; on its own this is the tag.
+    fn credential_tag(&self, credential: &Credential) -> String {
         let Some(service) = credential.service() else {
             return credential.label.clone();
         };
@@ -4912,29 +4913,53 @@ impl App {
         let group = account
             .as_ref()
             .and_then(|account| account.workspace.as_deref());
-        // The provider's name for an account is a fact and reads like an id; a
-        // name the operator gave it is a preference and is the one they will
-        // recognise. A name they chose wins, and the account answers for the rest.
+        // A name the operator gave wins: it is the one they will recognise. A
+        // name nobody gave is only the tool's display name, which the tag already
+        // says, so it is left out — but an account that named itself is the
+        // person rather than the tool, and that is worth printing.
         let identity = if credential.label_auto {
             account
                 .as_ref()
                 .map(|account| account.display_name.clone())
-                .unwrap_or_else(|| credential.label.clone())
+                .unwrap_or_default()
         } else {
             credential.label.clone()
         };
         describe(service, group, &identity)
     }
 
-    /// The identities this installation holds, as the pages name them.
+    /// The identities this installation holds, as every page names them.
+    ///
+    /// A login reads by its tag, which says the tool, the workspace and whose
+    /// login it is — so the name is not printed. Only where two logins would read
+    /// the same does something else have to say which is which, because a list of
+    /// two identical rows is a list of nothing.
     pub(in crate::tui) fn described_credentials(&self) -> Vec<Credential> {
-        self.settings_credentials()
+        let mut described: Vec<Credential> = self
+            .settings_credentials()
             .into_iter()
             .map(|mut credential| {
-                credential.label = self.credential_label(&credential);
+                credential.label = self.credential_tag(&credential);
                 credential
             })
-            .collect()
+            .collect();
+        // Two logins that read the same tag are told apart by their ids: the tag
+        // has nothing left to say about them, and the id is the one thing in the
+        // file that differs. A named login never gets here — its name is its
+        // identity, so naming it is what makes its tag its own.
+        let tags: Vec<String> = described.iter().map(|one| one.label.clone()).collect();
+        let mut told_apart: Vec<Option<String>> = vec![None; described.len()];
+        for (index, tag) in tags.iter().enumerate() {
+            if tags.iter().filter(|other| *other == tag).count() > 1 {
+                told_apart[index] = Some(described[index].id.clone());
+            }
+        }
+        for (credential, told_apart) in described.iter_mut().zip(told_apart) {
+            if let Some(told_apart) = told_apart {
+                credential.label = told_apart;
+            }
+        }
+        described
     }
 
     pub(in crate::tui) fn settings_credentials(&self) -> Vec<Credential> {
