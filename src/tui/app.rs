@@ -20,7 +20,7 @@ use ratatui::{DefaultTerminal, layout::Rect, text::Line};
 use tokio::{process::Command as HostCommand, sync::mpsc, task::JoinHandle, time::sleep};
 
 use crate::{
-    agent::AgentKind,
+    agent::{AGENTS, AgentKind},
     config::{Config, DEFAULT_PORT, SettingsError, SettingsFile},
     credentials::{
         Credential, CredentialAnswer, CredentialShell, CredentialShellCancel, CredentialShellEvent,
@@ -65,7 +65,7 @@ use popups::identity::{
     RenameIdentity, SetupDecision,
 };
 use popups::message::{Decision as MessageDecision, MessagePrompt};
-use popups::new_task::{AGENTS, Answer, Hit as NewTaskHit, Host, NewTask, SearchToken};
+use popups::new_task::{Answer, Hit as NewTaskHit, Host, NewTask, SearchToken};
 use popups::repositories::{Key as RepositoriesKey, Repositories};
 use popups::scopes::{Key as ScopesKey, Scopes};
 use popups::send_task::{Decision as SendDecision, SendTask};
@@ -5884,16 +5884,10 @@ impl App {
                 task,
                 project,
                 agent,
-                remember,
             }) => {
                 // The tab follows the answer, so the task is where the operator
                 // is looking. The project pill can name another one.
                 self.set_active_project(&project.id);
-                // The first answer becomes the default, because there was nothing
-                // to default to and guessing is not Altitude's to do.
-                if let Some(agent) = remember {
-                    self.set_agent(agent);
-                }
                 match self.project_machine(&project) {
                     // A task for a remote is founded there, off this loop. Nothing
                     // is copied: the machine that runs it owns it.
@@ -6029,9 +6023,6 @@ impl App {
                 let Some(submission) = submission else {
                     return;
                 };
-                if let Some(agent) = submission.remember {
-                    self.set_agent(agent);
-                }
                 self.set_active_project(&submission.project.id);
                 match self.project_machine(&submission.project) {
                     Ok(Some(address)) => {

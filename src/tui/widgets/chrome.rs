@@ -225,9 +225,11 @@ pub fn centered_at_most(area: Rect, percent_x: u16, max_width: u16, height: u16)
 }
 
 pub struct Body {
-    /// What the modal says, one empty row from the top of the frame and one
-    /// from the rule under it.
+    /// What the modal says, one empty row from the top of the frame.
     pub content: Rect,
+    /// The row between the words and the rule. Empty unless a page closes with
+    /// a note, which belongs to what was said rather than to the answers.
+    pub note: Rect,
     pub actions: Rect,
 }
 
@@ -237,14 +239,18 @@ pub struct Body {
 /// modals are spaced differently. A modal that laid this out itself would be the
 /// one that drifts.
 pub fn body(inner: Rect) -> Body {
-    let [_, content, _, actions] = Layout::vertical([
+    let [_, content, note, actions] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
         Constraint::Length(1),
         Constraint::Length(2),
     ])
     .areas(inner);
-    Body { content, actions }
+    Body {
+        content,
+        note,
+        actions,
+    }
 }
 
 /// The height a modal needs to say `rows` of words: a border on each side, an

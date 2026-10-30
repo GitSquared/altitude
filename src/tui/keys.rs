@@ -138,7 +138,7 @@ pub fn help_sections() -> Vec<HelpSection> {
             bindings: &[
                 ("Ctrl-Enter", "Start work using the displayed settings"),
                 ("Enter (prompt)", "Add a line to the prompt"),
-                ("Enter (pill)", "Open the choices"),
+                ("Enter (project)", "Open the projects"),
                 (
                     "j/k · ↑/↓ · Enter/Esc",
                     "Move through the open list, take or close it",
@@ -147,18 +147,18 @@ pub fn help_sections() -> Vec<HelpSection> {
                     "Letters (five choices or more)",
                     "Narrow the open list instead of moving in it",
                 ),
-                ("Ctrl-E · Ctrl-A", "Open the project or agent list"),
+                ("Ctrl-E", "Open the project list"),
                 (
                     "An issue ID or URL",
                     "Switch the prompt to linking that issue",
                 ),
                 (
                     "Tab / Shift-Tab",
-                    "Move between the prompt, pills and actions",
+                    "Move between the prompt, the project and the actions",
                 ),
                 (
                     "j/k · ←/→ · ↓/↑",
-                    "Move between the prompt, pills and actions",
+                    "Move between the prompt, the project and the actions",
                 ),
                 ("↓ / ↑ (issue search)", "Select a search result"),
                 ("Esc", "Cancel; q also cancels outside a text field"),

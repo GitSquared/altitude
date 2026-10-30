@@ -1,12 +1,13 @@
 //! Creating a task: what to do, what drives it, and which project it is for.
 //!
-//! One question rather than three, asked with the configured defaults already in
-//! place. The prompt is the question, so it gets the room: an intent is prose,
-//! and it is the only thing here that is written rather than chosen. The choices
-//! below it are named, because two values on a line say nothing about which is
-//! which. Where the task runs is not one of them: its project names a machine, and
-//! a task does not choose, so the machine is said under the pills as the answer
-//! the project has already given.
+//! One question, asked with the project already in place. The prompt is the
+//! question, so it gets the room: an intent is prose, and it is the only thing
+//! here that is written rather than chosen. The choice below it is named, because
+//! a value on a line says nothing about what it is.
+//!
+//! What drives the task and where it runs are not choices here: the project
+//! answers both, and a task does not overrule the project it belongs to. They are
+//! said under the pill as a caption to it.
 //!
 //! The same page can also bind a Linear issue instead of writing an intent. The
 //! prompt becomes the search box, the results take the room the prompt had, and
@@ -19,24 +20,20 @@
 //! that arrives after the query changed, or after this page closed, is dropped
 //! rather than shown under the wrong question.
 //!
-//! The choices are pills rather than rows: what is chosen is the thing you press,
-//! and enter opens it into a list you can narrow by typing. They sit
-//! under the prompt, so the list opens up over what has been written rather than
-//! down over the actions. Each has a chord of its own, so reaching one does not
-//! mean tabbing past the prompt.
+//! The choice is a pill rather than a row: what is chosen is the thing you press,
+//! and enter opens it into a list you can narrow by typing. It sits under the
+//! prompt, so the list opens up over what has been written rather than down over
+//! the actions. It has a chord of its own, so reaching it does not mean tabbing
+//! past the prompt.
 //!
 //! Enter is a line in the prompt, because an intent is prose. Answering is
 //! ctrl-enter, so the keys that start a task are never the keys that write one.
 //! It is also the one key here that a terminal has to be told to report as a key
 //! of its own, which is why the page asks for that protocol while it is open.
 //!
-//! Everything drawn here can also be clicked: the pills, the offers under them,
-//! the prompt and the two answers. The rectangles come from the last frame, so a
+//! Everything drawn here can also be clicked: the pill, the offers under it, the
+//! prompt and the two answers. The rectangles come from the last frame, so a
 //! click lands on what the operator saw rather than on what the layout would be.
-//!
-//! The agent's first answer becomes its default. On a fresh installation there
-//! is nothing to default to, and guessing on someone's behalf is not Altitude's
-//! to do.
 
 use std::{
     mem,
@@ -66,20 +63,15 @@ use crate::{
     tracker::{IssueReference, IssueSummary},
 };
 
-/// The agents on offer, in the order they are shown. One catalog, so the
-/// creation question and the settings list cannot disagree about them.
-pub(in crate::tui) const AGENTS: [AgentKind; 2] = [AgentKind::Pi, AgentKind::Claude];
-
 /// The page's width, as a share of the terminal. Wider than a question about one
 /// value, because the answer to this one is a paragraph.
 const WIDTH_PERCENT: u16 = 70;
 /// How wide it may get. The prompt is read a line at a time, so past a legible
 /// measure a wider window only makes the line harder to follow.
 const MAX_WIDTH: u16 = 88;
-/// Its height, which is the prompt's room plus the spacing, the pills, the machine
-/// they run on and the actions. The prompt takes what is left of it.
+/// Its height, which is the prompt's room plus the spacing, the project pill, the
+/// caption under it and the actions. The prompt takes what is left of it.
 const HEIGHT: u16 = 18;
-const PILL_GAP: u16 = 2;
 /// How long a query rests before it is searched, so a word typed a letter at a
 /// time is one search rather than ten.
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
@@ -93,23 +85,16 @@ static NEXT_SUBMISSION: AtomicU64 = AtomicU64::new(1);
 pub enum Focus {
     Task,
     Project,
-    Agent,
     Cancel,
     Create,
 }
 
-const ORDER: [Focus; 5] = [
-    Focus::Task,
-    Focus::Project,
-    Focus::Agent,
-    Focus::Cancel,
-    Focus::Create,
-];
+const ORDER: [Focus; 4] = [Focus::Task, Focus::Project, Focus::Cancel, Focus::Create];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::tui) enum Hit {
     Prompt,
-    Pill(Focus),
+    Pill,
     Offer(usize),
     Cancel,
     Create,
@@ -147,19 +132,17 @@ pub(in crate::tui) struct Submission {
     reference: IssueReference,
     pub(in crate::tui) project: Project,
     pub(in crate::tui) agent: AgentKind,
-    pub(in crate::tui) remember: Option<AgentKind>,
 }
 
 pub struct NewTask {
     task: TextBox,
     project: Select<Project>,
-    agent: Select<AgentKind>,
+    /// What the installation runs when a project names no harness of its own.
+    /// The project is asked first, and it is the project that answers.
+    default_agent: Option<AgentKind>,
     /// The machines this installation delegates to, so the one the chosen
     /// project runs on can be named rather than its address shown.
     hosts: Vec<Host>,
-    /// Whether the agent had never been chosen, in which case this answer is the
-    /// one to keep.
-    agent_unchosen: bool,
     /// Whether the question has been answered with nothing to answer yet. The
     /// page says what is missing only then, because until then it is not missing:
     /// it has not been asked for.
@@ -192,7 +175,6 @@ pub enum Answer {
         task: String,
         project: Box<Project>,
         agent: AgentKind,
-        remember: Option<AgentKind>,
     },
     /// Read this issue's snapshot before founding the task. The token says which
     /// submission the snapshot belongs to.
@@ -227,23 +209,11 @@ impl NewTask {
                 .collect(),
             chosen,
         );
-        let agent = Select::new(
-            "agent",
-            AGENTS
-                .iter()
-                .copied()
-                .map(|agent| Offer::new(agent, agent.to_string()))
-                .collect(),
-            default_agent
-                .and_then(|chosen| AGENTS.iter().position(|candidate| *candidate == chosen))
-                .unwrap_or(0),
-        );
         Self {
             task: TextBox::new(""),
             project,
-            agent,
+            default_agent,
             hosts,
-            agent_unchosen: default_agent.is_none(),
             refused: false,
             focus: Focus::Task,
             popup_id: NEXT_POPUP.fetch_add(1, Ordering::Relaxed),
@@ -298,11 +268,7 @@ impl NewTask {
     }
 
     fn list_open(&self) -> bool {
-        match self.focus {
-            Focus::Project => self.project.is_open(),
-            Focus::Agent => self.agent.is_open(),
-            _ => false,
-        }
+        self.focus == Focus::Project && self.project.is_open()
     }
 
     /// Whether a search or a snapshot read is still out, which is what keeps the
@@ -323,7 +289,6 @@ impl NewTask {
         // and a line that repeats them costs a line that could say something the
         // page alone knows.
         let mut hints = vec![chrome::Hint::new("ctrl-e", "project")];
-        hints.push(chrome::Hint::new("ctrl-a", "agent"));
         if self.issue {
             hints.push(chrome::Hint::new("↑/↓", "result"));
         }
@@ -352,18 +317,12 @@ impl NewTask {
     }
 
     fn open_list_hints(&self) -> Option<Vec<chrome::Hint>> {
-        match self.focus {
-            Focus::Project if self.project.is_open() => Some(self.project.hints()),
-            Focus::Agent if self.agent.is_open() => Some(self.agent.hints()),
-            _ => None,
-        }
+        self.project.is_open().then(|| self.project.hints())
     }
 
     fn paste_into_list(&mut self, text: &str) {
-        match self.focus {
-            Focus::Project => self.project.paste(text),
-            Focus::Agent => self.agent.paste(text),
-            _ => {}
+        if self.focus == Focus::Project {
+            self.project.paste(text);
         }
     }
 
@@ -394,8 +353,8 @@ impl NewTask {
                 self.focus = Focus::Task;
                 None
             }
-            Some(Hit::Pill(pill)) => {
-                self.focus = *pill;
+            Some(Hit::Pill) => {
+                self.focus = Focus::Project;
                 self.focus_return = None;
                 self.open_list();
                 None
@@ -424,25 +383,20 @@ impl NewTask {
     }
 
     fn choose(&mut self, index: usize) {
-        match self.focus {
-            Focus::Project => self.project.choose(index),
-            Focus::Agent => self.agent.choose(index),
-            _ => {}
+        if self.focus == Focus::Project {
+            self.project.choose(index);
         }
         self.close_lists();
     }
 
     fn scroll_list(&mut self, forward: bool) {
-        match self.focus {
-            Focus::Project => self.project.scroll(forward),
-            Focus::Agent => self.agent.scroll(forward),
-            _ => {}
+        if self.focus == Focus::Project {
+            self.project.scroll(forward);
         }
     }
 
     fn close_lists(&mut self) {
         self.project.close();
-        self.agent.close();
     }
 
     pub fn refusal(&self) -> Option<&'static str> {
@@ -450,6 +404,11 @@ impl NewTask {
         // a second answer.
         if self.submission.is_some() || self.queued_submit {
             return None;
+        }
+        // A task runs as its project's harness, so there is nothing to create
+        // until the project has one and the installation has a default under it.
+        if self.project.chosen_value().is_some() && self.agent().is_none() {
+            return Some("this project runs no agent; set one in Settings");
         }
         if self.issue {
             return match self.phase {
@@ -483,22 +442,15 @@ impl NewTask {
             self.queued_submit = false;
             return Some(Answer::Cancel);
         }
-        // The choices have chords of their own: reaching for a pill with the keys
-        // should not mean tabbing past the prompt to get to it. A chord
-        // is a detour rather than a move, so closing the list puts the keys back
-        // where they were.
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
-            let pill = match key.code {
-                KeyCode::Char('e') => Some(Focus::Project),
-                KeyCode::Char('a') => Some(Focus::Agent),
-                _ => None,
-            };
-            if let Some(pill) = pill {
-                self.focus_return = Some(self.focus);
-                self.focus = pill;
-                self.open_list();
-                return None;
-            }
+        // The choice has a chord of its own: reaching for the pill with the keys
+        // should not mean tabbing past the prompt to get to it. A chord is a
+        // detour rather than a move, so closing the list puts the keys back where
+        // they were.
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('e') {
+            self.focus_return = Some(self.focus);
+            self.focus = Focus::Project;
+            self.open_list();
+            return None;
         }
         // The answer is a chord, so it is never a key that writes the intent:
         // enter adds a line, and this starts the work.
@@ -540,19 +492,13 @@ impl NewTask {
     }
 
     fn list_key(&mut self, key: KeyEvent) -> bool {
-        match self.focus {
-            Focus::Project => self.project.handle_key(key),
-            Focus::Agent => self.agent.handle_key(key),
-            _ => false,
-        }
+        self.focus == Focus::Project && self.project.handle_key(key)
     }
 
     fn open_list(&mut self) {
         self.close_lists();
-        match self.focus {
-            Focus::Project => self.project.open(),
-            Focus::Agent => self.agent.open(),
-            _ => {}
+        if self.focus == Focus::Project {
+            self.project.open();
         }
     }
 
@@ -800,12 +746,11 @@ impl NewTask {
             let token = self.begin_submission()?;
             return Some(Answer::ReadIssue { token });
         }
-        let (project, agent, remember) = self.selections()?;
+        let (project, agent) = self.selections()?;
         Some(Answer::Create {
             task: self.task.value().trim().to_owned(),
             project: Box::new(project),
             agent,
-            remember,
         })
     }
 
@@ -814,7 +759,7 @@ impl NewTask {
             return None;
         }
         let summary = self.results.get(self.selected_result)?.clone();
-        let (project, agent, remember) = self.selections()?;
+        let (project, agent) = self.selections()?;
         let token = NEXT_SUBMISSION.fetch_add(1, Ordering::Relaxed);
         self.read_error = None;
         self.submission = Some(Submission {
@@ -822,32 +767,30 @@ impl NewTask {
             reference: summary.reference,
             project,
             agent,
-            remember,
         });
         Some(token)
     }
 
-    fn selections(&self) -> Option<(Project, AgentKind, Option<AgentKind>)> {
+    fn selections(&self) -> Option<(Project, AgentKind)> {
         let project = self.project.chosen_value()?.clone();
-        let agent = *self.agent.chosen_value()?;
-        Some((project, agent, self.agent_unchosen.then_some(agent)))
+        let agent = self.agent()?;
+        Some((project, agent))
+    }
+
+    /// The harness the chosen project runs: its own answer, or the installation
+    /// default underneath it for a project that names none.
+    fn agent(&self) -> Option<AgentKind> {
+        let project = self.project.chosen_value()?;
+        project.agent.or(self.default_agent)
     }
 
     /// The open list, over the prompt above the pill it belongs to, and where
     /// each offer was drawn.
-    fn draw_open_list(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        anchors: [Rect; 2],
-    ) -> Vec<(Rect, usize)> {
-        match self.focus {
-            Focus::Project if self.project.is_open() => {
-                self.project.draw_list(frame, area, anchors[0])
-            }
-            Focus::Agent if self.agent.is_open() => self.agent.draw_list(frame, area, anchors[1]),
-            _ => Vec::new(),
+    fn draw_open_list(&self, frame: &mut Frame, area: Rect, anchor: Rect) -> Vec<(Rect, usize)> {
+        if self.project.is_open() {
+            return self.project.draw_list(frame, area, anchor);
         }
+        Vec::new()
     }
 }
 
@@ -871,11 +814,11 @@ pub fn draw(
     if inner.height < 10 {
         return popup;
     }
-    // The pills sit right under the prompt, on the right like a toolbar, and the
-    // answers close the window under a rule: the prompt is the question, what it
-    // will run as qualifies it, and the two answers end it.
+    // The pill sits right under the prompt, on the right like a toolbar, and the
+    // answers close the window under a rule: the prompt is the question, what the
+    // project has already answered qualifies it, and the two answers end it.
     let body = chrome::body(inner);
-    let [label, prompt, pills, machine] = Layout::vertical([
+    let [label, prompt, choice, _] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(4),
         Constraint::Length(1),
@@ -890,13 +833,13 @@ pub fn draw(
         label,
     );
 
-    let anchors = draw_choices(frame, pills, new_task);
-    for (pill, anchor) in [Focus::Project, Focus::Agent].into_iter().zip(anchors) {
-        targets.add(anchor, Hit::Pill(pill));
-    }
+    let pill = draw_choices(frame, choice, new_task);
+    targets.add(pill, Hit::Pill);
 
-    // Under the pills, right-aligned with them: a caption to the answer above it
-    // rather than a third thing to choose.
+    // A row below the pill rather than against it, and right-aligned with it: a
+    // caption to the answer above, not another thing to choose. It takes the
+    // modal's note row, which is the last one before the rule, so the row of air
+    // is the pill's side of the caption rather than the answers'.
     let (machine_label, reachable) = new_task.machine();
     frame.render_widget(
         Paragraph::new(Line::styled(
@@ -908,7 +851,7 @@ pub fn draw(
             },
         ))
         .alignment(Alignment::Right),
-        machine,
+        body.note,
     );
 
     let prompt_area = if new_task.issue {
@@ -924,8 +867,8 @@ pub fn draw(
     targets.add(prompt_area, Hit::Prompt);
 
     // Said only once it has been asked for: an empty prompt is not a mistake
-    // until an answer says it is. It goes beside the pills, which leave the left
-    // of their row free by sitting on the right.
+    // until an answer says it is. It goes beside the pill, which leaves the left
+    // of its row free by sitting on the right.
     if new_task.refused
         && let Some(refusal) = new_task.refusal()
     {
@@ -933,7 +876,7 @@ pub fn draw(
             Line::styled(refusal, palette::attention()),
             Rect {
                 x: inner.x,
-                y: pills.y,
+                y: choice.y,
                 width: inner.width,
                 height: 1,
             },
@@ -955,7 +898,7 @@ pub fn draw(
         targets.add(create, Hit::Create);
     }
 
-    for (row, offer) in new_task.draw_open_list(frame, prompt, anchors) {
+    for (row, offer) in new_task.draw_open_list(frame, prompt, pill) {
         targets.add(row, Hit::Offer(offer));
     }
     popup
@@ -1043,38 +986,25 @@ fn result_line(summary: &IssueSummary, width: usize, focused: bool) -> Line<'sta
     Line::from(spans)
 }
 
-fn draw_choices(frame: &mut Frame, area: Rect, new_task: &NewTask) -> [Rect; 2] {
-    let named = [
-        new_task.project.pill_width(true),
-        new_task.agent.pill_width(true),
-    ];
-    let valued = [
-        new_task.project.pill_width(false),
-        new_task.agent.pill_width(false),
-    ];
-    let available = area.width.saturating_sub(PILL_GAP);
-    // A pill is its value first: a row too narrow for the names keeps what each
-    // one is set to, and the open list says which decision it belongs to.
-    let (widths, with_name) = if named.iter().sum::<u16>() <= available {
+fn draw_choices(frame: &mut Frame, area: Rect, new_task: &NewTask) -> Rect {
+    let named = new_task.project.pill_width(true);
+    let valued = new_task.project.pill_width(false);
+    // A pill is its value first: a row too narrow for the name keeps what it is
+    // set to, and the open list says which decision it belongs to.
+    let (width, with_name) = if named <= area.width {
         (named, true)
-    } else if valued.iter().sum::<u16>() <= available {
+    } else if valued <= area.width {
         (valued, false)
     } else {
-        ([available / 2; 2], false)
+        (area.width, false)
     };
-    let [project, agent] =
-        Layout::horizontal([Constraint::Length(widths[0]), Constraint::Length(widths[1])])
-            .flex(Flex::End)
-            .spacing(PILL_GAP)
-            .areas(area);
-    let focused = new_task.focus;
+    let [project] = Layout::horizontal([Constraint::Length(width)])
+        .flex(Flex::End)
+        .areas(area);
     new_task
         .project
-        .draw_pill(frame, project, focused == Focus::Project, with_name);
-    new_task
-        .agent
-        .draw_pill(frame, agent, focused == Focus::Agent, with_name);
-    [project, agent]
+        .draw_pill(frame, project, new_task.focus == Focus::Project, with_name);
+    project
 }
 
 /// Whether text is shaped like something Linear can be asked about directly: an

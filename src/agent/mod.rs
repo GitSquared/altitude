@@ -12,6 +12,11 @@ pub mod tools;
 use claude::ClaudeCode;
 use pi::PiCode;
 
+/// The harnesses an installation can be set up to run, in the order the
+/// interface lists them. One catalog, so no two screens can offer a different
+/// set.
+pub const AGENTS: [AgentKind; 2] = [AgentKind::Pi, AgentKind::Claude];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Type, Serialize, Deserialize)]
 #[sqlx(type_name = "TEXT", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
