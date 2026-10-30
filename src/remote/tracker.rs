@@ -2,12 +2,12 @@
 //!
 //! A serve role has no person at the keyboard. Work arrives as a Linear
 //! AgentSessionEvent, an Issue status change, or a comment notification, is
-//! durably recorded before the webhook is acknowledged, and is then routed to
-//! the task host that owns the capsule. Comments pass through
-//! [`super::admission`] before anything reacts or wakes. This module owns only
-//! the mapping between an external issue/session and a local task, a peer, and a
-//! tracker user; the task's own state is always read back from the host, never
-//! cached here.
+//! durably recorded before the webhook is acknowledged, and is then handed to the
+//! task host that owns the capsule. Comments pass through
+//! [`super::admission`] before anything reacts or wakes. This module owns only the
+//! mapping between an external issue/session and a local task, a client, and a
+//! tracker user — one [`IssueReport`] per task — and the task's own state is
+//! always read back from the host, never cached here.
 //!
 //! The coordinator calls the host through [`Host`], a small callback surface the
 //! serve role implements over its task event loop. Keeping the two apart is what
@@ -163,23 +163,23 @@ impl RemoteTracker {
 
     /// Sponsor a session on an issue for a task a client started here.
     ///
-    /// The peer must have synced a tracker account: a route needs a tracker user
+    /// The peer must have synced a tracker account: a report needs a tracker user
     /// who can answer it, and a peer that has pushed none has nobody. The session
     /// is made through the public Agent API so an issue this app was never
     /// delegated can still be reported on, and the human assignee is left alone. A
-    /// route that already holds the task or the issue is left as it is, so a retry
+    /// report that already holds the task or the issue is left as it is, so a retry
     /// cannot sponsor a second session once one has been recorded.
-    pub async fn pilot_task(
+    pub async fn start_reporting(
         &self,
-        peer: EndpointId,
+        owner: &str,
         task_id: String,
         issue: IssueReference,
         session_agent: Option<String>,
     ) -> Result<(), String> {
-        let Some(tracker_user_id) = self.user_for_peer(&peer.to_string()) else {
+        let Some(tracker_user_id) = self.user_for_owner(owner) else {
             return Err("sync a Linear account to this remote before delegating issue work".into());
         };
-        if self.route_for_task(&task_id).is_some() || self.route_for_issue(&issue.id).is_some() {
+        if self.report_for_task(&task_id).is_some() || self.report_for_issue(&issue.id).is_some() {
             return Ok(());
         }
         let session_id = self
@@ -188,14 +188,14 @@ impl RemoteTracker {
             .create_session_on_issue(&issue.id)
             .await
             .map_err(|error| error.to_string())?;
-        self.upsert_route(Route {
+        self.upsert_report(IssueReport {
             issue_id: issue.id,
-            session_id: session_id.clone(),
-            peer: peer.to_string(),
+            tracker_session_id: session_id.clone(),
+            owner: owner.to_owned(),
             tracker_user_id: tracker_user_id.clone(),
             task_id,
-            cursor: 0,
-            origin: RouteOrigin::Piloted,
+            reported_events: 0,
+            origin: ReportOrigin::StartedByClient,
         })?;
         if let Err(error) = self
             .set_session_summary(&session_id, &tracker_user_id, session_agent.as_deref())
@@ -220,7 +220,7 @@ impl RemoteTracker {
                 _ = self.notify.notified() => {}
             }
             self.process_deliveries(host.as_ref()).await;
-            self.poll_routes(host.as_ref()).await;
+            self.poll_reports(host.as_ref()).await;
         }
     }
 
@@ -359,10 +359,10 @@ impl RemoteTracker {
     /// A stop is a cancellation, never an acceptance or a status restore.
     ///
     /// Only the delegation operator may stop the work; a teammate's stop is not
-    /// the operator's judgment and is ignored. The route is dropped only after
+    /// the operator's judgment and is ignored. The report is dropped only after
     /// the stop and its notice have both succeeded, so nothing writes to it again.
     async fn handle_stop(&self, event: &SessionEvent, host: &dyn Host) -> Result<(), String> {
-        let Some(route) = self.route_for_session(&event.session_id) else {
+        let Some(report) = self.report_for_session(&event.session_id) else {
             if event
                 .creator_id
                 .as_deref()
@@ -377,22 +377,22 @@ impl RemoteTracker {
             }
             return Ok(());
         };
-        if !event.is_from(&route.tracker_user_id) {
+        if !event.is_from(&report.tracker_user_id) {
             return Ok(());
         }
-        host.stop(route.task_id.clone()).await?;
+        host.stop(report.task_id.clone()).await?;
         self.config
             .automation
             .create_activity(
-                &route.session_id,
-                &stable_id(&route.task_id, "stopped"),
+                &report.tracker_session_id,
+                &stable_id(&report.task_id, "stopped"),
                 AgentActivityContent::Response {
                     body: "Stopped. Altitude ended this task and deleted its sandbox.".to_owned(),
                 },
             )
             .await
             .map_err(|error| error.to_string())?;
-        self.retire_route(&route)
+        self.retire_report(&report)
     }
 
     async fn handle_created(&self, event: &SessionEvent, host: &dyn Host) -> Result<(), String> {
@@ -400,13 +400,13 @@ impl RemoteTracker {
             return Ok(());
         };
         if self.is_terminated(&event.session_id)
-            || self.route_for_session(&event.session_id).is_some()
+            || self.report_for_session(&event.session_id).is_some()
         {
             return Ok(());
         }
         // The session's creator is the delegation author. An automation- or
         // agent-started session has no responsible human, so there is nobody to
-        // route through and no assignee fallback is invented. An app-created id
+        // report through and no assignee fallback is invented. An app-created id
         // cannot be guessed back to a person, and an issue already being worked
         // on is not news, so only an unknown issue is worth educating.
         let Some(author) = event
@@ -414,7 +414,7 @@ impl RemoteTracker {
             .as_deref()
             .filter(|id| *id != self.config.automation.app_user_id())
         else {
-            if self.route_for_issue(issue_id).is_none() {
+            if self.report_for_issue(issue_id).is_none() {
                 self.post_sync_guidance(&event.session_id).await?;
             }
             return Ok(());
@@ -437,7 +437,7 @@ impl RemoteTracker {
         };
         // A teammate's mention is a boundary case: acknowledge it and name the
         // operator, but do not run work for them.
-        if let Some(route) = self.route_for_issue(issue_id)
+        if let Some(report) = self.report_for_issue(issue_id)
             && is_mention
         {
             if let Some(source_comment_id) = event
@@ -447,11 +447,11 @@ impl RemoteTracker {
             {
                 self.react_eyes(source_comment_id).await;
             }
-            if author == route.tracker_user_id {
+            if author == report.tracker_user_id {
                 let body = event.prompt_body.clone().unwrap_or_default();
                 if !body.trim().is_empty() {
                     host.instruct(
-                        route.task_id,
+                        report.task_id,
                         format!(
                             "A mention from the task's operator:\n\n{body}\n\n\
                              This comment was addressed to you. Continue the task with it."
@@ -462,7 +462,7 @@ impl RemoteTracker {
                         .automation
                         .create_activity(
                             &event.session_id,
-                            &stable_id(&event.session_id, "routed"),
+                            &stable_id(&event.session_id, "already-running"),
                             AgentActivityContent::Response {
                                 body: "Added to the task already running for this issue."
                                     .to_owned(),
@@ -473,7 +473,7 @@ impl RemoteTracker {
                 }
                 return Ok(());
             }
-            let body = self.boundary_reply(&route.tracker_user_id).await;
+            let body = self.boundary_reply(&report.tracker_user_id).await;
             self.config
                 .automation
                 .create_activity(
@@ -507,29 +507,29 @@ impl RemoteTracker {
         }
         // The same session delivered again is the work already running here; it
         // must not be stopped and restarted.
-        if self.route_for_session(session_id).is_some() {
+        if self.report_for_session(session_id).is_some() {
             return Ok(());
         }
 
         // A different session on an issue that already has work is a
         // redelegation: stop the old task before the new one starts, so two
         // capsules never own the same issue.
-        let redelegation = if let Some(existing) = self.route_for_issue(issue_id) {
+        let redelegation = if let Some(existing) = self.report_for_issue(issue_id) {
             host.stop(existing.task_id.clone()).await?;
-            self.config.automation.create_activity(&existing.session_id, &stable_id(&existing.task_id, "redelegated"), AgentActivityContent::Response {
+            self.config.automation.create_activity(&existing.tracker_session_id, &stable_id(&existing.task_id, "redelegated"), AgentActivityContent::Response {
                 body: "A newer delegation replaced this one, so Altitude stopped this task and deleted its sandbox.".into(),
             }).await.map_err(|error| error.to_string())?;
-            self.retire_route(&existing)?;
+            self.retire_report(&existing)?;
             true
         } else {
             false
         };
 
-        let Some(peer) = self.peer_for_user(author) else {
+        let Some(owner) = self.owner_for_user(author) else {
             self.post_sync_guidance(session_id).await?;
             return Ok(());
         };
-        let peer: EndpointId = peer
+        let peer: EndpointId = owner
             .parse()
             .map_err(|_| "the remote's key could not be read".to_owned())?;
 
@@ -562,14 +562,14 @@ impl RemoteTracker {
                 return Ok(());
             }
         };
-        self.upsert_route(Route {
+        self.upsert_report(IssueReport {
             issue_id: issue_id.to_owned(),
-            session_id: session_id.to_owned(),
-            peer: peer.to_string(),
+            tracker_session_id: session_id.to_owned(),
+            owner,
             tracker_user_id: author.to_owned(),
             task_id: task_id.clone(),
-            cursor: 0,
-            origin: RouteOrigin::Delegated,
+            reported_events: 0,
+            origin: ReportOrigin::Delegated,
         })?;
         let session_agent = host.session_agent(task_id.clone()).await?;
         if let Err(error) = self
@@ -598,14 +598,14 @@ impl RemoteTracker {
         let Some(answer) = event.prompt_body.as_deref() else {
             return Ok(());
         };
-        let Some(route) = self.route_for_session(&event.session_id) else {
-            // No route yet: an operator's prompt on an issue session is a
+        let Some(report) = self.report_for_session(&event.session_id) else {
+            // No report yet: an operator's prompt on an issue session is a
             // delegation, which is how a session opened from the issue starts the
             // work. It is also the retry path after a failed start.
             if let Some(author) = event.prompt_author_id.as_deref()
                 && let Some(issue_id) = event.issue_id.as_deref()
                 && event.creator_id.as_deref() == Some(author)
-                && self.peer_for_user(author).is_some()
+                && self.owner_for_user(author).is_some()
             {
                 let label = event.creator_name.as_deref().unwrap_or(author);
                 return self
@@ -617,8 +617,8 @@ impl RemoteTracker {
         // Only the current delegation operator's reply counts; a teammate's
         // prompt is not a decision. Say so on the session and name the operator
         // rather than silently ignoring a human who spoke to the app.
-        if !event.is_from(&route.tracker_user_id) {
-            let body = self.boundary_reply(&route.tracker_user_id).await;
+        if !event.is_from(&report.tracker_user_id) {
+            let body = self.boundary_reply(&report.tracker_user_id).await;
             let discriminator = event
                 .activity_id
                 .as_deref()
@@ -637,7 +637,7 @@ impl RemoteTracker {
                 .map_err(|error| error.to_string())?;
             return Ok(());
         }
-        let signals = host.unresolved_signals(route.task_id.clone()).await?;
+        let signals = host.unresolved_signals(report.task_id.clone()).await?;
         // A prompt answers only what was already waiting when it was written. A
         // prompt that predates a signal is stale, and letting it resolve the
         // newer question would answer something the operator never saw.
@@ -659,16 +659,16 @@ impl RemoteTracker {
             .find(|signal| signal.kind == TaskOperatorSignalKind::InReview);
         let Some(signal) = question.or(review) else {
             return host
-                .instruct(route.task_id.clone(), answer.to_owned())
+                .instruct(report.task_id.clone(), answer.to_owned())
                 .await;
         };
         if signal.kind == TaskOperatorSignalKind::InReview && is_acceptance(answer) {
-            host.accept(route.task_id.clone(), signal.id.clone())
+            host.accept(report.task_id.clone(), signal.id.clone())
                 .await?;
-            let events = host.events(route.task_id.clone()).await?;
-            return self.finish_accepted(&route, &events).await;
+            let events = host.events(report.task_id.clone()).await?;
+            return self.finish_accepted(&report, &events).await;
         }
-        host.reply(route.task_id.clone(), signal.id.clone(), answer.to_owned())
+        host.reply(report.task_id.clone(), signal.id.clone(), answer.to_owned())
             .await
     }
 
@@ -685,10 +685,10 @@ impl RemoteTracker {
         occurred_at_ms: i64,
         host: &dyn Host,
     ) -> Result<(), String> {
-        let Some(route) = self.route_for_issue(issue_id) else {
+        let Some(report) = self.report_for_issue(issue_id) else {
             return Ok(());
         };
-        if route.tracker_user_id.as_str() != actor_id {
+        if report.tracker_user_id.as_str() != actor_id {
             return Ok(());
         }
         let delegation = self
@@ -700,7 +700,7 @@ impl RemoteTracker {
         if delegation.state.id != state_id || delegation.state.state_type != "completed" {
             return Ok(());
         }
-        let history = host.events(route.task_id.clone()).await?;
+        let history = host.events(report.task_id.clone()).await?;
         let was_waiting = history
             .iter()
             .rev()
@@ -722,7 +722,7 @@ impl RemoteTracker {
         if !was_waiting {
             return Ok(());
         }
-        let signals = host.unresolved_signals(route.task_id.clone()).await?;
+        let signals = host.unresolved_signals(report.task_id.clone()).await?;
         let Some(review) = signals
             .iter()
             .find(|signal| signal.kind == TaskOperatorSignalKind::InReview)
@@ -734,10 +734,10 @@ impl RemoteTracker {
         if review.last_raised_at_ms > occurred_at_ms {
             return Ok(());
         }
-        host.accept(route.task_id.clone(), review.id.clone())
+        host.accept(report.task_id.clone(), review.id.clone())
             .await?;
-        let events = host.events(route.task_id.clone()).await?;
-        self.finish_accepted(&route, &events).await
+        let events = host.events(report.task_id.clone()).await?;
+        self.finish_accepted(&report, &events).await
     }
 
     /// A comment reached a task's issue or document. Decide whether it is for
@@ -758,14 +758,14 @@ impl RemoteTracker {
         let Some(issue_id) = issue_id else {
             return Ok(());
         };
-        let Some(route) = self.route_for_issue(&issue_id) else {
+        let Some(report) = self.report_for_issue(&issue_id) else {
             return Ok(());
         };
-        if !host.is_active(route.task_id.clone()).await? {
+        if !host.is_active(report.task_id.clone()).await? {
             return Ok(());
         }
         let app_user_id = self.config.automation.app_user_id();
-        let actor = if event.actor_id == route.tracker_user_id {
+        let actor = if event.actor_id == report.tracker_user_id {
             Actor::Operator
         } else if event.actor_id == app_user_id {
             Actor::Agent
@@ -779,7 +779,7 @@ impl RemoteTracker {
             || site
                 .human_authors
                 .iter()
-                .any(|id| id.as_str() != route.tracker_user_id && id.as_str() != app_user_id);
+                .any(|id| id.as_str() != report.tracker_user_id && id.as_str() != app_user_id);
         let facts = InputFacts {
             actor,
             is_mention: event.is_mention,
@@ -797,7 +797,7 @@ impl RemoteTracker {
             comment = %event.comment_id,
             root = %site.root_comment_id,
             site_comment = %site.comment_id,
-            task = %route.task_id,
+            task = %report.task_id,
             ?decision,
             reason = decision.reason(),
             mention = event.is_mention,
@@ -822,11 +822,11 @@ impl RemoteTracker {
                     "A comment from {author} on the task's {source}:\n\n{body}\n\n\
                      This comment was addressed to you. Continue the task with it."
                 );
-                host.instruct(route.task_id, instruction).await
+                host.instruct(report.task_id, instruction).await
             }
             Admission::Redirect => {
                 self.react_eyes(&event.comment_id).await;
-                let body = self.boundary_reply(&route.tracker_user_id).await;
+                let body = self.boundary_reply(&report.tracker_user_id).await;
                 self.config
                     .automation
                     .comment_reply(
@@ -904,18 +904,19 @@ impl RemoteTracker {
     /// Report task life outward, and stop work the issue no longer delegates.
     ///
     /// A completed issue is not accepted here: a poll cannot prove who changed
-    /// the state. It is only ignored, so it never blocks the other routes.
-    async fn poll_routes(&self, host: &dyn Host) {
-        for route in self.routes() {
+    /// the state. It is only ignored, so it never blocks the other tasks'
+    /// reporting.
+    async fn poll_reports(&self, host: &dyn Host) {
+        for report in self.reports() {
             // A task the operator removed is no longer work: stop writing about
             // it rather than reporting a history that will never advance. A task
             // that left because it moved elsewhere still gets one goodbye, and
             // neither ending stops the work or marks the issue Done.
-            match host.is_active(route.task_id.clone()).await {
+            match host.is_active(report.task_id.clone()).await {
                 Ok(true) => {}
                 Ok(false) => {
                     let moved = host
-                        .events(route.task_id.clone())
+                        .events(report.task_id.clone())
                         .await
                         .unwrap_or_default()
                         .iter()
@@ -923,62 +924,62 @@ impl RemoteTracker {
                             matches!(event, TaskHistoryEvent::TransferCommitted { .. })
                         });
                     let outcome = if moved {
-                        self.finish_transferred(&route).await
+                        self.finish_transferred(&report).await
                     } else {
-                        self.retire_route(&route)
+                        self.retire_report(&report)
                     };
                     if let Err(error) = outcome {
-                        tracing::warn!(task = %route.task_id, %error, "could not drop a removed task's route");
+                        tracing::warn!(task = %report.task_id, %error, "could not drop a removed task's report");
                     }
                     continue;
                 }
                 Err(error) => {
-                    tracing::warn!(task = %route.task_id, %error, "could not tell whether a task is still here");
+                    tracing::warn!(task = %report.task_id, %error, "could not tell whether a task is still here");
                     continue;
                 }
             }
-            // A piloted route was not delegated to the app, so it does not end
+            // A piloted report was not delegated to the app, so it does not end
             // when the issue stops being delegated; it still accepts a native
             // stop and the operator's own control.
-            if route.origin == RouteOrigin::Delegated {
+            if report.origin == ReportOrigin::Delegated {
                 let delegation = match self
                     .config
                     .automation
-                    .issue_delegation(&route.issue_id)
+                    .issue_delegation(&report.issue_id)
                     .await
                 {
                     Ok(delegation) => delegation,
                     Err(error) => {
-                        tracing::warn!(issue = %route.issue_id, %error, "could not read the issue's delegation");
+                        tracing::warn!(issue = %report.issue_id, %error, "could not read the issue's delegation");
                         continue;
                     }
                 };
                 if delegation.delegate_id.as_deref() != Some(self.config.automation.app_user_id()) {
-                    self.unhook(host, &route).await;
+                    self.unhook(host, &report).await;
                     continue;
                 }
             }
-            if let Err(error) = self.sync_route(host, &route).await {
-                tracing::warn!(task = %route.task_id, %error, "task updates remain queued");
+            if let Err(error) = self.sync_report(host, &report).await {
+                tracing::warn!(task = %report.task_id, %error, "task updates remain queued");
             }
         }
     }
 
     /// The issue is no longer delegated to this app. Stop once, say so once,
-    /// then drop the route so nothing writes to it again.
+    /// then drop the report so nothing writes to it again.
     ///
-    /// A failed stop leaves the route in place so the next pass retries it; the
+    /// A failed stop leaves the report in place so the next pass retries it; the
     /// notice is only posted after the work is actually stopped.
-    async fn unhook(&self, host: &dyn Host, route: &Route) {
-        if host.stop(route.task_id.clone()).await.is_err() {
+    async fn unhook(&self, host: &dyn Host, report: &IssueReport) {
+        if host.stop(report.task_id.clone()).await.is_err() {
             return;
         }
         if let Err(error) = self
             .config
             .automation
             .create_activity(
-                &route.session_id,
-                &stable_id(&route.task_id, "unhooked"),
+                &report.tracker_session_id,
+                &stable_id(&report.task_id, "unhooked"),
                 AgentActivityContent::Response {
                     body: "This issue isn't delegated to Altitude anymore, so the task was                            stopped."
                         .to_owned(),
@@ -986,11 +987,11 @@ impl RemoteTracker {
             )
             .await
         {
-            tracing::warn!(task = %route.task_id, %error, "could not say why a task was unhooked");
+            tracing::warn!(task = %report.task_id, %error, "could not say why a task was unhooked");
             return;
         }
-        if let Err(error) = self.retire_route(route) {
-            tracing::warn!(task = %route.task_id, %error, "could not drop an unhooked route");
+        if let Err(error) = self.retire_report(report) {
+            tracing::warn!(task = %report.task_id, %error, "could not drop an unhooked report");
         }
     }
 
@@ -1001,43 +1002,48 @@ impl RemoteTracker {
     /// came from a tracker reply or the local interface, and produces the one
     /// Done transition, final response, and unhook. An agent run ending is not an
     /// ending and never implies Done.
-    async fn sync_route(&self, host: &dyn Host, route: &Route) -> Result<(), String> {
-        let events = host.events(route.task_id.clone()).await?;
-        if route.cursor > events.len() {
-            self.set_cursor(&route.issue_id, 0)?;
+    async fn sync_report(&self, host: &dyn Host, report: &IssueReport) -> Result<(), String> {
+        let events = host.events(report.task_id.clone()).await?;
+        if report.reported_events > events.len() {
+            self.set_cursor(&report.issue_id, 0)?;
             return Ok(());
         }
         // Signals still open are the only ones worth publishing; one already
         // answered or confirmed must not be raised again on the next pass.
         let unresolved: HashSet<String> = host
-            .unresolved_signals(route.task_id.clone())
+            .unresolved_signals(report.task_id.clone())
             .await?
             .into_iter()
             .map(|signal| signal.id)
             .collect();
-        // A route that only began after a transfer must not replay the source's
+        // A report that only began after a transfer must not replay the source's
         // whole life as new activity. Folding leaves the projected state below.
-        let folded = route.cursor == 0 && was_transferred(&events);
-        let start = if folded { events.len() } else { route.cursor };
+        let folded = report.reported_events == 0 && was_transferred(&events);
+        let start = if folded {
+            events.len()
+        } else {
+            report.reported_events
+        };
         for (index, (_, event)) in events.iter().enumerate().skip(start) {
             match event {
                 TaskHistoryEvent::AgentModelObserved { .. } => {
-                    if let Ok(Some(session_agent)) = host.session_agent(route.task_id.clone()).await
+                    if let Ok(Some(session_agent)) =
+                        host.session_agent(report.task_id.clone()).await
                         && let Err(error) = self
                             .set_session_summary(
-                                &route.session_id,
-                                &route.tracker_user_id,
+                                &report.tracker_session_id,
+                                &report.tracker_user_id,
                                 Some(&session_agent),
                             )
                             .await
                     {
-                        tracing::warn!(task = %route.task_id, %error, "could not update the session model label");
+                        tracing::warn!(task = %report.task_id, %error, "could not update the session model label");
                     }
                 }
                 TaskHistoryEvent::PlanUpdated { steps } => {
                     self.config
                         .automation
-                        .update_session_plan(&route.session_id, steps)
+                        .update_session_plan(&report.tracker_session_id, steps)
                         .await
                         .map_err(|error| error.to_string())?;
                 }
@@ -1054,8 +1060,8 @@ impl RemoteTracker {
                         self.config
                             .automation
                             .create_activity(
-                                &route.session_id,
-                                &stable_id(&route.task_id, agent_run_id),
+                                &report.tracker_session_id,
+                                &stable_id(&report.task_id, agent_run_id),
                                 AgentActivityContent::Thought {
                                     body: "Got your reply. Altitude is continuing the task.".into(),
                                 },
@@ -1066,7 +1072,7 @@ impl RemoteTracker {
                     self.config
                         .automation
                         .status(
-                            &self.issue_reference(&route.issue_id),
+                            &self.issue_reference(&report.issue_id),
                             TrackerStatus::InProgress,
                         )
                         .await
@@ -1076,7 +1082,7 @@ impl RemoteTracker {
                     if unresolved.contains(&signal.id) {
                         let contributions = contribution_details(&events[..=index]);
                         self.publish_signal(
-                            route,
+                            report,
                             &signal.id,
                             signal.kind,
                             &signal.title,
@@ -1091,27 +1097,28 @@ impl RemoteTracker {
                     resolved: true,
                     ..
                 } => {
-                    self.resolve_signal_comment(route, signal_id, &events[..=index])
+                    self.resolve_signal_comment(report, signal_id, &events[..=index])
                         .await;
                 }
                 TaskHistoryEvent::OperatorSignalConfirmed { signal_id } => {
-                    self.resolve_signal_comment(route, signal_id, &events[..=index])
+                    self.resolve_signal_comment(report, signal_id, &events[..=index])
                         .await;
-                    return self.finish_accepted(route, &events[..=index]).await;
+                    return self.finish_accepted(report, &events[..=index]).await;
                 }
                 TaskHistoryEvent::TaskCompleted { .. } => {
-                    self.resolve_signal_comments(route, &events[..=index]).await;
-                    return self.finish_accepted(route, &events[..=index]).await;
+                    self.resolve_signal_comments(report, &events[..=index])
+                        .await;
+                    return self.finish_accepted(report, &events[..=index]).await;
                 }
                 _ => {}
             }
-            self.set_cursor(&route.issue_id, index + 1)?;
+            self.set_cursor(&report.issue_id, index + 1)?;
         }
         if folded {
             // The destination still owes the operator whatever is waiting, even
             // though the rest of the history was already reported at the source.
             let contributions = contribution_details(&events);
-            for signal in host.unresolved_signals(route.task_id.clone()).await? {
+            for signal in host.unresolved_signals(report.task_id.clone()).await? {
                 if !unresolved.contains(&signal.id) {
                     continue;
                 }
@@ -1119,7 +1126,7 @@ impl RemoteTracker {
                     continue;
                 };
                 self.publish_signal(
-                    route,
+                    report,
                     &signal.id,
                     signal.kind,
                     &signal.title,
@@ -1128,41 +1135,41 @@ impl RemoteTracker {
                 )
                 .await?;
             }
-            self.set_cursor(&route.issue_id, events.len())?;
+            self.set_cursor(&report.issue_id, events.len())?;
         }
         Ok(())
     }
 
-    /// The task moved to another machine: say so and drop the route without
+    /// The task moved to another machine: say so and drop the report without
     /// stopping the work or marking the issue Done.
-    async fn finish_transferred(&self, route: &Route) -> Result<(), String> {
+    async fn finish_transferred(&self, report: &IssueReport) -> Result<(), String> {
         self.config
             .automation
             .create_activity(
-                &route.session_id,
-                &stable_id(&route.task_id, "transferred"),
+                &report.tracker_session_id,
+                &stable_id(&report.task_id, "transferred"),
                 AgentActivityContent::Response {
                     body: "This task moved to another remote and keeps running there.".to_owned(),
                 },
             )
             .await
             .map_err(|error| error.to_string())?;
-        self.retire_route(route)
+        self.retire_report(report)
     }
 
     async fn publish_signal(
         &self,
-        route: &Route,
+        report: &IssueReport,
         signal_id: &str,
         kind: TaskOperatorSignalKind,
         title: &str,
         body: &str,
         contributions: &[String],
     ) -> Result<(), String> {
-        let reference = self.issue_reference(&route.issue_id);
+        let reference = self.issue_reference(&report.issue_id);
         let comment_id = stable_id(
             "comment",
-            &format!("signal:{}:{}", route.task_id, signal_id),
+            &format!("signal:{}:{}", report.task_id, signal_id),
         );
         match kind {
             // Updates are the session's transcript, not an issue comment.
@@ -1171,8 +1178,8 @@ impl RemoteTracker {
                 self.config
                     .automation
                     .create_activity(
-                        &route.session_id,
-                        &stable_id(&route.task_id, signal_id),
+                        &report.tracker_session_id,
+                        &stable_id(&report.task_id, signal_id),
                         AgentActivityContent::Thought { body },
                     )
                     .await
@@ -1182,7 +1189,7 @@ impl RemoteTracker {
                 let body = format!("**→ Decision:** {}\n\n{}", title.trim(), body.trim());
                 self.config
                     .automation
-                    .comment_on_issue(&route.issue_id, &body, &comment_id)
+                    .comment_on_issue(&report.issue_id, &body, &comment_id)
                     .await
                     .map_err(|error| error.to_string())
             }
@@ -1190,7 +1197,7 @@ impl RemoteTracker {
                 let body = format!("**? Needs you:** {}\n\n{}", title.trim(), body.trim());
                 self.config
                     .automation
-                    .comment_on_issue(&route.issue_id, &body, &comment_id)
+                    .comment_on_issue(&report.issue_id, &body, &comment_id)
                     .await
                     .map_err(|error| error.to_string())?;
                 if let Err(error) = self
@@ -1199,7 +1206,7 @@ impl RemoteTracker {
                     .status(&reference, TrackerStatus::InReview)
                     .await
                 {
-                    tracing::warn!(issue = %route.issue_id, %error, "signal comment posted without an attention status");
+                    tracing::warn!(issue = %report.issue_id, %error, "signal comment posted without an attention status");
                 }
                 Ok(())
             }
@@ -1209,7 +1216,7 @@ impl RemoteTracker {
                 append_contributions(&mut body, contributions);
                 self.config
                     .automation
-                    .comment_on_issue(&route.issue_id, &body, &comment_id)
+                    .comment_on_issue(&report.issue_id, &body, &comment_id)
                     .await
                     .map_err(|error| error.to_string())?;
                 if let Err(error) = self
@@ -1218,7 +1225,7 @@ impl RemoteTracker {
                     .status(&reference, TrackerStatus::InReview)
                     .await
                 {
-                    tracing::warn!(issue = %route.issue_id, %error, "review comment posted without an In Review status");
+                    tracing::warn!(issue = %report.issue_id, %error, "review comment posted without an In Review status");
                 }
                 Ok(())
             }
@@ -1227,7 +1234,7 @@ impl RemoteTracker {
 
     async fn resolve_signal_comment(
         &self,
-        route: &Route,
+        report: &IssueReport,
         signal_id: &str,
         events: &[(i64, TaskHistoryEvent)],
     ) {
@@ -1239,7 +1246,7 @@ impl RemoteTracker {
         }
         let comment_id = stable_id(
             "comment",
-            &format!("signal:{}:{}", route.task_id, signal_id),
+            &format!("signal:{}:{}", report.task_id, signal_id),
         );
         if let Err(error) = self
             .config
@@ -1247,11 +1254,15 @@ impl RemoteTracker {
             .resolve_comment(&comment_id, None)
             .await
         {
-            tracing::warn!(task = %route.task_id, signal = signal_id, %error, "could not resolve a signal comment");
+            tracing::warn!(task = %report.task_id, signal = signal_id, %error, "could not resolve a signal comment");
         }
     }
 
-    async fn resolve_signal_comments(&self, route: &Route, events: &[(i64, TaskHistoryEvent)]) {
+    async fn resolve_signal_comments(
+        &self,
+        report: &IssueReport,
+        events: &[(i64, TaskHistoryEvent)],
+    ) {
         let mut seen = HashSet::new();
         for (_, event) in events {
             let TaskHistoryEvent::OperatorSignalRaised { signal } = event else {
@@ -1260,32 +1271,33 @@ impl RemoteTracker {
             if signal.kind == TaskOperatorSignalKind::Update || !seen.insert(signal.id.clone()) {
                 continue;
             }
-            self.resolve_signal_comment(route, &signal.id, events).await;
+            self.resolve_signal_comment(report, &signal.id, events)
+                .await;
         }
     }
 
     async fn finish_accepted(
         &self,
-        route: &Route,
+        report: &IssueReport,
         events: &[(i64, TaskHistoryEvent)],
     ) -> Result<(), String> {
         self.config
             .automation
-            .status(&self.issue_reference(&route.issue_id), TrackerStatus::Done)
+            .status(&self.issue_reference(&report.issue_id), TrackerStatus::Done)
             .await
             .map_err(|error| error.to_string())?;
         self.config
             .automation
             .create_activity(
-                &route.session_id,
-                &stable_id(&route.task_id, "accepted"),
+                &report.tracker_session_id,
+                &stable_id(&report.task_id, "accepted"),
                 AgentActivityContent::Response {
                     body: accepted_body(&contribution_urls(events)),
                 },
             )
             .await
             .map_err(|error| error.to_string())?;
-        self.retire_route(route)
+        self.retire_report(report)
     }
 
     async fn post_sync_guidance(&self, session_id: &str) -> Result<(), String> {
@@ -1336,7 +1348,7 @@ impl RemoteTracker {
             .map_err(|error| error.to_string())
     }
 
-    fn peer_for_user(&self, tracker_user_id: &str) -> Option<String> {
+    fn owner_for_user(&self, tracker_user_id: &str) -> Option<String> {
         let mut matches = self
             .accounts()
             .into_iter()
@@ -1358,16 +1370,16 @@ impl RemoteTracker {
             .into()
     }
 
-    /// Whether this peer has synced a tracker account, which is what a route
+    /// Whether this peer has synced a tracker account, which is what a report
     /// needs to be answerable.
-    pub fn has_account(&self, peer: EndpointId) -> bool {
-        self.user_for_peer(&peer.to_string()).is_some()
+    pub fn has_account(&self, owner: &str) -> bool {
+        self.user_for_owner(owner).is_some()
     }
 
-    fn user_for_peer(&self, peer: &str) -> Option<String> {
+    fn user_for_owner(&self, owner: &str) -> Option<String> {
         self.accounts()
             .into_iter()
-            .find(|(owner, _)| owner == peer)
+            .find(|(peer, _)| peer == owner)
             .map(|(_, record)| record.account.user_id)
     }
 
@@ -1397,59 +1409,59 @@ impl RemoteTracker {
         accounts
     }
 
-    fn route_for_task(&self, task_id: &str) -> Option<Route> {
+    fn report_for_task(&self, task_id: &str) -> Option<IssueReport> {
         let ledger = self.lock().ok()?;
         ledger
-            .routes
+            .reports
             .iter()
-            .find(|route| route.task_id == task_id)
+            .find(|report| report.task_id == task_id)
             .cloned()
     }
 
-    fn route_for_session(&self, session_id: &str) -> Option<Route> {
+    fn report_for_session(&self, session_id: &str) -> Option<IssueReport> {
         let ledger = self.lock().ok()?;
         ledger
-            .routes
+            .reports
             .iter()
-            .find(|route| route.session_id == session_id)
+            .find(|report| report.tracker_session_id == session_id)
             .cloned()
     }
 
-    fn route_for_issue(&self, issue_id: &str) -> Option<Route> {
+    fn report_for_issue(&self, issue_id: &str) -> Option<IssueReport> {
         let ledger = self.lock().ok()?;
         ledger
-            .routes
+            .reports
             .iter()
-            .find(|route| route.issue_id == issue_id)
+            .find(|report| report.issue_id == issue_id)
             .cloned()
     }
 
-    fn routes(&self) -> Vec<Route> {
+    fn reports(&self) -> Vec<IssueReport> {
         self.lock()
-            .map(|ledger| ledger.routes.clone())
+            .map(|ledger| ledger.reports.clone())
             .unwrap_or_default()
     }
 
-    fn upsert_route(&self, route: Route) -> Result<(), String> {
+    fn upsert_report(&self, report: IssueReport) -> Result<(), String> {
         self.mutate(|ledger| {
             ledger
-                .routes
-                .retain(|existing| existing.issue_id != route.issue_id);
-            ledger.routes.push(route);
+                .reports
+                .retain(|existing| existing.issue_id != report.issue_id);
+            ledger.reports.push(report);
         })
     }
 
-    fn retire_route(&self, route: &Route) -> Result<(), String> {
+    fn retire_report(&self, report: &IssueReport) -> Result<(), String> {
         let now = now_ms();
         self.mutate(|ledger| {
             ledger
-                .routes
-                .retain(|existing| existing.issue_id != route.issue_id);
+                .reports
+                .retain(|existing| existing.issue_id != report.issue_id);
             ledger
                 .terminated_sessions
-                .retain(|session| session.session_id != route.session_id);
+                .retain(|session| session.session_id != report.tracker_session_id);
             ledger.terminated_sessions.push(TerminatedSession {
-                session_id: route.session_id.clone(),
+                session_id: report.tracker_session_id.clone(),
                 terminated_at_ms: now,
             });
             ledger.prune_terminated(now);
@@ -1469,8 +1481,8 @@ impl RemoteTracker {
 
     fn set_cursor(&self, issue_id: &str, cursor: usize) -> Result<(), String> {
         self.mutate(|ledger| {
-            if let Some(route) = ledger.routes.iter_mut().find(|r| r.issue_id == issue_id) {
-                route.cursor = cursor;
+            if let Some(report) = ledger.reports.iter_mut().find(|r| r.issue_id == issue_id) {
+                report.reported_events = cursor;
             }
         })
     }
@@ -1909,7 +1921,7 @@ struct Ledger {
     #[serde(default)]
     deliveries: Vec<Delivery>,
     #[serde(default)]
-    routes: Vec<Route>,
+    reports: Vec<IssueReport>,
     #[serde(default)]
     terminated_sessions: Vec<TerminatedSession>,
 }
@@ -1978,30 +1990,42 @@ struct Delivery {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct Route {
+/// One task being told to one tracker issue.
+///
+/// The task's own history is what happened; this is how much of it has been told,
+/// through which tracker session, and whose login is telling it. It is written
+/// once, when the task is created or imported, and dropped when the task ends.
+struct IssueReport {
+    /// The issue in the tracker's own terms, which is what the API takes.
     issue_id: String,
-    session_id: String,
-    peer: String,
+    /// The session this machine opened on that issue, so a second one is never
+    /// opened for the same work.
+    tracker_session_id: String,
+    /// The client whose pushed login reports this task: a report speaks as the
+    /// person the work belongs to, not as the machine.
+    owner: String,
     tracker_user_id: String,
     task_id: String,
+    /// How many events of the task's history have been reported. Reporting resumes
+    /// here, so a failure repeats one event rather than the whole history.
     #[serde(default)]
-    cursor: usize,
+    reported_events: usize,
     #[serde(default)]
-    origin: RouteOrigin,
+    origin: ReportOrigin,
 }
 
-/// How a route came to exist, which decides whether it depends on the issue
-/// still being delegated to this app.
+/// Who started the work, which decides whether the report outlives the tracker's
+/// own delegation of the issue.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum RouteOrigin {
-    /// Linear delegated the issue to the app, so removing that delegation ends
-    /// the route.
+enum ReportOrigin {
+    /// The tracker delegated the issue to this app, so an issue that stops being
+    /// delegated stops being reported.
     #[default]
     Delegated,
-    /// A client started the task and this remote only reports it, so the
-    /// issue need not stay delegated and a native stop is still accepted.
-    Piloted,
+    /// A client started the task on the issue, so this machine only reports it:
+    /// the issue need not stay delegated and a native stop is still accepted.
+    StartedByClient,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

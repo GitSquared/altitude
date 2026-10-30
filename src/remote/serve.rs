@@ -1010,7 +1010,7 @@ async fn report_issue_task(
         );
         return;
     };
-    if !tracker.has_account(peer) {
+    if !tracker.has_account(&peer.to_string()) {
         tracing::warn!(
             task = %task.id,
             "the client that started this task has synced no tracker account, so the issue \
@@ -1019,7 +1019,12 @@ async fn report_issue_task(
         return;
     }
     if let Err(error) = tracker
-        .pilot_task(peer, task.id.clone(), reference, task.session_agent())
+        .start_reporting(
+            &peer.to_string(),
+            task.id.clone(),
+            reference,
+            task.session_agent(),
+        )
         .await
     {
         tracing::warn!(task = %task.id, %error, "could not open a session on the task's issue");
