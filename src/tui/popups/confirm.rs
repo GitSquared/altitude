@@ -252,15 +252,21 @@ pub(in crate::tui) async fn handle_confirm_key<E>(
     let Foreground::Confirm(mut pending) = mem::take(&mut app.foreground) else {
         return;
     };
+    // An answer leaves the operator on the screen the question was asked over. The
+    // foreground was taken to get the dialog out of the way, and an action that
+    // fails partway — a refusal, a forgotten identity that a project still binds —
+    // must say so over that screen rather than over whatever the enum defaults to.
+    // An action that means to go somewhere sets the foreground itself.
+    app.foreground = if pending.is_settings() {
+        Foreground::Panel
+    } else if pending.is_signal() {
+        Foreground::Signals
+    } else {
+        Foreground::Tasks
+    };
     match pending.dialog.handle_key(key) {
         None => app.foreground = Foreground::Confirm(pending),
-        Some(Decision::Cancel) => {
-            if pending.is_settings() {
-                app.foreground = Foreground::Panel;
-            } else if pending.is_signal() {
-                app.foreground = Foreground::Signals;
-            }
-        }
+        Some(Decision::Cancel) => {}
         Some(Decision::Confirm) => match pending.action {
             ConfirmAction::RemoveTask { id } => {
                 if let Some(task) = app.tasks.iter().find(|task| task.id == id).cloned() {
@@ -276,12 +282,8 @@ pub(in crate::tui) async fn handle_confirm_key<E>(
             ConfirmAction::PullTask { id } => app.pull_task(&id, event_loop, landings),
             ConfirmAction::ReplaceKey { address } => app.accept_remote_key(&address).await,
             ConfirmAction::TakeOver { id } => app.take_over(&id, terminal, event_loop, landings),
-            ConfirmAction::DeleteSetting(target) => {
-                app.foreground = Foreground::Panel;
-                app.delete(target).await;
-            }
+            ConfirmAction::DeleteSetting(target) => app.delete(target).await,
             ConfirmAction::DeleteCommitIdentity(commits) => {
-                app.foreground = Foreground::Panel;
                 app.delete_commit_identity(&commits);
             }
             ConfirmAction::ForgetCredentials(target) => {
