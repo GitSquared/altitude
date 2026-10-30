@@ -92,7 +92,7 @@ impl TaskAgentTools {
         };
         if !self
             .store
-            .is_active(&self.task_id)
+            .is_kept(&self.task_id)
             .await
             .map_err(tool_failure)?
         {
@@ -174,7 +174,7 @@ impl TaskAgentTools {
     async fn ensure_active(&self) -> Result<(), AgentToolError> {
         if !self
             .store
-            .is_active(&self.task_id)
+            .is_kept(&self.task_id)
             .await
             .map_err(tool_failure)?
         {

@@ -215,7 +215,7 @@ where
         // not commented on or moved; its record stays.
         let active = self
             .store
-            .is_active(&task.id)
+            .is_kept(&task.id)
             .await
             .map_err(|error| TrackerError::new(error.to_string()))?;
         if !active {

@@ -266,7 +266,7 @@ where
             Ok(task) => {
                 if self
                     .store
-                    .is_active(&task.id)
+                    .is_kept(&task.id)
                     .await
                     .map_err(TaskServiceError::Task)?
                 {

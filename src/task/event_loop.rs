@@ -1255,7 +1255,7 @@ where
         };
         // The operator can take over or remove a task while a pass is in flight;
         // acting on a hold that is gone would raise a signal nobody owns.
-        match self.service.store.is_active(&task.id).await {
+        match self.service.store.is_kept(&task.id).await {
             Ok(true) => {}
             Ok(false) | Err(_) => return,
         }

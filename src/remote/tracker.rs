@@ -120,8 +120,23 @@ pub trait Host: Send + Sync + 'static {
     fn instruct(&self, task_id: String, instruction: String) -> HostFuture<'_, ()>;
     fn reply(&self, task_id: String, signal_id: String, answer: String) -> HostFuture<'_, ()>;
     fn accept(&self, task_id: String, signal_id: String) -> HostFuture<'_, ()>;
-    fn is_active(&self, task_id: String) -> HostFuture<'_, bool>;
+    /// Whether the task's record is still kept on this machine. A completed task
+    /// is kept, which is what lets its ending be reported before it is dropped.
+    fn is_kept(&self, task_id: String) -> HostFuture<'_, bool>;
+
+    /// The tasks here that are bound to a tracker issue, with the client whose
+    /// work each one is. Reporting is adopted from this list.
+    fn bound_tasks(&self) -> HostFuture<'_, Vec<BoundTask>>;
     fn session_agent(&self, task_id: String) -> HostFuture<'_, Option<String>>;
+}
+
+/// A task this machine holds that is bound to a tracker issue.
+pub struct BoundTask {
+    pub task_id: String,
+    /// The client whose login reports it, as the peer id it arrived as.
+    pub owner: String,
+    pub issue: IssueReference,
+    pub session_agent: Option<String>,
 }
 
 pub struct RemoteTracker {
@@ -220,7 +235,44 @@ impl RemoteTracker {
                 _ = self.notify.notified() => {}
             }
             self.process_deliveries(host.as_ref()).await;
+            self.adopt_bound_tasks(host.as_ref()).await;
             self.poll_reports(host.as_ref()).await;
+        }
+    }
+
+    /// Start reporting on the tasks that are bound to an issue and are not being
+    /// reported on.
+    ///
+    /// A report is written when the task is created, which is one chance: a task
+    /// created while this machine held no account for its client had none, and a
+    /// ledger that was lost takes every report with it. Reading the tasks this
+    /// machine holds is what gives it a second chance.
+    async fn adopt_bound_tasks(&self, host: &dyn Host) {
+        let bound = match host.bound_tasks().await {
+            Ok(bound) => bound,
+            Err(error) => {
+                tracing::warn!(%error, "could not read the tasks bound to an issue");
+                return;
+            }
+        };
+        for task in bound {
+            if self.report_for_task(&task.task_id).is_some()
+                || self.report_for_issue(&task.issue.id).is_some()
+                || self.user_for_owner(&task.owner).is_none()
+            {
+                continue;
+            }
+            if let Err(error) = self
+                .start_reporting(
+                    &task.owner,
+                    task.task_id.clone(),
+                    task.issue.clone(),
+                    task.session_agent.clone(),
+                )
+                .await
+            {
+                tracing::warn!(task = %task.task_id, %error, "could not start reporting on a bound task");
+            }
         }
     }
 
@@ -761,7 +813,7 @@ impl RemoteTracker {
         let Some(report) = self.report_for_issue(&issue_id) else {
             return Ok(());
         };
-        if !host.is_active(report.task_id.clone()).await? {
+        if !host.is_kept(report.task_id.clone()).await? {
             return Ok(());
         }
         let app_user_id = self.config.automation.app_user_id();
@@ -912,7 +964,7 @@ impl RemoteTracker {
             // it rather than reporting a history that will never advance. A task
             // that left because it moved elsewhere still gets one goodbye, and
             // neither ending stops the work or marks the issue Done.
-            match host.is_active(report.task_id.clone()).await {
+            match host.is_kept(report.task_id.clone()).await {
                 Ok(true) => {}
                 Ok(false) => {
                     let moved = host

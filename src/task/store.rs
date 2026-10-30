@@ -274,7 +274,12 @@ impl TaskStore {
         .map(|row| row.map(Task::from))
     }
 
-    pub async fn is_active(&self, task_id: &str) -> Result<bool, TaskError> {
+    /// Whether the task's record is still kept here.
+    ///
+    /// A completed task is kept: the operator may still read it, and a tracker is
+    /// told the work is done from a record that is still here rather than one that
+    /// has been thrown away.
+    pub async fn is_kept(&self, task_id: &str) -> Result<bool, TaskError> {
         let active: Option<bool> =
             sqlx::query_scalar("SELECT removed_at_ms IS NULL FROM tasks WHERE id = ?")
                 .bind(task_id)

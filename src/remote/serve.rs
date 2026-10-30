@@ -950,7 +950,26 @@ impl super::tracker::Host for OwnTasks {
         })
     }
 
-    fn is_active(&self, task_id: String) -> super::tracker::HostFuture<'_, bool> {
+    fn bound_tasks(&self) -> super::tracker::HostFuture<'_, Vec<super::tracker::BoundTask>> {
+        Box::pin(async move {
+            let tasks = self.tasks.list().await.map_err(|error| error.to_string())?;
+            Ok(tasks
+                .into_iter()
+                .filter_map(|task| {
+                    let issue = task.facts.tracker_issue.clone()?;
+                    let owner = task.operator_id()?.to_owned();
+                    Some(super::tracker::BoundTask {
+                        task_id: task.id.clone(),
+                        owner,
+                        issue,
+                        session_agent: task.session_agent(),
+                    })
+                })
+                .collect())
+        })
+    }
+
+    fn is_kept(&self, task_id: String) -> super::tracker::HostFuture<'_, bool> {
         Box::pin(async move {
             Ok(self
                 .tasks

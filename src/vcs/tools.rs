@@ -38,7 +38,7 @@ impl VcsAgentTools {
         })?;
         if !self
             .store
-            .is_active(&self.task_id)
+            .is_kept(&self.task_id)
             .await
             .map_err(tool_failure)?
         {
