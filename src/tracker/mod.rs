@@ -88,6 +88,13 @@ pub struct TrackerAccount {
     pub provider: TrackerKind,
     pub user_id: String,
     pub display_name: String,
+    /// The workspace this login belongs to, when the provider names one.
+    ///
+    /// A login is one account in one workspace, and two logins to the same
+    /// tracker differ by which workspace they are in rather than by whose name
+    /// they carry, so the name says both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
 }
 
 /// The lifecycle transitions Altitude reports, named for their meaning rather

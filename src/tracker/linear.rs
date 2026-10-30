@@ -452,7 +452,28 @@ async fn read_account(session: &Session) -> Result<TrackerAccount, TrackerError>
             .and_then(Value::as_str)
             .ok_or_else(|| TrackerError::new("Linear returned no name for your account"))?
             .to_owned(),
+        workspace: workspace_of(user),
     })
+}
+
+/// The workspace the account is in, from whichever shape the provider sent.
+///
+/// Asked of the account rather than fetched separately: it is one fact about one
+/// login, and a provider that does not name it leaves it absent rather than
+/// guessed.
+fn workspace_of(user: &Value) -> Option<String> {
+    let workspace = user
+        .get("organization")
+        .or_else(|| user.get("workspace"))
+        .or_else(|| user.get("team").and_then(|team| team.get("organization")))?;
+    let named = workspace
+        .get("urlKey")
+        .or_else(|| workspace.get("key"))
+        .or_else(|| workspace.get("slug"))
+        .or_else(|| workspace.get("name"))
+        .and_then(Value::as_str)?
+        .trim();
+    (!named.is_empty()).then(|| named.to_owned())
 }
 
 impl IssueReader for Linear {

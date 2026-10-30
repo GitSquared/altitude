@@ -6210,12 +6210,21 @@ impl App {
 
     /// The account a tracker profile last recorded, for a name the operator does
     /// not have to invent.
+    ///
+    /// `user@workspace` when the provider named the workspace, which is what
+    /// tells two logins to the same tracker apart.
     fn tracker_account_name(&self, credential: &str) -> Option<String> {
         let text =
             fs::read_to_string(self.config.profile_dir(credential).join("identity.json")).ok()?;
         let account: TrackerAccount = serde_json::from_str(&text).ok()?;
         let name = account.display_name.trim();
-        (!name.is_empty()).then(|| name.to_owned())
+        if name.is_empty() {
+            return None;
+        }
+        Some(match account.workspace.as_deref().map(str::trim) {
+            Some(workspace) if !workspace.is_empty() => format!("{name}@{workspace}"),
+            _ => name.to_owned(),
+        })
     }
 
     /// Move a freshly checked identity to the id its account name implies,
