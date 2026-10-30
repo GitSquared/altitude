@@ -55,7 +55,10 @@ const ISSUE_STATES_QUERY: &str = "query IssueStates($id: String!) { \
 const CREATE_ACTIVITY_MUTATION: &str = "mutation CreateAgentActivity($input: AgentActivityCreateInput!) { \
     agentActivityCreate(input: $input) { success agentActivity { id } } }";
 
-const CREATE_SESSION_ON_ISSUE_MUTATION: &str = "mutation CreateAgentSessionOnIssue($input: AgentSessionCreateOnIssueInput!) { \
+// The input type is named for the mutation, not for the input: Linear has no
+// `AgentSessionCreateOnIssueInput`, and asking for one is a validation error
+// rather than a refusal, which is why the session was never created.
+const CREATE_SESSION_ON_ISSUE_MUTATION: &str = "mutation CreateAgentSessionOnIssue($input: AgentSessionCreateOnIssue!) { \
     agentSessionCreateOnIssue(input: $input) { success agentSession { id } } }";
 
 const UPDATE_STATE_MUTATION: &str = "mutation UpdateIssueState($id: String!, $input: IssueUpdateInput!) { \
@@ -700,8 +703,11 @@ impl LinearAutomation {
             .await
             .map_err(|_| TrackerError::new("Linear returned a response that was not JSON"))?;
         if !status.is_success() {
+            // A refused request carries the reason in its body, and a status alone
+            // sends whoever reads the log to guess at it.
             return Err(TrackerError::new(format!(
-                "Linear rejected the request with HTTP {status}"
+                "Linear rejected the request with HTTP {status}: {}",
+                describe_refusal(&payload)
             )));
         }
         if let Some(errors) = payload.get("errors") {
@@ -1024,6 +1030,23 @@ fn mutation_succeeded<'a>(data: &'a Value, field: &str) -> Result<&'a Value, Tra
         )));
     }
     Ok(payload)
+}
+
+/// What a refused response said, in one line.
+fn describe_refusal(payload: &Value) -> String {
+    if let Some(errors) = payload.get("errors").and_then(Value::as_array) {
+        let messages: Vec<String> = errors
+            .iter()
+            .filter_map(|error| error.get("message").and_then(Value::as_str))
+            .map(|message| message.chars().take(200).collect())
+            .collect();
+        if !messages.is_empty() {
+            return messages.join("; ");
+        }
+    }
+    let text = payload.to_string();
+    let text: String = text.chars().take(200).collect();
+    text
 }
 
 fn graphql_error_message(errors: &[Value]) -> String {

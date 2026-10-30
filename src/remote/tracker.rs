@@ -15,7 +15,7 @@
 
 use std::{
     cmp::Reverse,
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     future::Future,
     io::{self, ErrorKind},
@@ -143,6 +143,10 @@ pub struct RemoteTracker {
     config: RemoteTrackerConfig,
     ledger: Mutex<Ledger>,
     notify: Notify,
+    /// Why a task could not be adopted, so a tracker that keeps refusing one task
+    /// says so once instead of every tick. A task is still retried: the reason may
+    /// go away, and silence about a failure is worse than a second line about it.
+    refusals: Mutex<HashMap<String, String>>,
     /// Whether anything has arrived since this process started. The first
     /// delivery is said at info because it is the only proof a freshly installed
     /// app can reach this machine, and a silent first install is indistinguishable
@@ -160,6 +164,7 @@ impl RemoteTracker {
         Ok(Arc::new(Self {
             config,
             ledger: Mutex::new(ledger),
+            refusals: Mutex::new(HashMap::new()),
             notify: Notify::new(),
             delivered: AtomicBool::new(false),
         }))
@@ -262,16 +267,33 @@ impl RemoteTracker {
             {
                 continue;
             }
-            if let Err(error) = self
+            let outcome = self
                 .start_reporting(
                     &task.owner,
                     task.task_id.clone(),
                     task.issue.clone(),
                     task.session_agent.clone(),
                 )
-                .await
-            {
-                tracing::warn!(task = %task.task_id, %error, "could not start reporting on a bound task");
+                .await;
+            let refusal = outcome.err();
+            let changed = self
+                .refusals
+                .lock()
+                .map(|mut refusals| match &refusal {
+                    Some(reason) => {
+                        refusals.insert(task.task_id.clone(), reason.clone())
+                            != Some(reason.clone())
+                    }
+                    None => refusals.remove(&task.task_id).is_some(),
+                })
+                .unwrap_or(false);
+            match refusal {
+                Some(reason) if changed => tracing::warn!(
+                    task = %task.task_id,
+                    %reason,
+                    "could not start reporting on a bound task"
+                ),
+                _ => {}
             }
         }
     }
