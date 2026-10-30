@@ -21,10 +21,19 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
-RUN cargo build --release --locked
+# The compiled graph and the crate registry are kept between builds, so a rebuild
+# recompiles this crate and what changed rather than every dependency. They live in
+# cache mounts, which never reach the image, so the binary is copied out to a path
+# that does.
+ENV CARGO_TARGET_DIR=/cargo-target
+RUN --mount=type=cache,target=/cargo-target,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    cargo build --release --locked \
+    && install -m 0755 /cargo-target/release/altitude /usr/local/bin/altitude-built
 
 FROM runtime AS main
-COPY --from=build /src/target/release/altitude /usr/local/bin/altitude
+COPY --from=build /usr/local/bin/altitude-built /usr/local/bin/altitude
 USER altitude
 
 # The default target installs the latest stable release, or ALTITUDE_VERSION when set.
