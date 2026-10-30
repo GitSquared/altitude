@@ -628,7 +628,16 @@ fn issue_description(issue: &Value) -> String {
 }
 
 fn summary_of(issue: &Value) -> Result<IssueSummary, TrackerError> {
-    let id = string_field(issue, "id")?;
+    // Linear's MCP server answers with the identifier in `id` and the canonical
+    // uuid beside it, while webhooks and state changes speak uuid. A reference is
+    // compared against those, so the uuid is what `id` has to hold; `identifier` is
+    // the name people use.
+    let id = issue
+        .get("uuid")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .map(Ok)
+        .unwrap_or_else(|| string_field(issue, "id"))?;
     let url = issue_url(issue)?;
     // The identifier is the operator's name for the issue — `ALT-123`. A row of a
     // search does not always carry it, though the URL always spells it, so the

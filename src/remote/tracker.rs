@@ -225,7 +225,8 @@ impl RemoteTracker {
             .await
             .map_err(|error| error.to_string())?;
         self.upsert_report(IssueReport {
-            issue_id: issue.id,
+            issue_id: issue.id.clone(),
+            issue_identifier: issue.identifier.clone(),
             tracker_session_id: session_id.clone(),
             owner: owner.to_owned(),
             tracker_user_id: tracker_user_id.clone(),
@@ -721,6 +722,7 @@ impl RemoteTracker {
         };
         self.upsert_report(IssueReport {
             issue_id: issue_id.to_owned(),
+            issue_identifier: self.issue_reference(issue_id).identifier.clone(),
             tracker_session_id: session_id.to_owned(),
             owner,
             tracker_user_id: author.to_owned(),
@@ -1763,7 +1765,7 @@ impl RemoteTracker {
         let mut held: Vec<&IssueReport> = ledger
             .reports
             .iter()
-            .filter(|report| report.issue_id == issue_id)
+            .filter(|report| report.issue_id == issue_id || report.issue_identifier == issue_id)
             .collect();
         // A finished report is history; a task still being told about wins, so a
         // second task on the same issue is reported rather than quietly skipped.
@@ -2388,6 +2390,10 @@ struct Delivery {
 struct IssueReport {
     /// The issue in the tracker's own terms, which is what the API takes.
     issue_id: String,
+    /// The name people know it by, `ALT-12`. Reported through because it is what a
+    /// reference made from a search carries, and a report has to answer to either.
+    #[serde(default)]
+    issue_identifier: String,
     /// The session this machine opened on that issue, so a second one is never
     /// opened for the same work.
     tracker_session_id: String,
