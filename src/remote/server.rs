@@ -260,25 +260,24 @@ impl LinkHandler {
             });
         }
         held.save(&held_path)?;
-        // The account a peer is signed in as travels in its tracker login, so it
-        // is read back from what was just written rather than trusted from the
-        // pushed bytes. A machine holds one login directory per account, so the
-        // login's own path is what is read.
+        // The account a peer is signed in as travels in its tracker login, and a
+        // login is only sent when it changed. What this machine holds is the
+        // question, so it is read from the logins on disk: a push that carries
+        // nothing new still says who the peer is.
         let mut pushed = Vec::new();
         for provider in TrackerKind::ALL {
-            let Some(login) = bundle
-                .profiles
-                .iter()
-                .map(|sent| sent.profile.as_str())
-                .find(|login| provider.owns(login))
-            else {
+            let Ok(logins) = fs::read_dir(operator_dir.join(provider.profile())) else {
+                // A provider this machine holds no login for keeps the record it
+                // already has, if it has one.
                 continue;
             };
-            let path = operator_dir.join(login).join("profile").join(ACCOUNT_FILE);
-            let account = fs::read(&path)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<TrackerAccount>(&bytes).ok())
-                .filter(|account| account.provider == provider);
+            let account = logins.flatten().find_map(|login| {
+                let path = login.path().join("profile").join(ACCOUNT_FILE);
+                fs::read(&path)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<TrackerAccount>(&bytes).ok())
+                    .filter(|account| account.provider == provider)
+            });
             pushed.push((provider, account));
         }
         // Taking an account over says whose it is now, so the clients it was
