@@ -34,6 +34,7 @@ use super::{
 
 const LIST_ISSUES: &str = "list_issues";
 const LIST_TEAMS: &str = "list_teams";
+const WHOAMI: &str = "whoami";
 const GET_ISSUE: &str = "get_issue";
 const LIST_COMMENTS: &str = "list_comments";
 const LIST_ISSUE_STATUSES: &str = "list_issue_statuses";
@@ -54,7 +55,6 @@ const MAX_COMMENT_PAGES: usize = 20;
 /// saved.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(180);
 const TOOL_TIMEOUT: Duration = Duration::from_secs(30);
-const WORKSPACE_TIMEOUT: Duration = Duration::from_secs(15);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(3);
 
 struct Session {
@@ -255,11 +255,7 @@ impl Linear {
     }
 
     async fn record_account(&self, session: &Session) -> Result<(), TrackerError> {
-        let mut account = read_account(session).await?;
-        // The account the MCP server reports does not say which workspace it is
-        // in, and two logins are told apart by exactly that. Asked once, here,
-        // with the token this sign-in produced.
-        account.workspace = account.workspace.or(workspace_name(&self.profile).await);
+        let account = read_account(session).await?;
         let bytes = serde_json::to_vec_pretty(&account)
             .map_err(|_| TrackerError::new("could not encode the Linear account"))?;
         fs::write(self.profile.join(ACCOUNT_FILE), bytes)
@@ -451,14 +447,22 @@ impl Linear {
 }
 
 async fn read_account(session: &Session) -> Result<TrackerAccount, TrackerError> {
-    let parameter = if session.accepts("get_user", "query") {
-        "query"
+    // `whoami` answers the person and the workspace in one call, which is what a
+    // login is named by here. `get_user` knows only the person, and being signed in
+    // is not the same as knowing where: a name without a workspace is one of two
+    // logins that read the same.
+    let data = if session.has(WHOAMI) {
+        session.call(WHOAMI, Map::new()).await
     } else {
-        "id"
-    };
-    let mut arguments = Map::new();
-    arguments.insert(parameter.into(), json!("me"));
-    let data = session.call("get_user", arguments).await?;
+        let parameter = if session.accepts("get_user", "query") {
+            "query"
+        } else {
+            "id"
+        };
+        let mut arguments = Map::new();
+        arguments.insert(parameter.into(), json!("me"));
+        session.call("get_user", arguments).await
+    }?;
     let user = data.get("user").unwrap_or(&data);
     Ok(TrackerAccount {
         provider: TrackerKind::Linear,
@@ -469,48 +473,22 @@ async fn read_account(session: &Session) -> Result<TrackerAccount, TrackerError>
             .and_then(Value::as_str)
             .ok_or_else(|| TrackerError::new("Linear returned no name for your account"))?
             .to_owned(),
-        workspace: workspace_of(user),
+        workspace: workspace_of(user).or_else(|| workspace_named(&data)),
     })
 }
 
-/// What Linear calls the workspace this login is for.
+/// The workspace an answer named beside the person, as `whoami` does.
 ///
-/// The MCP server's account answer names the person and not the workspace, so it
-/// is asked of Linear's own API with the token the sign-in produced. A token that
-/// cannot answer, or an answer without a workspace, leaves it absent rather than
-/// guessed: `gaby` is a worse name than `gaby@acme`, and a wrong workspace is
-/// worse than either.
-async fn workspace_name(profile: &Path) -> Option<String> {
-    let token = grant_token(profile)?;
-    let client = reqwest::Client::builder()
-        .timeout(WORKSPACE_TIMEOUT)
-        .build()
-        .ok()?;
-    let response = client
-        .post("https://api.linear.app/graphql")
-        .bearer_auth(token)
-        .json(&json!({ "query": "{ viewer { organization { name urlKey } } }" }))
-        .send()
-        .await
-        .ok()?;
-    let body: Value = response.json().await.ok()?;
-    let organization = body.pointer("/data/viewer/organization")?;
-    let named = organization
-        .get("urlKey")
-        .or_else(|| organization.get("name"))
-        .and_then(Value::as_str)?
-        .trim();
-    (!named.is_empty()).then(|| named.to_owned())
-}
-
-/// The access token the sign-in stored, which is what can answer for it.
-fn grant_token(profile: &Path) -> Option<String> {
-    let text = fs::read_to_string(profile.join(super::linear_auth::GRANT_FILE)).ok()?;
-    let grant: Value = serde_json::from_str(&text).ok()?;
-    grant
-        .pointer("/token_response/access_token")
+/// The name is what a person recognises, and it is the only thing asked: a login's
+/// workspace is part of its name, so a guess is worse than an absence.
+fn workspace_named(data: &Value) -> Option<String> {
+    let named = data
+        .get("workspace")?
+        .get("name")
         .and_then(Value::as_str)
-        .map(str::to_owned)
+        .map(str::trim)
+        .filter(|named| !named.is_empty())?;
+    Some(named.to_owned())
 }
 
 /// The workspace the account itself named, when it named one.
