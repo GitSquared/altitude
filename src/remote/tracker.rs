@@ -130,6 +130,15 @@ pub trait Host: Send + Sync + 'static {
     fn session_agent(&self, task_id: String) -> HostFuture<'_, Option<String>>;
 }
 
+/// Whether asking a tracker again could work.
+///
+/// A revoked token, a rate limit, and a tracker having a bad day are all worth
+/// another pass. An issue the tracker no longer has is not: the task will not
+/// become reportable by waiting.
+fn worth_retrying(refusal: &str) -> bool {
+    !refusal.contains("not found") && !refusal.contains("Entity not found")
+}
+
 /// A task this machine holds that is bound to a tracker issue.
 pub struct BoundTask {
     pub task_id: String,
@@ -266,6 +275,18 @@ impl RemoteTracker {
             }
         };
         for task in bound {
+            // A refusal that waits for nothing is not asked again in this process: an
+            // issue the tracker no longer has does not come back by asking every ten
+            // seconds, and a restart asks once.
+            let refused_for_good = self
+                .refusals
+                .lock()
+                .ok()
+                .and_then(|refusals| refusals.get(&task.task_id).cloned())
+                .is_some_and(|reason| !worth_retrying(&reason));
+            if refused_for_good {
+                continue;
+            }
             if self.report_for_task(&task.task_id).is_some()
                 || self
                     .report_for_issue(&task.issue.id)
