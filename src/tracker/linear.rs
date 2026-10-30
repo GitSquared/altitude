@@ -373,7 +373,19 @@ impl Linear {
         let issues = issue_list(&data)?;
         let mut results = Vec::with_capacity(issues.len());
         for issue in &issues {
-            results.push(summary_of(issue)?);
+            // A row this client cannot read is a row missing from the list, not
+            // an answer of "nothing found": the rest are still worth showing, and
+            // the log says what was dropped rather than the page saying nothing.
+            match summary_of(issue) {
+                Ok(summary) => results.push(summary),
+                Err(error) => tracing::warn!(
+                    %error,
+                    fields = ?issue
+                        .as_object()
+                        .map(|object| object.keys().cloned().collect::<Vec<_>>()),
+                    "could not read a Linear issue from a search"
+                ),
+            }
         }
         rank(&mut results, query);
         Ok(results)
@@ -639,8 +651,14 @@ fn issue_description(issue: &Value) -> String {
 
 fn summary_of(issue: &Value) -> Result<IssueSummary, TrackerError> {
     let id = string_field(issue, "id")?;
-    let identifier = string_field(issue, "identifier")?;
     let url = issue_url(issue)?;
+    // The identifier is the operator's name for the issue — `ALT-123`. A row of a
+    // search does not always carry it, though the URL always spells it, so the
+    // URL answers when the field does not.
+    let identifier = match string_field(issue, "identifier") {
+        Ok(identifier) => identifier,
+        Err(missing) => issue_identifier_from_url(&url).ok_or(missing)?,
+    };
     let workspace = workspace_slug_from_url(&url)
         .ok_or_else(|| TrackerError::new("the Linear issue URL has no workspace"))?;
     let project = issue
