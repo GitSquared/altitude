@@ -45,6 +45,9 @@ pub struct InputFacts {
     /// A signal root this task published and tracks. Reserved for the signal
     /// binding ledger; false until signal comments exist.
     pub is_tracked_signal: bool,
+    /// The comment is on the issue this task is bound to, rather than in a
+    /// document or a thread under it.
+    pub is_task_issue: bool,
     /// Any human other than the operator has spoken in this thread or document.
     /// Unknown is treated as true so an uncertain answer cannot cause a wake.
     pub has_other_humans: bool,
@@ -59,7 +62,10 @@ pub struct InputFacts {
 /// 2. A tracked signal root is the operator↔agent channel.
 /// 3. A reply in a one-to-one agent thread, or a top-level comment on a
 ///    one-to-one agent document, is a conversation with the agent.
-/// 4. Everything else is context.
+/// 4. The operator writing on the task's own issue is talking to the task: an
+///    issue is where the work is described, and a person who owns that work
+///    adding a sentence to it is not making conversation with a crowd.
+/// 5. Everything else is context.
 pub fn decide(facts: &InputFacts) -> Admission {
     if facts.actor == Actor::Agent {
         return Admission::Ignore;
@@ -81,6 +87,12 @@ pub fn decide(facts: &InputFacts) -> Admission {
         && !facts.has_other_humans
         && (facts.is_agent_thread || facts.is_agent_document_comment)
     {
+        return Admission::Wake;
+    }
+
+    // The operator's own words on the task's issue are words for the task. Nobody
+    // else's are, which is why this asks about the actor rather than the place.
+    if facts.actor == Actor::Operator && facts.is_task_issue {
         return Admission::Wake;
     }
 

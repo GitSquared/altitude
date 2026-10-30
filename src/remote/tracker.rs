@@ -978,6 +978,9 @@ impl RemoteTracker {
             // Signal comments do not exist yet; the binding ledger will set this
             // when they do.
             is_tracked_signal: false,
+            is_task_issue: site.document_content_id.is_none()
+                && site.issue_id.as_deref() == Some(issue_id.as_str())
+                && site.parent_id.is_none(),
             has_other_humans,
         };
         let decision = admission::decide(&facts);
