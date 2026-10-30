@@ -57,14 +57,24 @@ impl TrackerKind {
         Self::ALL[0]
     }
 
-    /// The synced profile that carries this tracker's login and account.
+    /// The directory this tracker's logins live under, one login to a directory:
+    /// `trackers/linear/gaby` carries the account named gaby.
     ///
-    /// It travels with the rest of a client's profiles and is never mounted:
+    /// A login travels with the rest of a client's profiles and is never mounted:
     /// nothing inside a capsule needs to know who the operator is.
     pub fn profile(self) -> &'static str {
         match self {
             Self::Linear => "trackers/linear",
         }
+    }
+
+    /// Whether a login is this tracker's, by the directory it lives in rather
+    /// than by a path a caller spelled out: a machine holds one directory per
+    /// login, so the login is what arrives and the tracker is who owns it.
+    pub fn owns(self, login: &str) -> bool {
+        login
+            .strip_prefix(self.profile())
+            .is_some_and(|rest| rest.starts_with('/'))
     }
 }
 

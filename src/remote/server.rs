@@ -63,16 +63,24 @@ enum ConfigWrite {
 /// is whatever the pushed login says it is, and the check that follows has to
 /// happen before anything is written.
 fn arriving_accounts(decoded: &[(PathBuf, Vec<u8>)]) -> Vec<(TrackerKind, Option<TrackerAccount>)> {
+    let logins: Vec<(String, &[u8])> = decoded
+        .iter()
+        .filter_map(|(path, bytes)| {
+            if path.file_name()? != ACCOUNT_FILE {
+                return None;
+            }
+            // `trackers/linear/gaby/profile/identity.json` names the login two
+            // directories up.
+            let login = path.parent()?.parent()?;
+            Some((login.to_string_lossy().into_owned(), bytes.as_slice()))
+        })
+        .collect();
     TrackerKind::ALL
         .iter()
         .map(|provider| {
-            let account = decoded
+            let account = logins
                 .iter()
-                .find(|(path, _)| {
-                    path == &Path::new(provider.profile())
-                        .join("profile")
-                        .join(ACCOUNT_FILE)
-                })
+                .find(|(login, _)| provider.owns(login))
                 .and_then(|(_, bytes)| serde_json::from_slice::<TrackerAccount>(bytes).ok())
                 .filter(|account| account.provider == *provider);
             (*provider, account)
@@ -252,22 +260,21 @@ impl LinkHandler {
             });
         }
         held.save(&held_path)?;
-        // The account a peer is signed in as travels in its tracker profile, so it
+        // The account a peer is signed in as travels in its tracker login, so it
         // is read back from what was just written rather than trusted from the
-        // pushed bytes.
+        // pushed bytes. A machine holds one login directory per account, so the
+        // login's own path is what is read.
         let mut pushed = Vec::new();
         for provider in TrackerKind::ALL {
-            if !bundle
+            let Some(login) = bundle
                 .profiles
                 .iter()
-                .any(|sent| sent.profile == provider.profile())
-            {
+                .map(|sent| sent.profile.as_str())
+                .find(|login| provider.owns(login))
+            else {
                 continue;
-            }
-            let path = operator_dir
-                .join(provider.profile())
-                .join("profile")
-                .join(ACCOUNT_FILE);
+            };
+            let path = operator_dir.join(login).join("profile").join(ACCOUNT_FILE);
             let account = fs::read(&path)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<TrackerAccount>(&bytes).ok())
