@@ -962,6 +962,13 @@ impl App {
                 }
                 return;
             }
+            // A click on a list row is a choice, and it goes to the list before
+            // it goes to whatever the row is drawn over.
+            if let Some(form) = self.panel.form.as_mut()
+                && form.pill_mouse(mouse)
+            {
+                return;
+            }
             let target = self
                 .panel
                 .form
@@ -984,6 +991,11 @@ impl App {
                     };
                     if let Some(form) = self.panel.form.as_mut() {
                         form.focus = focus;
+                        // A pill is pressed rather than selected: one click opens
+                        // the list it says it opens.
+                        if focus.is_a_pill() {
+                            form.open_pill();
+                        }
                     }
                     match focus {
                         Focus::Cancel => self.panel.form = None,
@@ -1364,6 +1376,9 @@ impl App {
                 if let Some(form) = &self.panel.form {
                     if let Some(browser) = &form.repositories {
                         return browser.select.hints();
+                    }
+                    if let Some(hints) = form.list_hints() {
+                        return hints;
                     }
                     let mut hints = vec![
                         Hint::new("tab", "next"),
@@ -3827,6 +3842,13 @@ impl App {
         };
         let mut keep = true;
         let mut save = false;
+        // An open list holds every key, escape included: it closes the list
+        // rather than the page, which is what a dropdown does everywhere else.
+        if form.list_open() {
+            form.list_key(key);
+            self.panel.form = Some(form);
+            return;
+        }
         if let Some(mut scopes) = form.scopes.take() {
             match scopes.key(key) {
                 ScopesKey::Still => {
@@ -3890,20 +3912,11 @@ impl App {
                 KeyCode::Enter | KeyCode::Char(' ') if form.focus == Focus::Accept => {
                     form.accepts_delegated_work = !form.accepts_delegated_work;
                 }
-                KeyCode::Enter | KeyCode::Char(' ') if form.focus == Focus::Host => {
-                    form.cycle_host();
-                }
-                KeyCode::Enter | KeyCode::Char(' ') if form.focus == Focus::Agent => {
-                    form.cycle_agent();
-                }
-                KeyCode::Enter | KeyCode::Char(' ') if form.focus == Focus::VcsIdentity => {
-                    form.cycle_vcs();
-                }
-                KeyCode::Enter | KeyCode::Char(' ') if form.focus == Focus::TrackerIdentity => {
-                    form.cycle_tracker();
-                }
-                KeyCode::Enter | KeyCode::Char(' ') if form.focus == Focus::Identity => {
-                    form.cycle_identity();
+                // A pill opens its list, the way a pill does everywhere else.
+                // The two whose list is a page of its own are opened before this
+                // by the keys that fetch it.
+                KeyCode::Enter | KeyCode::Char(' ') if form.focus.is_a_pill() => {
+                    form.open_pill();
                 }
                 KeyCode::Enter if form.enters_newline() => form.handle_text(key),
                 KeyCode::Enter => match form.focus {
@@ -5123,11 +5136,11 @@ impl App {
                 project.name = name;
                 project.repository = repository;
                 project.host = form.host_value();
-                project.agent = form.agent;
-                project.agent_credential = form.agent_credential.clone();
-                project.vcs_credential = form.vcs_credential.clone();
+                project.agent = form.agent();
+                project.agent_credential = form.agent_credential();
+                project.vcs_credential = form.vcs_credential();
                 project.vcs = form
-                    .vcs_credential
+                    .vcs_credential()
                     .as_deref()
                     .and_then(Service::from_id)
                     .and_then(|service| match service {
@@ -5146,7 +5159,7 @@ impl App {
                 // says so; one that claims nothing is not.
                 project.tracker =
                     (!scope.is_empty() || form.accepts_delegated_work).then(|| TrackerRoute {
-                        credential: form.tracker_credential.clone(),
+                        credential: form.tracker_credential(),
                         scope: (!scope.is_empty()).then(|| scope.to_owned()),
                         accepts_delegated_work: form.accepts_delegated_work,
                     });
@@ -6412,7 +6425,7 @@ impl App {
                 return;
             }
             let scope_credential = self.panel.form.as_ref().and_then(|form| {
-                form.tracker_credential.clone().or_else(|| {
+                form.tracker_credential().or_else(|| {
                     self.settings_file.as_ref().and_then(|file| {
                         file.settings()
                             .default_credential(Slot::Tracker)

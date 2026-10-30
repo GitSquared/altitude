@@ -20,13 +20,54 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     Frame,
+    buffer::Buffer,
     layout::{Constraint, Layout, Rect},
     style::Style,
     text::{Line, Span},
-    widgets::{Block, BorderType, Clear, Padding, Paragraph},
+    widgets::{Block, BorderType, Clear, Padding, Paragraph, Widget},
 };
 
 use crate::tui::widgets::{chrome, palette, utils::truncate};
+
+/// A pill that shows a value whose list is a page of its own.
+///
+/// The same box a [`Select`] wears, for a field whose choices are a browser
+/// rather than a list: the operator should not have to learn two ways of reading
+/// "this is a value you can change".
+pub fn shown_pill(buffer: &mut Buffer, area: Rect, value: &str, focused: bool) {
+    let room = usize::from(area.width).saturating_sub(3);
+    let (value_style, quiet) = if focused {
+        (palette::focus(), palette::focus())
+    } else {
+        (palette::primary(), palette::muted())
+    };
+    pill_in(
+        buffer,
+        area,
+        &[
+            Span::styled(" ", quiet),
+            Span::styled(truncate(value, room), value_style),
+            Span::styled(format!(" {OPENS} "), quiet),
+        ],
+        focused,
+    );
+}
+
+/// The fill and the spans, which is what makes a row a pill.
+fn pill_in(buffer: &mut Buffer, area: Rect, spans: &[Span<'static>], focused: bool) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    // The fill covers the spaces as well as the words, because the pill is the
+    // whole of what the fill is for.
+    Paragraph::new(Line::from(spans.to_vec()))
+        .style(if focused {
+            palette::focus()
+        } else {
+            Style::default()
+        })
+        .render(area, buffer);
+}
 
 /// How many offers a list needs before typing narrows it. Under that, j/k and
 /// the arrows are worth more than a query: the list is already short enough to
@@ -314,23 +355,18 @@ impl<T> Select<T> {
     /// interface. Inside, the name is quiet and the value is not, which is the
     /// whole difference between the two.
     pub fn draw_pill(&self, frame: &mut Frame, area: Rect, focused: bool, with_name: bool) {
-        if area.height == 0 || area.width == 0 {
-            return;
-        }
-        // The fill covers the spaces as well as the words, because the pill is
-        // the whole of what the fill is for.
-        frame.render_widget(
-            Paragraph::new(Line::from(self.pill_spans(
-                focused,
-                with_name,
-                usize::from(area.width),
-            )))
-            .style(if focused {
-                palette::focus()
-            } else {
-                Style::default()
-            }),
+        self.draw_pill_in(frame.buffer_mut(), area, focused, with_name);
+    }
+
+    /// The same pill, for a page that draws into a buffer of its own rather than
+    /// onto the frame — a form that scrolls its fields composes the whole page
+    /// before it is shown.
+    pub fn draw_pill_in(&self, buffer: &mut Buffer, area: Rect, focused: bool, with_name: bool) {
+        pill_in(
+            buffer,
             area,
+            &self.pill_spans(focused, with_name, usize::from(area.width)),
+            focused,
         );
     }
 

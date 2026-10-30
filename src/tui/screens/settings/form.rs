@@ -4,6 +4,8 @@
 //! scroll with the caret: the block being edited is always on screen, and the ones
 //! above it are one shift-tab away.
 
+use std::mem;
+
 use crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::{
     Frame,
@@ -22,7 +24,9 @@ use crate::{
         screens::settings::rows::ProjectDefaults,
         widgets::{
             button, chrome, palette,
+            select::{self, Offer, Select},
             text::{Field, FieldStyle, TextBox},
+            utils::truncate,
         },
     },
     vcs::Repository,
@@ -104,6 +108,17 @@ impl Focus {
     fn is_multiline(self) -> bool {
         matches!(self, Self::Setup | Self::Caches | Self::Instructions)
     }
+
+    /// Whether this field is a pill whose list opens where it stands.
+    ///
+    /// The repository and the team are pills too, but their choices come from the
+    /// network: they open a page of their own rather than a list built here.
+    pub fn is_a_pill(self) -> bool {
+        matches!(
+            self,
+            Self::Agent | Self::VcsIdentity | Self::TrackerIdentity | Self::Identity | Self::Host
+        )
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -120,7 +135,8 @@ impl Kind {
             Self::Single => 4,
             Self::Multi => 6,
             Self::Toggle => 8,
-            Self::Choice => 3,
+            // One line: the label, and the value as a pill at the right edge.
+            Self::Choice => 1,
         }
     }
 }
@@ -212,17 +228,14 @@ pub struct Form {
     pub instructions: TextBox,
     pub scope: Field,
     identity_choices: Vec<ProjectCommits>,
-    identity_at: Option<usize>,
-    /// The coding agent new tasks here use, which is what its identity is for.
-    pub agent: Option<AgentKind>,
-    pub agent_credential: Option<String>,
-    pub vcs_credential: Option<String>,
-    pub tracker_credential: Option<String>,
-    credentials: Vec<Credential>,
-    pub host: Option<String>,
-    /// The machines offered, besides this one. A stale address already on the
-    /// project is kept, so editing does not silently move the work.
-    host_choices: Vec<String>,
+    /// The choices, each a value you press and a list you step through. The
+    /// value's own type is the answer: `None` is the offer that clears a field,
+    /// which is what made "nothing chosen" a state the page could not reach.
+    agent: Select<Option<String>>,
+    vcs: Select<Option<String>>,
+    tracker: Select<Option<String>>,
+    identity: Select<Option<usize>>,
+    host: Select<Option<String>>,
     pub accepts_delegated_work: bool,
     pub focus: Focus,
     /// How many rows of the form are above the viewport.
@@ -231,6 +244,8 @@ pub struct Form {
     free_scroll: bool,
     /// Where each group and action was drawn, for a click.
     hits: Vec<(Rect, Focus)>,
+    /// Where an open list drew its rows on the frame, so a click can find them.
+    pill_rows: Vec<(Rect, usize)>,
     /// How the tracker's scope is named in this form: a Linear team, a Jira
     /// project, a GitHub repository.
     scope_label: String,
@@ -301,6 +316,13 @@ impl Form {
                     identities.len() - 1
                 })
         });
+        let agent_credential = project.agent_credential.clone().or(defaults.agent.clone());
+        let vcs_credential = project.vcs_credential.clone().or(defaults.vcs.clone());
+        let tracker_credential = project
+            .tracker
+            .as_ref()
+            .and_then(|route| route.credential.clone())
+            .or(defaults.tracker.clone());
         let mut host_choices = remotes.to_vec();
         if let Some(host) = &project.host
             && !host_choices.contains(host)
@@ -321,25 +343,30 @@ impl Form {
                     .and_then(|route| route.scope.as_deref())
                     .unwrap_or_default(),
             ),
+            agent: credential_pick(
+                "agent",
+                Slot::Agent,
+                &credentials,
+                agent_credential.as_deref(),
+                "not chosen",
+            ),
+            vcs: credential_pick(
+                "version control",
+                Slot::VersionControl,
+                &credentials,
+                vcs_credential.as_deref(),
+                "none",
+            ),
+            tracker: credential_pick(
+                "task tracker",
+                Slot::Tracker,
+                &credentials,
+                tracker_credential.as_deref(),
+                "none",
+            ),
+            identity: identity_pick(&identities, identity_at),
+            host: host_pick(&host_choices, project.host.as_deref()),
             identity_choices: identities,
-            identity_at,
-            // A project that names no harness yet runs the one the identity it
-            // is choosing is a login for, so saving the form cannot leave it
-            // without one.
-            agent: project
-                .agent
-                .or(agent_of(project.agent_credential.as_deref()))
-                .or(agent_of(defaults.agent.as_deref())),
-            agent_credential: project.agent_credential.clone().or(defaults.agent),
-            vcs_credential: project.vcs_credential.clone().or(defaults.vcs),
-            tracker_credential: project
-                .tracker
-                .as_ref()
-                .and_then(|route| route.credential.clone())
-                .or(defaults.tracker),
-            credentials,
-            host: project.host.clone(),
-            host_choices,
             accepts_delegated_work: project
                 .tracker
                 .as_ref()
@@ -348,6 +375,7 @@ impl Form {
             scroll: 0,
             free_scroll: false,
             hits: Vec::new(),
+            pill_rows: Vec::new(),
             scope_label: scope_label.to_owned(),
             repositories: None,
             scopes: None,
@@ -364,19 +392,17 @@ impl Form {
             instructions: TextBox::new(""),
             scope: Field::with(""),
             identity_choices: Vec::new(),
-            identity_at: None,
-            agent: None,
-            agent_credential: None,
-            vcs_credential: None,
-            tracker_credential: None,
-            credentials: Vec::new(),
-            host: None,
-            host_choices: Vec::new(),
+            agent: credential_pick("agent", Slot::Agent, &[], None, "not chosen"),
+            vcs: credential_pick("version control", Slot::VersionControl, &[], None, "none"),
+            tracker: credential_pick("task tracker", Slot::Tracker, &[], None, "none"),
+            identity: identity_pick(&[], None),
+            host: host_pick(&[], None),
             accepts_delegated_work: false,
             focus: Focus::Primary,
             scroll: 0,
             free_scroll: false,
             hits: Vec::new(),
+            pill_rows: Vec::new(),
             scope_label: String::new(),
             repositories: None,
             scopes: None,
@@ -448,97 +474,148 @@ impl Form {
     }
 
     pub fn host_value(&self) -> Option<String> {
-        self.host.clone()
+        self.host.chosen_value().cloned().flatten()
     }
 
     pub fn commits(&self) -> Option<ProjectCommits> {
-        self.identity_at
-            .and_then(|index| self.identity_choices.get(index).cloned())
+        let at = self.identity.chosen_value().copied().flatten()?;
+        self.identity_choices.get(at).cloned()
     }
 
-    pub fn cycle_identity(&mut self) {
-        if self.identity_choices.is_empty() {
-            return;
+    pub fn agent_credential(&self) -> Option<String> {
+        self.agent.chosen_value().cloned().flatten()
+    }
+
+    /// The harness the chosen login is for, which is what a task would run.
+    pub fn agent(&self) -> Option<AgentKind> {
+        agent_of(self.agent_credential().as_deref())
+    }
+
+    pub fn vcs_credential(&self) -> Option<String> {
+        self.vcs.chosen_value().cloned().flatten()
+    }
+
+    pub fn tracker_credential(&self) -> Option<String> {
+        self.tracker.chosen_value().cloned().flatten()
+    }
+
+    /// Whether one of the pills has its list open, in which case the keys are
+    /// that list's and not the page's.
+    pub fn list_open(&self) -> bool {
+        match self.focus {
+            Focus::Agent => self.agent.is_open(),
+            Focus::VcsIdentity => self.vcs.is_open(),
+            Focus::TrackerIdentity => self.tracker.is_open(),
+            Focus::Identity => self.identity.is_open(),
+            Focus::Host => self.host.is_open(),
+            _ => false,
         }
-        let at = self.identity_at.unwrap_or(0);
-        self.identity_at = Some((at + 1) % self.identity_choices.len());
     }
 
-    fn identity_value(&self) -> String {
-        self.commits().map_or_else(
-            || "not set".to_owned(),
-            |commits| {
-                let label = if commits.label.is_empty() {
-                    commits.name
-                } else {
-                    commits.label
-                };
-                format!("{label} <{}>", commits.email)
-            },
-        )
+    /// Open the focused pill's list. Nothing happens on a field whose list is a
+    /// page of its own: those open from the keys that own them.
+    pub fn open_pill(&mut self) {
+        match self.focus {
+            Focus::Agent => self.agent.open(),
+            Focus::VcsIdentity => self.vcs.open(),
+            Focus::TrackerIdentity => self.tracker.open(),
+            Focus::Identity => self.identity.open(),
+            Focus::Host => self.host.open(),
+            _ => {}
+        }
     }
 
-    pub fn cycle_agent(&mut self) {
-        let options = self.identities_for(Slot::Agent);
-        self.agent_credential = next_choice(&options, self.agent_credential.as_deref());
-        self.agent = agent_of(self.agent_credential.as_deref());
+    /// Take a key for the open list. Answers whether it was the list's.
+    pub fn list_key(&mut self, key: KeyEvent) -> bool {
+        let handled = match self.focus {
+            Focus::Agent => self.agent.handle_key(key),
+            Focus::VcsIdentity => self.vcs.handle_key(key),
+            Focus::TrackerIdentity => self.tracker.handle_key(key),
+            Focus::Identity => self.identity.handle_key(key),
+            Focus::Host => self.host.handle_key(key),
+            _ => false,
+        };
+        // A team belongs to the tracker it came from, so choosing another one —
+        // or none at all — leaves no team behind.
+        if handled && self.focus == Focus::TrackerIdentity && !self.tracker.is_open() {
+            self.scope = Field::with("");
+        }
+        handled
     }
 
-    pub fn cycle_vcs(&mut self) {
-        let options = self.identities_for(Slot::VersionControl);
-        self.vcs_credential = next_choice(&options, self.vcs_credential.as_deref());
+    /// What an open list's keys are, for the guidance line.
+    pub fn list_hints(&self) -> Option<Vec<chrome::Hint>> {
+        match self.focus {
+            Focus::Agent if self.agent.is_open() => Some(self.agent.hints()),
+            Focus::VcsIdentity if self.vcs.is_open() => Some(self.vcs.hints()),
+            Focus::TrackerIdentity if self.tracker.is_open() => Some(self.tracker.hints()),
+            Focus::Identity if self.identity.is_open() => Some(self.identity.hints()),
+            Focus::Host if self.host.is_open() => Some(self.host.hints()),
+            _ => None,
+        }
     }
 
-    pub fn cycle_tracker(&mut self) {
-        let options = self.identities_for(Slot::Tracker);
-        self.tracker_credential = next_choice(&options, self.tracker_credential.as_deref());
-        // A team belongs to the tracker it came from, so changing which one is
-        // chosen — or choosing none — leaves no team behind.
-        self.scope = Field::with("");
+    /// A click on one of the list's rows is the choice, the way it is everywhere
+    /// else a list is drawn.
+    pub fn pill_mouse(&mut self, mouse: MouseEvent) -> bool {
+        let rows = mem::take(&mut self.pill_rows);
+        let taken = match self.focus {
+            Focus::Agent => self.agent.mouse(mouse, &rows),
+            Focus::VcsIdentity => self.vcs.mouse(mouse, &rows),
+            Focus::TrackerIdentity => self.tracker.mouse(mouse, &rows),
+            Focus::Identity => self.identity.mouse(mouse, &rows),
+            Focus::Host => self.host.mouse(mouse, &rows),
+            _ => false,
+        };
+        self.pill_rows = rows;
+        taken
     }
 
-    fn identities_for(&self, slot: Slot) -> Vec<String> {
-        self.credentials
-            .iter()
-            .filter(|credential| {
-                credential
-                    .service()
-                    .is_some_and(|service| service.slot() == slot)
-            })
-            .map(|credential| credential.id.clone())
-            .collect()
+    /// Draw the open list over the fields, answering where each row landed.
+    fn draw_list(&self, frame: &mut Frame, area: Rect, anchor: Rect) -> Vec<(Rect, usize)> {
+        match self.focus {
+            Focus::Agent => self.agent.draw_list(frame, area, anchor),
+            Focus::VcsIdentity => self.vcs.draw_list(frame, area, anchor),
+            Focus::TrackerIdentity => self.tracker.draw_list(frame, area, anchor),
+            Focus::Identity => self.identity.draw_list(frame, area, anchor),
+            Focus::Host => self.host.draw_list(frame, area, anchor),
+            _ => Vec::new(),
+        }
     }
 
-    fn identity_label(&self, id: Option<&str>, missing: &str) -> String {
-        id.and_then(|id| {
-            self.credentials
-                .iter()
-                .find(|credential| credential.id == id)
-                .map(|credential| credential.label.clone())
-        })
-        .unwrap_or_else(|| missing.to_owned())
+    /// How wide the pill on a field wants to be.
+    fn pill_width(&self, focus: Focus) -> u16 {
+        match focus {
+            Focus::Agent => self.agent.pill_width(false),
+            Focus::VcsIdentity => self.vcs.pill_width(false),
+            Focus::TrackerIdentity => self.tracker.pill_width(false),
+            Focus::Identity => self.identity.pill_width(false),
+            Focus::Host => self.host.pill_width(false),
+            _ => 0,
+        }
     }
 
-    fn agent_value(&self) -> String {
-        self.identity_label(self.agent_credential.as_deref(), "not chosen")
+    fn draw_pill(&self, focus: Focus, buffer: &mut Buffer, area: Rect, focused: bool) {
+        match focus {
+            Focus::Agent => self.agent.draw_pill_in(buffer, area, focused, false),
+            Focus::VcsIdentity => self.vcs.draw_pill_in(buffer, area, focused, false),
+            Focus::TrackerIdentity => self.tracker.draw_pill_in(buffer, area, focused, false),
+            Focus::Identity => self.identity.draw_pill_in(buffer, area, focused, false),
+            Focus::Host => self.host.draw_pill_in(buffer, area, focused, false),
+            _ => {}
+        }
     }
 
-    fn vcs_value(&self) -> String {
-        self.identity_label(self.vcs_credential.as_deref(), "none")
-    }
-
-    fn tracker_value(&self) -> String {
-        self.identity_label(self.tracker_credential.as_deref(), "none")
-    }
-
-    pub fn cycle_host(&mut self) {
-        let mut options = vec![None];
-        options.extend(self.host_choices.iter().cloned().map(Some));
-        let at = options
-            .iter()
-            .position(|option| *option == self.host)
-            .unwrap_or(0);
-        self.host = options[(at + 1) % options.len()].clone();
+    fn pick_value(&self, focus: Focus) -> String {
+        let value = match focus {
+            Focus::Agent => self.agent.label().to_owned(),
+            Focus::VcsIdentity => self.vcs.label().to_owned(),
+            Focus::TrackerIdentity => self.tracker.label().to_owned(),
+            Focus::Identity => self.identity.label().to_owned(),
+            Focus::Host => self.host.label().to_owned(),
+            _ => String::new(),
+        };
+        value.to_owned()
     }
 
     pub fn paste(&mut self, text: &str) {
@@ -579,21 +656,69 @@ impl Form {
     }
 }
 
-/// The choice after this one, with "nothing chosen" as the first stop.
+/// A pill over the logins this installation holds for one slot.
 ///
-/// Every one of these could once be set and never emptied: with a single
-/// identity on offer, one press of enter chose it for good. The stop before the
-/// first identity is what makes the field reversible, and it is what an unset
-/// field already means — the installation's answer underneath.
-fn next_choice(options: &[String], current: Option<&str>) -> Option<String> {
-    let mut stops = Vec::with_capacity(options.len() + 1);
-    stops.push(None);
-    stops.extend(options.iter().cloned().map(Some));
-    let at = stops
+/// The empty offer comes first, so the field can be emptied as well as filled:
+/// it means the installation's own answer, which is what an unset field runs on
+/// anyway.
+fn credential_pick(
+    name: &'static str,
+    slot: Slot,
+    credentials: &[Credential],
+    chosen: Option<&str>,
+    missing: &str,
+) -> Select<Option<String>> {
+    let mut offers = vec![Offer::new(None, missing.to_owned())];
+    offers.extend(
+        credentials
+            .iter()
+            .filter(|credential| {
+                credential
+                    .service()
+                    .is_some_and(|service| service.slot() == slot)
+            })
+            .map(|credential| Offer::new(Some(credential.id.clone()), credential.label.clone())),
+    );
+    let at = offers
         .iter()
-        .position(|stop| stop.as_deref() == current)
+        .position(|offer| offer.value.as_deref() == chosen)
         .unwrap_or(0);
-    stops[(at + 1) % stops.len()].clone()
+    Select::new(name, offers, at)
+}
+
+fn identity_pick(identities: &[ProjectCommits], chosen: Option<usize>) -> Select<Option<usize>> {
+    let mut offers = vec![Offer::new(None, "the installation's".to_owned())];
+    for (index, commits) in identities.iter().enumerate() {
+        let label = if commits.label.is_empty() {
+            commits.name.clone()
+        } else {
+            commits.label.clone()
+        };
+        offers.push(Offer::new(
+            Some(index),
+            format!("{label} <{}>", commits.email),
+        ));
+    }
+    let at = offers
+        .iter()
+        .position(|offer| offer.value == chosen)
+        .unwrap_or(0);
+    Select::new("commit identity", offers, at)
+}
+
+fn host_pick(hosts: &[String], chosen: Option<&str>) -> Select<Option<String>> {
+    let mut offers = vec![Offer::new(None, "this machine".to_owned())];
+    offers.extend(
+        hosts
+            .iter()
+            .cloned()
+            .map(|host| Offer::new(Some(host.clone()), host)),
+    );
+    let at = offers
+        .iter()
+        .position(|offer| offer.value.as_deref() == chosen)
+        .unwrap_or(0);
+    Select::new("machine", offers, at)
 }
 
 pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &mut Form, tick: Option<usize>) {
@@ -655,6 +780,7 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &mut Form, tick: Op
     let mut cursor = None;
     let mut repository_anchor = None;
     let mut scope_anchor = None;
+    let mut pill_anchor = None;
     for (index, group) in groups.iter().enumerate() {
         let rect = Rect {
             x: 0,
@@ -681,6 +807,9 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &mut Form, tick: Op
             }
             if group.focus == Focus::Scope {
                 scope_anchor = Some(anchor);
+            }
+            if group.focus.is_a_pill() && form.list_open() {
+                pill_anchor = Some(anchor);
             }
         }
     }
@@ -710,6 +839,9 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &mut Form, tick: Op
         && let Some(scopes) = form.scopes.as_mut()
     {
         scopes.draw(frame, fields, anchor, tick);
+    }
+    if let Some(anchor) = pill_anchor {
+        form.pill_rows = form.draw_list(frame, fields, anchor);
     }
 
     // The actions sit at the bottom right, where the eye ends up.
@@ -767,7 +899,9 @@ fn draw_group(buffer: &mut Buffer, area: Rect, form: &Form, group: &Group) -> Op
             } else {
                 group.label
             };
-            draw_label(buffer, area, label, focused);
+            // A pill beside its label rather than a value under it: a value you
+            // can change reads as a control, and the page gets a line back for
+            // every one of them.
             let value = match group.focus {
                 Focus::Repository => {
                     let value = form.repository.value();
@@ -777,10 +911,6 @@ fn draw_group(buffer: &mut Buffer, area: Rect, form: &Form, group: &Group) -> Op
                         value.to_owned()
                     }
                 }
-                Focus::Agent => form.agent_value(),
-                Focus::VcsIdentity => form.vcs_value(),
-                Focus::TrackerIdentity => form.tracker_value(),
-                Focus::Identity => form.identity_value(),
                 Focus::Scope => {
                     let scope = form.scope.value();
                     if scope.trim().is_empty() {
@@ -789,15 +919,38 @@ fn draw_group(buffer: &mut Buffer, area: Rect, form: &Form, group: &Group) -> Op
                         scope.to_owned()
                     }
                 }
-                _ => form.host.as_deref().unwrap_or("this machine").to_owned(),
+                focus => form.pick_value(focus),
             };
-            let style = if focused {
-                palette::primary().bold()
-            } else {
-                palette::muted()
+            let width = match group.focus {
+                Focus::Repository | Focus::Scope => {
+                    // Its list is a page of its own, so the pill only says what
+                    // the field holds and its key opens that page.
+                    (value.chars().count() as u16 + 3).min(area.width)
+                }
+                focus => form.pill_width(focus).min(area.width),
             };
-            Paragraph::new(Line::styled(format!("‹ {value} ›"), style))
-                .render(below_label(area), buffer);
+            let pill = Rect {
+                x: area.right().saturating_sub(width),
+                width,
+                height: 1,
+                ..area
+            };
+            match group.focus {
+                Focus::Repository | Focus::Scope => {
+                    select::shown_pill(buffer, pill, &value, focused)
+                }
+                focus => form.draw_pill(focus, buffer, pill, focused),
+            }
+            draw_label(
+                buffer,
+                Rect {
+                    width: area.width.saturating_sub(width).saturating_sub(1),
+                    height: 1,
+                    ..area
+                },
+                label,
+                focused,
+            );
             None
         }
         Kind::Toggle => {
@@ -847,8 +1000,10 @@ fn draw_label(buffer: &mut Buffer, area: Rect, text: &str, focused: bool) {
     } else {
         palette::muted()
     };
+    let mark = if focused { "› " } else { "  " };
+    let room = usize::from(area.width).saturating_sub(mark.chars().count());
     Paragraph::new(Line::styled(
-        format!("{}{text}", if focused { "› " } else { "  " }),
+        format!("{mark}{}", truncate(text, room)),
         style,
     ))
     .render(
