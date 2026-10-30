@@ -513,20 +513,14 @@ impl TaskHost for OwnTasks {
             let task_id = incoming.stage(peer, &transfer_id).await?;
             // A task that arrives already bound to an issue is reported here now,
             // through a session on that issue, without replaying its history.
-            if let Some(tracker) = tracker
-                && tracker.has_account(peer)
-                && let Some(task) = tasks
-                    .list()
-                    .await
-                    .map_err(|error| error.to_string())?
-                    .into_iter()
-                    .find(|task| task.id == task_id)
-                && let Some(reference) = task.facts.tracker_issue.clone()
-                && let Err(error) = tracker
-                    .pilot_task(peer, task_id.clone(), reference, task.session_agent())
-                    .await
+            if let Some(task) = tasks
+                .list()
+                .await
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .find(|task| task.id == task_id)
             {
-                tracing::warn!(task = %task_id, %error, "could not pilot a transferred bound task");
+                report_issue_task(tracker.as_deref(), peer, &task).await;
             }
             Ok(task_id)
         })
@@ -717,18 +711,7 @@ impl TaskHost for OwnTasks {
                         .create_issue_for_operator(*issue, project, request.agent, operator)
                         .await
                         .map_err(|error| error.to_string())?;
-                    // A session can only be piloted for a peer that has synced a
-                    // tracker account; without one the work still runs, it just
-                    // cannot be reported to the tracker from here.
-                    if let Some(tracker) = &tracker
-                        && tracker.has_account(peer)
-                        && let Some(reference) = task.facts.tracker_issue.clone()
-                        && let Err(error) = tracker
-                            .pilot_task(peer, task.id.clone(), reference, task.session_agent())
-                            .await
-                    {
-                        tracing::warn!(task = %task.id, %error, "could not pilot a delegated issue task");
-                    }
+                    report_issue_task(tracker.as_deref(), peer, &task).await;
                 }
             }
             Ok(())
@@ -1007,6 +990,40 @@ async fn transfer_committed(
             TaskHistoryEvent::TransferCommitted { transfer_id, recipient }
             if transfer_id == &prepared.handover.transfer_id && recipient == &prepared.recipient)
     }))
+}
+
+/// Report a task that was created from a tracker issue, and say why not when it
+/// cannot be: a task bound to an issue that nothing reports on is otherwise silent
+/// in both directions, and the issue is the only place the operator would look.
+async fn report_issue_task(
+    tracker: Option<&super::tracker::RemoteTracker>,
+    peer: EndpointId,
+    task: &Task,
+) {
+    let Some(reference) = task.facts.tracker_issue.clone() else {
+        return;
+    };
+    let Some(tracker) = tracker else {
+        tracing::warn!(
+            task = %task.id,
+            "this machine has no tracker app of its own, so the issue will not be reported on"
+        );
+        return;
+    };
+    if !tracker.has_account(peer) {
+        tracing::warn!(
+            task = %task.id,
+            "the client that started this task has synced no tracker account, so the issue \
+             will not be reported on"
+        );
+        return;
+    }
+    if let Err(error) = tracker
+        .pilot_task(peer, task.id.clone(), reference, task.session_agent())
+        .await
+    {
+        tracing::warn!(task = %task.id, %error, "could not open a session on the task's issue");
+    }
 }
 
 fn is_machine_local_event(event: &TaskHistoryEvent) -> bool {
