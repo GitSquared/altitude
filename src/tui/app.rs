@@ -2866,8 +2866,6 @@ impl App {
             .is_none_or(|transfer| transfer.opens_terminal);
         if opens_terminal {
             self.take_over(id, terminal, event_loop, landings);
-        } else {
-            self.say("The task is here");
         }
     }
 
@@ -3006,10 +3004,6 @@ impl App {
                 });
                 let (local, remote) = self.visible_counts();
                 self.selected = self.selected.min((local + remote).saturating_sub(1));
-                self.say(format!(
-                    "Task dropped from {}",
-                    self.remote_name(&reply.address)
-                ));
             }
             Err(error) => self.problem(format!("Could not drop the task: {error}")),
         }
@@ -3077,9 +3071,9 @@ impl App {
                     .insert(reply.address.clone(), RemoteStatus::Reached);
                 self.pending_remote = Some((reply.address, task_id));
             }
-            Err(error) if error == transfer::STOPPED => {
-                self.say("Transfer stopped; the task is still here")
-            }
+            // Stopped is what the operator asked for, and the task is visibly
+            // theirs still; saying so would only be read a second time.
+            Err(error) if error == transfer::STOPPED => {}
             Err(error) => {
                 // Not "did not take it": the remote may hold the task while the
                 // final acknowledgement was lost, in which case a restart finishes

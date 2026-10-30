@@ -753,8 +753,9 @@ where
                         app.task_landed(&id, terminal, &event_loop, &landings);
                     }
                     Err(error) if error == transfer::STOPPED => {
+                        // The operator pressed the key that stops it, and the task
+                        // is where they left it: the bar going is the answer.
                         app.transfer = None;
-                        app.say("Transfer stopped; the task did not move");
                     }
                     Err(error) => {
                         app.transfer = None;
