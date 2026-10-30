@@ -674,6 +674,9 @@ impl RemoteTracker {
             origin: ReportOrigin::Delegated,
             finished: false,
         })?;
+        // New work on an issue is a new cycle: whatever ending was written for the
+        // last task there is not this one's.
+        self.mutate(|ledger| ledger.settled_issues.retain(|id| id != issue_id))?;
         let session_agent = host.session_agent(task_id.clone()).await?;
         if let Err(error) = self
             .set_session_summary(session_id, author, session_agent.as_deref())
@@ -1430,17 +1433,38 @@ impl RemoteTracker {
         }
     }
 
+    /// Write the one ending an issue gets, and only once.
+    ///
+    /// A report replays its history, and a pass that stops before advancing its
+    /// cursor replays the same acceptance: writing Done each time is how a machine
+    /// fought an operator who had moved the issue themselves. The issue is recorded
+    /// as settled when its ending is written, and a later acceptance for a task on
+    /// the same issue says nothing new.
     async fn finish_accepted(
         &self,
         report: &IssueReport,
         events: &[(i64, TaskHistoryEvent)],
     ) -> Result<(), String> {
-        self.config
-            .automation
-            .status(&self.issue_reference(&report.issue_id), TrackerStatus::Done)
-            .await
-            .map_err(|error| error.to_string())?;
-        self.config
+        let settled = self
+            .lock()
+            .map(|ledger| ledger.settled_issues.contains(&report.issue_id))
+            .unwrap_or(false);
+        if !settled {
+            self.config
+                .automation
+                .status(&self.issue_reference(&report.issue_id), TrackerStatus::Done)
+                .await
+                .map_err(|error| error.to_string())?;
+            self.mutate(|ledger| {
+                if !ledger.settled_issues.contains(&report.issue_id) {
+                    ledger.settled_issues.push(report.issue_id.clone());
+                }
+            })?;
+        }
+        // The activity is what the session shows, not the issue's state: a failure
+        // to say it must not hold the cursor on an ending that has been written.
+        if let Err(error) = self
+            .config
             .automation
             .create_activity(
                 &report.tracker_session_id,
@@ -1450,8 +1474,10 @@ impl RemoteTracker {
                 },
             )
             .await
-            .map_err(|error| error.to_string())?;
-        self.retire_report(report)
+        {
+            tracing::warn!(task = %report.task_id, %error, "could not post an acceptance answer");
+        }
+        self.finish_report(report)
     }
 
     async fn post_sync_guidance(&self, session_id: &str) -> Result<(), String> {
@@ -2102,6 +2128,10 @@ struct Ledger {
     reports: Vec<IssueReport>,
     #[serde(default)]
     terminated_sessions: Vec<TerminatedSession>,
+    /// The issues whose ending has been written. One issue gets one ending, however
+    /// many passes replay how it got there.
+    #[serde(default)]
+    settled_issues: Vec<String>,
 }
 
 impl Ledger {
