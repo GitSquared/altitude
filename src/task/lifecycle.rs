@@ -392,36 +392,7 @@ where
                     {
                         Ok(path) => {
                             service.release_agent_channel(&task.id);
-                            let snapshot_path = path.to_string_lossy().into_owned();
-                            // A pause recovery was interrupted mid-way through, so
-                            // finish it rather than turning it into a fresh turn.
-                            // A held review is one of those pauses.
-                            let event = if task.facts.deferred_review.is_some() {
-                                TaskHistoryEvent::ExecutionPaused {
-                                    execution_status: TaskExecutionStatus::Paused,
-                                    sandbox_available: false,
-                                    snapshot_available: true,
-                                    execution_pause_reason:
-                                        TaskExecutionPauseReason::AwaitingReviewChecks,
-                                    snapshot_path,
-                                }
-                            } else if task.facts.blocking_signal_kind.is_some() {
-                                TaskHistoryEvent::ExecutionPaused {
-                                    execution_status: TaskExecutionStatus::Paused,
-                                    sandbox_available: false,
-                                    snapshot_available: true,
-                                    execution_pause_reason:
-                                        TaskExecutionPauseReason::AwaitingOperator,
-                                    snapshot_path,
-                                }
-                            } else {
-                                TaskHistoryEvent::ExecutionRecovered {
-                                    execution_status: TaskExecutionStatus::Pending,
-                                    sandbox_available: false,
-                                    snapshot_available: true,
-                                    snapshot_path,
-                                }
-                            };
+                            let event = resumed(&task, path.to_string_lossy().into_owned());
                             task = service.record_snapshot(&task, &[event]).await?;
                         }
                         Err(error) => {
@@ -434,6 +405,18 @@ where
                             return Err(TaskServiceError::Isolation(error));
                         }
                     }
+                } else if task.facts.snapshot_available
+                    && task.facts.execution_pause_reason
+                        == Some(TaskExecutionPauseReason::ApplicationShutdown)
+                {
+                    // The shutdown had already suspended the capsule, so there is
+                    // nothing to stop and no live sandbox to stop it: the task was
+                    // left holding a snapshot and nothing picked it up again. This
+                    // is the shape a restart leaves behind for every task it was
+                    // running, and it resumes exactly as a live pause does.
+                    let event =
+                        resumed(&task, task.facts.snapshot_path.clone().unwrap_or_default());
+                    task = service.record(&task.id, &[event]).await?;
                 } else if task.facts.deferred_review.is_some() && task.facts.snapshot_available {
                     // A shutdown can catch a review between the hold being
                     // recorded and its capsule being suspended, which leaves it
@@ -559,5 +542,37 @@ where
             .await
             .map_err(TaskServiceError::Task)?;
         Ok(failure_events(task, error, signal_id).into())
+    }
+}
+
+/// What a resumed pause becomes, by what it was holding for.
+///
+/// Recovery is not starting: a task that was waiting for the operator goes back to
+/// waiting, a review that was held goes back to being held, and only a task that
+/// was working becomes work again.
+fn resumed(task: &Task, snapshot_path: String) -> TaskHistoryEvent {
+    if task.facts.deferred_review.is_some() {
+        TaskHistoryEvent::ExecutionPaused {
+            execution_status: TaskExecutionStatus::Paused,
+            sandbox_available: false,
+            snapshot_available: true,
+            execution_pause_reason: TaskExecutionPauseReason::AwaitingReviewChecks,
+            snapshot_path,
+        }
+    } else if task.facts.blocking_signal_kind.is_some() {
+        TaskHistoryEvent::ExecutionPaused {
+            execution_status: TaskExecutionStatus::Paused,
+            sandbox_available: false,
+            snapshot_available: true,
+            execution_pause_reason: TaskExecutionPauseReason::AwaitingOperator,
+            snapshot_path,
+        }
+    } else {
+        TaskHistoryEvent::ExecutionRecovered {
+            execution_status: TaskExecutionStatus::Pending,
+            sandbox_available: false,
+            snapshot_available: true,
+            snapshot_path,
+        }
     }
 }

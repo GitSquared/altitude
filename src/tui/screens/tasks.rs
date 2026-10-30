@@ -360,7 +360,7 @@ fn card_status(
         TaskExecutionStatus::Paused => Line::from(match summary.pause_reason {
             Some(TaskExecutionPauseReason::AwaitingOperator) => "paused · awaiting operator",
             Some(TaskExecutionPauseReason::AwaitingReviewChecks) => "paused · watching PRs",
-            Some(TaskExecutionPauseReason::ApplicationShutdown) => "paused · altitude closed",
+            Some(TaskExecutionPauseReason::ApplicationShutdown) => "paused · machine restarted",
             Some(TaskExecutionPauseReason::Transfer) => "paused · transferring",
             None => "paused",
         })
