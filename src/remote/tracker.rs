@@ -1322,7 +1322,12 @@ impl RemoteTracker {
             .resolve_comment(&comment_id, None)
             .await
         {
-            tracing::warn!(task = %report.task_id, signal = signal_id, %error, "could not resolve a signal comment");
+            // A signal resolved before this machine could report had no comment to
+            // resolve, and a raise that is already answered is deliberately not
+            // published. There is nothing to close, which is not a failure.
+            if !error.to_string().contains("Entity not found") {
+                tracing::warn!(task = %report.task_id, signal = signal_id, %error, "could not resolve a signal comment");
+            }
         }
     }
 

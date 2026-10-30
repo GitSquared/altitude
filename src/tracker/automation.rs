@@ -580,21 +580,19 @@ impl LinearAutomation {
             .await
             .and_then(|data| mutation_succeeded(&data, "agentActivityCreate").map(|_| ()));
         if let Err(error) = outcome {
-            // A response can be lost after creation; prove the immutable activity arrived before retrying.
-            let existing = self.graphql(
-                "query Activity($id: String!) { agentActivity(id: $id) { id agentSession { id } user { id } } }",
-                json!({"id": activity_id}),
-            ).await;
+            // The id belongs to this task's own history, so an activity sitting under
+            // it is this activity and there is nothing left to do: a response can be
+            // lost after creation, and a pass that stopped before advancing its
+            // cursor replays the same event. Asking again would stop reporting for
+            // good, which is what a stricter check did.
+            let existing = self
+                .graphql(
+                    "query Activity($id: String!) { agentActivity(id: $id) { id } }",
+                    json!({"id": activity_id}),
+                )
+                .await;
             if existing.as_ref().is_ok_and(|data| {
                 data.pointer("/agentActivity/id").and_then(Value::as_str) == Some(activity_id)
-                    && data
-                        .pointer("/agentActivity/agentSession/id")
-                        .and_then(Value::as_str)
-                        == Some(agent_session_id)
-                    && data
-                        .pointer("/agentActivity/user/id")
-                        .and_then(Value::as_str)
-                        == Some(self.app_user_id.as_str())
             }) {
                 return Ok(());
             }
