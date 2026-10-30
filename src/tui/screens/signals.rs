@@ -19,7 +19,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::Style,
     text::{Line, Span},
-    widgets::{Clear, Paragraph, Wrap},
+    widgets::{Paragraph, Wrap},
 };
 
 use crate::{
@@ -49,7 +49,7 @@ use crate::{
 /// what the room is for.
 const LIST_WIDTH: u16 = 40;
 const PLAN_WIDTH: u16 = 32;
-/// The gutter between the plan's text and its border, so the column reads like
+/// The gutter between the plan's text and its edges, so the column reads like
 /// the signals list rather than sitting on the divider.
 const PLAN_PADDING: u16 = 1;
 const PLAN_COLUMN_MIN: u16 = 112;
@@ -290,24 +290,20 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     draw_threads(frame, threads, app);
     app.signal_plan_tabs = inner.width < PLAN_COLUMN_MIN;
     if inner.width >= PLAN_COLUMN_MIN {
-        let parts =
-            Layout::horizontal([Constraint::Min(0), Constraint::Length(PLAN_WIDTH)]).split(detail);
-        let conversation = parts[0];
-        let plan = parts[1];
+        // The divider takes a column of the gap rather than a column of the
+        // plan, so the plan is cleared over everything it was given — padding
+        // included — the way the conversation is.
+        let [conversation, _, plan] = Layout::horizontal([
+            Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Length(PLAN_WIDTH),
+        ])
+        .areas(detail);
         surface::vertical_divider(frame, inner, conversation.right());
-        frame.render_widget(Clear, conversation);
+        surface::cover(frame, conversation);
         draw_conversation(frame, conversation, app);
-        // The divider at the plan's left edge is its border, so the clear
-        // starts after it rather than erasing it, and runs all the way to the
-        // surface's own right edge: the padding is part of the column, and a
-        // column cleared only as far as its text leaves the field showing.
-        let column = Rect {
-            x: plan.x.saturating_add(1),
-            width: plan.width.saturating_sub(1),
-            ..plan
-        };
-        frame.render_widget(Clear, column);
-        draw_plan(frame, column, app);
+        surface::cover(frame, plan);
+        draw_plan(frame, plan, app);
     } else {
         // The tabs and the rule under them are one band, so the separators
         // between the tabs run down onto that rule.
@@ -315,7 +311,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
             Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(detail);
         surface::horizontal_divider(frame, detail, band.y.saturating_add(1));
         draw_plan_tabs(frame, band, app);
-        frame.render_widget(Clear, pane);
+        surface::cover(frame, pane);
         if app.signal_plan_open {
             draw_plan(frame, pane, app);
         } else {
@@ -335,23 +331,19 @@ fn draw_plan_tabs(frame: &mut Frame, area: Rect, app: &App) {
     }
     // Only the labels are the tabs' to clear: the rule under them is the pane's,
     // and the separators between tabs are drawn onto it.
-    frame.render_widget(Clear, Rect { height: 1, ..area });
+    surface::cover(frame, Rect { height: 1, ..area });
     let tabs = [Tab::new("Signals"), Tab::new("Plan")];
     let selected = usize::from(app.signal_plan_open);
     tabs::draw(frame, area, &tabs, selected);
 }
 
-fn inset(area: Rect, columns: u16) -> Rect {
-    Rect {
-        x: area.x.saturating_add(columns),
-        width: area.width.saturating_sub(columns * 2),
-        ..area
-    }
-}
-
 fn draw_plan(frame: &mut Frame, area: Rect, app: &App) {
-    let [title, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)])
-        .areas(inset(area, PLAN_PADDING));
+    let text = Rect {
+        x: area.x.saturating_add(PLAN_PADDING),
+        width: area.width.saturating_sub(PLAN_PADDING * 2),
+        ..area
+    };
+    let [title, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(text);
     let plan = app.signal_plan();
     let done = plan
         .iter()

@@ -33,6 +33,11 @@ pub fn outline() -> Style {
 /// anything that is meant to be opaque covers its own rectangle first. A row,
 /// a control bar, a button footer — all of them are opaque. Only the gaps a
 /// screen deliberately leaves open let the contours through.
+///
+/// The rectangle is the whole of what the pane was given, padding included. A
+/// divider belongs to the gap between two panes, never to a column of one, so
+/// there is no edge to stop short of: a pane covered only as far as its text
+/// leaves a seam of field beside the border.
 pub fn cover(frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, area);
 }
