@@ -48,7 +48,9 @@ impl App {
                 .collect(),
             Section::Remotes => self.remote_rows(),
         };
-        let credentials = self.settings_credentials();
+        // Named as the pages print them: one form for a login everywhere, rather
+        // than a page that has to describe what the list already decided.
+        let credentials = self.described_credentials();
         let tracker_states = credentials
             .iter()
             .filter(|credential| {

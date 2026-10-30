@@ -1914,8 +1914,15 @@ impl App {
         let Some(id) = credential.profile().map(str::to_owned) else {
             return;
         };
-        self.foreground =
-            Foreground::RenameIdentity(Box::new(RenameIdentity::new(id, &credential.label)));
+        // What is being renamed is the name, not the tag the row prints: the
+        // prompt starts from the name the operator gave, or from the account's.
+        let name = self
+            .settings_file
+            .as_ref()
+            .and_then(|file| file.settings().credential(&id))
+            .map(|credential| credential.label.clone())
+            .unwrap_or_default();
+        self.foreground = Foreground::RenameIdentity(Box::new(RenameIdentity::new(id, &name)));
     }
 
     fn open_rename_commit_identity(&mut self) {
@@ -4905,11 +4912,16 @@ impl App {
         let group = account
             .as_ref()
             .and_then(|account| account.workspace.as_deref());
-        let identity = match &account {
-            Some(account) => account.display_name.clone(),
-            // An identity that is only the tool's name is not worth repeating,
-            // and `describe` drops it: the served name is what an operator renamed.
-            None => credential.label.clone(),
+        // The provider's name for an account is a fact and reads like an id; a
+        // name the operator gave it is a preference and is the one they will
+        // recognise. A name they chose wins, and the account answers for the rest.
+        let identity = if credential.label_auto {
+            account
+                .as_ref()
+                .map(|account| account.display_name.clone())
+                .unwrap_or_else(|| credential.label.clone())
+        } else {
+            credential.label.clone()
         };
         describe(service, group, &identity)
     }
