@@ -199,7 +199,11 @@ impl RemoteTracker {
         let Some(tracker_user_id) = self.user_for_owner(owner) else {
             return Err("sync a Linear account to this remote before delegating issue work".into());
         };
-        if self.report_for_task(&task_id).is_some() || self.report_for_issue(&issue.id).is_some() {
+        if self.report_for_task(&task_id).is_some()
+            || self
+                .report_for_issue(&issue.id)
+                .is_some_and(|report| !report.finished)
+        {
             return Ok(());
         }
         let session_id = self
@@ -216,6 +220,7 @@ impl RemoteTracker {
             task_id,
             reported_events: 0,
             origin: ReportOrigin::StartedByClient,
+            finished: false,
         })?;
         if let Err(error) = self
             .set_session_summary(&session_id, &tracker_user_id, session_agent.as_deref())
@@ -262,7 +267,9 @@ impl RemoteTracker {
         };
         for task in bound {
             if self.report_for_task(&task.task_id).is_some()
-                || self.report_for_issue(&task.issue.id).is_some()
+                || self
+                    .report_for_issue(&task.issue.id)
+                    .is_some_and(|report| !report.finished)
                 || self.user_for_owner(&task.owner).is_none()
             {
                 continue;
@@ -466,7 +473,7 @@ impl RemoteTracker {
             )
             .await
             .map_err(|error| error.to_string())?;
-        self.retire_report(&report)
+        self.finish_report(&report)
     }
 
     async fn handle_created(&self, event: &SessionEvent, host: &dyn Host) -> Result<(), String> {
@@ -644,6 +651,7 @@ impl RemoteTracker {
             task_id: task_id.clone(),
             reported_events: 0,
             origin: ReportOrigin::Delegated,
+            finished: false,
         })?;
         let session_agent = host.session_agent(task_id.clone()).await?;
         if let Err(error) = self
@@ -981,7 +989,7 @@ impl RemoteTracker {
     /// the state. It is only ignored, so it never blocks the other tasks'
     /// reporting.
     async fn poll_reports(&self, host: &dyn Host) {
-        for report in self.reports() {
+        for report in self.reports().into_iter().filter(|report| !report.finished) {
             // A task the operator removed is no longer work: stop writing about
             // it rather than reporting a history that will never advance. A task
             // that left because it moved elsewhere still gets one goodbye, and
@@ -1079,7 +1087,7 @@ impl RemoteTracker {
     async fn sync_report(&self, host: &dyn Host, report: &IssueReport) -> Result<(), String> {
         let events = host.events(report.task_id.clone()).await?;
         if report.reported_events > events.len() {
-            self.set_cursor(&report.issue_id, 0)?;
+            self.set_cursor(&report.task_id, 0)?;
             return Ok(());
         }
         // Signals still open are the only ones worth publishing; one already
@@ -1186,7 +1194,7 @@ impl RemoteTracker {
                 }
                 _ => {}
             }
-            self.set_cursor(&report.issue_id, index + 1)?;
+            self.set_cursor(&report.task_id, index + 1)?;
         }
         if folded {
             // The destination still owes the operator whatever is waiting, even
@@ -1209,7 +1217,7 @@ impl RemoteTracker {
                 )
                 .await?;
             }
-            self.set_cursor(&report.issue_id, events.len())?;
+            self.set_cursor(&report.task_id, events.len())?;
         }
         Ok(())
     }
@@ -1228,7 +1236,7 @@ impl RemoteTracker {
             )
             .await
             .map_err(|error| error.to_string())?;
-        self.retire_report(report)
+        self.finish_report(report)
     }
 
     async fn publish_signal(
@@ -1471,11 +1479,15 @@ impl RemoteTracker {
 
     fn report_for_issue(&self, issue_id: &str) -> Option<IssueReport> {
         let ledger = self.lock().ok()?;
-        ledger
+        let mut held: Vec<&IssueReport> = ledger
             .reports
             .iter()
-            .find(|report| report.issue_id == issue_id)
-            .cloned()
+            .filter(|report| report.issue_id == issue_id)
+            .collect();
+        // A finished report is history; a task still being told about wins, so a
+        // second task on the same issue is reported rather than quietly skipped.
+        held.sort_by_key(|report| report.finished);
+        held.first().map(|report| (*report).clone())
     }
 
     fn reports(&self) -> Vec<IssueReport> {
@@ -1484,12 +1496,32 @@ impl RemoteTracker {
             .unwrap_or_default()
     }
 
+    /// Record one task's reporting, replacing what this task had before.
+    ///
+    /// Keyed by task, not by issue: a finished task keeps its report so it is never
+    /// adopted again, and a second task started from the same issue gets one of its
+    /// own.
     fn upsert_report(&self, report: IssueReport) -> Result<(), String> {
         self.mutate(|ledger| {
             ledger
                 .reports
-                .retain(|existing| existing.issue_id != report.issue_id);
+                .retain(|existing| existing.task_id != report.task_id);
             ledger.reports.push(report);
+        })
+    }
+
+    /// Note that a task's life is fully told, and stop writing about it.
+    ///
+    /// The report stays in the ledger, finished: the task is still here, and a
+    /// report that was thrown away looks exactly like one that was never made, so
+    /// the next pass would open another session and tell the same story again.
+    fn finish_report(&self, report: &IssueReport) -> Result<(), String> {
+        self.mutate(|ledger| {
+            for existing in &mut ledger.reports {
+                if existing.task_id == report.task_id {
+                    existing.finished = true;
+                }
+            }
         })
     }
 
@@ -1498,7 +1530,7 @@ impl RemoteTracker {
         self.mutate(|ledger| {
             ledger
                 .reports
-                .retain(|existing| existing.issue_id != report.issue_id);
+                .retain(|existing| existing.task_id != report.task_id);
             ledger
                 .terminated_sessions
                 .retain(|session| session.session_id != report.tracker_session_id);
@@ -1521,9 +1553,9 @@ impl RemoteTracker {
             .unwrap_or(false)
     }
 
-    fn set_cursor(&self, issue_id: &str, cursor: usize) -> Result<(), String> {
+    fn set_cursor(&self, task_id: &str, cursor: usize) -> Result<(), String> {
         self.mutate(|ledger| {
-            if let Some(report) = ledger.reports.iter_mut().find(|r| r.issue_id == issue_id) {
+            if let Some(report) = ledger.reports.iter_mut().find(|r| r.task_id == task_id) {
                 report.reported_events = cursor;
             }
         })
@@ -2085,6 +2117,11 @@ struct IssueReport {
     reported_events: usize,
     #[serde(default)]
     origin: ReportOrigin,
+    /// Whether this task has ended and there is nothing left to tell. A finished
+    /// report stays: dropping it would make the task look unreported, and a task
+    /// is reported once.
+    #[serde(default)]
+    finished: bool,
 }
 
 /// Who started the work, which decides whether the report outlives the tracker's
