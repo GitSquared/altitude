@@ -17,17 +17,18 @@ use crate::{
     db::Database,
     remote::{
         ClientRecord,
-        tracker::{AccountRecord, accounts_path},
+        tracker::{Login, logins_of},
     },
     task::TaskStore,
+    tracker::TrackerKind,
 };
 
 pub struct KnownClient {
     pub key: String,
     pub services: Vec<String>,
-    /// The tracker accounts it pushed, which are what routes its work in a tracker
-    /// to this machine.
-    pub accounts: Vec<AccountRecord>,
+    /// The tracker accounts it pushed, which are what attributes its work in a
+    /// tracker to this machine.
+    pub accounts: Vec<Login>,
 }
 
 pub async fn list(config: &Config) -> LinkResult<()> {
@@ -56,12 +57,12 @@ pub async fn list(config: &Config) -> LinkResult<()> {
         if client.accounts.is_empty() {
             println!("  tracker:  none");
         }
-        for record in &client.accounts {
+        for login in &client.accounts {
             println!(
                 "  tracker:  {} as {} ({})",
-                record.account.provider.label(),
-                record.account.display_name,
-                record.account.user_id
+                login.account.provider.label(),
+                login.account.display_name,
+                login.account.user_id
             );
         }
         println!("  tasks:    {owned}");
@@ -170,9 +171,13 @@ fn services(operator_dir: &Path) -> io::Result<Vec<String>> {
     Ok(services)
 }
 
-fn accounts(operator_dir: &Path) -> Vec<AccountRecord> {
-    fs::read_to_string(accounts_path(operator_dir))
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+fn accounts(operator_dir: &Path) -> Vec<Login> {
+    let owner = operator_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    TrackerKind::ALL
+        .iter()
+        .flat_map(|provider| logins_of(operator_dir, &owner, *provider))
+        .collect()
 }

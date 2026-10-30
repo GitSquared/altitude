@@ -659,9 +659,6 @@ impl TaskHost for OwnTasks {
                     scoped.forget_profiles(&profiles)?;
                     held.profiles.clear();
                     held.save(&held_path)?;
-                    for provider in TrackerKind::ALL {
-                        super::tracker::forget_account(&directory, provider)?;
-                    }
                     Ok::<(), io::Error>(())
                 })
                 .await

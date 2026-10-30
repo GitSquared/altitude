@@ -49,7 +49,7 @@ use crate::{
         TaskOperatorSignalKind, TaskOperatorSignalThread,
     },
     tracker::{
-        IssueReference, IssueSnapshot, TrackerAccount, TrackerKind, TrackerStatus,
+        ACCOUNT_FILE, IssueReference, IssueSnapshot, TrackerAccount, TrackerKind, TrackerStatus,
         automation::{
             AgentActivityContent, AgentSessionEvent, LinearAutomation, WebhookError,
             parse_agent_session_event, verify_signature,
@@ -1348,65 +1348,34 @@ impl RemoteTracker {
             .map_err(|error| error.to_string())
     }
 
+    /// The client whose login answers for a tracker account.
+    ///
+    /// The login that arrived most recently wins, so a client that has just signed
+    /// in answers for the account; a tie is broken by the client's own key, so the
+    /// answer does not depend on directory order.
     fn owner_for_user(&self, tracker_user_id: &str) -> Option<String> {
-        let mut matches = self
-            .accounts()
+        logins(&self.config.operators_dir)
             .into_iter()
-            .filter(|(_, record)| record.account.user_id == tracker_user_id);
-        let (first_peer, first) = matches.next()?;
-        // The newest account wins, and a tie is broken by the peer's own key so
-        // the answer does not depend on directory order.
-        matches
-            .fold((first_peer, first), |best, candidate| {
-                if candidate.1.changed_at_ms > best.1.changed_at_ms
-                    || (candidate.1.changed_at_ms == best.1.changed_at_ms && candidate.0 < best.0)
-                {
-                    candidate
-                } else {
-                    best
-                }
+            .filter(|login| login.account.user_id == tracker_user_id)
+            .max_by(|left, right| {
+                left.arrived
+                    .cmp(&right.arrived)
+                    .then_with(|| right.owner.cmp(&left.owner))
             })
-            .0
-            .into()
+            .map(|login| login.owner)
     }
 
-    /// Whether this peer has synced a tracker account, which is what a report
+    /// Whether this client has synced a tracker account, which is what a report
     /// needs to be answerable.
     pub fn has_account(&self, owner: &str) -> bool {
         self.user_for_owner(owner).is_some()
     }
 
     fn user_for_owner(&self, owner: &str) -> Option<String> {
-        self.accounts()
+        logins(&self.config.operators_dir)
             .into_iter()
-            .find(|(peer, _)| peer == owner)
-            .map(|(_, record)| record.account.user_id)
-    }
-
-    /// Every peer's synced tracker account, read from what each pushed.
-    ///
-    /// Read from disk rather than cached: the account is the peer's, and a peer
-    /// that has not synced yet is simply absent.
-    fn accounts(&self) -> Vec<(String, AccountRecord)> {
-        let Ok(entries) = fs::read_dir(&self.config.operators_dir) else {
-            return Vec::new();
-        };
-        let mut accounts = Vec::new();
-        for entry in entries.flatten() {
-            let peer = entry.file_name().to_string_lossy().into_owned();
-            let Ok(text) = fs::read_to_string(accounts_path(&entry.path())) else {
-                continue;
-            };
-            let Ok(records) = serde_json::from_str::<Vec<AccountRecord>>(&text) else {
-                continue;
-            };
-            for record in records {
-                if record.account.provider == TrackerKind::Linear {
-                    accounts.push((peer.clone(), record));
-                }
-            }
-        }
-        accounts
+            .find(|login| login.owner == owner)
+            .map(|login| login.account.user_id)
     }
 
     fn report_for_task(&self, task_id: &str) -> Option<IssueReport> {
@@ -1827,93 +1796,124 @@ impl AppNotificationEvent {
 
 // ------------------------------------------------------------------- storage
 
-/// The tracker account a peer pushed, and when it last changed.
-///
-/// The stamp follows the account, not the push: a login refreshes underneath the
-/// profile it travels in, and a refreshed login must not re-assert a binding the
-/// operator has since moved to another machine.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AccountRecord {
+/// A tracker login a client has pushed to this machine.
+pub struct Login {
+    pub owner: String,
     pub account: TrackerAccount,
-    pub changed_at_ms: i64,
+    /// When the login last arrived here, which is how this machine tells two
+    /// clients signed in as the same person apart.
+    pub arrived: SystemTime,
 }
 
-pub fn accounts_path(operator_dir: &Path) -> PathBuf {
-    operator_dir.join("accounts.json")
-}
-
-/// Stop a peer's record naming a provider, because another client took it over.
+/// The tracker logins this machine holds, read from the profiles that arrived.
 ///
-/// What that peer pushed stays where it is: the login is the same account, and
-/// which client a task is attributed to is the question here, not who holds the
-/// credentials.
-pub fn forget_account(operator_dir: &Path, provider: TrackerKind) -> io::Result<()> {
-    let path = accounts_path(operator_dir);
-    let Ok(text) = fs::read_to_string(&path) else {
-        return Ok(());
+/// The login on disk is the fact. A record of it beside the login is a second copy,
+/// and a second copy can be missing while the fact is there — which is exactly how
+/// one machine spent a day reporting nothing while holding the login all along.
+pub fn logins(operators_dir: &Path) -> Vec<Login> {
+    let Ok(entries) = fs::read_dir(operators_dir) else {
+        return Vec::new();
     };
-    let held: Vec<AccountRecord> = serde_json::from_str(&text).unwrap_or_default();
-    let kept: Vec<&AccountRecord> = held
-        .iter()
-        .filter(|record| record.account.provider != provider)
-        .collect();
-    if kept.len() == held.len() {
-        return Ok(());
-    }
-    let text = serde_json::to_string_pretty(&kept).map_err(io::Error::other)?;
-    super::identity::write_private(&path, &text).map_err(io::Error::other)
+    entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .flat_map(|entry| {
+            let owner = entry.file_name().to_string_lossy().into_owned();
+            TrackerKind::ALL
+                .iter()
+                .flat_map(move |provider| logins_of(&entry.path(), &owner, *provider))
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
-/// Note the tracker accounts a peer's profiles now name.
+/// One client's logins of one tracker, oldest name first.
 ///
-/// `pushed` carries one entry per tracker profile in the configuration that just
-/// arrived: the account it names, or nothing when the peer has signed out. A
-/// provider that was not in this push keeps the account it already had.
-pub fn record_accounts(
-    operator_dir: &Path,
-    pushed: &[(TrackerKind, Option<TrackerAccount>)],
-) -> io::Result<()> {
-    let path = accounts_path(operator_dir);
-    let held: Vec<AccountRecord> = fs::read_to_string(&path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default();
-    let now = now_ms();
-    let mut records: Vec<AccountRecord> = pushed
-        .iter()
-        .filter_map(|(_, account)| account.as_ref())
-        .map(|account| AccountRecord {
-            changed_at_ms: held
-                .iter()
-                .find(|record| record.account == *account)
-                .map_or(now, |record| record.changed_at_ms),
-            account: account.clone(),
+/// A login its client has yielded to another is not a claim and is left out: the
+/// credential is still theirs to use, but their work here is no longer attributed
+/// to that account.
+pub fn logins_of(operator_dir: &Path, owner: &str, provider: TrackerKind) -> Vec<Login> {
+    if yielded_providers(operator_dir).contains(&provider) {
+        return Vec::new();
+    }
+    let Ok(entries) = fs::read_dir(operator_dir.join(provider.profile())) else {
+        return Vec::new();
+    };
+    let mut logins: Vec<Login> = entries
+        .flatten()
+        .filter_map(|login| {
+            let identity = login.path().join("profile").join(ACCOUNT_FILE);
+            let arrived = fs::metadata(&identity).ok()?.modified().ok()?;
+            let account = fs::read(&identity)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<TrackerAccount>(&bytes).ok())
+                .filter(|account| account.provider == provider)?;
+            Some(Login {
+                owner: owner.to_owned(),
+                account,
+                arrived,
+            })
         })
         .collect();
-    records.extend(
-        held.iter()
-            .filter(|record| {
-                !pushed
-                    .iter()
-                    .any(|(provider, _)| *provider == record.account.provider)
-            })
-            .cloned(),
-    );
-    // A pushed login refreshing underneath an unchanged account must not look
-    // like the account changed, so nothing is written when nothing moved.
-    if records == held {
+    logins.sort_by(|left, right| left.account.user_id.cmp(&right.account.user_id));
+    logins
+}
+
+/// Note that this client no longer claims a tracker, because another client took
+/// it over.
+///
+/// What the client pushed stays where it is: the login is the same account, and
+/// which client a task is attributed to is the question here, not who holds the
+/// credentials.
+pub fn yield_account(operator_dir: &Path, provider: TrackerKind) -> io::Result<()> {
+    set_yielded(operator_dir, provider, true)
+}
+
+/// A client that pushes a login again claims it again.
+pub fn claim_account(operator_dir: &Path, provider: TrackerKind) -> io::Result<()> {
+    set_yielded(operator_dir, provider, false)
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct Yielded {
+    #[serde(default)]
+    providers: Vec<TrackerKind>,
+}
+
+fn yielded_path(operator_dir: &Path) -> PathBuf {
+    operator_dir.join("yielded.json")
+}
+
+fn yielded_providers(operator_dir: &Path) -> Vec<TrackerKind> {
+    fs::read_to_string(yielded_path(operator_dir))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Yielded>(&text).ok())
+        .map(|yielded| yielded.providers)
+        .unwrap_or_default()
+}
+
+fn set_yielded(operator_dir: &Path, provider: TrackerKind, yielded: bool) -> io::Result<()> {
+    let path = yielded_path(operator_dir);
+    let mut held = yielded_providers(operator_dir);
+    let had = held.contains(&provider);
+    if yielded == had {
         return Ok(());
     }
-    if records.is_empty() {
+    if yielded {
+        held.push(provider);
+    } else {
+        held.retain(|held| *held != provider);
+    }
+    if held.is_empty() {
         return match fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error),
         };
     }
-    let text = serde_json::to_string_pretty(&records)
-        .map_err(|error| io::Error::other(format!("could not encode tracker accounts: {error}")))?;
-    write_private(&path, &text).map_err(io::Error::other)
+    let text =
+        serde_json::to_string_pretty(&Yielded { providers: held }).map_err(io::Error::other)?;
+    super::identity::write_private(&path, &text).map_err(io::Error::other)
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]

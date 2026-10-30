@@ -260,36 +260,24 @@ impl LinkHandler {
             });
         }
         held.save(&held_path)?;
-        // The account a peer is signed in as travels in its tracker login, and a
-        // login is only sent when it changed. What this machine holds is the
-        // question, so it is read from the logins on disk: a push that carries
-        // nothing new still says who the peer is.
-        let mut pushed = Vec::new();
-        for provider in TrackerKind::ALL {
-            let Ok(logins) = fs::read_dir(operator_dir.join(provider.profile())) else {
-                // A provider this machine holds no login for keeps the record it
-                // already has, if it has one.
-                continue;
-            };
-            let account = logins.flatten().find_map(|login| {
-                let path = login.path().join("profile").join(ACCOUNT_FILE);
-                fs::read(&path)
-                    .ok()
-                    .and_then(|bytes| serde_json::from_slice::<TrackerAccount>(&bytes).ok())
-                    .filter(|account| account.provider == provider)
-            });
-            pushed.push((provider, account));
-        }
-        // Taking an account over says whose it is now, so the clients it was
-        // linked to stop claiming it. What they pushed stays: their login is the
+        // Taking an account over says whose it is now, so the client it was linked
+        // to stops claiming it. What it pushed stays where it is: the login is the
         // same account, and deleting another client's credentials is not what a
         // question about attribution should be able to authorise.
         for (other, provider, _) in &holders {
-            if let Err(error) = super::tracker::forget_account(other, *provider) {
-                tracing::warn!(%error, operator = %other.display(), "could not unlink a taken-over tracker account");
+            if let Err(error) = super::tracker::yield_account(other, *provider) {
+                tracing::warn!(%error, operator = %other.display(), "could not release a taken-over tracker account");
             }
         }
-        super::tracker::record_accounts(&operator_dir, &pushed)?;
+        // A client that pushes a login again claims it again, so a machine that was
+        // paired, yielded an account and is paired again is not left silent.
+        for (provider, account) in &arriving {
+            if account.is_some()
+                && let Err(error) = super::tracker::claim_account(&operator_dir, *provider)
+            {
+                tracing::warn!(%error, operator = %operator_dir.display(), "could not record a claim on a tracker account");
+            }
+        }
         Ok(ConfigWrite::Written {
             forget_logins: bundle.remove_logins,
         })
@@ -315,17 +303,13 @@ impl LinkHandler {
             if entry.file_name().to_string_lossy() == peer.to_string() {
                 continue;
             }
-            let held: Vec<super::tracker::AccountRecord> =
-                fs::read_to_string(super::tracker::accounts_path(&directory))
-                    .ok()
-                    .and_then(|text| serde_json::from_str(&text).ok())
-                    .unwrap_or_default();
+            let owner = entry.file_name().to_string_lossy().into_owned();
             for (provider, account) in pushed {
                 let Some(account) = account else { continue };
-                if held.iter().any(|record| {
-                    record.account.provider == *provider
-                        && record.account.user_id == account.user_id
-                }) {
+                if super::tracker::logins_of(&directory, &owner, *provider)
+                    .iter()
+                    .any(|login| login.account.user_id == account.user_id)
+                {
                     holders.push((directory.clone(), *provider, account.display_name.clone()));
                 }
             }
