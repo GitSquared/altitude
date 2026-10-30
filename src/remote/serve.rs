@@ -18,7 +18,7 @@ use std::{
 
 use crate::{
     isolation::capsule::{ENVIRONMENT_LABEL, EnvironmentBase},
-    task::TaskExecutionPauseReason,
+    task::{TaskExecutionPauseReason, TaskExecutionStatus},
     vcs::now_ms,
     version::VERSION,
 };
@@ -956,6 +956,18 @@ impl super::tracker::Host for OwnTasks {
             Ok(tasks
                 .into_iter()
                 .filter_map(|task| {
+                    // Only a task still in play has anything to report. One that
+                    // ended — accepted, completed or failed — has told its story,
+                    // and adopting it again opens a second session and replays an
+                    // acceptance the operator has already moved past.
+                    if !matches!(
+                        task.facts.execution_status,
+                        TaskExecutionStatus::Pending
+                            | TaskExecutionStatus::Running
+                            | TaskExecutionStatus::Paused
+                    ) {
+                        return None;
+                    }
                     let issue = task.facts.tracker_issue.clone()?;
                     let owner = task.operator_id()?.to_owned();
                     Some(super::tracker::BoundTask {

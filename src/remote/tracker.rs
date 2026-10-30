@@ -702,11 +702,28 @@ impl RemoteTracker {
             return Ok(());
         };
         let Some(report) = self.report_for_session(&event.session_id) else {
-            // No report yet: an operator's prompt on an issue session is a
-            // delegation, which is how a session opened from the issue starts the
-            // work. It is also the retry path after a failed start.
+            // No report for this session: it is either an operator's own prompt on
+            // an issue still delegated to this app — which is how a session opened
+            // from the issue starts work, and the retry path after a failed start —
+            // or a session this machine is done with. Only a delegation the tracker
+            // is actually asking for becomes work: a prompt on anything else must
+            // not found a task nobody asked for.
+            let Some(issue_id) = event.issue_id.as_deref() else {
+                return Ok(());
+            };
+            let delegation = self
+                .config
+                .automation
+                .issue_delegation(issue_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            // The tracker has to still be asking for this issue's work. Otherwise
+            // the prompt is a memory of a session this machine is done with, and
+            // founding a task from it is work nobody asked for.
+            if delegation.delegate_id.as_deref() != Some(self.config.automation.app_user_id()) {
+                return Ok(());
+            }
             if let Some(author) = event.prompt_author_id.as_deref()
-                && let Some(issue_id) = event.issue_id.as_deref()
                 && event.creator_id.as_deref() == Some(author)
                 && self.owner_for_user(author).is_some()
             {
@@ -1093,8 +1110,8 @@ impl RemoteTracker {
             tracing::warn!(task = %report.task_id, %error, "could not say why a task was unhooked");
             return;
         }
-        if let Err(error) = self.retire_report(report) {
-            tracing::warn!(task = %report.task_id, %error, "could not drop an unhooked report");
+        if let Err(error) = self.finish_report(report) {
+            tracing::warn!(task = %report.task_id, %error, "could not close an unhooked report");
         }
     }
 
