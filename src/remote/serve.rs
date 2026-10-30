@@ -752,6 +752,7 @@ impl TaskHost for OwnTasks {
 
     fn remove(&self, peer: EndpointId, task_id: String) -> BoxFuture<Result<(), String>> {
         let tasks = Arc::clone(&self.tasks);
+        let tracker = self.tracker.clone();
         Box::pin(async move {
             let owner = peer.to_string();
             let task = tasks
@@ -765,9 +766,16 @@ impl TaskHost for OwnTasks {
                 return Err("that task belongs to another operator".into());
             }
             tasks
-                .remove_and_wait(task)
+                .remove_and_wait(task.clone())
                 .await
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string())?;
+            // Deleting a task is the operator saying the work is gone. The issue
+            // should stop pointing at this machine, and its thread should not look
+            // like it is still thinking.
+            if let Some(tracker) = &tracker {
+                tracker.forget_task(&task.id).await;
+            }
+            Ok(())
         })
     }
 }

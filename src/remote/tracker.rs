@@ -67,6 +67,9 @@ const MAX_WEBHOOK_BYTES: usize = 1024 * 1024;
 const SIGNATURE_HEADER: &str = "linear-signature";
 
 const TICK: Duration = Duration::from_secs(10);
+/// How many passes may fail on one event before it is skipped. A tracker that will
+/// not take an event is news; a machine asking again forever is not.
+const EVENT_ATTEMPTS: usize = 3;
 /// A failed delivery is retried at a fixed pace: the work is already durable on
 /// disk, so a tracker outage should not produce a request storm.
 const RETRY: Duration = Duration::from_secs(10);
@@ -230,6 +233,8 @@ impl RemoteTracker {
             reported_events: 0,
             origin: ReportOrigin::StartedByClient,
             finished: false,
+            failed_at: None,
+            failed_attempts: 0,
         })?;
         if let Err(error) = self
             .set_session_summary(&session_id, &tracker_user_id, session_agent.as_deref())
@@ -238,6 +243,43 @@ impl RemoteTracker {
             tracing::warn!(session = %session_id, %error, "could not name a piloted session");
         }
         Ok(())
+    }
+
+    /// A task was deleted here: close what the tracker knows about it.
+    ///
+    /// Deleting a task is the operator saying the work is gone, so the issue stops
+    /// pointing at this machine and the report closes rather than waiting for a
+    /// history that will never advance. Best-effort by design: the task is already
+    /// deleted, and an unreachable tracker must not resurrect it.
+    pub async fn forget_task(&self, task_id: &str) {
+        let Some(report) = self.report_for_task(task_id) else {
+            return;
+        };
+        if let Err(error) = self
+            .config
+            .automation
+            .release_issue(&self.issue_reference(&report.issue_id))
+            .await
+        {
+            tracing::warn!(issue = %report.issue_id, %error, "could not release a deleted task's issue");
+        }
+        if let Err(error) = self
+            .config
+            .automation
+            .create_activity(
+                &report.tracker_session_id,
+                &stable_id(task_id, "deleted"),
+                AgentActivityContent::Response {
+                    body: "This task was deleted, with its sandbox and its record.".to_owned(),
+                },
+            )
+            .await
+        {
+            tracing::warn!(task = %task_id, %error, "could not say a task was deleted");
+        }
+        if let Err(error) = self.finish_report(&report) {
+            tracing::warn!(task = %task_id, %error, "could not close a deleted task's report");
+        }
     }
 
     /// Drain queued webhooks and report task life, forever.
@@ -483,13 +525,26 @@ impl RemoteTracker {
             return Ok(());
         }
         host.stop(report.task_id.clone()).await?;
+        // The work is gone, so the app has nothing left to be asked for: the issue
+        // goes back to whoever owns it rather than pointing at a machine that
+        // stopped listening.
+        if let Err(error) = self
+            .config
+            .automation
+            .release_issue(&self.issue_reference(&report.issue_id))
+            .await
+        {
+            tracing::warn!(issue = %report.issue_id, %error, "could not release a stopped task's issue");
+        }
         self.config
             .automation
             .create_activity(
                 &report.tracker_session_id,
                 &stable_id(&report.task_id, "stopped"),
                 AgentActivityContent::Response {
-                    body: "Stopped. Altitude ended this task and deleted its sandbox.".to_owned(),
+                    body: "Stopped. Altitude ended this task, deleted its sandbox, and handed \
+                           the issue back."
+                        .to_owned(),
                 },
             )
             .await
@@ -673,6 +728,8 @@ impl RemoteTracker {
             reported_events: 0,
             origin: ReportOrigin::Delegated,
             finished: false,
+            failed_at: None,
+            failed_attempts: 0,
         })?;
         // New work on an issue is a new cycle: whatever ending was written for the
         // last task there is not this one's.
@@ -846,10 +903,18 @@ impl RemoteTracker {
             return Ok(());
         }
         let signals = host.unresolved_signals(report.task_id.clone()).await?;
-        let Some(review) = signals
+        let review = signals
             .iter()
-            .find(|signal| signal.kind == TaskOperatorSignalKind::InReview)
-        else {
+            .find(|signal| signal.kind == TaskOperatorSignalKind::InReview);
+        let Some(review) = review else {
+            // The operator closed the issue themselves, without a review to accept.
+            // That is their ending: recording it is what stops this machine from
+            // writing In Progress or In Review over it later.
+            self.mutate(|ledger| {
+                if !ledger.settled_issues.contains(&report.issue_id) {
+                    ledger.settled_issues.push(report.issue_id.clone());
+                }
+            })?;
             return Ok(());
         };
         // The review must already have been waiting when the operator marked the
@@ -1049,7 +1114,7 @@ impl RemoteTracker {
                     let outcome = if moved {
                         self.finish_transferred(&report).await
                     } else {
-                        self.retire_report(&report)
+                        self.finish_report(&report)
                     };
                     if let Err(error) = outcome {
                         tracing::warn!(task = %report.task_id, %error, "could not drop a removed task's report");
@@ -1127,8 +1192,11 @@ impl RemoteTracker {
     /// ending and never implies Done.
     async fn sync_report(&self, host: &dyn Host, report: &IssueReport) -> Result<(), String> {
         let events = host.events(report.task_id.clone()).await?;
+        // A cursor past the end means the history it counted is gone, which is not a
+        // reason to replay from the beginning: a replay re-writes statuses and
+        // re-resolves threads the operator has since touched themselves.
         if report.reported_events > events.len() {
-            self.set_cursor(&report.task_id, 0)?;
+            self.set_cursor(&report.task_id, events.len())?;
             return Ok(());
         }
         // Signals still open are the only ones worth publishing; one already
@@ -1147,7 +1215,85 @@ impl RemoteTracker {
         } else {
             report.reported_events
         };
-        for (index, (_, event)) in events.iter().enumerate().skip(start) {
+        for index in start..events.len() {
+            let outcome = self
+                .report_event(host, report, &events, index, &unresolved)
+                .await;
+            match outcome {
+                Ok(Some(done)) => return Ok(done),
+                Ok(None) => {}
+                Err(error) => return self.refused_event(report, index, error),
+            }
+            self.set_cursor(&report.task_id, index + 1)?;
+        }
+        if folded {
+            self.replay_signals(host, report, &events).await?;
+        }
+        Ok(())
+    }
+
+    /// Give up on an event after it has been refused enough times.
+    ///
+    /// A tracker that will not accept one event — an issue that was deleted, a
+    /// comment it says is gone — used to hold the cursor there forever: the same
+    /// write every ten seconds, and nothing after it ever reported. Skipping is
+    /// loud and bounded, which is the better failure.
+    fn refused_event(
+        &self,
+        report: &IssueReport,
+        index: usize,
+        error: String,
+    ) -> Result<(), String> {
+        let attempts = if report.failed_at == Some(index) {
+            report.failed_attempts + 1
+        } else {
+            1
+        };
+        if attempts < EVENT_ATTEMPTS {
+            self.mutate(|ledger| {
+                if let Some(held) = ledger
+                    .reports
+                    .iter_mut()
+                    .find(|held| held.task_id == report.task_id)
+                {
+                    held.failed_at = Some(index);
+                    held.failed_attempts = attempts;
+                }
+            })?;
+            return Err(error);
+        }
+        tracing::warn!(
+            task = %report.task_id,
+            index,
+            %error,
+            "skipping an event the tracker kept refusing"
+        );
+        self.mutate(|ledger| {
+            if let Some(held) = ledger
+                .reports
+                .iter_mut()
+                .find(|held| held.task_id == report.task_id)
+            {
+                held.failed_at = None;
+                held.failed_attempts = 0;
+            }
+        })?;
+        self.set_cursor(&report.task_id, index + 1)
+    }
+
+    /// Report one event of a task's history.
+    ///
+    /// `Some(())` means the event was the task's ending, which closes the report.
+    async fn report_event(
+        &self,
+        host: &dyn Host,
+        report: &IssueReport,
+        events: &[(i64, TaskHistoryEvent)],
+        index: usize,
+        unresolved: &HashSet<String>,
+    ) -> Result<Option<()>, String> {
+        let (_, event) = &events[index];
+        {
             match event {
                 TaskHistoryEvent::AgentModelObserved { .. } => {
                     if let Ok(Some(session_agent)) =
@@ -1257,45 +1403,74 @@ impl RemoteTracker {
                 } => {
                     self.resolve_signal_comment(report, signal_id, &events[..=index])
                         .await;
+                    // Answering a question puts the work back in progress: the issue
+                    // said In Review while the task was waiting, and it is not waiting
+                    // any more. An issue whose ending was already written is left as
+                    // the operator left it.
+                    if !self.is_settled(&report.issue_id)
+                        && let Err(error) = self
+                            .config
+                            .automation
+                            .status(
+                                &self.issue_reference(&report.issue_id),
+                                TrackerStatus::InProgress,
+                            )
+                            .await
+                    {
+                        tracing::warn!(issue = %report.issue_id, %error, "could not say the task is running again");
+                    }
                 }
                 TaskHistoryEvent::OperatorSignalConfirmed { signal_id } => {
                     self.resolve_signal_comment(report, signal_id, &events[..=index])
                         .await;
-                    return self.finish_accepted(report, &events[..=index]).await;
+                    self.finish_accepted(report, &events[..=index]).await?;
+                    return Ok(Some(()));
                 }
                 TaskHistoryEvent::TaskCompleted { .. } => {
                     self.resolve_signal_comments(report, &events[..=index])
                         .await;
-                    return self.finish_accepted(report, &events[..=index]).await;
+                    self.finish_accepted(report, &events[..=index]).await?;
+                    return Ok(Some(()));
                 }
                 _ => {}
             }
-            self.set_cursor(&report.task_id, index + 1)?;
         }
-        if folded {
-            // The destination still owes the operator whatever is waiting, even
-            // though the rest of the history was already reported at the source.
-            let contributions = contribution_details(&events);
-            for signal in host.unresolved_signals(report.task_id.clone()).await? {
-                if !unresolved.contains(&signal.id) {
-                    continue;
-                }
-                let Some(message) = signal.latest_agent_message() else {
-                    continue;
-                };
-                self.publish_signal(
-                    report,
-                    &signal.id,
-                    signal.kind,
-                    &signal.title,
-                    &message.body,
-                    &contributions,
-                )
-                .await?;
+        Ok(None)
+    }
+
+    /// The destination still owes the operator whatever is waiting, even though the
+    /// rest of the history was already reported at the source.
+    async fn replay_signals(
+        &self,
+        host: &dyn Host,
+        report: &IssueReport,
+        events: &[(i64, TaskHistoryEvent)],
+    ) -> Result<(), String> {
+        let unresolved: HashSet<String> = host
+            .unresolved_signals(report.task_id.clone())
+            .await?
+            .into_iter()
+            .map(|signal| signal.id)
+            .collect();
+        let contributions = contribution_details(events);
+        for signal in host.unresolved_signals(report.task_id.clone()).await? {
+            if !unresolved.contains(&signal.id) {
+                continue;
             }
-            self.set_cursor(&report.task_id, events.len())?;
+            let Some(message) = signal.latest_agent_message() else {
+                continue;
+            };
+            self.publish_signal(
+                report,
+                &signal.id,
+                signal.kind,
+                &signal.title,
+                &message.body,
+                &contributions,
+            )
+            .await?;
         }
-        Ok(())
+        self.set_cursor(&report.task_id, events.len())
     }
 
     /// The task moved to another machine: say so and drop the report without
@@ -1445,11 +1620,7 @@ impl RemoteTracker {
         report: &IssueReport,
         events: &[(i64, TaskHistoryEvent)],
     ) -> Result<(), String> {
-        let settled = self
-            .lock()
-            .map(|ledger| ledger.settled_issues.contains(&report.issue_id))
-            .unwrap_or(false);
-        if !settled {
+        if !self.is_settled(&report.issue_id) {
             self.config
                 .automation
                 .status(&self.issue_reference(&report.issue_id), TrackerStatus::Done)
@@ -1556,6 +1727,14 @@ impl RemoteTracker {
             .into_iter()
             .find(|login| login.owner == owner)
             .map(|login| login.account.user_id)
+    }
+
+    /// Whether this issue's ending has been written, which is what stops a machine
+    /// from contradicting an operator who has moved the issue since.
+    fn is_settled(&self, issue_id: &str) -> bool {
+        self.lock()
+            .map(|ledger| ledger.settled_issues.iter().any(|id| id == issue_id))
+            .unwrap_or(false)
     }
 
     fn report_for_task(&self, task_id: &str) -> Option<IssueReport> {
@@ -2225,6 +2404,12 @@ struct IssueReport {
     /// is reported once.
     #[serde(default)]
     finished: bool,
+    /// The event a pass is stuck on, and how many passes have refused it. An event
+    /// the tracker will not take is skipped rather than pinning the report forever.
+    #[serde(default)]
+    failed_at: Option<usize>,
+    #[serde(default)]
+    failed_attempts: usize,
 }
 
 /// Who started the work, which decides whether the report outlives the tracker's

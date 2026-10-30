@@ -231,6 +231,24 @@ impl LinearAutomation {
         Ok(())
     }
 
+    /// Take this app off an issue, so the tracker stops pointing at a task that is
+    /// no longer running.
+    ///
+    /// A stop ends the work here; the issue then belongs to whoever owns it rather
+    /// than to a machine that stopped listening. Clearing the delegate says that,
+    /// and it is the operator's own view of the issue that has to change for it to
+    /// be true.
+    pub async fn release_issue(&self, reference: &IssueReference) -> Result<(), TrackerError> {
+        let data = self
+            .graphql(
+                UPDATE_STATE_MUTATION,
+                json!({ "id": reference.id, "input": { "delegateId": null } }),
+            )
+            .await?;
+        mutation_succeeded(&data, "issueUpdate")?;
+        Ok(())
+    }
+
     /// The thread, document, and authors around one comment.
     ///
     /// Admission needs facts, not a cached copy of the issue. Every call is a
