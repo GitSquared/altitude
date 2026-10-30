@@ -285,6 +285,20 @@ impl App {
                 .cloned()
                 .unwrap_or(RemoteStatus::Unknown);
             let trackers = self.remote_trackers.get(&address).cloned();
+            // Which of this operator's projects would receive an issue the
+            // remote's tracker delegates: bound to this machine, and accepting
+            // delegated work.
+            let delegate_target = self
+                .projects()
+                .into_iter()
+                .find(|project| {
+                    project.host.as_deref() == Some(address.as_str())
+                        && project
+                            .tracker
+                            .as_ref()
+                            .is_some_and(|route| route.accepts_delegated_work)
+                })
+                .map(|project| project.name.clone());
             Row {
                 // A name is what the remote called itself, so an address
                 // that has never answered shows itself instead.
@@ -299,6 +313,7 @@ impl App {
                     remembered,
                     status,
                     trackers,
+                    delegate_target,
                 },
             }
         }));

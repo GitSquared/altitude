@@ -48,6 +48,10 @@ pub enum RowKind {
         /// What its last announcement said its shared trackers are, when it has
         /// answered. Absent while it has not, which is unknown rather than empty.
         trackers: Option<Vec<TrackerConnection>>,
+        /// The project here that takes the work such a tracker delegates. A remote
+        /// can have the app installed and still have nowhere for its issues to go,
+        /// so this is the other half of the answer.
+        delegate_target: Option<String>,
     },
     Discovered(DiscoveredRemote),
     Switch {
@@ -180,7 +184,7 @@ impl Row {
                         "connect"
                     },
                 ),
-                chrome::Hint::new("t", "task trackers"),
+                chrome::Hint::new("t", "tracker guide"),
                 chrome::Hint::new("e", "edit"),
             ],
             RowKind::Discovered(_) => vec![chrome::Hint::new("enter", "use remote")],

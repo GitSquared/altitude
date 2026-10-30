@@ -125,7 +125,10 @@ pub fn help_sections() -> Vec<HelpSection> {
                     "d / Delete / Backspace",
                     "Remove a project or remote, after confirmation",
                 ),
-                ("t (Remotes)", "Choose the remote's task tracker"),
+                (
+                    "t (Remotes)",
+                    "Open the guide for piloting tasks from a tracker",
+                ),
                 (
                     "PgUp / PgDn · Home",
                     "Scroll details, or return to their beginning",
@@ -217,7 +220,7 @@ pub fn help_sections() -> Vec<HelpSection> {
             bindings: &[
                 (
                     "j/k · ↓/↑",
-                    "Scroll the instructions, or choose a task tracker",
+                    "Scroll the instructions, or choose a tracker's guide",
                 ),
                 ("Enter (task trackers)", "Open the selected tracker's guide"),
                 (

@@ -564,7 +564,9 @@ pub(super) fn remote_connector(
         RemoteStatus::Reached if needs_config => (
             Reach::Asking,
             "synchronizing…",
-            Some("Sending this machine's projects and logins.".to_owned()),
+            // What is actually sent: the projects that run on it, and the logins
+            // those projects use. Nothing else of this machine's goes.
+            Some("Sending the projects that run there, and the logins they use.".to_owned()),
             None,
         ),
         RemoteStatus::Reached => (Reach::On, "synced", None, None),
@@ -572,7 +574,11 @@ pub(super) fn remote_connector(
         RemoteStatus::Syncing => (
             Reach::Asking,
             "synchronizing…",
-            Some("It is building what it needs to run a task.".to_owned()),
+            Some(
+                "It is building what it needs to run a task. A first build installs the \
+                 project's tools, so it takes a while and is only done once."
+                    .to_owned(),
+            ),
             None,
         ),
         RemoteStatus::Changed => (
@@ -594,10 +600,13 @@ pub(super) fn remote_connector(
             Some("Press enter to reach it."),
         ),
     };
+    // Its own name is the row's title, and its key is what this client
+    // remembers: neither is an identity of ours, so the status line says nothing
+    // "as".
     let mut fields = vec![("address", address.to_owned())];
     match remembered {
         Some(key) => {
-            fields.push(("identity", short_key(&key.key)));
+            fields.push(("key", short_key(&key.key)));
             fields.push(("version", key.version.clone()));
             fields.push(("met", met_ago(key.seen_at_ms)));
         }
@@ -608,7 +617,7 @@ pub(super) fn remote_connector(
         reach,
         status: word.to_owned(),
         status_value: None,
-        identity: remembered.map(|key| key.label.clone()),
+        identity: None,
         note,
         action,
         purpose: "A machine that keeps running your tasks after you close Altitude, so work \

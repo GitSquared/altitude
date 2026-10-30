@@ -241,6 +241,7 @@ fn detail(panel: &Panel, view: &View, tick: Option<usize>) -> Paragraph<'static>
             status,
             needs_config,
             trackers,
+            delegate_target,
         } => {
             let mut lines =
                 remote_connector(label, address, remembered.as_ref(), status, *needs_config)
@@ -248,10 +249,29 @@ fn detail(panel: &Panel, view: &View, tick: Option<usize>) -> Paragraph<'static>
             lines.push(Line::from(""));
             lines.push(section_heading("Task tracker"));
             lines.push(tracker_summary(trackers.as_deref(), tick));
-            lines.push(Line::styled(
-                "Press t to choose a task tracker.",
-                palette::accent(),
-            ));
+            // Nothing here is a choice of this client's: the app belongs to the
+            // machine that runs it. An answered remote says what it has and where
+            // its work lands; one that has none is offered the guide instead of a
+            // menu.
+            match trackers.as_deref() {
+                Some([]) => lines.push(Line::styled(
+                    "Press t to learn how to pilot tasks from your tracker.",
+                    palette::accent(),
+                )),
+                _ => {
+                    if let Some(project) = delegate_target {
+                        lines.push(Line::from(format!(
+                            "Issues it delegates start tasks in {project}."
+                        )));
+                    } else if trackers.is_some() {
+                        lines.push(Line::styled(
+                            "Its delegated issues start nothing: no project here accepts them.",
+                            palette::muted(),
+                        ));
+                    }
+                    lines.push(Line::styled("Press t for the guide.", palette::accent()));
+                }
+            }
             lines
         }
         RowKind::Discovered(discovered) => vec![
