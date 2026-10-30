@@ -2288,15 +2288,15 @@ impl App {
             KeyCode::Left | KeyCode::Char('h') => self.panel.depth = Depth::Rail,
             KeyCode::Down | KeyCode::Char('j') => self.panel.move_selection(true, rows),
             KeyCode::Up | KeyCode::Char('k') => self.panel.move_selection(false, rows),
-            KeyCode::Delete | KeyCode::Backspace
-                if self.panel.section.slot().is_some()
-                    && self
-                        .selected_row()
-                        .is_some_and(|row| matches!(row.kind, RowKind::Credential(_))) =>
+            _ if is_remove(key)
+                && self.panel.section.slot().is_some()
+                && self
+                    .selected_row()
+                    .is_some_and(|row| matches!(row.kind, RowKind::Credential(_))) =>
             {
                 self.ask_to_forget_credentials()
             }
-            KeyCode::Delete | KeyCode::Backspace if self.selected_has_credentials() => {
+            _ if is_remove(key) && self.selected_has_credentials() => {
                 self.ask_to_forget_credentials()
             }
             KeyCode::Char(' ')
@@ -3687,6 +3687,14 @@ impl App {
         let Some(id) = credential.profile().map(str::to_owned) else {
             return;
         };
+        if let Some(refusal) = self
+            .settings_file
+            .as_ref()
+            .and_then(|file| file.settings().binding_refusal(&id))
+        {
+            self.problem(refusal);
+            return;
+        }
         let tracker = Service::from_id(&id).is_some_and(|service| service.slot() == Slot::Tracker);
         let question = format!(
             "Delete the {} identity? Its login and profile are forgotten here. {}",

@@ -457,19 +457,48 @@ impl Settings {
         Ok(())
     }
 
+    /// The projects that run with a credential.
+    ///
+    /// Named rather than counted: an identity cannot be forgotten while a project
+    /// still reads it, and "a project" sends the operator looking for which one.
+    pub fn projects_binding(&self, id: &str) -> Vec<&str> {
+        self.projects
+            .iter()
+            .filter(|project| {
+                project.agent_credential.as_deref() == Some(id)
+                    || project.vcs_credential.as_deref() == Some(id)
+                    || project
+                        .tracker
+                        .as_ref()
+                        .and_then(|binding| binding.credential.as_deref())
+                        == Some(id)
+            })
+            .map(|project| project.name.as_str())
+            .collect()
+    }
+
+    /// Why an identity cannot be forgotten yet, naming what still reads it.
+    pub fn binding_refusal(&self, id: &str) -> Option<String> {
+        let bound = self.projects_binding(id);
+        if bound.is_empty() {
+            return None;
+        }
+        let one = bound.len() == 1;
+        Some(format!(
+            "{} still {} this identity; change {} first",
+            named(&bound),
+            if one { "binds" } else { "bind" },
+            if one {
+                "the project's login"
+            } else {
+                "their logins"
+            },
+        ))
+    }
+
     pub fn remove_credential(&mut self, id: &str) -> Result<(), SettingsError> {
-        if self.projects.iter().any(|project| {
-            project.agent_credential.as_deref() == Some(id)
-                || project.vcs_credential.as_deref() == Some(id)
-                || project
-                    .tracker
-                    .as_ref()
-                    .and_then(|binding| binding.credential.as_deref())
-                    == Some(id)
-        }) {
-            return Err(SettingsError::Invalid(
-                "a project still binds this identity".to_owned(),
-            ));
+        if let Some(refusal) = self.binding_refusal(id) {
+            return Err(SettingsError::Invalid(refusal));
         }
         // A tracker is optional, so its default may go with its last identity.
         // An agent and a version-control login are what a task runs with, so
@@ -858,3 +887,13 @@ impl fmt::Display for SettingsError {
 }
 
 impl Error for SettingsError {}
+
+/// A list of names as a sentence reads it: "altitude", "altitude and api",
+/// "altitude, api and web".
+fn named(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => (*one).to_owned(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
