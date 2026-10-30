@@ -18,8 +18,9 @@ pub fn is_dismiss(key: KeyEvent) -> bool {
 
 /// Whether the operator asked for the secondary action rather than the primary
 /// one: ctrl-enter, the heavier of the two gestures a surface offers. It starts
-/// the work a creation page is showing, takes a task over from the list, and
-/// replies where enter accepts.
+/// the work a prompt has written, takes a task over from the list, and replies
+/// where enter accepts. A surface whose enter is not a line — an issue's one-line
+/// query — has no use for it and says so where it reads keys.
 ///
 /// One chord everywhere, so the gesture is one thing to learn and one thing to
 /// state. What it costs is stated here once: a chorded enter is a key of its own

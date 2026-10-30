@@ -26,10 +26,14 @@
 //! the actions. It has a chord of its own, so reaching it does not mean tabbing
 //! past the prompt.
 //!
-//! Enter is a line in the prompt, because an intent is prose. Answering is
-//! ctrl-enter, so the keys that start a task are never the keys that write one.
-//! It is also the one key here that a terminal has to be told to report as a key
-//! of its own, which is why the page asks for that protocol while it is open.
+//! Enter is a line in the prompt, because an intent is prose, and ctrl-enter
+//! answers, so the keys that start a task are never the keys that write one.
+//! That chord is the one key here a terminal has to be told to report as a key of
+//! its own, which is why the page asks for that protocol while it is open.
+//!
+//! The issue page has no such split: its prompt is one line of query, which a
+//! carriage return has no business in, so enter is the answer there and the chord
+//! does nothing. Given the same page twice, the lighter key is the one to press.
 //!
 //! Everything drawn here can also be clicked: the pill, the offers under it, the
 //! prompt and the two answers. The rectangles come from the last frame, so a
@@ -283,10 +287,11 @@ impl NewTask {
         if self.issue {
             hints.push(chrome::Hint::new("↑/↓", "result"));
         }
-        hints.push(chrome::Hint::new(
-            "ctrl-enter",
-            if self.issue { "link" } else { "create" },
-        ));
+        hints.push(if self.issue {
+            chrome::Hint::new("enter", "link")
+        } else {
+            chrome::Hint::new("ctrl-enter", "create")
+        });
         hints.push(chrome::Hint::new("esc", "cancel"));
         hints
     }
@@ -444,9 +449,10 @@ impl NewTask {
             return None;
         }
         // The answer is a chord, so it is never a key that writes the intent:
-        // enter adds a line, and this starts the work.
+        // enter adds a line, and this starts the work. Link an issue, though, and
+        // enter is already the answer, so the chord has nothing left to say.
         if keys::is_secondary(key) {
-            return self.answer();
+            return (!self.issue).then(|| self.answer()).flatten();
         }
         if self.is_typing() {
             return self.prompt_key(key);
@@ -498,10 +504,8 @@ impl NewTask {
     fn prompt_key(&mut self, key: KeyEvent) -> Option<Answer> {
         match key.code {
             // The issue page's prompt is one line of query, so enter is not a
-            // second line there: it does nothing rather than writing a query
-            // Linear cannot search for. Linking is the answer chord, as creating
-            // is on the prompt.
-            KeyCode::Enter if self.issue => None,
+            // second line there: it links the highlighted issue.
+            KeyCode::Enter if self.issue => self.answer(),
             KeyCode::Tab => {
                 self.move_focus(true);
                 None
