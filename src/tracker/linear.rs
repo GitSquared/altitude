@@ -956,19 +956,34 @@ pub(super) fn scope_of(issue: &Value) -> Result<Option<IssueScope>, TrackerError
     let Some(team) = issue.get("team").filter(|team| !team.is_null()) else {
         return Ok(None);
     };
-    let id = team
-        .get("id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| TrackerError::new("the tracker returned a scope without an id"))?;
-    let key = team.get("key").and_then(Value::as_str).map(str::to_owned);
-    let name = team.get("name").and_then(Value::as_str).map(str::to_owned);
-    let label = format!(
-        "Linear team {}",
-        key.as_deref().or(name.as_deref()).unwrap_or(id)
-    );
+    // A team is an object in Linear's own API and sometimes only the word the
+    // operator knows it by in what a tool returns. What names the team answers
+    // for all of it: a scope is matched by name against a project's claim, never
+    // used to write anything back.
+    let (id, key, name) = match team {
+        Value::String(named) => (None, Some(named.clone()), None),
+        Value::Object(_) => (
+            team.get("id").and_then(Value::as_str).map(str::to_owned),
+            team.get("key").and_then(Value::as_str).map(str::to_owned),
+            team.get("name").and_then(Value::as_str).map(str::to_owned),
+        ),
+        other => {
+            tracing::debug!(shape = ?other, "the tracker named a team in a shape this client does not read");
+            return Ok(None);
+        }
+    };
+    let Some(shown) = key.clone().or_else(|| name.clone()).or_else(|| id.clone()) else {
+        tracing::debug!("the tracker returned a team with no name at all");
+        return Ok(None);
+    };
+    let id = id.unwrap_or_else(|| shown.clone());
+    let mut aliases: Vec<String> = key.into_iter().collect();
+    if id != shown {
+        aliases.push(shown.clone());
+    }
     Ok(Some(IssueScope {
-        id: id.to_owned(),
-        aliases: key.into_iter().collect(),
-        label,
+        aliases,
+        label: format!("Linear team {shown}"),
+        id,
     }))
 }
