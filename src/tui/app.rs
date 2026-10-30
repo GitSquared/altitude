@@ -27,7 +27,7 @@ use crate::{
         Service, Slot, credential_shell_id, describe, new_id,
     },
     isolation::{EnvironmentDescription, EnvironmentProgress, IsolationEngine, ProfileSummary},
-    project::{Project, ProjectCommits, TrackerRoute, normalize_repository},
+    project::{Project, ProjectCommits, TrackerBinding, normalize_repository},
     remote::{
         Announcement, ConfigBundle, ConfigPush, DiscoveredRemote, DiscoveryEvent, LinkClient,
         RemoteKey, RemoteKeyStatus, RemoteKeys, RemoteState, TaskOrigin, TaskRequest, TaskSummary,
@@ -5228,10 +5228,10 @@ impl App {
                 project.caches = form.cache_paths();
                 project.instructions = form.instruction_text();
                 let scope = form.scope.value().trim();
-                // A project that accepts the whole account is a route too, and
+                // A project that accepts the whole account is a binding too, and
                 // says so; one that claims nothing is not.
                 project.tracker =
-                    (!scope.is_empty() || form.accepts_delegated_work).then(|| TrackerRoute {
+                    (!scope.is_empty() || form.accepts_delegated_work).then(|| TrackerBinding {
                         credential: form.tracker_credential(),
                         scope: (!scope.is_empty()).then(|| scope.to_owned()),
                         accepts_delegated_work: form.accepts_delegated_work,
@@ -6389,7 +6389,7 @@ impl App {
                     || project
                         .tracker
                         .as_ref()
-                        .and_then(|route| route.credential.as_deref())
+                        .and_then(|binding| binding.credential.as_deref())
                         == Some(id)
             })
         }) {

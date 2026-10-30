@@ -540,7 +540,7 @@ impl LinearAutomation {
     /// that runs it: the issue need not be delegated to this app, and the
     /// human assignee is left where the operator put them. Linear has no way to
     /// make this idempotent, so a response lost after the session was created
-    /// leaves a second session behind; the caller records a route before it
+    /// leaves a second session behind; the caller records a binding before it
     /// retries so it does not ask twice.
     pub async fn create_session_on_issue(&self, issue_id: &str) -> Result<String, TrackerError> {
         let data = self

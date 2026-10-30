@@ -328,7 +328,7 @@ impl Form {
         let tracker_credential = project
             .tracker
             .as_ref()
-            .and_then(|route| route.credential.clone())
+            .and_then(|binding| binding.credential.clone())
             .or(defaults.tracker.clone());
         let mut host_choices = remotes.to_vec();
         if let Some(host) = &project.host
@@ -347,7 +347,7 @@ impl Form {
                 project
                     .tracker
                     .as_ref()
-                    .and_then(|route| route.scope.as_deref())
+                    .and_then(|binding| binding.scope.as_deref())
                     .unwrap_or_default(),
             ),
             agent: credential_pick(
@@ -377,7 +377,7 @@ impl Form {
             accepts_delegated_work: project
                 .tracker
                 .as_ref()
-                .is_some_and(|route| route.accepts_delegated_work),
+                .is_some_and(|binding| binding.accepts_delegated_work),
             focus: Focus::Primary,
             scroll: 0,
             free_scroll: false,

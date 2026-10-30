@@ -261,11 +261,14 @@ pub(super) fn project_lines(
         .vcs_credential
         .as_deref()
         .or(defaults.vcs.as_deref());
-    let tracker = project.tracker.as_ref().map(|route| {
-        let id = route.credential.as_deref().or(defaults.tracker.as_deref());
+    let tracker = project.tracker.as_ref().map(|binding| {
+        let id = binding
+            .credential
+            .as_deref()
+            .or(defaults.tracker.as_deref());
         let mut value = label(id);
         let kind = TrackerKind::sole();
-        match &route.scope {
+        match &binding.scope {
             Some(scope) => value.push_str(&format!(" · {} {scope}", kind.scope_noun())),
             None => value.push_str(" · whole account"),
         }
@@ -274,7 +277,7 @@ pub(super) fn project_lines(
             .copied()
             .unwrap_or_default();
         value.push_str(match state {
-            TrackerState::Connected if route.accepts_delegated_work => {
+            TrackerState::Connected if binding.accepts_delegated_work => {
                 " · connected · ready to delegate"
             }
             TrackerState::Connected => " · connected · not accepting delegated work",

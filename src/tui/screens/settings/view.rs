@@ -109,7 +109,7 @@ impl App {
                     Slot::Tracker => project
                         .tracker
                         .as_ref()
-                        .and_then(|route| route.credential.as_deref().or(fallback)),
+                        .and_then(|binding| binding.credential.as_deref().or(fallback)),
                 };
                 (effective == Some(id) && !project.name.trim().is_empty()).then_some(project.name)
             })
@@ -317,7 +317,7 @@ impl App {
 
     /// The tracker work this machine has bound to one remote.
     ///
-    /// Read from the projects that run there: the login each one's route names,
+    /// Read from the projects that run there: the login each one's binding names,
     /// and the team it claims. A remote with the app and no project of ours is
     /// bound to nothing, which is a different answer from a remote without the
     /// app.
@@ -336,10 +336,10 @@ impl App {
         let mut workspace = None;
         let mut teams = Vec::new();
         for project in &projects {
-            let Some(route) = &project.tracker else {
+            let Some(binding) = &project.tracker else {
                 continue;
             };
-            if let Some(credential) = route.credential.clone().or_else(|| default.clone()) {
+            if let Some(credential) = binding.credential.clone().or_else(|| default.clone()) {
                 // The account says whose login it is and which workspace it is
                 // in; the label says what the operator called it. Both are read
                 // here rather than asked over the network.
@@ -369,7 +369,7 @@ impl App {
                 }
             }
             teams.push((
-                route
+                binding
                     .scope
                     .clone()
                     .unwrap_or_else(|| "whole account".to_owned()),

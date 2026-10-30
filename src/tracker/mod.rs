@@ -40,19 +40,20 @@ impl TrackerKind {
     /// What this provider calls the container an issue lives in, for an operator
     /// reading a setting: a team, a project, a repository.
     ///
-    /// Altitude routes on the container, not on any provider's word for it, so the
-    /// word belongs to the adapter rather than to the route.
+    /// Altitude decides by the container, not by any provider's word for it, so
+    /// the word belongs to the adapter rather than to the caller.
     pub fn scope_noun(self) -> &'static str {
         match self {
             Self::Linear => "team",
         }
     }
 
-    /// The tracker a route speaks for while a build knows only one.
+    /// The tracker a binding speaks for while a build knows only one.
     ///
-    /// A route will name its connection when a machine can hold more than one
-    /// tracker. Until then every route is this one's, and saying so here keeps the
-    /// assumption in the tracker module rather than in a caller indexing a list.
+    /// A binding will name its connection when a machine can hold more than one
+    /// tracker. Until then every binding is this one's, and saying so here keeps
+    /// the assumption in the tracker module rather than in a caller indexing a
+    /// list.
     pub fn sole() -> Self {
         Self::ALL[0]
     }
@@ -82,10 +83,9 @@ pub const ACCOUNT_FILE: &str = "identity.json";
 
 /// The tracker account a machine is signed in as, as it travels to a remote.
 ///
-/// This is what lets a remote route an issue delegated in the tracker to the
-/// machine that owns it, so a machine's account is a fact a remote keeps rather
-/// than something it infers.
-/// One container a tracker route can claim, as a picker lists it.
+/// This is what lets a remote report on an issue delegated in the tracker, through
+/// the account of the client the work belongs to.
+/// One container a tracker binding can claim, as a picker lists it.
 #[derive(Clone, Debug)]
 pub struct ScopeSummary {
     pub id: String,
@@ -131,9 +131,9 @@ pub struct IssueReference {
 
 /// The container an issue belongs to, in the provider's own terms.
 ///
-/// A Linear team, a Jira project, a GitHub repository. Altitude routes on this and
-/// never on the provider's vocabulary: the adapter says what an issue's container
-/// is, what a person might type for it, and what to call it when no project claims
+/// A Linear team, a Jira project, a GitHub repository. Altitude decides by this and
+/// never by the provider's vocabulary: the adapter says what an issue's container
+/// is, what a person might type for it, and what to call it when no binding claims
 /// it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IssueScope {
@@ -148,8 +148,8 @@ pub struct IssueSummary {
     pub reference: IssueReference,
     pub title: String,
     pub project: Option<String>,
-    /// The container that owns the issue, when the provider says. A route is a
-    /// claim on one, so an issue without a scope cannot be routed.
+    /// The container that owns the issue, when the provider says. A binding claims
+    /// one, so an issue without a scope has nothing to bind it.
     #[serde(default)]
     pub scope: Option<IssueScope>,
 }
@@ -249,7 +249,7 @@ pub trait TrackerProvider: IssueReader {
 
     fn search<'a>(&'a self, query: &'a str) -> TrackerFuture<'a, Vec<IssueSummary>>;
 
-    /// The containers a route can claim, for a picker. A server that does not
+    /// The containers a binding can claim, for a picker. A server that does not
     /// offer them is a server the operator types a key into.
     fn scopes<'a>(&'a self) -> TrackerFuture<'a, Vec<ScopeSummary>>;
     fn status<'a>(

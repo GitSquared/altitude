@@ -70,7 +70,7 @@ pub struct Project {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vcs_credential: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tracker: Option<TrackerRoute>,
+    pub tracker: Option<TrackerBinding>,
     /// The identity commits made here carry, when it differs from the
     /// installation's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -89,10 +89,10 @@ pub struct ProjectCommits {
 
 /// Work arriving from a task tracker, and what it may do here.
 ///
-/// A route is a claim: this project, and only this one, is what issues from that
+/// A binding is a claim: this project, and only this one, is what issues from that
 /// scope become. Without one, a delegated issue starts nothing and says so.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct TrackerRoute {
+pub struct TrackerBinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<String>,
     /// The provider's scope, by id or by the name a person types: a Linear team, a
@@ -105,13 +105,13 @@ pub struct TrackerRoute {
     /// Whether a delegated issue may start work without an operator at the
     /// keyboard.
     ///
-    /// Off until the operator says otherwise. The route alone says which scope the
-    /// project is for; this says whether Altitude may act on it unattended.
+    /// Off until the operator says otherwise. The binding alone says which scope
+    /// the project is for; this says whether Altitude may act on it unattended.
     #[serde(default)]
     pub accepts_delegated_work: bool,
 }
 
-impl TrackerRoute {
+impl TrackerBinding {
     pub fn claims(&self, id: &str, aliases: &[String]) -> bool {
         let Some(scope) = &self.scope else {
             return false;
@@ -306,8 +306,8 @@ impl Project {
                 ));
             }
         }
-        if let Some(route) = &self.tracker
-            && let Some(scope) = &route.scope
+        if let Some(binding) = &self.tracker
+            && let Some(scope) = &binding.scope
         {
             // Provider-neutral: a team key, a project key, or `owner/repo`. What a
             // scope may look like belongs to the adapter; what breaks matching is
@@ -315,7 +315,7 @@ impl Project {
             let scope = scope.trim();
             if scope.is_empty()
                 || scope.len() > 128
-                || scope != route.scope.as_deref().unwrap_or_default()
+                || scope != binding.scope.as_deref().unwrap_or_default()
                 || scope.starts_with('-')
                 || scope
                     .chars()
@@ -323,7 +323,7 @@ impl Project {
             {
                 return Err(ProjectError(format!(
                     "tracker scope {:?} must be 1-128 printable characters with no spaces, as the tracker names it",
-                    route.scope.as_deref().unwrap_or_default()
+                    binding.scope.as_deref().unwrap_or_default()
                 )));
             }
         }

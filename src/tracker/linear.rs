@@ -951,7 +951,7 @@ fn is_not_found(error: &TrackerError) -> bool {
 
 /// The scope a Linear issue belongs to: its team.
 ///
-/// Absent rather than an error: an issue with no team is one no route can claim.
+/// Absent rather than an error: an issue with no team is one no binding can claim.
 pub(super) fn scope_of(issue: &Value) -> Result<Option<IssueScope>, TrackerError> {
     let Some(team) = issue.get("team").filter(|team| !team.is_null()) else {
         return Ok(None);

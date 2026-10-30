@@ -270,10 +270,10 @@ impl Settings {
             {
                 project.vcs_credential = self.defaults.vcs_credential.clone();
             }
-            if let Some(route) = &mut project.tracker
-                && route.credential.as_deref().is_none_or(|id| !known(id))
+            if let Some(binding) = &mut project.tracker
+                && binding.credential.as_deref().is_none_or(|id| !known(id))
             {
-                route.credential = self.defaults.tracker_credential.clone();
+                binding.credential = self.defaults.tracker_credential.clone();
             }
         }
         // A project answers what it runs as soon as it is read, so no screen has
@@ -409,10 +409,10 @@ impl Settings {
             if project.vcs_credential.as_deref() == Some(old) {
                 project.vcs_credential = Some(new.to_owned());
             }
-            if let Some(route) = &mut project.tracker
-                && route.credential.as_deref() == Some(old)
+            if let Some(binding) = &mut project.tracker
+                && binding.credential.as_deref() == Some(old)
             {
-                route.credential = Some(new.to_owned());
+                binding.credential = Some(new.to_owned());
             }
         }
         Ok(())
@@ -464,7 +464,7 @@ impl Settings {
                 || project
                     .tracker
                     .as_ref()
-                    .and_then(|route| route.credential.as_deref())
+                    .and_then(|binding| binding.credential.as_deref())
                     == Some(id)
         }) {
             return Err(SettingsError::Invalid(
@@ -516,7 +516,7 @@ impl Settings {
             let tracker = project
                 .tracker
                 .as_ref()
-                .and_then(|route| route.credential.clone());
+                .and_then(|binding| binding.credential.clone());
             used.extend(agent.into_iter().chain(vcs).chain(tracker));
         }
         used.sort_unstable();
@@ -539,8 +539,8 @@ impl Settings {
     /// Keep only the projects a machine is the one that runs.
     ///
     /// A remote is sent what it is for: its own projects' setup, repository, and
-    /// route. Everything else stays on the machine the work belongs to, which is
-    /// what keeps a day-job project's settings off a personal machine.
+    /// tracker binding. Everything else stays on the machine the work belongs to,
+    /// which is what keeps a day-job project's settings off a personal machine.
     pub fn retain_projects_for(&mut self, host: &str) {
         self.projects
             .retain(|project| project.host.as_deref() == Some(host));
@@ -704,7 +704,7 @@ impl Settings {
                     project
                         .tracker
                         .as_ref()
-                        .and_then(|route| route.credential.as_deref()),
+                        .and_then(|binding| binding.credential.as_deref()),
                 ),
             ] {
                 if let Some(id) = id
@@ -745,16 +745,16 @@ impl Settings {
                 )));
             }
         }
-        // Two projects claiming one scope is a question nobody can answer at
-        // routing time, so it is refused while the file is being written. A
-        // route with no scope claims its whole account, and only one project may.
+        // Two projects claiming one scope is a question nobody can answer when the
+        // issue arrives, so it is refused while the file is being written. A binding
+        // with no scope claims its whole account, and only one project may.
         let mut claims: Vec<(String, &str)> = Vec::new();
         for project in &self.projects {
-            let Some(route) = &project.tracker else {
+            let Some(binding) = &project.tracker else {
                 continue;
             };
-            let key = route.claim_key();
-            let what = route.scope.as_deref().unwrap_or("the whole account");
+            let key = binding.claim_key();
+            let what = binding.scope.as_deref().unwrap_or("the whole account");
             if let Some((_, other)) = claims.iter().find(|(claimed, _)| *claimed == key) {
                 return Err(SettingsError::Invalid(format!(
                     "{other} and {} both claim {what}",

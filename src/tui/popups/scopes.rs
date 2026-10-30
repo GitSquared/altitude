@@ -1,4 +1,4 @@
-//! The containers a task tracker route can claim, as a list under its field.
+//! The containers a task tracker binding can claim, as a list under its field.
 //!
 //! The same shape as the repository picker: the field opens the list, the list
 //! takes every key while it is open, and choosing closes it with the value the
