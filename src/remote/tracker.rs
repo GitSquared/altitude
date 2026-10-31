@@ -632,8 +632,8 @@ impl RemoteTracker {
                 &report.tracker_session_id,
                 &stable_id(&report.task_id, "stopped"),
                 AgentActivityContent::Response {
-                    body: "Stopped. Altitude ended this task, deleted its sandbox, and handed \
-                           the issue back."
+                    body: "Stopped. Altitude stopped this task and handed the issue back; \
+                           the work it had done is still in Altitude, if you want it."
                         .to_owned(),
                 },
             )
@@ -732,7 +732,7 @@ impl RemoteTracker {
                 .map_err(|error| error.to_string())?;
             return Ok(());
         }
-        self.delegate(issue_id, &event.session_id, author, label, host)
+        self.delegate(issue_id, &event.session_id, author, label, host, false)
             .await
     }
 
@@ -748,6 +748,7 @@ impl RemoteTracker {
         author: &str,
         label: &str,
         host: &dyn Host,
+        is_retry: bool,
     ) -> Result<(), String> {
         if self.is_terminated(session_id) {
             return Ok(());
@@ -755,6 +756,29 @@ impl RemoteTracker {
         // The same session delivered again is the work already running here; it
         // must not be stopped and restarted.
         if self.report_for_session(session_id).is_some() {
+            return Ok(());
+        }
+
+        // An issue whose work the operator took over is being driven on their own
+        // machine. Deleting that out from under them would be Altitude deciding
+        // what their take over meant, so the first delegation says what it sees and
+        // waits to be asked again — replying on the session is that ask.
+        let taken_over = self.taken_over(issue_id, host).await;
+        if taken_over && !is_retry {
+            self.config
+                .automation
+                .create_activity(
+                    session_id,
+                    &stable_id(session_id, "taken-over"),
+                    AgentActivityContent::Response {
+                        body: "The operator took this issue's task over on their own machine, \
+                               so it is being driven there. Nothing starts here unless you ask \
+                               for a second task: reply here and Altitude will start one."
+                            .to_owned(),
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string())?;
             return Ok(());
         }
 
@@ -767,15 +791,19 @@ impl RemoteTracker {
                 TaskExecutionPauseReason::StoppedInTracker,
             )
             .await?;
+            let body = if taken_over {
+                "This issue's work was taken over on another machine, and a newer delegation \
+                 asked for a task here, so a second one has started."
+            } else {
+                "A newer delegation replaced this one, so Altitude stopped this task."
+            };
             self.config
                 .automation
                 .create_activity(
                     &existing.tracker_session_id,
                     &stable_id(&existing.task_id, "redelegated"),
                     AgentActivityContent::Response {
-                        body:
-                            "A newer delegation replaced this one, so Altitude stopped this task."
-                                .into(),
+                        body: body.to_owned(),
                     },
                 )
                 .await
@@ -896,7 +924,7 @@ impl RemoteTracker {
             {
                 let label = event.creator_name.as_deref().unwrap_or(author);
                 return self
-                    .delegate(issue_id, &event.session_id, author, label, host)
+                    .delegate(issue_id, &event.session_id, author, label, host, true)
                     .await;
             }
             return Ok(());
@@ -1703,7 +1731,9 @@ impl RemoteTracker {
                 &report.tracker_session_id,
                 &stable_id(&report.task_id, "transferred"),
                 AgentActivityContent::Response {
-                    body: "This task moved to another remote and keeps running there.".to_owned(),
+                    body: "The operator handed this task to another machine, and it keeps \
+                           running there."
+                        .to_owned(),
                 },
             )
             .await
@@ -1890,6 +1920,22 @@ impl RemoteTracker {
                 held.last_status = None;
             }
         })
+    }
+
+    /// Whether this issue's task was taken over, and handed to a person's machine.
+    ///
+    /// The commitment is what a take over records once the other machine has landed
+    /// the task, so it is the one fact that says the work left here for an operator,
+    /// rather than being stopped or replaced.
+    async fn taken_over(&self, issue_id: &str, host: &dyn Host) -> bool {
+        let Some(report) = self.report_for_issue(issue_id) else {
+            return false;
+        };
+        host.events(report.task_id)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .any(|(_, event)| matches!(event, TaskHistoryEvent::TransferCommitted { .. }))
     }
 
     /// Say the task is running again, unless the operator has already ended the

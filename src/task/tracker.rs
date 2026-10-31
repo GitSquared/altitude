@@ -123,9 +123,13 @@ where
         agent: AgentKind,
         requester: Option<InstallationIdentity>,
     ) -> Result<Task, TaskServiceError> {
-        let intent = issue.intent();
-        let title = issue.issue.title.trim().to_owned();
+        // A requester is what makes this a delegation: the tracker says a person
+        // asked for the work, and that person is who the agent is answering. A task
+        // started from the operator's own machine has no such person to name.
+        let delegated_by = requester.as_ref().map(|identity| identity.label.clone());
         let operator = requester.unwrap_or_else(|| self.identity.clone());
+        let intent = issue.intent(delegated_by.as_deref());
+        let title = issue.issue.title.trim().to_owned();
         // The issue is what the work is called. A list that names a linked task by
         // its id is a list of file names, and the operator asked for the issue.
         let mut arrival = vec![TaskHistoryEvent::TrackerIssueBound { issue }];

@@ -181,13 +181,25 @@ pub struct IssueSnapshot {
 }
 
 impl IssueSnapshot {
-    pub fn intent(&self) -> String {
+    /// What the agent is told this work is.
+    ///
+    /// `delegated_by` is the person the tracker says asked for it, when this task
+    /// exists because an issue was delegated rather than because somebody started
+    /// it themselves: it is who the agent is answering, and where its words end up.
+    pub fn intent(&self, delegated_by: Option<&str>) -> String {
         let mut prompt = String::new();
         prompt.push_str(&format!(
             "Work on tracker issue {}: {}\n",
             self.issue.reference.identifier, self.issue.title
         ));
         prompt.push_str(&format!("Issue URL: {}\n", self.issue.reference.url));
+        if let Some(who) = delegated_by.map(str::trim).filter(|who| !who.is_empty()) {
+            prompt.push_str(&format!(
+                "Delegated by: {who}, through the tracker. They are away from the terminal: \
+                 your updates and questions appear on this issue, and Altitude answers you \
+                 here when they reply.\n"
+            ));
+        }
         if let Some(project) = &self.issue.project {
             prompt.push_str(&format!("Project: {project}\n"));
         }
