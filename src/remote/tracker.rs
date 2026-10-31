@@ -389,7 +389,8 @@ impl RemoteTracker {
                 return;
             }
         };
-        for reference in delegated {
+        for delegated in delegated {
+            let reference = &delegated.reference;
             // A finished report is the last task on that issue, not this
             // delegation: an issue delegated again after its work ended is work
             // that nothing is doing.
@@ -418,23 +419,30 @@ impl RemoteTracker {
                 );
                 continue;
             };
-            let session = match self
-                .config
-                .automation
-                .create_session_on_issue(&reference.id)
-                .await
-            {
-                Ok(session) => session,
-                Err(error) => {
-                    tracing::warn!(issue = %reference.identifier, %error, "could not open a session for a delegation");
-                    continue;
-                }
+            // The session the operator delegated into is where they are watching,
+            // so answering in it is answering where they asked. One is opened only
+            // when the tracker made none.
+            let adopted = delegated.session.clone();
+            let session = match &adopted {
+                Some(session) => session.clone(),
+                None => match self
+                    .config
+                    .automation
+                    .create_session_on_issue(&reference.id)
+                    .await
+                {
+                    Ok(session) => session,
+                    Err(error) => {
+                        tracing::warn!(issue = %reference.identifier, %error, "could not open a session for a delegation");
+                        continue;
+                    }
+                },
             };
             tracing::info!(
                 issue = %reference.identifier,
                 "recovered a delegation that arrived while this machine was not listening"
             );
-            if let Err(error) = self
+            let started = self
                 .delegate(
                     &reference.id,
                     &session,
@@ -443,10 +451,34 @@ impl RemoteTracker {
                     host,
                     false,
                 )
-                .await
+                .await;
+            let Err(error) = started else {
+                continue;
+            };
+            // A session the operator delegated into can already be closed, and a
+            // closed session accepts nothing: one this machine opens is the second
+            // chance rather than losing the delegation to a dead thread.
+            if adopted.is_some()
+                && let Ok(fresh) = self
+                    .config
+                    .automation
+                    .create_session_on_issue(&reference.id)
+                    .await
+                && self
+                    .delegate(
+                        &reference.id,
+                        &fresh,
+                        &login.account.user_id,
+                        &login.account.display_name,
+                        host,
+                        false,
+                    )
+                    .await
+                    .is_ok()
             {
-                tracing::warn!(issue = %reference.identifier, %error, "could not start a recovered delegation");
+                continue;
             }
+            tracing::warn!(issue = %reference.identifier, %error, "could not start a recovered delegation");
         }
     }
 

@@ -54,6 +54,7 @@ const ISSUE_DELEGATION_QUERY: &str = "query IssueDelegation($id: String!) { \
 const DELEGATED_ISSUES_QUERY: &str = "query DelegatedIssues($app: ID!) { \
     issues(filter: { delegate: { id: { eq: $app } } }, first: 25) { \
     nodes { id identifier title url project { name } \
+    agentSessions(first: 1) { nodes { id } } \
     team { id key name organization { id } } } } }";
 
 const ISSUE_STATES_QUERY: &str = "query IssueStates($id: String!) { \
@@ -195,7 +196,11 @@ impl LinearAutomation {
     }
 
     /// The issues this app is delegated to, as the tracker has them now.
-    pub async fn delegated_issues(&self) -> Result<Vec<IssueReference>, TrackerError> {
+    ///
+    /// Each comes with the session the operator delegated into, when the tracker
+    /// made one: that session is where they are watching, so answering in it is
+    /// answering where they asked.
+    pub async fn delegated_issues(&self) -> Result<Vec<DelegatedIssue>, TrackerError> {
         let data = self
             .graphql(DELEGATED_ISSUES_QUERY, json!({ "app": self.app_user_id }))
             .await?;
@@ -207,10 +212,17 @@ impl LinearAutomation {
             .unwrap_or_default();
         let mut issues = Vec::new();
         for node in nodes {
-            let Ok(identifier) = summary_of(&node) else {
+            let Ok(issue) = summary_of(&node) else {
                 continue;
             };
-            issues.push(identifier.reference);
+            let session = node
+                .pointer("/agentSessions/nodes/0/id")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            issues.push(DelegatedIssue {
+                reference: issue.reference,
+                session,
+            });
         }
         Ok(issues)
     }
@@ -792,7 +804,13 @@ impl LinearAutomation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// An issue delegated to this app, and the session it was delegated into.
+#[derive(Clone, Debug)]
+pub struct DelegatedIssue {
+    pub reference: IssueReference,
+    pub session: Option<String>,
+}
+
 pub struct IssueDelegation {
     pub delegate_id: Option<String>,
     pub state: WorkflowState,
