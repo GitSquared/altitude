@@ -1535,12 +1535,12 @@ impl App {
                 } else {
                     if !self.tasks.is_empty() {
                         hints.push(Hint::new("d", "delete"));
-                        // A task goes where its project runs, so there is a move
-                        // to offer only when the project names a machine. A
-                        // project that runs here has nothing to push to, and the
+                        // A task goes where its project runs, so there is a hand
+                        // back to offer only when the project names a machine. A
+                        // project that runs here has nothing to hand to, and the
                         // key would offer a question with one possible answer.
                         if self.selected_project_runs_remotely() {
-                            hints.push(Hint::new("p", "push to remote"));
+                            hints.push(Hint::new("p", "hand back"));
                         }
                     }
                     if self
