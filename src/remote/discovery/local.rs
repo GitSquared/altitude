@@ -1,7 +1,7 @@
 //! Iroh announcements and browsing on the local network.
 
 use super::{DiscoveredRemote, DiscoveryEvent, clean, format_address};
-use crate::remote::LinkResult;
+use crate::remote::{LinkResult, compat::Compatibility};
 use futures_util::{Stream, StreamExt};
 use iroh::{
     Endpoint,
@@ -80,6 +80,7 @@ fn describe(info: &EndpointInfo) -> Option<DiscoveredRemote> {
         label: clean(&metadata.label, 64),
         version: clean(&metadata.version, 32),
         address: format_address(preferred_address(info)?),
+        compatibility: Compatibility::of(&metadata.version),
     })
 }
 

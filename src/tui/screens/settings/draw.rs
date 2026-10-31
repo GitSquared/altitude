@@ -19,6 +19,8 @@ use crate::tui::widgets::{
     utils::shimmer,
 };
 
+use crate::remote::LOCAL_VERSION;
+
 use super::{
     form::draw_form,
     pages::{
@@ -293,16 +295,38 @@ fn detail(panel: &Panel, view: &View, tick: Option<usize>) -> Paragraph<'static>
             }
             lines
         }
-        RowKind::Discovered(discovered) => vec![
-            heading(label),
-            Line::from(""),
-            Line::from(format!(
-                "We detected this remote running altitude v{} on your network.",
-                discovered.version
-            )),
-            Line::from(""),
-            Line::styled("Press enter to start using it", palette::accent()),
-        ],
+        RowKind::Discovered(discovered) => {
+            let mut lines = vec![
+                heading(label),
+                Line::from(""),
+                Line::from(format!(
+                    "We detected this remote running altitude v{} on your network.",
+                    discovered.version
+                )),
+            ];
+            if discovered.compatibility.is_compatible() {
+                lines.push(Line::from(""));
+                lines.push(Line::styled(
+                    "Press enter to start using it",
+                    palette::accent(),
+                ));
+            } else {
+                // A mismatch is a known, stable fact rather than a remote that
+                // failed: say which two releases disagree, and offer the only
+                // action there is rather than a connection that cannot be made.
+                lines.push(Line::from(""));
+                lines.push(Line::from(format!(
+                    "This machine runs altitude v{}.",
+                    LOCAL_VERSION
+                )));
+                lines.push(Line::from(""));
+                lines.push(Line::styled(
+                    "Update both machines to the same version to use it",
+                    palette::accent(),
+                ));
+            }
+            lines
+        }
     };
     Paragraph::new(lines).wrap(Wrap { trim: true })
 }

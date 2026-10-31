@@ -48,6 +48,15 @@ pub struct Announcement {
     pub trackers: Vec<TrackerConnection>,
 }
 
+impl Announcement {
+    /// What to call this remote where a message needs a name: the name it gave
+    /// itself, or the address the caller reached it at when it gave none.
+    pub fn name_or<'a>(&'a self, address: &'a str) -> &'a str {
+        let name = self.label.trim();
+        if name.is_empty() { address } else { name }
+    }
+}
+
 /// What a remote's tracker can do right now.
 ///
 /// Setup is checked when the remote starts, so this says how far its owner got,
