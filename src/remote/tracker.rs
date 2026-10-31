@@ -253,6 +253,10 @@ impl RemoteTracker {
             failed_at: None,
             failed_attempts: 0,
         })?;
+        // Work started on an issue is a new cycle: whatever ending was written for
+        // the last task there does not bind this one, and the operator asked for
+        // this by starting it.
+        self.mutate(|ledger| ledger.settled_issues.retain(|id| id != &issue.id))?;
         if let Err(error) = self
             .set_session_summary(&session_id, &tracker_user_id, session_agent.as_deref())
             .await
