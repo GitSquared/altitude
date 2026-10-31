@@ -70,6 +70,8 @@ const TICK: Duration = Duration::from_secs(10);
 /// How many passes may fail on one event before it is skipped. A tracker that will
 /// not take an event is news; a machine asking again forever is not.
 const EVENT_ATTEMPTS: usize = 3;
+/// How long a lapsed delegation is waited on before it ends the task.
+const UNHOOK_GRACE_MS: i64 = 60_000;
 /// A failed delivery is retried at a fixed pace: the work is already durable on
 /// disk, so a tracker outage should not produce a request storm.
 const RETRY: Duration = Duration::from_secs(10);
@@ -117,7 +119,12 @@ pub trait Host: Send + Sync + 'static {
         issue: IssueSnapshot,
         label: String,
     ) -> super::StartFuture<'_, String>;
-    fn stop(&self, task_id: String) -> HostFuture<'_, ()>;
+    /// Stop a task this machine no longer runs. The reason is kept in the task's
+    /// own record, so an ending that happened here can be read here.
+    fn stop(&self, task_id: String, reason: TaskExecutionPauseReason) -> HostFuture<'_, ()>;
+    /// Record in the task's own history that the issue now says `status`, so a
+    /// card can show what the tracker says instead of asking it again.
+    fn record_status(&self, task_id: String, status: TrackerStatus) -> HostFuture<'_, ()>;
     /// Every thread this task raised, open and closed. The caller filters: which
     /// ones are waiting is a question about the answer, not about the task.
     fn signal_threads(&self, task_id: String) -> HostFuture<'_, Vec<TaskOperatorSignalThread>>;
@@ -158,6 +165,15 @@ fn pause_notice(reason: &TaskExecutionPauseReason) -> &'static str {
         }
         TaskExecutionPauseReason::Transfer => {
             "This task is moving to another machine and keeps running there."
+        }
+        TaskExecutionPauseReason::TrackerEnded => {
+            "The issue this task was working on ended, so the task stopped."
+        }
+        TaskExecutionPauseReason::StoppedInTracker => {
+            "This task was stopped in the tracker, so it stopped here."
+        }
+        TaskExecutionPauseReason::DelegationWithdrawn => {
+            "This issue is no longer delegated to Altitude, so the task stopped."
         }
     }
 }
@@ -263,8 +279,10 @@ impl RemoteTracker {
             reported_events: 0,
             origin: ReportOrigin::StartedByClient,
             finished: false,
+            last_status: None,
             failed_at: None,
             failed_attempts: 0,
+            unhooked_at: None,
         })?;
         // Work started on an issue is a new cycle: whatever ending was written for
         // the last task there does not bind this one, and the operator asked for
@@ -592,7 +610,11 @@ impl RemoteTracker {
         if !event.is_from(&report.tracker_user_id) {
             return Ok(());
         }
-        host.stop(report.task_id.clone()).await?;
+        host.stop(
+            report.task_id.clone(),
+            TaskExecutionPauseReason::StoppedInTracker,
+        )
+        .await?;
         // The work is gone, so the app has nothing left to be asked for: the issue
         // goes back to whoever owns it rather than pointing at a machine that
         // stopped listening.
@@ -740,10 +762,24 @@ impl RemoteTracker {
         // redelegation: stop the old task before the new one starts, so two
         // capsules never own the same issue.
         let redelegation = if let Some(existing) = self.report_for_issue(issue_id) {
-            host.stop(existing.task_id.clone()).await?;
-            self.config.automation.create_activity(&existing.tracker_session_id, &stable_id(&existing.task_id, "redelegated"), AgentActivityContent::Response {
-                body: "A newer delegation replaced this one, so Altitude stopped this task and deleted its sandbox.".into(),
-            }).await.map_err(|error| error.to_string())?;
+            host.stop(
+                existing.task_id.clone(),
+                TaskExecutionPauseReason::StoppedInTracker,
+            )
+            .await?;
+            self.config
+                .automation
+                .create_activity(
+                    &existing.tracker_session_id,
+                    &stable_id(&existing.task_id, "redelegated"),
+                    AgentActivityContent::Response {
+                        body:
+                            "A newer delegation replaced this one, so Altitude stopped this task."
+                                .into(),
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string())?;
             self.retire_report(&existing)?;
             true
         } else {
@@ -797,8 +833,10 @@ impl RemoteTracker {
             reported_events: 0,
             origin: ReportOrigin::Delegated,
             finished: false,
+            last_status: None,
             failed_at: None,
             failed_attempts: 0,
+            unhooked_at: None,
         })?;
         // New work on an issue is a new cycle: whatever ending was written for the
         // last task there is not this one's.
@@ -916,7 +954,7 @@ impl RemoteTracker {
             host.accept(report.task_id.clone(), signal.id.clone())
                 .await?;
             let events = host.events(report.task_id.clone()).await?;
-            return self.finish_accepted(&report, &events).await;
+            return self.finish_accepted(host, &report, &events).await;
         }
         host.reply(report.task_id.clone(), signal.id.clone(), answer.to_owned())
             .await
@@ -956,6 +994,9 @@ impl RemoteTracker {
         if delegation.state.id != state_id {
             return Ok(());
         }
+        if let Err(error) = self.forget_status(&report.issue_id) {
+            tracing::warn!(issue = %report.issue_id, %error, "could not forget the issue's status");
+        }
         let is_done = delegation.state.state_type == "completed";
         if !is_done && delegation.state.state_type != "canceled" {
             return Ok(());
@@ -970,7 +1011,7 @@ impl RemoteTracker {
             host.accept(report.task_id.clone(), review.id.clone())
                 .await?;
             let events = host.events(report.task_id.clone()).await?;
-            return self.finish_accepted(&report, &events).await;
+            return self.finish_accepted(host, &report, &events).await;
         }
         self.stop_for_ending(host, &report, is_done).await
     }
@@ -1035,7 +1076,11 @@ impl RemoteTracker {
         } else {
             "You canceled this issue, so Altitude stopped the task."
         };
-        host.stop(report.task_id.clone()).await?;
+        host.stop(
+            report.task_id.clone(),
+            TaskExecutionPauseReason::TrackerEnded,
+        )
+        .await?;
         if let Err(error) = self
             .config
             .automation
@@ -1276,8 +1321,23 @@ impl RemoteTracker {
                     }
                 };
                 if delegation.delegate_id.as_deref() != Some(self.config.automation.app_user_id()) {
-                    self.unhook(host, &report).await;
-                    continue;
+                    // Un-delegating and delegating again says the operator changed
+                    // their mind, not that the work stopped. Waiting before acting
+                    // keeps a flap from ending a task and starting a second one.
+                    match self.unhook_held(&report) {
+                        Ok(true) => {
+                            self.unhook(host, &report).await;
+                            continue;
+                        }
+                        Ok(false) => continue,
+                        Err(error) => {
+                            tracing::warn!(task = %report.task_id, %error, "could not record a lapsed delegation");
+                            continue;
+                        }
+                    }
+                }
+                if let Err(error) = self.clear_unhook(&report) {
+                    tracing::warn!(task = %report.task_id, %error, "could not clear a lapsed delegation");
                 }
             }
             if let Err(error) = self.sync_report(host, &report).await {
@@ -1286,13 +1346,57 @@ impl RemoteTracker {
         }
     }
 
+    /// Whether a delegation that lapsed has stayed lapsed long enough to act on.
+    ///
+    /// The first time it is seen, the lapse is recorded rather than acted on: a
+    /// toggle the operator was still making up their mind about would otherwise
+    /// stop a task and start another one a moment later.
+    fn unhook_held(&self, report: &IssueReport) -> Result<bool, String> {
+        let now = now_ms();
+        let mut held_for = None;
+        self.mutate(|ledger| {
+            if let Some(held) = ledger
+                .reports
+                .iter_mut()
+                .find(|held| held.task_id == report.task_id)
+            {
+                let at = *held.unhooked_at.get_or_insert(now);
+                held_for = Some(now - at);
+            }
+        })?;
+        Ok(held_for.is_some_and(|held_for| held_for >= UNHOOK_GRACE_MS))
+    }
+
+    /// The delegation is back, so the lapse it lapsed from never happened.
+    fn clear_unhook(&self, report: &IssueReport) -> Result<(), String> {
+        if report.unhooked_at.is_none() {
+            return Ok(());
+        }
+        self.mutate(|ledger| {
+            if let Some(held) = ledger
+                .reports
+                .iter_mut()
+                .find(|held| held.task_id == report.task_id)
+            {
+                held.unhooked_at = None;
+            }
+        })
+    }
+
     /// The issue is no longer delegated to this app. Stop once, say so once,
     /// then drop the report so nothing writes to it again.
     ///
     /// A failed stop leaves the report in place so the next pass retries it; the
     /// notice is only posted after the work is actually stopped.
     async fn unhook(&self, host: &dyn Host, report: &IssueReport) {
-        if host.stop(report.task_id.clone()).await.is_err() {
+        if host
+            .stop(
+                report.task_id.clone(),
+                TaskExecutionPauseReason::DelegationWithdrawn,
+            )
+            .await
+            .is_err()
+        {
             return;
         }
         if let Err(error) = self
@@ -1302,8 +1406,9 @@ impl RemoteTracker {
                 &report.tracker_session_id,
                 &stable_id(&report.task_id, "unhooked"),
                 AgentActivityContent::Response {
-                    body: "This issue isn't delegated to Altitude anymore, so the task was                            stopped."
-                        .to_owned(),
+                    body:
+                        "This issue isn't delegated to Altitude anymore, so the task was stopped."
+                            .to_owned(),
                 },
             )
             .await
@@ -1490,27 +1595,25 @@ impl RemoteTracker {
                         .await
                         .map_err(|error| error.to_string())?;
                 }
-                self.config
-                    .automation
-                    .status(
-                        &self.issue_reference(&report.issue_id),
-                        TrackerStatus::InProgress,
-                    )
-                    .await
-                    .map_err(|error| error.to_string())?;
+                self.set_status(host, report, TrackerStatus::InProgress)
+                    .await?;
             }
             TaskHistoryEvent::OperatorSignalRaised { signal } => {
                 if unresolved.contains(&signal.id) {
                     let contributions = contribution_details(&events[..=index]);
-                    self.publish_signal(
-                        report,
-                        &signal.id,
-                        signal.kind,
-                        &signal.title,
-                        &signal.body,
-                        &contributions,
-                    )
-                    .await?;
+                    if let Some(status) = self
+                        .publish_signal(
+                            report,
+                            &signal.id,
+                            signal.kind,
+                            &signal.title,
+                            &signal.body,
+                            &contributions,
+                        )
+                        .await?
+                    {
+                        self.set_status(host, report, status).await?;
+                    }
                 }
             }
             TaskHistoryEvent::OperatorSignalResolved {
@@ -1524,7 +1627,7 @@ impl RemoteTracker {
                 // said In Review while the task was waiting, and it is not waiting
                 // any more. An issue whose ending was already written is left as
                 // the operator left it.
-                self.say_task_is_running(report).await;
+                self.say_task_is_running(host, report).await;
             }
             TaskHistoryEvent::OperatorSignalResolved {
                 signal_id,
@@ -1536,14 +1639,7 @@ impl RemoteTracker {
                 self.set_signal_comment_state(report, signal_id, &events[..=index], false)
                     .await;
                 if !self.is_settled(&report.issue_id)
-                    && let Err(error) = self
-                        .config
-                        .automation
-                        .status(
-                            &self.issue_reference(&report.issue_id),
-                            TrackerStatus::InReview,
-                        )
-                        .await
+                    && let Err(error) = self.set_status(host, report, TrackerStatus::InReview).await
                 {
                     tracing::warn!(issue = %report.issue_id, %error, "could not say the task is waiting again");
                 }
@@ -1551,13 +1647,15 @@ impl RemoteTracker {
             TaskHistoryEvent::OperatorSignalConfirmed { signal_id } => {
                 self.set_signal_comment_state(report, signal_id, &events[..=index], true)
                     .await;
-                self.finish_accepted(report, &events[..=index]).await?;
+                self.finish_accepted(host, report, &events[..=index])
+                    .await?;
                 return Ok(Some(()));
             }
             TaskHistoryEvent::TaskCompleted { .. } => {
                 self.resolve_signal_comments(report, &events[..=index])
                     .await;
-                self.finish_accepted(report, &events[..=index]).await?;
+                self.finish_accepted(host, report, &events[..=index])
+                    .await?;
                 return Ok(Some(()));
             }
             _ => {}
@@ -1579,15 +1677,19 @@ impl RemoteTracker {
             let Some(message) = signal.latest_agent_message() else {
                 continue;
             };
-            self.publish_signal(
-                report,
-                &signal.id,
-                signal.kind,
-                &signal.title,
-                &message.body,
-                &contributions,
-            )
-            .await?;
+            if let Some(status) = self
+                .publish_signal(
+                    report,
+                    &signal.id,
+                    signal.kind,
+                    &signal.title,
+                    &message.body,
+                    &contributions,
+                )
+                .await?
+            {
+                self.set_status(host, report, status).await?;
+            }
         }
         self.set_cursor(&report.task_id, events.len())
     }
@@ -1609,6 +1711,9 @@ impl RemoteTracker {
         self.finish_report(report)
     }
 
+    /// Publish one signal on the tracker, and answer the status the issue should
+    /// now have. The status is the caller's to write: it is the report's business
+    /// whether the issue moves, not one comment's.
     async fn publish_signal(
         &self,
         report: &IssueReport,
@@ -1617,8 +1722,7 @@ impl RemoteTracker {
         title: &str,
         body: &str,
         contributions: &[String],
-    ) -> Result<(), String> {
-        let reference = self.issue_reference(&report.issue_id);
+    ) -> Result<Option<TrackerStatus>, String> {
         let comment_id = published_comment_id(&report.task_id, signal_id);
         match kind {
             // Updates are the session's transcript, not an issue comment.
@@ -1632,7 +1736,8 @@ impl RemoteTracker {
                         AgentActivityContent::Thought { body },
                     )
                     .await
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| error.to_string())?;
+                Ok(None)
             }
             TaskOperatorSignalKind::Decision => {
                 let body = format!("**→ Decision:** {}\n\n{}", title.trim(), body.trim());
@@ -1640,7 +1745,8 @@ impl RemoteTracker {
                     .automation
                     .comment_on_issue(&report.issue_id, &body, &comment_id)
                     .await
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| error.to_string())?;
+                Ok(None)
             }
             TaskOperatorSignalKind::Blocked => {
                 // A question is not a review: the work is still in progress, and
@@ -1651,7 +1757,8 @@ impl RemoteTracker {
                     .automation
                     .comment_on_issue(&report.issue_id, &body, &comment_id)
                     .await
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| error.to_string())?;
+                Ok(None)
             }
             TaskOperatorSignalKind::InReview => {
                 let mut body =
@@ -1662,15 +1769,7 @@ impl RemoteTracker {
                     .comment_on_issue(&report.issue_id, &body, &comment_id)
                     .await
                     .map_err(|error| error.to_string())?;
-                if let Err(error) = self
-                    .config
-                    .automation
-                    .status(&reference, TrackerStatus::InReview)
-                    .await
-                {
-                    tracing::warn!(issue = %report.issue_id, %error, "review comment posted without an In Review status");
-                }
-                Ok(())
+                Ok(Some(TrackerStatus::InReview))
             }
         }
     }
@@ -1739,19 +1838,68 @@ impl RemoteTracker {
         }
     }
 
+    /// Put a status on the issue, unless the issue already says it.
+    ///
+    /// Says nothing when there is nothing to say: a repeat is a write nobody asked
+    /// for, and a tracker's history is read by people.
+    async fn set_status(
+        &self,
+        host: &dyn Host,
+        report: &IssueReport,
+        status: TrackerStatus,
+    ) -> Result<(), String> {
+        let held = self.report_for_task(&report.task_id);
+        if held.as_ref().and_then(|held| held.last_status) == Some(status) {
+            return Ok(());
+        }
+        self.config
+            .automation
+            .status(&self.issue_reference(&report.issue_id), status)
+            .await
+            .map_err(|error| error.to_string())?;
+        // The task's own history says what the issue says, so a card reads it
+        // from the record rather than a second field that can disagree.
+        if let Err(error) = host.record_status(report.task_id.clone(), status).await {
+            tracing::warn!(task = %report.task_id, %error, "could not record the issue's state");
+        }
+        // The write happened, so a failure to remember it costs one repeat at
+        // most, which is not worth failing the pass over.
+        if let Err(error) = self.mutate(|ledger| {
+            if let Some(held) = ledger
+                .reports
+                .iter_mut()
+                .find(|held| held.task_id == report.task_id)
+            {
+                held.last_status = Some(status);
+            }
+        }) {
+            tracing::warn!(task = %report.task_id, %error, "could not record a status already written");
+        }
+        Ok(())
+    }
+
+    /// The operator moved the issue, so what this machine last said is no longer
+    /// what it says. Forgetting it is what lets altitude answer them later.
+    fn forget_status(&self, issue_id: &str) -> Result<(), String> {
+        self.mutate(|ledger| {
+            for held in ledger
+                .reports
+                .iter_mut()
+                .filter(|held| held.issue_id == issue_id)
+            {
+                held.last_status = None;
+            }
+        })
+    }
+
     /// Say the task is running again, unless the operator has already ended the
     /// issue: an issue nobody has moved since is the one this machine may write to.
-    async fn say_task_is_running(&self, report: &IssueReport) {
+    async fn say_task_is_running(&self, host: &dyn Host, report: &IssueReport) {
         if self.is_settled(&report.issue_id) {
             return;
         }
         if let Err(error) = self
-            .config
-            .automation
-            .status(
-                &self.issue_reference(&report.issue_id),
-                TrackerStatus::InProgress,
-            )
+            .set_status(host, report, TrackerStatus::InProgress)
             .await
         {
             tracing::warn!(issue = %report.issue_id, %error, "could not say the task is running again");
@@ -1767,15 +1915,12 @@ impl RemoteTracker {
     /// the same issue says nothing new.
     async fn finish_accepted(
         &self,
+        host: &dyn Host,
         report: &IssueReport,
         events: &[(i64, TaskHistoryEvent)],
     ) -> Result<(), String> {
         if !self.is_settled(&report.issue_id) {
-            self.config
-                .automation
-                .status(&self.issue_reference(&report.issue_id), TrackerStatus::Done)
-                .await
-                .map_err(|error| error.to_string())?;
+            self.set_status(host, report, TrackerStatus::Done).await?;
             self.settle(&report.issue_id)?;
         }
         // The activity is what the session shows, not the issue's state: a failure
@@ -2569,6 +2714,16 @@ struct IssueReport {
     failed_at: Option<usize>,
     #[serde(default)]
     failed_attempts: usize,
+    /// The status this machine last put on the issue. An agent run that starts
+    /// writes In Progress, and a task with ten runs must not write it ten times:
+    /// the tracker's history is not a log of altitude's clock.
+    #[serde(default)]
+    last_status: Option<TrackerStatus>,
+    /// When the issue was first seen not delegated to this app. A lapse is waited
+    /// out before it ends the task, so a delegation toggled twice in a minute
+    /// leaves the work alone.
+    #[serde(default)]
+    unhooked_at: Option<i64>,
 }
 
 /// Who started the work, which decides whether the report outlives the tracker's

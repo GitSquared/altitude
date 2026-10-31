@@ -108,6 +108,10 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      FROM task_event_logs
      WHERE task_id = tasks.id AND event_type = 'tracker_issue_bound'
      ORDER BY sequence DESC LIMIT 1) AS tracker_issue,
+    (SELECT payload ->> '$.data.status'
+     FROM task_event_logs
+     WHERE task_id = tasks.id AND event_type = 'tracker_synced'
+     ORDER BY sequence DESC LIMIT 1) AS tracker_status,
     (SELECT kind
      FROM task_operator_signals
      WHERE task_id = tasks.id

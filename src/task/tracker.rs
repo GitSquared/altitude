@@ -229,6 +229,7 @@ where
                 &task.id,
                 &[TaskHistoryEvent::TrackerSynced {
                     event_count: events.len(),
+                    status: target,
                 }],
             )
             .await
@@ -247,7 +248,7 @@ fn checkpoint(events: &[(i64, TaskHistoryEvent)]) -> usize {
         .iter()
         .rev()
         .find_map(|(_, event)| match event {
-            TaskHistoryEvent::TrackerSynced { event_count } => Some(*event_count),
+            TaskHistoryEvent::TrackerSynced { event_count, .. } => Some(*event_count),
             _ => None,
         })
         .unwrap_or(0)

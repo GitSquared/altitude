@@ -19,10 +19,10 @@ use crate::{
     },
     task::{
         DeferredReview, Task, TaskAgentRequestedAction, TaskAgentRun, TaskExecutionMode,
-        TaskExecutionStatus, TaskHistoryEvent, TaskOperatorSignal, TaskOperatorSignalAuthor,
-        TaskService, TaskServiceError,
+        TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent, TaskOperatorSignal,
+        TaskOperatorSignalAuthor, TaskService, TaskServiceError,
     },
-    tracker::IssueSnapshot,
+    tracker::{IssueSnapshot, TrackerStatus},
     vcs::{
         CodeContribution, ContributionObservation, ContributionOutlook, ContributionReadiness,
         now_ms,
@@ -300,7 +300,8 @@ where
                 "this task has already been accepted",
             )));
         }
-        self.suspend(task).await?;
+        self.suspend(task, TaskExecutionPauseReason::ApplicationShutdown)
+            .await?;
         let task = self
             .list()
             .await?
@@ -706,11 +707,68 @@ where
     /// This is the first thing a transfer does: the machine sending a task stops
     /// running it before any of it moves, and only then is there something settled to
     /// send.
-    pub async fn suspend(&self, task: Task) -> Result<(), TaskServiceError> {
+    pub async fn suspend(
+        &self,
+        task: Task,
+        reason: TaskExecutionPauseReason,
+    ) -> Result<(), TaskServiceError> {
         self.mark_suspending(&task.id);
-        for result in self.service.suspend_all(vec![task]).await {
+        for result in self.service.suspend_all(vec![task], reason).await {
             result?;
         }
+        Ok(())
+    }
+
+    /// Record the state the bound issue now has, so a card reads it from the
+    /// task's own history rather than asking the tracker again.
+    pub async fn record_status(
+        &self,
+        task_id: &str,
+        status: TrackerStatus,
+    ) -> Result<(), TaskServiceError> {
+        let events = self.service.events(task_id).await?;
+        self.service
+            .record(
+                task_id,
+                &[TaskHistoryEvent::TrackerSynced {
+                    event_count: events.len(),
+                    status: Some(status),
+                }],
+            )
+            .await
+            .map(|_| ())
+    }
+
+    /// Stop a task that will not be run again, and say in its own record why.
+    ///
+    /// A task with nothing running has no capsule to suspend, but the reason is
+    /// still the only thing that explains why it stopped, so it is written either
+    /// way. The task is kept: the ending happened on the operator's behalf, and a
+    /// record they cannot read is the same as no record.
+    pub async fn stop(
+        &self,
+        task: Task,
+        reason: TaskExecutionPauseReason,
+    ) -> Result<(), TaskServiceError> {
+        if task.facts.execution_pause_reason.as_ref() == Some(&reason) {
+            return Ok(());
+        }
+        if super::should_suspend(&task) {
+            self.suspend(task, reason).await?;
+            return Ok(());
+        }
+        self.service
+            .record(
+                &task.id,
+                &[TaskHistoryEvent::ExecutionPaused {
+                    execution_status: TaskExecutionStatus::Paused,
+                    sandbox_available: task.facts.sandbox_available,
+                    snapshot_available: task.facts.snapshot_available,
+                    execution_pause_reason: reason,
+                    snapshot_path: task.facts.snapshot_path.clone().unwrap_or_default(),
+                }],
+            )
+            .await?;
         Ok(())
     }
 
@@ -761,7 +819,8 @@ where
         if is_staged {
             capture.facts.execution_status = TaskExecutionStatus::Running;
         }
-        self.suspend(capture).await?;
+        self.suspend(capture, TaskExecutionPauseReason::Transfer)
+            .await?;
         let stopped = self
             .list()
             .await?
@@ -999,7 +1058,11 @@ where
         // work suspended is better than none, and the first failure is reported
         // once the rest have had their turn.
         let mut first_error = None;
-        for result in self.service.suspend_all(tasks).await {
+        for result in self
+            .service
+            .suspend_all(tasks, TaskExecutionPauseReason::ApplicationShutdown)
+            .await
+        {
             if let Err(error) = result {
                 tracing::error!(%error, "a task could not be suspended");
                 first_error.get_or_insert(error);

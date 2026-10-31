@@ -189,7 +189,10 @@ impl Card {
             issue: summary
                 .tracker_issue
                 .as_ref()
-                .map(|issue| format!("{} · Linear", issue.identifier)),
+                .map(|issue| match summary.tracker_state {
+                    Some(state) => format!("{} · {}", issue.identifier, state.word()),
+                    None => format!("{} · Linear", issue.identifier),
+                }),
             is_alarm: is_alarming(summary),
             status: card_summary(summary, at_capacity, tick, build),
             extras: card_extras(summary, now_ms),
@@ -362,6 +365,9 @@ fn card_status(
             Some(TaskExecutionPauseReason::AwaitingReviewChecks) => "paused · watching PRs",
             Some(TaskExecutionPauseReason::ApplicationShutdown) => "paused · machine restarted",
             Some(TaskExecutionPauseReason::Transfer) => "paused · transferring",
+            Some(TaskExecutionPauseReason::TrackerEnded) => "paused · the issue ended",
+            Some(TaskExecutionPauseReason::StoppedInTracker) => "paused · stopped in the tracker",
+            Some(TaskExecutionPauseReason::DelegationWithdrawn) => "paused · no longer delegated",
             None => "paused",
         })
         .style(palette::attention()),

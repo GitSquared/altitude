@@ -254,6 +254,15 @@ impl TaskStore {
                       WHERE finished.task_id = tasks.id
                         AND finished.event_type IN ('operator_signal_confirmed', 'task_completed')
                   )
+                  -- A task the tracker ended is a record, not work in play. The
+                  -- issue can be delegated again without foundering on it.
+                  AND NOT EXISTS (
+                      SELECT 1 FROM task_event_logs AS ended
+                      WHERE ended.task_id = tasks.id
+                        AND ended.event_type = 'execution_paused'
+                        AND ended.payload ->> '$.data.execution_pause_reason'
+                            IN ('tracker_ended', 'stopped_in_tracker', 'delegation_withdrawn')
+                  )
                   AND EXISTS (
                       SELECT 1 FROM task_event_logs AS bound
                       WHERE bound.task_id = tasks.id

@@ -109,12 +109,24 @@ pub struct TrackerAccount {
 
 /// The lifecycle transitions Altitude reports, named for their meaning rather
 /// than any tracker's workflow states.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
+#[sqlx(rename_all = "snake_case")]
 pub enum TrackerStatus {
     InProgress,
     InReview,
     Done,
+}
+
+impl TrackerStatus {
+    /// What the state is called where a person reads it.
+    pub fn word(&self) -> &'static str {
+        match self {
+            Self::InProgress => "in progress",
+            Self::InReview => "in review",
+            Self::Done => "done",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

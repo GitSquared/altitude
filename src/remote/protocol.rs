@@ -21,7 +21,7 @@ use crate::task::{
     Task, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent,
     TaskOperatorAttentionLevel, TaskOperatorSignalKind, TaskOperatorSignalThread, TaskPlanStep,
 };
-use crate::tracker::{IssueReference, IssueSnapshot, TrackerKind};
+use crate::tracker::{IssueReference, IssueSnapshot, TrackerKind, TrackerStatus};
 use crate::vcs::ContributionState;
 use crate::{agent::AgentKind, project::Project};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -350,6 +350,10 @@ pub struct TaskSummary {
     /// client can act on the binding without reading the whole task.
     #[serde(default)]
     pub tracker_issue: Option<IssueReference>,
+    /// The state the issue was last told to have, so a card can say what the
+    /// tracker says without asking it.
+    #[serde(default)]
+    pub tracker_state: Option<TrackerStatus>,
     #[serde(default)]
     pub operator_label: Option<String>,
     /// What this task has open for review, so a client reads the same rows the
@@ -403,6 +407,7 @@ impl TaskSummary {
             unresolved_signal_count: task.facts.unresolved_signal_count,
             last_error: task.facts.last_error.clone(),
             tracker_issue: task.facts.tracker_issue.clone(),
+            tracker_state: task.facts.tracker_status,
             operator_label: task.facts.operator_label.clone(),
             contributions: task
                 .code_contributions

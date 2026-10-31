@@ -450,9 +450,14 @@ where
             .map_err(TaskServiceError::Task)
     }
 
-    pub async fn suspend_all(&self, tasks: Vec<Task>) -> Vec<Result<(), TaskServiceError>> {
+    pub async fn suspend_all(
+        &self,
+        tasks: Vec<Task>,
+        reason: TaskExecutionPauseReason,
+    ) -> Vec<Result<(), TaskServiceError>> {
         join_all(tasks.into_iter().filter(should_suspend).map(|task| {
             let service = self.clone();
+            let reason = reason.clone();
             async move {
                 let sandbox_id = task
                     .facts
@@ -481,8 +486,7 @@ where
                                 execution_status: TaskExecutionStatus::Paused,
                                 sandbox_available: false,
                                 snapshot_available: true,
-                                execution_pause_reason:
-                                    TaskExecutionPauseReason::ApplicationShutdown,
+                                execution_pause_reason: reason,
                                 snapshot_path,
                             }
                         };

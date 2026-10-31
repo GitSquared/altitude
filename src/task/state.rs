@@ -5,7 +5,7 @@ use std::fmt;
 use crate::agent::AgentKind;
 use crate::id;
 use crate::project::Project;
-use crate::tracker::{IssueReference, IssueSnapshot, TrackerKind};
+use crate::tracker::{IssueReference, IssueSnapshot, TrackerKind, TrackerStatus};
 use crate::vcs::{CodeContribution, ContributionObservation};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -150,6 +150,16 @@ pub enum TaskExecutionPauseReason {
     AwaitingReviewChecks,
     ApplicationShutdown,
     Transfer,
+    /// The operator closed the issue in the tracker. The task is kept so the
+    /// ending is something they can read in Altitude rather than something that
+    /// happened elsewhere and left nothing behind.
+    TrackerEnded,
+    /// The operator stopped this task in the tracker, or a newer delegation
+    /// replaced it.
+    StoppedInTracker,
+    /// The issue stopped being delegated to Altitude. The task is kept for the
+    /// same reason, and delegating it again founds a new one.
+    DelegationWithdrawn,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
@@ -344,6 +354,10 @@ pub struct TaskFacts {
     /// arrived by transfer carries where it belongs with the rest of its history.
     #[sqlx(json(nullable))]
     pub tracker_issue: Option<IssueReference>,
+    /// The state the bound issue was last told to have, which is the last thing
+    /// either side said about it.
+    #[sqlx(default)]
+    pub tracker_status: Option<TrackerStatus>,
     pub blocking_signal_kind: Option<TaskOperatorSignalKind>,
     pub unresolved_signal_count: u32,
     /// The wrap-up request the host is holding while it watches linked
@@ -562,6 +576,10 @@ pub enum TaskHistoryEvent {
     /// idle scans never generate a checkpoint of their own.
     TrackerSynced {
         event_count: usize,
+        /// The status the sync put on the issue, when it put one. It is what lets
+        /// a card say what the issue says without asking the tracker again.
+        #[serde(default)]
+        status: Option<TrackerStatus>,
     },
 }
 

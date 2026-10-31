@@ -55,7 +55,7 @@ use crate::{
     task::{Task, TaskEventLoop, TaskExecutionUpdate, TaskService, TaskStore},
     task::{TaskHistoryEvent, TaskOperatorSignalThread, TrackerHost},
     tracker::{
-        IssueReader, IssueSnapshot, Linear, TrackerKind, TrackerProvider,
+        IssueReader, IssueSnapshot, Linear, TrackerKind, TrackerProvider, TrackerStatus,
         automation::LinearAutomation, oauth,
     },
 };
@@ -867,7 +867,11 @@ impl super::tracker::Host for OwnTasks {
         })
     }
 
-    fn stop(&self, task_id: String) -> super::tracker::HostFuture<'_, ()> {
+    fn stop(
+        &self,
+        task_id: String,
+        reason: TaskExecutionPauseReason,
+    ) -> super::tracker::HostFuture<'_, ()> {
         Box::pin(async move {
             if let Some(task) = self
                 .tasks
@@ -878,11 +882,24 @@ impl super::tracker::Host for OwnTasks {
                 .find(|task| task.id == task_id)
             {
                 self.tasks
-                    .remove_and_wait(task)
+                    .stop(task, reason)
                     .await
                     .map_err(|error| error.to_string())?;
             }
             Ok(())
+        })
+    }
+
+    fn record_status(
+        &self,
+        task_id: String,
+        status: TrackerStatus,
+    ) -> super::tracker::HostFuture<'_, ()> {
+        Box::pin(async move {
+            self.tasks
+                .record_status(&task_id, status)
+                .await
+                .map_err(|error| error.to_string())
         })
     }
 
