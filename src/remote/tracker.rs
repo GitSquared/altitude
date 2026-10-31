@@ -51,7 +51,7 @@ use crate::{
     tracker::{
         ACCOUNT_FILE, IssueReference, IssueSnapshot, TrackerAccount, TrackerKind, TrackerStatus,
         automation::{
-            AgentActivityContent, AgentSessionEvent, LinearAutomation, WebhookError,
+            AgentActivityContent, AgentSessionEvent, CommentSite, LinearAutomation, WebhookError,
             parse_agent_session_event, verify_signature,
         },
     },
@@ -118,7 +118,12 @@ pub trait Host: Send + Sync + 'static {
         label: String,
     ) -> super::StartFuture<'_, String>;
     fn stop(&self, task_id: String) -> HostFuture<'_, ()>;
-    fn unresolved_signals(&self, task_id: String) -> HostFuture<'_, Vec<TaskOperatorSignalThread>>;
+    /// Every thread this task raised, open and closed. The caller filters: which
+    /// ones are waiting is a question about the answer, not about the task.
+    fn signal_threads(&self, task_id: String) -> HostFuture<'_, Vec<TaskOperatorSignalThread>>;
+    /// Reopen a thread the operator has come back to, so this machine's state
+    /// follows the conversation rather than remembering an answer it no longer has.
+    fn reopen_signal(&self, task_id: String, signal_id: String) -> HostFuture<'_, ()>;
     fn events(&self, task_id: String) -> HostFuture<'_, Vec<(i64, TaskHistoryEvent)>>;
     fn instruct(&self, task_id: String, instruction: String) -> HostFuture<'_, ()>;
     fn reply(&self, task_id: String, signal_id: String, answer: String) -> HostFuture<'_, ()>;
@@ -131,6 +136,14 @@ pub trait Host: Send + Sync + 'static {
     /// work each one is. Reporting is adopted from this list.
     fn bound_tasks(&self) -> HostFuture<'_, Vec<BoundTask>>;
     fn session_agent(&self, task_id: String) -> HostFuture<'_, Option<String>>;
+}
+
+/// The tracker comment this machine publishes a signal thread under.
+///
+/// Derived rather than recorded: both sides of the conversation can work it out
+/// from the task and the signal, so there is no table to keep in step.
+fn published_comment_id(task_id: &str, signal_id: &str) -> String {
+    stable_id("comment", &format!("signal:{task_id}:{signal_id}"))
 }
 
 /// What the session says when a task stops working, by why it stopped.
@@ -521,6 +534,40 @@ impl RemoteTracker {
         }
     }
 
+    /// Reopen the thread a comment landed on, when this machine had closed it.
+    ///
+    /// The comment is matched to its signal by the id this machine gave the thread
+    /// it published, so no table of published comments has to be kept: the ids are
+    /// derived from the task and the signal, and either side can work them out.
+    async fn reopen_closed_thread(
+        &self,
+        report: &IssueReport,
+        site: &CommentSite,
+        host: &dyn Host,
+    ) {
+        let root = site.root_comment_id.as_str();
+        let Ok(threads) = host.signal_threads(report.task_id.clone()).await else {
+            return;
+        };
+        let Some(thread) = threads.iter().find(|thread| {
+            thread.is_resolved() && published_comment_id(&report.task_id, &thread.id) == root
+        }) else {
+            return;
+        };
+        if let Err(error) = host
+            .reopen_signal(report.task_id.clone(), thread.id.clone())
+            .await
+        {
+            tracing::warn!(task = %report.task_id, signal = %thread.id, %error, "could not reopen a closed thread");
+            return;
+        }
+        tracing::info!(
+            task = %report.task_id,
+            signal = %thread.id,
+            "a reply reopened a closed thread"
+        );
+    }
+
     /// A stop is a cancellation, never an acceptance or a status restore.
     ///
     /// Only the delegation operator may stop the work; a teammate's stop is not the
@@ -839,12 +886,13 @@ impl RemoteTracker {
                 .map_err(|error| error.to_string())?;
             return Ok(());
         }
-        let signals = host.unresolved_signals(report.task_id.clone()).await?;
+        let signals = host.signal_threads(report.task_id.clone()).await?;
         // A prompt answers only what was already waiting when it was written. A
         // prompt that predates a signal is stale, and letting it resolve the
         // newer question would answer something the operator never saw.
         let waiting: Vec<&TaskOperatorSignalThread> = signals
             .iter()
+            .filter(|signal| signal.is_unresolved())
             .filter(|signal| signal.last_raised_at_ms <= event.occurred_at_ms)
             .collect();
         // A decision is not blocking, but a reply from the issue still belongs
@@ -961,9 +1009,10 @@ impl RemoteTracker {
             return Ok(None);
         }
         Ok(host
-            .unresolved_signals(report.task_id.clone())
+            .signal_threads(report.task_id.clone())
             .await?
             .into_iter()
+            .filter(TaskOperatorSignalThread::is_unresolved)
             .find(|signal| {
                 signal.kind == TaskOperatorSignalKind::InReview
                     && signal.last_raised_at_ms <= occurred_at_ms
@@ -1044,6 +1093,11 @@ impl RemoteTracker {
                 .human_authors
                 .iter()
                 .any(|id| id.as_str() != report.tracker_user_id && id.as_str() != app_user_id);
+        // A comment on a thread this machine closed is the thread being reopened.
+        // The tracker does not tell a separate story about an un-resolve, but a
+        // reply in a closed thread is exactly that: nobody writes into an answered
+        // question unless it is being asked again.
+        self.reopen_closed_thread(&report, &site, host).await;
         let facts = InputFacts {
             actor,
             is_mention: event.is_mention,
@@ -1281,9 +1335,10 @@ impl RemoteTracker {
         // Signals still open are the only ones worth publishing; one already
         // answered or confirmed must not be raised again on the next pass.
         let unresolved: HashSet<String> = host
-            .unresolved_signals(report.task_id.clone())
+            .signal_threads(report.task_id.clone())
             .await?
             .into_iter()
+            .filter(TaskOperatorSignalThread::is_unresolved)
             .map(|signal| signal.id)
             .collect();
         // A report that only began after a transfer must not replay the source's
@@ -1518,17 +1573,9 @@ impl RemoteTracker {
         report: &IssueReport,
         events: &[(i64, TaskHistoryEvent)],
     ) -> Result<(), String> {
-        let unresolved: HashSet<String> = host
-            .unresolved_signals(report.task_id.clone())
-            .await?
-            .into_iter()
-            .map(|signal| signal.id)
-            .collect();
+        let threads = host.signal_threads(report.task_id.clone()).await?;
         let contributions = contribution_details(events);
-        for signal in host.unresolved_signals(report.task_id.clone()).await? {
-            if !unresolved.contains(&signal.id) {
-                continue;
-            }
+        for signal in threads.iter().filter(|signal| signal.is_unresolved()) {
             let Some(message) = signal.latest_agent_message() else {
                 continue;
             };
@@ -1572,10 +1619,7 @@ impl RemoteTracker {
         contributions: &[String],
     ) -> Result<(), String> {
         let reference = self.issue_reference(&report.issue_id);
-        let comment_id = stable_id(
-            "comment",
-            &format!("signal:{}:{}", report.task_id, signal_id),
-        );
+        let comment_id = published_comment_id(&report.task_id, signal_id);
         match kind {
             // Updates are the session's transcript, not an issue comment.
             TaskOperatorSignalKind::Update => {

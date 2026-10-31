@@ -886,15 +886,30 @@ impl super::tracker::Host for OwnTasks {
         })
     }
 
-    fn unresolved_signals(
+    fn signal_threads(
         &self,
         task_id: String,
     ) -> super::tracker::HostFuture<'_, Vec<TaskOperatorSignalThread>> {
         Box::pin(async move {
             self.tasks
                 .service()
-                .unresolved_signal_threads(&task_id)
+                .signal_threads(&task_id)
                 .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn reopen_signal(
+        &self,
+        task_id: String,
+        signal_id: String,
+    ) -> super::tracker::HostFuture<'_, ()> {
+        Box::pin(async move {
+            self.tasks
+                .service()
+                .resolve_signal(&task_id, &signal_id, false)
+                .await
+                .map(|_| ())
                 .map_err(|error| error.to_string())
         })
     }

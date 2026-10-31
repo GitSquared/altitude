@@ -480,7 +480,21 @@ impl LinearAutomation {
     }
 
     /// Reopen a thread, so the tracker and this machine agree that it is waiting.
+    ///
+    /// Asked only when the thread is closed: a reply in the tracker reopens it by
+    /// itself, and un-resolving an open thread is a call that can only fail.
     pub async fn reopen_comment(&self, comment_id: &str) -> Result<(), TrackerError> {
+        let existing = self
+            .graphql(COMMENT_EXISTS_QUERY, json!({ "id": comment_id }))
+            .await?;
+        let comment = existing.get("comment").filter(|comment| !comment.is_null());
+        if comment.is_none()
+            || comment
+                .and_then(|comment| comment.get("resolvedAt"))
+                .is_some_and(Value::is_null)
+        {
+            return Ok(());
+        }
         let data = self
             .graphql(COMMENT_UNRESOLVE_MUTATION, json!({ "id": comment_id }))
             .await?;
