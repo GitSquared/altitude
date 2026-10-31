@@ -405,7 +405,7 @@ impl TaskHost for OwnTasks {
             let prepared: PreparedTransfer = serde_json::from_slice(
                 &fs::read(directory.join("transfer.json")).map_err(|e| e.to_string())?,
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|_| "this transfer was prepared by another version of Altitude".to_owned())?;
             if prepared.recipient != peer.to_string() {
                 return Err("this transfer belongs to another recipient".into());
             }
@@ -1695,8 +1695,9 @@ where
         let Ok(bytes) = fs::read(entry.path().join("transfer.json")) else {
             continue;
         };
-        let prepared: PreparedTransfer =
-            serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        let Ok(prepared) = serde_json::from_slice::<PreparedTransfer>(&bytes) else {
+            continue;
+        };
         if prepared.handover.task_id == task_id {
             if prepared.recipient != recipient {
                 return Err("another recipient is already taking this task".into());
