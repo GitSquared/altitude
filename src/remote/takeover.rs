@@ -62,12 +62,8 @@ where
         return Ok(task.id);
     }
     let outcome = receive(&peer, &handover, client, event_loop, transfer).await;
-    if outcome.is_err() && transfer.is_stopped() {
-        // Best effort: the task is resumable from here either way, because the
-        // source only gives ownership up once this machine has landed it.
-        if let Err(error) = client.abandon_take(&peer, &handover.transfer_id).await {
-            tracing::warn!(%error, "could not give a stopped transfer back to the source");
-        }
+    if outcome.is_err() {
+        give_back(&peer, &handover.transfer_id, client).await;
     }
     outcome
 }
@@ -91,15 +87,9 @@ where
     if handover.history.len > super::protocol::MAX_BLOB_BYTES {
         return Err("task history exceeds the transfer limit".into());
     }
-    // What has to travel, before any of it does: one bar for the whole arrival
-    // rather than one per archive.
-    let whole = handover.history.len
-        + handover.capsule.len
-        + handover
-            .environment
-            .as_ref()
-            .map_or(0, |base| base.archive.len);
-    transfer.counting(whole);
+    // The history is the smallest part and it decides the rest, so it arrives
+    // before the bar appears: what is counted is what is still to come.
+    transfer.waiting("taking over…");
     let history_path = landing.path().join("history.json");
     client
         .fetch_part(
@@ -118,11 +108,14 @@ where
     let project = record.draft.project;
     // Building the base here is a wait with nothing to count, so the bar gives
     // way to the words until there are bytes again.
-    transfer.waiting("building environment…");
+    transfer.waiting("building the environment here…");
     event_loop
         .prepare_project(&project, record.draft.agent)
         .await
         .map_err(|e| e.to_string())?;
+    // What this machine already has is not moved again: the bar counts what
+    // travels, so a base that is here already must not be counted or it can never
+    // be filled.
     let base = match &handover.environment {
         Some(base) => {
             let cached = Snapshot::open(&base.snapshot_id)
@@ -130,8 +123,12 @@ where
                 .ok()
                 .filter(|snapshot| snapshot.digest() == base.descriptor_digest);
             let snapshot = match cached {
-                Some(snapshot) => snapshot,
+                Some(snapshot) => {
+                    transfer.counting(handover.capsule.len);
+                    snapshot
+                }
                 None => {
+                    transfer.counting(base.archive.len + handover.capsule.len);
                     let path = landing.path().join("environment.tar.zst");
                     client
                         .fetch_part(
@@ -164,12 +161,11 @@ where
             Some(snapshot)
         }
         None if handover.capsule.len == 0 => None,
-        None => return Err("the disk capsule has no exact environment".into()),
+        None => return Err("the sender has no environment to rebuild the task on".into()),
     };
     let capsule = if handover.capsule.len == 0 {
         None
     } else {
-        transfer.counting(whole);
         let path = landing.path().join("capsule.tar.zst");
         client
             .fetch_part(
@@ -219,8 +215,31 @@ where
         })
         .await
         .map_err(|e| e.to_string())?;
-    complete_landing(peer, &handover.transfer_id, client, event_loop, &task).await?;
+    if let Err(error) =
+        complete_landing(peer, &handover.transfer_id, client, event_loop, &task).await
+    {
+        // Nothing has been confirmed, so the source still owns this work: what
+        // arrived here is a copy that would be a second task on the same issue.
+        // It goes, and the source is told to carry on rather than wait.
+        if let Err(problem) = event_loop.remove_and_wait(task.clone()).await {
+            tracing::warn!(task = %task.id, %problem, "could not take back a task that did not land");
+        }
+        give_back(peer, &handover.transfer_id, client).await;
+        return Err(error);
+    }
     Ok(task.id)
+}
+
+/// Hand a take over back to the machine that still owns the task.
+///
+/// Best effort, and said out loud when it fails: the source keeps the task until
+/// this machine lands it, so a failure to say so costs it a wait rather than the
+/// task. Doing nothing is what leaves a task paused in a transfer nobody is
+/// making, with the operator looking at two copies of the same work.
+async fn give_back(peer: &iroh::EndpointAddr, transfer_id: &str, client: &LinkClient) {
+    if let Err(error) = client.abandon_take(peer, transfer_id).await {
+        tracing::warn!(%error, transfer_id, "could not give a transfer back to its owner");
+    }
 }
 
 async fn complete_landing<E>(
