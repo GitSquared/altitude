@@ -48,6 +48,13 @@ const ISSUE_DELEGATION_QUERY: &str = "query IssueDelegation($id: String!) { \
     issue(id: $id) { id delegate { id } state { id name type } \
     team { id organization { id } } } }";
 
+// Issues the app has been asked to work on. A delegation is delivered by webhook,
+// and a webhook that arrives while this machine is restarting is gone: this is how
+// the machine finds out what it was asked to do while it was not listening.
+const DELEGATED_ISSUES_QUERY: &str = "query DelegatedIssues($app: ID!) { \
+    issues(filter: { delegate: { id: { eq: $app } } }, first: 25) { \
+    nodes { id identifier team { id organization { id } } } } }";
+
 const ISSUE_STATES_QUERY: &str = "query IssueStates($id: String!) { \
     issue(id: $id) { id team { id organization { id } \
     states(first: 250) { nodes { id name type position } } } } }";
@@ -184,6 +191,27 @@ impl LinearAutomation {
                 .to_owned(),
             comments,
         })
+    }
+
+    /// The issues this app is delegated to, as the tracker has them now.
+    pub async fn delegated_issues(&self) -> Result<Vec<IssueReference>, TrackerError> {
+        let data = self
+            .graphql(DELEGATED_ISSUES_QUERY, json!({ "app": self.app_user_id }))
+            .await?;
+        let nodes = data
+            .get("issues")
+            .and_then(|issues| issues.get("nodes"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut issues = Vec::new();
+        for node in nodes {
+            let Ok(identifier) = summary_of(&node) else {
+                continue;
+            };
+            issues.push(identifier.reference);
+        }
+        Ok(issues)
     }
 
     pub async fn issue_delegation(&self, issue_id: &str) -> Result<IssueDelegation, TrackerError> {

@@ -67,6 +67,8 @@ const MAX_WEBHOOK_BYTES: usize = 1024 * 1024;
 const SIGNATURE_HEADER: &str = "linear-signature";
 
 const TICK: Duration = Duration::from_secs(10);
+/// How often this machine asks the tracker what it may have missed, in ticks.
+const DELEGATION_SWEEP_TICKS: u32 = 6;
 /// How many passes may fail on one event before it is skipped. A tracker that will
 /// not take an event is news; a machine asking again forever is not.
 const EVENT_ATTEMPTS: usize = 3;
@@ -204,6 +206,10 @@ pub struct RemoteTracker {
     /// says so once instead of every tick. A task is still retried: the reason may
     /// go away, and silence about a failure is worse than a second line about it.
     refusals: Mutex<HashMap<String, String>>,
+    /// Issues a delegation was recovered for in this process. One pass is enough:
+    /// the pass exists for a webhook that arrived while this machine was not
+    /// listening, and a second pass would ask the same question every minute.
+    recovered: Mutex<HashSet<String>>,
     /// Whether anything has arrived since this process started. The first
     /// delivery is said at info because it is the only proof a freshly installed
     /// app can reach this machine, and a silent first install is indistinguishable
@@ -222,6 +228,7 @@ impl RemoteTracker {
             config,
             ledger: Mutex::new(ledger),
             refusals: Mutex::new(HashMap::new()),
+            recovered: Mutex::new(HashSet::new()),
             notify: Notify::new(),
             delivered: AtomicBool::new(false),
         }))
@@ -342,6 +349,7 @@ impl RemoteTracker {
     pub async fn run(self: Arc<Self>, host: Arc<dyn Host>) {
         let mut tick = interval(TICK);
         tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut passes = 0u32;
         loop {
             tokio::select! {
                 _ = tick.tick() => {}
@@ -350,7 +358,99 @@ impl RemoteTracker {
             self.process_deliveries(host.as_ref()).await;
             self.adopt_bound_tasks(host.as_ref()).await;
             self.poll_reports(host.as_ref()).await;
+            // A delegation is delivered by webhook, and a webhook that arrives
+            // while this machine is restarting is gone. Asking the tracker which
+            // issues are delegated is how the machine finds the work it was asked
+            // for while it was not listening.
+            passes += 1;
+            if passes.is_multiple_of(DELEGATION_SWEEP_TICKS) {
+                self.recover_delegations(host.as_ref()).await;
+            }
         }
+    }
+
+    /// Pick up work that was delegated to this app while it was not listening.
+    ///
+    /// A delegation arrives as a webhook, and Linear does not keep trying: a
+    /// delivery that lands during a restart is gone, and the issue sits delegated
+    /// to the app with no task, no session, and nothing to say so. So the machine
+    /// asks the tracker which issues are delegated to it and starts the ones it has
+    /// never seen — through the login it holds, since that is the person whose work
+    /// it would be reporting.
+    ///
+    /// Silent when it cannot tell whose work it is. One login is an answer; two
+    /// mean a machine serving several people, and picking one would put a task in
+    /// front of the wrong person.
+    async fn recover_delegations(&self, host: &dyn Host) {
+        let delegated = match self.config.automation.delegated_issues().await {
+            Ok(delegated) => delegated,
+            Err(error) => {
+                tracing::debug!(%error, "could not ask which issues are delegated to this app");
+                return;
+            }
+        };
+        for reference in delegated {
+            if self.report_for_issue(&reference.id).is_some() {
+                continue;
+            }
+            if self.taken_over(&reference.id, host).await {
+                continue;
+            }
+            let first_try = self
+                .recovered
+                .lock()
+                .map(|mut recovered| recovered.insert(reference.id.clone()))
+                .unwrap_or(false);
+            if !first_try {
+                continue;
+            }
+            let Some(login) = self.sole_login() else {
+                tracing::info!(
+                    issue = %reference.identifier,
+                    "an issue is delegated to this app and this machine holds several logins, \
+                     so it cannot tell whose work it is"
+                );
+                continue;
+            };
+            let session = match self
+                .config
+                .automation
+                .create_session_on_issue(&reference.id)
+                .await
+            {
+                Ok(session) => session,
+                Err(error) => {
+                    tracing::warn!(issue = %reference.identifier, %error, "could not open a session for a delegation");
+                    continue;
+                }
+            };
+            tracing::info!(
+                issue = %reference.identifier,
+                "recovered a delegation that arrived while this machine was not listening"
+            );
+            if let Err(error) = self
+                .delegate(
+                    &reference.id,
+                    &session,
+                    &login.account.user_id,
+                    &login.account.display_name,
+                    host,
+                    false,
+                )
+                .await
+            {
+                tracing::warn!(issue = %reference.identifier, %error, "could not start a recovered delegation");
+            }
+        }
+    }
+
+    /// The one login this machine holds, when it holds exactly one.
+    fn sole_login(&self) -> Option<Login> {
+        let mut logins = logins(&self.config.operators_dir);
+        if logins.len() != 1 {
+            return None;
+        }
+        logins.pop()
     }
 
     /// Start reporting on the tasks that are bound to an issue and are not being
