@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
     sync::{Arc, Mutex},
 };
@@ -10,7 +10,10 @@ use tokio::{sync::mpsc, time};
 use crate::{
     agent::{AgentKind, TaskReportDecoder},
     config::InstallationIdentity,
-    isolation::{Command, CommandEvent, CommandSession, IsolationEngine, OutputStream},
+    isolation::{
+        Command, CommandEvent, CommandSession, FileTransferSink, IsolationEngine, OutputStream,
+        guest_absolute,
+    },
     project::Project,
     task::capacity::{HostCapacity, HostSampler, SAMPLE_INTERVAL},
     task::review::{
@@ -844,6 +847,96 @@ where
             .await
     }
 
+    /// Carry a task's files out of its sandbox, into a directory on this machine.
+    ///
+    /// A take over moves files, not a disk: the checkout the work is made of and
+    /// the agent's own conversation. Both are read through the sandbox's
+    /// filesystem channel, so nothing runs in the guest and no host directory is
+    /// shared with it — and a task that is paused is started for exactly as long
+    /// as the reading takes, with no agent in it.
+    pub async fn pack_task_files(
+        &self,
+        task: &Task,
+        destination: &Path,
+        progress: &dyn FileTransferSink,
+    ) -> Result<(), TaskServiceError> {
+        let owner = task.operator_id().ok_or(TaskServiceError::Task(
+            super::TaskError::OperationRejected("the task records no operator to pack for"),
+        ))?;
+        let isolation = self
+            .service
+            .isolation
+            .for_operator(owner)
+            .map_err(TaskServiceError::Isolation)?;
+        let resumed = self.service.provision(task.clone()).await?;
+        let sandbox_id = resumed
+            .facts
+            .sandbox_id
+            .clone()
+            .ok_or(TaskServiceError::Task(super::TaskError::MissingSandbox))?;
+        let packed = self
+            .pack_into(
+                &isolation,
+                &resumed,
+                sandbox_id.clone(),
+                destination,
+                progress,
+            )
+            .await
+            .map(|_| ());
+        // The sandbox was made to be read, so it goes once it has been.
+        let outcome = packed;
+        if let Err(error) = isolation.remove(sandbox_id).await {
+            tracing::warn!(%error, "could not remove the sandbox a task was packed from");
+        }
+        self.service.release_agent_channel(&task.id);
+        outcome
+    }
+
+    async fn pack_into(
+        &self,
+        isolation: &E,
+        task: &Task,
+        sandbox_id: String,
+        destination: &Path,
+        progress: &dyn FileTransferSink,
+    ) -> Result<(), TaskServiceError> {
+        let project = task
+            .project()
+            .ok_or(TaskServiceError::Task(super::TaskError::MissingProject))?;
+        if let Some(checkout) = project.checkout_path() {
+            let checkout = guest_absolute(&checkout).map_err(TaskServiceError::Isolation)?;
+            let mut excluded = Vec::new();
+            for cache in &project.caches {
+                excluded.push(guest_absolute(cache).map_err(TaskServiceError::Isolation)?);
+            }
+            isolation
+                .collect_files(
+                    sandbox_id.clone(),
+                    checkout,
+                    excluded,
+                    destination.join("work"),
+                    progress,
+                )
+                .await
+                .map_err(TaskServiceError::Isolation)?;
+        }
+        if let (Some(conversation), Some(kind)) =
+            (&task.facts.agent_conversation_id, task.agent_kind)
+        {
+            let guest = self
+                .service
+                .agents
+                .engine(kind)
+                .conversation_transcript_path(conversation);
+            isolation
+                .collect_file(sandbox_id, guest, destination.join("transcript.jsonl"))
+                .await
+                .map_err(TaskServiceError::Isolation)?;
+        }
+        Ok(())
+    }
+
     pub async fn relinquish(
         &self,
         task: Task,
@@ -896,11 +989,12 @@ where
             agent,
             conversation,
             history,
-            capsule,
+            files,
             transfer_id,
             peer,
         } = arrival;
-        self.service
+        let task = self
+            .service
             .adopt(
                 self.service
                     .draft(intent, project, agent, conversation, None),
@@ -912,11 +1006,21 @@ where
                     execution_pause_reason: super::TaskExecutionPauseReason::Transfer,
                     execution_mode: TaskExecutionMode::Operator,
                     sandbox_available: false,
-                    snapshot_available: capsule.is_some(),
-                    snapshot_path: capsule,
+                    snapshot_available: false,
+                    snapshot_path: None,
                 }],
             )
-            .await
+            .await?;
+        // Filed under the task's own id, where provisioning looks for them: the
+        // sandbox does not exist yet, and this is the only place to put them until
+        // it does.
+        if let Some(files) = files {
+            let arrivals = self.service.arrivals_dir(&task.id);
+            if let Err(error) = super::copy_tree(&files, &arrivals) {
+                tracing::warn!(task = %task.id, %error, "could not keep the files this task arrived with");
+            }
+        }
+        Ok(task)
     }
 
     /// Put a task back after a transfer was stopped before ownership moved.

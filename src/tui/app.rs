@@ -1524,7 +1524,7 @@ impl App {
                 // Drawn from different places, but acted on the same way: a task is
                 // moved across with one key, and deleted by the machine holding it.
                 if self.selected_is_remote() {
-                    hints.push(Hint::new("p", "pull here"));
+                    hints.push(Hint::new("p", "take over"));
                     hints.push(Hint::new("d", "delete"));
                     if self
                         .selected_held()
@@ -2771,7 +2771,7 @@ impl App {
 
     /// Bring a task home from the machine that owns it.
     ///
-    /// The remote stops running it, its capsule travels, and it is founded here with the
+    /// The remote stops running it, its files and conversation travel, and it is founded here with the
     /// history of what was decided about it — and only then is the remote told it is no
     /// longer the owner. Everything after that is the ordinary take-over of a task that
     /// is here, because by then it is.
@@ -2792,9 +2792,9 @@ impl App {
         let landings = landings.clone();
         self.alert = None;
         let transfer = self.begin_transfer(
-            &format!("Pulling task from {}", self.remote_name(&address)),
+            &format!("Taking over on {}", self.remote_name(&address)),
             &summary.title,
-            "packaging…",
+            "collecting the working files…",
             opens_terminal,
         );
         tokio::spawn(async move {
@@ -3014,7 +3014,7 @@ impl App {
     /// Send a task that is already here to a machine that will continue it, off
     /// the event loop.
     ///
-    /// The task stops here, its capsule travels, the remote boots it, and only
+    /// The task stops here, its files and conversation travel, the remote builds it a sandbox, and only
     /// then does this machine relinquish. Nothing is reported as done until the
     /// remote has acknowledged it.
     pub(in crate::tui) fn begin_send_to_remote<E>(
@@ -3029,9 +3029,9 @@ impl App {
     {
         self.alert = None;
         let transfer = self.begin_transfer(
-            &format!("Sending task to {}", self.remote_name(&address)),
+            &format!("Handing back to {}", self.remote_name(&address)),
             &title,
-            "packaging…",
+            "collecting the working files…",
             false,
         );
         let config = self.config.clone();
@@ -7015,7 +7015,8 @@ impl App {
                 self.foreground = Foreground::Confirm(PendingConfirm::pulling(
                     held.summary.id.clone(),
                     format!(
-                        "Pull \"{}\" here? It stops on {} and keeps running here.",
+                        "Take over \"{}\" on this machine? The agent stops on {} and you \
+                         continue with it here.",
                         held.summary.title,
                         self.remote_name(&held.address)
                     ),

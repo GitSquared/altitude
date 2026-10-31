@@ -164,7 +164,7 @@ fn pause_notice(reason: &TaskExecutionPauseReason) -> &'static str {
             "The machine running this task restarted. The task resumes when it is back."
         }
         TaskExecutionPauseReason::Transfer => {
-            "This task is moving to another machine and keeps running there."
+            "The operator is taking this task over on their own machine; it keeps running there."
         }
         TaskExecutionPauseReason::TrackerEnded => {
             "The issue this task was working on ended, so the task stopped."

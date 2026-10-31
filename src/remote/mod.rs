@@ -41,8 +41,8 @@ pub use {
     keys::{RemoteKey, RemoteKeys},
     known::{RemoteKeyStatus, meet},
     protocol::{
-        ConfigPush, EnvironmentArchive, Handover, HandoverDraft, HandoverRecord, RecordedEvent,
-        TaskOrigin, TaskRequest, TaskSummary, TransferArchive, TransferPart, WatchEvent,
+        ConfigPush, Handover, HandoverDraft, HandoverRecord, RecordedEvent, TaskOrigin,
+        TaskRequest, TaskSummary, TransferArchive, TransferPart, WatchEvent,
     },
     server::LinkServer,
     takeover::bring_home,

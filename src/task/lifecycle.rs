@@ -4,7 +4,8 @@ use crate::{
     agent::{AgentKind, mcp},
     config::InstallationIdentity,
     isolation::{
-        CommandEvent, CommandSession, IsolationEngine, SandboxOptions, VsockRoute, mounts,
+        CommandEvent, CommandSession, IsolationEngine, SandboxOptions, UnwatchedFiles, VsockRoute,
+        guest_absolute, mounts,
     },
     project::Project,
     vcs::VcsProviderKind,
@@ -12,7 +13,7 @@ use crate::{
 use futures_util::future::join_all;
 
 use crate::isolation::Unwatched;
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 use uuid::Uuid;
 
 use super::{
@@ -166,6 +167,15 @@ where
         self.launch(task, command, TaskExecutionMode::Autopilot, None)
             .await
     }
+    /// Where a task's arriving files wait for the sandbox that will be given them.
+    pub(super) fn arrivals_dir(&self, task_id: &str) -> PathBuf {
+        self.credentials
+            .config()
+            .data_dir()
+            .join("arrivals")
+            .join(task_id)
+    }
+
     pub(super) async fn provision(&self, task: Task) -> Result<Task, TaskServiceError> {
         if task.facts.accepted {
             return Err(TaskServiceError::Task(TaskError::OperationRejected(
@@ -270,6 +280,7 @@ where
                     .await
                     .map_err(TaskServiceError::Task)?
                 {
+                    self.place_arrivals(&isolation, &task, &sandbox_id).await;
                     Ok(task)
                 } else {
                     self.release_resources(&task).await?;
@@ -286,6 +297,58 @@ where
             }
         }
     }
+    /// Put the files a task arrived with into the sandbox it was just given.
+    ///
+    /// Before anything runs in it, and through the sandbox's own filesystem
+    /// channel: what a task brought is a tree the agent left, not a copy of its
+    /// bytes. Nothing waits if there is nothing to put there.
+    async fn place_arrivals(&self, isolation: &E, task: &Task, sandbox_id: &str) {
+        let arrivals = self.arrivals_dir(&task.id);
+        if !arrivals.is_dir() {
+            return;
+        }
+        let checkout = task
+            .project()
+            .and_then(|project| project.checkout_path())
+            .and_then(|path| guest_absolute(&path).ok());
+        let work = arrivals.join("work");
+        if let Some(checkout) = checkout
+            && work.is_dir()
+        {
+            match isolation
+                .deliver_files(sandbox_id.to_owned(), work, checkout, &UnwatchedFiles)
+                .await
+            {
+                Ok(tally) => tracing::info!(
+                    task = %task.id,
+                    files = tally.files,
+                    "put the files this task arrived with into its sandbox"
+                ),
+                Err(error) => {
+                    tracing::warn!(task = %task.id, %error, "could not put a task's files into its sandbox")
+                }
+            }
+        }
+        let transcript = arrivals.join("transcript.jsonl");
+        if let (true, Some(kind), Some(conversation)) = (
+            transcript.is_file(),
+            task.agent_kind,
+            task.facts.agent_conversation_id.as_deref(),
+        ) {
+            let guest = self
+                .agents
+                .engine(kind)
+                .conversation_transcript_path(conversation);
+            if let Err(error) = isolation
+                .deliver_file(sandbox_id.to_owned(), transcript, guest)
+                .await
+            {
+                tracing::warn!(task = %task.id, %error, "could not put a task's conversation into its sandbox");
+            }
+        }
+        let _ = fs::remove_dir_all(&arrivals);
+    }
+
     pub async fn finish(
         &self,
         task: &Task,

@@ -12,18 +12,18 @@ use std::{
     io::{Read, Seek, SeekFrom},
     net::SocketAddr,
     path::{Path, PathBuf},
+    process,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
 
 use crate::{
-    isolation::capsule::{ENVIRONMENT_LABEL, EnvironmentBase},
+    isolation::UnwatchedFiles,
     task::{TaskExecutionPauseReason, TaskExecutionStatus},
     vcs::now_ms,
     version::VERSION,
 };
 use iroh::EndpointId;
-use microsandbox::{SaveOpts, Snapshot};
 use tokio::{
     sync::{Mutex as AsyncMutex, Semaphore},
     task::spawn_blocking,
@@ -207,7 +207,7 @@ impl OwnTasks {
                 .expect("transfer activity lock poisoned")
                 .remove(&transfer_id);
             if let Ok(directory) = self.transfer_directory(&transfer_id) {
-                for name in ["environment.tar.zst", "capsule.tar.zst", "history.json"] {
+                for name in ["work.tar.zst", "transcript.jsonl", "history.json"] {
                     let _ = fs::remove_file(directory.join(name));
                 }
             }
@@ -414,9 +414,9 @@ impl TaskHost for OwnTasks {
                 .expect("transfer activity lock poisoned")
                 .insert(transfer_id.clone(), now_ms());
             let filename = match part {
-                super::TransferPart::Environment => "environment.tar.zst",
                 super::TransferPart::History => "history.json",
-                super::TransferPart::Capsule => "capsule.tar.zst",
+                super::TransferPart::Work => "work.tar.zst",
+                super::TransferPart::Transcript => "transcript.jsonl",
             };
             let path = directory.join(filename);
             spawn_blocking(move || {
@@ -440,7 +440,7 @@ impl TaskHost for OwnTasks {
         &self,
         peer: EndpointId,
         handover: Handover,
-    ) -> BoxFuture<Result<bool, String>> {
+    ) -> BoxFuture<Result<(), String>> {
         let incoming = self.incoming.clone();
         Box::pin(async move { incoming.prepare(peer, handover).await })
     }
@@ -494,7 +494,7 @@ impl TaskHost for OwnTasks {
                 .abandon_transfer(&task.id, &transfer_id)
                 .await
                 .map_err(|error| error.to_string())?;
-            for name in ["environment.tar.zst", "capsule.tar.zst", "history.json"] {
+            for name in ["work.tar.zst", "transcript.jsonl", "history.json"] {
                 let _ = fs::remove_file(root.join(&transfer_id).join(name));
             }
             Ok(())
@@ -584,7 +584,7 @@ impl TaskHost for OwnTasks {
                 .relinquish(task, &transfer_id, &peer.to_string())
                 .await
                 .map_err(|e| e.to_string())?;
-            for name in ["environment.tar.zst", "capsule.tar.zst", "history.json"] {
+            for name in ["work.tar.zst", "transcript.jsonl", "history.json"] {
                 let _ = fs::remove_file(directory.join(name));
             }
             Ok(())
@@ -1116,64 +1116,65 @@ fn is_machine_local_event(event: &TaskHistoryEvent) -> bool {
     )
 }
 
-async fn bundle_capsule(
+/// Carry a task's files out of its sandbox and bring them together for the wire.
+///
+/// The sandbox is started for the reading and removed after it, so what is read is
+/// a tree nobody is writing to. The files come out through the sandbox's own
+/// filesystem channel, one at a time, and the archive is made on this machine: the
+/// guest needs no `tar` and shares no directory with the host.
+async fn bundle_task_files<E>(
+    tasks: &TaskEventLoop<E>,
     task: &Task,
     directory: &Path,
-) -> Result<(TransferArchive, Option<super::EnvironmentArchive>), String> {
-    let Some(path) = task
-        .facts
-        .snapshot_path
-        .as_ref()
-        .filter(|_| task.facts.snapshot_available)
-    else {
-        return Ok((
-            TransferArchive {
-                len: 0,
-                digest: blake3::hash(&[]).to_hex().to_string(),
-            },
-            None,
-        ));
+) -> Result<(TransferArchive, TransferArchive), String>
+where
+    E: IsolationEngine + Clone + 'static,
+{
+    let staging = directory.join("files");
+    let _ = fs::remove_dir_all(&staging);
+    fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+    tasks
+        .pack_task_files(task, &staging, &UnwatchedFiles)
+        .await
+        .map_err(|error| error.to_string())?;
+    let empty = || TransferArchive {
+        len: 0,
+        digest: blake3::hash(&[]).to_hex().to_string(),
     };
-    let snapshot = Snapshot::open(path).await.map_err(|e| e.to_string())?;
-    let encoded = snapshot.labels().get(ENVIRONMENT_LABEL).ok_or_else(|| {
-        "the capsule has no recorded environment boundary; rebuild its task state explicitly before transferring".to_owned()
-    })?;
-    let base: EnvironmentBase = serde_json::from_str(encoded).map_err(|e| e.to_string())?;
-    let staging = tempfile::tempdir_in(directory).map_err(|e| e.to_string())?;
-    let (environment, capsule) = base.stage(&snapshot, staging.path()).await?;
-    // Both receivers prepare the image locally before importing. Bundling its
-    // cache would also carry a VMDK descriptor with the sender's absolute paths.
-    environment
-        .save_to(&directory.join("environment.tar.zst"), SaveOpts::default())
-        .await
-        .map_err(|e| e.to_string())?;
-    capsule
-        .save_to(
-            &directory.join("capsule.tar.zst"),
-            SaveOpts {
-                since: Some(
-                    environment
-                        .path()
-                        .map_err(|e| e.to_string())?
-                        .to_string_lossy()
-                        .into_owned(),
-                ),
-                ..SaveOpts::default()
-            },
+    let work = if staging.join("work").is_dir() {
+        archive_directory(&staging.join("work"), &directory.join("work.tar.zst"))?;
+        archive_description(&directory.join("work.tar.zst"))?
+    } else {
+        empty()
+    };
+    let transcript = if staging.join("transcript.jsonl").is_file() {
+        fs::copy(
+            staging.join("transcript.jsonl"),
+            directory.join("transcript.jsonl"),
         )
-        .await
         .map_err(|e| e.to_string())?;
-    let descriptor_digest = environment.digest().to_owned();
-    let snapshot_id = environment.manifest().snapshot_id.to_string();
-    Ok((
-        archive_description(&directory.join("capsule.tar.zst"))?,
-        Some(super::EnvironmentArchive {
-            snapshot_id,
-            descriptor_digest,
-            layer_roots: base.roots,
-            archive: archive_description(&directory.join("environment.tar.zst"))?,
-        }),
-    ))
+        archive_description(&directory.join("transcript.jsonl"))?
+    } else {
+        empty()
+    };
+    let _ = fs::remove_dir_all(&staging);
+    Ok((work, transcript))
+}
+
+/// One archive of a directory, with the modes and links it was found with.
+fn archive_directory(source: &Path, archive: &Path) -> Result<(), String> {
+    let status = process::Command::new("tar")
+        .arg("-czf")
+        .arg(archive)
+        .arg("-C")
+        .arg(source)
+        .arg(".")
+        .status()
+        .map_err(|error| format!("could not run tar: {error}"))?;
+    if !status.success() {
+        return Err("the working files could not be packed".to_owned());
+    }
+    Ok(())
 }
 
 fn archive_description(path: &Path) -> Result<TransferArchive, String> {
@@ -1743,7 +1744,7 @@ where
         };
     let directory = root.join(&transfer_id);
     fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
-    for name in ["capsule.tar.zst", "environment.tar.zst"] {
+    for name in ["work.tar.zst", "transcript.jsonl"] {
         let _ = fs::remove_file(directory.join(name));
     }
     let stopped = tasks
@@ -1781,13 +1782,13 @@ where
     if history.len > super::protocol::MAX_BLOB_BYTES {
         return Err("task history exceeds the transfer limit".into());
     }
-    let (capsule, environment) = bundle_capsule(&stopped, &directory).await?;
+    let (work, transcript) = bundle_task_files(tasks, &stopped, &directory).await?;
     let handover = Handover {
         task_id: task_id.to_owned(),
         transfer_id,
         history,
-        capsule,
-        environment,
+        work,
+        transcript,
     };
     let prepared = PreparedTransfer {
         recipient: recipient.to_owned(),

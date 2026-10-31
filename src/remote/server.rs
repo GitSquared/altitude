@@ -402,11 +402,8 @@ pub trait TaskHost: Send + Sync + 'static {
         transfer_id: String,
     ) -> BoxFuture<Result<(), String>>;
     fn handed_over(&self, peer: EndpointId, transfer_id: String) -> BoxFuture<Result<(), String>>;
-    fn prepare_import(
-        &self,
-        peer: EndpointId,
-        handover: Handover,
-    ) -> BoxFuture<Result<bool, String>>;
+    fn prepare_import(&self, peer: EndpointId, handover: Handover)
+    -> BoxFuture<Result<(), String>>;
     fn put_import_part(
         &self,
         peer: EndpointId,
@@ -605,7 +602,7 @@ async fn answer(
         }
         LinkRequest::PrepareImport { handover } => {
             let response = match handler.tasks.prepare_import(peer, *handover).await {
-                Ok(needs_environment) => LinkResponse::ImportPrepared { needs_environment },
+                Ok(()) => LinkResponse::ImportPrepared,
                 Err(reason) => LinkResponse::Rejected { reason },
             };
             write_frame(&mut send, &response).await?;

@@ -173,11 +173,11 @@ impl PendingConfirm {
         }
     }
 
-    /// Confirming unhooks a task from the machine running it: the same transfer as
-    /// taking it over, with one answer different.
+    /// Confirming takes a task over from the machine running it: the files and the
+    /// conversation move here, and the agent stops there.
     pub(in crate::tui) fn pulling(task_id: String, question: String) -> Self {
         Self {
-            dialog: Confirm::new(question, "unhook"),
+            dialog: Confirm::new(question, "take over"),
             action: ConfirmAction::PullTask { id: task_id },
         }
     }

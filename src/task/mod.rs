@@ -10,7 +10,14 @@ use crate::{
     tracker::{IssueReader, TrackerProvider},
     vcs::{self, Repository, VcsProviderKind, tools::VcsAgentTools},
 };
-use std::{collections::HashMap, error::Error, fmt, io, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    error::Error,
+    fmt, fs, io,
+    os::unix::fs::symlink,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -41,7 +48,10 @@ pub struct TaskArrival {
     pub agent: AgentKind,
     pub conversation: Option<String>,
     pub history: Vec<(i64, TaskHistoryEvent)>,
-    pub capsule: Option<String>,
+    /// The files a task brought with it: a directory holding `work/` and the
+    /// harness's `transcript.jsonl`. They are put into its sandbox when it is
+    /// built, which is the first moment there is one to put them in.
+    pub files: Option<PathBuf>,
     pub transfer_id: String,
     pub peer: String,
 }
@@ -63,6 +73,26 @@ pub struct TaskService<E> {
     /// reads the change rather than asking the store on a clock: a tool write is
     /// not a task update, so nothing else would carry it to the screen.
     signal_changes: broadcast::Sender<String>,
+}
+
+/// Copy a tree of files, keeping the modes and links it was found with.
+pub(crate) fn copy_tree(source: &Path, destination: &Path) -> io::Result<()> {
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let target = destination.join(entry.file_name());
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if metadata.is_symlink() {
+            let _ = fs::remove_file(&target);
+            symlink(fs::read_link(entry.path())?, &target)?;
+        } else if metadata.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), &target)?;
+            fs::set_permissions(&target, metadata.permissions())?;
+        }
+    }
+    Ok(())
 }
 
 fn failure_events(task: &Task, error: String, signal_id: String) -> [TaskHistoryEvent; 2] {

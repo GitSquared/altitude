@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::{self, ErrorKind},
-    os::unix::fs::symlink,
+    os::unix::fs::{PermissionsExt, symlink},
     path::{Path, PathBuf},
     process,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -9,7 +9,11 @@ use std::{
 
 use microsandbox::{
     LocalBackend, Sandbox,
-    sandbox::{MAX_SANDBOX_LIST_LIMIT, PullPolicy, exec::ExecEvent},
+    sandbox::{
+        MAX_SANDBOX_LIST_LIMIT, PullPolicy,
+        exec::ExecEvent,
+        fs::{FsEntryKind, FsSetAttrs, SandboxFsOps},
+    },
     set_default_backend,
     setup::{
         InstallOptions, RuntimeOrigin, Version, ensure_runtime, install_runtime,
@@ -30,12 +34,178 @@ use crate::project::Project;
 use super::{
     BaseSandboxRecipe, BaseSandboxSnapshot, CREDENTIAL_PREFIX, Command, CommandEvent,
     CommandSession, CredentialCheck, CredentialReport, CredentialSandbox, EnvironmentDescription,
-    EnvironmentProgress, EnvironmentProgressSink, IsolationEngine, IsolationError, IsolationStatus,
-    OutputStream, ProfileRecipe, SandboxOptions, SetupStep, VsockRoute, WATCHER_PREFIX,
-    mount_git_cache,
+    EnvironmentProgress, EnvironmentProgressSink, FileTally, FileTransferSink, IsolationEngine,
+    IsolationError, IsolationStatus, OutputStream, ProfileRecipe, SandboxOptions, SetupStep,
+    VsockRoute, WATCHER_PREFIX, mount_git_cache,
     sandbox::{self, REFRESH_AFTER, private_directory},
     trust_host_roots,
 };
+
+/// The sandbox's own filesystem channel, and the sandbox it belongs to.
+///
+/// They come back together because the channel borrows the sandbox: the caller
+/// holds it for as long as it is moving files.
+async fn connect(id: &str) -> Result<Sandbox, IsolationError> {
+    Sandbox::get(id)
+        .await
+        .map_err(|error| IsolationError::new(error.to_string()))?
+        .connect_or_start()
+        .await
+        .map_err(|error| IsolationError::new(error.to_string()))
+}
+
+impl MicrosandboxIsolation {
+    /// Everything under `root`, as the sandbox sees it, without descending into
+    /// the paths this machine mounted and called disposable.
+    async fn walk_guest(
+        &self,
+        fs: &SandboxFsOps<'_>,
+        root: &str,
+        excluded: &[String],
+    ) -> Result<GuestTree, IsolationError> {
+        let mut tree = GuestTree {
+            directories: Vec::new(),
+            files: Vec::new(),
+            links: Vec::new(),
+            whole: FileTally::default(),
+        };
+        let mut pending = vec![(root.trim_end_matches('/').to_owned(), String::new())];
+        while let Some((directory, relative_directory)) = pending.pop() {
+            let entries = fs
+                .list(&directory)
+                .await
+                .map_err(|error| IsolationError::new(error.to_string()))?;
+            for entry in entries {
+                let name = entry.path.rsplit('/').next().unwrap_or_default().to_owned();
+                if name.is_empty() || name == "." || name == ".." {
+                    continue;
+                }
+                let relative = if relative_directory.is_empty() {
+                    name
+                } else {
+                    format!("{relative_directory}/{name}")
+                };
+                if excluded
+                    .iter()
+                    .any(|left| entry.path == *left || entry.path.starts_with(&format!("{left}/")))
+                {
+                    continue;
+                }
+                match entry.kind {
+                    FsEntryKind::Directory => {
+                        tree.directories.push(relative.clone());
+                        pending.push((entry.path, relative));
+                    }
+                    FsEntryKind::File => {
+                        tree.whole.files += 1;
+                        tree.whole.bytes += entry.size;
+                        tree.files.push(GuestFile {
+                            guest: entry.path,
+                            relative,
+                            size: entry.size,
+                            mode: entry.mode,
+                        });
+                    }
+                    FsEntryKind::Symlink => {
+                        let target = fs
+                            .read_link(&entry.path)
+                            .await
+                            .map_err(|error| IsolationError::new(error.to_string()))?;
+                        tree.links.push(GuestLink { relative, target });
+                    }
+                    FsEntryKind::Other => {}
+                }
+            }
+        }
+        Ok(tree)
+    }
+}
+
+/// The same shape, read from this machine while a task's files travel.
+fn host_tree(source: &Path) -> Result<HostTree, IsolationError> {
+    let mut tree = HostTree {
+        directories: Vec::new(),
+        files: Vec::new(),
+        links: Vec::new(),
+        whole: FileTally::default(),
+    };
+    let mut pending = vec![(source.to_path_buf(), String::new())];
+    while let Some((directory, relative_directory)) = pending.pop() {
+        let entries = fs::read_dir(&directory).map_err(io_error)?;
+        for entry in entries {
+            let entry = entry.map_err(io_error)?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let relative = if relative_directory.is_empty() {
+                name.clone()
+            } else {
+                format!("{relative_directory}/{name}")
+            };
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(io_error)?;
+            if metadata.is_symlink() {
+                let target = fs::read_link(&path).map_err(io_error)?;
+                tree.links.push(GuestLink {
+                    relative,
+                    target: target.to_string_lossy().into_owned(),
+                });
+            } else if metadata.is_dir() {
+                tree.directories.push(relative.clone());
+                pending.push((path, relative));
+            } else {
+                tree.whole.files += 1;
+                tree.whole.bytes += metadata.len();
+                tree.files.push(HostFile {
+                    relative,
+                    size: metadata.len(),
+                    mode: metadata.permissions().mode(),
+                });
+            }
+        }
+    }
+    Ok(tree)
+}
+
+/// Which files under `root` a task's work is made of, and what they are.
+struct GuestTree {
+    directories: Vec<String>,
+    files: Vec<GuestFile>,
+    links: Vec<GuestLink>,
+    whole: FileTally,
+}
+
+struct GuestFile {
+    guest: String,
+    relative: String,
+    size: u64,
+    mode: u32,
+}
+
+struct GuestLink {
+    relative: String,
+    target: String,
+}
+
+/// The same tree, as it sits on this machine while it travels.
+struct HostTree {
+    directories: Vec<String>,
+    files: Vec<HostFile>,
+    links: Vec<GuestLink>,
+    whole: FileTally,
+}
+
+struct HostFile {
+    relative: String,
+    size: u64,
+    mode: u32,
+}
+
+fn io_error(error: io::Error) -> IsolationError {
+    IsolationError::new(error.to_string())
+}
+
+fn permissions(mode: u32) -> fs::Permissions {
+    fs::Permissions::from_mode(mode)
+}
 
 /// Ubuntu rather than Alpine: the Rust crates Altitude builds expect glibc, and
 /// Alpine's musl cannot link them. 24.04 is the current LTS.
@@ -267,12 +437,6 @@ impl MicrosandboxIsolation {
         pull_policy: PullPolicy,
     ) -> Result<(), IsolationError> {
         mount_git_cache(&mut options, &self.config.git_cache_dir());
-        let base = options
-            .environment_base
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|e| IsolationError::new(e.to_string()))?;
         let trusted = trust_host_roots(&mut options, self.config.data_dir());
         tracing::debug!(sandbox_id = %id, network_enabled = options.network_enabled, cpus = options.size.cpus, memory_mib = options.size.memory_mib, "creating sandbox");
         let result = match options.snapshot_path {
@@ -303,14 +467,10 @@ impl MicrosandboxIsolation {
                     restore = restore.vsock(route.host_socket, route.guest_port);
                 }
                 match restore.restore().await {
-                    Ok(_) if options.environment.is_empty() && base.is_none() => Ok(()),
+                    Ok(_) if options.environment.is_empty() => Ok(()),
                     Ok(sandbox) => {
                         // Restore preserves captured env; supply this environment's values for future execs.
                         let mut modification = sandbox.modify().restart();
-                        if let Some(base) = &base {
-                            modification =
-                                modification.label(super::capsule::ENVIRONMENT_LABEL, base);
-                        }
                         for (key, value) in options.environment {
                             modification = modification.env(key, value);
                         }
@@ -1073,6 +1233,152 @@ impl IsolationEngine for MicrosandboxIsolation {
         })
     }
 
+    async fn collect_files(
+        &self,
+        id: String,
+        root: String,
+        excluded: Vec<String>,
+        destination: PathBuf,
+        progress: &dyn FileTransferSink,
+    ) -> Result<FileTally, IsolationError> {
+        let sandbox = connect(&id).await?;
+        let fs = sandbox.fs();
+        let tree = self.walk_guest(&fs, &root, &excluded).await?;
+        progress.counted(tree.whole);
+        let mut moved = FileTally::default();
+        for directory in &tree.directories {
+            fs::create_dir_all(destination.join(directory)).map_err(io_error)?;
+        }
+        for file in &tree.files {
+            let host = destination.join(&file.relative);
+            if let Some(parent) = host.parent() {
+                fs::create_dir_all(parent).map_err(io_error)?;
+            }
+            fs.copy_to_host(&file.guest, &host)
+                .await
+                .map_err(|error| IsolationError::new(error.to_string()))?;
+            // A copy is bytes; what a task left is a tree, so the mode comes with it.
+            fs::set_permissions(&host, permissions(file.mode)).map_err(io_error)?;
+            moved.files += 1;
+            moved.bytes += file.size;
+            progress.moved(FileTally {
+                files: 1,
+                bytes: file.size,
+            });
+        }
+        for link in &tree.links {
+            let host = destination.join(&link.relative);
+            if let Some(parent) = host.parent() {
+                fs::create_dir_all(parent).map_err(io_error)?;
+            }
+            let _ = fs::remove_file(&host);
+            symlink(&link.target, &host).map_err(io_error)?;
+        }
+        tracing::info!(
+            sandbox_id = %id,
+            files = moved.files,
+            bytes = moved.bytes,
+            "carried a task's files out"
+        );
+        Ok(moved)
+    }
+
+    async fn collect_file(
+        &self,
+        id: String,
+        guest_path: String,
+        host_path: PathBuf,
+    ) -> Result<u64, IsolationError> {
+        let sandbox = connect(&id).await?;
+        let fs = sandbox.fs();
+        let size = fs
+            .stat(&guest_path)
+            .await
+            .map_err(|error| IsolationError::new(error.to_string()))?
+            .size;
+        if let Some(parent) = host_path.parent() {
+            fs::create_dir_all(parent).map_err(io_error)?;
+        }
+        fs.copy_to_host(&guest_path, &host_path)
+            .await
+            .map_err(|error| IsolationError::new(error.to_string()))?;
+        Ok(size)
+    }
+
+    async fn deliver_file(
+        &self,
+        id: String,
+        host_path: PathBuf,
+        guest_path: String,
+    ) -> Result<(), IsolationError> {
+        let sandbox = connect(&id).await?;
+        let fs = sandbox.fs();
+        if let Some(parent) = guest_path.rsplit_once('/').map(|(parent, _)| parent)
+            && !parent.is_empty()
+        {
+            let _ = fs.mkdir(parent).await;
+        }
+        fs.copy_from_host(&host_path, &guest_path)
+            .await
+            .map_err(|error| IsolationError::new(error.to_string()))
+    }
+
+    async fn deliver_files(
+        &self,
+        id: String,
+        source: PathBuf,
+        root: String,
+        progress: &dyn FileTransferSink,
+    ) -> Result<FileTally, IsolationError> {
+        let tree = host_tree(&source)?;
+        progress.counted(tree.whole);
+        let sandbox = connect(&id).await?;
+        let fs = sandbox.fs();
+        let guest = |relative: &str| format!("{}/{relative}", root.trim_end_matches('/'));
+        let _ = fs.mkdir(&root).await;
+        let mut moved = FileTally::default();
+        for directory in &tree.directories {
+            let _ = fs.mkdir(&guest(directory)).await;
+        }
+        for file in &tree.files {
+            fs.copy_from_host(source.join(&file.relative), &guest(&file.relative))
+                .await
+                .map_err(|error| IsolationError::new(error.to_string()))?;
+            if let Err(error) = fs
+                .set_stat(
+                    &guest(&file.relative),
+                    true,
+                    FsSetAttrs {
+                        mode: Some(file.mode),
+                        ..FsSetAttrs::default()
+                    },
+                )
+                .await
+            {
+                tracing::warn!(path = %file.relative, %error, "could not restore a file's mode");
+            }
+            moved.files += 1;
+            moved.bytes += file.size;
+            progress.moved(FileTally {
+                files: 1,
+                bytes: file.size,
+            });
+        }
+        for link in &tree.links {
+            let _ = fs.remove(&guest(&link.relative)).await;
+            fs.symlink(&link.target, &guest(&link.relative))
+                .await
+                .map_err(|error| IsolationError::new(error.to_string()))?;
+        }
+        tracing::info!(
+            sandbox_id = %id,
+            files = moved.files,
+            bytes = moved.bytes,
+            "put a task's files in"
+        );
+        Ok(moved)
+    }
+
     async fn remove(&self, id: String) -> Result<(), IsolationError> {
         tracing::debug!(sandbox_id = %id, "removing sandbox");
         let sandbox = Sandbox::get(&id)
@@ -1103,21 +1409,11 @@ impl IsolationEngine for MicrosandboxIsolation {
             .stop_with_timeout(Duration::from_secs(10))
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
-        let base = sandbox
-            .config()
-            .map_err(|e| IsolationError::new(e.to_string()))?
-            .spec
-            .labels
-            .get(super::capsule::ENVIRONMENT_LABEL)
-            .cloned();
         // Altitude keeps one checkpoint per capsule; each capture owns its snapshot group.
-        let mut capture = Snapshot::builder(&snapshot_name)
+        let capture = Snapshot::builder(&snapshot_name)
             .group(snapshot_name)
             .from_sandbox(&id)
             .dest_dir(snapshots_dir);
-        if let Some(base) = base {
-            capture = capture.label(super::capsule::ENVIRONMENT_LABEL, base);
-        }
         let snapshot = capture
             .create()
             .await

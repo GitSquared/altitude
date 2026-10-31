@@ -15,18 +15,18 @@ use std::{
     fmt, fs,
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
+    process,
     sync::Arc,
 };
 
 use iroh::{EndpointAddr, EndpointId};
-use microsandbox::Snapshot;
 use tokio::sync::Mutex;
 
 use crate::isolation::private_directory;
 
 use crate::{
     config::{Config, DEFAULT_PORT},
-    isolation::{IsolationEngine, MicrosandboxIsolation, capsule::verify_environment},
+    isolation::{IsolationEngine, MicrosandboxIsolation},
     remote::{
         ConfigBundle, ConfigPush, Handover, HandoverRecord, LinkClient, RemoteKeyStatus,
         RemoteKeys, Transfer, TransferArchive, TransferPart, meet,
@@ -41,8 +41,8 @@ const DESTINATION_FILE: &str = "outgoing.json";
 const TRANSFER_FILE: &str = "transfer.json";
 const COMMITTED_FILE: &str = "committed";
 const HISTORY_FILE: &str = "history.json";
-const ENVIRONMENT_FILE: &str = "environment.tar.zst";
-const CAPSULE_FILE: &str = "capsule.tar.zst";
+const WORK_FILE: &str = "work.tar.zst";
+const TRANSCRIPT_FILE: &str = "transcript.jsonl";
 
 fn message(error: impl fmt::Display) -> String {
     error.to_string()
@@ -60,15 +60,14 @@ struct OutgoingTransfer {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct IncomingTransfer {
     peer: String,
-    needs_environment: bool,
     handover: Handover,
 }
 
 /// Send an existing local task to a remote, and return the id the remote gave it.
 ///
 /// The remote must be the one this address was approved as, and it must hold this
-/// client's setup before the capsule travels, because the capsule is a delta on
-/// top of an environment the remote builds for itself.
+/// client's setup: what travels is the task's files and conversation, and the
+/// sandbox it continues in is built there from the same configuration.
 pub async fn send_to_remote<E>(
     address: &str,
     task_id: &str,
@@ -138,7 +137,7 @@ where
 
     // Packing is the first wait, and it has nothing to count: the archives do not
     // exist until it finishes.
-    transfer.waiting("packaging…");
+    transfer.waiting("collecting the working files…");
     let handover =
         super::serve::export_task(config, event_loop, task_id, &peer.id.to_string()).await?;
     let directory = transfer_directory(config, &handover.transfer_id)?;
@@ -154,20 +153,11 @@ where
         },
     )?;
 
-    let needs_environment = client
+    client
         .prepare_import(&peer, &handover)
         .await
         .map_err(message)?;
-    if let Err(error) = upload_handover(
-        client,
-        &peer,
-        &directory,
-        &handover,
-        needs_environment,
-        transfer,
-    )
-    .await
-    {
+    if let Err(error) = upload_handover(client, &peer, &directory, &handover, transfer).await {
         if transfer.is_stopped() {
             // Nothing has landed there, so dropping the staging is all it takes
             // for that machine to be as it was.
@@ -210,15 +200,14 @@ async fn upload_handover(
     peer: &EndpointAddr,
     directory: &Path,
     handover: &Handover,
-    needs_environment: bool,
     transfer: &Transfer,
 ) -> Result<(), String> {
     let mut parts = vec![TransferPart::History];
-    if needs_environment && handover.environment.is_some() {
-        parts.push(TransferPart::Environment);
+    if handover.work.len > 0 {
+        parts.push(TransferPart::Work);
     }
-    if handover.capsule.len > 0 {
-        parts.push(TransferPart::Capsule);
+    if handover.transcript.len > 0 {
+        parts.push(TransferPart::Transcript);
     }
     let mut whole = 0;
     for part in &parts {
@@ -332,30 +321,21 @@ impl IncomingTransfers {
     /// Accept the shape of a transfer, write down who sent it, and say whether
     /// the environment archive has to travel.
     ///
-    /// The environment is skipped when the exact base is already here: the
-    /// capsule is a delta, and a base that matches by descriptor is the base the
-    /// delta was taken against.
-    pub async fn prepare(&self, peer: EndpointId, handover: Handover) -> Result<bool, String> {
+    /// Accept a transfer before any of it arrives.
+    ///
+    /// Nothing image-shaped travels, so there is nothing for this machine to check
+    /// it already has: the environment is built here from the same configuration.
+    pub async fn prepare(&self, peer: EndpointId, handover: Handover) -> Result<(), String> {
         let _serialized = self.lock.lock().await;
         let transfer_id = validated_transfer_id(&handover.transfer_id)?;
         if handover.history.len == 0 || handover.history.len > MAX_BLOB_BYTES {
             return Err("the task history is outside the transfer limit".into());
         }
         validate_archive(&handover.history, "history")?;
-        validate_archive(&handover.capsule, "capsule")?;
-        if let Some(environment) = &handover.environment {
-            validate_archive(&environment.archive, "environment")?;
-        }
-        let needs_environment = match &handover.environment {
-            Some(base) => !Snapshot::open(&base.snapshot_id)
-                .await
-                .ok()
-                .is_some_and(|snapshot| snapshot.digest() == base.descriptor_digest),
-            None => false,
-        };
+        validate_archive(&handover.work, "work")?;
+        validate_archive(&handover.transcript, "transcript")?;
         let metadata = IncomingTransfer {
             peer: peer.to_string(),
-            needs_environment,
             handover,
         };
         let directory = self.incoming_directory(&transfer_id);
@@ -367,11 +347,11 @@ impl IncomingTransfers {
                 if existing.peer != metadata.peer || existing.handover != metadata.handover {
                     return Err("this transfer is already prepared for another recipient".into());
                 }
-                Ok(existing.needs_environment)
+                Ok(())
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 write_json(&path, &metadata)?;
-                Ok(needs_environment)
+                Ok(())
             }
             Err(error) => Err(message(error)),
         }
@@ -439,14 +419,15 @@ impl IncomingTransfers {
         }
         let handover = &metadata.handover;
         verify_file(&directory.join(HISTORY_FILE), &handover.history, "history")?;
-        if let Some(environment) = &handover.environment {
-            let path = directory.join(ENVIRONMENT_FILE);
-            if path.exists() {
-                verify_file(&path, &environment.archive, "environment")?;
-            }
+        if handover.work.len > 0 {
+            verify_file(&directory.join(WORK_FILE), &handover.work, "work")?;
         }
-        if handover.capsule.len > 0 {
-            verify_file(&directory.join(CAPSULE_FILE), &handover.capsule, "capsule")?;
+        if handover.transcript.len > 0 {
+            verify_file(
+                &directory.join(TRANSCRIPT_FILE),
+                &handover.transcript,
+                "transcript",
+            )?;
         }
         let record: HandoverRecord =
             serde_json::from_reader(fs::File::open(directory.join(HISTORY_FILE)).map_err(message)?)
@@ -461,7 +442,7 @@ impl IncomingTransfers {
             .prepare_project_as_operator(&metadata.peer, &record.draft.project, record.draft.agent)
             .await
             .map_err(message)?;
-        let capsule = import_snapshots(&directory, handover).await?;
+        let files = unpack_task_files(&directory, handover)?;
         let task = self
             .tasks
             .land(TaskArrival {
@@ -470,7 +451,7 @@ impl IncomingTransfers {
                 agent: record.draft.agent,
                 conversation: record.draft.agent_conversation_id,
                 history,
-                capsule,
+                files,
                 transfer_id: transfer_id.clone(),
                 peer: metadata.peer.clone(),
             })
@@ -515,7 +496,7 @@ impl IncomingTransfers {
             .map_err(message)?
             .sync_all()
             .map_err(message)?;
-        for name in [HISTORY_FILE, ENVIRONMENT_FILE, CAPSULE_FILE] {
+        for name in [HISTORY_FILE, WORK_FILE, TRANSCRIPT_FILE] {
             let _ = fs::remove_file(directory.join(name));
         }
         Ok(())
@@ -557,53 +538,38 @@ impl IncomingTransfers {
     }
 }
 
-async fn import_snapshots(directory: &Path, handover: &Handover) -> Result<Option<String>, String> {
-    let Some(environment) = &handover.environment else {
-        return if handover.capsule.len == 0 {
-            Ok(None)
-        } else {
-            Err("the disk capsule has no exact environment".into())
-        };
-    };
-    let cached = Snapshot::open(&environment.snapshot_id)
-        .await
-        .ok()
-        .filter(|snapshot| snapshot.digest() == environment.descriptor_digest);
-    let base = match cached {
-        Some(snapshot) => snapshot,
-        None => {
-            let snapshot = Snapshot::load(&directory.join(ENVIRONMENT_FILE), None)
-                .await
-                .map_err(message)?
-                .open()
-                .await
-                .map_err(message)?;
-            if snapshot.digest() != environment.descriptor_digest
-                || snapshot.manifest().snapshot_id.to_string() != environment.snapshot_id
-            {
-                return Err("the environment descriptor differs from the prepared base".into());
-            }
-            snapshot
-        }
-    };
-    verify_environment(&base, &environment.layer_roots).await?;
-    if handover.capsule.len == 0 {
+/// Unpack what arrived so the sandbox this task gets can be given it.
+///
+/// The archive is expanded here, on the host, and the tree it makes is handed to
+/// the arrival: provisioning writes it into the guest through the same filesystem
+/// channel it came out of.
+fn unpack_task_files(directory: &Path, handover: &Handover) -> Result<Option<PathBuf>, String> {
+    if handover.work.len == 0 && handover.transcript.len == 0 {
         return Ok(None);
     }
-    let loaded = Snapshot::load_with_base(
-        &directory.join(CAPSULE_FILE),
-        None,
-        &base.path().map_err(message)?.to_string_lossy(),
-    )
-    .await
-    .map_err(message)?;
-    Ok(Some(
-        loaded
-            .path()
-            .map_err(message)?
-            .to_string_lossy()
-            .into_owned(),
-    ))
+    let files = directory.join("files");
+    let _ = fs::remove_dir_all(&files);
+    fs::create_dir_all(&files).map_err(message)?;
+    if handover.work.len > 0 {
+        let status = process::Command::new("tar")
+            .arg("-xzf")
+            .arg(directory.join(WORK_FILE))
+            .arg("-C")
+            .arg(&files)
+            .status()
+            .map_err(|error| format!("could not run tar: {error}"))?;
+        if !status.success() {
+            return Err("the working files could not be unpacked".to_owned());
+        }
+    }
+    if handover.transcript.len > 0 {
+        fs::rename(
+            directory.join(TRANSCRIPT_FILE),
+            files.join("transcript.jsonl"),
+        )
+        .map_err(message)?;
+    }
+    Ok(Some(files))
 }
 
 /// Refuse history founded under an identity other than the one that authenticated.
@@ -627,16 +593,8 @@ fn part_details(
 ) -> Result<(&'static str, &'static str, &TransferArchive), String> {
     Ok(match part {
         TransferPart::History => ("history", HISTORY_FILE, &handover.history),
-        TransferPart::Capsule => ("capsule", CAPSULE_FILE, &handover.capsule),
-        TransferPart::Environment => (
-            "environment",
-            ENVIRONMENT_FILE,
-            handover
-                .environment
-                .as_ref()
-                .map(|environment| &environment.archive)
-                .ok_or_else(|| "this transfer carries no environment".to_owned())?,
-        ),
+        TransferPart::Work => ("work", WORK_FILE, &handover.work),
+        TransferPart::Transcript => ("transcript", TRANSCRIPT_FILE, &handover.transcript),
     })
 }
 

@@ -345,11 +345,7 @@ impl LinkClient {
 
     /// Offer a stopped task to a remote, and learn whether it needs the base
     /// environment the capsule was taken against.
-    pub async fn prepare_import(
-        &self,
-        peer: &EndpointAddr,
-        handover: &Handover,
-    ) -> LinkResult<bool> {
+    pub async fn prepare_import(&self, peer: &EndpointAddr, handover: &Handover) -> LinkResult<()> {
         match self
             .say(
                 peer.clone(),
@@ -359,7 +355,7 @@ impl LinkClient {
             )
             .await?
         {
-            LinkResponse::ImportPrepared { needs_environment } => Ok(needs_environment),
+            LinkResponse::ImportPrepared => Ok(()),
             LinkResponse::Rejected { reason } => Err(reason.into()),
             other => Err(format!("unexpected answer: {other:?}").into()),
         }

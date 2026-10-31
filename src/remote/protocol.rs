@@ -255,11 +255,8 @@ pub enum LinkResponse {
     Handover {
         handover: Box<Handover>,
     },
-    /// The recipient accepted the transfer and this is whether it needs the
-    /// environment archive.
-    ImportPrepared {
-        needs_environment: bool,
-    },
+    /// The recipient accepted the transfer and is ready for its pieces.
+    ImportPrepared,
     Imported {
         task_id: String,
     },
@@ -428,28 +425,29 @@ impl TaskSummary {
     }
 }
 
+/// A task on its way to another machine.
+///
+/// What travels is what a person would carry moving to the other desk: the record
+/// of what was asked, the files the work is made of, and the agent's own
+/// conversation. No image travels — each machine builds the environment from the
+/// same configuration — and no cache does, because a cache is a shortcut rather
+/// than knowledge.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Handover {
     pub task_id: String,
     pub transfer_id: String,
-    pub environment: Option<EnvironmentArchive>,
     pub history: TransferArchive,
-    pub capsule: TransferArchive,
+    /// The task's working files: the checkout it was working in.
+    pub work: TransferArchive,
+    /// The agent harness's conversation, so the next turn continues the same one.
+    pub transcript: TransferArchive,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum TransferPart {
-    Environment,
     History,
-    Capsule,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EnvironmentArchive {
-    pub snapshot_id: String,
-    pub descriptor_digest: String,
-    pub layer_roots: Vec<String>,
-    pub archive: TransferArchive,
+    Work,
+    Transcript,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

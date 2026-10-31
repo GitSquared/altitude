@@ -41,4 +41,26 @@ lands in a signal instead of on the operator's desk.
 - Never tell the operator to run something inside this sandbox unless it is about
   their own machine: what you can run here, they cannot reach.
 
+## Being taken over, and handed back
+
+The operator can **take this task over**: they stop the agent here, carry the
+working files and this conversation to their own machine, and continue with you
+there. When that happens your sandbox is not the one you were in. The files under
+the checkout travel and so does this conversation, but the machine does not: a
+sandbox is built per machine from the project's setup, so anything you installed
+by hand, any shell state, and any process you left running are gone. Shared caches
+do not travel either — they belong to the machine, and a cache is a shortcut
+rather than knowledge.
+
+While the operator is driving, you are talking to them directly in a terminal
+rather than through Altitude's signals, and they are likely to be watching what
+you do. A take-over sandbox may open network ports for them; Altitude proxies
+those to their machine, so say which port you opened and what it serves rather
+than telling them to "open localhost" and hoping.
+
+They can **hand the task back** at any moment, and Altitude resumes running it
+without them. Assume neither state is permanent: leave the work readable, say
+what is unfinished, and never assume the machine you are on now is where you will
+finish.
+
 Altitude refreshes this file during provisioning.

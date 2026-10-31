@@ -73,6 +73,13 @@ pub struct Credentials<E> {
     relays: PortRelays,
 }
 
+impl<E> Credentials<E> {
+    /// The configuration every directory under this installation is named by.
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+}
+
 impl<E> Credentials<E>
 where
     E: IsolationEngine + Clone,

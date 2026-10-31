@@ -92,7 +92,7 @@ pub fn help_sections() -> Vec<HelpSection> {
                 ),
                 (
                     "p",
-                    "Push a local task to a remote, or unhook a remote one and run it here",
+                    "Take over a task that runs on another machine, or hand a local one back",
                 ),
                 ("b", "Open its linked issue in your browser"),
                 (

@@ -2,15 +2,14 @@
 
 use crate::{
     config::DEFAULT_PORT,
-    isolation::{IsolationEngine, capsule::verify_environment},
+    isolation::IsolationEngine,
     remote::{
         Handover, HandoverRecord, LinkClient, RemoteKeyStatus, RemoteKeys, TaskSummary, Transfer,
         TransferPart, meet,
     },
     task::{Task, TaskArrival, TaskEventLoop, TaskHistoryEvent},
 };
-use microsandbox::Snapshot;
-use std::fs;
+use std::{fs, process};
 
 pub async fn bring_home<E>(
     address: &str,
@@ -113,89 +112,52 @@ where
         .prepare_project(&project, record.draft.agent)
         .await
         .map_err(|e| e.to_string())?;
-    // What this machine already has is not moved again: the bar counts what
-    // travels, so a base that is here already must not be counted or it can never
-    // be filled.
-    let base = match &handover.environment {
-        Some(base) => {
-            let cached = Snapshot::open(&base.snapshot_id)
-                .await
-                .ok()
-                .filter(|snapshot| snapshot.digest() == base.descriptor_digest);
-            let snapshot = match cached {
-                Some(snapshot) => {
-                    transfer.counting(handover.capsule.len);
-                    snapshot
-                }
-                None => {
-                    transfer.counting(base.archive.len + handover.capsule.len);
-                    let path = landing.path().join("environment.tar.zst");
-                    client
-                        .fetch_part(
-                            peer,
-                            &handover.transfer_id,
-                            TransferPart::Environment,
-                            &base.archive,
-                            &path,
-                            transfer,
-                        )
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    let snapshot = Snapshot::load(&path, None)
-                        .await
-                        .map_err(|e| e.to_string())?
-                        .open()
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    if snapshot.digest() != base.descriptor_digest
-                        || snapshot.manifest().snapshot_id.to_string() != base.snapshot_id
-                    {
-                        return Err(
-                            "the environment descriptor differs from the prepared base".into()
-                        );
-                    }
-                    snapshot
-                }
-            };
-            verify_environment(&snapshot, &base.layer_roots).await?;
-            Some(snapshot)
-        }
-        None if handover.capsule.len == 0 => None,
-        None => return Err("the sender has no environment to rebuild the task on".into()),
-    };
-    let capsule = if handover.capsule.len == 0 {
-        None
-    } else {
-        let path = landing.path().join("capsule.tar.zst");
+    // What travels is the task: its record, the files the work is made of, and the
+    // harness's own conversation. Nothing image-shaped does, so the environment is
+    // built here and the files go into the sandbox once it exists.
+    let files = landing.path().join("files");
+    fs::create_dir_all(&files).map_err(|e| e.to_string())?;
+    let whole = handover.work.len + handover.transcript.len;
+    if whole > 0 {
+        transfer.counting(whole);
+    }
+    if handover.work.len > 0 {
+        let path = landing.path().join("work.tar.zst");
         client
             .fetch_part(
                 peer,
                 &handover.transfer_id,
-                TransferPart::Capsule,
-                &handover.capsule,
+                TransferPart::Work,
+                &handover.work,
                 &path,
                 transfer,
             )
             .await
             .map_err(|e| e.to_string())?;
-        let base = base
-            .as_ref()
-            .ok_or_else(|| "the environment is missing".to_owned())?;
-        let loaded = Snapshot::load_with_base(
-            &path,
-            None,
-            &base.path().map_err(|e| e.to_string())?.to_string_lossy(),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-        Some(
-            loaded
-                .path()
-                .map_err(|e| e.to_string())?
-                .to_string_lossy()
-                .into_owned(),
-        )
-    };
+        let status = process::Command::new("tar")
+            .arg("-xzf")
+            .arg(&path)
+            .arg("-C")
+            .arg(&files)
+            .status()
+            .map_err(|e| format!("could not run tar: {e}"))?;
+        if !status.success() {
+            return Err("the working files could not be unpacked".to_owned());
+        }
+    }
+    if handover.transcript.len > 0 {
+        client
+            .fetch_part(
+                peer,
+                &handover.transfer_id,
+                TransferPart::Transcript,
+                &handover.transcript,
+                &files.join("transcript.jsonl"),
+                transfer,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+    }
     let history = record
         .events
         .into_iter()
@@ -209,7 +171,7 @@ where
             agent: record.draft.agent,
             conversation: record.draft.agent_conversation_id,
             history,
-            capsule,
+            files: (whole > 0).then_some(files),
             transfer_id: handover.transfer_id.clone(),
             peer: peer.id.to_string(),
         })

@@ -1,6 +1,6 @@
 //! Choosing the machine that will continue a task that is already here.
 //!
-//! A transfer is not a copy: the task stops here, its capsule travels, and it
+//! A transfer is not a copy: the task stops here, its files and conversation travel, and it
 //! continues there. So this page names the task it is about and the machines that
 //! could take it, and nothing leaves until enter is pressed. Escape is a way out
 //! that sends nothing.

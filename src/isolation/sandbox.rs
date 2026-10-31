@@ -206,7 +206,6 @@ impl SandboxPlan {
             ),
             options: SandboxOptions {
                 snapshot_path: None,
-                environment_base: None,
                 network_enabled: true,
                 mounts: Vec::new(),
                 environment,
@@ -453,8 +452,7 @@ pub async fn ensure_project(
 }
 
 enum SnapshotSource {
-    /// A task's capsule: the environment boundary it was exported with is part of
-    /// what it is, and a capsule that travels has to prove it.
+    /// A task's own snapshot: it was taken here, so it runs here.
     Capsule(String),
     /// An environment already built here, taken as it is. A sign-in or a check
     /// reads or writes a login, which is no less true of a day-old image, so no
@@ -478,12 +476,6 @@ impl SandboxKind {
             Self::Task => "/altitude/task-state",
             Self::Shell => "/tmp/altitude-shell",
         }
-    }
-
-    /// Whether the environment boundary is recorded, which only a capsule that
-    /// travels has to prove.
-    fn records_environment(self) -> bool {
-        self == Self::Task
     }
 }
 
@@ -680,31 +672,15 @@ async fn create(
     progress: &dyn EnvironmentProgressSink,
 ) -> Result<(), IsolationError> {
     plan.initialize(config)?;
-    let (path, base) = match snapshot {
-        Some(SnapshotSource::Capsule(path)) => {
-            let base = super::capsule::EnvironmentBase::from_capsule(&path)
-                .await
-                .map_err(IsolationError::new)?;
-            (path, Some(base))
-        }
-        Some(SnapshotSource::Environment(path)) => (path, None),
-        None => {
-            let path = engine
-                .ensure_base(plan.recipe, progress)
-                .await?
-                .path
-                .to_string_lossy()
-                .into_owned();
-            let base = match kind.records_environment() {
-                true => Some(
-                    super::capsule::EnvironmentBase::from_environment(&path)
-                        .await
-                        .map_err(IsolationError::new)?,
-                ),
-                false => None,
-            };
-            (path, base)
-        }
+    let path = match snapshot {
+        Some(SnapshotSource::Capsule(path)) => path,
+        Some(SnapshotSource::Environment(path)) => path,
+        None => engine
+            .ensure_base(plan.recipe, progress)
+            .await?
+            .path
+            .to_string_lossy()
+            .into_owned(),
     };
     let relay = plan
         .options
@@ -712,7 +688,6 @@ async fn create(
         .iter()
         .any(|route| route.guest_port == PORT_RELAY_GUEST_PORT);
     plan.options.snapshot_path = Some(path);
-    plan.options.environment_base = base;
     engine.create(id.clone(), plan.options).await?;
     let mut command = String::from("set -eu\n");
     command.push_str(&opener_script());
@@ -786,6 +761,11 @@ pub(crate) fn shell_quote(value: &str) -> String {
 ///
 /// A project writes `~/` because that is how it reads on the host; the sandbox's
 /// home is the guest home, and an absolute path is already the guest's.
+/// The same path the sandbox calls it, for callers outside this module.
+pub(crate) fn guest_absolute(path: &str) -> Result<String, IsolationError> {
+    Ok(expand_guest_path(path)?.to_string_lossy().into_owned())
+}
+
 fn expand_guest_path(path: &str) -> Result<PathBuf, IsolationError> {
     let path = path.trim().trim_end_matches('/');
     let expanded = match path.strip_prefix("~/") {
