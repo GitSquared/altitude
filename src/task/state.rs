@@ -221,11 +221,24 @@ pub struct TaskOperatorSignalThread {
     pub resolved: bool,
     pub resolved_by: Option<TaskOperatorSignalAuthor>,
     pub resolved_at_ms: Option<i64>,
+    /// Every close and re-open, oldest first. The current state is the last one;
+    /// the list is what the conversation shows between its messages, and what tells
+    /// a reader that a thread was answered, reopened and answered again.
+    #[serde(default)]
+    pub transitions: Vec<SignalTransition>,
     /// The change this thread is asking the operator to make, when it is asking
     /// for one. It travels with the thread rather than inside a message, so the
     /// operator's screen can read it as a change and not only as prose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposal: Option<ProjectProposal>,
+}
+
+/// One close or re-open of a thread, at the point in the conversation it happened.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct SignalTransition {
+    pub at_ms: i64,
+    pub resolved: bool,
+    pub by: TaskOperatorSignalAuthor,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

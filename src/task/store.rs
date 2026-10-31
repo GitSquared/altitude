@@ -4,11 +4,11 @@ use sqlx::{FromRow, Sqlite, SqlitePool, Transaction, types::Json};
 use uuid::Uuid;
 
 use super::{
-    ProjectProposal, Task, TaskAgentRun, TaskAgentTurnReport, TaskError, TaskExecutionMode,
-    TaskExecutionStatus, TaskFacts, TaskHistoryEvent, TaskInput, TaskInputAuthor, TaskInputSource,
-    TaskOperatorAttentionLevel, TaskOperatorSignal, TaskOperatorSignalAuthor,
-    TaskOperatorSignalDraft, TaskOperatorSignalKind, TaskOperatorSignalMessage,
-    TaskOperatorSignalThread, TaskPlanStep,
+    ProjectProposal, SignalTransition, Task, TaskAgentRun, TaskAgentTurnReport, TaskError,
+    TaskExecutionMode, TaskExecutionStatus, TaskFacts, TaskHistoryEvent, TaskInput,
+    TaskInputAuthor, TaskInputSource, TaskOperatorAttentionLevel, TaskOperatorSignal,
+    TaskOperatorSignalAuthor, TaskOperatorSignalDraft, TaskOperatorSignalKind,
+    TaskOperatorSignalMessage, TaskOperatorSignalThread, TaskPlanStep,
 };
 use crate::id;
 use crate::project::Project;
@@ -721,6 +721,7 @@ impl TaskStore {
                             resolved: false,
                             resolved_by: None,
                             resolved_at_ms: None,
+                            transitions: Vec::new(),
                             proposal: signal.proposal,
                         }),
                     }
@@ -776,6 +777,11 @@ impl TaskStore {
                         thread.resolved = resolved;
                         thread.resolved_by = resolved.then_some(by);
                         thread.resolved_at_ms = resolved.then_some(at_ms);
+                        thread.transitions.push(SignalTransition {
+                            at_ms,
+                            resolved,
+                            by,
+                        });
                     }
                 }
                 TaskHistoryEvent::OperatorSignalConfirmed { signal_id } => {

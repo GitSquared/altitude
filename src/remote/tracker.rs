@@ -854,11 +854,17 @@ impl RemoteTracker {
             .await
     }
 
-    /// A user changed an issue's workflow state.
+    /// The operator moved an issue's workflow state.
     ///
-    /// Only the delegation operator's own change is the operator's judgment, and
-    /// only a state the native API confirms is completed counts. A teammate's
-    /// status change is ignored, as is a poll that merely observes Done.
+    /// Only the operator's own change is the operator's judgment — a teammate's
+    /// status change is not a decision about their work — and only a state the
+    /// tracker itself reports as an ending closes this cycle.
+    ///
+    /// An ending means the issue is finished or canceled, and there are two ways to
+    /// honour it: a review that was waiting is accepted, because moving the issue
+    /// to Done is how a person says yes; anything else stops the task, because no
+    /// more work is being asked for. Both record the ending first, so nothing here
+    /// writes over it afterwards.
     async fn handle_issue_state(
         &self,
         issue_id: &str,
@@ -879,18 +885,61 @@ impl RemoteTracker {
             .issue_delegation(issue_id)
             .await
             .map_err(|error| error.to_string())?;
-        if delegation.state.id != state_id || delegation.state.state_type != "completed" {
+        if delegation.state.id != state_id {
             return Ok(());
         }
-        // The operator closed the issue. That is their ending whatever the task is
-        // doing, so it is recorded before anything is decided: an issue nobody has
-        // moved since is the one this machine may then write to.
+        let is_done = delegation.state.state_type == "completed";
+        if !is_done && delegation.state.state_type != "canceled" {
+            return Ok(());
+        }
         self.settle(&report.issue_id)?;
-        let history = host.events(report.task_id.clone()).await?;
-        let was_waiting = history
+        if is_done
+            && self
+                .accepts_a_waiting_review(&report, occurred_at_ms, host)
+                .await?
+        {
+            let review = self
+                .waiting_review(&report, occurred_at_ms, host)
+                .await?
+                .expect("the question was asked of the same signals");
+            host.accept(report.task_id.clone(), review.id.clone())
+                .await?;
+            let events = host.events(report.task_id.clone()).await?;
+            return self.finish_accepted(&report, &events).await;
+        }
+        self.stop_for_ending(host, &report, is_done).await
+    }
+
+    /// Whether the operator marking an issue done is the answer to a review that
+    /// was already waiting, which is an acceptance rather than a stop.
+    async fn accepts_a_waiting_review(
+        &self,
+        report: &IssueReport,
+        occurred_at_ms: i64,
+        host: &dyn Host,
+    ) -> Result<bool, String> {
+        Ok(self
+            .waiting_review(report, occurred_at_ms, host)
+            .await?
+            .is_some())
+    }
+
+    /// The review signal that was already waiting when the issue was closed.
+    ///
+    /// A review raised after the operator moved the issue belongs to a later cycle,
+    /// and a task that was not waiting on one is not accepting anything.
+    async fn waiting_review(
+        &self,
+        report: &IssueReport,
+        occurred_at_ms: i64,
+        host: &dyn Host,
+    ) -> Result<Option<TaskOperatorSignalThread>, String> {
+        let was_waiting = host
+            .events(report.task_id.clone())
+            .await?
             .iter()
             .rev()
-            .filter(|(time, _)| *time <= occurred_at_ms)
+            .filter(|(at_ms, _)| *at_ms <= occurred_at_ms)
             .find_map(|(_, event)| match event {
                 TaskHistoryEvent::AgentRunStarted { .. }
                 | TaskHistoryEvent::ExecutionQueued { .. } => Some(false),
@@ -906,24 +955,50 @@ impl RemoteTracker {
             })
             .unwrap_or(false);
         if !was_waiting {
-            return Ok(());
+            return Ok(None);
         }
-        let signals = host.unresolved_signals(report.task_id.clone()).await?;
-        let review = signals
-            .iter()
-            .find(|signal| signal.kind == TaskOperatorSignalKind::InReview);
-        let Some(review) = review else {
-            return Ok(());
+        Ok(host
+            .unresolved_signals(report.task_id.clone())
+            .await?
+            .into_iter()
+            .find(|signal| {
+                signal.kind == TaskOperatorSignalKind::InReview
+                    && signal.last_raised_at_ms <= occurred_at_ms
+            }))
+    }
+
+    /// Stop a task because the operator ended its issue.
+    ///
+    /// The session says what happened, so the tracker does not look like it is
+    /// still thinking while the sandbox disappears.
+    async fn stop_for_ending(
+        &self,
+        host: &dyn Host,
+        report: &IssueReport,
+        is_done: bool,
+    ) -> Result<(), String> {
+        let notice = if is_done {
+            "You moved this issue to Done, so Altitude stopped the task: no more work is asked \
+             for. Raise a new task when you want more from it."
+        } else {
+            "You canceled this issue, so Altitude stopped the task."
         };
-        // The review must already have been waiting when the operator marked the
-        // issue done; a later one belongs to a later cycle.
-        if review.last_raised_at_ms > occurred_at_ms {
-            return Ok(());
+        host.stop(report.task_id.clone()).await?;
+        if let Err(error) = self
+            .config
+            .automation
+            .create_activity(
+                &report.tracker_session_id,
+                &stable_id(&report.task_id, "closed-by-operator"),
+                AgentActivityContent::Response {
+                    body: notice.to_owned(),
+                },
+            )
+            .await
+        {
+            tracing::warn!(task = %report.task_id, %error, "could not say why a task stopped");
         }
-        host.accept(report.task_id.clone(), review.id.clone())
-            .await?;
-        let events = host.events(report.task_id.clone()).await?;
-        self.finish_accepted(&report, &events).await
+        self.finish_report(report)
     }
 
     /// A comment reached a task's issue or document. Decide whether it is for
@@ -1402,27 +1477,38 @@ impl RemoteTracker {
                     resolved: true,
                     ..
                 } => {
-                    self.resolve_signal_comment(report, signal_id, &events[..=index])
+                    self.mark_signal_comment(report, signal_id, &events[..=index], true)
                         .await;
                     // Answering a question puts the work back in progress: the issue
                     // said In Review while the task was waiting, and it is not waiting
                     // any more. An issue whose ending was already written is left as
                     // the operator left it.
+                    self.say_task_is_running(report).await;
+                }
+                TaskHistoryEvent::OperatorSignalResolved {
+                    signal_id,
+                    resolved: false,
+                    ..
+                } => {
+                    // Reopening a thread says the question is live again, so the
+                    // tracker shows it open and the issue is waiting on the operator.
+                    self.mark_signal_comment(report, signal_id, &events[..=index], false)
+                        .await;
                     if !self.is_settled(&report.issue_id)
                         && let Err(error) = self
                             .config
                             .automation
                             .status(
                                 &self.issue_reference(&report.issue_id),
-                                TrackerStatus::InProgress,
+                                TrackerStatus::InReview,
                             )
                             .await
                     {
-                        tracing::warn!(issue = %report.issue_id, %error, "could not say the task is running again");
+                        tracing::warn!(issue = %report.issue_id, %error, "could not say the task is waiting again");
                     }
                 }
                 TaskHistoryEvent::OperatorSignalConfirmed { signal_id } => {
-                    self.resolve_signal_comment(report, signal_id, &events[..=index])
+                    self.mark_signal_comment(report, signal_id, &events[..=index], true)
                         .await;
                     self.finish_accepted(report, &events[..=index]).await?;
                     return Ok(Some(()));
@@ -1560,11 +1646,17 @@ impl RemoteTracker {
         }
     }
 
-    async fn resolve_signal_comment(
+    /// Close or reopen the tracker's thread for one signal.
+    ///
+    /// A log has no thread to close; everything else follows what the operator did
+    /// in the interface, so the tracker and this machine say the same thing about
+    /// whether a question is still waiting.
+    async fn mark_signal_comment(
         &self,
         report: &IssueReport,
         signal_id: &str,
         events: &[(i64, TaskHistoryEvent)],
+        resolved: bool,
     ) {
         let Some(kind) = signal_kind(events, signal_id) else {
             return;
@@ -1576,17 +1668,26 @@ impl RemoteTracker {
             "comment",
             &format!("signal:{}:{}", report.task_id, signal_id),
         );
-        if let Err(error) = self
-            .config
-            .automation
-            .resolve_comment(&comment_id, None)
-            .await
-        {
-            // A signal resolved before this machine could report had no comment to
-            // resolve, and a raise that is already answered is deliberately not
-            // published. There is nothing to close, which is not a failure.
+        let outcome = if resolved {
+            self.config
+                .automation
+                .resolve_comment(&comment_id, None)
+                .await
+        } else {
+            self.config.automation.reopen_comment(&comment_id).await
+        };
+        if let Err(error) = outcome {
+            // A thread that was never published has nothing to close or reopen: a
+            // signal resolved before this machine could report had no comment, and a
+            // raise that is already answered is deliberately not published.
             if !error.to_string().contains("Entity not found") {
-                tracing::warn!(task = %report.task_id, signal = signal_id, %error, "could not resolve a signal comment");
+                tracing::warn!(
+                    task = %report.task_id,
+                    signal = signal_id,
+                    resolved,
+                    %error,
+                    "could not follow a signal's thread in the tracker"
+                );
             }
         }
     }
@@ -1604,8 +1705,27 @@ impl RemoteTracker {
             if signal.kind == TaskOperatorSignalKind::Update || !seen.insert(signal.id.clone()) {
                 continue;
             }
-            self.resolve_signal_comment(report, &signal.id, events)
+            self.mark_signal_comment(report, &signal.id, events, true)
                 .await;
+        }
+    }
+
+    /// Say the task is running again, unless the operator has already ended the
+    /// issue: an issue nobody has moved since is the one this machine may write to.
+    async fn say_task_is_running(&self, report: &IssueReport) {
+        if self.is_settled(&report.issue_id) {
+            return;
+        }
+        if let Err(error) = self
+            .config
+            .automation
+            .status(
+                &self.issue_reference(&report.issue_id),
+                TrackerStatus::InProgress,
+            )
+            .await
+        {
+            tracing::warn!(issue = %report.issue_id, %error, "could not say the task is running again");
         }
     }
 

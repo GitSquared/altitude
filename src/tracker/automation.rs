@@ -479,6 +479,14 @@ impl LinearAutomation {
         mutation_succeeded(&data, "commentResolve").map(|_| ())
     }
 
+    /// Reopen a thread, so the tracker and this machine agree that it is waiting.
+    pub async fn reopen_comment(&self, comment_id: &str) -> Result<(), TrackerError> {
+        let data = self
+            .graphql(COMMENT_UNRESOLVE_MUTATION, json!({ "id": comment_id }))
+            .await?;
+        mutation_succeeded(&data, "commentUnresolve").map(|_| ())
+    }
+
     /// Add one reaction to a comment, optionally under a stable id so a retry is
     /// the same reaction rather than a second one.
     pub async fn react_to_comment(

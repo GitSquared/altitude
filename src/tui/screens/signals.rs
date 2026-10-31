@@ -25,7 +25,7 @@ use ratatui::{
 use crate::{
     project::Project,
     task::{
-        ProjectProposal, TaskOperatorSignalAuthor, TaskOperatorSignalKind,
+        ProjectProposal, SignalTransition, TaskOperatorSignalAuthor, TaskOperatorSignalKind,
         TaskOperatorSignalThread, TaskPlanStatus,
     },
     tui::{
@@ -159,7 +159,7 @@ impl SignalAction {
             Self::Apply => "apply change",
             Self::Resolve => match (kind, resolved) {
                 (TaskOperatorSignalKind::Update, _) => "resolve",
-                (TaskOperatorSignalKind::Decision, true) => "reopen",
+                (_, true) => "reopen",
                 (TaskOperatorSignalKind::Decision, false) => "acknowledge",
                 _ => "resolve",
             },
@@ -169,7 +169,14 @@ impl SignalAction {
 
 pub fn primary_action(thread: &TaskOperatorSignalThread) -> Option<SignalAction> {
     if thread.is_resolved() {
-        return (thread.kind == TaskOperatorSignalKind::Decision).then_some(SignalAction::Resolve);
+        // A closed log stays closed; a question or a decision can be opened again
+        // by the person who closed it, and reopening is what puts it back in front
+        // of the agent.
+        return matches!(
+            thread.kind,
+            TaskOperatorSignalKind::Decision | TaskOperatorSignalKind::Blocked
+        )
+        .then_some(SignalAction::Resolve);
     }
     // A blocked thread that carries a change is answered by making it: the
     // operator's other option, replying, is still there beside it.
@@ -617,19 +624,6 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
         app.signal_message_cursor
             .min(thread.messages.len().saturating_sub(1)),
     );
-    // A resolution is part of the conversation, not a message: it follows the
-    // last card as a quiet line rather than another bordered block.
-    let status = thread.is_resolved().then(|| {
-        let at = thread.resolved_at_ms.unwrap_or(thread.last_raised_at_ms);
-        Line::styled(
-            format!(
-                "✓ resolved by {} · {}",
-                who(thread.resolved_by, &agent),
-                ago(at, now)
-            ),
-            palette::muted(),
-        )
-    });
     let working = app.signal_agent_working();
     let project = app.signal_task_project();
     let conversation = draw_messages(
@@ -640,7 +634,6 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
             project: project.as_ref(),
             agent: &agent,
             selected: selected_message,
-            status,
             working,
             tick: app.animation_tick(),
         },
@@ -715,7 +708,6 @@ struct Conversation<'a> {
     project: Option<&'a Project>,
     agent: &'a str,
     selected: Option<usize>,
-    status: Option<Line<'static>>,
     working: bool,
     tick: Option<usize>,
 }
@@ -832,7 +824,6 @@ fn draw_messages(
         project,
         agent,
         selected,
-        status,
         working,
         tick,
     } = conversation;
@@ -850,18 +841,28 @@ fn draw_messages(
         title: "proposed change",
         lines: proposal_lines(proposal, project, usize::from(width.saturating_sub(6))),
     });
-    let mut rows = Vec::with_capacity(thread.messages.len());
+    // A close or a reopen is part of the conversation, not a message: it sits
+    // between the cards at the point it happened, as a quiet line.
+    let entries = conversation_entries(thread);
+    let mut rows = vec![(0u16, 0u16); thread.messages.len()];
+    let mut layout: Vec<(Entry, u16, u16)> = Vec::with_capacity(entries.len());
     let mut cursor = 0u32;
-    for (index, message) in thread.messages.iter().enumerate() {
-        let nested = proposed.as_ref().filter(|_| Some(index) == last_agent);
-        let height = card::height(width, &message.body, nested);
-        rows.push((u16::try_from(cursor).unwrap_or(u16::MAX), height));
-        // A blank row after every card, which is what makes the last card's
-        // following line sit a line below it.
+    for entry in entries {
+        let height = match entry {
+            Entry::Message(index) => {
+                let nested = proposed.as_ref().filter(|_| Some(index) == last_agent);
+                let height = card::height(width, &thread.messages[index].body, nested);
+                rows[index] = (u16::try_from(cursor).unwrap_or(u16::MAX), height);
+                height
+            }
+            Entry::Transition(_) => 1,
+        };
+        layout.push((entry, u16::try_from(cursor).unwrap_or(u16::MAX), height));
+        // A blank row after every entry, which is what makes the line following a
+        // card sit a line below it.
         cursor = cursor.saturating_add(u32::from(height)).saturating_add(1);
     }
-    let tail = status.is_some() || working;
-    let content = if tail {
+    let content = if working {
         cursor.saturating_add(1)
     } else {
         cursor.saturating_sub(1)
@@ -878,12 +879,11 @@ fn draw_messages(
     let viewport_top = i32::from(area.y);
     let viewport_bottom = i32::from(area.bottom());
     let mut hitboxes = Vec::new();
-    for (index, message) in thread.messages.iter().enumerate() {
-        let (top, height) = rows[index];
-        let card_top = i32::from(area.y) + i32::from(top) - i32::from(offset);
-        let card_bottom = card_top + i32::from(height);
-        let visible_top = card_top.max(viewport_top);
-        let visible_bottom = card_bottom.min(viewport_bottom);
+    for (entry, top, height) in layout {
+        let entry_top = i32::from(area.y) + i32::from(top) - i32::from(offset);
+        let entry_bottom = entry_top + i32::from(height);
+        let visible_top = entry_top.max(viewport_top);
+        let visible_bottom = entry_bottom.min(viewport_bottom);
         if visible_bottom <= visible_top {
             continue;
         }
@@ -892,6 +892,16 @@ fn draw_messages(
             height: u16::try_from(visible_bottom - visible_top).unwrap_or(0),
             ..area
         };
+        let Entry::Message(index) = entry else {
+            if let Entry::Transition(transition) = entry {
+                frame.render_widget(
+                    Paragraph::new(transition_line(transition, agent, now)),
+                    visible,
+                );
+            }
+            continue;
+        };
+        let message = &thread.messages[index];
         let from_operator = message.author == TaskOperatorSignalAuthor::Operator;
         let tick = from_operator.then(|| {
             if last_agent.is_some_and(|agent| agent > index) {
@@ -906,7 +916,7 @@ fn draw_messages(
             frame,
             visible,
             height,
-            u16::try_from(visible_top - card_top).unwrap_or(0),
+            u16::try_from(visible_top - entry_top).unwrap_or(0),
             &card::Message {
                 author: if from_operator { "you" } else { agent },
                 when: &ago(message.at_ms, now),
@@ -926,18 +936,16 @@ fn draw_messages(
         hitboxes.push((visible, index));
     }
 
-    let line_top =
-        i32::from(area.y) + i32::try_from(cursor).unwrap_or(i32::MAX) - i32::from(offset);
-    if tail && line_top >= viewport_top && line_top < viewport_bottom {
-        let line = Rect {
-            x: area.x.saturating_add(1),
-            y: u16::try_from(line_top).unwrap_or(0),
-            width: area.width.saturating_sub(2),
-            height: 1,
-        };
-        if let Some(status) = status {
-            frame.render_widget(Paragraph::new(status), line);
-        } else if working {
+    if working {
+        let line_top =
+            i32::from(area.y) + i32::try_from(cursor).unwrap_or(i32::MAX) - i32::from(offset);
+        if line_top >= viewport_top && line_top < viewport_bottom {
+            let line = Rect {
+                x: area.x.saturating_add(1),
+                y: u16::try_from(line_top).unwrap_or(0),
+                width: area.width.saturating_sub(2),
+                height: 1,
+            };
             frame.render_widget(
                 Paragraph::new(Line::from(shimmer(&format!("{agent} is working…"), tick))),
                 line,
@@ -949,6 +957,46 @@ fn draw_messages(
         rows,
         scroll_max,
     }
+}
+
+/// One entry of a conversation: what was said, or the thread being closed or
+/// reopened between two things said.
+#[derive(Clone, Copy)]
+enum Entry {
+    Message(usize),
+    Transition(SignalTransition),
+}
+
+/// The thread's messages and its closes in the order they happened.
+fn conversation_entries(thread: &TaskOperatorSignalThread) -> Vec<Entry> {
+    let mut entries: Vec<(i64, Entry)> = thread
+        .messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| (message.at_ms, Entry::Message(index)))
+        .chain(
+            thread
+                .transitions
+                .iter()
+                .map(|transition| (transition.at_ms, Entry::Transition(*transition))),
+        )
+        .collect();
+    entries.sort_by_key(|(at_ms, _)| *at_ms);
+    entries.into_iter().map(|(_, entry)| entry).collect()
+}
+
+/// A close or a reopen, as the conversation shows it.
+fn transition_line(transition: SignalTransition, agent: &str, now: i64) -> Line<'static> {
+    let who = who(Some(transition.by), agent);
+    let what = if transition.resolved {
+        format!("✓ resolved by {who}")
+    } else {
+        format!("↺ reopened by {who}")
+    };
+    Line::styled(
+        format!(" {what} · {}", ago(transition.at_ms, now)),
+        palette::muted(),
+    )
 }
 
 /// The reply being written, where the conversation is, rather than in a box over

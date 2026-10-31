@@ -6837,7 +6837,9 @@ impl App {
             SignalAction::Resolve => {
                 if !matches!(
                     thread.kind,
-                    TaskOperatorSignalKind::Update | TaskOperatorSignalKind::Decision
+                    TaskOperatorSignalKind::Update
+                        | TaskOperatorSignalKind::Decision
+                        | TaskOperatorSignalKind::Blocked
                 ) {
                     return;
                 }
