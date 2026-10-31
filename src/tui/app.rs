@@ -58,7 +58,7 @@ use crate::{
 
 use super::background::terrain::Terrain;
 use super::links::Link;
-use super::widgets::{alert::Alert, list};
+use super::widgets::{alert::Alert, list, progress};
 use popups::confirm::PendingConfirm;
 use popups::identity::{
     GitIdentityDecision, GitIdentitySetup, IdentityChoice, IdentitySetup, RenameDecision,
@@ -391,8 +391,8 @@ impl TransferView {
         true
     }
 
-    fn progress(&self) -> super::widgets::progress::Progress<'_> {
-        super::widgets::progress::Progress {
+    fn progress(&self) -> progress::Progress<'_> {
+        progress::Progress {
             title: &self.title,
             label: &self.label,
             stage: if self.is_stopping {
@@ -400,9 +400,17 @@ impl TransferView {
             } else {
                 &self.update.stage
             },
-            done: self.update.done,
-            total: self.update.total,
-            rate: self.rate,
+            detail: match self.update.unit {
+                transfer::Unit::Bytes => progress::Detail::Bytes {
+                    done: self.update.done,
+                    total: self.update.total,
+                    rate: self.rate,
+                },
+                transfer::Unit::Files => progress::Detail::Files {
+                    done: self.update.done,
+                    total: self.update.total,
+                },
+            },
         }
     }
 }
@@ -1048,7 +1056,20 @@ impl App {
     /// place that answers where work goes. A machine that is configured but not
     /// answering is a reason to say so, not to fall back to this one.
     fn project_machine(&self, project: &Project) -> Result<Option<String>, String> {
-        let Some(address) = &project.host else {
+        // The machine is the operator's setting for the project, not a fact the
+        // task carries. A task taken over from a remote was built with that
+        // machine's copy of the project, which names no machine at all, because a
+        // remote does not name itself — so the setting decides and the record is
+        // the fallback.
+        let setting = self
+            .projects()
+            .into_iter()
+            .find(|held| held.id == project.id);
+        let Some(address) = setting
+            .as_ref()
+            .and_then(|held| held.host.as_ref())
+            .or(project.host.as_ref())
+        else {
             return Ok(None);
         };
         match self

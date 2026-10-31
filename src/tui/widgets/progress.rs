@@ -21,26 +21,44 @@ const WIDTH: u16 = 62;
 pub struct Progress<'a> {
     pub title: &'a str,
     pub label: &'a str,
-    /// What the transfer is waiting on. Empty while bytes are moving, when the
+    /// What the transfer is waiting on. Empty while something is moving, when the
     /// numbers say it instead.
     pub stage: &'a str,
-    /// Bytes landed, and the whole of them. Equal while there is nothing to
-    /// count yet, which is what makes the bar indeterminate.
-    pub done: u64,
-    pub total: u64,
-    pub rate: Option<f64>,
+    pub detail: Detail,
+}
+
+/// What this part of the wait counts.
+pub enum Detail {
+    /// Bytes between machines: what a link moves, with a rate and an estimate.
+    Bytes {
+        done: u64,
+        total: u64,
+        rate: Option<f64>,
+    },
+    /// Files between a machine and a sandbox: what a task is made of.
+    Files { done: u64, total: u64 },
+}
+
+impl Detail {
+    fn totals(&self) -> (u64, u64) {
+        match self {
+            Self::Bytes { done, total, .. } | Self::Files { done, total } => (*done, *total),
+        }
+    }
 }
 
 impl Progress<'_> {
     fn has_total(&self) -> bool {
-        self.total > 0 && self.done <= self.total
+        let (done, total) = self.detail.totals();
+        total > 0 && done <= total
     }
 
     fn percent(&self) -> u16 {
-        if self.total == 0 {
+        let (done, total) = self.detail.totals();
+        if total == 0 {
             return 0;
         }
-        ((self.done.min(self.total) * 100) / self.total) as u16
+        ((done.min(total) * 100) / total) as u16
     }
 }
 
@@ -90,42 +108,57 @@ pub fn draw(frame: &mut Frame, area: Rect, progress: &Progress<'_>, tick: Option
         return popup;
     }
     draw_bar(frame, rows[2], progress);
-    let waiting = !progress.stage.is_empty();
-    let detail = Rect {
-        height: 1,
-        ..rows[4]
-    };
-    if waiting {
-        // A wait inside a transfer keeps the bar where it got to, and says what
-        // it is waiting for where the numbers would be.
-        frame.render_widget(
-            Paragraph::new(Line::from_iter(shimmer(progress.stage, tick))),
-            detail,
-        );
-    } else {
-        let mut numbers = format!("{} of {}", amount(progress.done), amount(progress.total));
-        if let Some(rate) = progress.rate.filter(|rate| *rate > 0.0) {
+    // What is being counted, and what it is waiting on if it is waiting on
+    // anything: a counted bar does not need the phase word instead of its numbers.
+    let mut detail = match progress.detail {
+        Detail::Bytes {
+            done,
+            total,
+            rate: Some(rate),
+        } if rate > 0.0 => {
+            let mut numbers = format!("{} of {}", amount(done), amount(total));
             numbers.push_str(&format!(" · {}/s", amount(rate as u64)));
-            if let Some(left) = remaining(progress.total - progress.done, rate) {
+            if let Some(left) = remaining(total.saturating_sub(done), rate) {
                 numbers.push_str(&format!(" · {left} left"));
             }
+            numbers
         }
-        frame.render_widget(
-            Paragraph::new(Line::styled(numbers, palette::muted())),
-            detail,
-        );
+        Detail::Bytes { done, total, .. } => format!("{} of {}", amount(done), amount(total)),
+        Detail::Files { done, total } => format!("{done} of {total} files"),
+    };
+    if !progress.stage.is_empty() {
+        detail.push_str(&format!(" · {}", progress.stage));
     }
+    frame.render_widget(
+        Paragraph::new(Line::styled(detail, palette::muted())),
+        Rect {
+            height: 1,
+            ..rows[4]
+        },
+    );
     popup
 }
 
+/// The bar itself, filled to an eighth of a cell.
+///
+/// A bar that only moves once per character looks frozen when the thing it is
+/// counting is slow, which is exactly when an operator is watching it.
 fn draw_bar(frame: &mut Frame, area: Rect, progress: &Progress<'_>) {
+    const PARTIAL: [&str; 8] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
     let percent = format!("{:>4}%", progress.percent());
     // A space between the bar and the numbers, and the bar is what is left.
     let bar_width = usize::from(area.width).saturating_sub(percent.chars().count() + 1);
-    let filled = bar_width * usize::from(progress.percent()) / 100;
+    let (done, total) = progress.detail.totals();
+    let eighths = (bar_width as u64 * 8 * done.min(total))
+        .checked_div(total)
+        .unwrap_or(0);
+    let filled = usize::try_from(eighths / 8).unwrap_or(0).min(bar_width);
+    let part = usize::try_from(eighths % 8).unwrap_or(0);
+    let hollow = bar_width.saturating_sub(filled + usize::from(part > 0));
     let line = Line::from(vec![
         Span::styled("█".repeat(filled), palette::accent()),
-        Span::styled("░".repeat(bar_width - filled), palette::backdrop()),
+        Span::styled(PARTIAL[part].to_owned(), palette::accent()),
+        Span::styled("░".repeat(hollow), palette::backdrop()),
         Span::raw(" "),
         Span::styled(percent, palette::primary()),
     ]);

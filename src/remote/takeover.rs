@@ -56,7 +56,15 @@ where
         let is_landed = history.iter().any(|(_, event)| matches!(event,
             TaskHistoryEvent::TransferLanded { transfer_id, .. } if transfer_id == &handover.transfer_id));
         if !is_landed {
-            complete_landing(&peer, &handover.transfer_id, client, event_loop, &task).await?;
+            complete_landing(
+                &peer,
+                &handover.transfer_id,
+                client,
+                event_loop,
+                &task,
+                transfer,
+            )
+            .await?;
         }
         return Ok(task.id);
     }
@@ -177,8 +185,15 @@ where
         })
         .await
         .map_err(|e| e.to_string())?;
-    if let Err(error) =
-        complete_landing(peer, &handover.transfer_id, client, event_loop, &task).await
+    if let Err(error) = complete_landing(
+        peer,
+        &handover.transfer_id,
+        client,
+        event_loop,
+        &task,
+        transfer,
+    )
+    .await
     {
         // Nothing has been confirmed, so the source still owns this work: what
         // arrived here is a copy that would be a second task on the same issue.
@@ -210,12 +225,18 @@ async fn complete_landing<E>(
     client: &LinkClient,
     event_loop: &TaskEventLoop<E>,
     task: &Task,
+    transfer: &Transfer,
 ) -> Result<(), String>
 where
     E: IsolationEngine + Clone + 'static,
 {
     event_loop
         .verify_landing(task.clone())
+        .await
+        .map_err(|e| e.to_string())?;
+    transfer.waiting("putting the files in…");
+    event_loop
+        .deliver_arrivals(task, transfer)
         .await
         .map_err(|e| e.to_string())?;
     client

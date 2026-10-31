@@ -951,6 +951,34 @@ where
         Ok(())
     }
 
+    /// Put the files a task arrived with into the sandbox it now has.
+    ///
+    /// Called once the task has a sandbox and before it is allowed to run, so the
+    /// first turn finds its own work rather than a fresh clone — and watched, since
+    /// it is the operator's last wait in a take over.
+    pub async fn deliver_arrivals(
+        &self,
+        task: &Task,
+        progress: &dyn FileTransferSink,
+    ) -> Result<(), TaskServiceError> {
+        let owner = task.operator_id().ok_or(TaskServiceError::Task(
+            super::TaskError::OperationRejected("the task records no operator to deliver for"),
+        ))?;
+        let isolation = self
+            .service
+            .isolation
+            .for_operator(owner)
+            .map_err(TaskServiceError::Isolation)?;
+        let sandbox_id = task
+            .facts
+            .sandbox_id
+            .clone()
+            .ok_or(TaskServiceError::Task(super::TaskError::MissingSandbox))?;
+        self.service
+            .deliver_arrivals(&isolation, task, &sandbox_id, progress)
+            .await
+    }
+
     pub async fn relinquish(
         &self,
         task: Task,

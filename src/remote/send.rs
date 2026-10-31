@@ -26,7 +26,7 @@ use crate::isolation::private_directory;
 
 use crate::{
     config::{Config, DEFAULT_PORT},
-    isolation::{IsolationEngine, MicrosandboxIsolation},
+    isolation::{IsolationEngine, MicrosandboxIsolation, UnwatchedFiles},
     remote::{
         ConfigBundle, ConfigPush, Handover, HandoverRecord, LinkClient, RemoteKeyStatus,
         RemoteKeys, Transfer, TransferArchive, TransferPart, meet,
@@ -101,7 +101,18 @@ where
     let project = task
         .project()
         .ok_or_else(|| "that task has no recorded project".to_owned())?;
-    if project.host.as_deref() != Some(address) {
+    // The machine a project runs on is the operator's setting, not a fact a task
+    // carries: a task taken over from a remote was built with that machine's copy
+    // of the project, which names no machine at all because a remote does not name
+    // itself. So the setting decides, and the record is only the fallback.
+    let setting = config
+        .load_or_create_settings()
+        .ok()
+        .and_then(|settings| settings.settings().project(&project.id).cloned());
+    let machine = setting
+        .and_then(|project| project.host)
+        .or_else(|| project.host.clone());
+    if machine.as_deref() != Some(address) {
         return Err(format!(
             "{address} is not this project's machine; set it in Settings → Projects to send work there"
         ));
@@ -135,11 +146,10 @@ where
         ));
     }
 
-    // Packing is the first wait, and it has nothing to count: the archives do not
-    // exist until it finishes.
     transfer.waiting("collecting the working files…");
     let handover =
-        super::serve::export_task(config, event_loop, task_id, &peer.id.to_string()).await?;
+        super::serve::export_task(config, event_loop, task_id, &peer.id.to_string(), transfer)
+            .await?;
     let directory = transfer_directory(config, &handover.transfer_id)?;
     // Written before a single byte travels: a client that restarts after the
     // source committed but before the recipient acknowledged needs to know where
@@ -459,6 +469,10 @@ impl IncomingTransfers {
             .map_err(message)?;
         self.tasks
             .verify_landing(task.clone())
+            .await
+            .map_err(message)?;
+        self.tasks
+            .deliver_arrivals(&task, &UnwatchedFiles)
             .await
             .map_err(message)?;
         Ok(task.id)

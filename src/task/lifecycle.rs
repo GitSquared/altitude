@@ -4,8 +4,8 @@ use crate::{
     agent::{AgentKind, mcp},
     config::InstallationIdentity,
     isolation::{
-        CommandEvent, CommandSession, IsolationEngine, SandboxOptions, UnwatchedFiles, VsockRoute,
-        guest_absolute, mounts,
+        CommandEvent, CommandSession, FileTransferSink, IsolationEngine, SandboxOptions,
+        VsockRoute, guest_absolute, mounts,
     },
     project::Project,
     vcs::VcsProviderKind,
@@ -280,7 +280,6 @@ where
                     .await
                     .map_err(TaskServiceError::Task)?
                 {
-                    self.place_arrivals(&isolation, &task, &sandbox_id).await;
                     Ok(task)
                 } else {
                     self.release_resources(&task).await?;
@@ -302,10 +301,16 @@ where
     /// Before anything runs in it, and through the sandbox's own filesystem
     /// channel: what a task brought is a tree the agent left, not a copy of its
     /// bytes. Nothing waits if there is nothing to put there.
-    async fn place_arrivals(&self, isolation: &E, task: &Task, sandbox_id: &str) {
+    pub(super) async fn deliver_arrivals(
+        &self,
+        isolation: &E,
+        task: &Task,
+        sandbox_id: &str,
+        progress: &dyn FileTransferSink,
+    ) -> Result<(), TaskServiceError> {
         let arrivals = self.arrivals_dir(&task.id);
         if !arrivals.is_dir() {
-            return;
+            return Ok(());
         }
         let checkout = task
             .project()
@@ -316,7 +321,7 @@ where
             && work.is_dir()
         {
             match isolation
-                .deliver_files(sandbox_id.to_owned(), work, checkout, &UnwatchedFiles)
+                .deliver_files(sandbox_id.to_owned(), work, checkout, progress)
                 .await
             {
                 Ok(tally) => tracing::info!(
@@ -347,6 +352,7 @@ where
             }
         }
         let _ = fs::remove_dir_all(&arrivals);
+        Ok(())
     }
 
     pub async fn finish(

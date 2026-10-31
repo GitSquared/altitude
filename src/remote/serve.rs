@@ -18,7 +18,7 @@ use std::{
 };
 
 use crate::{
-    isolation::UnwatchedFiles,
+    isolation::{FileTransferSink, UnwatchedFiles},
     task::{TaskExecutionPauseReason, TaskExecutionStatus},
     vcs::now_ms,
     version::VERSION,
@@ -371,7 +371,14 @@ impl TaskHost for OwnTasks {
             {
                 return Err("that task belongs to another operator".into());
             }
-            let handover = export_task(&config, &tasks, &task_id, &peer.to_string()).await?;
+            let handover = export_task(
+                &config,
+                &tasks,
+                &task_id,
+                &peer.to_string(),
+                &UnwatchedFiles,
+            )
+            .await?;
             // Packaging is done, so the wait for the first piece starts now rather
             // than from when the task was staged.
             activity
@@ -1126,6 +1133,7 @@ async fn bundle_task_files<E>(
     tasks: &TaskEventLoop<E>,
     task: &Task,
     directory: &Path,
+    progress: &dyn FileTransferSink,
 ) -> Result<(TransferArchive, TransferArchive), String>
 where
     E: IsolationEngine + Clone + 'static,
@@ -1134,7 +1142,7 @@ where
     let _ = fs::remove_dir_all(&staging);
     fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
     tasks
-        .pack_task_files(task, &staging, &UnwatchedFiles)
+        .pack_task_files(task, &staging, progress)
         .await
         .map_err(|error| error.to_string())?;
     let empty = || TransferArchive {
@@ -1684,6 +1692,7 @@ pub(super) async fn export_task<E>(
     tasks: &TaskEventLoop<E>,
     task_id: &str,
     recipient: &str,
+    progress: &dyn FileTransferSink,
 ) -> Result<Handover, String>
 where
     E: IsolationEngine + Clone + 'static,
@@ -1783,7 +1792,7 @@ where
     if history.len > super::protocol::MAX_BLOB_BYTES {
         return Err("task history exceeds the transfer limit".into());
     }
-    let (work, transcript) = bundle_task_files(tasks, &stopped, &directory).await?;
+    let (work, transcript) = bundle_task_files(tasks, &stopped, &directory, progress).await?;
     let handover = Handover {
         task_id: task_id.to_owned(),
         transfer_id,
