@@ -390,7 +390,13 @@ impl RemoteTracker {
             }
         };
         for reference in delegated {
-            if self.report_for_issue(&reference.id).is_some() {
+            // A finished report is the last task on that issue, not this
+            // delegation: an issue delegated again after its work ended is work
+            // that nothing is doing.
+            if self
+                .report_for_issue(&reference.id)
+                .is_some_and(|report| !report.finished)
+            {
                 continue;
             }
             if self.taken_over(&reference.id, host).await {
