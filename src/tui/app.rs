@@ -35,8 +35,8 @@ use crate::{
         transfer::TransferUpdate,
     },
     task::{
-        Task, TaskEventLoop, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
-        TaskExecutionUpdate, TaskOperatorSignalAuthor, TaskOperatorSignalKind,
+        SignalTransition, Task, TaskEventLoop, TaskExecutionMode, TaskExecutionPauseReason,
+        TaskExecutionStatus, TaskExecutionUpdate, TaskOperatorSignalAuthor, TaskOperatorSignalKind,
         TaskOperatorSignalMessage, TaskOperatorSignalThread, TaskPlanStep, TaskService,
         TaskServiceError,
     },
@@ -5669,9 +5669,17 @@ impl App {
             .iter_mut()
             .find(|thread| thread.id == signal_id)
         {
+            let at_ms = chrono::Utc::now().timestamp_millis();
             thread.resolved = resolved;
             thread.resolved_by = resolved.then_some(TaskOperatorSignalAuthor::Operator);
-            thread.resolved_at_ms = resolved.then(|| chrono::Utc::now().timestamp_millis());
+            thread.resolved_at_ms = resolved.then_some(at_ms);
+            // The line belongs in the conversation without waiting for the next
+            // read: this is what the operator just did.
+            thread.transitions.push(SignalTransition {
+                at_ms,
+                resolved,
+                by: TaskOperatorSignalAuthor::Operator,
+            });
         }
         self.apply_signal_view();
     }
