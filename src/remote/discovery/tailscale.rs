@@ -20,7 +20,7 @@ use tokio::{process::Command, sync::mpsc, time};
 use super::{DiscoveredRemote, DiscoveryEvent, Source, SourceEvent, clean, format_address};
 use crate::{
     config::DEFAULT_PORT,
-    remote::{announce, protocol::LINK_ALPN},
+    remote::{announce, compat::Compatibility, protocol::LINK_ALPN},
 };
 
 const STATUS_LIMIT: Duration = Duration::from_secs(5);
@@ -209,5 +209,6 @@ async fn discover_remote(candidate: Candidate, own_id: EndpointId) -> Option<Dis
         label: clean(&announcement.label, 64),
         version: clean(&announcement.version, 32),
         address: candidate.wrote,
+        compatibility: Compatibility::of(&announcement.version),
     })
 }
