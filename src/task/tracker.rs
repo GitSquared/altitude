@@ -124,12 +124,19 @@ where
         requester: Option<InstallationIdentity>,
     ) -> Result<Task, TaskServiceError> {
         let intent = issue.intent();
+        let title = issue.issue.title.trim().to_owned();
         let operator = requester.unwrap_or_else(|| self.identity.clone());
+        // The issue is what the work is called. A list that names a linked task by
+        // its id is a list of file names, and the operator asked for the issue.
+        let mut arrival = vec![TaskHistoryEvent::TrackerIssueBound { issue }];
+        if !title.is_empty() {
+            arrival.push(TaskHistoryEvent::TaskTitleSet { title });
+        }
         let task = self
             .adopt(
                 self.draft(intent, project, agent, None, Some(operator.clone())),
                 None,
-                &[TaskHistoryEvent::TrackerIssueBound { issue }],
+                &arrival,
             )
             .await?;
         if task.operator_id() != Some(operator.id.as_str()) {
