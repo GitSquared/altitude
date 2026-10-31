@@ -267,6 +267,8 @@ pub(crate) fn mount_git_cache(options: &mut SandboxOptions, cache_dir: &Path) {
             options.mounts.push(SandboxMount {
                 host_path,
                 guest_path: git_cache::GUEST_PATH.to_owned(),
+                readonly: false,
+                noexec: true,
             });
             options.environment.push((
                 git_cache::ENVIRONMENT.to_owned(),
@@ -332,6 +334,8 @@ pub(crate) fn trust_host_roots(options: &mut SandboxOptions, data_dir: &Path) ->
     options.mounts.push(SandboxMount {
         host_path: staged.clone(),
         guest_path: guest.to_owned(),
+        readonly: true,
+        noexec: true,
     });
     options
         .environment
@@ -361,6 +365,13 @@ impl SandboxOptions {
 pub struct SandboxMount {
     pub host_path: PathBuf,
     pub guest_path: String,
+    /// A mount the sandbox may read but not write. Used for data this machine
+    /// supplies rather than state a task keeps.
+    pub readonly: bool,
+    /// Nothing on this mount may be executed directly. A cache is written by one
+    /// task and read by the next, so it is the one place where a file planted by
+    /// an agent could be run by later work.
+    pub noexec: bool,
 }
 
 pub enum Command {

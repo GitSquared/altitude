@@ -281,6 +281,10 @@ impl SandboxPlan {
                 plan.options.mounts.push(SandboxMount {
                     host_path,
                     guest_path: guest_path.to_string_lossy().into_owned(),
+                    readonly: false,
+                    // The agent writes its own sessions and tokens here, and
+                    // nothing here is a program to run.
+                    noexec: true,
                 });
             }
             for (name, value) in recipe.environment {
@@ -329,6 +333,10 @@ impl SandboxPlan {
             plan.options.mounts.push(SandboxMount {
                 host_path,
                 guest_path: guest_path.to_string_lossy().into_owned(),
+                readonly: false,
+                // A cache is written by one task and read by the next: the place
+                // where a file one agent leaves behind could be run by later work.
+                noexec: true,
             });
         }
         Ok(plan)

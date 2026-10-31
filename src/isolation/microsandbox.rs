@@ -285,8 +285,19 @@ impl MicrosandboxIsolation {
                     restore = restore.disable_network();
                 }
                 for mount in options.mounts {
-                    restore =
-                        restore.volume(mount.guest_path, |volume| volume.bind(mount.host_path));
+                    restore = restore.volume(mount.guest_path, |volume| {
+                        let volume = volume.bind(mount.host_path);
+                        let volume = if mount.noexec {
+                            volume.noexec()
+                        } else {
+                            volume
+                        };
+                        if mount.readonly {
+                            volume.readonly()
+                        } else {
+                            volume
+                        }
+                    });
                 }
                 for route in options.vsock {
                     restore = restore.vsock(route.host_socket, route.guest_port);
@@ -319,8 +330,19 @@ impl MicrosandboxIsolation {
                     builder = builder.disable_network();
                 }
                 for mount in options.mounts {
-                    builder =
-                        builder.volume(mount.guest_path, |volume| volume.bind(mount.host_path));
+                    builder = builder.volume(mount.guest_path, |volume| {
+                        let volume = volume.bind(mount.host_path);
+                        let volume = if mount.noexec {
+                            volume.noexec()
+                        } else {
+                            volume
+                        };
+                        if mount.readonly {
+                            volume.readonly()
+                        } else {
+                            volume
+                        }
+                    });
                 }
                 for route in options.vsock {
                     builder = builder.vsock(route.host_socket, route.guest_port);
@@ -360,7 +382,9 @@ impl MicrosandboxIsolation {
     /// roots is the sandbox there was before, and most of what runs in one does not
     /// need them.
     async fn append_host_roots(&self, id: &str) {
-        let command = "cat /etc/altitude/host-roots.pem >> /etc/ssl/certs/ca-certificates.crt";
+        // The store is not in every image: a base without it would fail an append
+        // that is only a warning, which reads like a broken sandbox.
+        let command = "mkdir -p /etc/ssl/certs && cat /etc/altitude/host-roots.pem >> /etc/ssl/certs/ca-certificates.crt";
         match self.run_to_end(id, command).await {
             Ok((0, _)) => tracing::debug!(sandbox_id = %id, "sandbox trusts this machine's roots"),
             Ok((code, output)) => tracing::warn!(
