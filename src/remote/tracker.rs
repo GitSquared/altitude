@@ -882,6 +882,10 @@ impl RemoteTracker {
         if delegation.state.id != state_id || delegation.state.state_type != "completed" {
             return Ok(());
         }
+        // The operator closed the issue. That is their ending whatever the task is
+        // doing, so it is recorded before anything is decided: an issue nobody has
+        // moved since is the one this machine may then write to.
+        self.settle(&report.issue_id)?;
         let history = host.events(report.task_id.clone()).await?;
         let was_waiting = history
             .iter()
@@ -909,14 +913,6 @@ impl RemoteTracker {
             .iter()
             .find(|signal| signal.kind == TaskOperatorSignalKind::InReview);
         let Some(review) = review else {
-            // The operator closed the issue themselves, without a review to accept.
-            // That is their ending: recording it is what stops this machine from
-            // writing In Progress or In Review over it later.
-            self.mutate(|ledger| {
-                if !ledger.settled_issues.contains(&report.issue_id) {
-                    ledger.settled_issues.push(report.issue_id.clone());
-                }
-            })?;
             return Ok(());
         };
         // The review must already have been waiting when the operator marked the
@@ -1631,11 +1627,7 @@ impl RemoteTracker {
                 .status(&self.issue_reference(&report.issue_id), TrackerStatus::Done)
                 .await
                 .map_err(|error| error.to_string())?;
-            self.mutate(|ledger| {
-                if !ledger.settled_issues.contains(&report.issue_id) {
-                    ledger.settled_issues.push(report.issue_id.clone());
-                }
-            })?;
+            self.settle(&report.issue_id)?;
         }
         // The activity is what the session shows, not the issue's state: a failure
         // to say it must not hold the cursor on an ending that has been written.
@@ -1732,6 +1724,15 @@ impl RemoteTracker {
             .into_iter()
             .find(|login| login.owner == owner)
             .map(|login| login.account.user_id)
+    }
+
+    /// Record that an issue's ending is written, whoever wrote it.
+    fn settle(&self, issue_id: &str) -> Result<(), String> {
+        self.mutate(|ledger| {
+            if !ledger.settled_issues.iter().any(|id| id == issue_id) {
+                ledger.settled_issues.push(issue_id.to_owned());
+            }
+        })
     }
 
     /// Whether this issue's ending has been written, which is what stops a machine
