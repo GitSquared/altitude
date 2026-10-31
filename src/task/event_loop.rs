@@ -884,10 +884,24 @@ where
             )
             .await
             .map(|_| ());
-        // The sandbox was made to be read, so it goes once it has been.
+        // The sandbox was made to be read, so it goes once it has been, and the
+        // task's record says so: a task left believing it has a sandbox that no
+        // longer exists is one that fails the next time anything looks at it.
         let outcome = packed;
         if let Err(error) = isolation.remove(sandbox_id).await {
             tracing::warn!(%error, "could not remove the sandbox a task was packed from");
+        }
+        if let Err(error) = self
+            .service
+            .record(
+                &task.id,
+                &[TaskHistoryEvent::SandboxRemoved {
+                    sandbox_available: false,
+                }],
+            )
+            .await
+        {
+            tracing::warn!(task = %task.id, %error, "could not record that a packed sandbox is gone");
         }
         self.service.release_agent_channel(&task.id);
         outcome
