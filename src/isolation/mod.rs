@@ -130,6 +130,33 @@ impl EnvironmentProgressSink for Unwatched {
     fn report(&self, _progress: EnvironmentProgress) {}
 }
 
+/// How many files have moved, and how much they weigh.
+///
+/// A task's files are counted rather than weighed: what an operator waits for
+/// while work is carried between machines is mostly "how many are left", and the
+/// bytes come along for the estimate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FileTally {
+    pub files: u64,
+    pub bytes: u64,
+}
+
+/// Watches files carried out of, or into, one sandbox.
+pub trait FileTransferSink: Send + Sync {
+    /// What the whole of it is, once known: the walk has finished and the moves
+    /// are about to start.
+    fn counted(&self, whole: FileTally);
+    /// What one step moved, however many files it covered.
+    fn moved(&self, step: FileTally);
+}
+
+pub struct UnwatchedFiles;
+
+impl FileTransferSink for UnwatchedFiles {
+    fn counted(&self, _whole: FileTally) {}
+    fn moved(&self, _step: FileTally) {}
+}
+
 #[derive(Clone, Debug)]
 pub struct BaseSandboxSnapshot {
     pub path: PathBuf,
@@ -559,6 +586,37 @@ pub trait IsolationEngine: Send + Sync {
         id: String,
         path: String,
     ) -> impl Future<Output = Result<bool, IsolationError>> + Send;
+
+    /// Carry the files under `root` out of a sandbox into a host directory.
+    ///
+    /// Through the sandbox's own filesystem channel, one file at a time: nothing
+    /// is executed in the guest and no host directory is shared with it, which is
+    /// what a task's files crossing a machine boundary needs. Paths in `excluded`
+    /// are left behind — a cache is a shortcut, not knowledge.
+    ///
+    /// Modes and symlinks are written as they were found, so what arrives is the
+    /// tree the agent left rather than a copy of its bytes.
+    fn collect_files(
+        &self,
+        id: String,
+        root: String,
+        excluded: Vec<String>,
+        destination: PathBuf,
+        progress: &dyn FileTransferSink,
+    ) -> impl Future<Output = Result<FileTally, IsolationError>> + Send;
+
+    /// Write a host directory into a sandbox, under `root`.
+    ///
+    /// The other half of [`Self::collect_files`], and the same channel: the tree
+    /// a task left behind appears in the guest as it was, so a task that arrives
+    /// finds its work rather than a clone of it.
+    fn deliver_files(
+        &self,
+        id: String,
+        source: PathBuf,
+        root: String,
+        progress: &dyn FileTransferSink,
+    ) -> impl Future<Output = Result<FileTally, IsolationError>> + Send;
 }
 
 pub fn prepare(engine: impl IsolationEngine + 'static) -> watch::Receiver<IsolationStatus> {
