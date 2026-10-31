@@ -53,7 +53,8 @@ const ISSUE_DELEGATION_QUERY: &str = "query IssueDelegation($id: String!) { \
 // the machine finds out what it was asked to do while it was not listening.
 const DELEGATED_ISSUES_QUERY: &str = "query DelegatedIssues($app: ID!) { \
     issues(filter: { delegate: { id: { eq: $app } } }, first: 25) { \
-    nodes { id identifier team { id organization { id } } } } }";
+    nodes { id identifier title url project { name } \
+    team { id key name organization { id } } } } }";
 
 const ISSUE_STATES_QUERY: &str = "query IssueStates($id: String!) { \
     issue(id: $id) { id team { id organization { id } \
