@@ -398,11 +398,17 @@ where
     }
 
     /// The work an issue has right now: the task in play that belongs to one of the
-    /// two delegations named, if any.
+    /// delegations named, if any — or to no delegation at all, when none are named.
     ///
     /// One question, answered from the tasks themselves. Callers bring the
     /// delegation they are asking about, so "is this delegation already being
     /// worked?" and "which task does this issue have?" are the same call.
+    ///
+    /// `tracker_delegation` being absent means "no delegation asked for this work",
+    /// never "unknown": a task linked from the operator's own machine is reported by
+    /// that machine, as its own login, and must never be mistaken for the work a
+    /// delegation is already getting. An unbound task has no issue at all, so every
+    /// question here leaves local work alone.
     pub async fn work_for_issue(
         &self,
         issue_id: &str,
