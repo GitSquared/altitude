@@ -1433,9 +1433,14 @@ where
             // Only the operator can sign a provider in again, so the reviews this
             // owner is holding become theirs.
             Look::GivenUp => {
+                let reason = self
+                    .watchers
+                    .last_failure(owner)
+                    .await
+                    .unwrap_or_else(|| "it did not say".to_owned());
                 for task in &watching {
                     if let Some(deferred) = task.facts.deferred_review.clone() {
-                        self.abandon_review(task, &deferred).await;
+                        self.abandon_review(task, &deferred, &reason).await;
                     }
                 }
                 return;
@@ -1532,13 +1537,14 @@ where
     /// The alternative is a review nobody watches and nobody is told about: the
     /// agent was never woken and the operator was never asked. Only the operator
     /// can sign a provider in again, so the request becomes theirs.
-    async fn abandon_review(&self, task: &Task, deferred: &DeferredReview) {
+    async fn abandon_review(&self, task: &Task, deferred: &DeferredReview, reason: &str) {
         tracing::warn!(
             task_id = %task.id,
             attempts = OBSERVATION_ATTEMPTS,
+            %reason,
             "giving up on linked contributions"
         );
-        self.deliver_review(task, unreadable(&deferred.signal))
+        self.deliver_review(task, unreadable(&deferred.signal, reason))
             .await;
     }
 

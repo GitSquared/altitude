@@ -130,18 +130,29 @@ where
             .await
             .map_err(TaskServiceError::Isolation)?;
         let mut output = String::new();
+        // What it said when it failed is the only thing that explains why: a
+        // provider that refuses without a reason leaves the operator guessing.
+        let mut complaint = String::new();
         while let Some(event) = session.events.recv().await {
             match event {
                 CommandEvent::Output {
                     stream: OutputStream::Stdout,
                     bytes,
                 } => output.push_str(&String::from_utf8_lossy(&bytes)),
-                CommandEvent::Output { .. } => {}
+                CommandEvent::Output {
+                    stream: OutputStream::Stderr,
+                    bytes,
+                } => complaint.push_str(&String::from_utf8_lossy(&bytes)),
                 CommandEvent::Exited(0) => return Ok(output),
                 CommandEvent::Exited(code) => {
-                    return Err(TaskServiceError::Isolation(IsolationError::new(format!(
-                        "observation command exited with code {code}"
-                    ))));
+                    let said = complaint.trim();
+                    return Err(TaskServiceError::Isolation(IsolationError::new(
+                        if said.is_empty() {
+                            format!("observation command exited with code {code}")
+                        } else {
+                            format!("observation command exited with code {code}: {said}")
+                        },
+                    )));
                 }
                 CommandEvent::Failed(error) => {
                     return Err(TaskServiceError::Isolation(IsolationError::new(error)));

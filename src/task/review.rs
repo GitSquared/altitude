@@ -46,6 +46,8 @@ pub(super) const OBSERVATION_ATTEMPTS: u32 = 5;
 
 pub(super) enum Look {
     Read(Vec<ContributionObservation>),
+    /// The provider could not be read. Why is logged where it failed, and kept
+    /// for the message the operator gets if the machine gives up.
     Unreadable,
     /// The provider was not asked, because the host is stopping or because its
     /// recent reads failed and it is waiting out a backoff.
@@ -74,6 +76,9 @@ struct Owner {
     sandbox: Option<String>,
     failures: u32,
     retry_at: Option<Instant>,
+    /// What the provider said the last time it could not be read, which is what
+    /// the operator is told when the machine stops waiting on it.
+    last_failure: Option<String>,
 }
 
 impl<E> Watchers<E>
@@ -126,19 +131,28 @@ where
         };
         let read = match &sandbox {
             Some(id) => self.read(id, contributions).await,
-            None => None,
+            None => Err("no sandbox could be made to ask in".to_owned()),
         };
         match read {
-            Some(observations) => {
+            Ok(observations) => {
                 entry.failures = 0;
                 entry.retry_at = None;
                 Look::Read(observations)
             }
-            None => {
-                self.failed(owner, entry).await;
+            Err(reason) => {
+                self.failed(owner, entry, reason).await;
                 Look::Unreadable
             }
         }
+    }
+
+    /// What the provider last said when it could not be read.
+    pub(super) async fn last_failure(&self, owner: &str) -> Option<String> {
+        self.owners
+            .lock()
+            .await
+            .get(owner)
+            .and_then(|entry| entry.last_failure.clone())
     }
 
     pub(super) async fn retain(&self, owners: &HashSet<String>) {
@@ -175,12 +189,14 @@ where
     /// a machine made again, which is what a wedged one needs. A login that is
     /// gone is not fixed by that, which is why the attempts are also spaced out,
     /// and why the host eventually gives up on them.
-    async fn failed(&self, owner: &str, entry: &mut Owner) {
+    async fn failed(&self, owner: &str, entry: &mut Owner, reason: String) {
         entry.failures += 1;
         entry.retry_at = Some(Instant::now() + backoff(entry.failures));
+        entry.last_failure = Some(reason.clone());
         tracing::warn!(
             %owner,
             failures = entry.failures,
+            %reason,
             "could not read linked contributions"
         );
         if let Some(id) = entry.sandbox.take() {
@@ -202,7 +218,7 @@ where
         &self,
         sandbox_id: &str,
         contributions: &[CodeContribution],
-    ) -> Option<Vec<ContributionObservation>> {
+    ) -> Result<Vec<ContributionObservation>, String> {
         let mut observations = Vec::with_capacity(contributions.len());
         for batch in ProviderBatch::of(contributions) {
             let command = batch.command();
@@ -211,11 +227,25 @@ where
                     .await
                 {
                     Ok(Ok(read)) => read,
-                    Ok(Err(_)) | Err(_) => return None,
+                    Ok(Err(error)) => return Err(error.to_string()),
+                    Err(_) => {
+                        return Err(format!(
+                            "the provider did not answer within {}s",
+                            READ_TIMEOUT.as_secs()
+                        ));
+                    }
                 };
-            observations.extend(batch.observations(&read)?);
+            // What came back is the provider's words, so a reply this machine
+            // cannot read is quoted rather than summarised as "unreadable".
+            let parsed = batch.observations(&read).ok_or_else(|| {
+                format!(
+                    "the provider's answer was not what this machine expected: {}",
+                    tail(&read, 200)
+                )
+            })?;
+            observations.extend(parsed);
         }
-        Some(observations)
+        Ok(observations)
     }
 
     async fn remove(&self, id: &str) {
@@ -320,13 +350,23 @@ pub(super) fn wake_reason(needing_action: &[String]) -> String {
 ///
 /// The request is the agent's words, so what the host could not do is appended
 /// rather than replacing them.
-pub(super) fn unreadable(signal: &TaskOperatorSignal) -> TaskOperatorSignal {
+pub(super) fn unreadable(signal: &TaskOperatorSignal, reason: &str) -> TaskOperatorSignal {
     let mut signal = signal.clone();
     signal.body = format!(
-        "{}\n\nAltitude could not read this task's pull requests after {OBSERVATION_ATTEMPTS} attempts, so it has stopped waiting on them. The provider's command is most likely signed out on this machine.",
+        "{}\n\nAltitude could not read this task's pull requests after {OBSERVATION_ATTEMPTS} attempts, so it has stopped waiting on them. What the provider said: {reason}",
         signal.body
     );
     signal
+}
+
+/// The end of a long reply, which is where a provider puts what went wrong.
+fn tail(text: &str, limit: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= limit {
+        return trimmed.to_owned();
+    }
+    let skip = trimmed.chars().count() - limit;
+    format!("…{}", trimmed.chars().skip(skip).collect::<String>())
 }
 
 /// The name of an owner's watcher sandbox.
