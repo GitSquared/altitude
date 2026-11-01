@@ -3610,7 +3610,9 @@ impl App {
                     form.move_focus(false)
                 }
                 KeyCode::Enter | KeyCode::Char(' ') if form.focus == Focus::Accept => {
-                    form.accepts_delegated_work = !form.accepts_delegated_work;
+                    if form.has_tracker() {
+                        form.accepts_delegated_work = !form.accepts_delegated_work;
+                    }
                 }
                 // A pill opens its list, the way a pill does everywhere else.
                 // The two whose list is a page of its own are opened before this
@@ -4859,9 +4861,11 @@ impl App {
                 project.instructions = form.instruction_text();
                 let scope = form.scope.value().trim();
                 // A project that accepts the whole account is a binding too, and
-                // says so; one that claims nothing is not.
-                project.tracker =
-                    (!scope.is_empty() || form.accepts_delegated_work).then(|| TrackerBinding {
+                // says so; one that claims nothing is not. A project with no
+                // tracker has nothing to bind, whatever the fields still hold.
+                project.tracker = (form.has_tracker()
+                    && (!scope.is_empty() || form.accepts_delegated_work))
+                    .then(|| TrackerBinding {
                         credential: form.tracker_credential(),
                         scope: (!scope.is_empty()).then(|| scope.to_owned()),
                         accepts_delegated_work: form.accepts_delegated_work,
@@ -6067,11 +6071,9 @@ impl App {
                 })
             });
             let wants_scopes = matches!(key.code, KeyCode::Enter | KeyCode::Char(' '))
-                && self
-                    .panel
-                    .form
-                    .as_ref()
-                    .is_some_and(|form| form.focus == Focus::Scope && form.scopes.is_none())
+                && self.panel.form.as_ref().is_some_and(|form| {
+                    form.focus == Focus::Scope && form.scopes.is_none() && form.has_tracker()
+                })
                 && scope_credential
                     .as_deref()
                     .is_some_and(|id| self.tracker_state_for(id) == TrackerState::Connected);

@@ -242,13 +242,13 @@ impl GetStarted {
     pub fn is_typing(&self) -> bool {
         self.name_editing
             || (self.commits.open && self.commits.takes_text())
-            || self.agent.is_searching()
-            || self.vcs.is_searching()
-            || self.tracker.is_searching()
+            || self.agent.is_filtering()
+            || self.vcs.is_filtering()
+            || self.tracker.is_filtering()
             || self
                 .repositories
                 .as_ref()
-                .is_some_and(|browser| browser.select.is_searching())
+                .is_some_and(|browser| browser.select.is_filtering())
     }
 
     pub fn choose_repository(&mut self, repository: &Repository) {

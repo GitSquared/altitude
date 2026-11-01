@@ -121,8 +121,8 @@ pub fn help_sections() -> Vec<HelpSection> {
                     "Move through the open list, take or close it",
                 ),
                 (
-                    "Letters (five choices or more)",
-                    "Narrow the open list instead of moving in it",
+                    "/ (five choices or more)",
+                    "Filter the open list; esc clears the filter, then closes",
                 ),
                 ("Ctrl-E", "Open the project list"),
                 (
@@ -179,6 +179,10 @@ pub fn help_sections() -> Vec<HelpSection> {
                     "Save a project or remote from wherever the caret is",
                 ),
                 ("← / → (confirmation)", "Switch between cancel and confirm"),
+                (
+                    "/ (five choices or more)",
+                    "Filter the open list instead of moving in it",
+                ),
                 ("j/k · ↓/↑ (send task)", "Choose a remote"),
                 ("s (send task)", "Open Settings if no remote is ready"),
                 ("Enter", "Use the selected button or submit the form"),
