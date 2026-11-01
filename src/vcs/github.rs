@@ -137,13 +137,17 @@ impl VcsProvider for GitHub {
         if number == 0 {
             return None;
         }
-        let repository = format!("{owner}/{repository}").to_ascii_lowercase();
-        let canonical_url = format!("https://{host}/{repository}/pull/{number}");
+        // The name is compared case-insensitively, so the identity is lowercase.
+        // The URL is not: GitHub resolves a `resource(url:)` by its exact owner, so
+        // a link rewritten to lowercase comes back as nothing at all — which reads
+        // as a pull request that does not exist rather than as a case mismatch.
+        let naming = format!("{owner}/{repository}").to_ascii_lowercase();
+        let canonical_url = format!("https://{host}/{owner}/{repository}/pull/{number}");
         Some(CodeContribution {
-            id: canonical_url.clone(),
+            id: canonical_url.to_ascii_lowercase(),
             provider: VcsProviderKind::GitHub,
             host: host.to_owned(),
-            repository,
+            repository: naming,
             reference: number.to_string(),
             url: canonical_url,
         })
