@@ -69,6 +69,7 @@ pub struct Select<T> {
     offers: Vec<Offer<T>>,
     chosen: usize,
     open: bool,
+    filtering: bool,
     query: String,
     at: usize,
     search_from: usize,
@@ -81,6 +82,7 @@ impl<T> Select<T> {
             chosen: chosen.min(offers.len().saturating_sub(1)),
             offers,
             open: false,
+            filtering: false,
             query: String::new(),
             at: 0,
             search_from: SEARCH_FROM,
@@ -155,12 +157,17 @@ impl<T> Select<T> {
         if !self.open {
             return Vec::new();
         }
-        let mut hints = Vec::new();
-        if self.is_searching() {
-            hints.push(chrome::Hint::new("type", "narrow"));
-            hints.push(chrome::Hint::new("↑/↓", "choose"));
-        } else {
-            hints.push(chrome::Hint::new("j/k · ↑/↓", "choose"));
+        if self.filtering {
+            return vec![
+                chrome::Hint::new("type", "narrow"),
+                chrome::Hint::new("↑/↓", "choose"),
+                chrome::Hint::new("enter", "take it"),
+                chrome::Hint::new("esc", "clear"),
+            ];
+        }
+        let mut hints = vec![chrome::Hint::new("j/k · ↑/↓", "choose")];
+        if self.is_searchable() {
+            hints.push(chrome::Hint::new("/", "filter"));
         }
         hints.push(chrome::Hint::new("enter", "take it"));
         hints.push(chrome::Hint::new("esc", "close"));
@@ -171,33 +178,51 @@ impl<T> Select<T> {
         self.open
     }
 
-    pub fn is_searching(&self) -> bool {
-        self.open && self.offers.len() >= self.search_from
+    pub fn is_searchable(&self) -> bool {
+        self.offers.len() >= self.search_from
+    }
+
+    pub fn is_filtering(&self) -> bool {
+        self.open && self.filtering
     }
 
     pub fn open(&mut self) {
         self.open = true;
+        self.filtering = false;
         self.query.clear();
         self.at = self.chosen;
     }
 
     pub fn close(&mut self) {
         self.open = false;
+        self.filtering = false;
         self.query.clear();
         self.at = 0;
+    }
+
+    fn leave_filter(&mut self) {
+        self.filtering = false;
+        self.query.clear();
+        self.at = self.chosen.min(self.offers.len().saturating_sub(1));
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
         if !self.open {
             return false;
         }
-        let searching = self.is_searching();
         let matches = self.matches();
         match key.code {
+            // Escape leaves the filter before it leaves the list, so one press
+            // puts the whole list back and a second closes it.
+            KeyCode::Esc if self.filtering => self.leave_filter(),
             KeyCode::Esc => self.close(),
             // A list that is not being typed at leaves the way everything else
             // does.
-            KeyCode::Char('q') if !searching => self.close(),
+            KeyCode::Char('q') if !self.filtering => self.close(),
+            KeyCode::Char('/') if self.is_searchable() && !self.filtering => {
+                self.filtering = true;
+                self.at = self.at.min(matches.len().saturating_sub(1));
+            }
             KeyCode::Enter => {
                 if let Some(index) = matches.get(self.at)
                     && self.offers[*index].ready
@@ -206,10 +231,16 @@ impl<T> Select<T> {
                     self.close();
                 }
             }
-            KeyCode::Down | KeyCode::Char('j') if !searching => self.step(true, matches.len()),
-            KeyCode::Up | KeyCode::Char('k') if !searching => self.step(false, matches.len()),
-            // Tab is still the way down a list that is being typed at, because
-            // there is no other way to move without leaving a letter behind.
+            // Movement is movement: the vim keys travel until `/` says the list
+            // is being typed at.
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab if !self.filtering => {
+                self.step(true, matches.len());
+            }
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab if !self.filtering => {
+                self.step(false, matches.len());
+            }
+            // The arrows still travel while typing, because a filter that has to
+            // be left before its matches can be read is not a filter.
             KeyCode::Down | KeyCode::Tab => self.step(true, matches.len()),
             KeyCode::Up | KeyCode::BackTab => self.step(false, matches.len()),
             KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -218,7 +249,7 @@ impl<T> Select<T> {
             KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.step(false, matches.len());
             }
-            KeyCode::Backspace if searching => {
+            KeyCode::Backspace if self.filtering => {
                 self.query.pop();
                 self.at = 0;
             }
@@ -226,7 +257,7 @@ impl<T> Select<T> {
             // the delete key do nothing rather than move a caret this list does
             // not have.
             KeyCode::Char(character)
-                if searching
+                if self.filtering
                     && !key
                         .modifiers
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER) =>
@@ -319,7 +350,7 @@ impl<T> Select<T> {
     }
 
     pub fn paste(&mut self, text: &str) {
-        if self.is_searching() {
+        if self.filtering {
             self.query.push_str(&text.replace(['\r', '\n'], " "));
             self.at = 0;
         }
@@ -348,7 +379,7 @@ impl<T> Select<T> {
         if !self.open || area.height == 0 || area.width == 0 {
             return Vec::new();
         }
-        let searching = self.is_searching();
+        let filtering = self.filtering;
         let matches = self.matches();
         let widest = matches
             .iter()
@@ -362,12 +393,12 @@ impl<T> Select<T> {
         let width = (widest + 6)
             .max(self.name.chars().count() + 4)
             .max(usize::from(anchor.width))
-            .max(if searching { 20 } else { 0 })
+            .max(if filtering { 20 } else { 0 })
             .min(usize::from(area.width)) as u16;
         if area.height < 3 {
             return Vec::new();
         }
-        let height = (matches.len() as u16 + 2 + u16::from(searching))
+        let height = (matches.len() as u16 + 2 + u16::from(filtering))
             .max(3)
             .min(area.height);
         let y = if opens_up {
@@ -396,9 +427,9 @@ impl<T> Select<T> {
             return Vec::new();
         }
         let [query_row, list_area] =
-            Layout::vertical([Constraint::Length(u16::from(searching)), Constraint::Min(0)])
+            Layout::vertical([Constraint::Length(u16::from(filtering)), Constraint::Min(0)])
                 .areas(inner);
-        if searching {
+        if filtering {
             // The typed query is marked out from the matches under it, so the
             // first row is not read as what has been typed.
             let typed = format!("› {}", self.query);
