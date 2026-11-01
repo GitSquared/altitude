@@ -1150,7 +1150,7 @@ impl TaskStore {
 
 fn tracker_binding(events: &[TaskHistoryEvent]) -> Option<&IssueReference> {
     events.iter().find_map(|event| match event {
-        TaskHistoryEvent::TrackerIssueBound { issue } => Some(&issue.issue.reference),
+        TaskHistoryEvent::TrackerIssueBound { issue, .. } => Some(&issue.issue.reference),
         _ => None,
     })
 }

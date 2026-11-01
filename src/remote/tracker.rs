@@ -115,11 +115,14 @@ pub trait Host: Send + Sync + 'static {
     /// pushed, and the client does not get to name it. The label is the signed
     /// human name the work belongs to, so a task card reads a person rather than
     /// the peer's key.
+    /// Found a task for `issue`, under the delegation that asked for it when a
+    /// tracker delegation did: the task carries it, so nothing downstream infers it.
     fn start_issue(
         &self,
         peer: EndpointId,
         issue: IssueSnapshot,
         label: String,
+        delegation: Option<String>,
     ) -> super::StartFuture<'_, String>;
     /// Stop a task this machine no longer runs. The reason is kept in the task's
     /// own record, so an ending that happened here can be read here.
@@ -1008,7 +1011,15 @@ impl RemoteTracker {
             .read(&self.issue_reference(issue_id))
             .await
             .map_err(|error| error.to_string())?;
-        let task_id = match host.start_issue(peer, snapshot, label.to_owned()).await {
+        let task_id = match host
+            .start_issue(
+                peer,
+                snapshot,
+                label.to_owned(),
+                Some(session_id.to_owned()),
+            )
+            .await
+        {
             Ok(task_id) => task_id,
             Err(refusal) => {
                 // A remote that cannot start the work needs its operator to push

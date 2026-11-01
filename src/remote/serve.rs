@@ -712,7 +712,7 @@ impl TaskHost for OwnTasks {
                 }
                 super::protocol::TaskOrigin::Issue(issue) => {
                     let task = tasks
-                        .create_issue_for_operator(*issue, project, request.agent, operator)
+                        .create_issue_for_operator(*issue, project, request.agent, operator, None)
                         .await
                         .map_err(|error| error.to_string())?;
                     report_issue_task(tracker.as_deref(), peer, &task).await;
@@ -793,6 +793,7 @@ impl super::tracker::Host for OwnTasks {
         peer: EndpointId,
         issue: IssueSnapshot,
         label: String,
+        delegation: Option<String>,
     ) -> super::StartFuture<'_, String> {
         Box::pin(async move {
             if self.delegation_paused {
@@ -865,6 +866,7 @@ impl super::tracker::Host for OwnTasks {
                         id: owner.clone(),
                         label,
                     },
+                    delegation,
                 )
                 .await
                 .map_err(|error| super::StartRefusal::Unavailable {

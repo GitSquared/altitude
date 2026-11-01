@@ -123,6 +123,20 @@ where
         agent: AgentKind,
         requester: Option<InstallationIdentity>,
     ) -> Result<Task, TaskServiceError> {
+        self.create_from_issue_bound(issue, project, agent, requester, None)
+            .await
+    }
+
+    /// The same, for work a tracker delegation asked for: the task remembers which
+    /// delegation it belongs to, so nothing downstream has to infer it.
+    pub async fn create_from_issue_bound(
+        &self,
+        issue: IssueSnapshot,
+        project: Project,
+        agent: AgentKind,
+        requester: Option<InstallationIdentity>,
+        delegation: Option<String>,
+    ) -> Result<Task, TaskServiceError> {
         // A requester is what makes this a delegation: the tracker says a person
         // asked for the work, and that person is who the agent is answering. A task
         // started from the operator's own machine has no such person to name.
@@ -132,7 +146,7 @@ where
         let title = issue.issue.title.trim().to_owned();
         // The issue is what the work is called. A list that names a linked task by
         // its id is a list of file names, and the operator asked for the issue.
-        let mut arrival = vec![TaskHistoryEvent::TrackerIssueBound { issue }];
+        let mut arrival = vec![TaskHistoryEvent::TrackerIssueBound { issue, delegation }];
         if !title.is_empty() {
             arrival.push(TaskHistoryEvent::TaskTitleSet { title });
         }

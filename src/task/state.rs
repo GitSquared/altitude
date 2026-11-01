@@ -354,6 +354,9 @@ pub struct TaskFacts {
     /// arrived by transfer carries where it belongs with the rest of its history.
     #[sqlx(json(nullable))]
     pub tracker_issue: Option<IssueReference>,
+    /// The delegation the bound work belongs to, so the tracker never has to infer
+    /// which task its session is about.
+    pub tracker_delegation: Option<String>,
     /// The state the bound issue was last told to have, which is the last thing
     /// either side said about it.
     #[sqlx(default)]
@@ -568,6 +571,12 @@ pub enum TaskHistoryEvent {
     /// from, and what the tracker's later state is compared against.
     TrackerIssueBound {
         issue: IssueSnapshot,
+        /// The delegation that asked for this work: the tracker's own session, when
+        /// there is one. It is what makes "delegate it again" a new delegation rather
+        /// than a second guess at which report is current, and it is a fact about the
+        /// task, so it survives a lost ledger.
+        #[serde(default)]
+        delegation: Option<String>,
     },
     /// How far this task's tracker binding has been reported, by history position.
     ///

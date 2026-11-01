@@ -25,7 +25,7 @@ use crate::{
         TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent, TaskOperatorSignal,
         TaskOperatorSignalAuthor, TaskService, TaskServiceError,
     },
-    tracker::{IssueSnapshot, TrackerStatus},
+    tracker::{IssueReference, IssueSnapshot, TrackerStatus},
     vcs::{
         CodeContribution, ContributionObservation, ContributionOutlook, ContributionReadiness,
         now_ms,
@@ -384,16 +384,58 @@ where
         project: Project,
         agent: AgentKind,
         operator: InstallationIdentity,
+        delegation: Option<String>,
     ) -> Result<Task, TaskServiceError> {
         let task = self
             .service
-            .create_from_issue_as_operator(issue, project, agent, Some(operator))
+            .create_from_issue_bound(issue, project, agent, Some(operator), delegation)
             .await?;
         let _ = self
             .events
             .send(TaskExecutionUpdate::Created(Ok(task.clone())));
         self.admit();
         Ok(task)
+    }
+
+    /// The work an issue has right now: the task in play that belongs to one of the
+    /// two delegations named, if any.
+    ///
+    /// One question, answered from the tasks themselves. Callers bring the
+    /// delegation they are asking about, so "is this delegation already being
+    /// worked?" and "which task does this issue have?" are the same call.
+    pub async fn work_for_issue(
+        &self,
+        issue: &IssueReference,
+        delegations: &[&str],
+    ) -> Result<Option<Task>, TaskServiceError> {
+        Ok(self
+            .list()
+            .await?
+            .into_iter()
+            .find(|task| {
+                task.facts.execution_pause_reason.is_none()
+                    || !matches!(
+                        task.facts.execution_pause_reason,
+                        Some(
+                            TaskExecutionPauseReason::TrackerEnded
+                                | TaskExecutionPauseReason::StoppedInTracker
+                                | TaskExecutionPauseReason::DelegationWithdrawn
+                        )
+                    )
+            })
+            .filter(|task| {
+                task.facts.tracker_issue.as_ref().is_some_and(|bound| {
+                    bound.id == issue.id || bound.identifier == issue.identifier
+                })
+            })
+            .filter(|task| {
+                delegations.is_empty()
+                    || task
+                        .facts
+                        .tracker_delegation
+                        .as_deref()
+                        .is_some_and(|held| delegations.contains(&held))
+            }))
     }
 
     pub async fn list(&self) -> Result<Vec<Task>, TaskServiceError> {
