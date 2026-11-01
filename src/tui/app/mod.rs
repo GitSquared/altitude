@@ -9,7 +9,7 @@ use std::{
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use iroh::{EndpointAddr, EndpointId};
-use ratatui::{DefaultTerminal, layout::Rect, text::Line};
+use ratatui::{DefaultTerminal, text::Line};
 use tokio::{process::Command as HostCommand, sync::mpsc, task::JoinHandle};
 
 use crate::{
@@ -50,7 +50,6 @@ use crate::{
 };
 
 use super::background::terrain::Terrain;
-use super::links::Link;
 use super::widgets::{alert::Alert, list, progress};
 use popups::confirm::PendingConfirm;
 use popups::identity::{
@@ -98,6 +97,7 @@ pub(in crate::tui) enum Foreground {
 
 mod identity;
 mod panel;
+mod shells;
 
 pub(super) use panel::{open_panel, open_panel_at};
 mod remotes;
@@ -1451,48 +1451,6 @@ impl App {
             Foreground::Setup(setup) => setup.wheel(up, ROWS),
             Foreground::Panel => self.panel.detail_scroll = step(self.panel.detail_scroll),
             _ => {}
-        }
-    }
-
-    pub(in crate::tui) fn send_shell_input<E>(
-        &self,
-        id: &ShellId,
-        bytes: Vec<u8>,
-        event_loop: &TaskEventLoop<E>,
-    ) where
-        E: IsolationEngine + Clone + 'static,
-    {
-        match id {
-            ShellId::Task(task_id) => event_loop.send_terminal_input(task_id, bytes),
-            ShellId::Credentials(_) => {
-                if let CredentialShellState::Open(shell) = &self.credential_shell {
-                    shell.input(bytes);
-                }
-            }
-        }
-    }
-
-    pub(in crate::tui) fn resize_shell<E>(
-        &mut self,
-        rows: u16,
-        cols: u16,
-        event_loop: &TaskEventLoop<E>,
-    ) where
-        E: IsolationEngine + Clone + 'static,
-    {
-        let Some(id) = self.open_shell().cloned() else {
-            return;
-        };
-        if let Some(shell) = self.shells.get_mut(&id) {
-            shell.resize(rows, cols);
-        }
-        match &id {
-            ShellId::Task(task_id) => event_loop.resize_terminal(task_id, rows, cols),
-            ShellId::Credentials(_) => {
-                if let CredentialShellState::Open(shell) = &self.credential_shell {
-                    shell.resize(rows, cols);
-                }
-            }
         }
     }
 
@@ -3652,19 +3610,6 @@ impl App {
         self.removing.contains(id)
     }
 
-    pub(in crate::tui) fn hide_shell(&mut self) {
-        tracing::info!(shell = ?self.open_shell(), "detaching terminal");
-        self.foreground = Foreground::Tasks;
-    }
-
-    pub(in crate::tui) fn remove_shell(&mut self, task_id: &str) {
-        let id = ShellId::Task(task_id.to_owned());
-        self.shells.remove(&id);
-        if self.open_shell() == Some(&id) {
-            self.foreground = Foreground::Tasks;
-        }
-    }
-
     pub(in crate::tui) fn signal_thread(&self) -> Option<&TaskOperatorSignalThread> {
         self.signal_threads.get(self.signals_cursor.selected())
     }
@@ -4180,38 +4125,6 @@ impl App {
             panel.focus = SetupFocus::Ready;
         }
         self.foreground = Foreground::GetStarted(panel);
-    }
-
-    pub(in crate::tui) async fn shell_key<E>(
-        &mut self,
-        key: KeyEvent,
-        event_loop: &TaskEventLoop<E>,
-        task_service: &TaskService<E>,
-    ) where
-        E: IsolationEngine + Clone + 'static,
-    {
-        let Some(id) = self.open_shell().cloned() else {
-            return;
-        };
-        if screens::shell::is_exit_key(key) {
-            match &id {
-                ShellId::Task(task_id) => {
-                    if !event_loop.return_to_autopilot(task_id) {
-                        self.say("This task is no longer running; control stayed with autopilot");
-                    }
-                    self.hide_shell();
-                }
-                ShellId::Credentials(_) => self.close_credential_shell(task_service).await,
-            }
-            return;
-        }
-        let bytes = self
-            .shells
-            .get_mut(&id)
-            .and_then(|shell| shell.key_bytes(key));
-        if let Some(bytes) = bytes {
-            self.send_shell_input(&id, bytes, event_loop);
-        }
     }
 
     pub(in crate::tui) async fn new_task_key<E>(
@@ -5516,16 +5429,6 @@ impl App {
         self.foreground = Foreground::Shell(id);
     }
 
-    pub(in crate::tui) fn shell_size(&mut self, terminal: &DefaultTerminal) -> Option<(u16, u16)> {
-        match terminal.size() {
-            Ok(size) => Some(screens::shell::size(self.shell_area(size.into()))),
-            Err(error) => {
-                self.problem(error.to_string());
-                None
-            }
-        }
-    }
-
     pub(in crate::tui) fn git_identity(&self) -> GitIdentity {
         self.git_identity.clone()
     }
@@ -5583,10 +5486,6 @@ impl App {
             }
         }
         self.git_identity = identity;
-    }
-
-    pub(in crate::tui) fn shell_area(&self, area: Rect) -> Rect {
-        super::widgets::chrome::content_area(area, &self.hints(), self.keyboard_hints())
     }
 
     pub(in crate::tui) async fn open_signals<E>(
@@ -6033,66 +5932,6 @@ impl App {
         if matches!(self.foreground, Foreground::Signals) && self.remote_signals.is_none() {
             self.refresh_signal_threads(event_loop).await;
         }
-    }
-
-    pub(in crate::tui) fn shell_has_active_notice(&self) -> bool {
-        self.open_shell()
-            .and_then(|id| self.shells.get(id))
-            .is_some_and(|shell| shell.has_active_notice() || shell.has_reachable_ports())
-    }
-
-    pub(in crate::tui) fn port_is_reachable(&mut self, sandbox: &str, port: u16) {
-        let id = self
-            .tasks
-            .iter()
-            .find(|task| task.facts.sandbox_id.as_deref() == Some(sandbox))
-            .map(|task| ShellId::Task(task.id.clone()))
-            .unwrap_or_else(|| ShellId::Credentials(sandbox.to_owned()));
-        if let Some(shell) = self.shells.get_mut(&id) {
-            shell.show_reachable_port(port);
-        }
-    }
-
-    fn forward_shell_output(&mut self, id: &ShellId, bytes: Vec<u8>) -> Vec<Vec<u8>> {
-        let mut asked_to_open = None;
-        let mut replies = Vec::new();
-        {
-            let Some(shell) = self.shells.get_mut(id) else {
-                return replies;
-            };
-            for request in shell.process(bytes) {
-                match request {
-                    GuestRequest::Copy(text) => match copy_to_clipboard(text) {
-                        Ok(()) => {
-                            shell.show_clipboard_confirmation();
-                            tracing::info!("copied terminal text to clipboard");
-                        }
-                        Err(error) => tracing::error!(%error, "could not copy terminal text"),
-                    },
-                    GuestRequest::Open(url) => asked_to_open = Some(url),
-                    GuestRequest::Reply(reply) => replies.push(reply),
-                }
-            }
-        }
-        if let Some(url) = asked_to_open {
-            match Link::parse(&url) {
-                Some(link) => {
-                    // The address is checked into a page; opening it is not a
-                    // question the operator asked to be interrupted for.
-                    match open_in_browser(link.url()) {
-                        Ok(()) => tracing::info!(%url, "opened a sandbox's link"),
-                        Err(error) => {
-                            tracing::warn!(%error, "could not open a sandbox's link");
-                            self.say(format!("Could not open {url}: {error}"));
-                        }
-                    }
-                }
-                None => {
-                    tracing::debug!(%url, "a sandbox asked to open something that is not a page")
-                }
-            }
-        }
-        replies
     }
 
     pub(in crate::tui) fn is_preparing(&self) -> bool {
