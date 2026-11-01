@@ -27,6 +27,8 @@ use tokio::{
     task::spawn_blocking,
 };
 
+use futures_util::{StreamExt, stream};
+
 use crate::agent::mcp::AGENT_CHANNEL_PORT;
 use crate::config::Config;
 use crate::project::Project;
@@ -197,6 +199,10 @@ fn io_error(error: io::Error) -> IsolationError {
 fn permissions(mode: u32) -> fs::Permissions {
     fs::Permissions::from_mode(mode)
 }
+
+/// How many files a transfer has in flight at once. Enough to fill a round trip,
+/// few enough that the guest's file server is not the thing being measured.
+const COPY_CONCURRENCY: usize = 8;
 
 const BASE_IMAGE: &str = "ubuntu:24.04";
 
@@ -1156,21 +1162,43 @@ impl IsolationEngine for MicrosandboxIsolation {
             fs::create_dir_all(destination.join(directory)).map_err(io_error)?;
         }
         for file in &tree.files {
-            let host = destination.join(&file.relative);
-            if let Some(parent) = host.parent() {
+            if let Some(parent) = destination.join(&file.relative).parent() {
                 fs::create_dir_all(parent).map_err(io_error)?;
             }
-            fs.copy_to_host(&file.guest, &host)
-                .await
-                .map_err(|error| IsolationError::new(error.to_string()))?;
-            // A copy is bytes; what a task left is a tree, so the mode comes with it.
-            fs::set_permissions(&host, permissions(file.mode)).map_err(io_error)?;
-            moved.files += 1;
-            moved.bytes += file.size;
-            progress.moved(FileTally {
-                files: 1,
-                bytes: file.size,
+        }
+        // One round trip per file, several in flight: a checkout is hundreds of small
+        // files and waiting for each in turn is what made a transfer look stuck.
+        let fs = &fs;
+        let planned: Vec<(String, PathBuf, u32, u64)> = tree
+            .files
+            .iter()
+            .map(|file| {
+                (
+                    file.guest.clone(),
+                    destination.join(&file.relative),
+                    file.mode,
+                    file.size,
+                )
+            })
+            .collect();
+        let copying = planned
+            .into_iter()
+            .map(|(guest, host, mode, size)| async move {
+                fs.copy_to_host(&guest, &host)
+                    .await
+                    .map_err(|error| IsolationError::new(error.to_string()))?;
+                // A copy is bytes; what a task left is a tree, so the mode comes too.
+                fs::set_permissions(&host, permissions(mode)).map_err(io_error)?;
+                progress.moved(FileTally {
+                    files: 1,
+                    bytes: size,
+                });
+                Ok::<u64, IsolationError>(size)
             });
+        let mut copying = stream::iter(copying).buffer_unordered(COPY_CONCURRENCY);
+        while let Some(result) = copying.next().await {
+            moved.bytes += result?;
+            moved.files += 1;
         }
         for link in &tree.links {
             let host = destination.join(&link.relative);
