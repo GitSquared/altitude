@@ -12,8 +12,7 @@ use crate::{
     config::InstallationIdentity,
     isolation::{
         Command, CommandEvent, CommandSession, FileTransferSink, IsolationEngine, OutputStream,
-        capacity::{HostCapacity, SAMPLE_INTERVAL},
-        guest_absolute,
+        SandboxCapacity, capacity::SAMPLE_INTERVAL, guest_absolute,
     },
     project::Project,
     task::review::{
@@ -84,7 +83,6 @@ pub struct TaskEventLoop<E> {
     runs: Arc<Mutex<HashMap<String, ActiveRun>>>,
     control_requests: Arc<Mutex<HashMap<String, RequestedControl>>>,
     terminal_output: Arc<Mutex<HashMap<String, CachedTerminalOutput>>>,
-    capacity: Arc<Mutex<HostCapacity>>,
     starting: Arc<Mutex<HashSet<String>>>,
     watchers: Arc<Watchers<E>>,
     review_waits: Arc<ReviewWaits>,
@@ -128,7 +126,6 @@ where
             runs: Arc::new(Mutex::new(HashMap::new())),
             control_requests: Arc::new(Mutex::new(HashMap::new())),
             terminal_output: Arc::new(Mutex::new(HashMap::new())),
-            capacity: Arc::new(Mutex::new(HostCapacity::new())),
             starting: Arc::new(Mutex::new(HashSet::new())),
             watchers,
             review_waits: Arc::new(ReviewWaits::default()),
@@ -138,11 +135,8 @@ where
         (event_loop, receiver)
     }
 
-    pub fn capacity_limit(&self) -> usize {
-        self.capacity
-            .lock()
-            .expect("capacity lock poisoned")
-            .limit()
+    pub fn sandbox_capacity(&self) -> SandboxCapacity {
+        self.service.isolation.sandbox_capacity()
     }
 
     fn watch_host_capacity(&self) {
@@ -165,14 +159,14 @@ where
                         continue;
                     }
                 };
-                let limit = event_loop
-                    .capacity
-                    .lock()
-                    .expect("capacity lock poisoned")
-                    .observe(demand);
-                if let Some(limit) = limit {
-                    tracing::debug!(limit, demand, "observed host capacity");
-                }
+                let capacity = event_loop.service.isolation.observe_demand(demand);
+                tracing::debug!(
+                    slots = capacity.slots,
+                    ceiling_cpus = capacity.ceiling.cpus,
+                    ceiling_mib = capacity.ceiling.memory_mib,
+                    demand,
+                    "observed host capacity"
+                );
                 event_loop.admit();
             }
         });
@@ -210,10 +204,10 @@ where
             .count();
         let taken = occupied + self.starting.lock().expect("starting lock poisoned").len();
         let room = self
-            .capacity
-            .lock()
-            .expect("capacity lock poisoned")
-            .free_slots(taken);
+            .service
+            .isolation
+            .sandbox_capacity()
+            .free_slots_after(taken);
         // A task with a held review is the scheduler's: admission must not start
         // an agent turn for it while the review is still waiting.
         let mut waiting: Vec<Task> = tasks

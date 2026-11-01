@@ -7,6 +7,8 @@ use std::{
 
 use sysinfo::{MINIMUM_CPU_UPDATE_INTERVAL, System};
 
+use super::SandboxCeiling;
+
 pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
 
 pub const WINDOW: Duration = Duration::from_secs(10 * 60);
@@ -56,6 +58,60 @@ impl SampleWindow {
     }
 }
 
+/// What the machine has to divide up, read once: it does not change under us.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HostTotals {
+    pub cpus: usize,
+    pub memory_mib: u64,
+}
+
+/// The same machine's own numbers as sysinfo reports them.
+impl HostTotals {
+    fn of(system: &mut System) -> Self {
+        system.refresh_memory();
+        Self {
+            cpus: system.cpus().len().max(1),
+            memory_mib: total_memory_mib(system),
+        }
+    }
+}
+
+fn total_memory_mib(system: &System) -> u64 {
+    system.total_memory() / (1024 * 1024)
+}
+
+/// What a sandbox may be given on this host, and how many may run at once.
+///
+/// Both answers come from the same two numbers — the machine's totals and the
+/// count the policy has settled on — so the worst case is bounded by the last
+/// ceiling handed out times the count in force, and neither can drift from the
+/// other. A defaulted value means this host could not be read.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SandboxCapacity {
+    pub slots: usize,
+    pub ceiling: SandboxCeiling,
+}
+
+impl SandboxCapacity {
+    pub fn free_slots_after(&self, in_use: usize) -> usize {
+        self.slots.saturating_sub(in_use)
+    }
+}
+
+impl Default for SandboxCapacity {
+    fn default() -> Self {
+        Self {
+            slots: 1,
+            ceiling: SandboxCeiling::CAPSULE,
+        }
+    }
+}
+
+pub const MEMORY_SHARE_OF_HOST: u64 = 80;
+pub const MINIMUM_CEILING_MIB: u64 = 2 * 1_024;
+pub const MAXIMUM_CEILING_MIB: u64 = 8 * 1_024;
+pub const MAXIMUM_CEILING_CPUS: u8 = 4;
+
 pub fn optimistic_start() -> usize {
     thread::available_parallelism().map_or(1, |cores| cores.get())
 }
@@ -91,16 +147,58 @@ fn percentile_75(values: impl Iterator<Item = f64>) -> Option<f64> {
 #[derive(Debug)]
 pub struct HostCapacity {
     sampler: Option<HostSampler>,
+    totals: HostTotals,
     window: SampleWindow,
-    limit: usize,
+    slots: usize,
 }
 
 impl HostCapacity {
     pub fn new() -> Self {
+        let mut sampler = HostSampler::new();
+        let totals = sampler
+            .as_mut()
+            .map(HostSampler::totals)
+            .unwrap_or(HostTotals {
+                cpus: 1,
+                memory_mib: 0,
+            });
         Self {
-            sampler: HostSampler::new(),
+            sampler,
+            totals,
             window: SampleWindow::new(),
-            limit: optimistic_start(),
+            slots: optimistic_start(),
+        }
+    }
+
+    /// What one sandbox may be given, dividing the host by the count in force.
+    ///
+    /// Dividing by the count is what keeps the ceilings and the number of
+    /// sandboxes from disagreeing: letting another sandbox run also narrows
+    /// every later one, without touching a sandbox already running.
+    fn ceiling(&self) -> SandboxCeiling {
+        if self.totals.memory_mib == 0 {
+            return SandboxCeiling::CAPSULE;
+        }
+        let share = u64::try_from(self.slots.max(1)).unwrap_or(u64::MAX);
+        // The floor wins over the share, deliberately: a sandbox too small to run
+        // a package manager fails in a way that looks like a broken agent, while
+        // one that grows past its share is caught by the sampler, which pulls the
+        // count down rather than shrinking work already in progress. The ceiling
+        // is a bound, not a reservation, so the overshoot costs nothing until a
+        // guest actually touches that memory.
+        let memory_mib = (self.totals.memory_mib * MEMORY_SHARE_OF_HOST / 100 / share)
+            .clamp(MINIMUM_CEILING_MIB, MAXIMUM_CEILING_MIB);
+        let cpus = u64::try_from(self.totals.cpus).unwrap_or(1) / share;
+        SandboxCeiling {
+            cpus: u8::try_from(cpus.clamp(1, u64::from(MAXIMUM_CEILING_CPUS))).unwrap_or(1),
+            memory_mib: u32::try_from(memory_mib.min(u64::from(u32::MAX))).unwrap_or(u32::MAX),
+        }
+    }
+
+    pub fn sandbox_capacity(&self) -> SandboxCapacity {
+        SandboxCapacity {
+            slots: self.slots,
+            ceiling: self.ceiling(),
         }
     }
 
@@ -111,20 +209,8 @@ impl HostCapacity {
     pub fn observe(&mut self, demand: usize) -> Option<usize> {
         let sample = self.sampler.as_mut()?.sample()?;
         self.window.push(sample);
-        self.limit = next_slot_limit(self.limit, &self.window, demand);
-        Some(self.limit)
-    }
-
-    pub fn limit(&self) -> usize {
-        self.limit
-    }
-
-    /// How many more sandboxes this host will take, given how many hold one.
-    ///
-    /// The task queue asks this instead of subtracting a limit it would have to
-    /// know the meaning of: what fits is the host's business.
-    pub fn free_slots(&self, in_use: usize) -> usize {
-        self.limit.saturating_sub(in_use)
+        self.slots = next_slot_limit(self.slots, &self.window, demand);
+        Some(self.slots)
     }
 }
 
@@ -151,6 +237,10 @@ impl HostSampler {
 }
 
 impl HostSampler {
+    fn totals(&mut self) -> HostTotals {
+        HostTotals::of(&mut self.system)
+    }
+
     pub fn sample(&mut self) -> Option<ResourceSample> {
         let now = Instant::now();
         if let Some(last) = self.last_refresh

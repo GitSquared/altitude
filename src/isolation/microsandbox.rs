@@ -4,6 +4,7 @@ use std::{
     os::unix::fs::{PermissionsExt, symlink},
     path::{Path, PathBuf},
     process,
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -37,8 +38,10 @@ use super::{
     BaseSandboxRecipe, BaseSandboxSnapshot, CREDENTIAL_PREFIX, Command, CommandEvent,
     CommandSession, CredentialCheck, CredentialReport, CredentialSandbox, EnvironmentDescription,
     EnvironmentProgress, EnvironmentProgressSink, FileTally, FileTransferSink, IsolationEngine,
-    IsolationError, IsolationStatus, OutputStream, ProfileRecipe, SandboxOptions, SetupStep,
-    VsockRoute, WATCHER_PREFIX, mount_git_cache,
+    IsolationError, IsolationStatus, OutputStream, ProfileRecipe, SandboxCapacity, SandboxCeiling,
+    SandboxOptions, SetupStep, VsockRoute, WATCHER_PREFIX,
+    capacity::HostCapacity,
+    mount_git_cache,
     sandbox::{self, REFRESH_AFTER, private_directory},
     trust_host_roots,
 };
@@ -266,6 +269,9 @@ pub struct MicrosandboxIsolation {
     cache_home: PathBuf,
     socket_safe_home: PathBuf,
     build_lock: BuildLock,
+    // Shared rather than per view: how much this machine can take is the same
+    // answer for every operator on it.
+    host_capacity: Arc<Mutex<HostCapacity>>,
 }
 
 #[derive(Clone)]
@@ -375,7 +381,21 @@ impl MicrosandboxIsolation {
             cache_home: config.isolation_cache_dir(),
             socket_safe_home: config.microsandbox_socket_dir(),
             build_lock: BuildLock::new(config),
+            host_capacity: Arc::new(Mutex::new(HostCapacity::new())),
         }
+    }
+
+    /// The ceilings a sandbox gets on this host now.
+    ///
+    /// Decided when a sandbox is created and never revisited: a guest that is
+    /// already running is not resized under the agent working in it, so the
+    /// count can move freely around it.
+    fn sandbox_ceiling(&self) -> SandboxCeiling {
+        self.host_capacity
+            .lock()
+            .expect("capacity lock poisoned")
+            .sandbox_capacity()
+            .ceiling
     }
 
     fn credential_shell_channel(&self, id: &str) -> Option<VsockRoute> {
@@ -567,6 +587,10 @@ impl MicrosandboxIsolation {
             parent.map(|snapshot| snapshot.path.to_string_lossy().into_owned()),
         );
         options.network_enabled = true;
+        // An environment build is a sandbox like any other, so it takes the same
+        // ceiling: it runs apt and a package manager, which is exactly the work
+        // that wants the room.
+        options.size = self.sandbox_ceiling();
         self.create_sandbox(sandbox_id.clone(), options, PullPolicy::Always)
             .await?;
         let result = async {
@@ -860,6 +884,19 @@ fn now_ms() -> i64 {
 }
 
 impl IsolationEngine for MicrosandboxIsolation {
+    fn sandbox_capacity(&self) -> SandboxCapacity {
+        self.host_capacity
+            .lock()
+            .expect("capacity lock poisoned")
+            .sandbox_capacity()
+    }
+
+    fn observe_demand(&self, queued_tasks: usize) -> SandboxCapacity {
+        let mut capacity = self.host_capacity.lock().expect("capacity lock poisoned");
+        capacity.observe(queued_tasks);
+        capacity.sandbox_capacity()
+    }
+
     fn for_operator(&self, owner: &str) -> Result<Self, IsolationError> {
         if !self.config.serves_operators() {
             return Ok(self.clone());
@@ -877,6 +914,7 @@ impl IsolationEngine for MicrosandboxIsolation {
             cache_home: self.cache_home.clone(),
             socket_safe_home: self.socket_safe_home.clone(),
             build_lock: self.build_lock.clone(),
+            host_capacity: Arc::clone(&self.host_capacity),
         })
     }
 
@@ -1032,6 +1070,7 @@ impl IsolationEngine for MicrosandboxIsolation {
     }
 
     async fn create(&self, id: String, mut options: SandboxOptions) -> Result<(), IsolationError> {
+        options.size = self.sandbox_ceiling();
         if let Some(route) = self.credential_shell_channel(&id) {
             options.vsock.push(route);
         }

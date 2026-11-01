@@ -15,6 +15,8 @@ use crate::project::Project;
 // lives here rather than beside the task queue because it is a fact about the
 // machine, not about the work.
 pub(crate) mod capacity;
+
+pub use capacity::SandboxCapacity;
 mod git_cache;
 mod microsandbox;
 pub(crate) mod mounts;
@@ -190,7 +192,7 @@ pub struct SandboxOptions {
 /// A ceiling, not a reservation: the host backs memory as the guest touches it
 /// and runs a virtual CPU only while it has work, so these bound the worst case
 /// rather than setting aside anything.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SandboxCeiling {
     pub cpus: u8,
     pub memory_mib: u32,
@@ -352,6 +354,16 @@ impl fmt::Display for IsolationError {
 impl StdError for IsolationError {}
 
 pub trait IsolationEngine: Send + Sync {
+    /// What a sandbox may be given on this host right now, and how many may run.
+    ///
+    /// The queue asks this rather than knowing what a vCPU is: what fits is the
+    /// host's business, and the ceilings come back with the count so the caller
+    /// never has to pick a size.
+    fn sandbox_capacity(&self) -> SandboxCapacity;
+
+    /// Re-measure the host with `queued_tasks` waiting, and say what it takes.
+    fn observe_demand(&self, queued_tasks: usize) -> SandboxCapacity;
+
     fn provision(
         &self,
         id: String,
