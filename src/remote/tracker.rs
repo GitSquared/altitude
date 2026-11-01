@@ -391,19 +391,22 @@ impl RemoteTracker {
         };
         for delegated in delegated {
             let reference = &delegated.reference;
-            // What is recovered is a *delegation*, and a delegation is a session:
-            // one that already has a report has been handled. An issue whose work
-            // has ended before is not a delegation waiting to be picked up, and
-            // inventing one for it starts the same task again every minute.
-            let handled = match delegated.session.as_deref() {
-                Some(session) => self.report_for_session(session).is_some(),
-                None => self
-                    .report_for_issue(&reference.id)
-                    .is_some_and(|report| !report.finished),
+            // What is recovered is a *delegation*, and a delegation is a session.
+            // One already being reported into has been handled; one the issue has
+            // never had reported into is new work, and a session newer than the one
+            // in hand is the operator delegating again — which restarts the task, so
+            // the work follows the issue as it is now rather than as it was.
+            let reporting = self.report_for_issue(&reference.id);
+            let handled = match (delegated.session.as_deref(), reporting.as_ref()) {
+                (Some(newest), Some(report)) => newest == report.tracker_session_id,
+                (Some(_), None) => false,
+                (None, Some(report)) => !report.finished,
+                (None, None) => false,
             };
             if handled {
                 continue;
             }
+            let redelegated = delegated.session.is_some() && reporting.is_some();
             let first_try = self
                 .recovered
                 .lock()
@@ -447,6 +450,7 @@ impl RemoteTracker {
             };
             tracing::info!(
                 issue = %reference.identifier,
+                redelegated,
                 "recovered a delegation that arrived while this machine was not listening"
             );
             let started = self
@@ -456,7 +460,10 @@ impl RemoteTracker {
                     &login.account.user_id,
                     &login.account.display_name,
                     host,
-                    false,
+                    // A redelegation replaces what is running, so it is the second
+                    // ask rather than the first: the other guard is for a first
+                    // delegation arriving on work a person has taken over.
+                    redelegated,
                 )
                 .await;
             let Err(error) = started else {
@@ -478,7 +485,7 @@ impl RemoteTracker {
                         &login.account.user_id,
                         &login.account.display_name,
                         host,
-                        false,
+                        redelegated,
                     )
                     .await
                     .is_ok()
