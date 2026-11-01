@@ -1358,10 +1358,21 @@ impl RemoteTracker {
                     event.body.clone()
                 };
                 if let Some(thread) = &answered {
-                    // A reply answers the thread it is in; whether the question is
-                    // settled is the agent's to decide, and it says so with its own
-                    // resolve. Settling here would take that from it.
-                    return host.reply(report.task_id, thread.id.clone(), body).await;
+                    // A review answered with a plain acceptance is accepted, the
+                    // same as one answered on the session: the words are the
+                    // operator's judgment whatever surface they typed them on.
+                    if thread.kind == TaskOperatorSignalKind::InReview && is_acceptance(&body) {
+                        host.accept(report.task_id.clone(), thread.id.clone())
+                            .await?;
+                        let events = host.events(report.task_id.clone()).await?;
+                        return self.finish_accepted(host, &report, &events).await;
+                    }
+                    // Otherwise the reply answers the thread it is in; whether the
+                    // question is settled is the agent's to decide, and it says so
+                    // with its own resolve. Settling here would take that from it.
+                    return host
+                        .reply(report.task_id.clone(), thread.id.clone(), body)
+                        .await;
                 }
                 let source = if site.document_id.is_some() {
                     "document"
