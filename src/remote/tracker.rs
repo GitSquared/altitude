@@ -1917,13 +1917,16 @@ impl RemoteTracker {
         match kind {
             // Updates are the session's transcript, not an issue comment.
             TaskOperatorSignalKind::Update => {
+                // A reply rather than a thought: a thought is folded away in the
+                // session's sidebar, and an update the operator never unfolds is an
+                // update that was never delivered.
                 let body = format!("**○ Info:** {}\n\n{}", title.trim(), body.trim());
                 self.config
                     .automation
                     .create_activity(
                         &report.tracker_session_id,
                         &stable_id(&report.task_id, signal_id),
-                        AgentActivityContent::Thought { body },
+                        AgentActivityContent::Response { body },
                     )
                     .await
                     .map_err(|error| error.to_string())?;
