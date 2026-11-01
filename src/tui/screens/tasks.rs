@@ -91,6 +91,44 @@ fn draw_tasks(
     card_width: u16,
     height: u16,
 ) {
+    // What has been asked for and is not here yet goes above the grid: a send takes
+    // a moment on another machine, and an empty list looks like nothing happened.
+    let announced = app
+        .pending_tasks
+        .len()
+        .min(usize::from(area.height.saturating_sub(2)) / 2);
+    let area = if announced == 0 {
+        area
+    } else {
+        let strip = Rect {
+            height: announced as u16,
+            ..area
+        };
+        let tick = app.animation_tick();
+        for (index, pending) in app.pending_tasks.iter().take(announced).enumerate() {
+            let line = Rect {
+                y: strip.y + index as u16,
+                height: 1,
+                ..strip
+            };
+            let waited = pending.started.elapsed().as_secs();
+            let where_to = match (&pending.address, waited) {
+                (Some(address), 0..=4) => format!(" · sending to {address}"),
+                (Some(address), seconds) => format!(" · sending to {address} · {seconds}s"),
+                (None, 0..=4) => " · starting".to_owned(),
+                (None, seconds) => format!(" · starting · {seconds}s"),
+            };
+            let mut spans = vec![Span::styled("· ", palette::muted())];
+            spans.extend(shimmer(&pending.label, tick));
+            spans.push(Span::styled(where_to, palette::muted()));
+            frame.render_widget(Paragraph::new(Line::from(spans)), line);
+        }
+        Rect {
+            y: area.y + announced as u16,
+            height: area.height.saturating_sub(announced as u16),
+            ..area
+        }
+    };
     let cards = cards(app);
     let total = cards.len();
     if total == 0 {

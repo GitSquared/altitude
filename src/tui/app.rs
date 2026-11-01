@@ -281,6 +281,12 @@ pub(in crate::tui) enum CredentialShellState {
     Open(CredentialShell),
 }
 
+pub(in crate::tui) struct PendingTask {
+    pub label: String,
+    pub address: Option<String>,
+    pub started: Instant,
+}
+
 pub(in crate::tui) struct TransferView {
     title: String,
     label: String,
@@ -503,6 +509,10 @@ pub struct App {
     pub(in crate::tui) foreground: Foreground,
     shell_behind: Behind<Foreground>,
     pub(in crate::tui) transfer: Option<TransferView>,
+    /// Work that has been asked for and is not in the list yet: a remote founds the
+    /// task on its own machine, which takes a moment, and a list that stays empty
+    /// until then looks like nothing happened.
+    pub(in crate::tui) pending_tasks: Vec<PendingTask>,
     pub(in crate::tui) remote_status: HashMap<String, RemoteStatus>,
     pub(in crate::tui) remote_trackers: HashMap<String, Vec<TrackerConnection>>,
     pub(in crate::tui) credential_status: HashMap<String, CredentialStatus>,
@@ -648,6 +658,7 @@ impl App {
             foreground: Foreground::default(),
             shell_behind: Behind::default(),
             transfer: None,
+            pending_tasks: Vec::new(),
             remote_status: HashMap::new(),
             remote_trackers: HashMap::new(),
             credential_status: HashMap::new(),
@@ -2619,6 +2630,11 @@ impl App {
         let address = address.to_owned();
         let project_id = project_id.to_owned();
         let keys = self.remote_keys.clone();
+        self.pending_tasks.push(PendingTask {
+            label: origin_label(&origin),
+            address: Some(self.remote_name(&address)),
+            started: Instant::now(),
+        });
         let client = self.link.clone();
         let replies = replies.clone();
         tokio::spawn(async move {
@@ -7199,13 +7215,17 @@ impl App {
             TaskExecutionUpdate::Created(Ok(task)) => {
                 // A task that was just asked for is the one in view, whether it
                 // was founded or an existing binding was reused for it.
+                self.pending_tasks.clear();
                 let id = task.id.clone();
                 self.replace_task(task);
                 if let Some(index) = self.tasks.iter().position(|task| task.id == id) {
                     self.selected = index;
                 }
             }
-            TaskExecutionUpdate::Created(Err(error)) => self.problem(error.to_string()),
+            TaskExecutionUpdate::Created(Err(error)) => {
+                self.pending_tasks.clear();
+                self.problem(error.to_string());
+            }
             TaskExecutionUpdate::Started(Ok(task)) => self.replace_task(task),
             TaskExecutionUpdate::Started(Err(error)) => self.problem(error.to_string()),
             TaskExecutionUpdate::Finished(id, Ok(task)) if !self.is_removing(&id) => {
@@ -7451,6 +7471,17 @@ fn credential_status(answer: CredentialAnswer) -> CredentialStatus {
             output: String::new(),
         },
     }
+}
+
+/// The first line of what was asked for, which is what a task is called until the
+/// agent names it.
+fn origin_label(origin: &TaskOrigin) -> String {
+    let text = match origin {
+        TaskOrigin::Intent(intent) => intent.as_str(),
+        TaskOrigin::Issue(issue) => issue.issue.title.as_str(),
+    };
+    let first = text.lines().next().unwrap_or_default().trim();
+    first.chars().take(64).collect()
 }
 
 fn copy_to_clipboard(text: String) -> Result<(), arboard::Error> {
