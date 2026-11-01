@@ -147,6 +147,13 @@ pub trait Host: Send + Sync + 'static {
     /// The tasks here that are bound to a tracker issue, with the client whose
     /// work each one is. Reporting is adopted from this list.
     fn bound_tasks(&self) -> HostFuture<'_, Vec<BoundTask>>;
+    /// The work an issue has right now: the task in play for one of these
+    /// delegations, or for any of them when none are named.
+    fn work_for_issue(
+        &self,
+        issue_id: String,
+        delegations: Vec<String>,
+    ) -> HostFuture<'_, Option<BoundTask>>;
     fn session_agent(&self, task_id: String) -> HostFuture<'_, Option<String>>;
 }
 
@@ -394,22 +401,27 @@ impl RemoteTracker {
         };
         for delegated in delegated {
             let reference = &delegated.reference;
-            // What is recovered is a *delegation*, and a delegation is a session.
-            // One already being reported into has been handled; one the issue has
-            // never had reported into is new work, and a session newer than the one
-            // in hand is the operator delegating again — which restarts the task, so
-            // the work follows the issue as it is now rather than as it was.
-            let reporting = self.report_for_issue(&reference.id);
-            let handled = match (delegated.session.as_deref(), reporting.as_ref()) {
-                (Some(newest), Some(report)) => newest == report.tracker_session_id,
-                (Some(_), None) => false,
-                (None, Some(report)) => !report.finished,
-                (None, None) => false,
+            // Which work this issue has is a question the tasks answer. This
+            // delegation's own work means nothing to do; work for another one means
+            // the operator delegated again, which replaces it.
+            let mine: Vec<String> = delegated.session.iter().cloned().collect();
+            let own_work = match host.work_for_issue(reference.id.clone(), mine).await {
+                Ok(work) => work,
+                Err(error) => {
+                    tracing::debug!(issue = %reference.identifier, %error, "could not ask which task an issue has");
+                    continue;
+                }
             };
-            if handled {
+            if own_work.is_some() {
                 continue;
             }
-            let redelegated = delegated.session.is_some() && reporting.is_some();
+            let redelegated = match host.work_for_issue(reference.id.clone(), Vec::new()).await {
+                Ok(work) => work.is_some(),
+                Err(error) => {
+                    tracing::debug!(issue = %reference.identifier, %error, "could not ask which task an issue has");
+                    continue;
+                }
+            };
             let first_try = self
                 .recovered
                 .lock()
@@ -910,7 +922,11 @@ impl RemoteTracker {
         }
         // The same session delivered again is the work already running here; it
         // must not be stopped and restarted.
-        if self.report_for_session(session_id).is_some() {
+        if host
+            .work_for_issue(issue_id.to_owned(), vec![session_id.to_owned()])
+            .await?
+            .is_some()
+        {
             return Ok(());
         }
 
@@ -943,7 +959,11 @@ impl RemoteTracker {
         // that starts is the new delegation rather than one an older task quietly
         // inherited, because a task leaves the issue to whoever founds it next only
         // once it is out of play.
-        let replaced = self.replaced_tasks(issue_id, host).await;
+        let replaced: Vec<BoundTask> = host
+            .work_for_issue(issue_id.to_owned(), Vec::new())
+            .await?
+            .into_iter()
+            .collect();
         let redelegation = !replaced.is_empty();
         for task in &replaced {
             if let Err(error) = host
@@ -2135,21 +2155,6 @@ impl RemoteTracker {
                 held.last_status = None;
             }
         })
-    }
-
-    /// Every task this machine still has in play on an issue.
-    ///
-    /// Read from the tasks themselves rather than from the ledger: a task can be
-    /// bound to an issue without a report (a start that never got that far), and one
-    /// of those left running is exactly what a redelegation must not inherit.
-    async fn replaced_tasks(&self, issue_id: &str, host: &dyn Host) -> Vec<BoundTask> {
-        let Ok(bound) = host.bound_tasks().await else {
-            return Vec::new();
-        };
-        bound
-            .into_iter()
-            .filter(|task| task.issue.id == issue_id || task.issue.identifier == issue_id)
-            .collect()
     }
 
     /// Whether this issue's task was taken over, and handed to a person's machine.

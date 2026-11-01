@@ -986,6 +986,30 @@ impl super::tracker::Host for OwnTasks {
         })
     }
 
+    fn work_for_issue(
+        &self,
+        issue_id: String,
+        delegations: Vec<String>,
+    ) -> super::tracker::HostFuture<'_, Option<super::tracker::BoundTask>> {
+        Box::pin(async move {
+            let wanted: Vec<&str> = delegations.iter().map(String::as_str).collect();
+            let task = self
+                .tasks
+                .work_for_issue(&issue_id, &wanted)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(task.and_then(|task| {
+                let issue = task.facts.tracker_issue.clone()?;
+                Some(super::tracker::BoundTask {
+                    task_id: task.id.clone(),
+                    owner: task.operator_id()?.to_owned(),
+                    issue,
+                    session_agent: task.session_agent(),
+                })
+            }))
+        })
+    }
+
     fn session_agent(&self, task_id: String) -> super::tracker::HostFuture<'_, Option<String>> {
         Box::pin(async move {
             Ok(self

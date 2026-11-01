@@ -25,7 +25,7 @@ use crate::{
         TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent, TaskOperatorSignal,
         TaskOperatorSignalAuthor, TaskService, TaskServiceError,
     },
-    tracker::{IssueReference, IssueSnapshot, TrackerStatus},
+    tracker::{IssueSnapshot, TrackerStatus},
     vcs::{
         CodeContribution, ContributionObservation, ContributionOutlook, ContributionReadiness,
         now_ms,
@@ -405,7 +405,7 @@ where
     /// worked?" and "which task does this issue have?" are the same call.
     pub async fn work_for_issue(
         &self,
-        issue: &IssueReference,
+        issue_id: &str,
         delegations: &[&str],
     ) -> Result<Option<Task>, TaskServiceError> {
         Ok(self
@@ -424,9 +424,10 @@ where
                     )
             })
             .filter(|task| {
-                task.facts.tracker_issue.as_ref().is_some_and(|bound| {
-                    bound.id == issue.id || bound.identifier == issue.identifier
-                })
+                task.facts
+                    .tracker_issue
+                    .as_ref()
+                    .is_some_and(|bound| bound.id == issue_id || bound.identifier == issue_id)
             })
             .filter(|task| {
                 delegations.is_empty()
