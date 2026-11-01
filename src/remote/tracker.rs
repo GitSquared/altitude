@@ -2025,10 +2025,18 @@ impl RemoteTracker {
         if kind == TaskOperatorSignalKind::Update {
             return;
         }
-        let comment_id = stable_id(
-            "comment",
-            &format!("signal:{}:{}", report.task_id, signal_id),
-        );
+        let comment_id = published_comment_id(&report.task_id, signal_id);
+        // A signal resolved before this machine could report it has no thread to
+        // close: asking first is how that stays a fact rather than an error the
+        // provider might also be giving for a real failure.
+        match self.config.automation.comment(&comment_id).await {
+            Ok(Some(_)) => {}
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(task = %report.task_id, signal = signal_id, %error, "could not read a signal's thread");
+                return;
+            }
+        }
         let outcome = if resolved {
             self.config
                 .automation
@@ -2038,18 +2046,13 @@ impl RemoteTracker {
             self.config.automation.reopen_comment(&comment_id).await
         };
         if let Err(error) = outcome {
-            // A thread that was never published has nothing to close or reopen: a
-            // signal resolved before this machine could report had no comment, and a
-            // raise that is already answered is deliberately not published.
-            if !error.to_string().contains("Entity not found") {
-                tracing::warn!(
-                    task = %report.task_id,
-                    signal = signal_id,
-                    resolved,
-                    %error,
-                    "could not follow a signal's thread in the tracker"
-                );
-            }
+            tracing::warn!(
+                task = %report.task_id,
+                signal = signal_id,
+                resolved,
+                %error,
+                "could not follow a signal's thread in the tracker"
+            );
         }
     }
 
