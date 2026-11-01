@@ -1665,6 +1665,18 @@ where
                     task.id.clone(),
                     Ok(task.clone()),
                 ));
+                // The next turn is told what happened to it, so the agent picks up from
+                // the conversation rather than wondering why the operator went quiet.
+                let _ = self
+                    .service
+                    .express_input(
+                        &task.id,
+                        "Altitude: the operator has left the task. You are back under \
+                         Altitude's control; continue the work from wherever the \
+                         conversation left it."
+                            .to_owned(),
+                    )
+                    .await;
                 self.watch_agent_run(self.service.resume_autopilot_after_operator(task).await);
             }
         }

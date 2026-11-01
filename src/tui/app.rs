@@ -2512,9 +2512,7 @@ impl App {
 
     fn ask_to_take_over(&mut self, id: &str, title: &str, agent: &str, from: Option<String>) {
         let question = match from {
-            Some(name) => format!(
-                "Take over {title} and speak directly to {agent}? It moves here from {name} first."
-            ),
+            Some(_) => format!("Take over {title} and speak directly to {agent}?"),
             None => format!("Take over {title} and speak directly to {agent}?"),
         };
         self.foreground = Foreground::Confirm(PendingConfirm::taking_over(id.to_owned(), question));
@@ -7300,7 +7298,16 @@ impl App {
                 event_loop.resize_terminal(&id, rows, cols);
                 self.shells
                     .insert(shell_id.clone(), Shell::new(rows, cols, history, title));
-                self.foreground = Foreground::Shell(shell_id);
+                self.foreground = Foreground::Shell(shell_id.clone());
+                // The agent is about to be spoken to by a person rather than piloted,
+                // and nothing else tells it so. Same channel as the operator's keys.
+                if let ShellId::Task(task_id) = &shell_id {
+                    event_loop.send_terminal_input(
+                        task_id,
+                        b"Altitude: the operator has taken this task over and will speak to you directly.\r"
+                            .to_vec(),
+                    );
+                }
             }
             TaskExecutionUpdate::Report { task } => {
                 self.replace_task(task);
