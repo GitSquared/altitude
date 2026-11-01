@@ -1388,6 +1388,10 @@ impl RemoteTracker {
                         host.accept(report.task_id.clone(), thread.id.clone())
                             .await?;
                         let events = host.events(report.task_id.clone()).await?;
+                        // The work is finished, so the threads it was waiting in are
+                        // finished too: an acceptance takes the same ending a run
+                        // that completes does, and that ending closes them.
+                        self.resolve_signal_comments(&report, &events).await;
                         return self.finish_accepted(host, &report, &events).await;
                     }
                     // Otherwise the reply answers the thread it is in; whether the
