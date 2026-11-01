@@ -923,18 +923,6 @@ impl super::tracker::Host for OwnTasks {
         })
     }
 
-    fn settle_signal(
-        &self,
-        task_id: String,
-        signal_id: String,
-        answer: String,
-    ) -> super::tracker::HostFuture<'_, ()> {
-        Box::pin(async move {
-            self.tasks.settle_signal(task_id, signal_id, answer);
-            Ok(())
-        })
-    }
-
     fn reopen_signal(
         &self,
         task_id: String,

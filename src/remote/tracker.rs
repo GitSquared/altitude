@@ -136,15 +136,6 @@ pub trait Host: Send + Sync + 'static {
     fn events(&self, task_id: String) -> HostFuture<'_, Vec<(i64, TaskHistoryEvent)>>;
     fn instruct(&self, task_id: String, instruction: String) -> HostFuture<'_, ()>;
     fn reply(&self, task_id: String, signal_id: String, answer: String) -> HostFuture<'_, ()>;
-    /// Answer a question and settle it in one act, which is what a reply the
-    /// operator typed in the tracker means: they have answered, and the task is
-    /// no longer waiting on them.
-    fn settle_signal(
-        &self,
-        task_id: String,
-        signal_id: String,
-        answer: String,
-    ) -> HostFuture<'_, ()>;
     fn accept(&self, task_id: String, signal_id: String) -> HostFuture<'_, ()>;
     /// Whether the task's record is still kept on this machine. A completed task
     /// is kept, which is what lets its ending be reported before it is dropped.
@@ -1361,9 +1352,10 @@ impl RemoteTracker {
                     event.body.clone()
                 };
                 if let Some(thread) = &answered {
-                    return host
-                        .settle_signal(report.task_id, thread.id.clone(), body)
-                        .await;
+                    // A reply answers the thread it is in; whether the question is
+                    // settled is the agent's to decide, and it says so with its own
+                    // resolve. Settling here would take that from it.
+                    return host.reply(report.task_id, thread.id.clone(), body).await;
                 }
                 let source = if site.document_id.is_some() {
                     "document"
