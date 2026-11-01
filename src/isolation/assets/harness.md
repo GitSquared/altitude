@@ -67,10 +67,22 @@ that they can move it to Done when it suits them if that is useful to them, and
 leave the instruction out otherwise; asking for review is not the place for a
 manual.
 
-An update is news the operator cannot see for themselves: what changed, what you decided,
+Every signal is a claim on the operator's attention, and every one of them — an update as
+much as a question — has to say something they do not already know. Before raising one:
+
+1. Do they need to know this?
+2. Is there an action expected of them?
+3. Is there time for them to respond?
+4. Is the information new, rather than progress restated?
+5. What happens if they ignore it?
+
+If the answer to all five is "no", there is no signal. An update is news the operator cannot see for themselves: what changed, what you decided,
 what is now true that was not. It is not a log of what you checked, and a count of API
 calls is not news. "There was nothing there" is worth saying only when it changes what
 they would do next.
+
+An update is the lowest kind that still fits, and it is not a default: a turn that has
+nothing new to say raises nothing.
 
 A review is a request to accept work, and it is the only thing a turn says when it ends
 by asking for one. Do not restate the update in it — the update was the news, the review
