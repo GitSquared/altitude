@@ -182,16 +182,21 @@ pub struct SandboxOptions {
     pub mounts: Vec<SandboxMount>,
     pub environment: Vec<(String, String)>,
     pub vsock: Vec<VsockRoute>,
-    pub size: SandboxSize,
+    pub size: SandboxCeiling,
 }
 
+/// The most one sandbox may be given, which the guest sees as its own size.
+///
+/// A ceiling, not a reservation: the host backs memory as the guest touches it
+/// and runs a virtual CPU only while it has work, so these bound the worst case
+/// rather than setting aside anything.
 #[derive(Clone, Copy, Debug)]
-pub struct SandboxSize {
+pub struct SandboxCeiling {
     pub cpus: u8,
     pub memory_mib: u32,
 }
 
-impl SandboxSize {
+impl SandboxCeiling {
     pub const CAPSULE: Self = Self {
         cpus: 4,
         memory_mib: 5 * 1_024,
@@ -292,7 +297,7 @@ impl SandboxOptions {
             mounts: Vec::new(),
             environment: Vec::new(),
             vsock: Vec::new(),
-            size: SandboxSize::CAPSULE,
+            size: SandboxCeiling::CAPSULE,
         }
     }
 }

@@ -17,7 +17,7 @@ use crate::{
 use super::{
     BaseSandboxRecipe, BaseSandboxSnapshot, CommandEvent, CredentialCheck, CredentialReport,
     CredentialSandbox, EnvironmentProgressSink, IsolationEngine, IsolationError, OutputStream,
-    PORT_RELAY_GUEST_PORT, SandboxMount, SandboxOptions, SandboxSize, SetupStep, VsockRoute,
+    PORT_RELAY_GUEST_PORT, SandboxCeiling, SandboxMount, SandboxOptions, SetupStep, VsockRoute,
 };
 
 const GUEST_HOME: &str = "/root";
@@ -184,7 +184,7 @@ impl SandboxPlan {
                 mounts: Vec::new(),
                 environment,
                 vsock: Vec::new(),
-                size: SandboxSize::CAPSULE,
+                size: SandboxCeiling::CAPSULE,
             },
             defaults: Vec::new(),
             managed_files: Vec::new(),
@@ -497,7 +497,7 @@ pub(super) async fn credential_reports(
     let mut plan = SandboxPlan::compose(config, Project::profile_build(), recipes)?;
     // One command and nothing else, so it is sized like the provider watcher
     // rather than like a task.
-    plan.options.size = SandboxSize::COMMAND;
+    plan.options.size = SandboxCeiling::COMMAND;
     create(
         engine,
         config,
@@ -582,7 +582,7 @@ pub(super) async fn watcher(
     let mut plan = SandboxPlan::compose(config, project, recipes)?;
     // This sandbox runs a provider's read command and nothing else, so it is
     // sized for one command rather than for an agent.
-    plan.options.size = SandboxSize::COMMAND;
+    plan.options.size = SandboxCeiling::COMMAND;
     create(engine, config, id, plan, SandboxKind::Shell, None, progress).await
 }
 
