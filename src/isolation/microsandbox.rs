@@ -1290,10 +1290,12 @@ impl IsolationEngine for MicrosandboxIsolation {
         let sandbox = Sandbox::get(&id)
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
-        sandbox
-            .stop_with_timeout(Duration::from_secs(10))
-            .await
-            .map_err(|error| IsolationError::new(error.to_string()))?;
+        // A stop that runs out of patience is not a sandbox that will not go: the
+        // removal is what makes it go, and a task must not fail because the runtime
+        // was slow to acknowledge a shutdown it no longer needs to wait for.
+        if let Err(error) = sandbox.stop_with_timeout(Duration::from_secs(10)).await {
+            tracing::warn!(sandbox_id = %id, %error, "sandbox did not stop in time; removing it");
+        }
         sandbox
             .remove()
             .await
