@@ -1134,12 +1134,6 @@ impl RemoteTracker {
                 .instruct(report.task_id.clone(), answer.to_owned())
                 .await;
         };
-        if signal.kind == TaskOperatorSignalKind::InReview && is_acceptance(answer) {
-            host.accept(report.task_id.clone(), signal.id.clone())
-                .await?;
-            let events = host.events(report.task_id.clone()).await?;
-            return self.finish_accepted(host, &report, &events).await;
-        }
         host.reply(report.task_id.clone(), signal.id.clone(), answer.to_owned())
             .await
     }
@@ -1381,22 +1375,12 @@ impl RemoteTracker {
                     event.body.clone()
                 };
                 if let Some(thread) = &answered {
-                    // A review answered with a plain acceptance is accepted, the
-                    // same as one answered on the session: the words are the
-                    // operator's judgment whatever surface they typed them on.
-                    if thread.kind == TaskOperatorSignalKind::InReview && is_acceptance(&body) {
-                        host.accept(report.task_id.clone(), thread.id.clone())
-                            .await?;
-                        let events = host.events(report.task_id.clone()).await?;
-                        // The work is finished, so the threads it was waiting in are
-                        // finished too: an acceptance takes the same ending a run
-                        // that completes does, and that ending closes them.
-                        self.resolve_signal_comments(&report, &events).await;
-                        return self.finish_accepted(host, &report, &events).await;
-                    }
-                    // Otherwise the reply answers the thread it is in; whether the
-                    // question is settled is the agent's to decide, and it says so
-                    // with its own resolve. Settling here would take that from it.
+                    // The reply answers the thread it is in. Whether an answer
+                    // settles a question is the agent's to judge and it says so with
+                    // its own resolve, and whether the *work* is accepted is not
+                    // something words decide at all: the operator says that by
+                    // moving the issue to Done, which is theirs to do and cannot be
+                    // misread as a comment.
                     return host
                         .reply(report.task_id.clone(), thread.id.clone(), body)
                         .await;
@@ -3187,27 +3171,6 @@ fn stable_id(namespace: &str, discriminator: &str) -> String {
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     uuid::Uuid::from_bytes(bytes).to_string()
-}
-
-/// Whether an operator's reply is a clear acceptance of a wrap-up request.
-///
-/// A reply that is not an acceptance is sent back to the task as further
-/// instructions, which is the safe default.
-fn is_acceptance(body: &str) -> bool {
-    let normalized = body.trim().to_ascii_lowercase();
-    [
-        "accept",
-        "accepted",
-        "approve",
-        "approved",
-        "lgtm",
-        "done",
-        "complete",
-        "completed",
-        "ship it",
-        "looks good",
-    ]
-    .contains(&normalized.as_str())
 }
 
 /// Whether this history crossed machines, which is what makes replaying it
