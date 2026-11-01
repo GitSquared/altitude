@@ -84,8 +84,13 @@ fn percentile_75(values: impl Iterator<Item = f64>) -> Option<f64> {
     sorted.get(rank.checked_sub(1)?).copied()
 }
 
+/// How many sandboxes this host will run at once, and why.
+///
+/// The sampling belongs here with the rule: a host that cannot read itself is
+/// not an empty host, and that judgement has no business in the task queue.
 #[derive(Debug)]
 pub struct HostCapacity {
+    sampler: Option<HostSampler>,
     window: SampleWindow,
     limit: usize,
 }
@@ -93,15 +98,21 @@ pub struct HostCapacity {
 impl HostCapacity {
     pub fn new() -> Self {
         Self {
+            sampler: HostSampler::new(),
             window: SampleWindow::new(),
             limit: optimistic_start(),
         }
     }
 
-    pub fn observe(&mut self, sample: ResourceSample, demand: usize) -> usize {
+    /// Re-measure the host and let the policy move the count.
+    ///
+    /// Returns `None` when this host cannot be read, which leaves the count
+    /// where it is: an unreadable machine is not an empty one.
+    pub fn observe(&mut self, demand: usize) -> Option<usize> {
+        let sample = self.sampler.as_mut()?.sample()?;
         self.window.push(sample);
         self.limit = next_slot_limit(self.limit, &self.window, demand);
-        self.limit
+        Some(self.limit)
     }
 
     pub fn limit(&self) -> usize {

@@ -12,7 +12,7 @@ use crate::{
     config::InstallationIdentity,
     isolation::{
         Command, CommandEvent, CommandSession, FileTransferSink, IsolationEngine, OutputStream,
-        capacity::{HostCapacity, HostSampler, SAMPLE_INTERVAL},
+        capacity::{HostCapacity, SAMPLE_INTERVAL},
         guest_absolute,
     },
     project::Project,
@@ -148,14 +148,11 @@ where
     fn watch_host_capacity(&self) {
         let event_loop = self.clone();
         tokio::spawn(async move {
-            // A host whose readings cannot be established has no capacity to
-            // measure, and the limit is left where it is.
-            let Some(mut sampler) = HostSampler::new() else {
-                return;
-            };
             let mut tick = time::interval(SAMPLE_INTERVAL);
             loop {
                 tick.tick().await;
+                // Demand is the queue's business; how much room that leaves is
+                // the host's, and only the second half is asked for here.
                 let demand = match event_loop.service.list().await {
                     Ok(tasks) => tasks
                         .iter()
@@ -168,16 +165,14 @@ where
                         continue;
                     }
                 };
-                // A host that cannot be read leaves the limit where it is.
-                let Some(sample) = sampler.sample() else {
-                    continue;
-                };
                 let limit = event_loop
                     .capacity
                     .lock()
                     .expect("capacity lock poisoned")
-                    .observe(sample, demand);
-                tracing::debug!(limit, demand, "observed host capacity");
+                    .observe(demand);
+                if let Some(limit) = limit {
+                    tracing::debug!(limit, demand, "observed host capacity");
+                }
                 event_loop.admit();
             }
         });
