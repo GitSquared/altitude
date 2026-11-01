@@ -102,10 +102,29 @@ impl Default for SandboxCapacity {
     fn default() -> Self {
         Self {
             slots: 1,
-            ceiling: SandboxCeiling::CAPSULE,
+            ceiling: smallest_ceiling(),
         }
     }
 }
+
+/// The ceiling a host that cannot be read still gets.
+///
+/// Small rather than generous: a machine whose own numbers are unavailable is
+/// not one to hand a large guest to, and the floor is what can still run an
+/// agent at all.
+fn smallest_ceiling() -> SandboxCeiling {
+    SandboxCeiling {
+        cpus: 1,
+        memory_mib: u32::try_from(MINIMUM_CEILING_MIB).unwrap_or(u32::MAX),
+        disk_mib: SANDBOX_DISK_CEILING_MIB,
+    }
+}
+
+/// What one sandbox's own disk may grow to.
+///
+/// Not divided by the count like the others: a capsule outlives the slot it ran
+/// in, so the number of them is not the number of tasks running now.
+pub const SANDBOX_DISK_CEILING_MIB: u32 = 15 * 1_024;
 
 pub const MEMORY_SHARE_OF_HOST: u64 = 80;
 pub const MINIMUM_CEILING_MIB: u64 = 2 * 1_024;
@@ -177,7 +196,7 @@ impl HostCapacity {
     /// every later one, without touching a sandbox already running.
     fn ceiling(&self) -> SandboxCeiling {
         if self.totals.memory_mib == 0 {
-            return SandboxCeiling::CAPSULE;
+            return smallest_ceiling();
         }
         let share = u64::try_from(self.slots.max(1)).unwrap_or(u64::MAX);
         // The floor wins over the share, deliberately: a sandbox too small to run
@@ -192,6 +211,7 @@ impl HostCapacity {
         SandboxCeiling {
             cpus: u8::try_from(cpus.clamp(1, u64::from(MAXIMUM_CEILING_CPUS))).unwrap_or(1),
             memory_mib: u32::try_from(memory_mib.min(u64::from(u32::MAX))).unwrap_or(u32::MAX),
+            disk_mib: SANDBOX_DISK_CEILING_MIB,
         }
     }
 

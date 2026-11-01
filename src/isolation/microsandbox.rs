@@ -39,7 +39,7 @@ use super::{
     CommandSession, CredentialCheck, CredentialReport, CredentialSandbox, EnvironmentDescription,
     EnvironmentProgress, EnvironmentProgressSink, FileTally, FileTransferSink, IsolationEngine,
     IsolationError, IsolationStatus, OutputStream, ProfileRecipe, SandboxCapacity, SandboxCeiling,
-    SandboxOptions, SetupStep, VsockRoute, WATCHER_PREFIX,
+    SandboxOptions, SandboxPurpose, SetupStep, VsockRoute, WATCHER_PREFIX,
     capacity::HostCapacity,
     mount_git_cache,
     sandbox::{self, REFRESH_AFTER, private_directory},
@@ -208,8 +208,6 @@ fn permissions(mode: u32) -> fs::Permissions {
 const COPY_CONCURRENCY: usize = 8;
 
 const BASE_IMAGE: &str = "ubuntu:24.04";
-
-const CAPSULE_DISK_MIB: u32 = 15 * 1_024;
 
 const WORKSPACE_PACKAGES: &[&str] = &[
     "bash",
@@ -413,17 +411,18 @@ impl MicrosandboxIsolation {
         &self,
         id: String,
         mut options: SandboxOptions,
+        ceiling: SandboxCeiling,
         pull_policy: PullPolicy,
     ) -> Result<(), IsolationError> {
         mount_git_cache(&mut options, &self.config.git_cache_dir());
         let trusted = trust_host_roots(&mut options, self.config.data_dir());
-        tracing::debug!(sandbox_id = %id, network_enabled = options.network_enabled, cpus = options.size.cpus, memory_mib = options.size.memory_mib, "creating sandbox");
+        tracing::debug!(sandbox_id = %id, network_enabled = options.network_enabled, cpus = ceiling.cpus, memory_mib = ceiling.memory_mib, "creating sandbox");
         let result = match options.snapshot_path {
             Some(snapshot_path) => {
                 let mut restore = Sandbox::restore(snapshot_path)
                     .name(&id)
-                    .cpus(options.size.cpus)
-                    .memory(options.size.memory_mib);
+                    .cpus(ceiling.cpus)
+                    .memory(ceiling.memory_mib);
                 if !options.network_enabled {
                     restore = restore.disable_network();
                 }
@@ -460,10 +459,10 @@ impl MicrosandboxIsolation {
             }
             None => {
                 let mut builder = Sandbox::builder(&id)
-                    .cpus(options.size.cpus)
-                    .memory(options.size.memory_mib)
+                    .cpus(ceiling.cpus)
+                    .memory(ceiling.memory_mib)
                     .image(BASE_IMAGE)
-                    .root_disk(CAPSULE_DISK_MIB)
+                    .root_disk(ceiling.disk_mib)
                     .pull_policy(pull_policy);
                 if !options.network_enabled {
                     builder = builder.disable_network();
@@ -590,8 +589,8 @@ impl MicrosandboxIsolation {
         // An environment build is a sandbox like any other, so it takes the same
         // ceiling: it runs apt and a package manager, which is exactly the work
         // that wants the room.
-        options.size = self.sandbox_ceiling();
-        self.create_sandbox(sandbox_id.clone(), options, PullPolicy::Always)
+        let ceiling = self.sandbox_ceiling();
+        self.create_sandbox(sandbox_id.clone(), options, ceiling, PullPolicy::Always)
             .await?;
         let result = async {
             for (completed, step) in steps.iter().enumerate() {
@@ -1069,12 +1068,21 @@ impl IsolationEngine for MicrosandboxIsolation {
         Ok(())
     }
 
-    async fn create(&self, id: String, mut options: SandboxOptions) -> Result<(), IsolationError> {
-        options.size = self.sandbox_ceiling();
+    async fn create(
+        &self,
+        id: String,
+        mut options: SandboxOptions,
+        purpose: SandboxPurpose,
+    ) -> Result<(), IsolationError> {
+        let ceiling = match purpose {
+            SandboxPurpose::Capsule => self.sandbox_ceiling(),
+            SandboxPurpose::Command => SandboxCeiling::COMMAND,
+        };
         if let Some(route) = self.credential_shell_channel(&id) {
             options.vsock.push(route);
         }
-        self.create_sandbox(id, options, PullPolicy::Never).await
+        self.create_sandbox(id, options, ceiling, PullPolicy::Never)
+            .await
     }
 
     fn base_description(&self) -> Option<EnvironmentDescription> {

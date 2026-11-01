@@ -1,6 +1,7 @@
 use crate::{
     agent::AgentKind,
     remote::TaskSummary,
+    task::tasks_ahead_in_queue,
     tui::{
         App,
         app::PendingTask,
@@ -225,7 +226,7 @@ fn cards(app: &App) -> Vec<Card> {
         .visible_tasks()
         .map(|task| {
             let summary = TaskSummary::of(task);
-            let standing = match crate::task::tasks_ahead_in_queue(&app.tasks, &task.id) {
+            let standing = match tasks_ahead_in_queue(&app.tasks, &task.id) {
                 Some(ahead) => Standing::Queued { ahead, has_room },
                 None => Standing::NotQueued,
             };

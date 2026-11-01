@@ -3,7 +3,7 @@ use crate::{
     config::InstallationIdentity,
     isolation::{
         CommandEvent, CommandSession, FileTransferSink, IsolationEngine, SandboxOptions,
-        VsockRoute, guest_absolute, mounts,
+        SandboxPurpose, VsockRoute, guest_absolute, mounts,
     },
     project::Project,
     vcs::VcsProviderKind,
@@ -241,7 +241,11 @@ where
             }
             None => {
                 isolation
-                    .create(sandbox_id.clone(), SandboxOptions::isolated(snapshot_path))
+                    .create(
+                        sandbox_id.clone(),
+                        SandboxOptions::isolated(snapshot_path),
+                        SandboxPurpose::Capsule,
+                    )
                     .await
             }
         };

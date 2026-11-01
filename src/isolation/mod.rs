@@ -184,7 +184,18 @@ pub struct SandboxOptions {
     pub mounts: Vec<SandboxMount>,
     pub environment: Vec<(String, String)>,
     pub vsock: Vec<VsockRoute>,
-    pub size: SandboxCeiling,
+}
+
+/// What a sandbox is for, which is what decides its ceiling.
+///
+/// It travels with the sandbox rather than becoming a size the caller picks:
+/// a capsule is sized from what the host can spare at that moment, while a shell
+/// run to check a credential needs almost nothing and must not take a capsule's
+/// place in that reckoning.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SandboxPurpose {
+    Capsule,
+    Command,
 }
 
 /// The most one sandbox may be given, which the guest sees as its own size.
@@ -196,17 +207,15 @@ pub struct SandboxOptions {
 pub struct SandboxCeiling {
     pub cpus: u8,
     pub memory_mib: u32,
+    pub disk_mib: u32,
 }
 
 impl SandboxCeiling {
-    pub const CAPSULE: Self = Self {
-        cpus: 4,
-        memory_mib: 5 * 1_024,
-    };
-
+    /// A shell, not a workspace: enough to run a command and read its answer.
     pub const COMMAND: Self = Self {
         cpus: 1,
         memory_mib: 512,
+        disk_mib: 15 * 1_024,
     };
 }
 
@@ -299,7 +308,6 @@ impl SandboxOptions {
             mounts: Vec::new(),
             environment: Vec::new(),
             vsock: Vec::new(),
-            size: SandboxCeiling::CAPSULE,
         }
     }
 }
@@ -402,10 +410,16 @@ pub trait IsolationEngine: Send + Sync {
         status: &watch::Sender<IsolationStatus>,
     ) -> impl Future<Output = Result<(), IsolationError>> + Send;
 
+    /// Create the sandbox, choosing the ceiling from what it is for.
+    ///
+    /// `purpose` is the caller's only say in the size: what a capsule may take is
+    /// the host's answer at this moment, and a command shell is sized like a
+    /// command shell.
     fn create(
         &self,
         id: String,
         options: SandboxOptions,
+        purpose: SandboxPurpose,
     ) -> impl Future<Output = Result<(), IsolationError>> + Send;
 
     fn ensure_project(
