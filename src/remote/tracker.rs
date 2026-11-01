@@ -400,9 +400,6 @@ impl RemoteTracker {
             {
                 continue;
             }
-            if self.taken_over(&reference.id, host).await {
-                continue;
-            }
             let first_try = self
                 .recovered
                 .lock()
@@ -2066,7 +2063,17 @@ impl RemoteTracker {
     /// the task, so it is the one fact that says the work left here for an operator,
     /// rather than being stopped or replaced.
     async fn taken_over(&self, issue_id: &str, host: &dyn Host) -> bool {
-        let Some(report) = self.report_for_issue(issue_id) else {
+        // The newest report on the issue, not whichever one reporting prefers: a
+        // take over is the last thing that happened to this work, and an older
+        // task that was taken over says nothing about the one after it.
+        let Some(report) = self.lock().ok().and_then(|ledger| {
+            ledger
+                .reports
+                .iter()
+                .rev()
+                .find(|report| report.issue_id == issue_id || report.issue_identifier == issue_id)
+                .cloned()
+        }) else {
             return false;
         };
         host.events(report.task_id)
