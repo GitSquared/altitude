@@ -226,7 +226,7 @@ impl LinearAutomation {
                 .and_then(|sessions| {
                     sessions.iter().max_by_key(|session| {
                         session
-                            .get("updatedAt")
+                            .get("createdAt")
                             .and_then(Value::as_str)
                             .unwrap_or_default()
                             .to_owned()
