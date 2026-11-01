@@ -391,13 +391,17 @@ impl RemoteTracker {
         };
         for delegated in delegated {
             let reference = &delegated.reference;
-            // A finished report is the last task on that issue, not this
-            // delegation: an issue delegated again after its work ended is work
-            // that nothing is doing.
-            if self
-                .report_for_issue(&reference.id)
-                .is_some_and(|report| !report.finished)
-            {
+            // What is recovered is a *delegation*, and a delegation is a session:
+            // one that already has a report has been handled. An issue whose work
+            // has ended before is not a delegation waiting to be picked up, and
+            // inventing one for it starts the same task again every minute.
+            let handled = match delegated.session.as_deref() {
+                Some(session) => self.report_for_session(session).is_some(),
+                None => self
+                    .report_for_issue(&reference.id)
+                    .is_some_and(|report| !report.finished),
+            };
+            if handled {
                 continue;
             }
             let first_try = self
@@ -2157,6 +2161,17 @@ impl RemoteTracker {
         if !self.is_settled(&report.issue_id) {
             self.set_status(host, report, TrackerStatus::Done).await?;
             self.settle(&report.issue_id)?;
+        }
+        // The work is accepted, so the issue stops pointing at this machine: an
+        // issue left delegated to an app that has finished is one the app will
+        // adopt all over again.
+        if let Err(error) = self
+            .config
+            .automation
+            .release_issue(&self.issue_reference(&report.issue_id))
+            .await
+        {
+            tracing::warn!(issue = %report.issue_id, %error, "could not release an accepted task's issue");
         }
         // The activity is what the session shows, not the issue's state: a failure
         // to say it must not hold the cursor on an ending that has been written.
