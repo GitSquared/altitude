@@ -413,8 +413,6 @@ impl App {
                 } else {
                     remote.label.clone()
                 },
-                // A remote this build cannot work with says so in the list, before
-                // anyone opens its page or tries to send work there.
                 detail: Some(if remote.compatibility.is_compatible() {
                     remote.address.clone()
                 } else {

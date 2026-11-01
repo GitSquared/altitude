@@ -589,10 +589,6 @@ pub(super) fn remote_connector(
             Some("It is not the machine this client knew.".to_owned()),
             Some("Press enter to accept its identity."),
         ),
-        // It answered, so this is not a machine that is down: it is one running a
-        // release this build cannot work with, and the fix is an update rather
-        // than another dial. The line names both releases, because which one is
-        // older is the only thing the operator still has to work out.
         RemoteStatus::Incompatible { local, remote } => (
             Reach::Off,
             "update required",

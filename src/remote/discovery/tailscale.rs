@@ -209,6 +209,6 @@ async fn discover_remote(candidate: Candidate, own_id: EndpointId) -> Option<Dis
         label: clean(&announcement.label, 64),
         version: clean(&announcement.version, 32),
         address: candidate.wrote,
-        compatibility: Compatibility::of(&announcement.version),
+        compatibility: Compatibility::with_local_version(&announcement.version),
     })
 }

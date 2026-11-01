@@ -33,7 +33,7 @@ where
     if sighting.compatibility == Compatibility::RequiresUpdate {
         return Err(format!(
             "{} needs an update before it can hand a task over",
-            sighting.announcement.name_or(address)
+            sighting.announcement.label_or_address(address)
         ));
     }
     let peer: iroh::EndpointAddr = sighting.ticket.into();

@@ -27,9 +27,6 @@ pub struct DiscoveredRemote {
     pub label: String,
     pub version: String,
     pub address: String,
-    /// Whether the version it announced can work with this build. A remote is
-    /// still discovered when it is incompatible; it just cannot be adopted or
-    /// given work until one side is updated.
     pub compatibility: Compatibility,
 }
 

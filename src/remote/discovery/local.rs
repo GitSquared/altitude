@@ -80,7 +80,7 @@ fn describe(info: &EndpointInfo) -> Option<DiscoveredRemote> {
         label: clean(&metadata.label, 64),
         version: clean(&metadata.version, 32),
         address: format_address(preferred_address(info)?),
-        compatibility: Compatibility::of(&metadata.version),
+        compatibility: Compatibility::with_local_version(&metadata.version),
     })
 }
 

@@ -49,11 +49,9 @@ pub struct Announcement {
 }
 
 impl Announcement {
-    /// What to call this remote where a message needs a name: the name it gave
-    /// itself, or the address the caller reached it at when it gave none.
-    pub fn name_or<'a>(&'a self, address: &'a str) -> &'a str {
-        let name = self.label.trim();
-        if name.is_empty() { address } else { name }
+    pub fn label_or_address<'a>(&'a self, address: &'a str) -> &'a str {
+        let label = self.label.trim();
+        if label.is_empty() { address } else { label }
     }
 }
 

@@ -177,13 +177,7 @@ pub(in crate::tui) enum RemoteStatus {
     Reached,
     Syncing,
     Changed,
-    /// It answered, and runs a release this build cannot work with. The versions
-    /// are carried so the interface can say which two are in front of the operator
-    /// without going back to the announcement.
-    Incompatible {
-        local: String,
-        remote: String,
-    },
+    Incompatible { local: String, remote: String },
     Silent(String),
 }
 
@@ -456,9 +450,6 @@ enum WatchEnd {
     /// It answered with a key that is not the one remembered, so there is nothing
     /// to listen to until the operator decides which key this machine is.
     UnapprovedKey,
-    /// It answered, but it runs a release this build cannot work with. Nothing is
-    /// listened to, and nothing is retried: the fix is an update on one of the two
-    /// machines, not another dial.
     Incompatible,
     Lost,
 }
@@ -2522,9 +2513,7 @@ impl App {
                 match Self::watch_once(&watching, &keys, &client, &events).await {
                     // Nothing is reading any more, which is the interface ending.
                     WatchEnd::Closed => break,
-                    // Dialling again will get the same answer until the operator
-                    // says which key this machine is, or updates one of the two
-                    // machines.
+                    // Retrying cannot resolve an identity or version mismatch.
                     WatchEnd::UnapprovedKey | WatchEnd::Incompatible => break,
                     WatchEnd::Lost => {
                         // A watch that ran for a while was working, and its retry
@@ -2588,9 +2577,6 @@ impl App {
         if key_status == RemoteKeyStatus::Changed {
             return WatchEnd::UnapprovedKey;
         }
-        // A version this build cannot work with ends the watch the same way a
-        // changed key does: dialling again gets the same answer, and the operator
-        // is the one who has to change something.
         if compatibility == Compatibility::RequiresUpdate {
             return WatchEnd::Incompatible;
         }
@@ -2656,9 +2642,6 @@ impl App {
                 RemoteKeyStatus::New | RemoteKeyStatus::Known => {
                     self.remember(&address, &announcement).await;
                     if compatibility == Compatibility::RequiresUpdate {
-                        // It answered, so the sighting is real and is remembered;
-                        // what is not done is opening its task stream or sending
-                        // it work. The row says which two releases disagree.
                         self.clear_remote_trackers(&address);
                         self.remote_synced.remove(&address);
                         self.remote_status.insert(
@@ -2981,7 +2964,7 @@ impl App {
         if sighting.compatibility == Compatibility::RequiresUpdate {
             return Err(format!(
                 "{} needs an update before it can take tasks",
-                sighting.announcement.name_or(address)
+                sighting.announcement.label_or_address(address)
             ));
         }
         // Whose work this is travels as a label. The machine it came from is the
@@ -8052,7 +8035,7 @@ async fn deliver_config(
     if sighting.compatibility == Compatibility::RequiresUpdate {
         return Err(format!(
             "{} needs an update before it can receive this configuration",
-            sighting.announcement.name_or(address)
+            sighting.announcement.label_or_address(address)
         ));
     }
     let peer: EndpointAddr = sighting.ticket.into();

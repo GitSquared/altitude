@@ -44,9 +44,6 @@ pub struct Sighting {
     pub ticket: RemoteTicket,
     pub announcement: Announcement,
     pub key_status: RemoteKeyStatus,
-    /// Whether the version it announced can work with this build. A sighting is a
-    /// successful sighting whatever this says: the machine answered, and it is up
-    /// to the caller whether the difference is something to act on.
     pub compatibility: Compatibility,
 }
 
@@ -67,7 +64,7 @@ pub async fn meet(
         .id
         .parse()
         .map_err(|error| format!("{address} announced an unreadable key: {error}"))?;
-    let compatibility = Compatibility::of(&announcement.version);
+    let compatibility = Compatibility::with_local_version(&announcement.version);
     Ok(Sighting {
         ticket,
         announcement,

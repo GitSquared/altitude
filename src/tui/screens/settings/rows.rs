@@ -205,20 +205,15 @@ impl Row {
             RowKind::Remote {
                 status, trackers, ..
             } => {
-                let enter = match status {
+                let enter_action = match status {
                     RemoteStatus::Changed => "accept identity",
-                    // Not "connect": dialling again reaches the same machine and
-                    // gets the same answer until one of the two is updated, so the
-                    // key re-reads rather than reconnects.
                     RemoteStatus::Incompatible { .. } => "check again",
                     _ => "connect",
                 };
                 let mut hints = vec![
-                    chrome::Hint::new("enter", enter),
+                    chrome::Hint::new("enter", enter_action),
                     chrome::Hint::new("e", "edit"),
                 ];
-                // Nothing about its trackers is worth offering while the two
-                // machines cannot work together at all.
                 if !tracker_is_set_up(trackers.as_deref())
                     && !matches!(status, RemoteStatus::Incompatible { .. })
                 {
@@ -226,8 +221,6 @@ impl Row {
                 }
                 hints
             }
-            // A remote this build cannot work with is still offered, so it can be
-            // seen and its versions read, but it is not something to adopt.
             RowKind::Discovered(remote) => {
                 if remote.compatibility.is_compatible() {
                     vec![chrome::Hint::new("enter", "use remote")]

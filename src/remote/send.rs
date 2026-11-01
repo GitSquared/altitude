@@ -91,7 +91,7 @@ where
     if sighting.compatibility == Compatibility::RequiresUpdate {
         return Err(format!(
             "{} needs an update before it can take tasks",
-            sighting.announcement.name_or(address)
+            sighting.announcement.label_or_address(address)
         ));
     }
     let peer: EndpointAddr = sighting.ticket.into();

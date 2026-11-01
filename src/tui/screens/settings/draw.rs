@@ -311,9 +311,6 @@ fn detail(panel: &Panel, view: &View, tick: Option<usize>) -> Paragraph<'static>
                     palette::accent(),
                 ));
             } else {
-                // A mismatch is a known, stable fact rather than a remote that
-                // failed: say which two releases disagree, and offer the only
-                // action there is rather than a connection that cannot be made.
                 lines.push(Line::from(""));
                 lines.push(Line::from(format!(
                     "This machine runs altitude v{}.",
