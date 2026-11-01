@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
     sync::{Arc, Mutex},
@@ -51,27 +51,9 @@ pub enum TaskExecutionUpdate {
     },
 }
 
-#[derive(Default)]
-struct CachedTerminalOutput {
-    chunks: VecDeque<Vec<u8>>,
-    byte_count: usize,
-}
+mod terminal;
 
-impl CachedTerminalOutput {
-    fn push(&mut self, bytes: &[u8]) {
-        const LIMIT: usize = 2 * 1024 * 1024;
-        let bytes = &bytes[bytes.len().saturating_sub(LIMIT)..];
-        self.byte_count += bytes.len();
-        self.chunks.push_back(bytes.to_vec());
-        while self.byte_count > LIMIT {
-            self.byte_count -= self
-                .chunks
-                .pop_front()
-                .expect("nonempty output cache")
-                .len();
-        }
-    }
-}
+use terminal::CachedTerminalOutput;
 
 #[derive(Clone)]
 pub struct TaskEventLoop<E> {
@@ -428,51 +410,11 @@ where
         self.service.list().await
     }
 
-    pub fn cached_terminal_output(&self, task_id: &str) -> Vec<Vec<u8>> {
-        self.terminal_output
-            .lock()
-            .expect("terminal output lock poisoned")
-            .get(task_id)
-            .map(|output| output.chunks.iter().cloned().collect())
-            .unwrap_or_default()
-    }
-
-    fn cache_terminal_output(&self, task_id: &str, bytes: &[u8]) {
-        self.terminal_output
-            .lock()
-            .expect("terminal output lock poisoned")
-            .entry(task_id.to_owned())
-            .or_default()
-            .push(bytes);
-    }
-
     pub fn has_active_run(&self, task_id: &str) -> bool {
         self.runs
             .lock()
             .expect("task run lock poisoned")
             .contains_key(task_id)
-    }
-
-    pub fn send_terminal_input(&self, task_id: &str, bytes: Vec<u8>) {
-        if let Some(run) = self
-            .runs
-            .lock()
-            .expect("task run lock poisoned")
-            .get(task_id)
-        {
-            let _ = run.commands.send(Command::Input(bytes));
-        }
-    }
-
-    pub fn resize_terminal(&self, task_id: &str, rows: u16, cols: u16) {
-        if let Some(run) = self
-            .runs
-            .lock()
-            .expect("task run lock poisoned")
-            .get(task_id)
-        {
-            let _ = run.commands.send(Command::Resize { rows, cols });
-        }
     }
 
     pub fn take_control(&self, task_id: &str) -> bool {
