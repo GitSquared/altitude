@@ -183,11 +183,26 @@ impl VcsProvider for GitHub {
         let response: ContributionQuery = serde_json::from_str(output).ok()?;
         let resources = response.data?;
         let mut observations = Vec::with_capacity(contributions.len());
+        let mut unresolved = Vec::new();
         for (index, contribution) in contributions.iter().enumerate() {
             // A contribution the provider cannot resolve answers null, which is
-            // not a state to decide anything from.
-            let view = resources.get(&format!("c{index}"))?.as_ref()?;
-            observations.push(observation_of(contribution, view));
+            // not a state to decide anything from. It is also not a reason to
+            // throw away the ones it did resolve: one dead link used to fail every
+            // review its owner was watching.
+            match resources.get(&format!("c{index}")) {
+                Some(Some(view)) => observations.push(observation_of(contribution, view)),
+                _ => unresolved.push(contribution.url.clone()),
+            }
+        }
+        if observations.is_empty() && !unresolved.is_empty() {
+            // Nothing was answered, so this is not a look at all.
+            return None;
+        }
+        if !unresolved.is_empty() {
+            tracing::warn!(
+                unresolved = unresolved.join(", "),
+                "the provider resolved none of these pull requests"
+            );
         }
         Some(observations)
     }
