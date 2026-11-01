@@ -229,10 +229,13 @@ impl AgentEngine for PiCode {
         )
     }
 
-    fn operator_command(&self, conversation_id: &str) -> String {
+    fn operator_command(&self, conversation_id: &str, opening: &str) -> String {
+        // The message is a positional one, so the session resumes with it as the first
+        // thing the agent reads: no keystrokes into a terminal that is not ours.
         format!(
-            "exec pi --session {}",
-            shell_quote(&self.conversation_transcript_path(conversation_id))
+            "exec pi --session {} {}",
+            shell_quote(&self.conversation_transcript_path(conversation_id)),
+            shell_quote(opening)
         )
     }
 

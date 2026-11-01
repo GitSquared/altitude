@@ -7298,16 +7298,7 @@ impl App {
                 event_loop.resize_terminal(&id, rows, cols);
                 self.shells
                     .insert(shell_id.clone(), Shell::new(rows, cols, history, title));
-                self.foreground = Foreground::Shell(shell_id.clone());
-                // The agent is about to be spoken to by a person rather than piloted,
-                // and nothing else tells it so. Same channel as the operator's keys.
-                if let ShellId::Task(task_id) = &shell_id {
-                    event_loop.send_terminal_input(
-                        task_id,
-                        b"Altitude: the operator has taken this task over and will speak to you directly.\r"
-                            .to_vec(),
-                    );
-                }
+                self.foreground = Foreground::Shell(shell_id);
             }
             TaskExecutionUpdate::Report { task } => {
                 self.replace_task(task);

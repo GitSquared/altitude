@@ -279,7 +279,11 @@ where
         let conversation_id = self
             .agent_conversation(&task, engine.operator_requires_conversation())
             .await?;
-        let command = engine.operator_command(&conversation_id);
+        let command = engine.operator_command(
+            &conversation_id,
+            "Altitude: the operator has taken this task over and will speak to you \
+             directly from here. They are at the terminal now.",
+        );
         let mut bound = None;
         let command = match task.facts.sandbox_id.as_deref() {
             Some(sandbox_id) => match self.bind_ports(sandbox_id) {

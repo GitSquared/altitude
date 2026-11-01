@@ -178,7 +178,9 @@ pub trait AgentEngine: Send + Sync {
         resume: bool,
     ) -> String;
     fn report_command(&self, conversation_id: &str, context: &TaskAgentTurnContext) -> String;
-    fn operator_command(&self, conversation_id: &str) -> String;
+    /// The command that hands the terminal to the operator, opening with a message of
+    /// Altitude's own so the agent knows a person is at the keyboard.
+    fn operator_command(&self, conversation_id: &str, opening: &str) -> String;
     fn operator_requires_conversation(&self) -> bool;
     fn report_decoder(&self) -> Box<dyn TaskReportDecoder>;
 }

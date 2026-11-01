@@ -186,10 +186,11 @@ impl AgentEngine for ClaudeCode {
         )
     }
 
-    fn operator_command(&self, conversation_id: &str) -> String {
+    fn operator_command(&self, conversation_id: &str, opening: &str) -> String {
         format!(
-            "exec claude --permission-mode auto --resume {}",
-            shell_quote(conversation_id)
+            "exec claude --permission-mode auto --resume {} {}",
+            shell_quote(conversation_id),
+            shell_quote(opening)
         )
     }
 
