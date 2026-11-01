@@ -1,5 +1,3 @@
-//! A task's life: founding it, provisioning it, and taking it apart.
-
 use crate::{
     agent::{AgentKind, mcp},
     config::InstallationIdentity,
@@ -74,11 +72,6 @@ where
         .await
     }
 
-    /// A copy of this service whose isolation builds for one operator.
-    ///
-    /// Nothing else changes: the store, the machine's identity and the progress
-    /// registry belong to the machine, and only the directories a build writes
-    /// into depend on who the work belongs to.
     pub(super) fn as_operator(&self, owner: &str) -> Result<Self, TaskServiceError> {
         Ok(Self {
             isolation: self
@@ -89,10 +82,6 @@ where
         })
     }
 
-    /// Build what a task's project needs, and say where its snapshot is.
-    ///
-    /// Local tools and profile mounts must be ready before a task arrives. Physical
-    /// disk dependencies are synchronized separately against their exact snapshot.
     pub async fn prepare_project(
         &self,
         project: &Project,
@@ -167,7 +156,6 @@ where
         self.launch(task, command, TaskExecutionMode::Autopilot, None)
             .await
     }
-    /// Where a task's arriving files wait for the sandbox that will be given them.
     pub(super) fn arrivals_dir(&self, task_id: &str) -> PathBuf {
         self.credentials
             .config()
@@ -296,11 +284,6 @@ where
             }
         }
     }
-    /// Put the files a task arrived with into the sandbox it was just given.
-    ///
-    /// Before anything runs in it, and through the sandbox's own filesystem
-    /// channel: what a task brought is a tree the agent left, not a copy of its
-    /// bytes. Nothing waits if there is nothing to put there.
     pub(super) async fn deliver_arrivals(
         &self,
         isolation: &E,
@@ -598,12 +581,6 @@ where
         self.record(&task.id, &events).await
     }
 
-    /// The events a failed attempt records: why it stopped, and the blocked
-    /// thread that says so.
-    ///
-    /// Existing conversations are left alone. A failure is news about this run,
-    /// not a reason to resolve questions the operator may still be reading or
-    /// answering in another thread.
     async fn stopped_events(
         &self,
         task: &Task,
@@ -618,11 +595,6 @@ where
     }
 }
 
-/// What a resumed pause becomes, by what it was holding for.
-///
-/// Recovery is not starting: a task that was waiting for the operator goes back to
-/// waiting, a review that was held goes back to being held, and only a task that
-/// was working becomes work again.
 fn resumed(task: &Task, snapshot_path: String) -> TaskHistoryEvent {
     if task.facts.deferred_review.is_some() {
         TaskHistoryEvent::ExecutionPaused {

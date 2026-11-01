@@ -1,28 +1,11 @@
-//! The MCP server that gives one agent the tools its subsystems registered.
-//!
-//! Altitude speaks MCP over whatever byte stream reaches an agent — a Unix
-//! socket bridged to a sandbox by virtio-vsock — so this module knows nothing
-//! about sandboxes, tasks, or which tools exist. It binds an
-//! [`AgentToolRegistry`] to the protocol and names no tool itself.
-
 use serde_json::{Value, json};
 use std::io;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
 use super::tools::AgentToolRegistry;
 
-/// The guest port an agent's bridge dials on the host. Fixed because every
-/// sandbox reaches the host the same way; the host socket behind it is the
-/// per-agent part.
-///
-/// The other half of this contract is `ALTITUDE_MCP_PORT` in
-/// `src/agent/assets/bridge.py`, which defaults to the same number.
 pub const AGENT_CHANNEL_PORT: u32 = 5000;
 
-/// The protocol revisions Altitude answers, newest first.
-///
-/// A client that asks for one of these gets it back; one that asks for anything
-/// else is offered the newest, which is the protocol's own negotiation.
 const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
 pub async fn serve_agent<R, W>(

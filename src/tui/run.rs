@@ -1,9 +1,3 @@
-//! The terminal loop: events in, and one frame out.
-//!
-//! Everything here is about the terminal rather than about the work: reading
-//! events, routing them to whatever is in front, and drawing. What the
-//! application does with an event is its own business, in `app`.
-
 use std::{
     fs, io, mem,
     time::{Duration, Instant},
@@ -51,11 +45,6 @@ use super::widgets;
 use super::widgets::utils::shimmer_clock;
 use crate::credentials::CredentialShellEvent;
 
-/// A modal's last frame, kept so it can be drawn once more while it leaves.
-///
-/// By the time a modal is dismissed, the screen behind it already has the
-/// foreground, so the only way to animate the modal out is to hold the cells it
-/// left behind and draw them back over the screen for as long as it takes.
 struct Leaving {
     area: Rect,
     cells: Buffer,
@@ -81,8 +70,6 @@ impl Leaving {
     }
 }
 
-/// How a modal leaves. A pop-up reverses the dissolve it would have arrived
-/// with; the panel slides back up the way it came down.
 fn exit(panel: bool, area: Rect) -> Effect {
     if panel {
         fx::coalesce((110, Interpolation::QuadOut))
@@ -94,8 +81,6 @@ fn exit(panel: bool, area: Rect) -> Effect {
     .with_area(area)
 }
 
-/// Draw a frame, but only when something has asked for one. At rest the loop
-/// never reaches this, so an idle interface costs nothing.
 fn draw_when(
     redraw: &mut bool,
     terminal: &mut DefaultTerminal,
@@ -108,11 +93,6 @@ fn draw_when(
     Ok(())
 }
 
-/// Move only the field, against the frame the last full draw left.
-///
-/// The interface above the field has not changed, so its cells can be replayed
-/// rather than laid out again. Returns whether it could: a resize or a missing
-/// snapshot needs the full draw.
 fn draw_backdrop(
     terminal: &mut DefaultTerminal,
     snapshot: &mut Option<Buffer>,
@@ -143,8 +123,6 @@ struct EventReplies<'a> {
     tracker_scopes: &'a mpsc::UnboundedSender<TrackerScopesReply>,
 }
 
-/// What the loop hears from outside the terminal: the work changing, and what the
-/// machines this client uses are holding.
 pub struct Feeds {
     pub task_execution: mpsc::UnboundedReceiver<TaskExecutionUpdate>,
     pub watched_tasks: mpsc::UnboundedReceiver<WatchedTasks>,
@@ -1175,7 +1153,6 @@ where
     Ok(false)
 }
 
-/// Starts one pass of network discovery, reporting why there is none.
 async fn start_scan(app: &mut App) -> Option<Scan> {
     match app.link.scan_remotes().await {
         Ok(scan) => Some(scan),

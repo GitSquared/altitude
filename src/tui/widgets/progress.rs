@@ -1,10 +1,3 @@
-//! Bytes moving, and how fast.
-//!
-//! A transfer is the one wait here that has something to count, so it is the one
-//! wait that draws a bar rather than a travelling highlight. What it counts is
-//! always bytes: the pieces of an archive on their way to another machine, or the
-//! same pieces arriving from one.
-
 use ratatui::{
     Frame,
     layout::{Constraint, Flex, Layout, Rect},
@@ -14,29 +7,25 @@ use ratatui::{
 
 use crate::tui::widgets::{palette, utils::shimmer};
 
-/// The modal is wide enough for two columns of numbers and no wider: it is a
-/// measurement, not a page.
 const WIDTH: u16 = 62;
 
 pub struct Progress<'a> {
     pub title: &'a str,
     pub label: &'a str,
-    /// What the transfer is waiting on. Empty while something is moving, when the
-    /// numbers say it instead.
     pub stage: &'a str,
     pub detail: Detail,
 }
 
-/// What this part of the wait counts.
 pub enum Detail {
-    /// Bytes between machines: what a link moves, with a rate and an estimate.
     Bytes {
         done: u64,
         total: u64,
         rate: Option<f64>,
     },
-    /// Files between a machine and a sandbox: what a task is made of.
-    Files { done: u64, total: u64 },
+    Files {
+        done: u64,
+        total: u64,
+    },
 }
 
 impl Detail {
@@ -139,10 +128,6 @@ pub fn draw(frame: &mut Frame, area: Rect, progress: &Progress<'_>, tick: Option
     popup
 }
 
-/// The bar itself, filled to an eighth of a cell.
-///
-/// A bar that only moves once per character looks frozen when the thing it is
-/// counting is slow, which is exactly when an operator is watching it.
 fn draw_bar(frame: &mut Frame, area: Rect, progress: &Progress<'_>) {
     const PARTIAL: [&str; 8] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
     let percent = format!("{:>4}%", progress.percent());
@@ -165,11 +150,6 @@ fn draw_bar(frame: &mut Frame, area: Rect, progress: &Progress<'_>) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-/// Bytes, in the units a person reads a transfer in.
-///
-/// Decimal rather than binary, because a link is sold and measured in decimal and
-/// a bar that reports 64% of 71.9 MB is easier to check against a 75 MB file than
-/// the same bytes spelled in MiB.
 fn amount(bytes: u64) -> String {
     const KILO: f64 = 1_000.0;
     let bytes = bytes as f64;

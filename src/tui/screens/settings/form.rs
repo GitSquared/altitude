@@ -1,9 +1,3 @@
-//! The page that edits one project or remote, and the fields behind it.
-//!
-//! A project has more to say than fits a modal on a short terminal, so the fields
-//! scroll with the caret: the block being edited is always on screen, and the ones
-//! above it are one shift-tab away.
-
 use std::mem;
 
 use crossterm::event::{KeyEvent, MouseEvent};
@@ -33,22 +27,12 @@ use crate::{
     vcs::VcsProviderKind,
 };
 
-/// What an action applies to: the list it saves into, and what it replaces.
-///
-/// One type for the form and for the confirmation, because both need to know
-/// which list they are about and which row they are about.
 #[derive(Clone, PartialEq, Eq)]
 pub enum Target {
     NewProject,
-    /// The project being edited, so the fields this form does not show survive
-    /// the save.
-    Project {
-        id: String,
-    },
+    Project { id: String },
     NewRemote,
-    Remote {
-        original: String,
-    },
+    Remote { original: String },
 }
 
 impl Target {
@@ -106,16 +90,10 @@ impl Focus {
         )
     }
 
-    /// Whether this field holds several lines, in which case the vertical arrows
-    /// are its own: they move the caret rather than the page.
     pub fn is_multiline(self) -> bool {
         matches!(self, Self::Setup | Self::Caches | Self::Instructions)
     }
 
-    /// Whether this field is a pill whose list opens where it stands.
-    ///
-    /// The repository and the team are pills too, but their choices come from the
-    /// network: they open a page of their own rather than a list built here.
     pub fn is_a_pill(self) -> bool {
         matches!(
             self,
@@ -235,9 +213,6 @@ pub struct Form {
     pub instructions: TextBox,
     pub scope: Field,
     identity_choices: Vec<ProjectCommits>,
-    /// The choices, each a value you press and a list you step through. The
-    /// value's own type is the answer: `None` is the offer that clears a field,
-    /// which is what made "nothing chosen" a state the page could not reach.
     agent: Select<Option<String>>,
     vcs: Select<Option<String>>,
     tracker: Select<Option<String>>,
@@ -245,16 +220,10 @@ pub struct Form {
     host: Select<Option<String>>,
     pub accepts_delegated_work: bool,
     pub focus: Focus,
-    /// How many rows of the form are above the viewport.
     scroll: u16,
-    /// Whether the wheel moved the form away from the caret's group.
     free_scroll: bool,
-    /// Where each group and action was drawn, for a click.
     hits: Vec<(Rect, Focus)>,
-    /// Where an open list drew its rows on the frame, so a click can find them.
     pill_rows: Vec<(Rect, usize)>,
-    /// How the tracker's scope is named in this form: a Linear team, a Jira
-    /// project, a GitHub repository.
     scope_label: String,
     pub repositories: Option<Repositories>,
     pub scopes: Option<Scopes>,
@@ -280,8 +249,6 @@ const PROJECT_FIELDS: [Focus; 14] = [
 const REMOTE_FIELDS: [Focus; 3] = [Focus::Primary, Focus::Cancel, Focus::Save];
 
 impl Form {
-    /// The form for a project that does not exist yet, with the caches a new
-    /// project starts with already filled in.
     pub fn new_project(
         scope_label: &str,
         remotes: &[String],
@@ -435,8 +402,6 @@ impl Form {
         self.free_scroll = false;
     }
 
-    /// Move the form by a wheel notch, letting the operator read past the
-    /// caret's group without moving it.
     pub fn scroll_by(&mut self, up: bool) {
         const ROWS: u16 = 3;
         self.free_scroll = true;
@@ -447,7 +412,6 @@ impl Form {
         };
     }
 
-    /// The field a click lands on, if it lands on the page.
     pub fn hit(&self, column: u16, row: u16) -> Option<Focus> {
         self.hits.iter().find_map(|(area, focus)| {
             (column >= area.x && column < area.right() && row >= area.y && row < area.bottom())
@@ -493,7 +457,6 @@ impl Form {
         self.agent.chosen_value().cloned().flatten()
     }
 
-    /// The harness the chosen login is for, which is what a task would run.
     pub fn agent(&self) -> Option<AgentKind> {
         agent_of(self.agent_credential().as_deref())
     }
@@ -502,7 +465,6 @@ impl Form {
         self.vcs.chosen_value().cloned().flatten()
     }
 
-    /// The provider the repository belongs to, which is the one its login is for.
     fn vcs_provider(&self) -> VcsProviderKind {
         self.vcs_credential()
             .as_deref()
@@ -518,8 +480,6 @@ impl Form {
         self.tracker.chosen_value().cloned().flatten()
     }
 
-    /// Whether one of the pills has its list open, in which case the keys are
-    /// that list's and not the page's.
     pub fn list_open(&self) -> bool {
         match self.focus {
             Focus::Agent => self.agent.is_open(),
@@ -531,8 +491,6 @@ impl Form {
         }
     }
 
-    /// Open the focused pill's list. Nothing happens on a field whose list is a
-    /// page of its own: those open from the keys that own them.
     pub fn open_pill(&mut self) {
         match self.focus {
             Focus::Agent => self.agent.open(),
@@ -544,7 +502,6 @@ impl Form {
         }
     }
 
-    /// Take a key for the open list. Answers whether it was the list's.
     pub fn list_key(&mut self, key: KeyEvent) -> bool {
         let handled = match self.focus {
             Focus::Agent => self.agent.handle_key(key),
@@ -562,7 +519,6 @@ impl Form {
         handled
     }
 
-    /// What an open list's keys are, for the guidance line.
     pub fn list_hints(&self) -> Option<Vec<chrome::Hint>> {
         match self.focus {
             Focus::Agent if self.agent.is_open() => Some(self.agent.hints()),
@@ -574,8 +530,6 @@ impl Form {
         }
     }
 
-    /// A click on one of the list's rows is the choice, the way it is everywhere
-    /// else a list is drawn.
     pub fn pill_mouse(&mut self, mouse: MouseEvent) -> bool {
         let rows = mem::take(&mut self.pill_rows);
         let taken = match self.focus {
@@ -590,7 +544,6 @@ impl Form {
         taken
     }
 
-    /// Draw the open list over the fields, answering where each row landed.
     fn draw_list(&self, frame: &mut Frame, area: Rect, anchor: Rect) -> Vec<(Rect, usize)> {
         match self.focus {
             Focus::Agent => self.agent.draw_list(frame, area, anchor),
@@ -602,7 +555,6 @@ impl Form {
         }
     }
 
-    /// How wide the pill on a field wants to be.
     fn pill_width(&self, focus: Focus) -> u16 {
         match focus {
             Focus::Agent => self.agent.pill_width(false),
@@ -651,8 +603,6 @@ impl Form {
         self.repository = Field::with(url);
     }
 
-    /// Take a mouse event for the repository list, answering the repository a
-    /// click chose. The wheel only moves the keys.
     pub fn repository_mouse(&mut self, mouse: MouseEvent) -> Option<Repository> {
         let chosen = self.repositories.as_mut()?.mouse(mouse)?;
         self.repositories = None;
@@ -675,11 +625,6 @@ impl Form {
     }
 }
 
-/// A pill over the logins this installation holds for one slot.
-///
-/// The empty offer comes first, so the field can be emptied as well as filled:
-/// it means the installation's own answer, which is what an unset field runs on
-/// anyway.
 fn credential_pick(
     name: &'static str,
     slot: Slot,

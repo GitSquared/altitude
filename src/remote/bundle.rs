@@ -1,7 +1,3 @@
-//! Client settings and private profile snapshots exchanged with a remote.
-//! Digests identify snapshots already received, including empty profiles that
-//! remove credentials the client no longer holds.
-
 use std::{fs, io, path::Path};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
@@ -11,17 +7,8 @@ use crate::config::Settings;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConfigBundle {
-    /// The configuration, so the remote holds the same environments.
-    ///
-    /// The part a remote can act on, not the file as written: what this interface
-    /// does is no business of a machine running a task, and hashing it would sync a
-    /// preference as though it were configuration.
     pub settings: String,
     pub profiles: Vec<ProfileBundle>,
-    /// Whether this machine should forget the operator's logins.
-    ///
-    /// True when the operator keeps no project here. A machine is a copy of where
-    /// the work is, so when it is none of it, it holds none of the keys either.
     #[serde(default)]
     pub remove_logins: bool,
 }
@@ -45,8 +32,6 @@ pub struct ProfileDigest {
     pub digest: String,
 }
 
-/// What a remote holds, kept beside its configuration so a client can be told what
-/// not to send again.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct HeldConfig {
     pub profiles: Vec<ProfileDigest>,
@@ -60,8 +45,6 @@ impl HeldConfig {
             .unwrap_or_default()
     }
 
-    /// Writes it beside the real record and moves it into place, so a reader never
-    /// sees half of one.
     pub fn save(&self, path: &Path) -> io::Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -72,11 +55,6 @@ impl HeldConfig {
     }
 }
 
-/// Whether a machine is sent the logins as well as the configuration.
-///
-/// A machine that is about to run a task needs them. One that is merely paired
-/// and holds no project has no reason to keep a copy of an operator's keys: it is
-/// a machine they may have added a week ago and never given work.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Logins {
     Always,
@@ -105,18 +83,6 @@ impl ConfigBundle {
         });
     }
 
-    /// Reads this installation's setup, sending the profiles a remote is missing.
-    ///
-    /// `mounted` is the logins a task mounts. The tracker profiles travel with
-    /// them but are never mounted: what they carry is the account a remote routes
-    /// tracker work by, not something a capsule reads.
-    ///
-    /// `held` is what the remote said it has. A profile is sent when it is not there
-    /// at all, or when its contents differ.
-    ///
-    /// `host` is the machine this bundle is for: only the projects it runs travel,
-    /// and only the profiles those projects run with, so a remote never learns
-    /// about work that belongs somewhere else and holds no key to it.
     pub fn of(
         settings: &str,
         data_dir: &Path,
@@ -158,10 +124,6 @@ impl ConfigBundle {
 }
 
 impl ProfileBundle {
-    /// Reads one profile's directory, or nothing when it has never been used.
-    ///
-    /// A profile nobody has logged into is a directory that does not exist, which is
-    /// not an error: it means there is nothing to send.
     pub fn of(data_dir: &Path, profile: &str) -> Result<Self, io::Error> {
         let root = data_dir.join(profile).join("profile");
         let mut files = Vec::new();

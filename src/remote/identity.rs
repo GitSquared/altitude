@@ -1,10 +1,3 @@
-//! The keypair that names an installation, and the file plumbing for machine-local
-//! state.
-//!
-//! The path is always the caller's: nothing here picks a default location or
-//! keeps global state, so the client and the serve role can each hold their own
-//! identity.
-
 use std::{
     fs,
     io::ErrorKind,
@@ -18,19 +11,11 @@ use super::LinkResult;
 
 // ------------------------------------------------------------------ identity
 
-/// An installation's transport identity: an Ed25519 keypair on disk.
-///
-/// The caller supplies the path. There is no default location and no global
-/// state, so the client and the serve role can each hold their own.
 pub struct InstallationKey {
     secret_key: SecretKey,
 }
 
 impl InstallationKey {
-    /// Loads the keypair at `path`, generating and writing one if absent.
-    ///
-    /// The file holds the 32 secret bytes, base64, on one line. On unix it is
-    /// created with mode 0600.
     pub fn load_or_create(path: impl Into<PathBuf>) -> LinkResult<Self> {
         let path = path.into();
         if let Some(parent) = path.parent() {
@@ -85,10 +70,6 @@ fn write_secret(path: &Path, secret_key: &SecretKey) -> LinkResult<()> {
     Ok(())
 }
 
-/// Writes a file only the owner can read, replaced atomically.
-///
-/// The rename means a reader sees either the old record or the new one, never a
-/// half-written list, and it carries the temporary file's mode across.
 pub(super) fn write_private(path: &Path, text: &str) -> LinkResult<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;

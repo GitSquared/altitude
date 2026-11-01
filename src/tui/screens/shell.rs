@@ -18,8 +18,6 @@ use terminput::Encoding;
 use terminput_crossterm::to_terminput;
 use tui_term::{vt100, widget::PseudoTerminal};
 
-/// What the program in a sandbox asked this machine to do, because a terminal
-/// cannot do it from in there.
 pub enum GuestRequest {
     Copy(String),
     Open(String),
@@ -30,12 +28,8 @@ pub struct Shell {
     parser: vt100::Parser<HostCallbacks>,
     requests: Receiver<GuestRequest>,
     clipboard_notice_until: Option<Instant>,
-    /// Ports this sandbox has lately made reachable here, so the border can say
-    /// so without taking a line from the terminal.
     reachable_ports: Vec<u16>,
     ports_notice_until: Option<Instant>,
-    /// What this terminal is, on its frame: a task's run, or the shell opened to set
-    /// up credentials.
     title: String,
 }
 
@@ -60,8 +54,6 @@ impl Shell {
         }
     }
 
-    /// Feed the terminal what its program printed, and answer with what it asked
-    /// for along the way.
     pub fn process(&mut self, bytes: Vec<u8>) -> Vec<GuestRequest> {
         self.parser.process(&bytes);
         self.requests.try_iter().collect()
@@ -76,10 +68,6 @@ impl Shell {
             .is_some_and(|until| Instant::now() < until)
     }
 
-    /// Say that a port in this terminal's sandbox can be reached from here.
-    ///
-    /// A second port arriving while the first is still being shown is the same
-    /// fact repeated, so they are read out together.
     pub fn show_reachable_port(&mut self, port: u16) {
         if !self.has_reachable_ports() {
             self.reachable_ports.clear();
@@ -226,8 +214,6 @@ impl Shell {
     }
 }
 
-/// The escape sequences a program in a sandbox uses to ask for something only this
-/// side of the terminal can do: a clipboard, and a browser.
 struct HostCallbacks {
     host: Sender<GuestRequest>,
 }
@@ -243,9 +229,6 @@ impl vt100::Callbacks for HostCallbacks {
         let _ = self.host.send(GuestRequest::Copy(text));
     }
 
-    /// A program asking its terminal where the cursor is waits for an answer on
-    /// its input. The host terminal never sees the question — this screen is
-    /// drawn here rather than passed through — so the screen answers for it.
     fn unhandled_csi(
         &mut self,
         screen: &mut vt100::Screen,
@@ -277,9 +260,6 @@ impl vt100::Callbacks for HostCallbacks {
         let _ = self.host.send(GuestRequest::Reply(reply.into_bytes()));
     }
 
-    /// Altitude's own sequence, written by the opener every sandbox is given. The
-    /// parser hands over anything that is not a sequence it knows, which is what
-    /// makes this one ours to define.
     fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
         if let [b"1337", b"open", url] = params
             && let Ok(url) = str::from_utf8(url)

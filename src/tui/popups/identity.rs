@@ -1,6 +1,3 @@
-//! The two small questions a service section asks: which service to connect,
-//! and what to call the identity.
-
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,
@@ -18,9 +15,6 @@ use crate::{
     },
 };
 
-/// One thing a service section can add. A version-control section has a Git
-/// identity as well as its provider logins, because the two answer different
-/// questions: who signed in, and who the commits are from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IdentityChoice {
     Service(Service),
@@ -98,10 +92,6 @@ impl IdentitySetup {
     }
 }
 
-/// The name, email, and signing choice commits carry.
-///
-/// It lives here rather than in the first-run card because the same question is
-/// asked from Settings, where the card is not on screen.
 pub struct GitIdentitySetup {
     name: Field,
     email: Field,

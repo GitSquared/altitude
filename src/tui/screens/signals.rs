@@ -1,16 +1,3 @@
-//! Signals: what is waiting on the operator, one thread at a time.
-//!
-//! Fullscreen, in two columns. The list on the left is every thread, fat enough
-//! to read at a glance, and the one it has selected is the conversation on the
-//! right: what each side said, and the actions available on it. The left
-//! column draws no background, so the terrain behind it shows through the gaps
-//! between rows; the conversation is an opaque pane.
-//!
-//! A thread has one state: unresolved or resolved. Reading is not a separate
-//! fact, and it is not one either: nothing is resolved by having been looked at,
-//! which would take a log away mid-sentence. Accepting a review is a resolve
-//! that also ends the task, behind a confirmation.
-
 use std::{collections::HashMap, time::Duration};
 
 use chrono::Utc;
@@ -44,24 +31,13 @@ use crate::{
     },
 };
 
-/// How wide the list asks to be, inside the frame, gutter included. Wide enough
-/// for a title and a line of what was said, and no wider: the conversation is
-/// what the room is for.
 const LIST_WIDTH: u16 = 40;
 const PLAN_WIDTH: u16 = 32;
-/// The gutter between the plan's text and its edges, so the column reads like
-/// the signals list rather than sitting on the divider.
 const PLAN_PADDING: u16 = 1;
 const PLAN_COLUMN_MIN: u16 = 112;
-/// The gutter between the list's rows and the frame, so the rows do not sit on
-/// the border.
 const LIST_PADDING: u16 = 1;
 const COMPOSER_HEIGHT: u16 = 5;
 
-/// Which threads the list shows.
-///
-/// The groups are the filters: a kind has one heading, and choosing that heading
-/// is how the operator asks for the whole history of that kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignalFilter {
     All,
@@ -74,8 +50,6 @@ pub enum SignalFilter {
 }
 
 impl SignalFilter {
-    /// Whether a thread belongs in this view. The kind filters keep that kind's
-    /// history, and the unresolved view is what still needs an answer.
     pub fn matches(self, thread: &TaskOperatorSignalThread) -> bool {
         match self {
             Self::All => true,
@@ -105,8 +79,6 @@ pub enum SignalFocus {
 }
 
 impl SignalFocus {
-    /// The next focus in the ring. The action buttons are only in the ring when
-    /// this thread has any.
     pub fn next(self, forward: bool, actions: usize) -> Self {
         let mut ring = vec![Self::List, Self::Detail];
         ring.extend((0..actions).map(Self::Action));
@@ -137,17 +109,11 @@ pub enum SignalHit {
     SortOffer(usize),
 }
 
-/// What the operator can do with the selected thread.
-///
-/// The screen shows one primary action and, where there is a second, one
-/// secondary action. They are the same gestures everywhere: enter is primary,
-/// ctrl-enter is secondary. What they mean follows from the kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignalAction {
     Reply,
     Resolve,
     Accept,
-    /// Apply the project change a blocked thread is carrying.
     Apply,
 }
 
@@ -190,8 +156,6 @@ pub fn primary_action(thread: &TaskOperatorSignalThread) -> Option<SignalAction>
     })
 }
 
-/// The action ctrl-enter takes. A blocked thread's primary is already a reply,
-/// so there is no second thing to offer there.
 pub fn secondary_action(thread: &TaskOperatorSignalThread) -> Option<SignalAction> {
     if thread.is_resolved() {
         return matches!(
@@ -204,8 +168,6 @@ pub fn secondary_action(thread: &TaskOperatorSignalThread) -> Option<SignalActio
         .then_some(SignalAction::Reply)
 }
 
-/// The actions available on a thread, in footer order: the secondary answer on
-/// the left and the primary one at the right edge.
 pub fn actions(thread: &TaskOperatorSignalThread) -> Vec<SignalAction> {
     secondary_action(thread)
         .into_iter()
@@ -447,8 +409,6 @@ fn draw_controls(frame: &mut Frame, toolbar: Rect, popup_area: Rect, app: &mut A
     }
 }
 
-/// The list of threads, in the left half of the frame, with the field visible
-/// through it.
 fn draw_threads(frame: &mut Frame, area: Rect, app: &mut App) {
     app.signal_targets.add(area, SignalHit::List);
     let agent = app.signal_agent_label();
@@ -537,8 +497,6 @@ fn draw_threads(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
-/// The selected thread: its title, conversation and actions, on the surface of
-/// the right half.
 fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
     app.signal_targets.add(area, SignalHit::Detail);
     // Opaque by construction: the field is never drawn on this side.
@@ -703,8 +661,6 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
 
 struct Conversation<'a> {
     thread: &'a TaskOperatorSignalThread,
-    /// The project as this machine's settings hold it, which is what a proposed
-    /// change is measured against. Absent for a task whose project is elsewhere.
     project: Option<&'a Project>,
     agent: &'a str,
     selected: Option<usize>,
@@ -718,16 +674,6 @@ struct ConversationLayout {
     scroll_max: u16,
 }
 
-/// The cards of the thread, scrolled by the row.
-///
-/// The conversation lays every card out whether or not it fits, then copies the
-/// rows the viewport can hold. `scroll` is a row offset from the top of the
-/// conversation, or [`u16::MAX`] for the bottom, and it is clamped here so a
-/// resize cannot leave the view past the end.
-/// The change a thread is asking for, as lines inside its card.
-///
-/// The words are the agent's; this is the part the operator acts on, so it is
-/// shown as a change against what the project is now rather than described.
 fn proposal_lines(
     proposal: &ProjectProposal,
     project: Option<&Project>,
@@ -754,8 +700,6 @@ fn proposal_lines(
     lines
 }
 
-/// Lines that left, then lines that arrived, and nothing for a field that is
-/// already what it would become.
 fn field_diff(out: &mut Vec<Line<'static>>, before: Option<&str>, after: &str, width: usize) {
     let old: Vec<&str> = before
         .unwrap_or_default()
@@ -786,7 +730,6 @@ fn field_diff(out: &mut Vec<Line<'static>>, before: Option<&str>, after: &str, w
     }
 }
 
-/// One side of a change, wrapped inside the card it lives in.
 fn diff_line(marker: char, text: &str, width: usize, tone: Style) -> Vec<Line<'static>> {
     let indent = "  ";
     let lead = format!("{indent}{marker} ");
@@ -959,15 +902,12 @@ fn draw_messages(
     }
 }
 
-/// One entry of a conversation: what was said, or the thread being closed or
-/// reopened between two things said.
 #[derive(Clone, Copy)]
 enum Entry {
     Message(usize),
     Transition(SignalTransition),
 }
 
-/// The thread's messages and its closes in the order they happened.
 fn conversation_entries(thread: &TaskOperatorSignalThread) -> Vec<Entry> {
     let mut entries: Vec<(i64, Entry)> = thread
         .messages
@@ -985,7 +925,6 @@ fn conversation_entries(thread: &TaskOperatorSignalThread) -> Vec<Entry> {
     entries.into_iter().map(|(_, entry)| entry).collect()
 }
 
-/// A close or a reopen, as the conversation shows it.
 fn transition_line(transition: SignalTransition, agent: &str, now: i64) -> Line<'static> {
     let who = who(Some(transition.by), agent);
     let what = if transition.resolved {
@@ -999,8 +938,6 @@ fn transition_line(transition: SignalTransition, agent: &str, now: i64) -> Line<
     )
 }
 
-/// The reply being written, where the conversation is, rather than in a box over
-/// it: the sentence belongs to the thread it will join.
 fn draw_composer(frame: &mut Frame, box_area: Rect, app: &App, agent: &str) {
     let Some(composer) = &app.signal_composer else {
         return;
@@ -1010,8 +947,6 @@ fn draw_composer(frame: &mut Frame, box_area: Rect, app: &App, agent: &str) {
         .draw_titled(frame, box_area, true, Some(&format!("reply to {agent}")));
 }
 
-/// The buttons at the foot of the conversation. The keys are in the frame's
-/// guidance; the buttons say what they do, not which key does it.
 fn draw_buttons(
     frame: &mut Frame,
     pane: Rect,
@@ -1063,8 +998,6 @@ fn draw_empty(frame: &mut Frame, area: Rect, app: &App) {
     empty::draw(frame, area, "Agent hasn't raised any signals yet");
 }
 
-/// What the agent's message reads as on one line: its first line, so a list row
-/// says what the thread last said without becoming a paragraph.
 fn one_line(body: &str) -> String {
     body.lines()
         .find(|line| !line.trim().is_empty())

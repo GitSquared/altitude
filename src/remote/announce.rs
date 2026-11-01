@@ -1,16 +1,3 @@
-//! Saying who a server is, to a client that cannot dial it yet.
-//!
-//! The link dials by public key, so a client needs the key before it can
-//! connect. That is the one thing an operator cannot reasonably be asked to type
-//! and the one thing that cannot come from the link itself, so the server says it
-//! over TCP on the same port number as its UDP. One address to remember, one
-//! thing to be told.
-//!
-//! It speaks HTTP rather than a protocol of its own. `curl` then works, which
-//! matters when a server is not answering and someone has to find out why, and a
-//! reverse proxy can put TLS in front of it, which authenticates the first
-//! sighting instead of trusting it.
-
 use std::{net::SocketAddr, time::Duration};
 
 use serde::{Deserialize, Serialize};
@@ -28,18 +15,10 @@ use super::LinkResult;
 use crate::tracker::TrackerKind;
 
 const EXCHANGE_LIMIT: Duration = Duration::from_secs(5);
-/// Enough for a request head and then some. A body is never read, because there
-/// is nothing to ask for.
 const MAX_REQUEST_BYTES: usize = 8 * 1024;
 
-/// What a server says about itself.
-///
-/// Nothing here is a secret: the key is public by definition, and everything else
-/// is what a person would read off the machine's own console.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Announcement {
-    /// The protocol a client must speak to this server, so a client can tell it is
-    /// talking to the right thing rather than to whatever else is on the port.
     pub protocol: String,
     pub id: String,
     pub label: String,
@@ -55,23 +34,15 @@ impl Announcement {
     }
 }
 
-/// What a remote's tracker can do right now.
-///
-/// Setup is checked when the remote starts, so this says how far its owner got,
-/// not whether the public webhook address actually reaches it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrackerReadiness {
     Ready,
     NotInstalled,
-    /// Installed, and the login would not verify — a replaced secret, a revoked
-    /// grant, or a clock far enough off to break the signature.
     Unavailable,
 }
 
 impl TrackerReadiness {
-    /// How the state reads to whoever has to act on it, so the client and the
-    /// remote log say the same words.
     pub fn said(self) -> &'static str {
         match self {
             Self::Ready => "ready",
@@ -81,22 +52,12 @@ impl TrackerReadiness {
     }
 }
 
-/// One tracker a remote is configured for.
-///
-/// Capability only: a client needs to know whether to wait or to nag, and nothing
-/// here names a workspace, an app, a path, or a secret. Those stay on the machine
-/// that holds them.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct TrackerConnection {
     pub provider: TrackerKind,
     pub state: TrackerReadiness,
 }
 
-/// What a remote can do with a task right now.
-///
-/// A machine that has just been sent a configuration is building what it needs to
-/// run one. Until that finishes it answers, so a client can tell it apart from a
-/// machine that is down, and cannot be given work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RemoteState {
@@ -109,14 +70,6 @@ pub(super) struct Broadcast {
 }
 
 impl Broadcast {
-    /// Starts answering on the sockets the link itself bound, over TCP.
-    ///
-    /// TCP and UDP do not collide, so this costs the operator no second address
-    /// to remember or to make reachable. Taking the link's own sockets rather
-    /// than the address the operator asked for is what keeps the port the same
-    /// when they asked for *any* port: an operating system picks a UDP port and
-    /// a TCP port independently, so binding the announcement to what was asked
-    /// for would quietly put it somewhere else.
     pub(super) async fn start(
         bound: &[SocketAddr],
         announcement: Announcement,
@@ -146,9 +99,6 @@ impl Broadcast {
     }
 }
 
-/// Linux's IPv6 wildcard also claims IPv4 unless IPV6_V6ONLY is explicit.
-/// SO_REUSEADDR permits restarting after closed connections; SO_REUSEPORT stays
-/// disabled so a competing listener still fails.
 fn bind_listener(address: SocketAddr) -> Result<TcpListener, String> {
     let socket = Socket::new(
         Domain::for_address(address),
@@ -242,11 +192,6 @@ async fn read_head(stream: &mut TcpStream, request: &mut Vec<u8>) -> LinkResult<
     }
 }
 
-/// Asks a server who it is.
-///
-/// The answer is not authenticated by anything, which is the point: this is the
-/// first sighting, and the client pins what it learns here. Everything after it
-/// is authenticated by the link's own handshake.
 pub async fn ask(host: &str, port: u16) -> LinkResult<Announcement> {
     let mut stream = timeout(EXCHANGE_LIMIT, TcpStream::connect((host, port))).await??;
     let request = format!("GET / HTTP/1.1\r\nhost: {host}:{port}\r\nconnection: close\r\n\r\n");

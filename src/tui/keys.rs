@@ -1,32 +1,9 @@
-//! What a key means, in one place.
-//!
-//! Three gestures recur on every surface, so they are defined once rather than
-//! spelled out per overlay. All three are conventions an operator can carry
-//! between screens, which is the point: `q` and escape always mean "go away",
-//! `d`, delete and backspace always mean "remove this", and `?` always means
-//! "what do the keys do here".
-//!
-//! Inside a text field the first two are characters, which is why the field is
-//! left with escape. `?` is the one that is only a character there.
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-/// Whether a key means "go away": close what is in front of you, or quit the
-/// application when there is nothing to close.
 pub fn is_dismiss(key: KeyEvent) -> bool {
     matches!(key.code, KeyCode::Esc | KeyCode::Char('q'))
 }
 
-/// Whether the operator asked for the secondary action rather than the primary
-/// one: ctrl-enter, the heavier of the two gestures a surface offers. It starts
-/// the work a prompt has written, takes a task over from the list, and replies
-/// where enter accepts. A surface whose enter is not a line — an issue's one-line
-/// query — has no use for it and says so where it reads keys.
-///
-/// One chord everywhere, so the gesture is one thing to learn and one thing to
-/// state. What it costs is stated here once: a chorded enter is a key of its own
-/// only under the terminal's keyboard protocol, and elsewhere it arrives as plain
-/// enter. What sits behind this therefore asks before it does anything the
-/// operator would not want by pressing the key beside it.
 pub fn is_secondary(key: KeyEvent) -> bool {
     key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL)
 }

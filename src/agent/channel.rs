@@ -1,10 +1,3 @@
-//! The socket an agent harness dials to reach Altitude's tools.
-//!
-//! One per sandbox, serving whatever registry it was bound with: a task's tools for a
-//! task's run, and nothing for a credential shell, which has no task for tools to act
-//! on. It lives under the cache because a Unix socket path is length-limited, and the
-//! data path plus a sandbox id is already at the limit on macOS.
-
 use std::{
     collections::HashMap,
     fs, io,
@@ -38,10 +31,6 @@ impl AgentChannels {
         }
     }
 
-    /// Bind the socket `id`'s harness dials, serving `tools`, and answer with it.
-    ///
-    /// Replacing rather than refusing: a sandbox id is never reused while its socket
-    /// is alive, so one already here is a leftover from a run that is gone.
     pub fn bind(&self, id: &str, tools: AgentToolRegistry) -> io::Result<PathBuf> {
         self.release(id);
         private_directory(&self.directory).map_err(|error| io::Error::other(error.to_string()))?;

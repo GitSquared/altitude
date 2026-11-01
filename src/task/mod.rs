@@ -48,9 +48,6 @@ pub struct TaskArrival {
     pub agent: AgentKind,
     pub conversation: Option<String>,
     pub history: Vec<(i64, TaskHistoryEvent)>,
-    /// The files a task brought with it: a directory holding `work/` and the
-    /// harness's `transcript.jsonl`. They are put into its sandbox when it is
-    /// built, which is the first moment there is one to put them in.
     pub files: Option<PathBuf>,
     pub transfer_id: String,
     pub peer: String,
@@ -69,13 +66,9 @@ pub struct TaskService<E> {
     credentials: Credentials<E>,
     trackers: Option<Arc<dyn TrackerHost>>,
     issue_reader: Option<Arc<dyn IssueReader>>,
-    /// Told whenever a signal thread is written by an agent tool. The interface
-    /// reads the change rather than asking the store on a clock: a tool write is
-    /// not a task update, so nothing else would carry it to the screen.
     signal_changes: broadcast::Sender<String>,
 }
 
-/// Copy a tree of files, keeping the modes and links it was found with.
 pub(crate) fn copy_tree(source: &Path, destination: &Path) -> io::Result<()> {
     fs::create_dir_all(destination)?;
     for entry in fs::read_dir(source)? {
@@ -182,11 +175,6 @@ impl Error for TaskServiceError {}
 
 // Execution policy consumes recorded values; the store does not infer these decisions.
 
-/// Whether this task is waiting for a slot, or holding one.
-///
-/// A paused task holds nothing: pausing suspends the capsule to a snapshot, so
-/// its resources are already back. What it wants is to be admitted again, which
-/// is a separate question from how much the host will carry.
 pub(crate) fn wants_a_slot(task: &Task) -> bool {
     matches!(
         task.facts.execution_status,
@@ -240,8 +228,6 @@ where
         }
     }
 
-    /// A receiver told when a signal thread changes, so a screen showing one can
-    /// read it instead of polling.
     pub fn subscribe_signals(&self) -> broadcast::Receiver<String> {
         self.signal_changes.subscribe()
     }
@@ -254,11 +240,6 @@ where
         &self.credentials
     }
 
-    /// The repositories this machine's version-control login can reach.
-    ///
-    /// Asked from a project's settings, so it runs in the login's own build and
-    /// never in a task's. Off the caller's loop: it may have to install the CLI
-    /// the first time.
     pub async fn repositories(
         &self,
         kind: VcsProviderKind,
@@ -268,8 +249,6 @@ where
             .map_err(|error| TaskServiceError::RepositoryListing(error.to_string()))
     }
 
-    /// Use the tracker each task's own operator pushed, for a machine serving
-    /// other peers rather than reporting its own work.
     pub fn with_trackers(mut self, trackers: Arc<dyn TrackerHost>) -> Self {
         self.trackers = Some(trackers);
         self
@@ -292,11 +271,6 @@ where
             .and_then(|host| host.for_credential(&self.identity.id, credential))
     }
 
-    /// The one place Altitude's subsystems are bound into an agent's tool set.
-    ///
-    /// Every agent-facing capability Altitude has is registered here and nowhere
-    /// else, so this is what to read when asking what an agent can do. The MCP
-    /// server serves whatever this returns and names no tool itself.
     fn agent_tools(&self, task_id: &str) -> AgentToolRegistry {
         let mut tools = AgentToolRegistry::new();
         tools.register(TaskAgentTools::new(
@@ -309,11 +283,6 @@ where
         tools
     }
 
-    /// Open the channel this task's agent reaches Altitude through, and say
-    /// where the sandbox finds it.
-    ///
-    /// Bound on every provisioning rather than kept: a restored capsule gets a
-    /// new sandbox, and a vsock route is fixed when the sandbox is made.
     pub(super) fn bind_agent_channel(&self, task_id: &str) -> Result<PathBuf, TaskServiceError> {
         self.agent_channels
             .bind(task_id, self.agent_tools(task_id))
@@ -324,8 +293,6 @@ where
         self.agent_channels.release(task_id);
     }
 
-    /// The relay channel a task's sandbox is made with, so that taking the task
-    /// over can reach whatever its terminal starts listening on.
     pub(super) fn relay_channel(&self, sandbox_id: &str) -> VsockRoute {
         self.port_relays.channel(sandbox_id)
     }
@@ -347,22 +314,12 @@ where
         }
     }
 
-    /// What each task's environment build is doing, for an interface to show.
-    ///
-    /// Keyed by task, and only present while this service is building for it.
     pub fn environment_builds(&self) -> HashMap<String, EnvironmentProgress> {
         self.environment_progress.published()
     }
     pub async fn list(&self) -> Result<Vec<Task>, TaskServiceError> {
         self.store.list().await.map_err(TaskServiceError::Task)
     }
-    /// Bring back what was running, and return the tasks that want a slot.
-    ///
-    /// Recovery is not starting. This puts a task's work back on disk and leaves
-    /// it waiting, so the caller decides what the host can carry; starting here
-    /// would run everything at once on the way up.
-    /// What the workspace base says about itself, for an interface that
-    /// describes environments rather than runs them.
     pub fn base_description(&self) -> Option<EnvironmentDescription> {
         self.isolation.base_description()
     }

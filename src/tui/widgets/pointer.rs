@@ -1,13 +1,3 @@
-//! Where a click can land.
-//!
-//! A widget draws itself and says what each rectangle it drew means; the mouse
-//! is read later against those rectangles. Keeping them from the last frame
-//! rather than recomputing them is what keeps a click and the thing under it in
-//! step: a layout that moved because a list opened is a layout that was drawn
-//! that way, and a second guess at it would be a second source of truth.
-//!
-//! The last thing drawn wins, because that is the thing on top.
-
 use ratatui::layout::Rect;
 
 pub struct Targets<T> {
@@ -23,8 +13,6 @@ impl<T> Default for Targets<T> {
 }
 
 impl<T> Targets<T> {
-    /// Forget the last frame's targets, which a page does before drawing again:
-    /// what is no longer on screen is no longer clickable.
     pub fn clear(&mut self) {
         self.entries.clear();
     }

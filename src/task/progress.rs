@@ -4,12 +4,6 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-/// What every task's environment build is doing right now.
-///
-/// Isolation reports progress through a writer; the interface reads what was
-/// published. A build lasts as long as one provisioning call, and its entry is
-/// removed when that call returns, so an absent entry means nothing is being
-/// built for that task.
 #[derive(Clone, Default)]
 pub struct EnvironmentProgressRegistry(Arc<Mutex<HashMap<String, EnvironmentProgress>>>);
 

@@ -1,15 +1,3 @@
-//! This machine's loopback, joined to a sandbox's own.
-//!
-//! A program run from a sandbox's terminal listens on the sandbox's loopback; a
-//! browser on this machine reaches this machine's. Neither is the other, so a link
-//! a sandbox opens — an OAuth callback, a dev server — lands where nothing listens.
-//!
-//! The guest half is `assets/port-relay.py`: it dials a sandbox's relay channel and
-//! announces every TCP port it sees listening. This is the host half. It binds each
-//! announced number on this machine's loopback when that number is free, and joins
-//! every incoming connection to a connection the sandbox dials back over the same
-//! channel. A port this machine already uses is left to whatever has it.
-
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs, io,
@@ -29,8 +17,6 @@ use tokio::{
 
 use super::{VsockRoute, private_directory};
 
-/// The guest port a sandbox's relay helper dials. The other half of this contract
-/// is `ALTITUDE_PORTS_PORT` in `assets/port-relay.py`.
 pub(crate) const PORT_RELAY_GUEST_PORT: u32 = 5001;
 
 const HELPER: &str = "/usr/local/bin/altitude-port-relay.py";
@@ -42,11 +28,6 @@ pub(crate) fn install_script() -> String {
     )
 }
 
-/// The command that opens a terminal with the relay helper behind it.
-///
-/// The helper is the terminal session's child: the setup session is gone before a
-/// terminal arrives, and a process left by it goes with it. Its output goes to a
-/// log rather than to the terminal the operator is working in.
 pub(crate) fn with_helper(command: &str) -> String {
     format!(
         "if command -v python3 >/dev/null 2>&1; then\n\
@@ -55,15 +36,8 @@ pub(crate) fn with_helper(command: &str) -> String {
     )
 }
 
-/// How long a client waits for the sandbox to answer before it is dropped.
-///
-/// A sandbox that never dials back would otherwise hold the operator's browser open
-/// until the browser gave up on its own, which reads as a hang rather than a refusal.
 const CLIENT_PATIENCE: Duration = Duration::from_secs(10);
 
-/// Below this a port is not forwarded: binding it needs privileges this machine may
-/// not give, and what listens there is the sandbox's plumbing rather than something
-/// an operator started.
 const FIRST_FORWARDED_PORT: u16 = 1024;
 
 #[derive(Clone, Debug)]
@@ -89,16 +63,12 @@ struct RelayState {
     notices: broadcast::Sender<PortNotice>,
     forwarded: HashMap<u16, Forwarded>,
     pending: HashMap<u16, VecDeque<Pending>>,
-    /// Ports that had no host number to take, so the operator is told once rather
-    /// than on every retry.
     refused: HashSet<u16>,
     last_token: u64,
     last_announcement: u64,
 }
 
 struct Forwarded {
-    /// Which announcement this forwarding answers, so a control connection that
-    /// has already been replaced cannot take the live one down with it.
     announcement: u64,
     orders: mpsc::UnboundedSender<()>,
     tasks: Vec<JoinHandle<()>>,
@@ -122,10 +92,6 @@ impl PortRelays {
         self.notices.subscribe()
     }
 
-    /// The relay channel a sandbox is made with.
-    ///
-    /// A route is fixed when the sandbox is made, so a task's sandbox is given its
-    /// channel at provisioning and the host end is bound when a terminal opens.
     pub fn channel(&self, id: &str) -> VsockRoute {
         VsockRoute {
             host_socket: self.directory.join(format!("{id}-ports.sock")),
@@ -133,9 +99,6 @@ impl PortRelays {
         }
     }
 
-    /// Bind a sandbox's end of the relay, and answer with the route it carries.
-    ///
-    /// It answers with nothing to relay until the guest announces.
     pub fn bind(&self, id: &str) -> io::Result<VsockRoute> {
         self.release(id);
         private_directory(&self.directory).map_err(|error| io::Error::other(error.to_string()))?;
@@ -208,11 +171,6 @@ async fn accept(listener: UnixListener, state: Arc<Mutex<RelayState>>, id: Strin
     }
 }
 
-/// Decide what one connection over the relay channel is for.
-///
-/// The guest sends `W <port>` to announce a listener and `D <port>` to carry one
-/// client. It reads the line a byte at a time so that whatever follows it is still
-/// there for the connection that uses it.
 async fn serve(mut stream: UnixStream, state: Arc<Mutex<RelayState>>, id: String) {
     let Some(line) = read_line(&mut stream).await else {
         return;
@@ -461,11 +419,6 @@ impl RelayState {
     }
 }
 
-/// Bind the sandbox's number on both loopbacks, or take nothing at all.
-///
-/// `localhost` is both families, and one operator asking for a port should not land
-/// somewhere different depending on which one their browser picks. Anything already
-/// answering there belongs to this machine and is left alone.
 async fn bind_loopback(port: u16) -> io::Result<Vec<TcpListener>> {
     let ipv4 = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await?;
     match bind_ipv6(port).await {

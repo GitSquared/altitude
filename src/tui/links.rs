@@ -1,13 +1,3 @@
-//! What a sandbox may open on this machine.
-//!
-//! A program in a sandbox has no browser, so it hands the address to the
-//! terminal Altitude streams, and Altitude opens it here. The address is the
-//! sandbox's to choose, so only a page gets through: `file://`, `javascript:`
-//! and anything else a launcher might treat as something other than a page are
-//! refused, not escaped.
-
-/// The longest address this will open, which is longer than any login page and
-/// shorter than a payload.
 const LONGEST: usize = 2_048;
 
 #[derive(Debug, PartialEq, Eq)]

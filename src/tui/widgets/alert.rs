@@ -1,10 +1,3 @@
-//! What the interface has to say, in front of the work until it is read.
-//!
-//! A message here is not furniture: it is the answer to something the operator
-//! pressed. It therefore sits where the answer is and waits to be dismissed,
-//! rather than taking a line of the frame that every screen would have to keep
-//! clear for it.
-
 use ratatui::{
     Frame,
     layout::{Constraint, Flex, Layout, Rect},
@@ -13,15 +6,11 @@ use ratatui::{
 
 use crate::tui::widgets::{button, chrome, palette};
 
-/// How wide a message box is willing to get. A sentence is readable across a
-/// third of a wide terminal and does not stretch to its edge.
 const MAX_WIDTH: u16 = 64;
 const MIN_WIDTH: u16 = 28;
 
 pub struct Alert {
     pub message: String,
-    /// Whether this is something that went wrong. A problem reads in the colour
-    /// that means a problem everywhere else in this interface.
     pub is_problem: bool,
 }
 

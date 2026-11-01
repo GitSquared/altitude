@@ -1,10 +1,3 @@
-//! The interface: what the operator sees, and what their keys reach.
-//!
-//! A screen fills the terminal and is the work itself; a pop-up sits over
-//! whatever is there and asks one thing; a widget is drawn by both. What the
-//! application is holding, and what it does with it, is in `app`. The loop that
-//! reads events and draws frames is in `run`.
-
 mod app;
 mod background;
 mod boot;

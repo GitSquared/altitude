@@ -1,16 +1,3 @@
-//! Lists that say what each row is, and the cursor that moves among them.
-//!
-//! A row is a small block rather than a line: an optional mark and note beside
-//! the name, and an optional detail under it. The focus bar covers the whole
-//! block, because what is selected is the row rather than its name. The pieces
-//! are placed the same way in every list that uses one: mark at the left edge,
-//! note at the right edge so a column of notes lines up.
-//!
-//! A row can start a group with a section heading. Rows may then differ in
-//! height, so the cursor measures the list when it decides how many fit. Every
-//! row is followed by a blank line, so blocks read apart rather than as one
-//! paragraph.
-
 use std::time::Duration;
 
 use ratatui::{
@@ -26,8 +13,6 @@ use crate::tui::widgets::{palette, utils::truncate};
 pub struct Heading {
     pub title: String,
     pub note: Option<String>,
-    /// The mark before the title and the tone both it and the title take.
-    /// A group can use one place for what every row in it shares.
     pub mark: Vec<Span<'static>>,
     pub tone: Style,
 }
@@ -37,8 +22,6 @@ pub struct Row {
     pub title: String,
     pub detail: Option<String>,
     pub note: Option<String>,
-    /// The mark in front of the first line, where the row has a status of its
-    /// own. Its spans keep their own styles; only their width is measured here.
     pub mark: Vec<Span<'static>>,
     pub tone: Style,
 }
@@ -181,15 +164,6 @@ impl Row {
     }
 }
 
-/// Where the cursor is, and which line the list starts at.
-///
-/// The two are separate because the view moves on its own clock: the selection
-/// changes on a key, and the rows follow it one frame at a time, so a jump reads
-/// as the list moving rather than the content changing.
-///
-/// The view is measured in lines rather than in rows, so a row taller than the
-/// view can be read by scrolling through it, and the last row is reached in full
-/// instead of stopping where the rows above it happen to end.
 #[derive(Default)]
 pub struct Cursor {
     selected: usize,
@@ -202,29 +176,20 @@ impl Cursor {
         self.selected
     }
 
-    /// The line the view starts at, counted from the top of the list.
     pub fn offset(&self) -> usize {
         self.offset
     }
 
-    /// Put the cursor on a row, keeping the view where it is until it is told to
-    /// follow.
     pub fn select(&mut self, index: usize) {
         self.selected = index;
     }
 
-    /// Start again at the top, with no scroll to carry over. Used when the list
-    /// under the cursor is a different list.
     pub fn reset(&mut self) {
         self.selected = 0;
         self.offset = 0;
         self.target = 0;
     }
 
-    /// Move one row, and stop at the ends rather than returning to the other.
-    ///
-    /// A list that loops makes a wheel that keeps turning impossible to read: the
-    /// row under the pointer is replaced by one from the far end of the list.
     pub fn move_by(&mut self, forward: bool, len: usize) {
         if len == 0 {
             self.selected = 0;
@@ -237,10 +202,6 @@ impl Cursor {
         };
     }
 
-    /// Move the selection one screen of rows, stopping at the ends.
-    ///
-    /// `layout` is what the list measured when it last drew itself: the keys
-    /// cannot measure the rows again without drawing them.
     pub fn page_by(&mut self, forward: bool, layout: &Layout) {
         let len = layout.heights.len();
         if len == 0 {
@@ -267,11 +228,6 @@ impl Cursor {
         self.selected = index;
     }
 
-    /// Point the view at the line it should start from, so the whole selected
-    /// row is on screen and the view stops at the end of the content.
-    ///
-    /// With animations off there is no clock to glide on, so the view is put
-    /// there at once.
     pub fn follow(&mut self, rows: &[Row], height: u16, animate: bool) {
         let band = usize::from(height).max(1);
         if rows.is_empty() {
@@ -301,11 +257,6 @@ impl Cursor {
         self.offset != self.target
     }
 
-    /// Move the view toward where it should be, easing out so a long jump does
-    /// not crawl. Answers whether anything moved, which is what asks for a frame.
-    ///
-    /// The step is measured in elapsed time, not in frames, so the faster loop
-    /// eases toward the target instead of jumping there.
     pub fn glide(&mut self, elapsed: Duration) -> bool {
         if self.offset == self.target {
             return false;
@@ -322,26 +273,18 @@ impl Cursor {
     }
 }
 
-/// How many lines a row occupies, including the blank one under it.
 fn block(row: &Row) -> usize {
     usize::from(row.height()) + 1
 }
 
-/// The line a row starts at, counted from the top of the list.
 fn start_line(rows: &[Row], index: usize) -> usize {
     rows[..index.min(rows.len())].iter().map(block).sum()
 }
 
-/// Every line the rows occupy, which is what the view stops at.
 pub fn content_lines(rows: &[Row]) -> usize {
     rows.iter().map(block).sum()
 }
 
-/// What a list measured when it last drew itself.
-///
-/// A key that pages the list needs the shape of the rows it is paging, and only
-/// the draw knows it: the rows are built from the contents of the screen rather
-/// than held anywhere the keys can reach.
 #[derive(Clone, Default)]
 pub struct Layout {
     heights: Vec<u16>,
@@ -357,13 +300,6 @@ impl Layout {
     }
 }
 
-/// Draw the rows from the line `offset` down.
-///
-/// `selected` is the row the detail follows, which keeps an inactive bar when
-/// the focus is elsewhere; `focused` is the row the keys are on. `gutter` is the
-/// horizontal padding inside the list: text is kept clear of it, but the bars run
-/// through it, so a row reads as the whole block rather than a line floating in
-/// the middle.
 pub fn draw(
     frame: &mut Frame,
     area: Rect,
@@ -444,9 +380,6 @@ pub fn draw(
     hitboxes
 }
 
-/// Where a row sits on screen, and how much of it is left to draw.
-///
-/// A row that is scrolled past, or one that starts below the area, has none.
 fn on_screen(rows: &[Row], index: usize, offset: usize, area: Rect) -> Option<(u16, u16)> {
     let start = start_line(rows, index);
     let first = start.max(offset);
@@ -513,8 +446,6 @@ fn heading_line(heading: &Heading, width: usize) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Padding inside an inactive selection keeps the bar's fill. Outside one there
-/// is nothing to continue, so it is plain space.
 fn padding_span(spaces: &str, selected: bool) -> Span<'static> {
     if selected {
         Span::styled(spaces.to_owned(), palette::inactive_selection())

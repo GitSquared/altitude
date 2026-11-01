@@ -1,13 +1,3 @@
-//! Installing the remote as a service: what keeps it running after the terminal
-//! closes and the machine comes back up.
-//!
-//! Guided rather than printed, because a service definition is a machine's own
-//! facts — where this binary is, which directories it reads, which user owns the
-//! sandboxes — and someone who can already write one is not who this is for. It
-//! says what it will do before doing it, never installs in a scope that was not
-//! chosen, and is the only place in the serve role that asks for the machine's
-//! owner.
-
 use std::{
     env,
     error::Error,
@@ -150,9 +140,6 @@ impl Installation {
         directory.join(format!("{LABEL}.plist"))
     }
 
-    /// Stops it, then removes the file. Both are best-effort until the removal: a
-    /// service that is already stopped still has a file to delete, and a stop that
-    /// refuses does not make the file less of a leftover.
     fn steps(path: &Path, scope: Scope, uid: &str) -> Vec<Step> {
         let mut steps = vec![if matches!(env::consts::OS, "linux") {
             Step::systemctl(scope, &["disable", "--now", UNIT], false)
@@ -251,12 +238,6 @@ impl Service {
         })
     }
 
-    /// A secret that only this shell's environment holds will not reach a service.
-    ///
-    /// Said before anything is written, because the service would otherwise start
-    /// without a tracker and look like a failed install. Reading the settings here
-    /// writes a default file when there is none, which is the file the service is
-    /// about to start from anyway.
     fn warn_about_inherited_secrets(&self) -> Result<(), Box<dyn Error>> {
         let settings = ServeSettings::load_or_create(&self.settings_path)?;
         let Some(linear) = settings.linear else {
@@ -450,8 +431,6 @@ impl Service {
         job
     }
 
-    /// What the service is told about this machine, with `HOME` added for a machine
-    /// service, which starts without a login to take it from.
     fn environment_for(&self, scope: Scope) -> Vec<(String, String)> {
         let mut environment = self.environment.clone();
         if scope == Scope::Machine {
@@ -488,8 +467,6 @@ struct Plan {
 struct Step {
     command: Vec<String>,
     privileged: bool,
-    /// Whether a failure stops the install. Unloading a job that is not loaded is
-    /// the normal first install, so that step is not.
     required: bool,
 }
 
@@ -609,8 +586,6 @@ impl Plan {
         run_steps(&self.commands)
     }
 
-    /// A user service on Linux stops with the last session unless it is lingering,
-    /// which is exactly what a headless remote must not do.
     fn linger(&self, service: &Service) -> Result<(), Box<dyn Error>> {
         let command = vec![
             "loginctl".to_owned(),
@@ -682,12 +657,6 @@ fn starts(scope: Scope) -> &'static str {
     }
 }
 
-/// Run one command, and answer whether it succeeded.
-///
-/// A step speaks only when it has something to complain about, and only when that
-/// complaint matters: unloading a job that was never loaded prints "no such
-/// process", which reads like a failure in the middle of a first install that is
-/// going perfectly well.
 fn run_command(command: &[String], privileged: bool, show_errors: bool) -> io::Result<bool> {
     let mut process = process_for(command, privileged)?;
     process.stdout(Stdio::null());

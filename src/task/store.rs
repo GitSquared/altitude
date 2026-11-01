@@ -44,14 +44,10 @@ impl From<TaskRow> for Task {
     }
 }
 
-/// What a task is founded with: what was asked for, who asked, where it runs, and
-/// what runs it.
 #[derive(Clone, Debug)]
 pub struct TaskDraft {
     pub intent: String,
     pub project: Project,
-    /// The installation this task is delegated under, which is what a tracker's actor
-    /// is mapped to.
     pub identity_id: String,
     pub identity_label: String,
     pub host: String,
@@ -64,10 +60,6 @@ pub struct TaskStore {
     pool: SqlitePool,
 }
 
-/// What the host does with the wrap-up request a report asks for.
-///
-/// The request either goes out in the agent's words or waits for the linked
-/// contributions to answer.
 pub(crate) enum ReviewRequest<'a> {
     Raise,
     Hold(&'a TaskOperatorSignalDraft),
@@ -80,10 +72,6 @@ impl TaskStore {
         }
     }
 
-    /// Every task still in play, newest first.
-    ///
-    /// A removed task is not here, and is still readable by id: removing one disposes
-    /// of its capsule and keeps what was decided on it.
     pub async fn list(&self) -> Result<Vec<Task>, TaskError> {
         sqlx::query_as::<_, TaskRow>(concat!(
             include_str!("read_task.sql"),
@@ -95,10 +83,6 @@ impl TaskStore {
         .map_err(TaskError::Database)
     }
 
-    /// The tasks whose wrap-up request the host is still holding, newest first.
-    ///
-    /// The review scheduler asks this every pass, so it reads only the tasks it
-    /// acts on rather than every task's facts.
     pub async fn list_held_reviews(&self) -> Result<Vec<Task>, TaskError> {
         sqlx::query_as::<_, TaskRow>(concat!(
             include_str!("read_task.sql"),
@@ -143,11 +127,6 @@ impl TaskStore {
         .map_err(TaskError::Database)
     }
 
-    /// Found a task, with the history it already had if it has one.
-    ///
-    /// A task born here is born with the intent that asked for it. A task that arrived
-    /// from another machine was asked for there, at a time that is part of its record,
-    /// so it is born with that instead of a second version of the same fact.
     pub async fn create(
         &self,
         draft: TaskDraft,
@@ -231,12 +210,6 @@ impl TaskStore {
         Ok(task)
     }
 
-    /// The active task bound to an issue, if one exists.
-    ///
-    /// A task counts as finished once the operator accepted it, which is the
-    /// judgment that precedes cleanup, or once cleanup recorded it completed. A
-    /// removed task is not in play. Both finished and removed work may be founded
-    /// again later, which is why neither is returned here.
     async fn active_bound_task(
         transaction: &mut Transaction<'_, Sqlite>,
         reference: &IssueReference,
@@ -283,11 +256,6 @@ impl TaskStore {
         }))
     }
 
-    /// Whether the task's record is still kept here.
-    ///
-    /// A completed task is kept: the operator may still read it, and a tracker is
-    /// told the work is done from a record that is still here rather than one that
-    /// has been thrown away.
     pub async fn is_kept(&self, task_id: &str) -> Result<bool, TaskError> {
         let active: Option<bool> =
             sqlx::query_scalar("SELECT removed_at_ms IS NULL FROM tasks WHERE id = ?")
@@ -314,10 +282,6 @@ impl TaskStore {
         Ok(task)
     }
 
-    /// Everything that happened to a task, in order, with when it happened.
-    ///
-    /// The time belongs with the event, because history that happened on another
-    /// machine must not arrive claiming it happened now.
     pub async fn events(&self, task_id: &str) -> Result<Vec<(i64, TaskHistoryEvent)>, TaskError> {
         let rows: Vec<(i64, String)> = sqlx::query_as(
             "SELECT recorded_at_ms, payload FROM task_event_logs WHERE task_id = ? ORDER BY sequence",
@@ -398,10 +362,6 @@ impl TaskStore {
         Ok(())
     }
 
-    /// Record that the operator asked for a different driver.
-    ///
-    /// The run is named because only it can hand over; the record is what makes
-    /// the request visible in a task's history afterwards, whatever happened to it.
     pub async fn request_control(
         &self,
         task_id: &str,
@@ -499,11 +459,6 @@ impl TaskStore {
         Ok(task)
     }
 
-    /// Link one contribution to a task, once.
-    ///
-    /// The event id is derived from the task and the contribution's canonical
-    /// identity, so linking the same pull request twice records one link. The
-    /// return says whether this call is the one that recorded it.
     pub async fn link_code_contribution(
         &self,
         task_id: &str,
@@ -539,12 +494,6 @@ impl TaskStore {
         Ok((task, inserted))
     }
 
-    /// Record transitions, including a return to a previously observed state.
-    /// Compare with the latest event under the write lock so unchanged polls
-    /// remain a no-op across restarts without suppressing A -> B -> A.
-    ///
-    /// The flag says whether anything was new, which is what tells the host the
-    /// contributions moved.
     pub async fn record_code_contribution_observations(
         &self,
         task_id: &str,
@@ -593,11 +542,6 @@ impl TaskStore {
         Ok((task, moved))
     }
 
-    /// The inputs that express what the operator has asked for, oldest first.
-    ///
-    /// The founding brief is the first input; a follow-up message or a signal
-    /// reply is another. Signal replies written before inputs existed are
-    /// projected here too, so old history stays readable.
     pub async fn inputs(&self, task_id: &str) -> Result<Vec<TaskInput>, TaskError> {
         let mut inputs = Vec::new();
         for (at_ms, event) in self.events(task_id).await? {
@@ -648,12 +592,6 @@ impl TaskStore {
         Ok(inputs)
     }
 
-    /// Whether the task is waiting on an answer only the operator can give.
-    ///
-    /// A thread counts while it is unresolved and holds nothing from them: once
-    /// they reply, the reply is the answer to wake for, and a thread they left
-    /// open is a conversation rather than a stop. This is what keeps a report
-    /// from having to raise a second question to say the task is stopped.
     pub async fn has_unanswered_question(&self, task_id: &str) -> Result<bool, TaskError> {
         Ok(self
             .unresolved_signal_threads(task_id)
@@ -670,8 +608,6 @@ impl TaskStore {
             }))
     }
 
-    /// The signal threads a task still has unresolved, with every message on
-    /// them.
     pub async fn unresolved_signal_threads(
         &self,
         task_id: &str,
@@ -684,12 +620,6 @@ impl TaskStore {
             .collect())
     }
 
-    /// Every thread a task has, resolved ones included.
-    ///
-    /// Derived from the event log rather than kept beside it: a thread is the
-    /// events that name its id, so the conversation cannot disagree with the
-    /// history that produced it. Resolved threads are part of the answer because
-    /// a conversation that ended is what explains the ones that followed.
     pub async fn signal_threads(
         &self,
         task_id: &str,
@@ -854,12 +784,6 @@ impl TaskStore {
             .await
     }
 
-    /// Add an operator message to a thread, reopening it if it was resolved.
-    ///
-    /// The meaning is the agent's to read. The caller decides whether the task
-    /// needs a run to read it. A reply does not resolve anything: it may be the
-    /// answer, or the next question, and only the two sides' reading of it says
-    /// which.
     pub async fn message_operator_signal(
         &self,
         task_id: &str,
@@ -908,8 +832,6 @@ impl TaskStore {
         .await
     }
 
-    /// Mark a thread resolved or unresolved. A message reopens it; this is the
-    /// explicit lever either side can pull.
     pub async fn resolve_signal(
         &self,
         task_id: &str,
@@ -929,9 +851,6 @@ impl TaskStore {
         .await
     }
 
-    /// A signal id unused inside this task. Two words are enough because the
-    /// task is the namespace; the check makes the promise real even when a
-    /// generation happens to land on a word pair already present.
     pub(super) async fn next_signal_id(&self, task_id: &str) -> Result<String, TaskError> {
         loop {
             let candidate = id::signal();
@@ -954,9 +873,6 @@ impl TaskStore {
         }
     }
 
-    /// Open a thread mid-turn. Updates and decisions ask nothing of the task; a
-    /// blocking question or a review request ends the turn and belongs in the
-    /// report.
     pub async fn open_signal(
         &self,
         task_id: &str,
@@ -1039,10 +955,6 @@ impl TaskStore {
         Ok(unresolved.is_some())
     }
 
-    /// Record that the operator accepted a wrap-up request.
-    ///
-    /// This resolves the thread but does not end the task: closing it out is the
-    /// caller's business, because that is where the capsule is disposed of.
     pub async fn confirm_operator_signal(
         &self,
         task_id: &str,
@@ -1120,14 +1032,6 @@ impl TaskStore {
         transaction.commit().await.map_err(TaskError::Database)
     }
 
-    /// Removes a task from play, keeping its record.
-    ///
-    /// The capsule is the caller's to dispose of; this is the row, and it stays so
-    /// that the signals raised on the task and the answers given to them outlive it.
-    /// Delete a task and its history outright, rather than marking it removed.
-    ///
-    /// For a machine clearing up after a client that is not coming back: a row
-    /// nobody can see is still a row, and so is the history behind it.
     pub async fn forget(&self, task_id: &str) -> Result<(), TaskError> {
         sqlx::query("DELETE FROM tasks WHERE id = ?")
             .bind(task_id)

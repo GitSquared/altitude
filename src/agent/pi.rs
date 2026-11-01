@@ -9,28 +9,18 @@ use serde_json::Value;
 use std::mem;
 use uuid::Uuid;
 
-/// Pi ships no standalone binary, so npm is its only distribution channel. The
-/// version is pinned so an environment keeps the harness Altitude was tested
-/// against instead of following whatever the registry publishes next.
 const INSTALL_COMMAND: &str = concat!(
     "npm install -g --ignore-scripts --no-fund --no-audit --no-progress --color=false ",
     "@earendil-works/pi-coding-agent@0.99.1",
     " && command -v pi >/dev/null"
 );
 
-/// Forced rather than left to the operator: the workspace is already isolated,
-/// so trusting a project's own `.pi` resources prompts for nothing useful, and
-/// the operator attaches to a terminal Altitude renders.
 const DEFAULT_SETTINGS: &str = r#"{
   "defaultProjectTrust": "always",
   "tuiMode": "fullscreen"
 }
 "#;
 
-/// Pi's view of Altitude's channel: the bridge this recipe writes as a managed
-/// file, exposed directly so the model calls the tools without searching for
-/// them. Which tools exist is decided at the binding point,
-/// `TaskService::agent_tools`.
 const DEFAULT_MCP: &str = r#"{
   "mcpServers": {
     "altitude": {
@@ -45,15 +35,7 @@ const DEFAULT_MCP: &str = r#"{
 
 const REPORT_EXTENSION_PATH: &str = "/tmp/altitude-report.ts";
 const REPORT_SCHEMA_ENV: &str = "ALTITUDE_REPORT_SCHEMA";
-/// The name the extension below registers. The shim repeats this name and
-/// `REPORT_SCHEMA_ENV`; both mentions sit in this file, near each other.
 const REPORT_TOOL_NAME: &str = "altitude_task_report";
-/// Pi has no schema-forced output mode, so the report turn loads a tool that
-/// carries Altitude's schema and terminates the turn with the report attached.
-///
-/// It is written per turn instead of living in the persistent profile: profile
-/// defaults are only created once, and the schema must travel with Altitude's
-/// code rather than with the operator's machine.
 const REPORT_EXTENSION: &str = r#"import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 

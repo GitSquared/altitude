@@ -1,6 +1,3 @@
-//! The panel's shape: the lists it holds, what a preference is, and where the
-//! focus is.
-
 use super::form::Form;
 use super::rows::{Row, View};
 use crate::{
@@ -50,15 +47,10 @@ impl Section {
         }
     }
 
-    /// Whether this list can grow and shrink.
-    ///
-    /// Every list but the preferences holds rows the operator adds and removes.
     pub fn grows(self) -> bool {
         self.slot().is_some() || matches!(self, Self::Projects | Self::Remotes)
     }
 
-    /// The project slot this section's identities fill, when it is one of the
-    /// service sections rather than a list of projects, remotes, or preferences.
     pub fn slot(self) -> Option<Slot> {
         match self {
             Self::Agents => Some(Slot::Agent),
@@ -76,8 +68,6 @@ impl Section {
         }
     }
 
-    /// The services a new identity in this section can be, in the order the
-    /// service picker offers them.
     pub fn services(self) -> Vec<Service> {
         Service::ALL
             .into_iter()
@@ -119,8 +109,6 @@ pub enum Depth {
 
 pub struct Panel {
     pub section: Section,
-    /// The list's selection and where its view starts, so a long list can be
-    /// stepped through and scrolled like any other.
     pub cursor: list::Cursor,
     pub depth: Depth,
     pub form: Option<Form>,

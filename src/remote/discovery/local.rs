@@ -1,5 +1,3 @@
-//! Iroh announcements and browsing on the local network.
-
 use super::{DiscoveredRemote, DiscoveryEvent, clean, format_address};
 use crate::remote::{LinkResult, compat::Compatibility};
 use futures_util::{Stream, StreamExt};
@@ -27,8 +25,6 @@ struct Metadata {
     version: String,
 }
 
-/// Keep browsing separate from the endpoint's permanent lookup services so
-/// dropping a scan also stops its multicast activity.
 pub(super) async fn browse(endpoint: &Endpoint) -> LinkResult<Browser> {
     let lookup = MdnsAddressLookup::builder()
         .advertise(false)
@@ -84,8 +80,6 @@ fn describe(info: &EndpointInfo) -> Option<DiscoveredRemote> {
     })
 }
 
-/// Prefer LAN IPv4 addresses. Loopback and unspecified addresses cannot lead
-/// another machine to this remote.
 fn preferred_address(info: &EndpointInfo) -> Option<SocketAddr> {
     let mut addresses: Vec<SocketAddr> = info
         .ip_addrs()

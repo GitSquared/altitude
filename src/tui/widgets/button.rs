@@ -1,10 +1,3 @@
-//! A word with room around it: the thing a footer or a card asks you to press.
-//!
-//! One style everywhere, so a button is one thing to recognise. A secondary
-//! answer is as legible as a primary one — it is quieter by weight, not by being
-//! dim — and a disabled one stays bold and dim rather than disappearing, because
-//! the keys can still be on it and what it would do is still worth reading.
-
 use ratatui::{
     Frame,
     layout::{Constraint, Flex, Layout, Rect},
@@ -72,8 +65,6 @@ impl<'a> Button<'a> {
         self
     }
 
-    /// The spaces are part of the label, so a fill covers the whole button and
-    /// not just the letters.
     pub fn width(&self) -> u16 {
         self.label.chars().count() as u16 + 2
     }
@@ -119,16 +110,6 @@ impl<'a> Action<'a> {
     }
 }
 
-/// Draws the divider that closes a modal's body and the answers under it, and
-/// answers with where each one was drawn so a click can find it.
-///
-/// `area` is two rows: the divider, then the buttons. The divider runs the full
-/// width of the modal and breaks its borders, because the answers belong to the
-/// window rather than to the form inside it.
-///
-/// A button is a word with room around it. The answer the page asks for is in
-/// the accent, the one holding the keys is filled with it, and both are bold so
-/// a footer made of two words still reads as somewhere to press.
 pub fn actions(frame: &mut Frame, modal: Rect, area: Rect, actions: &[Action]) -> Vec<Rect> {
     if area.height < 2 || area.width == 0 {
         return Vec::new();

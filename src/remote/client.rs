@@ -1,5 +1,3 @@
-//! The client side: dial a remote by key and run one exchange.
-
 use std::{fmt, fs, io::Write, path::Path};
 
 use iroh::{Endpoint, EndpointAddr, EndpointId, endpoint::Connection};
@@ -22,28 +20,17 @@ use super::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PathKind {
     Direct,
-    /// Traffic is going through a relay server.
-    ///
-    /// Unreachable while Altitude configures no relay, and kept because this
-    /// mirrors what iroh itself reports rather than what we expect to see.
     Relay,
     Unestablished,
 }
 
-/// How a connection travelled when the client looked, which is the difference
-/// between "hole punching worked" and "we are paying a relay".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LinkPath {
     pub selected: PathKind,
-    /// Whether a direct IP path was open as well. Reading relay with a direct
-    /// path open means hole punching succeeded and iroh's deliberately sticky
-    /// selector has not moved yet.
     pub direct_open: bool,
 }
 
 impl LinkPath {
-    /// Observed after an exchange, which gives hole punching a chance to have
-    /// replaced the relay path with a direct one.
     fn observe(connection: &Connection) -> Self {
         let paths = connection.paths();
         let selected = match paths.iter().find(|path| path.is_selected()) {
@@ -69,12 +56,6 @@ impl fmt::Display for LinkPath {
     }
 }
 
-/// The client side of the link: an endpoint that dials remotes by public key.
-///
-/// Cloning shares the one endpoint. Binding one per exchange would give this machine a
-/// new identity to every remote it speaks to, which is both a handshake each time and a
-/// stranger each time: a remote that keeps a record of its clients would see a new one
-/// every few seconds.
 #[derive(Clone)]
 pub struct LinkClient {
     endpoint: Endpoint,
@@ -89,8 +70,6 @@ impl LinkClient {
         Ok(Self { endpoint })
     }
 
-    /// Combines available network sources into remote suggestions.
-    /// The scan ends after five seconds; dropping it cancels in-flight probes.
     pub async fn scan_remotes(&self) -> LinkResult<Scan> {
         discovery::scan(&self.endpoint).await
     }
@@ -103,11 +82,6 @@ impl LinkClient {
         Ok(Dial(self.endpoint.connect(peer, LINK_ALPN).await?))
     }
 
-    /// The one exchange every operation is: say one thing, hear one thing.
-    ///
-    /// Each operation differs only in what follows the frame and whether the answer has
-    /// a body of its own, so this is where a connection is opened and closed and where
-    /// the answer says how it travelled.
     async fn say(
         &self,
         peer: impl Into<EndpointAddr>,
@@ -158,12 +132,6 @@ impl LinkClient {
         }
     }
 
-    /// Watches a machine's tasks: what it holds now, and every change after.
-    ///
-    /// The first frame is the snapshot and the rest are changes, so a watch that
-    /// reconnects re-syncs itself and nobody has to track a gap. Returning means
-    /// the watch ended, either because the machine stopped answering or because
-    /// the reader went away.
     pub async fn watch_tasks(
         &self,
         peer: impl Into<EndpointAddr>,
@@ -190,10 +158,6 @@ impl LinkClient {
         }
     }
 
-    /// Removes a task from the machine that holds it, disposing of its capsule.
-    ///
-    /// The same act as removing a task here, performed by the machine it belongs
-    /// to: a remote is compute, not a different kind of task.
     pub async fn remove_task(
         &self,
         peer: impl Into<EndpointAddr>,
@@ -214,10 +178,6 @@ impl LinkClient {
         }
     }
 
-    /// Asks which profiles a remote already holds for this client.
-    ///
-    /// Answered from the authenticated peer, so it is this client's stamps and not
-    /// whatever the remote holds for everyone else.
     pub async fn held_profiles(
         &self,
         peer: impl Into<EndpointAddr>,
@@ -293,8 +253,6 @@ impl LinkClient {
         Ok(())
     }
 
-    /// Gives up a prepared transfer, so the machine that owns the task takes it
-    /// back rather than holding it stopped.
     pub async fn abandon_take(&self, peer: &EndpointAddr, transfer_id: &str) -> LinkResult<()> {
         match self
             .say(
@@ -343,8 +301,6 @@ impl LinkClient {
         }
     }
 
-    /// Offer a stopped task to a remote, and learn whether it needs the base
-    /// environment the capsule was taken against.
     pub async fn prepare_import(&self, peer: &EndpointAddr, handover: &Handover) -> LinkResult<()> {
         match self
             .say(
@@ -383,8 +339,6 @@ impl LinkClient {
         }
     }
 
-    /// Ask the remote to land and boot the task it has staged, returning the id
-    /// it gave it there.
     pub async fn stage_import(&self, peer: &EndpointAddr, transfer_id: &str) -> LinkResult<String> {
         match self
             .say(
@@ -401,8 +355,6 @@ impl LinkClient {
         }
     }
 
-    /// Tell the remote the source has relinquished ownership, so the landed task
-    /// may begin. Idempotent: a lost answer is retried by a restarted source.
     pub async fn commit_import(&self, peer: &EndpointAddr, transfer_id: &str) -> LinkResult<()> {
         match self
             .say(
@@ -419,10 +371,6 @@ impl LinkClient {
         }
     }
 
-    /// Asks a remote to run a task of its own, and returns when it has taken it.
-    ///
-    /// Nothing is copied: the task is founded there and belongs to that machine from
-    /// the moment it accepts, which is why the answer is an acceptance and not a receipt.
     pub async fn run_task(
         &self,
         peer: impl Into<EndpointAddr>,
@@ -545,11 +493,6 @@ impl LinkClient {
         )
         .await
     }
-    /// Sends this machine's configuration for a remote to build from.
-    ///
-    /// `take_tracker` is consent to take over a task tracker account that is
-    /// already linked for another client, and it is false until somebody has been
-    /// asked.
     pub async fn put_config(
         &self,
         peer: impl Into<EndpointAddr>,
@@ -576,10 +519,6 @@ impl LinkClient {
     }
 }
 
-/// A connection to a remote, closed when it goes out of scope.
-///
-/// Every exchange opens one, and the ones that forget leave it up until the endpoint
-/// notices. Closing here means no operation has to remember to.
 struct Dial(Connection);
 
 impl Dial {
@@ -587,8 +526,6 @@ impl Dial {
         self.0.remote_id()
     }
 
-    /// How the bytes travelled, which is the difference between hole punching working
-    /// and paying for a relay.
     fn path(&self) -> LinkPath {
         LinkPath::observe(&self.0)
     }

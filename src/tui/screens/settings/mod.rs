@@ -1,15 +1,3 @@
-//! The settings panel: the identities work runs with, the projects it works on,
-//! the remotes it can be delegated to, and how the interface looks.
-//!
-//! Fullscreen, and three columns. The rail picks a list and the list picks a
-//! row. The third column is not a place the focus goes: it only says what is
-//! known about the row the list has selected, and stays readable while the list
-//! is being used.
-//!
-//! A project is a row like any other, and its page is the whole of what Altitude
-//! knows about it. There is no built-in entry to describe instead: a project with
-//! no setup is a project.
-
 mod draw;
 mod form;
 mod pages;

@@ -1,12 +1,3 @@
-//! The wait that has nothing to show but itself.
-//!
-//! A build, a sign-in being prepared: both are one line of what is happening, and
-//! neither is a page to read. This is that line in the smallest box that holds
-//! it, so a wait does not take the screen it is not using. A transfer is the one
-//! wait with something to count, and it draws a bar instead.
-//!
-//! What cancels it is the caller's to know; the keys are the frame's.
-
 use ratatui::{
     Frame,
     layout::{Constraint, Flex, Layout, Rect},

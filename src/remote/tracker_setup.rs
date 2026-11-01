@@ -1,10 +1,3 @@
-//! What `altitude serve connect linear` does: say what this machine holds, read
-//! the manual, install the app, say what landed.
-//!
-//! Every fact printed here belongs to this machine. The manual it reads is shared
-//! with the client, where none of those facts are present, so nothing this host
-//! has is ever rendered on a host that is not this one.
-
 use std::{error::Error, io, path::Path, time::SystemTime};
 
 use crate::{
@@ -53,10 +46,6 @@ pub async fn connect_linear(
     }
 }
 
-/// What this machine is configured with, and what it is missing.
-///
-/// Printed before the manual, because the operator needs to know what has been
-/// read before being told what to write.
 fn print_report(linear: &LinearSettings, settings_path: &Path) -> Result<(), Box<dyn Error>> {
     let callback = linear
         .endpoint("/altitude/linear/oauth/callback")

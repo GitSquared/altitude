@@ -1,11 +1,3 @@
-//! What a tool's own sign-in asks of the operator, before a terminal opens for
-//! it.
-//!
-//! A tool whose sign-in happens inside its own interface has to be driven: there
-//! is no command that finishes on its own. Saying what to do there, and that
-//! leaving saves the login, is the difference between arriving in a TUI that
-//! means nothing and knowing which key to press.
-
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,

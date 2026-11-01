@@ -1,5 +1,3 @@
-//! Infrastructure-owned Linear app installation and token refresh.
-
 use std::{
     fs,
     io::Write,
@@ -34,8 +32,6 @@ pub struct AppCredentials {
     refresh_token: String,
     expires_at_ms: i64,
     pub workspace_id: String,
-    /// What the workspace was called when it was installed, so a machine can say
-    /// what it holds without asking Linear again.
     #[serde(default)]
     pub workspace_name: String,
     pub app_user_id: String,

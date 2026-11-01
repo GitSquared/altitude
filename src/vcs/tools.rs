@@ -1,9 +1,3 @@
-//! What the `vcs` subsystem offers the agent running a task.
-//!
-//! One tool, scoped to the current task: the agent names a pull request it
-//! created or found, and Altitude canonicalizes it and records the link. Watching
-//! the linked contributions is the host's business, so there is no tool for it.
-
 use serde_json::{Value, json};
 use std::fmt;
 
@@ -21,11 +15,6 @@ impl VcsAgentTools {
         Self { store, task_id }
     }
 
-    /// Link one pull request to the current task.
-    ///
-    /// The URL is the only input; canonical identity is the provider's to
-    /// derive, so the agent cannot name a contribution the provider does not
-    /// recognize.
     async fn link_pull_request(&self, arguments: &Value) -> Result<Value, AgentToolError> {
         let url = arguments
             .get("url")

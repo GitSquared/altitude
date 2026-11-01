@@ -9,10 +9,6 @@ use crate::{
     },
 };
 
-/// What this profile installs: git and the tools that give it a GitHub
-/// identity, and then the git a task finds in its `PATH` — Altitude's own, which
-/// clones through this machine's shared object cache instead of pulling a
-/// repository the machine already has. See `assets/git-shim.sh`.
 const SETUP_COMMAND: &str = concat!(
     "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git openssh-client gh gnupg\n",
     // The login this profile mounts is the GitHub CLI's, so git is pointed at the
@@ -208,10 +204,6 @@ impl VcsProvider for GitHub {
     }
 }
 
-/// The fields every contribution is read from.
-///
-/// A pull request is asked about through `resource`, so the fragment carries what
-/// the host decides on and nothing else.
 const CONTRIBUTION_FIELDS: &str = r#"    ... on PullRequest {
       headRefOid
       createdAt
@@ -234,10 +226,6 @@ const CONTRIBUTION_FIELDS: &str = r#"    ... on PullRequest {
       }
     }"#;
 
-/// One GraphQL string literal.
-///
-/// The URL comes from one an agent supplied, so it is quoted rather than trusted
-/// to hold nothing that would end the literal.
 fn graphql_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
@@ -370,13 +358,6 @@ impl PullRequestView {
     }
 }
 
-/// How long GitHub may take to start a contribution's checks.
-///
-/// A workflow begins in the seconds after the pull request event, and until its
-/// check runs exist nothing in the pull request reports them. Waiting this long
-/// costs a review nothing in the ordinary case — an agent opens a pull request,
-/// keeps working, and asks for review minutes later — and in the unusual case it
-/// is the difference between seeing a failing check and never seeing it at all.
 const CHECKS_APPEAR_WITHIN_MS: i64 = 60_000;
 
 fn created_at_ms(created_at: &str) -> Option<i64> {
@@ -385,12 +366,6 @@ fn created_at_ms(created_at: &str) -> Option<i64> {
         .map(|created| created.timestamp_millis())
 }
 
-/// What GitHub says stands between a pull request and its merge.
-///
-/// GitHub reports this in two fields that each say part of it: `mergeStateStatus`
-/// names the state, and `reviewDecision` says whether a review is the reason. Only
-/// the pair together can say that a review is what is outstanding, which is the one
-/// standing the operator is the next step for.
 fn merge_standing(view: &PullRequestView) -> MergeStanding {
     match view.state.as_deref() {
         Some("MERGED") => return MergeStanding::Merged,
@@ -429,9 +404,6 @@ fn merge_standing(view: &PullRequestView) -> MergeStanding {
     }
 }
 
-/// A rollup entry is either a `CheckRun`, which carries a conclusion once it has
-/// finished, or a legacy `StatusContext`, which carries a single state; both
-/// normalize to the same three counts.
 #[derive(Deserialize)]
 struct CheckRollupEntry {
     #[serde(default)]

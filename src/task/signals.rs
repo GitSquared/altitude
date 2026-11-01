@@ -1,9 +1,3 @@
-//! What a task tells its operator, and what the operator answers.
-//!
-//! Signals are conversations. A reply is a message, not a typed command: the
-//! agent reads it and decides what it means. Resolving a thread is the one
-//! explicit state. Only accepting a review request also ends the task.
-
 use crate::isolation::{CommandSession, IsolationEngine};
 
 use super::{
@@ -34,11 +28,6 @@ where
             .map_err(TaskServiceError::Task)
     }
 
-    /// Add a new message from the operator to the expressed intent.
-    ///
-    /// The message is recorded before any turn starts. If the task is already
-    /// running, it is queued for the next turn rather than interrupting the
-    /// current one.
     pub async fn express_input(
         &self,
         task_id: &str,
@@ -115,8 +104,6 @@ where
             .map_err(TaskServiceError::Task)
     }
 
-    /// Resolve or reopen a thread. Resolving does not wake the agent and does not
-    /// change the task; accepting a review is the separate task-ending action.
     pub async fn resolve_signal(
         &self,
         task_id: &str,
@@ -134,9 +121,6 @@ where
             .map_err(TaskServiceError::Task)
     }
 
-    /// Reply in a thread. The message is recorded first; if the task is not
-    /// already running, it is woken to read it. What the reply means is the
-    /// agent's to decide.
     pub async fn reply_operator_signal(
         &self,
         task_id: &str,
@@ -177,11 +161,6 @@ where
         Ok(Some((task, run, session)))
     }
 
-    /// Accept a wrap-up request: the operator's judgment, and the only ending.
-    ///
-    /// The judgment is recorded before the capsule is touched, so what the
-    /// operator decided does not depend on cleanup succeeding. Nothing here ends a
-    /// run: the run that asked for review already ended, waiting for this answer.
     pub async fn confirm_operator_signal(
         &self,
         task_id: &str,

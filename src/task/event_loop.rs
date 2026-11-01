@@ -79,29 +79,17 @@ pub struct TaskEventLoop<E> {
     control_requests: Arc<Mutex<HashMap<String, RequestedControl>>>,
     terminal_output: Arc<Mutex<HashMap<String, CachedTerminalOutput>>>,
     capacity: Arc<Mutex<HostCapacity>>,
-    /// Tasks admitted but not yet running. A task stays `Pending` until its run
-    /// reports, so without this it would be admitted again on the next pass.
     starting: Arc<Mutex<HashSet<String>>>,
     watchers: Arc<Watchers<E>>,
     review_waits: Arc<ReviewWaits>,
 }
 
-/// A turn this host is currently driving.
-///
-/// The command channel, the run it belongs to, and a reason to expect its
-/// ending all share one lifetime. That is what keeps a control request or a
-/// suspension reason from being read against a run they were never about.
 struct ActiveRun {
     commands: mpsc::UnboundedSender<Command>,
     agent_run_id: String,
     suspending: bool,
 }
 
-/// A driver the operator asked for, and the run that was asked during.
-///
-/// Both are needed to answer the only question that matters later: whether this
-/// request is still the one that applies. A request whose run has gone is not a
-/// request any more.
 struct RequestedControl {
     agent_run_id: String,
     requested_mode: TaskExecutionMode,
@@ -185,11 +173,6 @@ where
         });
     }
 
-    /// Start waiting tasks while the host has room for them.
-    ///
-    /// Cheap to call and safe to call repeatedly: a task already being started is
-    /// skipped, so this is idempotent and can be triggered by anything that might
-    /// have freed a slot.
     pub fn enable_admission(&self) {
         self.admission_enabled.store(true, Ordering::Release);
         self.admit();
@@ -346,8 +329,6 @@ where
         Ok(())
     }
 
-    /// The signal threads of a task, resolved ones included, for the screen that
-    /// is showing them.
     pub async fn signal_threads(
         &self,
         task_id: &str,
@@ -397,18 +378,6 @@ where
         Ok(task)
     }
 
-    /// The work an issue has right now: the task in play that belongs to one of the
-    /// delegations named, if any — or to no delegation at all, when none are named.
-    ///
-    /// One question, answered from the tasks themselves. Callers bring the
-    /// delegation they are asking about, so "is this delegation already being
-    /// worked?" and "which task does this issue have?" are the same call.
-    ///
-    /// `tracker_delegation` being absent means "no delegation asked for this work",
-    /// never "unknown": a task linked from the operator's own machine is reported by
-    /// that machine, as its own login, and must never be mistaken for the work a
-    /// delegation is already getting. An unbound task has no issue at all, so every
-    /// question here leaves local work alone.
     pub async fn work_for_issue(
         &self,
         issue_id: &str,
@@ -518,13 +487,6 @@ where
         self.request_control(task_id, TaskExecutionMode::Autopilot)
     }
 
-    /// Ask for the task to be driven differently at the next safe boundary,
-    /// answering whether the request was accepted.
-    ///
-    /// The request names the run it was asked during, and only that run may act
-    /// on it. Asking while nothing is running is refused: a request with no run to
-    /// receive it would otherwise wait for whichever run ends next, handing the
-    /// task over long after the operator meant it.
     fn request_control(&self, task_id: &str, requested_mode: TaskExecutionMode) -> bool {
         let agent_run_id = {
             let runs = self.runs.lock().expect("task run lock poisoned");
@@ -574,11 +536,6 @@ where
             .remove(task_id)
     }
 
-    /// Take a control request if it belongs to the run that is ending now.
-    ///
-    /// A request addressed to another run is dropped. That run has already gone,
-    /// and honouring the request now would hand the task over at a moment the
-    /// operator never asked for.
     fn take_control_request(&self, task_id: &str, agent_run_id: &str) -> Option<TaskExecutionMode> {
         let mut requests = self
             .control_requests
@@ -594,8 +551,6 @@ where
         }
     }
 
-    /// Expect this run to end, so its ending is not recorded as a failure and
-    /// does not outlive the run it belongs to.
     fn mark_suspending(&self, task_id: &str) {
         if let Some(run) = self
             .runs
@@ -639,12 +594,6 @@ where
         });
     }
 
-    /// Found a task from an issue the host already fetched, then admit it like
-    /// any other new task.
-    ///
-    /// If an active task already holds the issue, creation returns that task, and
-    /// admitting it changes nothing: only a pending task starts, so a paused one
-    /// is left where the operator put it.
     pub fn create_from_issue(&self, issue: IssueSnapshot, project: Project, agent: AgentKind) {
         tracing::info!(issue = %issue.issue.reference.identifier, "creating task from issue");
         let event_loop = self.clone();
@@ -684,12 +633,6 @@ where
         });
     }
 
-    /// Answer a thread and close it in one act.
-    ///
-    /// For the case where the operator's answer *is* the thing the thread asked
-    /// for: they applied the change it carried. Sent in this order because a
-    /// message reopens a thread, so the closing has to be the last word — and
-    /// sent here rather than as two calls from the screen, which would race.
     pub fn settle_signal(&self, task_id: String, signal_id: String, body: String) {
         let event_loop = self.clone();
         tokio::spawn(async move {
@@ -754,11 +697,6 @@ where
         Ok(())
     }
 
-    /// Stop one task's run.
-    ///
-    /// This is the first thing a transfer does: the machine sending a task stops
-    /// running it before any of it moves, and only then is there something settled to
-    /// send.
     pub async fn suspend(
         &self,
         task: Task,
@@ -771,8 +709,6 @@ where
         Ok(())
     }
 
-    /// Record the state the bound issue now has, so a card reads it from the
-    /// task's own history rather than asking the tracker again.
     pub async fn record_status(
         &self,
         task_id: &str,
@@ -791,12 +727,6 @@ where
             .map(|_| ())
     }
 
-    /// Stop a task that will not be run again, and say in its own record why.
-    ///
-    /// A task with nothing running has no capsule to suspend, but the reason is
-    /// still the only thing that explains why it stopped, so it is written either
-    /// way. The task is kept: the ending happened on the operator's behalf, and a
-    /// record they cannot read is the same as no record.
     pub async fn stop(
         &self,
         task: Task,
@@ -896,13 +826,6 @@ where
             .await
     }
 
-    /// Carry a task's files out of its sandbox, into a directory on this machine.
-    ///
-    /// A take over moves files, not a disk: the checkout the work is made of and
-    /// the agent's own conversation. Both are read through the sandbox's
-    /// filesystem channel, so nothing runs in the guest and no host directory is
-    /// shared with it — and a task that is paused is started for exactly as long
-    /// as the reading takes, with no agent in it.
     pub async fn pack_task_files(
         &self,
         task: &Task,
@@ -1000,11 +923,6 @@ where
         Ok(())
     }
 
-    /// Put the files a task arrived with into the sandbox it now has.
-    ///
-    /// Called once the task has a sandbox and before it is allowed to run, so the
-    /// first turn finds its own work rather than a fresh clone — and watched, since
-    /// it is the operator's last wait in a take over.
     pub async fn deliver_arrivals(
         &self,
         task: &Task,
@@ -1071,8 +989,6 @@ where
             .await
     }
 
-    /// History and the transfer hold are one transaction, so an arriving task
-    /// cannot enter the execution queue before the source relinquishes ownership.
     pub async fn land(&self, arrival: super::TaskArrival) -> Result<Task, TaskServiceError> {
         let super::TaskArrival {
             intent,
@@ -1114,11 +1030,6 @@ where
         Ok(task)
     }
 
-    /// Put a task back after a transfer was stopped before ownership moved.
-    ///
-    /// The capsule was suspended to a snapshot when the transfer began, so the
-    /// task is not lost: it is waiting to be admitted again, which is what makes a
-    /// cancelled transfer a cancelled transfer rather than a stuck task.
     pub async fn abandon_transfer(
         &self,
         task_id: &str,
@@ -1367,12 +1278,6 @@ where
         });
     }
 
-    /// Scan the reviews the host is holding, on an interval, and resolve them.
-    ///
-    /// One loop for the whole host: a held review costs no capsule and no
-    /// per-task watcher, because the wait is recorded state and this only looks
-    /// at it. A provider that cannot be read leaves the review held for the next
-    /// pass, so a transient failure is a delay rather than a wrong decision.
     fn watch_held_reviews(&self) {
         let event_loop = self.clone();
         tokio::spawn(async move {
@@ -1442,10 +1347,6 @@ where
         }
     }
 
-    /// Every held review of one credential owner, looked at once.
-    ///
-    /// One sandbox reads for one owner, so one request asks it about every pull
-    /// request that owner is waiting on rather than one request for each.
     async fn observe_owner(&self, owner: &str, tasks: &[&Task]) {
         // A capsule that outlived its hold is given back before observing, so
         // watching never competes with running work.
@@ -1581,11 +1482,6 @@ where
         }
     }
 
-    /// Hand a held review to the operator because its provider cannot be read.
-    ///
-    /// The alternative is a review nobody watches and nobody is told about: the
-    /// agent was never woken and the operator was never asked. Only the operator
-    /// can sign a provider in again, so the request becomes theirs.
     async fn abandon_review(&self, task: &Task, deferred: &DeferredReview, reason: &str) {
         tracing::warn!(
             task_id = %task.id,
@@ -1597,11 +1493,6 @@ where
             .await;
     }
 
-    /// Raise the held review and keep the task paused for the operator.
-    ///
-    /// The signal and the pause are one record, so a retry cannot raise the
-    /// review without the task being stopped for it. The capsule is already in a
-    /// snapshot from the hold, so there is nothing to suspend here.
     async fn deliver_review(&self, task: &Task, signal: TaskOperatorSignal) {
         let events = [
             TaskHistoryEvent::OperatorSignalRaised { signal },
@@ -1625,12 +1516,6 @@ where
             .send(TaskExecutionUpdate::Finished(task.id.clone(), result));
     }
 
-    /// Drop the held review and queue the task for the agent, answering whether
-    /// the wait is over.
-    ///
-    /// The clear and the queue are one record, so a retry cannot clear the hold
-    /// without leaving the task somewhere it will run. Starting is admission's
-    /// business, so the wake respects host capacity like every other turn.
     async fn wake_review(&self, task: &Task, deferred: &DeferredReview, reason: String) -> bool {
         let events = [
             TaskHistoryEvent::ReviewDeferralCleared {
@@ -1775,8 +1660,6 @@ where
     }
 }
 
-/// The operator and version-control credential whose watcher reads this task's
-/// contributions.
 fn watcher_key(task: &Task) -> Option<String> {
     let operator = task.operator_id()?;
     let project = task.project()?;

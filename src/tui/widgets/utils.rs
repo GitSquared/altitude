@@ -24,13 +24,6 @@ pub fn centered_width(area: Rect, width: u16, height_percent: u16) -> Rect {
         .areas::<1>(area)[0]
 }
 
-/// A mark in front of a list row: what the last answer about that row said.
-///
-/// Lists that ask something on their own clock mark their rows with one, so the
-/// same thing in front of a row means the same thing wherever it is: filled when the
-/// answer came back, hollow while it has not, and travelling while it is still
-/// coming. A mark that is not an answer, like the house on the machine you are
-/// on, stands for itself.
 pub struct Dot {
     glyph: char,
     style: Style,
@@ -54,10 +47,6 @@ impl Dot {
         }
     }
 
-    /// The mark, and the space after it, ready to be the first span of a row.
-    ///
-    /// A travelling mark only travels while there is a frame counter to move it:
-    /// with animations off it sits still, in the style it would have travelled in.
     pub fn spans(&self, tick: Option<usize>) -> Vec<Span<'static>> {
         let text = format!("{} ", self.glyph);
         if self.travelling && tick.is_some() {
@@ -68,11 +57,6 @@ impl Dot {
     }
 }
 
-/// A highlight that travels across `text`, so a wait reads as work in progress.
-///
-/// `tick` is any increasing counter; each call wraps it, so callers only need
-/// to keep counting. `None` is a wait with no animation to draw: the text is
-/// shown whole, in the colour the highlight would have reached.
 pub fn shimmer(text: &str, tick: Option<usize>) -> Vec<Span<'static>> {
     let Some(tick) = tick else {
         return vec![Span::styled(text.to_owned(), palette::waiting())];
@@ -91,11 +75,6 @@ pub fn shimmer(text: &str, tick: Option<usize>) -> Vec<Span<'static>> {
         .collect()
 }
 
-/// What a terminal would have drawn, as text.
-///
-/// A command's output is written for a terminal: colours, cursor questions, window
-/// titles. Read as text, those are noise — and a question is noise a program asked
-/// something that was not there to answer.
 pub fn plain(text: &str) -> String {
     let mut plain = String::with_capacity(text.len());
     let mut characters = text.chars();
@@ -138,12 +117,6 @@ pub fn truncate(text: &str, width: usize) -> String {
     truncated
 }
 
-/// How long ago something happened, in the fewest characters that still say it.
-///
-/// Ages are read at a glance and compared down a column, so they stay short and
-/// change unit rather than growing words: `12m`, not `12 minutes ago`. Anything
-/// under a minute is `just now`: a clock that counts seconds makes an idle
-/// screen look busy.
 pub fn since(at_ms: i64, now_ms: i64) -> String {
     let seconds = now_ms.saturating_sub(at_ms) / 1000;
     match seconds {

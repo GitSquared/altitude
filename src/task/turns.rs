@@ -1,5 +1,3 @@
-//! Driving a task: one turn at a time, by autopilot or by an operator.
-
 use crate::{
     isolation::{
         CommandEvent, CommandSession, IsolationEngine, OutputStream, Unwatched, with_helper,
@@ -9,9 +7,8 @@ use crate::{
 };
 use uuid::Uuid;
 
-/// How many turns an agent may end by asking for another one before the operator is
-/// asked instead. Generous on purpose: silent turns are a normal way to work, and this
-/// is the backstop for an agent that has run out of things to do, not a step limit.
+// Generous on purpose: silent turns are a normal way to work, and this is the
+// backstop for an agent out of things to do, not a step limit.
 const TURNS_BEFORE_THE_OPERATOR: usize = 12;
 
 use super::{
@@ -26,10 +23,6 @@ impl<E> TaskService<E>
 where
     E: IsolationEngine + Clone,
 {
-    /// Record that the operator asked for the task to be driven differently.
-    ///
-    /// The request is addressed to the run it was asked during, so a later run
-    /// cannot pick it up as though it were still current.
     pub async fn request_control(
         &self,
         task_id: &str,
@@ -120,10 +113,6 @@ where
     ) -> Result<(Task, TaskAgentRun, CommandSession), TaskServiceError> {
         self.start_autopilot_turn(task, "The operator has returned control to Altitude. Review the preceding conversation and current workspace state, then continue the task autonomously wherever the original intent reasonably permits. Do not wait for routine confirmation.", None).await
     }
-    /// Run a command in the task's capsule and return its stdout.
-    ///
-    /// Only stdout is collected: providers emit structured output there and may
-    /// write progress to stderr, which would otherwise corrupt the parse.
     pub(super) async fn run_captured(
         &self,
         sandbox_id: &str,
@@ -168,13 +157,6 @@ where
             "observation command closed without an exit status",
         )))
     }
-    /// Refresh the external state of every contribution linked to a task.
-    ///
-    /// Runs inside the task's own capsule, where the provider CLI and its
-    /// credentials already live, so watching a contribution asks the operator
-    /// for no configuration anywhere. Best-effort by design: a provider that is
-    /// unreachable or unauthenticated must not stop the task, so failures are
-    /// logged and the turn proceeds with the state already recorded.
     async fn contribution_observations(&self, task: &Task) -> Vec<ContributionObservation> {
         if !task.facts.sandbox_available {
             return Vec::new();
@@ -257,11 +239,6 @@ where
         self.launch(task, command, TaskExecutionMode::AutopilotReport, answering)
             .await
     }
-    /// Hand the task's terminal to the operator.
-    ///
-    /// The conversation check is waived for harnesses that create a session on
-    /// demand, so an operator can attach and authenticate before a task's first
-    /// turn has ever succeeded.
     pub async fn start_operator(
         &self,
         mut task: Task,
@@ -371,14 +348,6 @@ where
             }
         }
     }
-    /// Whether the agent has gone quiet: many turns in a row that end by asking for
-    /// another one, with nothing in between that the operator could read.
-    ///
-    /// A turn that asks to continue is a step only while the work is moving. When a
-    /// run of them has left the task exactly as it was — no signal, no plan, nothing
-    /// the operator could read — the next one starts from the same state and says the
-    /// same thing. Generous on purpose: silent turns are a normal way to work, and
-    /// this is the backstop for an agent with nothing left to do, not a step limit.
     pub async fn went_quiet(&self, task: &Task) -> Result<bool, TaskServiceError> {
         let events = self.events(&task.id).await?;
         let mut turns = 0;
@@ -433,13 +402,6 @@ where
         Ok(task)
     }
 
-    /// Hold a wrap-up request while the host watches the linked pull requests,
-    /// and give the task's capsule back to the host in the meantime.
-    ///
-    /// The run ends here rather than when the wait resolves: it is the run's
-    /// request that is held, and the report turn is already over. Recording the
-    /// pause with it is what makes the wait survive a restart without an agent
-    /// turn.
     pub(super) async fn hold_review_checks(
         &self,
         task: &Task,
@@ -489,11 +451,6 @@ where
         }
     }
 
-    /// Make the sandbox that observes a provider for one credential owner.
-    ///
-    /// The base image plus what the providers install is the least that can
-    /// read them, and the shell shape mounts the owner's own profile without
-    /// making a task of it. It is left running for the next observation to reuse.
     pub(super) async fn open_watcher(
         &self,
         id: String,

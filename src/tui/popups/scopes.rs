@@ -1,9 +1,3 @@
-//! The containers a task tracker binding can claim, as a list under its field.
-//!
-//! The same shape as the repository picker: the field opens the list, the list
-//! takes every key while it is open, and choosing closes it with the value the
-//! caller stores. The only difference is where the offers come from.
-
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,

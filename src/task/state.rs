@@ -17,10 +17,6 @@ pub struct TaskAgentTurnReport {
 }
 
 impl TaskAgentTurnReport {
-    /// What this report asks for next, read from the signal it raises.
-    ///
-    /// The model used to send this as its own field and could contradict the
-    /// signal beside it; the signal already says whether the run waits.
     pub fn requested_action(&self) -> TaskAgentRequestedAction {
         match self.operator_signal.as_ref().map(|signal| signal.kind) {
             Some(TaskOperatorSignalKind::Blocked | TaskOperatorSignalKind::InReview) => {
@@ -33,10 +29,8 @@ impl TaskAgentTurnReport {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-/// What a work turn asks for next.
-///
-/// There is no way to finish a task here, deliberately: a harness may ask for the
-/// operator, but only the operator closes a task out.
+// A harness may ask for the operator, but only the operator closes a task out, so
+// there is deliberately no way to finish here.
 pub enum TaskAgentRequestedAction {
     Continue,
     AwaitOperator,
@@ -49,12 +43,6 @@ pub struct TaskOperatorSignalDraft {
     pub body: String,
 }
 
-/// One contribution to what the operator has asked for.
-///
-/// Inputs are the append-only record of expressed intent. The founding brief is
-/// the first one; a follow-up message or a signal reply is another. Signals
-/// remain the agent's attention requests; an operator's answer to one is an
-/// input with `responding_to` set.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskInput {
     pub id: String,
@@ -91,26 +79,16 @@ pub enum TaskInputSource {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
 #[sqlx(rename_all = "snake_case")]
+// Update is a log that asks for nothing, Decision is an assumption the operator may
+// challenge while the work continues, and Blocked is the only kind that stops it.
 pub enum TaskOperatorSignalKind {
-    /// A durable log of what the agent did. It asks for nothing and is resolved
-    /// once the operator has seen it and moved on.
     Update,
-    /// An assumption the agent made that a reasonable operator might challenge.
-    /// The task continues; the thread is the place to discuss it.
     Decision,
-    /// The work is finished as far as the harness can tell, and the operator
-    /// decides whether it is done. Accepting closes the task and disposes of its
-    /// capsule; a reply sends the task back for more work.
     InReview,
-    /// The agent cannot continue without the operator, including when the run
-    /// itself stopped. The task is waiting on an answer, not on a particular
-    /// cause.
     Blocked,
 }
 
 impl TaskOperatorSignalKind {
-    /// The order the operator deals with kinds: both blocking ends share the
-    /// top, decisions are review context, and updates are the log.
     pub fn tier(self) -> u8 {
         match self {
             Self::Blocked | Self::InReview => 0,
@@ -145,35 +123,20 @@ pub enum TaskExecutionStatus {
 #[sqlx(rename_all = "snake_case")]
 pub enum TaskExecutionPauseReason {
     AwaitingOperator,
-    /// The agent asked for review and the host is watching the linked pull
-    /// requests. The capsule is in a snapshot, so the wait costs no capacity.
     AwaitingReviewChecks,
     ApplicationShutdown,
-    /// The agent kept ending turns by asking for another one with nothing said in
-    /// between. The next turn starts from the same state and says the same thing,
-    /// so the loop is broken here instead of being left to run.
+    // A turn that ends by asking for another one and leaves nothing behind would say the
+    // same thing again from the same state.
     AgentWentQuiet,
     Transfer,
-    /// The operator closed the issue in the tracker. The task is kept so the
-    /// ending is something they can read in Altitude rather than something that
-    /// happened elsewhere and left nothing behind.
+    // The endings a tracker hands down keep the task: what happened elsewhere is something
+    // the operator can read here, rather than work that quietly disappears.
     TrackerEnded,
-    /// The operator stopped this task in the tracker, or a newer delegation
-    /// replaced it.
     StoppedInTracker,
-    /// The issue stopped being delegated to Altitude. The task is kept for the
-    /// same reason, and delegating it again founds a new one.
     DelegationWithdrawn,
 }
 
 impl TaskExecutionPauseReason {
-    /// Whether a task paused for this reason is out of play.
-    ///
-    /// The tracker ended this work: it was replaced by a newer delegation, it was
-    /// undelegated, or its issue was closed. The task is kept as a record, and every
-    /// question about "the work an issue has" has to leave it out — one rule, in one
-    /// place, because the three questions that ask it used to each keep their own
-    /// copy of this list.
     pub fn is_out_of_play(&self) -> bool {
         matches!(
             self,
@@ -195,9 +158,6 @@ pub enum TaskExecutionMode {
 pub struct TaskAgentRun {
     pub id: String,
     pub task_id: String,
-    /// The signal thread this run is continuing, when the operator replied on
-    /// one and this turn is the agent's answer to it. The report that ends this
-    /// run belongs to that thread instead of opening a new one.
     pub answering_signal_id: Option<String>,
 }
 
@@ -209,17 +169,10 @@ pub struct TaskOperatorSignal {
     pub title: String,
     pub body: String,
     pub raised_at_ms: i64,
-    /// A change to the project this task runs in, offered for the operator to
-    /// apply. Absent for every thread that is only words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposal: Option<ProjectProposal>,
 }
 
-/// A change to a project, as its task's agent would have it.
-///
-/// Only what an agent can know from inside a task: the setup command and the
-/// shared caches. A field left out is one the proposal does not touch, so
-/// applying it writes nothing back for that field.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectProposal {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -234,11 +187,6 @@ impl ProjectProposal {
     }
 }
 
-/// One signal thread as it reads now: what the agent raised, and every message
-/// exchanged on it since.
-///
-/// A thread's kind and title are the latest ones the agent gave it, so a
-/// conversation can become a review request without losing what led there.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskOperatorSignalThread {
     pub id: String,
@@ -251,19 +199,12 @@ pub struct TaskOperatorSignalThread {
     pub resolved: bool,
     pub resolved_by: Option<TaskOperatorSignalAuthor>,
     pub resolved_at_ms: Option<i64>,
-    /// Every close and re-open, oldest first. The current state is the last one;
-    /// the list is what the conversation shows between its messages, and what tells
-    /// a reader that a thread was answered, reopened and answered again.
     #[serde(default)]
     pub transitions: Vec<SignalTransition>,
-    /// The change this thread is asking the operator to make, when it is asking
-    /// for one. It travels with the thread rather than inside a message, so the
-    /// operator's screen can read it as a change and not only as prose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposal: Option<ProjectProposal>,
 }
 
-/// One close or re-open of a thread, at the point in the conversation it happened.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct SignalTransition {
     pub at_ms: i64,
@@ -273,8 +214,6 @@ pub struct SignalTransition {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskOperatorSignalMessage {
-    /// Position in this thread, as `m1`, `m2`, ... Nothing outside the thread
-    /// needs to be unique.
     #[serde(default)]
     pub id: String,
     pub author: TaskOperatorSignalAuthor,
@@ -299,8 +238,6 @@ impl TaskOperatorSignalThread {
         !self.resolved
     }
 
-    /// The latest thing the agent said on the thread, which is what an outside
-    /// system publishing the thread has to show.
     pub fn latest_agent_message(&self) -> Option<&TaskOperatorSignalMessage> {
         self.messages
             .iter()
@@ -309,18 +246,9 @@ impl TaskOperatorSignalThread {
     }
 }
 
-/// A wrap-up request the host is holding until the linked contributions can
-/// answer.
-///
-/// The agent's run is over, but its request is not delivered yet: the linked
-/// pull requests decide whether the operator is asked to review or the agent is
-/// woken to fix something. Keeping it as recorded state is what makes the wait
-/// survive a restart without an agent turn.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeferredReview {
     pub signal: TaskOperatorSignal,
-    /// The run that asked for review, recorded so its ending can be written with
-    /// the hold that began after it.
     pub agent_run_id: String,
 }
 
@@ -328,8 +256,6 @@ pub struct DeferredReview {
 pub struct Task {
     pub id: String,
     pub agent_kind: Option<AgentKind>,
-    /// The machine that holds this task's capsule, which is the machine that may run
-    /// it. Its own machine until the task is delegated.
     pub host: String,
     pub code_contributions: Vec<CodeContribution>,
     pub code_contribution_observations: Vec<ContributionObservation>,
@@ -341,16 +267,8 @@ pub struct TaskFacts {
     pub accepted: bool,
     pub intent: String,
     pub title: Option<String>,
-    /// The key of the operator whose work this is, from the earliest recorded
-    /// intent. It scopes their settings, logins and builds on a machine that
-    /// serves several peers.
     pub operator_id: Option<String>,
     pub operator_label: Option<String>,
-    /// The project this task was founded in, as it was recorded then.
-    ///
-    /// Recorded rather than looked up: a task carries the setup, repository,
-    /// caches and instructions it started with, so it keeps them when the project
-    /// is edited or when the task is transferred.
     #[sqlx(json(nullable))]
     pub project: Option<Project>,
     pub agent_conversation_id: Option<String>,
@@ -368,29 +286,17 @@ pub struct TaskFacts {
     pub last_error: Option<String>,
     #[sqlx(json(nullable))]
     pub latest_operator_message: Option<TaskOperatorSignalMessage>,
-    /// The tracker issue this task is bound to, when the operator bound one.
-    ///
-    /// Derived from the binding event rather than stored twice, so a task that
-    /// arrived by transfer carries where it belongs with the rest of its history.
     #[sqlx(json(nullable))]
     pub tracker_issue: Option<IssueReference>,
-    /// The delegation the bound work belongs to, so the tracker never has to infer
-    /// which task its session is about.
+    // None means no delegation asked for this task, never one that is unknown: it is
+    // what keeps local work out of every question about delegations.
     pub tracker_delegation: Option<String>,
-    /// The state the bound issue was last told to have, which is the last thing
-    /// either side said about it.
     #[sqlx(default)]
     pub tracker_status: Option<TrackerStatus>,
     pub blocking_signal_kind: Option<TaskOperatorSignalKind>,
     pub unresolved_signal_count: u32,
-    /// The wrap-up request the host is holding while it watches linked
-    /// contributions, when one is pending.
     #[sqlx(json(nullable))]
     pub deferred_review: Option<DeferredReview>,
-    /// Why the host last woke this task from watching its linked contributions.
-    ///
-    /// Present only until the next run starts, so the reason reaches the turn it
-    /// was recorded for and never reads as the reason for a later one.
     pub review_wake_reason: Option<String>,
 }
 
@@ -398,10 +304,6 @@ pub struct TaskFacts {
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)]
 pub enum TaskHistoryEvent {
-    /// The agent renamed the task, which is a fact about what it turned out to be.
-    ///
-    /// Recorded as history rather than overwritten: the task's earlier names say what
-    /// it was mistaken for, and the latest one is what a list reads.
     TaskTitleSet {
         title: String,
     },
@@ -413,15 +315,7 @@ pub enum TaskHistoryEvent {
         snapshot_available: bool,
         intent: String,
         project: Project,
-        /// The identity this task was delegated under.
-        ///
-        /// Recorded with the intent because it cannot be inferred later: a machine
-        /// that runs work for several operators needs to know whose work this is,
-        /// and the answer is only available at the moment of delegation.
         identity_id: String,
-        /// How that identity reads to a human, e.g. the machine it was delegated
-        /// from. Recorded beside the id so a task's history and a tracker comment
-        /// can say where the work is without anyone resolving a key.
         identity_label: String,
         agent_conversation_id: Option<String>,
     },
@@ -434,16 +328,9 @@ pub enum TaskHistoryEvent {
         agent_run_id: String,
         sandbox_id: String,
         execution_mode: TaskExecutionMode,
-        /// The thread this run is answering, when the operator started it by
-        /// replying to one.
         #[serde(default)]
         answering_signal_id: Option<String>,
     },
-    /// The operator asked for the task to be driven by someone else.
-    ///
-    /// It names the run it was asked during. Only that run can act on it, so a
-    /// request cannot land on whichever run happens to end next; a request with
-    /// no run to receive it is refused rather than recorded.
     ControlRequested {
         requested_mode: TaskExecutionMode,
         agent_run_id: String,
@@ -458,9 +345,6 @@ pub enum TaskHistoryEvent {
         requested_action: TaskAgentRequestedAction,
         operator_attention_level: TaskOperatorAttentionLevel,
     },
-    /// The model the harness reported for a turn, as the harness names it.
-    ///
-    /// Observation only: Altitude records what ran, not what should have run.
     AgentModelObserved {
         model: String,
     },
@@ -473,50 +357,31 @@ pub enum TaskHistoryEvent {
     OperatorSignalRaised {
         signal: TaskOperatorSignal,
     },
-    /// The agent said something on a thread it already opened, or the operator
-    /// replied. A message reopens a resolved thread and wakes the agent when the
-    /// task is not running; its meaning is the agent's to read.
     OperatorSignalMessage {
         signal_id: String,
         author: TaskOperatorSignalAuthor,
         body: String,
     },
-    /// The thread is done, or no longer done. This is the only signal state:
-    /// there is no separate read flag.
     OperatorSignalResolved {
         signal_id: String,
         resolved: bool,
         by: TaskOperatorSignalAuthor,
     },
-    /// The operator accepted a wrap-up request, which is the only way a task ends.
-    /// It resolves the thread as part of the task's ending.
     OperatorSignalConfirmed {
         signal_id: String,
     },
     CodeContributionLinked {
         contribution: CodeContribution,
     },
-    /// External state observed for a contribution.
-    ///
-    /// An input to the task, not a notification: the control loop decides
-    /// whether anything about it deserves the operator's attention.
     CodeContributionObserved {
         observation: ContributionObservation,
     },
-    /// A wrap-up request the host holds while it watches linked contributions.
-    ///
-    /// Recorded rather than waited on in memory, so the request is not lost to a
-    /// restart and the agent is not asked to poll for it.
     ReviewDeferred {
         signal: TaskOperatorSignal,
         agent_run_id: String,
     },
-    /// A held wrap-up request stopped waiting: the contributions need the agent,
-    /// or the operator took the task over before the host could decide.
     ReviewDeferralCleared {
         signal_id: String,
-        /// Why the wait ended, in the operator's words. The next autopilot turn
-        /// reads it as its prompt when the agent is the one being woken.
         reason: String,
     },
     ExecutionPaused {
@@ -560,12 +425,6 @@ pub enum TaskHistoryEvent {
         transfer_id: String,
         recipient: String,
     },
-    /// A transfer stopped before the source gave the task up.
-    ///
-    /// The task goes back to waiting to be run here. The pause field is part of
-    /// the record even though it is always empty: a reader takes the task's pause
-    /// from the latest event that carries the field, so leaving it out would leave
-    /// this task recorded as still being transferred.
     TransferAbandoned {
         transfer_id: String,
         execution_status: TaskExecutionStatus,
@@ -585,28 +444,13 @@ pub enum TaskHistoryEvent {
     TaskCompleted {
         execution_status: TaskExecutionStatus,
     },
-    /// The operator bound this task to a tracker issue when it was founded.
-    ///
-    /// The snapshot is kept here, once: it is what the task's prompt was built
-    /// from, and what the tracker's later state is compared against.
     TrackerIssueBound {
         issue: IssueSnapshot,
-        /// The delegation that asked for this work: the tracker's own session, when
-        /// there is one. It is what makes "delegate it again" a new delegation rather
-        /// than a second guess at which report is current, and it is a fact about the
-        /// task, so it survives a lost ledger.
         #[serde(default)]
         delegation: Option<String>,
     },
-    /// How far this task's tracker binding has been reported, by history position.
-    ///
-    /// `event_count` is the number of history events, checkpoints included, that
-    /// existed when the checkpoint was written. A later pass resumes there, so
-    /// idle scans never generate a checkpoint of their own.
     TrackerSynced {
         event_count: usize,
-        /// The status the sync put on the issue, when it put one. It is what lets
-        /// a card say what the issue says without asking the tracker again.
         #[serde(default)]
         status: Option<TrackerStatus>,
     },
@@ -635,18 +479,9 @@ pub enum TaskPlanStatus {
     Canceled,
 }
 
-/// What Altitude tells an agent about the task it is driving, at the start of a
-/// turn.
-///
-/// This is the whole of what an agent can know about its situation from Altitude:
-/// which machine and harness it is, what environment it runs in, what the task is
-/// called and how far along it is, and what the operator last said. It is read as
-/// prose by the harness, so the display is the interface.
 #[derive(Clone, Debug)]
 pub struct TaskAgentTurnContext {
     pub task_id: String,
-    /// The task's current title, which may still be the intent before the agent
-    /// has named it.
     pub title: String,
     pub host: String,
     pub project: Option<Project>,
@@ -741,11 +576,6 @@ impl fmt::Display for TaskAgentTurnContext {
 
 const TITLE_LIMIT: usize = 48;
 
-/// A title, normalized to what a list can show.
-///
-/// Collapsed to one line and cut at a word boundary, because a title is read
-/// rather than parsed. `None` for a title that says nothing, so a blank title
-/// never replaces a real one.
 pub fn normalize_title(title: &str) -> Option<String> {
     let collapsed = title.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.is_empty() {
@@ -774,18 +604,10 @@ pub fn normalize_title(title: &str) -> Option<String> {
 }
 
 impl Task {
-    /// The key that scopes this task's operator's settings, logins and
-    /// environments.
     pub fn operator_id(&self) -> Option<&str> {
         self.facts.operator_id.as_deref()
     }
 
-    /// What a list calls this task: the agent's title, or the task's own id
-    /// until the agent has chosen one.
-    ///
-    /// The id is what an operator can say to an agent and what a card has room
-    /// for; the intent is a paragraph, and a paragraph in a title slot reads as
-    /// a wall of text that hides the rest of the list.
     pub fn title(&self) -> &str {
         self.facts
             .title
@@ -793,12 +615,6 @@ impl Task {
             .unwrap_or_else(|| id::name(&self.id))
     }
 
-    /// The project this task belongs to, as it was recorded when the task was
-    /// founded.
-    ///
-    /// Recorded rather than looked up: a task carries the setup, repository, and
-    /// caches it started with, so a task that travels or outlives an edit keeps
-    /// the machine state it was asked for.
     pub fn project(&self) -> Option<&Project> {
         self.facts.project.as_ref()
     }
@@ -824,9 +640,6 @@ impl Task {
         }
     }
 
-    /// How this task reads as an agent in a session title: `harness-model`.
-    ///
-    /// The model may carry a provider prefix; a title needs the model's own name.
     pub fn session_agent(&self) -> Option<String> {
         let harness = self
             .agent_kind

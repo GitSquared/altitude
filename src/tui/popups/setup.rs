@@ -28,9 +28,6 @@ struct TrackerOption {
     status: &'static str,
 }
 
-/// The supported task trackers, one row each, saying how far the remote's own
-/// setup got. A remote that has not answered leaves them unknown rather than
-/// guessed, and one that answered with no tracker at all has none configured.
 fn candidates(report: Option<&[TrackerConnection]>) -> Vec<TrackerOption> {
     TrackerKind::ALL
         .iter()
@@ -58,11 +55,7 @@ pub struct Setup {
     pub kind: SetupKind,
     lines: Vec<Line<'static>>,
     scroll: u16,
-    /// The provider list a guide was opened from, so dismissing the guide returns
-    /// to it rather than all the way out.
     picker: Option<Picker>,
-    /// What `c` puts on the clipboard, when the page is showing something to take
-    /// away rather than something to read.
     copy: Option<String>,
     returns_to_card: bool,
 }
@@ -152,8 +145,6 @@ impl Setup {
         self.scroll = 0;
     }
 
-    /// Step back one level: from a provider's guide to the list. Returns whether
-    /// the helper stays open.
     pub fn back(&mut self) -> bool {
         if matches!(self.kind, SetupKind::RemoteTrackerGuide(_)) && self.picker.is_some() {
             self.kind = SetupKind::RemoteTrackers;

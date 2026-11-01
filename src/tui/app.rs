@@ -1,10 +1,3 @@
-//! The application: what it is holding, and what it does with it.
-//!
-//! One value holds everything a running client knows — the tasks, the settings,
-//! the shells, and what the keyboard is answering to — and the methods here are
-//! what it does in response. Nothing in this file talks to a terminal except to
-//! draw, and nothing here reads an event.
-
 use std::{
     collections::{HashMap, HashSet},
     env, fs, io, mem,
@@ -85,20 +78,8 @@ use screens::signals::{
     primary_action, secondary_action,
 };
 
-/// What the keyboard is answering to, most immediate first.
-///
-/// One value, because the order is the whole point. The keys, the guidance line
-/// and the drawing each worked it out separately, and could disagree about it:
-/// the shell offered a `?` it never sees, because every key in a shell goes to
-/// the terminal.
-///
-/// A question owns its state, because it exists only while it is in front. A
-/// view does not: the tasks, the signals, the shells and the settings are the
-/// work, and they live with the application.
 #[derive(Default)]
 pub(in crate::tui) enum Foreground {
-    /// The keys for wherever you are, over whatever is there. Help is stacked
-    /// rather than exclusive: dismissing it returns to what it covered.
     Keys(Box<Foreground>),
     Confirm(PendingConfirm),
     SendTask(Box<SendTask>),
@@ -118,8 +99,6 @@ pub(in crate::tui) enum Foreground {
 }
 
 impl Foreground {
-    /// Whether this is a fullscreen screen rather than a pop-up over the work.
-    /// Screens arrive and leave the same way, whatever they show.
     pub(in crate::tui) fn is_screen(&self) -> bool {
         match self {
             Self::Panel | Self::Signals | Self::GetStarted(_) => true,
@@ -128,8 +107,6 @@ impl Foreground {
         }
     }
 
-    /// Whether the signals screen is what is being read, possibly with a
-    /// question about one of its threads laid over it.
     pub(in crate::tui) fn shows_signals(&self) -> bool {
         match self {
             Self::Signals => true,
@@ -166,10 +143,6 @@ impl Foreground {
     }
 }
 
-/// What the panel last heard from an address.
-///
-/// Asking is automatic, because a status you have to ask for is one you will not
-/// see: opening the list dials every address in it, one at a time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum RemoteStatus {
     Unknown,
@@ -182,16 +155,11 @@ pub(in crate::tui) enum RemoteStatus {
 }
 
 impl RemoteStatus {
-    /// Whether something is happening, in which case the dot travels like every
-    /// other wait in the interface.
     pub(in crate::tui) fn is_in_progress(&self) -> bool {
         matches!(self, Self::Asking | Self::Syncing)
     }
 }
 
-/// What a task's terminal is called on its frame: the harness running it and the
-/// task, so two terminals can be told apart. The shell opened to set up a
-/// credential names the profile instead.
 fn task_shell_title(task: &Task) -> String {
     let agent = task
         .agent_kind
@@ -199,10 +167,6 @@ fn task_shell_title(task: &Task) -> String {
     format!("{agent} - {}", task.title())
 }
 
-/// What a profile's own check last said about its login.
-///
-/// Asked rather than known, and asked the way a remote's address is reached: one at a
-/// time, off the loop, with a mark in front of the row that says which it is doing.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub(in crate::tui) enum CredentialStatus {
     #[default]
@@ -221,8 +185,6 @@ impl CredentialStatus {
         *self == Self::Checking
     }
 
-    /// The list's word for this status, so the row and the page say the same
-    /// thing rather than keeping two vocabularies in step.
     pub(in crate::tui) fn summary(&self) -> &'static str {
         match self {
             Self::Checking => "checking…",
@@ -251,12 +213,6 @@ pub(in crate::tui) struct RepositoryListReply {
     pub result: Result<Vec<Repository>, String>,
 }
 
-/// What is known about the Linear tracker's live session.
-///
-/// The provider's own `is_connected` is the only truth here: a sign-in profile
-/// kept on disk is not a connection, so it is never shown as one. Signing in
-/// opens a browser and waits on an OAuth callback, which is minutes rather than
-/// frames, so it runs off the loop and reports back as one of these.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(in crate::tui) enum TrackerState {
     #[default]
@@ -275,30 +231,17 @@ impl TrackerState {
     }
 }
 
-/// What came back from a Linear search. The token says which popup and which
-/// query it answers, so a late one is dropped rather than shown under a query it
-/// was not about.
 pub(in crate::tui) struct IssueSearchReply {
     pub token: SearchToken,
     pub result: Result<Vec<IssueSummary>, String>,
 }
 
-/// What came back from reading one issue's snapshot. The token says which
-/// submission it belongs to, so a snapshot that lands after the question was
-/// dismissed cannot still found a task.
 pub(in crate::tui) struct IssueReadReply {
     pub token: u64,
     pub result: Result<IssueSnapshot, String>,
 }
 
-/// What came back from finishing a Linear sign-in.
-///
-/// The bool is the provider's own answer to `is_connected` after connecting,
-/// because a profile on disk is not a connection and only a live session makes
-/// the row say Connected.
 pub(in crate::tui) struct TrackerConnectReply {
-    /// Which attempt this answers, so a reply for one already given up on
-    /// changes nothing.
     pub attempt: u64,
     pub credential: String,
     pub result: Result<bool, String>,
@@ -307,29 +250,16 @@ pub(in crate::tui) struct TrackerConnectReply {
 pub(in crate::tui) const NO_TRACKER: &str =
     "No task tracker is signed in; connect one in Settings.";
 
-/// How long the list is shown before its addresses are dialled, so moving through
-/// the sections does not reach anything.
 const ASK_AFTER: Duration = Duration::from_millis(400);
 
-/// How far a j/k step moves a conversation. One row, so a message taller than
-/// the screen can be read in pieces rather than jumped over.
 const SIGNAL_SCROLL_STEP: i32 = 1;
 
-/// How long after nothing could check a login the section tries again, so a sandbox
-/// that will not start is not asked on every tick.
 const CHECK_RETRY_AFTER: Duration = Duration::from_secs(15);
-/// How long a login answer is shown before it is asked about again. The old
-/// answer stays on screen while the new check is out.
 const CHECK_FRESH_FOR: Duration = Duration::from_secs(10 * 60);
 const WATCH_RETRY: Duration = Duration::from_secs(1);
 const WATCH_RETRY_MAX: Duration = Duration::from_secs(30);
 const WATCH_SETTLED: Duration = Duration::from_secs(5);
 
-/// Which terminal is in front.
-///
-/// One shell with two owners: everything about drawing it, sizing it, pasting into
-/// it and copying out of it is the same either way, and only where its keys go
-/// differs.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(in crate::tui) enum ShellId {
     Task(String),
@@ -343,19 +273,12 @@ pub(in crate::tui) enum CredentialShellState {
     Opening {
         id: String,
         display: String,
-        /// What there is to say about the wait. Absent when the environment is
-        /// already built, because then there is no wait to show.
         progress: Option<String>,
         cancel: CredentialShellCancel,
     },
     Open(CredentialShell),
 }
 
-/// A transfer the interface is watching, and what it can say about it.
-///
-/// Bytes are the only thing a transfer has to report, so the numbers the bar
-/// draws are kept here rather than in the link: the link counts, and this turns
-/// counting into a speed over the last moment.
 pub(in crate::tui) struct TransferView {
     title: String,
     label: String,
@@ -363,8 +286,6 @@ pub(in crate::tui) struct TransferView {
     update: TransferUpdate,
     measured: Option<(Instant, u64)>,
     rate: Option<f64>,
-    /// Whether the operator has asked it to stop, which the bar says while the
-    /// transfer finishes the piece it is on.
     is_stopping: bool,
     opens_terminal: bool,
 }
@@ -416,14 +337,10 @@ impl TransferView {
     }
 }
 
-/// What a machine's watch reported, named by the machine so one channel can carry
-/// every remote.
 pub enum WatchedTasks {
     Dialling {
         address: String,
     },
-    /// It answered. What it said about itself is the only place an address becomes
-    /// a machine with a name, a key and a state.
     Reached {
         address: String,
         announcement: Box<Announcement>,
@@ -445,8 +362,6 @@ pub enum WatchedTasks {
         address: String,
         id: String,
     },
-    /// The watch ended: the machine is not answering any more, and its tasks are
-    /// its own.
     Ended {
         address: String,
         reason: String,
@@ -455,27 +370,17 @@ pub enum WatchedTasks {
 
 enum WatchEnd {
     Closed,
-    /// It answered with a key that is not the one remembered, so there is nothing
-    /// to listen to until the operator decides which key this machine is.
     UnapprovedKey,
     Incompatible,
     Lost,
 }
 
-/// A task another machine owns, and which machine that is.
-///
-/// Which machine matters, because a task belongs to the machine running it: asking for
-/// one is a question put to a particular machine, not to remotes in general.
 #[derive(Clone)]
 pub(in crate::tui) struct HeldTask {
     pub(in crate::tui) address: String,
     pub(in crate::tui) summary: TaskSummary,
 }
 
-/// The remote task the signals screen is about.
-///
-/// The attempt says which opening this is, so a reply carrying another attempt
-/// belongs to a screen the operator has already left and changes nothing.
 #[derive(Clone, PartialEq, Eq)]
 pub(in crate::tui) struct RemoteSignals {
     pub(in crate::tui) address: String,
@@ -497,8 +402,6 @@ enum CommitIdentityEdit {
     Saved(ProjectCommits),
 }
 
-/// What came back from a remote task's signals: the list when it opens, or the
-/// outcome of acting on one.
 pub(in crate::tui) enum RemoteSignalsReply {
     Opened {
         remote: RemoteSignals,
@@ -516,42 +419,28 @@ pub(in crate::tui) enum RemoteSignalsReply {
     },
 }
 
-/// What came back from asking a remote to run a task. The address names the
-/// machine that answered, so the message does.
 pub(in crate::tui) struct TaskDelegationReply {
     pub(in crate::tui) address: String,
     pub(in crate::tui) result: Result<(), String>,
 }
 
-/// What came back from sending an existing task to a machine. The result is the
-/// id that machine gave the task, once it has booted it and ownership moved.
 pub(in crate::tui) struct SendTaskReply {
     pub(in crate::tui) address: String,
     pub(in crate::tui) result: Result<String, String>,
 }
 
-/// What came back from asking a machine to remove a task of its own. The address
-/// names the machine, so the message can.
 pub(in crate::tui) struct RemoveTaskReply {
     pub(in crate::tui) address: String,
     pub(in crate::tui) task_id: String,
     pub(in crate::tui) result: Result<(), String>,
 }
 
-/// What came back from sending this client's configuration to a remote.
-///
-/// The digest names the bytes sent, so edits during a sync remain pending.
 pub(in crate::tui) struct ConfigPushReply {
     pub(in crate::tui) address: String,
     pub(in crate::tui) digest: String,
     pub(in crate::tui) result: Result<ConfigPush, String>,
 }
 
-/// A task tracker account this machine pushed that another client already claims
-/// on the same remote.
-///
-/// Nothing was written until this is answered: an account says whose work work is,
-/// and a machine that quietly reassigned one would attribute somebody else's.
 pub(in crate::tui) struct TrackerConflict {
     address: String,
     provider: TrackerKind,
@@ -560,165 +449,86 @@ pub(in crate::tui) struct TrackerConflict {
 
 pub struct App {
     pub(in crate::tui) tasks: Vec<Task>,
-    /// The project whose tasks the grid shows, by id. Absent until a tab is
-    /// chosen, which reads as the first project.
     active_project: Option<String>,
-    /// How many cards fit across, from the last drawing. Written by the
-    /// drawing, read by the keys, because a step within the grid is one card or
-    /// one whole row of them.
     pub(in crate::tui) grid_columns: usize,
-    /// What each provisioning task is waiting on, refreshed while any task is
-    /// pending.
     pub(in crate::tui) environment_builds: HashMap<String, EnvironmentProgress>,
     pub(in crate::tui) shimmer: usize,
     pub(in crate::tui) terrain: Terrain,
     pub(in crate::tui) help_scroll: u16,
-    /// What the host will run at once, so a wait can say whether there is room.
-    /// Absent until the first refresh, and never stale by more than one interval.
     pub(in crate::tui) capacity: Option<usize>,
     pub(in crate::tui) alert: Option<Alert>,
     pub(in crate::tui) removing: HashSet<String>,
     pub(in crate::tui) selected: usize,
     pub(in crate::tui) first_visible_task: usize,
     pub(in crate::tui) shells: HashMap<ShellId, Shell>,
-    /// Where the creation question's controls were drawn last, so a click can
-    /// land on what is on screen.
     pub(in crate::tui) new_task_targets: Targets<NewTaskHit>,
-    /// The shell opened to set up credentials, if there is one.
-    ///
-    /// One at a time: a profile is a shared directory, and two shells writing it
-    /// is a way to confuse yourself.
     pub(in crate::tui) credential_shell: CredentialShellState,
     git_identity: GitIdentity,
-    /// What the commit identity editor is changing.
     commit_edit: Option<CommitIdentityEdit>,
-    /// Whether that editor was opened from the first-run card.
     git_identity_over_card: bool,
-    /// The task the signals screen is about. Held rather than read from the
-    /// grid, so the screen stays about the same task while the grid is behind it.
     pub(in crate::tui) signal_task_id: Option<String>,
-    /// Every thread of that task, as read when the screen opened and refreshed
-    /// as the task moves. The screen shows the filtered view below.
     pub(in crate::tui) signal_all_threads: Vec<TaskOperatorSignalThread>,
     pub(in crate::tui) signal_threads: Vec<TaskOperatorSignalThread>,
     pub(in crate::tui) signal_filter: Select<SignalFilter>,
     pub(in crate::tui) signal_sort: Select<SignalSort>,
     pub(in crate::tui) signals_cursor: list::Cursor,
-    /// What the thread list measured when it last drew, so a key can page it.
     pub(in crate::tui) signals_layout: list::Layout,
-    /// How many rows the selected thread's conversation is scrolled down.
-    ///
-    /// `u16::MAX` means the bottom, so a new message arrives without the screen
-    /// having to know how tall the conversation is.
     pub(in crate::tui) signal_scroll: u16,
-    /// Where each message starts and how tall it is in the conversation, from
-    /// the last frame. The keys use it to bring a message into view.
     pub(in crate::tui) signal_message_rows: Vec<(u16, u16)>,
     pub(in crate::tui) signal_scroll_max: u16,
     pub(in crate::tui) signal_viewport_rows: u16,
     pub(in crate::tui) signal_composer: Option<Composer>,
     pub(in crate::tui) signal_plan_open: bool,
-    /// Whether the last signals frame had room only for the tab bar, which is
-    /// what makes Tab a tab key there and nowhere else.
     pub(in crate::tui) signal_plan_tabs: bool,
-    /// What the keys are on inside the signals screen, and which message of the
-    /// selected thread they are on.
     pub(in crate::tui) signal_focus: SignalFocus,
     pub(in crate::tui) signal_message_cursor: usize,
     pub(in crate::tui) signal_targets: Targets<SignalHit>,
     pub(in crate::tui) task_targets: Targets<usize>,
     pub(in crate::tui) project_targets: Targets<usize>,
     pub(in crate::tui) settings_targets: Targets<SettingsHit>,
-    /// Threads whose conversation changed since the last frame, with when it was
-    /// noticed, so a new arrival moves rather than appearing already settled.
     pub(in crate::tui) signal_arrivals: HashMap<String, Instant>,
-    /// The remote task the signals screen is about, when it is showing one from
-    /// another machine.
     pub(in crate::tui) remote_signals: Option<RemoteSignals>,
     pub(in crate::tui) remote_signals_loading: bool,
-    /// Which opening of the screen this is, so a reply from an earlier one is
-    /// dropped rather than replacing what is on screen.
     remote_signals_attempt: u64,
     pub(in crate::tui) config: Config,
     pub(in crate::tui) settings_file: Option<SettingsFile>,
     pub(in crate::tui) link: Arc<LinkClient>,
     pub(in crate::tui) panel: Panel,
     pub(in crate::tui) foreground: Foreground,
-    /// The screen a credential terminal was opened over, kept so the terminal can
-    /// be closed to the very thing that asked for it: the card with the same row
-    /// focused, or the settings list.
     shell_behind: Behind<Foreground>,
     pub(in crate::tui) transfer: Option<TransferView>,
     pub(in crate::tui) remote_status: HashMap<String, RemoteStatus>,
-    /// What each address's last announcement said about the trackers it runs.
-    /// Runtime only: it is a fact about the remote, not something to persist.
     pub(in crate::tui) remote_trackers: HashMap<String, Vec<TrackerConnection>>,
     pub(in crate::tui) credential_status: HashMap<String, CredentialStatus>,
-    /// When each answer last came back, so reopening Settings shows the last
-    /// answer instead of starting its checks again.
     credential_checked_at: HashMap<String, Instant>,
-    /// The profiles whose checks are out, kept apart from the answer shown so a
-    /// stale status stays visible while it is revalidated.
     credential_checking: HashSet<String>,
-    /// When the credentials list started showing, which the wait before asking is
-    /// measured from. Absent while it is not showing.
     credentials_visible_since: Option<Instant>,
     credential_check_generation: u64,
     credential_retry_at: Option<Instant>,
-    /// What the remotes are holding, as of the last time each answered. Read from
-    /// them rather than copied: a task belongs to the machine running it, so this is
-    /// only ever as good as the last answer.
     pub(in crate::tui) remote_tasks: Vec<HeldTask>,
-    /// The remote card to select once the next read of a remote's tasks lands,
-    /// so a task that has just been sent there is the one in view.
     pending_remote: Option<(String, String)>,
     pub(in crate::tui) tracker_conflict: Option<TrackerConflict>,
     pub(in crate::tui) conflict_choice: usize,
-    /// Addresses whose account the operator said to take over, so the next push
-    /// carries the consent.
     taking_over: HashSet<String>,
-    /// Addresses whose account the operator chose to leave alone, until the
-    /// configuration changes.
     conflict_declined: HashSet<String>,
-    /// Machines whose tasks are being watched, one watch each, and where a watch
-    /// reports what it finds.
     watched: HashMap<String, JoinHandle<()>>,
     watch_events: mpsc::UnboundedSender<WatchedTasks>,
     remote_synced: HashMap<String, String>,
-    /// What was last sent to each machine, so each is only sent a change of its
-    /// own.
     configuration_digests: HashMap<String, String>,
     remote_config_inflight: HashSet<String>,
     pub(in crate::tui) discovered_remotes: HashMap<EndpointId, DiscoveredRemote>,
 
-    /// What each address last answered with. Written by the dial once there is
-    /// one; read when the panel opens.
     pub(in crate::tui) remote_keys: RemoteKeys,
     pub(in crate::tui) remembered_keys: Vec<RemoteKey>,
     pub(in crate::tui) base_description: Option<EnvironmentDescription>,
-    /// The last repository listing, so opening a picker shows something at once
-    /// and a fresh list replaces it when it lands.
     repositories: Option<Vec<Repository>>,
-    /// Whether a listing is on its way, so the card can say it is being asked
-    /// for rather than sit still.
     repositories_listing: bool,
-    /// Whether this session has already asked for a listing, so a card that is
-    /// waiting for one does not ask again on every clock tick.
     repositories_requested: bool,
-    /// The profile the credential shell is signing in, so closing it asks
-    /// about that login again rather than showing what it said before.
     signing_in: Option<String>,
-    /// Whether Settings was opened from the first screen, so leaving it returns
-    /// there rather than to the task list behind it.
     panel_from_setup: bool,
     pub(in crate::tui) profiles: Vec<ProfileSummary>,
-    /// What the Linear tracker's session is doing, read when the panel opens
-    /// and updated when a sign-in lands.
     pub(in crate::tui) tracker_state: TrackerState,
     tracker_states: HashMap<String, TrackerState>,
-    /// The sign-in in flight, so a second enter can give up on it and leaving
-    /// the interface can take it down with it. The provider owns the browser and
-    /// the OAuth callback; dropping this future is what cancels them.
     tracker_connect: Option<JoinHandle<()>>,
     tracker_connecting: Option<String>,
     tracker_connect_attempt: u64,
@@ -734,9 +544,6 @@ impl Drop for App {
     }
 }
 
-/// Whether a task is one the grid lists.
-///
-/// Completed work is history; the grid is for what there is still something to do.
 fn is_listed(task: &Task) -> bool {
     task.facts.execution_status != TaskExecutionStatus::Completed
 }
@@ -902,8 +709,6 @@ impl App {
         }
     }
 
-    /// Take the task list the event loop reports, leaving out what the grid does
-    /// not show.
     pub(in crate::tui) fn list_tasks(&mut self, tasks: Vec<Task>) {
         self.tasks = listed(tasks);
         self.clamp_selection();
@@ -914,10 +719,6 @@ impl App {
         self.selected = self.selected.min((local + remote).saturating_sub(1));
     }
 
-    /// Move within the grid: one card across, or one row of cards.
-    ///
-    /// The grid does not wrap, because a card's neighbours are where it is and
-    /// wrapping from the last column to the first is a jump, not a step.
     pub(in crate::tui) fn select_adjacent(&mut self, step: isize, columns: usize) {
         let (local, remote) = self.visible_counts();
         let count = local + remote;
@@ -1053,11 +854,6 @@ impl App {
         self.grid_columns.max(1)
     }
 
-    /// Where a project's tasks run, if that machine can take one now.
-    ///
-    /// A project names one machine and a task does not choose, so this is the one
-    /// place that answers where work goes. A machine that is configured but not
-    /// answering is a reason to say so, not to fall back to this one.
     fn project_machine(&self, project: &Project) -> Result<Option<String>, String> {
         // The machine is the operator's setting for the project, not a fact the
         // task carries. A task taken over from a remote was built with that
@@ -1092,30 +888,22 @@ impl App {
         }
     }
 
-    /// Whether any project runs on this machine, which is what makes it a machine
-    /// Altitude has anything to say to.
     pub(in crate::tui) fn remote_runs_projects(&self, address: &str) -> bool {
         self.projects()
             .iter()
             .any(|project| project.host.as_deref() == Some(address))
     }
 
-    /// Whether this session has already sent this machine something, in which
-    /// case its last project leaving is a revocation it is owed.
     pub(in crate::tui) fn remote_was_given_config(&self, address: &str) -> bool {
         self.remote_synced.contains_key(address)
     }
 
-    /// Whether the selected task's project runs on another machine, which is the
-    /// only case where a task has somewhere to be pushed to.
     fn selected_project_runs_remotely(&self) -> bool {
         self.selected_task()
             .and_then(|task| task.project().map(|project| project.host.is_some()))
             .unwrap_or(false)
     }
 
-    /// The machines this installation delegates to, as the project form offers
-    /// them.
     fn remotes(&self) -> Vec<String> {
         self.settings_file
             .as_ref()
@@ -1123,17 +911,11 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// How a project's tracker scope is named in its form: the provider's own
-    /// word, so the setting does not ask a Linear operator for a "scope".
     fn scope_label(&self) -> String {
         let kind = TrackerKind::sole();
         format!("Task tracker {}", kind.scope_noun())
     }
 
-    /// The id of the project the grid is showing.
-    ///
-    /// A tab that names a project which is gone falls back to the first one, so a
-    /// deleted project cannot leave the grid looking at nothing.
     pub(in crate::tui) fn active_project_id(&self) -> String {
         let projects = self.projects();
         self.active_project
@@ -1169,10 +951,6 @@ impl App {
         self.set_active_project(&projects[next].id);
     }
 
-    /// Whether a task with this recorded project belongs in the active tab.
-    ///
-    /// A task that records no project cannot say which tab it belongs to, and
-    /// hiding it would be worse than showing it beside every one.
     fn in_active_tab(&self, project_id: Option<&str>) -> bool {
         match project_id {
             Some(id) => id == self.active_project_id(),
@@ -1219,10 +997,6 @@ impl App {
         local + remote
     }
 
-    /// The projects a task can be founded in.
-    ///
-    /// Built from the settings rather than stored on the app: the list is small,
-    /// and a copy kept here would be one more thing to keep in step with the file.
     pub(in crate::tui) fn projects(&self) -> Vec<Project> {
         self.settings_file
             .as_ref()
@@ -1273,35 +1047,20 @@ impl App {
             .is_none_or(|file| file.settings().interface().keyboard_hints)
     }
 
-    /// Whether the interface animates: the transitions between what is in
-    /// front, and the drifting backdrop behind it.
     pub(in crate::tui) fn animations(&self) -> bool {
         self.settings_file
             .as_ref()
             .is_none_or(|file| file.settings().interface().animations)
     }
 
-    /// Whether the drifting field is drawn and advanced.
-    ///
-    /// A terminal repaints whenever its program writes, so moving the field
-    /// under those frames spends the output on the backdrop. It is left out of
-    /// the frame behind a terminal instead.
     pub(in crate::tui) fn backdrop_animates(&self) -> bool {
         self.animations() && self.open_shell().is_none()
     }
 
-    /// The frame counter that drives animated drawing, absent while animations
-    /// are off. What is animated reads this rather than the counter itself, so
-    /// there is one place that decides whether anything moves at all.
     pub(in crate::tui) fn animation_tick(&self) -> Option<usize> {
         self.animations().then_some(self.shimmer)
     }
 
-    /// Whether the faster foreground clock has anything to move.
-    ///
-    /// The backdrop is not included: it has its own clock. This is the question
-    /// that decides whether an idle list wakes up twelve times a second for text
-    /// nobody is waiting on.
     pub(in crate::tui) fn needs_shimmer(&self) -> bool {
         self.has_modal()
             || self.repositories_listing
@@ -1598,8 +1357,6 @@ impl App {
         }
     }
 
-    /// Whether the terminal in front was opened from the first screen, which is
-    /// the screen that has to be behind it.
     pub(in crate::tui) fn credentials_over_card(&self) -> bool {
         matches!(self.foreground, Foreground::Shell(ShellId::Credentials(_)))
             && self
@@ -1619,15 +1376,10 @@ impl App {
         self.signals_cursor.is_gliding() || self.panel.cursor.is_gliding()
     }
 
-    /// Move the lists that are still catching up with their cursors, which is
-    /// what makes a jump read as the list moving. Answers whether anything
-    /// moved, so the loop knows to draw.
     pub(in crate::tui) fn glide_lists(&mut self, elapsed: Duration) -> bool {
         self.signals_cursor.glide(elapsed) | self.panel.cursor.glide(elapsed)
     }
 
-    /// Whether a modal is in front: a pop-up or the panel, rather than the work
-    /// itself or a terminal. What the transition animates.
     pub(in crate::tui) fn has_modal(&self) -> bool {
         // A transfer on its way, or a message, is a modal over the list and
         // leaves like one.
@@ -1647,11 +1399,6 @@ impl App {
             )
     }
 
-    /// Whether the app wants the terminal's mouse reports.
-    ///
-    /// A shell needs them to hand to its program, and a modal that scrolls needs
-    /// the wheel. Everywhere else they are left to the terminal, so selecting
-    /// text still works.
     pub(in crate::tui) fn wants_mouse(&self) -> bool {
         self.open_shell().is_some()
             || matches!(
@@ -1730,14 +1477,6 @@ impl App {
         }
     }
 
-    /// Start a profile's sign-in, with what it asks said first when the tool's own
-    /// interface is where it happens.
-    ///
-    /// A command that signs in and exits needs no page: the terminal is the
-    /// sign-in. A tool that has to be driven gets its instructions before its
-    /// screen, so the operator arrives knowing what to do there.
-    /// Open the service picker for a new identity, limited to the section's
-    /// services so adding from a section stays in that section.
     fn open_identity_setup(&mut self, section: Section) {
         let mut choices: Vec<IdentityChoice> = section
             .services()
@@ -1777,8 +1516,6 @@ impl App {
         }
     }
 
-    /// Create the identity, give it the fallback name, and start its sign-in.
-    /// A service that can name the account refines the label once it answers.
     fn create_identity<E>(
         &mut self,
         service: Service,
@@ -1881,8 +1618,6 @@ impl App {
         self.git_identity_over_card
     }
 
-    /// Save the identity the editor holds, or keep it open with what was typed
-    /// when it cannot be saved.
     pub(in crate::tui) async fn git_identity_key(&mut self, key: KeyEvent) {
         let Foreground::GitIdentity(mut identity) = mem::take(&mut self.foreground) else {
             return;
@@ -2063,12 +1798,6 @@ impl App {
         }
     }
 
-    /// Open a terminal in a throwaway sandbox, for one profile's login.
-    ///
-    /// Off the loop, because the sandbox may have to be built first and a build is
-    /// minutes rather than frames. Altitude is not in the way of the credential
-    /// either: the CLI writes it where the profile is mounted, and the interface
-    /// only ever reads names and places.
     pub(in crate::tui) fn open_credential_shell<E>(
         &mut self,
         display: &str,
@@ -2217,8 +1946,6 @@ impl App {
         }
     }
 
-    /// Forget what the last check said about the profile a shell just signed in,
-    /// so the row asks again instead of repeating its pre-sign-in answer.
     fn recheck_signed_in_profile(&mut self) {
         let Some(profile) = self.signing_in.take() else {
             return;
@@ -2228,10 +1955,6 @@ impl App {
         self.credential_checking.remove(&profile);
     }
 
-    /// Throw a credential shell away, and go back to where it was opened from.
-    ///
-    /// The shell is not a task: what it wrote is in the profile, which is a host
-    /// directory, and the sandbox only ever had to last as long as the terminal.
     pub(in crate::tui) async fn close_credential_shell<E>(&mut self, task_service: &TaskService<E>)
     where
         E: IsolationEngine + Clone + 'static,
@@ -2391,10 +2114,6 @@ impl App {
         }
     }
 
-    /// What `enter` does where the focus is: the row's own action, which for a
-    /// remote is reaching it rather than editing the address it is reached at, for
-    /// a credential is a terminal, and for a tracker is a browser sign-in, all
-    /// rather than a page.
     pub(in crate::tui) async fn activate_selected<E>(
         &mut self,
         task_service: &TaskService<E>,
@@ -2466,9 +2185,6 @@ impl App {
         }
     }
 
-    /// How a remote reads to a human: the name it gave itself, or its address
-    /// until it has said one. The same name its picker shows, so a message about
-    /// a machine and the list of machines agree.
     fn remote_name(&self, address: &str) -> String {
         self.remembered_keys
             .iter()
@@ -2476,8 +2192,6 @@ impl App {
             .map_or_else(|| address.to_owned(), |key| key.label.clone())
     }
 
-    /// The machines a task could run on: this one, then the remotes, each saying
-    /// whether it can be given work.
     fn task_hosts(&self) -> Vec<Host> {
         let mut hosts = vec![Host {
             address: None,
@@ -2513,11 +2227,6 @@ impl App {
         hosts
     }
 
-    /// Watch a machine's tasks, for as long as the interface runs.
-    ///
-    /// The one thing that dials a remote. What the watch finds on the way in is
-    /// what the interface shows about the machine, so nothing else has to ask it
-    /// the same question on a clock of its own.
     pub(in crate::tui) fn watch_remote(&mut self, address: &str) {
         if self.watched.contains_key(address) {
             return;
@@ -2563,8 +2272,6 @@ impl App {
         }
     }
 
-    /// Dial one machine, say what it answered, and carry its changes until the
-    /// stream ends.
     async fn watch_once(
         address: &str,
         keys: &RemoteKeys,
@@ -2755,10 +2462,6 @@ impl App {
         self.settle_selection();
     }
 
-    /// Select the card a machine just said it holds, when one was asked for.
-    ///
-    /// A task arriving from a project other than the one in front brings its tab
-    /// with it: the operator asked for it, so it is what they should be looking at.
     fn reveal_pending(&mut self) {
         let Some((address, id)) = self.pending_remote.take() else {
             return;
@@ -2798,11 +2501,6 @@ impl App {
         self.foreground = Foreground::Confirm(PendingConfirm::taking_over(id.to_owned(), question));
     }
 
-    /// Move a task here without taking its terminal over.
-    ///
-    /// The same transfer as taking it over, with the one difference an operator
-    /// chooses: the task keeps running where it lands rather than handing the
-    /// terminal over with it.
     pub(in crate::tui) fn pull_task<E>(
         &mut self,
         id: &str,
@@ -2821,12 +2519,6 @@ impl App {
         }
     }
 
-    /// Bring a task home from the machine that owns it.
-    ///
-    /// The remote stops running it, its files and conversation travel, and it is founded here with the
-    /// history of what was decided about it — and only then is the remote told it is no
-    /// longer the owner. Everything after that is the ordinary take-over of a task that
-    /// is here, because by then it is.
     fn ask_for_task<E>(
         &mut self,
         held: &HeldTask,
@@ -2888,8 +2580,6 @@ impl App {
         self.transfer.as_mut().is_some_and(TransferView::observe)
     }
 
-    /// Ask the transfer in front to stop. It stops between pieces, and what it
-    /// has already moved stays where it is.
     pub(in crate::tui) fn stop_transfer(&mut self) {
         if let Some(transfer) = &mut self.transfer {
             transfer.watching.stop();
@@ -2903,8 +2593,6 @@ impl App {
         self.transfer.as_ref().map(TransferView::progress)
     }
 
-    /// A task that has arrived is the operator's. Taking it over ends in its
-    /// terminal; pulling it here only moves it.
     pub(in crate::tui) fn task_landed<E>(
         &mut self,
         id: &str,
@@ -2923,11 +2611,6 @@ impl App {
         }
     }
 
-    /// Ask a remote to run a task of its own, off the event loop.
-    ///
-    /// Nothing is copied and nothing is kept here: the remote founds the task, and it
-    /// is the only machine that can say what the task is doing. The message that it
-    /// took the task arrives when the remote says so, not before.
     pub(in crate::tui) fn begin_delegation(
         &mut self,
         address: &str,
@@ -3016,10 +2699,6 @@ impl App {
         }
     }
 
-    /// Ask the machine that holds a task to remove it and dispose of its capsule.
-    ///
-    /// The same act as removing a task here, done by the machine it belongs to,
-    /// so there is nothing to say about it being elsewhere.
     pub(in crate::tui) fn begin_remove_remote(
         &mut self,
         address: &str,
@@ -3069,12 +2748,6 @@ impl App {
         }
     }
 
-    /// Send a task that is already here to a machine that will continue it, off
-    /// the event loop.
-    ///
-    /// The task stops here, its files and conversation travel, the remote builds it a sandbox, and only
-    /// then does this machine relinquish. Nothing is reported as done until the
-    /// remote has acknowledged it.
     pub(in crate::tui) fn begin_send_to_remote<E>(
         &mut self,
         address: String,
@@ -3116,10 +2789,6 @@ impl App {
         });
     }
 
-    /// Take what a remote answered when an existing task was sent to it.
-    ///
-    /// The source stays in the list until it is really relinquished, so a failure
-    /// leaves the stopped task visible rather than pretending it moved.
     pub(in crate::tui) fn send_task_resolved(&mut self, reply: SendTaskReply) {
         self.transfer = None;
         match reply.result {
@@ -3143,9 +2812,6 @@ impl App {
         }
     }
 
-    /// Take a fresh read of what the remotes hold, and put the highlight on a task
-    /// that has just been sent when it appears.
-    /// The keys of the send chooser: choose a machine, or leave without sending.
     pub(in crate::tui) async fn send_task_key<E>(
         &mut self,
         key: KeyEvent,
@@ -3178,9 +2844,6 @@ impl App {
         }
     }
 
-    /// The held task the selection is on, when it is on one.
-    ///
-    /// The list shows them after this machine's own, so the index says which it is.
     fn selected_held(&self) -> Option<&HeldTask> {
         let (local, _) = self.visible_counts();
         self.visible_remote_tasks()
@@ -3359,12 +3022,6 @@ impl App {
         }
     }
 
-    /// Note whether an identity section is showing, and start its clock when it
-    /// appears.
-    ///
-    /// A fresh look every time it is opened, so a login made in a shell a moment ago
-    /// is not still being reported as it was. Says whether anything changed, so a
-    /// poll that found nothing does not ask for a frame.
     pub(in crate::tui) fn sync_credentials(&mut self) -> bool {
         let showing =
             matches!(self.foreground, Foreground::Panel) && self.panel.section.slot().is_some();
@@ -3382,8 +3039,6 @@ impl App {
         }
     }
 
-    /// Whether any profile is being asked about right now, which is what keeps the
-    /// dot moving while it waits.
     pub(in crate::tui) fn is_asking_credentials(&self) -> bool {
         !self.credential_checking.is_empty()
             || self
@@ -3392,8 +3047,6 @@ impl App {
                 .any(CredentialStatus::is_in_progress)
     }
 
-    /// Whether it is time to ask about this page's logins: the list is showing, it
-    /// has been showing long enough to mean it, and nothing is in flight.
     pub(in crate::tui) fn wants_credential_check(&self) -> bool {
         let Some(since) = self.credentials_visible_since else {
             return false;
@@ -3403,10 +3056,6 @@ impl App {
             && !self.unasked_profiles().is_empty()
     }
 
-    /// The profiles on this page still to be asked about.
-    ///
-    /// An answer that came back is not asked again, and one that could not run waits
-    /// out a backoff rather than being retried on the next tick.
     fn unasked_profiles(&self) -> Vec<String> {
         let Some(slot) = self.panel.section.slot() else {
             return Vec::new();
@@ -3448,10 +3097,6 @@ impl App {
             .collect();
     }
 
-    /// Ask this page's profiles about their logins in one sandbox, off the loop.
-    ///
-    /// One sandbox for the page rather than one per profile: making it is the
-    /// expensive part of asking, and a check is a command inside it.
     pub(in crate::tui) fn ask_credential_checks<E>(
         &mut self,
         task_service: &TaskService<E>,
@@ -3543,18 +3188,12 @@ impl App {
         }
     }
 
-    /// Whether any address is being dialled right now, which is what keeps the
-    /// dot moving while it waits.
     pub(in crate::tui) fn is_asking_remotes(&self) -> bool {
         self.remote_status
             .values()
             .any(RemoteStatus::is_in_progress)
     }
 
-    /// The keys of the question about a tracker account that is already claimed.
-    ///
-    /// It holds every key while it is up: nothing behind it acts on a keystroke
-    /// meant for it, and there are two answers rather than a way to slip past.
     pub(in crate::tui) fn tracker_conflict_key(&mut self, key: KeyEvent) -> bool {
         let Some(conflict) = &self.tracker_conflict else {
             return false;
@@ -3576,16 +3215,12 @@ impl App {
         true
     }
 
-    /// Say yes: the next push carries the consent, and the remote stops attributing
-    /// the account to whoever had it.
     fn take_over_tracker(&mut self, address: &str) {
         self.tracker_conflict = None;
         self.conflict_declined.remove(address);
         self.taking_over.insert(address.to_owned());
     }
 
-    /// Say no: the account stays with the client that had it, and this machine
-    /// stops asking until its configuration changes.
     fn leave_tracker_conflict(&mut self, address: &str) {
         self.tracker_conflict = None;
         self.taking_over.remove(address);
@@ -3610,8 +3245,6 @@ impl App {
         ))
     }
 
-    /// Forget the key remembered for an address, so the key that answered is the
-    /// one it is, and start watching it again.
     pub(in crate::tui) async fn accept_remote_key(&mut self, address: &str) {
         if let Err(error) = self.remote_keys.forget(address).await {
             self.problem(format!("Could not accept the new identity: {error}"));
@@ -3623,11 +3256,6 @@ impl App {
         self.watch_remote(address);
     }
 
-    /// Ask a machine about itself again, now.
-    ///
-    /// The watch is what asks a machine anything, so asking again is starting a
-    /// fresh one rather than waiting out the backoff. This is also how a changed
-    /// key is accepted: forget the one remembered, then ask.
     pub(in crate::tui) async fn check_remote(&mut self, address: &str) {
         self.unwatch_remote(address);
         self.remote_status
@@ -3635,9 +3263,6 @@ impl App {
         self.watch_remote(address);
     }
 
-    /// Note what an announcement said about the trackers a remote runs. Called
-    /// only for an answer whose key is accepted, so a changed key never lends its
-    /// announcement any authority.
     fn note_remote_trackers(&mut self, address: &str, announcement: &Announcement) {
         self.remote_trackers
             .insert(address.to_owned(), announcement.trackers.clone());
@@ -3657,8 +3282,6 @@ impl App {
         }
     }
 
-    /// Read back what each address has answered with, which is what the panel and
-    /// every host picker show in place of the address.
     pub(in crate::tui) async fn reload_remembered_keys(&mut self) {
         match self.remote_keys.list().await {
             Ok(keys) => self.remembered_keys = keys,
@@ -4021,10 +3644,6 @@ impl App {
         }
     }
 
-    /// Open the repository list on what is cached, and ask for a fresh one.
-    ///
-    /// The list is a shortcut into the field, not a replacement for it: a
-    /// repository the login cannot list is still one an operator can name.
     pub(in crate::tui) fn begin_repository_listing<E>(
         &mut self,
         task_service: &TaskService<E>,
@@ -4057,8 +3676,6 @@ impl App {
         self.spawn_repository_list(kind, task_service, replies);
     }
 
-    /// Ask the tracker for its teams, and show them under the form's scope
-    /// field. A connection that cannot answer leaves the field as text.
     fn begin_scope_listing<E>(
         &mut self,
         task_service: &TaskService<E>,
@@ -4116,8 +3733,6 @@ impl App {
         });
     }
 
-    /// Read the repositories the VCS login reaches before a picker asks for
-    /// them, so opening the card's list finds it already there.
     pub(in crate::tui) fn prefetch_setup_repositories<E>(
         &mut self,
         task_service: &TaskService<E>,
@@ -4133,8 +3748,6 @@ impl App {
         true
     }
 
-    /// Whether the first-run card is signed in to a provider whose repositories
-    /// nobody has asked for yet.
     fn wants_setup_repositories(&self) -> bool {
         matches!(self.foreground, Foreground::GetStarted(_))
             && self.active_repository().is_none()
@@ -4149,8 +3762,6 @@ impl App {
             )
     }
 
-    /// Take a listing that arrived: the cache always, the open list when there is
-    /// one.
     pub(in crate::tui) fn repositories_listed(&mut self, reply: RepositoryListReply) {
         self.repositories_listing = false;
         match reply.result {
@@ -4180,10 +3791,6 @@ impl App {
         }
     }
 
-    /// The agent a task in the project in front would run under.
-    ///
-    /// The project's own choice comes first: a default is what a project that has
-    /// not chosen gets, not a rule that overrides it.
     pub(in crate::tui) fn active_agent(&self) -> Option<AgentKind> {
         let active = self.active_project_id();
         self.projects()
@@ -4193,10 +3800,6 @@ impl App {
             .or_else(|| self.agent())
     }
 
-    /// Choose the agent the project in front will run, wherever that choice lives.
-    ///
-    /// A project that names its own agent keeps doing so: the panel is editing
-    /// that project's answer, not the default underneath it.
     fn set_active_agent(&mut self, agent: AgentKind) {
         let active = self.active_project_id();
         let pinned = self
@@ -4222,9 +3825,6 @@ impl App {
         }
     }
 
-    /// Whether the first screen still has something to settle: a name, an agent,
-    /// a repository, or a login the CLI has said is not there. Unknown is not a
-    /// reason to keep someone on the card.
     pub(in crate::tui) fn setup_incomplete(&self) -> bool {
         self.setup_next_step().is_some()
     }
@@ -4306,11 +3906,6 @@ impl App {
         }
     }
 
-    /// The keys of the first-run screen.
-    ///
-    /// It owns every key while it is in front: the name is a field the moment
-    /// the caret is on it, and the only ways off the card are finishing it or
-    /// opening Settings from it. Answers whether the operator asked to quit.
     pub(in crate::tui) async fn get_started_key<E>(
         &mut self,
         key: KeyEvent,
@@ -4541,8 +4136,6 @@ impl App {
         false
     }
 
-    /// The keys while the identity editor is open. Answers whether it left
-    /// something else in front, which is the signing-key page.
     async fn commits_key(&mut self, panel: &mut GetStarted, key: KeyEvent) -> bool {
         match key.code {
             // Leaving saves, as it does for the project name. What cannot be
@@ -4638,8 +4231,6 @@ impl App {
         }
     }
 
-    /// Write the identity the editor holds into the profile's git config, making
-    /// a signing key first when signing was asked for and none is there.
     async fn save_commits(&mut self, panel: &mut GetStarted) -> bool {
         let name = panel.commits.name.value().trim().to_owned();
         let email = panel.commits.email.value().trim().to_owned();
@@ -4868,8 +4459,6 @@ impl App {
         );
     }
 
-    /// Write the name that is in the field, when it is one the project could
-    /// keep. Answers whether the saved name is what the field now says.
     fn commit_name(&mut self, panel: &GetStarted) -> bool {
         let name = panel.name.value().trim();
         if name.is_empty() {
@@ -4881,8 +4470,6 @@ impl App {
         self.rename_project(&self.active_project_id(), name)
     }
 
-    /// Leave the name field, saving what it holds. A field left empty goes back
-    /// to the saved name rather than making the project unnamed by accident.
     fn finish_name(&mut self, panel: &mut GetStarted) {
         if !self.commit_name(panel) {
             let saved = self.active_project_name();
@@ -4905,12 +4492,6 @@ impl App {
         self.spawn_repository_list(self.active_vcs(), task_service, replies);
     }
 
-    /// The agent the first-run card treats as chosen.
-    ///
-    /// A profile whose check came back saying its login is not there is not a
-    /// choice: the row goes back to the picker, where another agent or another
-    /// attempt is the answer. Until a check has answered, the choice stands and
-    /// the row says the check is out.
     fn setup_agent(&self) -> Option<AgentKind> {
         self.active_agent()
             .filter(|agent| !self.signed_out(agent.profile()))
@@ -4960,13 +4541,6 @@ impl App {
             .unwrap_or(TrackerState::NotConnected);
     }
 
-    /// How a login reads: `service:group/identity`, with a part left out when
-    /// the provider names none.
-    ///
-    /// The account a tracker login recorded is where the group comes from — the
-    /// workspace — and an agent login that was never renamed is only its tool:
-    /// `pi`, not `pi:pi`. Two logins that read the same are told apart by
-    /// [`Self::described_credentials`]; on its own this is the tag.
     fn credential_tag(&self, credential: &Credential) -> String {
         let Some(service) = credential.service() else {
             return credential.label.clone();
@@ -4990,12 +4564,6 @@ impl App {
         describe(service, group, &identity)
     }
 
-    /// The identities this installation holds, as every page names them.
-    ///
-    /// A login reads by its tag, which says the tool, the workspace and whose
-    /// login it is — so the name is not printed. Only where two logins would read
-    /// the same does something else have to say which is which, because a list of
-    /// two identical rows is a list of nothing.
     pub(in crate::tui) fn described_credentials(&self) -> Vec<Credential> {
         let mut described: Vec<Credential> = self
             .settings_credentials()
@@ -5031,11 +4599,6 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// The tracker login this installation asks about issues with.
-    ///
-    /// The one it defaults to, or the only one it has: a single connected login
-    /// is an answer rather than a choice somebody still has to make, and asking
-    /// for a default nobody set is what made a connected tracker look unsupported.
     pub(in crate::tui) fn tracker_credential(&self) -> Option<String> {
         let settings = self.settings_file.as_ref()?.settings();
         if let Some(default) = settings.default_credential(Slot::Tracker) {
@@ -5183,8 +4746,6 @@ impl App {
         profiles
     }
 
-    /// Whether the first-run screen has an agent whose login has not been asked
-    /// about yet.
     pub(in crate::tui) fn wants_setup_check(&self) -> bool {
         matches!(self.foreground, Foreground::GetStarted(_))
             && self
@@ -5457,12 +5018,6 @@ impl App {
         self.tasks.iter().find(|task| task.id == id)
     }
 
-    /// Whether the selected thread is waiting on an agent that is running.
-    ///
-    /// The agent is given the reply when the task is idle and a run starts; if
-    /// the task was already running, the reply is queued for the run after it.
-    /// Either way its last message is the operator's, and the task says it is
-    /// running.
     pub(in crate::tui) fn signal_agent_working(&self) -> bool {
         let Some(thread) = self.signal_thread() else {
             return false;
@@ -5484,10 +5039,6 @@ impl App {
             .is_some_and(|held| held.summary.status == TaskExecutionStatus::Running)
     }
 
-    /// Scroll the conversation by a number of rows, clamped to what exists.
-    ///
-    /// The focused message follows the top of the viewport, so `y` copies the
-    /// message being read rather than whichever one was last clicked.
     fn scroll_signal(&mut self, rows: i32) {
         let current = if self.signal_scroll == u16::MAX {
             self.signal_scroll_max
@@ -5552,8 +5103,6 @@ impl App {
             .find(|held| held.address == remote.address && held.summary.id == remote.task_id)
     }
 
-    /// The name the agent is known by here, which is its harness rather than the
-    /// word "agent": the operator is reading a conversation, not a category.
     pub(in crate::tui) fn signal_agent_label(&self) -> String {
         let local = self.signal_task();
         let agent = local
@@ -5651,11 +5200,6 @@ impl App {
         }
     }
 
-    /// Rebuild the visible threads from the chosen filter and sort.
-    ///
-    /// The groups keep their order: unresolved first, then the kind tier. The
-    /// sort only chooses the direction inside a tier, so a new message can move a
-    /// row but cannot move it past the group the operator is reading.
     pub(in crate::tui) fn apply_signal_view(&mut self) {
         let selected = self.signal_thread().map(|thread| thread.id.clone());
         let filter = self
@@ -5705,23 +5249,17 @@ impl App {
         self.normalise_signal_focus();
     }
 
-    /// Move between threads, and start the one now selected at its newest
-    /// message.
     pub(in crate::tui) fn move_signal_cursor(&mut self, forward: bool) {
         self.signals_cursor
             .move_by(forward, self.signal_threads.len());
         self.reset_signal_message();
     }
 
-    /// Move between threads by a screen at a time, with the same bookkeeping as
-    /// moving between them one at a time.
     pub(in crate::tui) fn page_signal_cursor(&mut self, forward: bool) {
         self.signals_cursor.page_by(forward, &self.signals_layout);
         self.reset_signal_message();
     }
 
-    /// Mark a thread resolved locally; the filter decides whether it stays on
-    /// screen. The store keeps the thread either way.
     pub(in crate::tui) fn resolve_signal_locally(&mut self, signal_id: &str, resolved: bool) {
         if let Some(thread) = self
             .signal_all_threads
@@ -5776,8 +5314,6 @@ impl App {
         self.apply_signal_view();
     }
 
-    /// The operator's answer, shown where it will be read: in the thread, at the
-    /// bottom, before the agent has come back to it.
     pub(in crate::tui) fn remember_signal_reply(&mut self, signal_id: &str, answer: String) {
         if let Some(thread) = self
             .signal_all_threads
@@ -5871,8 +5407,6 @@ impl App {
         }
     }
 
-    /// The project the task on screen runs in, as this machine's settings hold
-    /// it: what a proposed change to it is measured against.
     pub(in crate::tui) fn signal_task_project(&self) -> Option<Project> {
         let task_id = self.signal_task_id.as_deref()?;
         let project_id = self
@@ -5889,12 +5423,6 @@ impl App {
             .cloned()
     }
 
-    /// The keys of the inline reply box.
-    ///
-    /// Enter sends, shift-enter (or alt-enter, where a terminal reports it as its
-    /// own key) adds a line, and escape puts the box away without answering. The
-    /// reply joins the thread as soon as it is sent, so the screen says what was
-    /// said while the agent is still working out what to do about it.
     pub(in crate::tui) fn composer_key<E>(
         &mut self,
         key: KeyEvent,
@@ -5940,11 +5468,6 @@ impl App {
         }
     }
 
-    /// Take a click on the first-run card's repository list.
-    ///
-    /// The list is the only thing on the card with rows of its own; a click on
-    /// one means the same thing as Enter on it, and a click anywhere else leaves
-    /// the card as it is.
     pub(in crate::tui) fn get_started_mouse(&mut self, mouse: MouseEvent) {
         let Foreground::GetStarted(mut panel) = mem::take(&mut self.foreground) else {
             return;
@@ -5962,10 +5485,6 @@ impl App {
         self.foreground = Foreground::GetStarted(panel);
     }
 
-    /// Send a key to the terminal in front, or leave it.
-    ///
-    /// Leaving means different things: a task's shell goes back to autopilot, and a
-    /// credential shell is thrown away with its sandbox.
     pub(in crate::tui) async fn shell_key<E>(
         &mut self,
         key: KeyEvent,
@@ -6023,8 +5542,6 @@ impl App {
         .await;
     }
 
-    /// What a click on the creation question means, read against the rectangles
-    /// the last frame drew.
     pub(in crate::tui) async fn new_task_mouse<E>(
         &mut self,
         mouse: MouseEvent,
@@ -6050,8 +5567,6 @@ impl App {
         .await;
     }
 
-    /// Take an answer to the creation question, whether it came from a key or a
-    /// click: what a task being founded does is the same either way.
     async fn resolve_new_task<E>(
         &mut self,
         question: Box<NewTask>,
@@ -6116,8 +5631,6 @@ impl App {
         question.due_search(Instant::now())
     }
 
-    /// Tell the issue page why it cannot search, with the message the caller
-    /// chose: no session is the ordinary case, no provider is the build's.
     pub(in crate::tui) fn issue_search_unavailable(
         &mut self,
         token: SearchToken,
@@ -6128,8 +5641,6 @@ impl App {
         }
     }
 
-    /// Take a search answer, if the page is still asking that question. A
-    /// submission queued behind the search starts its read here, once.
     pub(in crate::tui) fn issue_search_resolved<E>(
         &mut self,
         reply: IssueSearchReply,
@@ -6149,8 +5660,6 @@ impl App {
         }
     }
 
-    /// Read the chosen issue off the loop, so the interface keeps drawing while
-    /// Linear is asked.
     fn start_issue_read<E>(
         &mut self,
         token: u64,
@@ -6188,13 +5697,6 @@ impl App {
         }
     }
 
-    /// Take a snapshot that has arrived, if the submission that asked for it is
-    /// still the one in front of the operator. This is the gate between the read
-    /// and founding a task: a reply whose token no longer matches creates nothing.
-    ///
-    /// A bound issue runs here or on the chosen machine. For a remote, the whole
-    /// snapshot travels as the task's origin, so the machine reads the issue itself
-    /// rather than founding a task from a plain prompt.
     pub(in crate::tui) async fn issue_read_resolved<E>(
         &mut self,
         reply: IssueReadReply,
@@ -6247,11 +5749,6 @@ impl App {
         }
     }
 
-    /// Start signing in to Linear, or give up on a sign-in already under way.
-    ///
-    /// The browser and the OAuth callback are the provider's; this asks for a
-    /// connection and keeps the one handle, so the attempt can be cancelled here
-    /// or taken down with the interface.
     pub(in crate::tui) fn connect_tracker<E>(
         &mut self,
         task_service: &TaskService<E>,
@@ -6400,11 +5897,6 @@ impl App {
         }
     }
 
-    /// The account a tracker profile last recorded, for a name the operator does
-    /// not have to invent.
-    ///
-    /// `user@workspace` when the provider named the workspace, which is what
-    /// tells two logins to the same tracker apart.
     fn tracker_account_name(&self, credential: &str) -> Option<String> {
         let account = self.profile_account(credential)?;
         let name = account.display_name.trim();
@@ -6417,21 +5909,12 @@ impl App {
         })
     }
 
-    /// The account a profile last recorded, as it recorded it.
-    ///
-    /// Read rather than asked: the file is written when the login is made, and a
-    /// page that names a login should not wait on a network for its name. A
-    /// tracker records one today; any service that learns whose login it holds —
-    /// and which workspace or organisation that login is in — writes the same
-    /// file, and the name it reads by gains the group.
     pub(in crate::tui) fn profile_account(&self, credential: &str) -> Option<TrackerAccount> {
         let text =
             fs::read_to_string(self.config.profile_dir(credential).join("identity.json")).ok()?;
         serde_json::from_str(&text).ok()
     }
 
-    /// Move a freshly checked identity to the id its account name implies,
-    /// unless it is already named by hand or a task already uses it.
     fn adopt_identity_name(&mut self, id: &str, label: &str) -> String {
         let Some(service) = Service::from_id(id) else {
             return id.to_owned();
@@ -6536,8 +6019,6 @@ impl App {
                 .any(|state| *state == TrackerState::Connecting)
     }
 
-    /// Whether the issue page is waiting on a search or a read, which is what
-    /// keeps its shimmer moving.
     pub(in crate::tui) fn is_awaiting_tracker(&self) -> bool {
         match &self.foreground {
             Foreground::NewTask(question) => question.is_awaiting(),
@@ -6962,12 +6443,6 @@ impl App {
         }
     }
 
-    /// Make the change a blocked thread is asking for.
-    ///
-    /// The project lives in this machine's settings, so applying lands there and
-    /// the machine running the task is sent the new configuration the same way it
-    /// is sent any other change. The thread is then answered and resolved: the
-    /// operator did the thing it was waiting on, so it stops asking.
     async fn apply_project_proposal<E>(
         &mut self,
         thread: &TaskOperatorSignalThread,
@@ -7257,12 +6732,6 @@ impl App {
         Ok(false)
     }
 
-    /// Stop the agent and give the operator its terminal.
-    ///
-    /// This is the one action never taken by accident: it ends the run's autonomy,
-    /// so it has a key of its own and it asks first. A task hosted by a remote is
-    /// also brought home by it, because a terminal has to be beside the capsule —
-    /// and handing control back sends it there again, which is the other half.
     pub(in crate::tui) fn take_over<E>(
         &mut self,
         id: &str,
@@ -7343,8 +6812,6 @@ impl App {
         self.foreground = Foreground::Shell(id);
     }
 
-    /// The size a terminal for a task should be, saying so when it cannot be read
-    /// rather than taking the whole interface down with it.
     pub(in crate::tui) fn shell_size(&mut self, terminal: &DefaultTerminal) -> Option<(u16, u16)> {
         match terminal.size() {
             Ok(size) => Some(screens::shell::size(self.shell_area(size.into()))),
@@ -7418,11 +6885,6 @@ impl App {
         super::widgets::chrome::content_area(area, &self.hints(), self.keyboard_hints())
     }
 
-    /// Read what a task is asking, and show it.
-    ///
-    /// A task on another machine is asked over the link, off this loop; this
-    /// machine's own is read from the store here, because that is a file rather
-    /// than a wait.
     pub(in crate::tui) async fn open_signals<E>(
         &mut self,
         task_service: &TaskService<E>,
@@ -7469,13 +6931,6 @@ impl App {
         self.reset_signal_message();
     }
 
-    /// Open the signals of a task another machine owns, and read them over the
-    /// link.
-    ///
-    /// The screen is shown before the answer arrives, so the operator sees the
-    /// wait rather than a frozen list. The attempt in the reply says which opening
-    /// it belongs to, so a reply from one already left behind cannot replace what
-    /// is on screen.
     fn open_remote_signals(&mut self, held: HeldTask, replies: &mpsc::Sender<RemoteSignalsReply>) {
         self.remote_signals_attempt = self.remote_signals_attempt.wrapping_add(1);
         let remote = RemoteSignals {
@@ -7508,8 +6963,6 @@ impl App {
         });
     }
 
-    /// Leave the signals screen, forgetting which task it was about so a reply
-    /// that lands after this changes nothing.
     fn leave_signals(&mut self) {
         self.foreground = Foreground::Tasks;
         self.remote_signals = None;
@@ -7529,9 +6982,6 @@ impl App {
         self.signal_viewport_rows = 0;
     }
 
-    /// The address to reach a remote at, once its key is checked against the one
-    /// remembered for it. A different key is refused: signals are not something to
-    /// send to a stranger.
     async fn remote_peer(address: &str, keys: &RemoteKeys) -> Result<EndpointAddr, String> {
         let remembered = keys
             .remembered(address)
@@ -7549,8 +6999,6 @@ impl App {
         Ok(sighting.ticket.into())
     }
 
-    /// Read one remote task's signals. Info logs resolve where they live when
-    /// the operator leaves them, just as they do here.
     async fn read_remote_signals(
         address: &str,
         task_id: &str,
@@ -7647,9 +7095,6 @@ impl App {
         }
     }
 
-    /// Take what came back from a remote task's signals. A reply that belongs to
-    /// a pop-up the operator has left changes nothing; one that succeeds drops the
-    /// resolved signal and re-reads the machine's cards.
     pub(in crate::tui) fn remote_signals_resolved(&mut self, reply: RemoteSignalsReply) {
         match reply {
             RemoteSignalsReply::Opened { remote, signals } => {
@@ -7799,8 +7244,6 @@ impl App {
         Ok(())
     }
 
-    /// Read the threads again, keeping the selection. Resolved ones come back
-    /// too, because a conversation that ended is part of what the screen shows.
     pub(in crate::tui) async fn refresh_signal_threads<E>(&mut self, event_loop: &TaskEventLoop<E>)
     where
         E: IsolationEngine + Clone + 'static,
@@ -7848,8 +7291,6 @@ impl App {
         }
     }
 
-    /// A signal thread changed. Keep the card's unresolved count current, and
-    /// read the screen again when it is showing this task.
     pub(in crate::tui) async fn signal_changed<E>(
         &mut self,
         task_id: &str,
@@ -7869,8 +7310,6 @@ impl App {
         }
     }
 
-    /// The change notices fell behind. The store has every change, so the open
-    /// screen is simply read again.
     pub(in crate::tui) async fn signal_changes_lagged<E>(&mut self, event_loop: &TaskEventLoop<E>)
     where
         E: IsolationEngine + Clone + 'static,
@@ -7886,10 +7325,6 @@ impl App {
             .is_some_and(|shell| shell.has_active_notice() || shell.has_reachable_ports())
     }
 
-    /// Say that a sandbox's port is reachable here, on the terminal it belongs to.
-    ///
-    /// Nothing else changes: the port just works, and the border says so for a
-    /// moment on whichever terminal is the one it came from.
     pub(in crate::tui) fn port_is_reachable(&mut self, sandbox: &str, port: u16) {
         let id = self
             .tasks
@@ -7902,12 +7337,6 @@ impl App {
         }
     }
 
-    /// Feed one terminal's bytes to the shell that draws it, and do what its program
-    /// asked for along the way.
-    ///
-    /// The same for a task's shell and a credential shell, because the terminal is
-    /// the same: only where the bytes came from differs. Answers what the program
-    /// is waiting for, which the caller writes back to it.
     fn process_shell_output(&mut self, id: &ShellId, bytes: Vec<u8>) -> Vec<Vec<u8>> {
         let mut asked_to_open = None;
         let mut replies = Vec::new();
@@ -7956,11 +7385,6 @@ impl App {
             .any(|task| task.facts.execution_status == TaskExecutionStatus::Pending)
     }
 
-    /// Whether anything on screen is waiting on work whose progress is worth
-    /// reading again while it runs.
-    ///
-    /// The animation clock reads this too, but it is not the animation's own
-    /// question: with animations off there is still a wait to report on.
     pub(in crate::tui) fn is_awaiting_progress(&self) -> bool {
         self.is_preparing()
             || self.is_asking_remotes()
@@ -8015,10 +7439,6 @@ fn copy_to_clipboard(text: String) -> Result<(), arboard::Error> {
     clipboard.set_text(text)
 }
 
-/// Open an address in this machine's browser.
-///
-/// One argument and never a shell word: the sandbox chooses the address, and a
-/// sandbox is not to be trusted with this machine's command line.
 fn open_in_browser(url: &str) -> Result<(), String> {
     let opener = match env::consts::OS {
         "macos" => "open",
@@ -8034,9 +7454,6 @@ fn open_in_browser(url: &str) -> Result<(), String> {
         .ok_or_else(|| format!("{opener} exited with {status}"))
 }
 
-/// Send a configuration bundle to a remote, and return only once it has
-/// acknowledged holding it. The dial is what makes this a push rather than a
-/// preference.
 async fn deliver_config(
     address: &str,
     mut bundle: ConfigBundle,
@@ -8076,9 +7493,6 @@ async fn deliver_config(
         .map_err(|error| error.to_string())
 }
 
-/// Open the settings panel, reading back the two things it cannot see for
-/// itself: what each address last answered with, and what the built base image is
-/// made of.
 async fn open_panel<E>(app: &mut App, task_service: &TaskService<E>)
 where
     E: IsolationEngine + Clone + 'static,
@@ -8100,8 +7514,6 @@ where
     }
 }
 
-/// Open Settings on one of its pages, for a card row that manages rather than
-/// edits what it shows.
 async fn open_panel_at<E>(app: &mut App, task_service: &TaskService<E>, section: Section)
 where
     E: IsolationEngine + Clone + 'static,

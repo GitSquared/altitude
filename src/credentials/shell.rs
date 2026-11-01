@@ -1,11 +1,3 @@
-//! The terminal a profile is signed in through.
-//!
-//! Not a task: nothing records it, nothing travels from it, and it is thrown away when
-//! the shell ends. It exists because a login is a command a CLI runs and a terminal to
-//! run it in, and Altitude never handles the credential itself — it runs the profile's
-//! own sign-in command in a sandbox that mounts what a task mounts, so the CLI writes
-//! where a task will read.
-
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -29,36 +21,15 @@ pub fn credential_shell_id() -> String {
 }
 
 pub enum CredentialShellEvent {
-    Preparing {
-        id: String,
-        label: String,
-    },
+    Preparing { id: String, label: String },
     Opened(CredentialShell),
-    Unavailable {
-        id: String,
-        reason: String,
-    },
-    /// What the shell printed, and which sandbox printed it, because that is where the
-    /// terminal drawing it is kept.
-    Output {
-        id: String,
-        bytes: Vec<u8>,
-    },
-    /// The shell ended, with the status it ended with. Its sandbox is still there
-    /// until it is closed.
-    Exited {
-        id: String,
-        code: i32,
-    },
-    Failed {
-        id: String,
-        error: String,
-    },
+    Unavailable { id: String, reason: String },
+    Output { id: String, bytes: Vec<u8> },
+    Exited { id: String, code: i32 },
+    Failed { id: String, error: String },
 }
 
 impl CredentialShellEvent {
-    /// The sandbox this came from, because that is where the terminal drawing it is
-    /// kept.
     pub fn id(&self) -> &str {
         match self {
             Self::Opened(shell) => shell.id(),
@@ -70,18 +41,11 @@ impl CredentialShellEvent {
         }
     }
 
-    /// Whether this is the last thing the shell will say. The first two answer the
-    /// question of opening one, and a shell that never opened says nothing else.
     pub fn is_last(&self) -> bool {
         matches!(self, Self::Exited { .. } | Self::Failed { .. })
     }
 }
 
-/// Says that a credential shell being prepared is no longer wanted.
-///
-/// Opening one can wait on an environment build, and the operator can leave the page
-/// long before it opens. Without this, the build would finish into a sandbox nobody can
-/// reach and leave it behind.
 #[derive(Clone, Default)]
 pub struct CredentialShellCancel(Arc<AtomicBool>);
 
@@ -141,16 +105,6 @@ impl<E> Credentials<E>
 where
     E: IsolationEngine + Clone + 'static,
 {
-    /// Open a shell in a throwaway sandbox, and answer with it.
-    ///
-    /// The sandbox mounts the profile a task mounts, so what is signed in to here is
-    /// what a task finds. Its environment is only what the login needs, so the wait is
-    /// that CLI's install rather than everything a task runs on, and its snapshot is
-    /// named by what it installs so building it leaves the task environment's alone.
-    ///
-    /// What the shell prints comes back on `events`: a shell outlives no frame, and the
-    /// interface draws it while it runs. `cancel` says the shell is no longer wanted
-    /// while it is being prepared, in which case nothing is left behind.
     pub async fn open_shell(
         &self,
         id: String,
@@ -241,23 +195,12 @@ where
         Ok(())
     }
 
-    /// Take a credential shell's sandbox away.
-    ///
-    /// The shell is not a task, so there is nothing to keep: what it wrote is in the
-    /// profile, which is a host directory, and the sandbox itself is only ever meant to
-    /// last as long as the terminal in front of the operator.
     pub async fn close_shell(&self, id: &str) -> Result<(), IsolationError> {
         self.channels.release(id);
         self.relays.release(id);
         self.isolation.remove(id.to_owned()).await
     }
 
-    /// Bind the MCP channel a credential shell's harness dials.
-    ///
-    /// The profile a shell mounts names Altitude's bridge, and without a channel the
-    /// bridge fails and the harness reports a server that would not start. The endpoint
-    /// serves no tools, because a shell sets up a login and has no task for tools to
-    /// act on.
     fn bind_channel(&self, id: &str) -> Result<(), CredentialsError> {
         self.channels
             .bind(id, AgentToolRegistry::new())

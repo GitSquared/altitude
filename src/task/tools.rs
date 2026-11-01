@@ -1,9 +1,3 @@
-//! What the `tasks` subsystem offers the agent running a task.
-//!
-//! The agent tools are declared and answered here, beside the task record they
-//! act on, under the `tasks` namespace. The MCP server binds them by name and
-//! knows none of them.
-
 use serde_json::{Value, json};
 use std::fmt;
 use std::sync::Arc;
@@ -78,12 +72,6 @@ impl TaskAgentTools {
         Ok(json!({ "title": title, "changed": true }))
     }
 
-    /// The tracker issue this task is bound to, as context for the work.
-    ///
-    /// Read-only, and always the binding the task already carries: the agent
-    /// cannot name an issue of its own, and nothing here can move an issue's
-    /// status or post to it. What comes back is the tracker's content, which is
-    /// context rather than an instruction to accept anything.
     async fn read_issue(&self) -> Result<Value, AgentToolError> {
         let Some(tracker) = &self.tracker else {
             return Err(AgentToolError::new(
@@ -169,8 +157,6 @@ impl TaskAgentTools {
         }
     }
 
-    /// Refuse to act on a task that has been removed or accepted, because
-    /// nothing the agent says on it would still be read by an operator.
     async fn ensure_active(&self) -> Result<(), AgentToolError> {
         if !self
             .store
@@ -307,12 +293,6 @@ impl TaskAgentTools {
         }
     }
 
-    /// Ask the operator to change the project this task runs in.
-    ///
-    /// The change is theirs to make: the project lives in Altitude's settings on
-    /// their machine, and applying it rebuilds the environment this task started
-    /// from. So this asks rather than does, and it asks in the form the operator
-    /// can act on: a blocked thread carrying the change itself.
     async fn propose_project(&self, arguments: &Value) -> Result<Value, AgentToolError> {
         let reason = argument(arguments, "reason")?;
         let setup_command = arguments
@@ -388,8 +368,6 @@ fn tool_failure(error: impl fmt::Display) -> AgentToolError {
     AgentToolError::new(error.to_string())
 }
 
-/// A required string argument, trimmed, with a message that says which one is
-/// missing rather than that something was.
 fn argument<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, AgentToolError> {
     arguments
         .get(name)

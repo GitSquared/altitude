@@ -1,10 +1,3 @@
-//! The serve role: work for clients, with no terminal.
-//!
-//! A different execution mode, not a different configuration of the same one. A
-//! serve role has nobody at the keyboard, so it never takes the terminal, it logs to
-//! stdout for whatever service manager started it, and it reads its own settings
-//! file rather than the client's.
-
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
@@ -66,10 +59,6 @@ struct PreparedTransfer {
     handover: Handover,
 }
 
-/// How long a prepared transfer may sit still before the task is taken back.
-///
-/// Long enough that a slow link is not mistaken for an abandoned one, because
-/// what arrives is the only sign that a recipient is still there.
 const TRANSFER_IDLE_MS: i64 = 120_000;
 
 struct OwnTasks {
@@ -77,25 +66,15 @@ struct OwnTasks {
     tasks: Arc<TaskEventLoop<MicrosandboxIsolation>>,
     incoming: IncomingTransfers,
     preparation_lock: Arc<AsyncMutex<()>>,
-    /// When each prepared transfer was last read from, by its id. A transfer is
-    /// alive while pieces are being fetched; the history says when it was staged,
-    /// which is the floor a restart starts from.
     activity: Arc<Mutex<HashMap<String, i64>>>,
     watchers: Arc<Watchers>,
     read_slots: Arc<Semaphore>,
     readiness: watch::Sender<RemoteState>,
     runtime: watch::Receiver<IsolationStatus>,
     tracker: Option<Arc<super::tracker::RemoteTracker>>,
-    /// Whether this machine may start work that arrives from a tracker, whatever
-    /// the project says about itself.
     delegation_paused: bool,
 }
 
-/// Who is watching this machine's tasks, one entry per open watch.
-///
-/// A watch is a peer that asked what this machine holds and is still listening;
-/// what it may see is its own work, which is the whole reason the filter is here
-/// and not in the task list.
 #[derive(Default)]
 struct Watchers {
     peers: Mutex<Vec<WatchingPeer>>,
@@ -141,8 +120,6 @@ impl Watchers {
         });
     }
 
-    /// A task is gone. Every watcher is told: an id that is not one of a peer's
-    /// tasks changes nothing there, and the id says nothing about whose it was.
     fn removed(&self, id: String) {
         let mut peers = self.peers.lock().expect("watchers lock poisoned");
         peers.retain(|watching| {
@@ -162,12 +139,6 @@ impl Watchers {
 }
 
 impl OwnTasks {
-    /// Take back tasks whose transfer stopped moving.
-    ///
-    /// A recipient that goes away mid-transfer leaves the task stopped here,
-    /// owned and run by nobody. Nothing on the other side will ever say so, so the
-    /// machine that owns the task decides: after a while with no piece read, the
-    /// task waits to run here again.
     async fn release_stalled_transfers(&self) {
         // Packaging holds this lock, and a transfer being packaged is not stalled.
         let Ok(_packaging) = self.preparation_lock.try_lock() else {
@@ -1117,9 +1088,6 @@ async fn transfer_committed(
     }))
 }
 
-/// Report a task that was created from a tracker issue, and say why not when it
-/// cannot be: a task bound to an issue that nothing reports on is otherwise silent
-/// in both directions, and the issue is the only place the operator would look.
 async fn report_issue_task(
     tracker: Option<&super::tracker::RemoteTracker>,
     peer: EndpointId,
@@ -1174,12 +1142,6 @@ fn is_machine_local_event(event: &TaskHistoryEvent) -> bool {
     )
 }
 
-/// Carry a task's files out of its sandbox and bring them together for the wire.
-///
-/// The sandbox is started for the reading and removed after it, so what is read is
-/// a tree nobody is writing to. The files come out through the sandbox's own
-/// filesystem channel, one at a time, and the archive is made on this machine: the
-/// guest needs no `tar` and shares no directory with the host.
 async fn bundle_task_files<E>(
     tasks: &TaskEventLoop<E>,
     task: &Task,
@@ -1220,7 +1182,6 @@ where
     Ok((work, transcript))
 }
 
-/// One archive of a directory, with the modes and links it was found with.
 fn archive_directory(source: &Path, archive: &Path) -> Result<(), String> {
     let status = process::Command::new("tar")
         .arg("-czf")
@@ -1607,12 +1568,6 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// The tracker each peer synced, opened from that peer's own profile.
-///
-/// A remote has no login of its own, so it reports a task through the account of
-/// the peer that owns the task. Opening one is cheap and the session inside it is
-/// shared, so the tracker is kept once opened — until the peer signs in again,
-/// which replaces the login the open one was made from.
 struct PushedTrackers {
     config: Config,
     opened: Mutex<HashMap<(String, String), Opened>>,
@@ -1678,8 +1633,6 @@ struct LinearRuntime {
     automation: Arc<LinearAutomation>,
     tracker: Arc<super::tracker::RemoteTracker>,
     listener: TcpListener,
-    /// What the install said it was, so startup can name it instead of saying
-    /// only that something is connected.
     workspace_name: String,
 }
 

@@ -1,10 +1,3 @@
-//! Text entry: one line, and several.
-//!
-//! Both are caret-owning buffers rather than renderers of someone else's string,
-//! because a caret is the part that is easy to get subtly wrong: it is counted in
-//! characters, indexed in bytes, and measured in terminal columns, and those are
-//! three different numbers as soon as anything outside ASCII is typed.
-
 use crate::tui::widgets::palette;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -42,8 +35,6 @@ impl Field {
         &self.value
     }
 
-    /// The value with a caret where the keys would write, for a field drawn as
-    /// one line of a form rather than in a box of its own.
     pub fn marked(&self) -> String {
         let mut value: Vec<char> = self.value.chars().collect();
         value.insert(self.cursor.min(value.len()), '▏');
@@ -85,18 +76,12 @@ impl Field {
         }
     }
 
-    /// Draws a bordered box holding this field, and the caret when focused.
-    ///
-    /// The value scrolls rather than wraps, so a long line stays one line. The
-    /// caret is kept on screen by measuring terminal columns, which is not the
-    /// same as counting characters.
     pub fn draw(&self, frame: &mut Frame, area: Rect, style: &FieldStyle) {
         if let Some(position) = self.render(frame.buffer_mut(), area, style) {
             frame.set_cursor_position(position);
         }
     }
 
-    /// Draw into a buffer, answering where the caret goes when focused.
     pub fn render(
         &self,
         buffer: &mut Buffer,
@@ -149,10 +134,6 @@ impl Field {
     }
 }
 
-/// Several lines of text, with a caret somewhere among them.
-///
-/// A command is a shell script, so it holds newlines; enter adds one rather than
-/// leaving the field, and leaving is what tab and escape are for.
 #[derive(Clone)]
 pub struct TextBox {
     lines: Vec<String>,
@@ -243,25 +224,16 @@ impl TextBox {
         }
     }
 
-    /// Draws a bordered box holding these lines, wrapped to its width and
-    /// scrolled to keep the caret in view.
-    ///
-    /// Wrapping is the box's, not the paragraph's, because the caret has to land
-    /// on the character it belongs to: a renderer that wraps on its own knows
-    /// where the text went and not where the caret should follow it.
     pub fn draw(&self, frame: &mut Frame, area: Rect, focused: bool) {
         self.draw_titled(frame, area, focused, None);
     }
 
-    /// The same box with something said on its top border, for a box that is one
-    /// question rather than a field of a larger page.
     pub fn draw_titled(&self, frame: &mut Frame, area: Rect, focused: bool, title: Option<&str>) {
         if let Some(position) = self.render_titled(frame.buffer_mut(), area, focused, title) {
             frame.set_cursor_position(position);
         }
     }
 
-    /// Draw into a buffer, answering where the caret goes when focused.
     pub fn render_titled(
         &self,
         buffer: &mut Buffer,
@@ -346,12 +318,6 @@ struct Row {
     end: usize,
 }
 
-/// Where `text` breaks to fit `width` terminal columns, as character ranges.
-///
-/// Breaks after the last space that fits, so a paragraph wraps between words;
-/// with no space in reach it breaks at the column, because a URL is still one
-/// word. The space broken at is not drawn again, so a wrapped paragraph does
-/// not gain a leading space.
 fn wrap(text: &str, width: usize) -> Vec<(usize, usize)> {
     let characters: Vec<char> = text.chars().collect();
     let width = width.max(1);

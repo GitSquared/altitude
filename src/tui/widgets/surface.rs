@@ -1,15 +1,3 @@
-//! A bordered region of the screen, and how it sits on the field behind it.
-//!
-//! The field is drawn once per frame under everything. A surface is what a
-//! screen draws on top of it: a bordered region that either lets the field show
-//! through, or covers it.
-//!
-//! Every edge names the terminal's own foreground. A border drawn with a default
-//! style keeps whatever colour the cells under it already had, and when the
-//! field is under the border, that is the field's grey rather than the theme's
-//! border colour. Naming the foreground is what makes the field safe to draw
-//! beneath a surface at all.
-
 use ratatui::{
     Frame,
     buffer::Buffer,
@@ -18,37 +6,14 @@ use ratatui::{
     widgets::{Block, BorderType, Clear},
 };
 
-/// The style every edge takes, whatever is behind it.
-///
-/// A reset rather than a foreground: the field sets a dim modifier on the cells
-/// it draws, and a foreground-only style would leave the border dimmed by a
-/// surface that is no longer there.
 pub fn outline() -> Style {
     Style::reset()
 }
 
-/// Cover an area a widget is about to write in.
-///
-/// The field is a backdrop, not a layer every widget is expected to know about:
-/// anything that is meant to be opaque covers its own rectangle first. A row,
-/// a control bar, a button footer — all of them are opaque. Only the gaps a
-/// screen deliberately leaves open let the contours through.
-///
-/// The rectangle is the whole of what the pane was given, padding included. A
-/// divider belongs to the gap between two panes, never to a column of one, so
-/// there is no edge to stop short of: a pane covered only as far as its text
-/// leaves a seam of field beside the border.
 pub fn cover(frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, area);
 }
 
-/// A horizontal divider across one panel column, joined to its sides.
-///
-/// `area` is the inside of one column: the divider starts at the surface's
-/// left border, runs across the column, and meets the vertical divider on the
-/// right. Both ends are joined to whatever was already there rather than
-/// replaced with a letter chosen by this function, so a divider ending at a
-/// vertical divider makes a tee and one ending at nothing makes a corner.
 pub fn horizontal_divider(frame: &mut Frame, area: Rect, y: u16) {
     if area.width == 0 || y < area.y || y >= area.bottom() {
         return;
@@ -149,12 +114,6 @@ pub fn vertical_divider(frame: &mut Frame, inner: Rect, x: u16) {
     }
 }
 
-/// Run a vertical stroke down a band, joining whatever is already in its cells.
-///
-/// A tab bar's separators belong to the band they sit in rather than to the row
-/// the labels are on: they end on the rule the caller drew under the tabs, so
-/// the bar reads as one piece instead of a pipe floating above a line. The rule
-/// is drawn first, which is what leaves a tee where they meet.
 pub fn join_down(frame: &mut Frame, x: u16, y: u16, rows: u16) {
     let buffer = frame.buffer_mut();
     for row in 0..rows {

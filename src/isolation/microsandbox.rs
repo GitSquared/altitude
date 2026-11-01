@@ -41,10 +41,6 @@ use super::{
     trust_host_roots,
 };
 
-/// The sandbox's own filesystem channel, and the sandbox it belongs to.
-///
-/// They come back together because the channel borrows the sandbox: the caller
-/// holds it for as long as it is moving files.
 async fn connect(id: &str) -> Result<Sandbox, IsolationError> {
     Sandbox::get(id)
         .await
@@ -55,8 +51,6 @@ async fn connect(id: &str) -> Result<Sandbox, IsolationError> {
 }
 
 impl MicrosandboxIsolation {
-    /// Everything under `root`, as the sandbox sees it, without descending into
-    /// the paths this machine mounted and called disposable.
     async fn walk_guest(
         &self,
         fs: &SandboxFsOps<'_>,
@@ -121,7 +115,6 @@ impl MicrosandboxIsolation {
     }
 }
 
-/// The same shape, read from this machine while a task's files travel.
 fn host_tree(source: &Path) -> Result<HostTree, IsolationError> {
     let mut tree = HostTree {
         directories: Vec::new(),
@@ -165,7 +158,6 @@ fn host_tree(source: &Path) -> Result<HostTree, IsolationError> {
     Ok(tree)
 }
 
-/// Which files under `root` a task's work is made of, and what they are.
 struct GuestTree {
     directories: Vec<String>,
     files: Vec<GuestFile>,
@@ -185,7 +177,6 @@ struct GuestLink {
     target: String,
 }
 
-/// The same tree, as it sits on this machine while it travels.
 struct HostTree {
     directories: Vec<String>,
     files: Vec<HostFile>,
@@ -207,24 +198,10 @@ fn permissions(mode: u32) -> fs::Permissions {
     fs::Permissions::from_mode(mode)
 }
 
-/// Ubuntu rather than Alpine: the Rust crates Altitude builds expect glibc, and
-/// Alpine's musl cannot link them. 24.04 is the current LTS.
 const BASE_IMAGE: &str = "ubuntu:24.04";
 
-/// How large a capsule's writable layer may grow.
-///
-/// A ceiling rather than a reservation, like the rest of a sandbox's size. It
-/// stays out of [`super::SandboxSize`] because it applies only when a sandbox is made
-/// from the image: one restored from a snapshot keeps what the snapshot was
-/// built with.
 const CAPSULE_DISK_MIB: u32 = 15 * 1_024;
 
-/// The packages every sandbox gets, before any environment adds its own.
-///
-/// Named once, because two things derive from the list: the command that
-/// installs them, and the command that asks a finished snapshot what versions it
-/// ended up with. The image's own plumbing is deliberately absent — it is true
-/// of every sandbox and tells an operator nothing.
 const WORKSPACE_PACKAGES: &[&str] = &[
     "bash",
     "ca-certificates",
@@ -249,10 +226,6 @@ const WORKSPACE_PACKAGES: &[&str] = &[
     "nodejs",
 ];
 
-/// What the workspace is built from, as the build runs it.
-///
-/// Pi needs a Node newer than the one Ubuntu 24.04 ships, so the distribution's
-/// package is replaced by NodeSource's current 22 before the rest is installed.
 fn workspace_setup() -> String {
     format!(
         "set -eu\n\
@@ -270,17 +243,6 @@ fn workspace_setup() -> String {
 }
 const PREPARATION_SANDBOX: &str = "altitude-base-image-setup";
 
-/// What a finished snapshot is made of, asked inside it.
-///
-/// One command, so the answer is one round trip, and one `key<TAB>value` line
-/// each, so the manifest can hold them on lines of its own. Recorded rather than
-/// inferred: the setup command names no versions, so nothing outside the
-/// snapshot can say what an operator ended up with.
-///
-/// The packages are the ones the workspace asked for, with their versions,
-/// rather than everything present: the image's own plumbing is true of every
-/// sandbox and tells an operator nothing, while the version of Python they got
-/// is worth knowing.
 fn description_command() -> String {
     // Asked package by package, because the list is the answer: scanning every
     // installed package would include the image's plumbing, and matching names
@@ -300,15 +262,6 @@ pub struct MicrosandboxIsolation {
     build_lock: BuildLock,
 }
 
-/// One environment build at a time on this machine.
-///
-/// A setup sandbox is named after the store it builds into, so a second build of
-/// one environment would tear down the first one's sandbox:
-/// [`MicrosandboxIsolation::remove_leftover`]
-/// cannot tell a leftover from a build that is running beside it. A mutex would
-/// only hold within one process, while the sandbox names and the snapshot store
-/// belong to the machine, so the lock is the file itself. Holding it is what
-/// makes "a sandbox under that name is a leftover" true.
 #[derive(Clone)]
 struct BuildLock {
     path: PathBuf,
@@ -531,16 +484,6 @@ impl MicrosandboxIsolation {
         Ok(())
     }
 
-    /// Puts this machine's trusted roots into the sandbox's own store as well.
-    ///
-    /// A tool that reads the system store — curl, apt, git — has no variable to be
-    /// told with, so the bundle is appended to the store the image already has. Done
-    /// at creation rather than at build, because a snapshot can be moved to another
-    /// machine and one host's inspection root must not travel with it.
-    ///
-    /// A failure here is not a failure to create a sandbox: a sandbox without these
-    /// roots is the sandbox there was before, and most of what runs in one does not
-    /// need them.
     async fn append_host_roots(&self, id: &str) {
         // The store is not in every image: a base without it would fail an append
         // that is only a warning, which reads like a broken sandbox.
@@ -559,13 +502,6 @@ impl MicrosandboxIsolation {
         }
     }
 
-    /// Remove a sandbox left behind by a build that never finished.
-    ///
-    /// Setup sandboxes are named after the recipe they build, so a sandbox already
-    /// under that name is always a leftover rather than something in use: an
-    /// interrupted build, or one whose cleanup never ran because the process was
-    /// signalled. Without this, a build that was stopped keeps the next start from
-    /// happening at all.
     async fn remove_leftover(&self, id: &str) {
         if Sandbox::get(id).await.is_err() {
             return;
@@ -674,10 +610,6 @@ impl MicrosandboxIsolation {
         Ok(snapshot)
     }
 
-    /// Run one build step, failing fast and reporting what the command printed.
-    ///
-    /// Steps share the sandbox's filesystem but not its shell, so a step must
-    /// stand on its own.
     async fn run_setup_step(
         &self,
         sandbox_id: &str,
@@ -697,10 +629,6 @@ impl MicrosandboxIsolation {
         }
     }
 
-    /// Runs a command to completion, returning its exit status and its output.
-    ///
-    /// Output is kept because some commands are asked questions rather than told
-    /// to do things; a build step and a description both run through here.
     async fn run_to_end(
         &self,
         sandbox_id: &str,
@@ -726,15 +654,6 @@ impl MicrosandboxIsolation {
         }
     }
 
-    /// What the finished snapshot actually contains, asked of the sandbox itself.
-    ///
-    /// Recorded rather than inferred: the base image is a rolling tag and the
-    /// workspace packages are installed from a command with no versions in it, so
-    /// nothing outside the snapshot can say what an operator ended up with.
-    ///
-    /// Failing to ask is not failing to build. A snapshot that cannot describe
-    /// itself is still usable, and the panel says so rather than inventing a
-    /// version.
     async fn describe_snapshot(&self, sandbox_id: &str) -> (String, String) {
         let unreadable = || {
             tracing::warn!("the sandbox would not describe itself");
@@ -794,10 +713,6 @@ impl BaseSandboxSnapshotStore {
         Self::at(recipe.snapshots_dir.clone(), recipe.refresh_after)
     }
 
-    /// The store for an environment's snapshots, by directory.
-    ///
-    /// A caller that only means to read what a snapshot says does not have a
-    /// recipe to hand, and should not need one.
     fn at(snapshots_dir: PathBuf, refresh_after: Duration) -> Self {
         Self {
             snapshots_dir,
@@ -901,19 +816,10 @@ impl BaseSandboxSnapshotStore {
     }
 }
 
-/// A short, stable tag for whichever directory a build writes into, so two
-/// operators' same-named environments cannot collide on one setup sandbox.
 fn build_namespace(snapshots_dir: &Path) -> String {
     blake3::hash(snapshots_dir.to_string_lossy().as_bytes()).to_hex()[..12].to_owned()
 }
 
-/// A name the runtime accepts for a sandbox.
-///
-/// A project's name is written for a person and may hold spaces; an id a runtime
-/// keys machines by may not. The readable part stays, because a sandbox left
-/// behind is looked for by name. The runtime also asks that the name begin with
-/// an alphanumeric, so a project called `.rust` or `_scratch` loses its lead
-/// rather than failing to build a sandbox at all.
 fn artifact_name(name: &str) -> String {
     let mut slug = String::with_capacity(name.len());
     let mut last_dash = false;

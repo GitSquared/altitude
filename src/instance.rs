@@ -1,13 +1,3 @@
-//! One driver per task database.
-//!
-//! A task's record has one driver: the process holding its capsule, its agent
-//! channel and its run. A second client reading the same database sees the same
-//! pending tasks and provisions them again — and because a setup sandbox is named
-//! after the environment it builds, the second build removes the first one's
-//! sandbox as a leftover, failing a task that had done nothing wrong. So the
-//! client claims the database for as long as it runs, and a second client says so
-//! rather than racing.
-
 use std::{
     error::Error,
     ffi::OsStr,

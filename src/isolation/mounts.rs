@@ -1,12 +1,3 @@
-//! The profiles a task mounts.
-//!
-//! One definition, because a build is identified by the setup steps of its
-//! composition: a list assembled anywhere else builds a second machine for the same
-//! work, and the first one's build is thrown away or never reused. A task runs one
-//! agent, so its build carries that agent's profile and the tools that give it an
-//! identity; every profile Altitude can mount is a different list, because it is what
-//! an interface says logins exist for, not a thing to build.
-
 use crate::{
     agent::{AgentEngines, AgentKind},
     isolation::ProfileRecipe,

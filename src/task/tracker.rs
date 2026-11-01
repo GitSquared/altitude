@@ -1,12 +1,3 @@
-//! Binding a task to a tracker issue, and reporting the task's life back.
-//!
-//! The binding lives in the task's history, so it survives a restart and travels
-//! with a transfer. Reporting is best-effort and checkpointed by history
-//! position: the coordinator calls [`TaskService::sync_tracker`] on an interval,
-//! and a failed pass leaves its work queued for the next one instead of failing
-//! the task. Provider credentials stay inside the provider; nothing here reads
-//! or records them.
-
 use std::{collections::HashMap, sync::Arc, time::SystemTime};
 
 use tokio::sync::Mutex;
@@ -22,24 +13,12 @@ use crate::{
 
 use super::{Task, TaskExecutionPauseReason, TaskHistoryEvent, TaskService, TaskServiceError};
 
-/// How a task's tracker is found.
-///
-/// A machine with one login answers the same provider for every task. A machine
-/// serving several peers has one login per peer, read from what each peer pushed,
-/// so the answer depends on who owns the task.
 pub trait TrackerHost: Send + Sync + 'static {
     fn for_credential(&self, operator: &str, credential: &str) -> Option<Arc<dyn TrackerProvider>>;
 
-    /// A client for this identity even before it is signed in, which is what a
-    /// sign-in needs; reporting uses [`Self::for_credential`].
     fn connectable(&self, operator: &str, credential: &str) -> Option<Arc<dyn TrackerProvider>>;
 }
 
-/// The tracker identities this machine holds for its own work.
-///
-/// One `Linear` client per credential, opened lazily and kept until the grant it
-/// was opened from is replaced. A task is reported through the identity its
-/// project's route names, so two accounts never share a session.
 pub(crate) struct OwnTrackers {
     config: Config,
     opened: Mutex<HashMap<String, Opened>>,
@@ -127,8 +106,6 @@ where
             .await
     }
 
-    /// The same, for work a tracker delegation asked for: the task remembers which
-    /// delegation it belongs to, so nothing downstream has to infer it.
     pub async fn create_from_issue_bound(
         &self,
         issue: IssueSnapshot,
@@ -165,15 +142,6 @@ where
         Ok(task)
     }
 
-    /// Report every bound task's life to its tracker, as far as it has not been
-    /// reported already.
-    ///
-    /// Each task is reported through the account of the peer that owns it, so a
-    /// machine serving several peers uses the login each of them synced. Safe to
-    /// call repeatedly: work is derived from history and checkpointed, so a pass
-    /// that finds nothing new writes nothing and a pass that fails leaves its work
-    /// for the next one. One task's provider failure does not stop the others; the
-    /// first failure is returned for the interface to show.
     pub async fn sync_tracker(&self) -> Result<(), TrackerError> {
         let Some(host) = self.trackers.clone() else {
             return Ok(());
@@ -263,11 +231,6 @@ where
     }
 }
 
-/// The history position the last checkpoint acknowledged, or the start.
-///
-/// The checkpoint records the position at which it was written, checkpoints
-/// counted, so resuming there re-reads the checkpoint itself and nothing it
-/// already covered.
 fn checkpoint(events: &[(i64, TaskHistoryEvent)]) -> usize {
     events
         .iter()
@@ -279,13 +242,6 @@ fn checkpoint(events: &[(i64, TaskHistoryEvent)]) -> usize {
         .unwrap_or(0)
 }
 
-/// The lifecycle status the whole history implies, with the latest transition
-/// winning.
-///
-/// Done is terminal: acceptance is the operator's judgment, and a later
-/// execution event cannot un-accept it. Failure, cancellation, and shutdown or
-/// transfer pauses imply no status of their own, so none of them can fake a
-/// review or an ending.
 fn latest_status(events: &[(i64, TaskHistoryEvent)]) -> Option<TrackerStatus> {
     let mut status = None;
     for (_, event) in events {

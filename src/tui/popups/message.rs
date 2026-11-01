@@ -1,9 +1,3 @@
-//! A message the operator writes to the agent outside any signal thread.
-//!
-//! It is not a signal: there is no question being answered and no expectation of
-//! a reply in this box. The message becomes task input, and whatever the agent
-//! needs to say comes back through its normal signal surface.
-
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,

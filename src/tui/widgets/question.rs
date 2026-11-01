@@ -1,8 +1,3 @@
-//! A question that stops what is happening until somebody answers it.
-//!
-//! Two answers and no third: a thing worth stopping for is worth deciding about,
-//! and a box that can be dismissed without deciding is a box that will be.
-
 use ratatui::{
     Frame,
     layout::{Constraint, Flex, Layout, Rect},

@@ -1,11 +1,3 @@
-//! Signing in to Linear's hosted MCP server.
-//!
-//! The endpoint speaks the MCP authorization spec — protected resource
-//! metadata, dynamic client registration, PKCE, and a refresh token — which is
-//! the flow a Node bridge would otherwise run for us. Doing it here keeps the
-//! grant a file Altitude owns, and means a machine can reach the tracker with
-//! nothing installed beside it.
-
 use std::{
     env, fs,
     io::{self, Write},
@@ -44,8 +36,6 @@ impl Grant {
         self.0.is_file()
     }
 
-    /// When the grant last changed, which is what tells a machine serving a peer
-    /// that the login it is holding has been replaced.
     pub(super) fn changed_at(&self) -> Option<SystemTime> {
         fs::metadata(&self.0)
             .ok()
@@ -84,8 +74,6 @@ pub(super) fn has_grant(profile: &Path) -> bool {
     Grant::new(profile).is_present()
 }
 
-/// When the sign-in last changed, for a machine that caches the client it opened
-/// from it.
 pub(super) fn grant_changed_at(profile: &Path) -> Option<SystemTime> {
     Grant::new(profile).changed_at()
 }
@@ -120,8 +108,6 @@ async fn manager(profile: &Path) -> Result<AuthorizationManager, TrackerError> {
     Ok(manager)
 }
 
-/// Walk the operator through Linear's sign-in, and answer with the manager that
-/// now holds the grant.
 async fn sign_in(mut manager: AuthorizationManager) -> Result<AuthorizationManager, TrackerError> {
     let resolution = manager.resolve_metadata().await.map_err(|error| {
         TrackerError::new(format!("Linear did not describe how to sign in: {error}"))
@@ -156,8 +142,6 @@ async fn sign_in(mut manager: AuthorizationManager) -> Result<AuthorizationManag
     Ok(session.auth_manager)
 }
 
-/// Wait for the browser to land on the callback, and answer with the URL it
-/// arrived at.
 async fn wait_for_redirect(listener: TcpListener, port: u16) -> Result<String, TrackerError> {
     let (mut stream, _) = listener
         .accept()

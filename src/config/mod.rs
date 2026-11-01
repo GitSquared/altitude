@@ -19,29 +19,12 @@ mod settings;
 pub use serve::{DEFAULT_PORT, LinearSettings, ServeSettings};
 pub use settings::{Settings, SettingsError, SettingsFile};
 
-/// How this installation names itself.
-///
-/// Two things travel together because they answer different questions about the
-/// same installation. The label is derived from the machine — who is at it, and
-/// which machine it is — so a human reading a task's history or a tracker
-/// comment knows where the work is. The id is what a machine checks, and it is
-/// deliberately not derived: a name anyone can type is not an identity.
-///
-/// The id is the installation's public key, and the keypair that proves it lives beside
-/// the label in the data directory. A name anyone can type is not an identity,
-/// which is why the label is only ever for reading.
 #[derive(Clone, Debug)]
 pub struct InstallationIdentity {
     pub id: String,
     pub label: String,
 }
 
-/// What is written down: the label, and nothing else.
-///
-/// The id is deliberately not recorded. It is the key, and a key written down
-/// beside a name is a second copy that can fall out of agreement with the first
-/// — which then needs a check, and an error, and an operator to resolve it. There
-/// is one source of truth instead, and nothing to keep in step.
 #[derive(Deserialize, Serialize)]
 struct RecordedLabel {
     label: String,
@@ -90,21 +73,10 @@ impl Config {
         &self.data_dir
     }
 
-    /// Whether this installation has a name but no key, which is not a first
-    /// start.
-    ///
-    /// The name is written before the key on a first start, so a name without one
-    /// is a key that has gone. Minting a replacement silently is the one thing not
-    /// to do: every remote knows this installation by the key, not the name.
     pub fn has_lost_identity(&self) -> bool {
         self.data_dir.join("identity").is_file() && !self.data_dir.join("identity.key").is_file()
     }
 
-    /// Move everything this installation has recorded out of the way, so the next
-    /// start is a first start.
-    ///
-    /// Renamed rather than deleted: this is what a person's task history and
-    /// links live in, and a decision made at a prompt is not worth losing it to.
     pub fn forget_installation(&self) -> io::Result<PathBuf> {
         let name = self.data_dir.file_name().map_or_else(
             || "altitude".to_owned(),
@@ -118,11 +90,6 @@ impl Config {
         Ok(aside)
     }
 
-    /// The same installation's paths, as the serve role sees them.
-    ///
-    /// The serve role is not a client: it keeps its own key, its own record of who has
-    /// connected and its own logs, and it reads its own settings file. One
-    /// machine can be both roles without either seeing the other's state.
     pub fn serve(&self) -> Self {
         Self {
             config_dir: self.config_dir.clone(),
@@ -132,12 +99,6 @@ impl Config {
         }
     }
 
-    /// A view scoped to one operator.
-    ///
-    /// A machine that runs work for several peers must not let one peer's logins
-    /// or project builds stand in for another's, so everything that is theirs
-    /// moves under their own directory. Everything shared — the database, the
-    /// runtime, the git cache, the base image — stays where it was.
     pub fn for_operator(&self, owner: &str) -> io::Result<Self> {
         if !is_safe_operator_key(owner) {
             return Err(io::Error::new(
@@ -167,13 +128,6 @@ impl Config {
         self
     }
 
-    /// How this installation names itself.
-    ///
-    /// One installation is one operator on one machine, and this is what a task
-    /// records as the identity it was delegated under. A machine that later runs
-    /// work for several operators needs that to tell them apart, and a task
-    /// cannot be given an identity retroactively without guessing at its own
-    /// history.
     pub fn identity(&self) -> io::Result<InstallationIdentity> {
         let path = self.data_dir.join("identity");
         match fs::read_to_string(&path) {
@@ -194,11 +148,6 @@ impl Config {
         }
     }
 
-    /// The keypair that is this installation's identity.
-    ///
-    /// Beside the label rather than inside it, because the two files have
-    /// different natures: one is a secret that is never read by a human, the
-    /// other is a name that appears in task history.
     fn key(&self) -> io::Result<InstallationKey> {
         let path = self.data_dir.join("identity.key");
         InstallationKey::load_or_create(&path).map_err(|error| {
@@ -211,13 +160,6 @@ impl Config {
         })
     }
 
-    /// Claim a name for the first time, privately.
-    ///
-    /// Kept outside the database so the name survives a task history reset, and
-    /// written exclusively so two Altitude instances cannot both claim one. The
-    /// label is resolved once and kept: a machine that is later renamed, or
-    /// reached from a context that cannot resolve a user, keeps the name the
-    /// tasks it already delegated were recorded under.
     fn claim_identity(&self, path: &Path) -> io::Result<InstallationIdentity> {
         let label = installation_label();
         let recorded = serde_json::to_string_pretty(&RecordedLabel {
@@ -279,11 +221,6 @@ impl Config {
         self.cache_dir.join("logs")
     }
 
-    /// Where this machine keeps what it has already pulled, so the next task over
-    /// the same repository does not pull it again.
-    ///
-    /// A cache by every rule that matters: disposable, and worth nothing that
-    /// cannot be fetched again.
     pub fn git_cache_dir(&self) -> PathBuf {
         self.cache_dir.join("git")
     }
@@ -296,11 +233,6 @@ impl Config {
         self.data_dir.join("snapshots")
     }
 
-    /// Where each task's agent channel listens.
-    ///
-    /// Under the cache rather than the data directory because a Unix socket
-    /// path is length-limited, and the data path plus a task id is already at
-    /// the limit on macOS.
     pub fn agent_channel_dir(&self) -> PathBuf {
         self.cache_dir.join("control")
     }
@@ -350,11 +282,6 @@ impl Config {
         self.profile_dir(id).parent().map(Path::to_owned)
     }
 
-    /// Where the base image's snapshots are kept: what every project is built on
-    /// top of.
-    ///
-    /// The directory still says `workspace` because it is storage, not
-    /// vocabulary, and moving it would throw away a base build for a rename.
     pub fn base_snapshots_dir(&self) -> PathBuf {
         self.data_dir
             .join("environments")
@@ -362,12 +289,6 @@ impl Config {
             .join("snapshots")
     }
 
-    /// Where a project's built snapshots are kept, one directory per build.
-    ///
-    /// Keyed by the project's id rather than its name, so renaming a project
-    /// leaves the build it is already running on where it is. A project's name is
-    /// not a build either: a sign-in builds only the CLI it signs in to, and tasks
-    /// build all of it, so the caller adds the directory that names the build.
     pub fn project_snapshots_dir(&self, project_id: &str) -> PathBuf {
         self.scoped_data_dir()
             .join("projects")
@@ -375,11 +296,6 @@ impl Config {
             .join("snapshots")
     }
 
-    /// Remove this scope's copies of the named profiles.
-    ///
-    /// A machine that runs none of an operator's projects keeps none of their
-    /// logins. Lookups by profile name are confined the same way every other
-    /// profile path is.
     pub fn forget_profiles(&self, profiles: &[String]) -> io::Result<()> {
         for profile in profiles {
             if Path::new(profile)
@@ -407,12 +323,6 @@ impl Config {
         }
     }
 
-    /// Remove the machine state of every project not in `keep`, answering which
-    /// were removed.
-    ///
-    /// A remote's pushed settings are the complete set of projects it runs, so
-    /// anything else under its store is work that moved away. Both builds and
-    /// caches are derived, so nothing a task's history records goes with them.
     pub fn prune_projects(&self, keep: &HashSet<String>) -> io::Result<Vec<String>> {
         let directory = self.scoped_data_dir().join("projects");
         let entries = match fs::read_dir(&directory) {
@@ -436,10 +346,6 @@ impl Config {
         Ok(removed)
     }
 
-    /// Forget a project's machine state: the builds and caches kept under its id.
-    ///
-    /// Both are derived and disposable, so this removes nothing a task's history
-    /// records. It is only ever called for a project no task in play belongs to.
     pub fn forget_project(&self, id: &str) -> io::Result<()> {
         if !is_safe_project_id(id) {
             return Err(io::Error::new(
@@ -454,10 +360,6 @@ impl Config {
         }
     }
 
-    /// Where a project's shared caches live on this machine.
-    ///
-    /// Disposable by design, like the git object cache: what is here is the
-    /// machine's convenience, and losing it costs a build rather than any work.
     pub fn project_cache_dir(&self, project_id: &str) -> PathBuf {
         self.scoped_data_dir()
             .join("projects")
@@ -481,19 +383,12 @@ fn is_safe_operator_key(owner: &str) -> bool {
         .is_ok_and(|id| id.to_string() == owner)
 }
 
-/// The name a human reads for this installation: who is at which machine.
-///
-/// Best effort by design. An instance started by a service manager may have no
-/// user
-/// in its environment, and an installation must still be able to name itself.
 fn installation_label() -> String {
     let user = name_or_unknown(whoami::username().unwrap_or_default());
     let host = name_or_unknown(whoami::hostname().unwrap_or_default());
     format!("{user}@{host}")
 }
 
-/// A name this machine could not resolve still has to read as something, and a
-/// name is written into single-line records, so its whitespace goes.
 fn name_or_unknown(name: String) -> String {
     let name: String = name.split_whitespace().collect();
     if name.is_empty() {

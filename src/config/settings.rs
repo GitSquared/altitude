@@ -14,18 +14,8 @@ use std::{
 };
 use toml::{de::Error as ParseError, ser::Error as SerializeError};
 
-/// What is configured, as `config.toml` holds it.
-///
-/// Fields are private and edited through the methods below, so that the rules
-/// that go with each list — there is always a project, a name appears once, an
-/// address appears once — live in one place instead of at every call site.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Settings {
-    /// The addresses of the machines this host delegates to.
-    ///
-    /// An address, not a name: what a remote is *called* is what it told you,
-    /// which is state rather than configuration. An address may be a hostname,
-    /// and one the tailnet gave is better than an IP that will move.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     remotes: Vec<String>,
     #[serde(default)]
@@ -34,8 +24,6 @@ pub struct Settings {
     interface: Interface,
     #[serde(default)]
     projects: Vec<Project>,
-    /// Commit identities projects have used, so a new project can reuse one
-    /// rather than being typed again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     identities: Vec<ProjectCommits>,
     #[serde(default)]
@@ -43,8 +31,6 @@ pub struct Settings {
 }
 
 impl Default for Settings {
-    /// A first start has one project, because every task belongs to one and an
-    /// interface with nothing to work in is not a first step.
     fn default() -> Self {
         Self {
             remotes: Vec::new(),
@@ -57,44 +43,22 @@ impl Default for Settings {
     }
 }
 
-/// What a new task gets when nobody says otherwise.
-///
-/// What the work is — its setup, repository, caches, instructions, and the machine
-/// its tasks start on — belongs to the project. This is what is left that is not
-/// about a project.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Defaults {
-    /// The coding-agent credential new tasks use. Absent is the default for the
-    /// service the old `agent` field names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_credential: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vcs_credential: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracker_credential: Option<String>,
-    /// The coding agent Altitude drives.
-    ///
-    /// Independent of projects: what is installed and what works in it are
-    /// different questions, and either harness is useful in the same project.
-    /// Absent means nobody has chosen yet, which is the one thing an interface
-    /// cannot guess on someone's behalf.
     pub agent: Option<AgentKind>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Interface {
-    /// Whether the keys that work are listed at the bottom of the screen.
-    ///
-    /// The `?` popup lists them either way: a key you cannot find is a key you
-    /// do not have, so help is never something to be switched on first.
     pub keyboard_hints: bool,
-    /// Whether the interface animates: the transitions between what is in
-    /// front, and the drifting backdrop behind it.
-    ///
-    /// Off, the loops that draw those are not run at all, rather than drawn
-    /// still, so a machine that is asked to do less actually does less.
     pub animations: bool,
 }
 
@@ -207,12 +171,6 @@ fn write_settings(path: &Path, contents: &str) -> Result<(), SettingsError> {
 }
 
 impl Settings {
-    /// Fill in what a file written before credentials existed did not say.
-    ///
-    /// A fresh installation starts with no identities; onboarding creates the
-    /// ones the operator chooses. Profiles already on disk are adopted once, so an
-    /// installation that predates credentials keeps its logins. A project that
-    /// named a service by kind keeps meaning that service's adopted identity.
     fn normalize(&mut self, existing: &[Credential]) {
         if self.credentials.is_empty() {
             self.credentials = existing.to_vec();
@@ -370,8 +328,6 @@ impl Settings {
         Ok(())
     }
 
-    /// Give an identity the id its account name implies, and carry every
-    /// reference to it along.
     pub fn reidentify(&mut self, old: &str, new: &str, label: &str) -> Result<(), SettingsError> {
         if old == new {
             self.suggest_credential_name(old, label);
@@ -457,10 +413,6 @@ impl Settings {
         Ok(())
     }
 
-    /// The projects that run with a credential.
-    ///
-    /// Named rather than counted: an identity cannot be forgotten while a project
-    /// still reads it, and "a project" sends the operator looking for which one.
     pub fn projects_binding(&self, id: &str) -> Vec<&str> {
         self.projects
             .iter()
@@ -477,7 +429,6 @@ impl Settings {
             .collect()
     }
 
-    /// Why an identity cannot be forgotten yet, naming what still reads it.
     pub fn binding_refusal(&self, id: &str) -> Option<String> {
         let bound = self.projects_binding(id);
         if bound.is_empty() {
@@ -521,16 +472,6 @@ impl Settings {
         Ok(())
     }
 
-    /// The credential ids this file's projects run with, which is what a remote
-    /// is sent.
-    ///
-    /// The installation's defaults are deliberately not part of this: they are
-    /// templates a new project is written from, not identities a task reads. A
-    /// machine is sent the logins of the work it runs, so a default that no
-    /// project here names would be a key in someone else's hand for no task.
-    ///
-    /// A project that names no identity falls back to what its harness or
-    /// provider implies, because that is what the task will resolve to.
     pub fn used_credential_ids(&self) -> Vec<String> {
         let mut used = Vec::new();
         for project in &self.projects {
@@ -565,24 +506,11 @@ impl Settings {
         &self.remotes
     }
 
-    /// Keep only the projects a machine is the one that runs.
-    ///
-    /// A remote is sent what it is for: its own projects' setup, repository, and
-    /// tracker binding. Everything else stays on the machine the work belongs to,
-    /// which is what keeps a day-job project's settings off a personal machine.
     pub fn retain_projects_for(&mut self, host: &str) {
         self.projects
             .retain(|project| project.host.as_deref() == Some(host));
     }
 
-    /// The configuration a remote is sent, which is the part it can act on.
-    ///
-    /// A remote builds this machine's environments, so it needs those and the
-    /// agent. It has no screen, and what this one shows — the keys, the
-    /// animations, the machine the last task went to — is not configuration it
-    /// could use. Sending it anyway would make a preference look like a change
-    /// worth syncing, and every task created would push a new configuration to
-    /// every remote.
     pub fn shared(&self) -> Self {
         let mut shared = self.clone();
         shared.remotes.clear();
@@ -619,8 +547,6 @@ impl Settings {
         }
     }
 
-    /// Remove a saved commit identity, leaving projects that used it on the
-    /// installation's identity.
     pub fn remove_identity(&mut self, commits: &ProjectCommits) {
         let matches = |known: &ProjectCommits| {
             known == commits || known.email.eq_ignore_ascii_case(&commits.email)
@@ -633,7 +559,6 @@ impl Settings {
         }
     }
 
-    /// Replace a saved commit identity and every project bound to it.
     pub fn replace_identity(&mut self, old: &ProjectCommits, new: ProjectCommits) {
         let matches =
             |known: &ProjectCommits| known == old || known.email.eq_ignore_ascii_case(&old.email);
@@ -669,12 +594,6 @@ impl Settings {
         self.projects.push(project);
     }
 
-    /// Remove a project.
-    ///
-    /// The last one stays: every task belongs to a project, and settings with
-    /// none cannot found one. Validation refuses the empty list, so an operator
-    /// who deletes the last project is told rather than left with a file the next
-    /// start would have to invent a project for.
     pub fn remove_project(&mut self, id: &str) {
         self.projects.retain(|existing| existing.id != id);
     }
@@ -805,10 +724,6 @@ impl Settings {
     }
 }
 
-/// A remote is an address: where it is, and optionally the port it serves on.
-///
-/// Checked only far enough to catch a typo. Proving an address reaches something
-/// means dialling it, which the link does and reports on its own.
 fn agent_slug(agent: AgentKind) -> &'static str {
     match agent {
         AgentKind::Claude => "claude",
@@ -888,8 +803,6 @@ impl fmt::Display for SettingsError {
 
 impl Error for SettingsError {}
 
-/// A list of names as a sentence reads it: "altitude", "altitude and api",
-/// "altitude, api and web".
 fn named(names: &[&str]) -> String {
     match names {
         [] => String::new(),

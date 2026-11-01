@@ -1,10 +1,3 @@
-//! The Linear tracker adapter.
-//!
-//! [`Linear`] speaks to Linear's official MCP server over streamable HTTP, driven
-//! by the official rmcp client. Signing in is Altitude's own OAuth flow, and the
-//! grant lives in the tracker's profile directory, which is never mounted into a
-//! capsule.
-
 use std::{
     cmp::Ordering,
     collections::HashMap,
@@ -51,8 +44,6 @@ const REQUIRED_TOOLS: [&str; 5] = [
 const SEARCH_LIMIT: u64 = 25;
 const PAGE_LIMIT: u64 = 100;
 const MAX_COMMENT_PAGES: usize = 20;
-/// Bounds sign-in and startup, which is a browser round trip when nothing is
-/// saved.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(180);
 const TOOL_TIMEOUT: Duration = Duration::from_secs(30);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(3);
@@ -136,8 +127,6 @@ impl Session {
 pub struct Linear {
     profile: PathBuf,
     session: Mutex<Option<Arc<Session>>>,
-    /// Bumped when the saved sign-in is forgotten, so a sign-in already under
-    /// way stops instead of writing a fresh one after the files are gone.
     generation: watch::Sender<u64>,
 }
 
@@ -152,11 +141,6 @@ impl fmt::Debug for Linear {
 }
 
 impl Linear {
-    /// A client for the host-only profile directory at `directory`.
-    ///
-    /// Nothing is read from it until `connect` is called, and the sign-in it
-    /// holds is written there and nowhere else. The directory is created if
-    /// absent so the grant has a private place to land.
     pub fn from_directory(directory: &Path) -> Result<Self, TrackerError> {
         private_directory(directory).map_err(|error| {
             TrackerError::new(format!(
@@ -184,21 +168,14 @@ impl Linear {
         linear_auth::has_grant(&self.profile)
     }
 
-    /// Whether a sign-in is saved, so a machine serving a peer can tell an
-    /// account that peer synced from one it never signed in to.
     pub fn is_signed_in(&self) -> bool {
         self.has_saved_auth()
     }
 
-    /// When the saved sign-in last changed, so a machine that opened a client
-    /// from it can tell that the login has since been replaced.
     pub fn sign_in_changed_at(&self) -> Option<SystemTime> {
         linear_auth::grant_changed_at(&self.profile)
     }
 
-    /// A session for an operation, reconnecting only when a saved sign-in
-    /// exists. With none, the operator is pointed at Settings instead of a
-    /// browser being opened from a background call.
     async fn session_or_reconnect(&self) -> Result<Arc<Session>, TrackerError> {
         if let Some(session) = self.session() {
             return Ok(session);
@@ -262,11 +239,6 @@ impl Linear {
             .map_err(|_| TrackerError::new("could not record the Linear account"))
     }
 
-    /// Forget the saved Linear sign-in.
-    ///
-    /// A sign-in already under way is stopped and the live session ended before
-    /// the grant is removed; otherwise a late callback could write a fresh login
-    /// back.
     async fn clear_credentials_impl(&self) -> Result<(), TrackerError> {
         self.generation
             .send_modify(|generation| *generation = generation.wrapping_add(1));
@@ -312,11 +284,6 @@ impl Linear {
             .map_err(|_| TrackerError::new("could not reset the Linear profile"))
     }
 
-    /// Refuse to act when the bound reference and the fetched issue are in
-    /// different workspaces.
-    ///
-    /// The stored slug guards against a reference moving between workspaces;
-    /// the fetched URL is the live fact. Both have to name the same workspace.
     fn ensure_workspace(
         &self,
         reference: &IssueReference,
@@ -477,10 +444,6 @@ async fn read_account(session: &Session) -> Result<TrackerAccount, TrackerError>
     })
 }
 
-/// The workspace an answer named beside the person, as `whoami` does.
-///
-/// The name is what a person recognises, and it is the only thing asked: a login's
-/// workspace is part of its name, so a guess is worse than an absence.
 fn workspace_named(data: &Value) -> Option<String> {
     let named = data
         .get("workspace")?
@@ -491,7 +454,6 @@ fn workspace_named(data: &Value) -> Option<String> {
     Some(named.to_owned())
 }
 
-/// The workspace the account itself named, when it named one.
 fn workspace_of(user: &Value) -> Option<String> {
     let workspace = user
         .get("organization")
@@ -708,10 +670,6 @@ async fn read_comments(
     )))
 }
 
-/// One page of comments plus the cursor for the next page, when there is one.
-///
-/// The server may return a full array with no pagination fields, in which case
-/// there is no next page.
 fn comment_page(value: &Value) -> Result<(Vec<IssueComment>, Option<String>), TrackerError> {
     let (items, container) = match value {
         Value::Array(items) => (items, None),
@@ -766,10 +724,6 @@ fn comment_of(node: &Value) -> Result<IssueComment, TrackerError> {
     })
 }
 
-/// Pick the team workflow state a [`TrackerStatus`] means, by type and name.
-///
-/// Linear teams name and order their own states, so this chooses among what the
-/// team actually has and refuses when nothing matches rather than guessing.
 async fn choose_state(
     session: &Session,
     issue: &Value,
@@ -825,8 +779,6 @@ fn status_list(value: &Value) -> Result<Vec<Value>, TrackerError> {
     Ok(states)
 }
 
-/// The team an issue belongs to, accepting the id, key, or team object the
-/// server may return.
 fn team_reference(issue: &Value) -> Option<&str> {
     issue
         .get("teamId")
@@ -891,17 +843,11 @@ fn rank(results: &mut [IssueSummary], term: &str) {
     });
 }
 
-/// The workspace slug in a Linear issue URL, which is the canonical URL's first
-/// path segment.
 fn workspace_slug_from_url(value: &str) -> Option<String> {
     let url = url::Url::parse(value).ok()?;
     url.path_segments()?.next().map(str::to_owned)
 }
 
-/// The identifier in a Linear issue URL, if the URL is one.
-///
-/// Linear appends view segments to the same resource (`/issue/ENG-1/slug`), and
-/// a reported URL may carry them; they do not identify a different issue.
 fn issue_identifier_from_url(value: &str) -> Option<String> {
     let url = url::Url::parse(value).ok()?;
     if url.scheme() != "https" || url.host_str() != Some("linear.app") {
@@ -936,9 +882,6 @@ fn is_not_found(error: &TrackerError) -> bool {
         || message.contains("does not exist")
 }
 
-/// The scope a Linear issue belongs to: its team.
-///
-/// Absent rather than an error: an issue with no team is one no binding can claim.
 pub(super) fn scope_of(issue: &Value) -> Result<Option<IssueScope>, TrackerError> {
     let Some(team) = issue.get("team").filter(|team| !team.is_null()) else {
         return Ok(None);

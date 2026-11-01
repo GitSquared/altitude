@@ -1,11 +1,3 @@
-//! Columns inside a surface, with the divider between them drawn as part of the
-//! layout.
-//!
-//! The caller draws the surface first and hands this the area inside its border.
-//! Each divider occupies one column of the gap, and is joined to the surface's
-//! border at both ends; a screen that asks for columns cannot end up without
-//! them.
-
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -21,14 +13,10 @@ pub struct Columns<'a> {
 }
 
 impl<'a> Columns<'a> {
-    /// The widths the columns before the last one ask for. The last column takes
-    /// what is left.
     pub fn new(widths: &'a [u16]) -> Self {
         Self { widths }
     }
 
-    /// Lay the columns out, draw the dividers between them, and answer the full
-    /// rectangles. `inner` is inside the surface's border.
     pub fn draw(self, frame: &mut Frame, inner: Rect) -> Vec<Rect> {
         // Narrow screens give width back from the requested columns first; the
         // last column is the one that cannot be scrolled sideways.

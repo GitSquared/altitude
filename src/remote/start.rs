@@ -1,10 +1,3 @@
-//! Why a delegated issue cannot start on this machine.
-//!
-//! The reason belongs to the machine that refused it: the tracker coordinator
-//! posts it, but it does not know which project claims a scope or which agent a
-//! project runs. Keeping the reasons typed means the wording cannot drift
-//! between the refusal and the message posted back.
-
 use std::{fmt, future::Future, pin::Pin};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,7 +54,5 @@ impl fmt::Display for StartRefusal {
     }
 }
 
-/// The start method's future, kept separate because its error carries the
-/// operator-facing reason rather than a generic string.
 pub(crate) type StartFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, StartRefusal>> + Send + 'a>>;

@@ -1,10 +1,3 @@
-//! A quiet contour field for the space around Altitude's work.
-//!
-//! The field has its own clock. It runs at thirty frames a second, but only
-//! samples the noise a few times a second: the frames in between interpolate
-//! between two sampled height fields, so the contours move smoothly without
-//! paying for a Perlin evaluation on every frame.
-
 use std::{mem, time::Duration};
 
 use ratatui::{
@@ -14,57 +7,30 @@ use ratatui::{
 
 use crate::tui::widgets::palette;
 
-/// How often the contour field advances.
-///
-/// Smoothness is most of what a backdrop is for. The sampling below is what keeps
-/// thirty frames a second from costing thirty noise evaluations.
 pub const CLOCK: Duration = Duration::from_millis(33);
 
 const KEYFRAME_TICKS: usize = 24;
 
-/// How fast the terrain evolves along the noise field's third axis.
-///
-/// The third axis is time: the land changes shape in place instead of sliding.
 const MORPH_PER_SECOND: f64 = 0.01;
 
-/// The noise-space extent of the dominant dimension. The other dimension
-/// follows from the window's shape, so the texture is never stretched.
 const WORLD_WIDTH: f64 = 3.2;
 const WORLD_HEIGHT: f64 = 2.0;
 
 const OCTAVES: usize = 3;
 const LEVELS: f64 = 14.3;
 
-/// The shape of the fractal: wide features, with the octaves close together and
-/// the higher ones a little stronger.
 const FREQUENCY: f64 = 0.7;
 const GAIN: f64 = 0.62;
 const LACUNARITY: f64 = 1.55;
 
-/// How far the base elevation pushes the next noise sample along its third axis.
-///
-/// The elevation feeds back into the noise coordinate instead of only advancing
-/// with time, which is what gives the field its coherent relief.
 const ELEVATION_AXIS: f64 = 0.28;
 
-/// Where the field starts along the noise's third axis. Not load-bearing: any
-/// slice is a valid terrain, this one just happens to be a known-good one.
 const Z_ORIGIN: f64 = 15.246592;
 
 const REDISTRIBUTION: f64 = 2.0;
 
-/// How much of the broad landscape shape to mix back in.
-///
-/// A little goes a long way: it gives the contours a horizon and makes the field
-/// read as relief rather than as an even field of noise.
 const SWELL_WEIGHT: f64 = 0.16;
 
-/// What a cell is marked with before the interface draws over it.
-///
-/// A private-use scalar no widget writes. Whatever still carries it after the
-/// screen has drawn is a cell the field is allowed to show through, which is what
-/// lets every widget stay unaware of the backdrop: an opaque widget writes its
-/// own cells, a translucent one leaves them alone.
 const OPEN_SYMBOL: &str = "\u{e000}";
 const OPEN_CELL: Cell = Cell::new(OPEN_SYMBOL);
 
@@ -124,10 +90,6 @@ impl Terrain {
         self.scan = scan;
     }
 
-    /// Repaint the cells the last draw left open, without looking for them again.
-    ///
-    /// For a frame where only the field moved, the interface above it is the one
-    /// the last frame already had, so the open cells are still the open cells.
     pub fn repaint(&mut self, buffer: &mut Buffer) {
         let Some((_, area)) = self.drawn else {
             return;
@@ -370,10 +332,6 @@ fn texture(x: f64, y: f64, z: f64) -> f64 {
     (0.5 + 0.5 * (texture / total)).clamp(0.0, 1.0)
 }
 
-/// Three-dimensional gradient noise, sliced at `z`.
-///
-/// The third axis is time, so the land changes in place rather than sliding
-/// under a moving window.
 #[inline(always)]
 fn perlin3(x: f64, y: f64, z: f64) -> f64 {
     const GRADIENTS: [(f64, f64, f64); 16] = [

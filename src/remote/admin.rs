@@ -1,14 +1,3 @@
-//! What a remote knows about the clients that have used it, from its own terminal.
-//!
-//! A remote has no account system: reaching it is the environment's job, so
-//! admitting someone is not its decision to make. That leaves the housekeeping to
-//! whoever runs the machine — who has been here, what they left behind, and how to
-//! be rid of it — which is what this is for.
-//!
-//! Nothing here reads a credential. What it reports is the shape of what a client
-//! pushed: which services it is signed in to, and which tracker account its work
-//! would be attributed to.
-
 use std::{fs, io, path::Path};
 
 use super::LinkResult;
@@ -26,8 +15,6 @@ use crate::{
 pub struct KnownClient {
     pub key: String,
     pub services: Vec<String>,
-    /// The tracker accounts it pushed, which are what attributes its work in a
-    /// tracker to this machine.
     pub accounts: Vec<Login>,
 }
 
@@ -70,11 +57,6 @@ pub async fn list(config: &Config) -> LinkResult<()> {
     Ok(())
 }
 
-/// Forget everything this remote knows about one client.
-///
-/// The directory it was given, the entry in the client record, and the tasks it
-/// owns here. What the container runtime has on disk for those tasks is the
-/// runtime's, and is left for it to reclaim.
 pub async fn evict(config: &Config, key: &str) -> LinkResult<()> {
     let parsed = key
         .parse::<iroh::EndpointId>()
@@ -143,11 +125,6 @@ fn archive(data_dir: &Path) -> io::Result<Vec<KnownClient>> {
     Ok(clients)
 }
 
-/// The profiles a client pushed, named by the directory each one lives in.
-///
-/// A profile is a nested path — `agents/claude`, `vcs/github` — with its files
-/// under `profile`, so what counts is any directory two levels down that holds
-/// one. Anything else here is bookkeeping the remote keeps beside it.
 fn services(operator_dir: &Path) -> io::Result<Vec<String>> {
     let mut services = Vec::new();
     for family in fs::read_dir(operator_dir)? {

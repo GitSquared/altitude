@@ -31,9 +31,6 @@ const DEFAULT_SETTINGS: &str = r#"{
 
 const MCP_TOOLS: &str = "mcp__altitude__*";
 
-/// Claude's view of Altitude's channel: the bridge this recipe writes as a
-/// managed file, named by `--mcp-config` on every turn. Which tools exist is
-/// decided at the binding point, `TaskService::agent_tools`.
 const DEFAULT_MCP: &str = r#"{
   "mcpServers": {
     "altitude": {

@@ -1,7 +1,3 @@
-//! Finds Altitude remotes on the machine's own tailnet.
-//!
-//! Uses the authenticated local Tailscale client to obtain probe candidates.
-
 use std::{
     collections::HashMap,
     env,
@@ -27,8 +23,6 @@ const STATUS_LIMIT: Duration = Duration::from_secs(5);
 const PROBE_LIMIT: Duration = Duration::from_secs(3);
 const MAX_CONCURRENT_PROBES: usize = 4;
 
-/// The app bundle ships a CLI the PATH often does not include, so on macOS it
-/// is the last place to look rather than a hard-coded first choice.
 #[cfg(target_os = "macos")]
 const MACOS_CLI: &str = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
 
@@ -38,18 +32,12 @@ struct Peer {
     is_online: bool,
     #[serde(rename = "TailscaleIPs", default)]
     addresses: Vec<IpAddr>,
-    /// The name this peer is known by on the tailnet, e.g. `studio.tailnet.ts.net.`
-    ///
-    /// Preferred over its address: a MagicDNS name keeps working when the address
-    /// does not, and the client's own resolver is what turns it back into one.
     #[serde(rename = "DNSName", default)]
     name: Option<String>,
 }
 
 struct Candidate {
     address: SocketAddr,
-    /// What to reach it by once it is known to be one: the name where the tailnet
-    /// gave one, and its address otherwise.
     wrote: String,
 }
 
@@ -170,8 +158,6 @@ async fn peer_addresses(executable: &Path) -> Option<Vec<Candidate>> {
     )
 }
 
-/// The name a tailnet peer is known by, without the trailing dot a DNS name
-/// carries and without anything that could not be typed into a settings file.
 fn tailnet_name(name: Option<&str>) -> Option<String> {
     let name = name?.trim().trim_end_matches('.');
     let name = clean(name, 253);

@@ -1,6 +1,3 @@
-//! Combines network discovery sources into remote suggestions for the TUI.
-//! Discovering a remote never adopts it or sends configuration and credentials.
-
 mod local;
 mod tailscale;
 
@@ -36,8 +33,6 @@ pub enum DiscoveryEvent {
     Removed(EndpointId),
 }
 
-/// A VPN address wins when both sources see a remote: it remains reachable
-/// when the client moves away from the remote's LAN.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Source {
     Tailscale,
@@ -145,8 +140,6 @@ fn format_address(address: SocketAddr) -> String {
     }
 }
 
-/// Drops control characters and caps the length, so a remote cannot put
-/// terminal escape sequences or an unbounded string in front of the operator.
 fn clean(value: &str, limit: usize) -> String {
     let mut bytes = 0;
     value

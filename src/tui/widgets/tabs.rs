@@ -1,16 +1,3 @@
-//! A line of tabs over the work they change: the projects above the task list,
-//! and the conversation or the plan on a narrow signals screen.
-//!
-//! The selected tab is bold and the others are quiet, so it reads as the place
-//! you are rather than as a word to press. A label keeps the case it was named
-//! in: a project called "Altitude" is not a heading.
-//!
-//! A bar that belongs to a whole pane sits in its header: the tabs on the first
-//! row inside the border, and the pane's divider under them, so the content
-//! starts at a line rather than under a row that belongs to the tabs. The
-//! separators between tabs run down through that band and end on the divider,
-//! so the caller draws the divider first.
-
 use ratatui::{
     Frame,
     layout::Rect,
@@ -39,11 +26,6 @@ impl Tab {
     }
 }
 
-/// Draws the tabs, and answers with where each was drawn so a click can choose
-/// one. A selection past the end draws every tab quiet.
-///
-/// `area` is the whole band: the labels on its first row, and whatever the caller
-/// drew under them on the rest.
 pub fn draw(frame: &mut Frame, area: Rect, tabs: &[Tab], selected: usize) -> Vec<(Rect, usize)> {
     if area.height == 0 {
         return Vec::new();

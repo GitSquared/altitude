@@ -1,9 +1,3 @@
-//! The line above a screen: what it is, and what is worth knowing at a glance.
-//!
-//! The row is cleared before it is drawn, so the field behind the screen does
-//! not run through the label. Settings and Signals wear the same header rather
-//! than one of them writing its name on the panel's border.
-
 use ratatui::{
     Frame,
     layout::Rect,
@@ -13,8 +7,6 @@ use ratatui::{
 
 use crate::tui::widgets::{palette, utils::truncate};
 
-/// Draw `name`, an optional `detail` after it, and an optional `note` at the
-/// right edge.
 pub fn draw(frame: &mut Frame, area: Rect, name: &str, detail: Option<&str>, note: Option<&str>) {
     frame.render_widget(Clear, area);
     let note = note.unwrap_or_default();

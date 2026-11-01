@@ -1,12 +1,3 @@
-//! The logins tasks run under: the shell a profile is signed in through, the check
-//! that says whether it worked, and what a saved login is on disk.
-//!
-//! Its own concern rather than a task's. Nothing here is recorded, travels, or belongs
-//! to a capsule, and none of it needs a task to exist: it uses the same profile
-//! recipes and isolation a task does, so what it writes is what a task finds. The
-//! interface asks it about logins; the task layer asks it for the profiles a task
-//! could mount.
-
 mod files;
 mod model;
 mod shell;
@@ -33,17 +24,12 @@ use crate::{
 pub struct CredentialAnswer {
     pub signed_in: bool,
     pub output: String,
-    /// Whether a profile's own CLI answered, rather than a login file on disk being
-    /// found. A file is a login a task would mount; only the CLI can say it still
-    /// works.
     pub is_verified: bool,
 }
 
 #[derive(Debug)]
 pub enum CredentialsError {
     Isolation(IsolationError),
-    /// Nothing could be done about this profile, and here is why: no recipe owns it, no
-    /// login files are known, or one could not be removed.
     Refused(String),
 }
 
@@ -58,12 +44,6 @@ impl fmt::Display for CredentialsError {
 
 impl Error for CredentialsError {}
 
-/// The profiles a task mounts, and the sandboxes that sign them in.
-///
-/// Holds no task state: an isolation engine, the configuration that says where
-/// profiles and channels live, and the recipes to mount. That is deliberately less
-/// than a task service, so a login can exist without a task and a task need not know
-/// how a login is written.
 #[derive(Clone)]
 pub struct Credentials<E> {
     isolation: E,
@@ -74,7 +54,6 @@ pub struct Credentials<E> {
 }
 
 impl<E> Credentials<E> {
-    /// The configuration every directory under this installation is named by.
     pub fn config(&self) -> &Config {
         &self.config
     }
@@ -109,11 +88,6 @@ where
         })
     }
 
-    /// The one recipe a profile's sign-in needs.
-    ///
-    /// One rather than the set a task gets: a login is written by the CLI that owns it,
-    /// so the environment is that CLI's and the wait is its install rather than somebody
-    /// else's.
     pub(crate) fn recipe(&self, profile: &str) -> Result<ProfileRecipe, CredentialsError> {
         if let Some(recipe) = mounts::every(&self.agents)
             .into_iter()
@@ -144,27 +118,11 @@ impl<E> Credentials<E>
 where
     E: IsolationEngine + Clone + 'static,
 {
-    /// Whether a sign-in for this profile would find its build ready.
-    ///
-    /// Asked before a shell is opened, so a wait is only shown when there is one. The
-    /// answer is the same lookup the shell makes, so a box that flashes for nothing
-    /// cannot happen.
     pub fn build_ready(&self, profile: &str) -> bool {
         self.credential_build(profile)
             .is_ok_and(|(_, snapshot)| snapshot.is_some())
     }
 
-    /// What profiles' own checks say about them.
-    ///
-    /// The checks run in the build a credential shell would use, so an answer is what
-    /// pressing enter would find, and they read a login from the profile rather than a
-    /// task's state. A built snapshot can answer; only with none is building necessary,
-    /// and a page is not the place for minutes of work, so the login files answer
-    /// instead. A page that said "not signed in" because nothing had been built yet
-    /// sent the operator into a build to fix a sign-in they already had.
-    ///
-    /// Profiles of different services share one composition. Two identities of
-    /// one service cannot, because they would mount the same guest paths.
     pub async fn answers(
         &self,
         mut profiles: Vec<String>,
@@ -252,21 +210,10 @@ where
             .collect())
     }
 
-    /// Forget a mounted profile's saved login, leaving everything else in it.
-    ///
-    /// Only the files a profile's CLI writes a sign-in to are removed: its settings,
-    /// models, managed MCP files, and the environment it was built in stay. The Linear
-    /// tracker is not a mounted profile; its sign-in is forgotten through the tracker
-    /// provider's `clear_credentials`.
     pub fn forget(&self, profile: &str) -> Result<(), CredentialsError> {
         files::forget(&self.profile_directory(profile), profile).map_err(CredentialsError::Refused)
     }
 
-    /// The recipes a sign-in mounts, and the snapshot it can run in.
-    ///
-    /// Only the CLI that owns the login is needed to write it, so this is the
-    /// profile's own build and never the project a task happens to run in: a sign-in
-    /// waits on its own tool rather than on everything a project installs.
     fn credential_build(
         &self,
         profile: &str,
@@ -278,11 +225,6 @@ where
         Ok((recipes, snapshot))
     }
 
-    /// What the login files in a profile's directory say, without a sandbox.
-    ///
-    /// Only presence and size are read, never the contents. A file there is a saved
-    /// login a task would mount, even when no environment has been built to ask the CLI
-    /// whether it still accepts it.
     fn saved_login(&self, profile: &str) -> CredentialAnswer {
         let signed_in = files::has_saved_login(&self.profile_directory(profile), profile);
         CredentialAnswer {
@@ -301,11 +243,6 @@ where
     }
 }
 
-/// The name the sandbox a profile's login is checked in has.
-///
-/// A check and a shell can be asked for at the same time — the list asks about the
-/// profiles it shows, and the operator can open one while an answer is still coming —
-/// so they cannot share a name.
 fn check_id(profiles: &[String]) -> String {
     let first = profiles.first().map(String::as_str).unwrap_or("profiles");
     format!("{CREDENTIAL_PREFIX}check-{}", first.replace('/', "-"))

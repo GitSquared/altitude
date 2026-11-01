@@ -1,6 +1,3 @@
-//! How the panel is drawn: the rail, the list, and the column that describes the
-//! focused row.
-
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -207,10 +204,6 @@ fn draw_empty_detail(frame: &mut Frame, area: Rect, section: Section) {
     empty::draw(frame, area, message);
 }
 
-/// The tracker work this machine gives a remote, as settings rather than prose.
-///
-/// One label column so the page reads down instead of across, and every value in
-/// the accent: these are the names the operator came to the page to read.
 fn tracker_setting_lines(binding: &TrackerBinding) -> Vec<Line<'static>> {
     const COLUMN: usize = 10;
     let setting = |label: &str, value: String| {

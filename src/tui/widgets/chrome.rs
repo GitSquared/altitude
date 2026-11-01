@@ -1,11 +1,3 @@
-//! The frame every screen shares: who this is, and what the keys do.
-//!
-//! A screen draws inside the area this hands back and says which keys would do
-//! something there. The header and the guidance belong to the frame rather than
-//! to any screen, so they are the same everywhere: a popup cannot invent its own
-//! keys, and the keys it does have appear in the one place an operator already
-//! looks.
-
 use std::mem;
 
 use ratatui::{
@@ -38,12 +30,6 @@ impl Hint {
     }
 }
 
-/// Draws the header and the guidance, and answers with the area a screen may
-/// draw in.
-///
-/// The header is the first row and the guidance the last, with nothing above
-/// either: the screen is the whole surface between them. What the interface has
-/// to say is a modal and does not take a row of this frame.
 pub fn draw(frame: &mut Frame, hints: &[Hint], guidance_enabled: bool) -> Rect {
     let area = frame.area();
     let inner = Rect {
@@ -121,8 +107,6 @@ fn guidance_lines(hints: &[Hint], width: usize) -> Vec<Line<'static>> {
     lines
 }
 
-/// Dims what has already been drawn, so a popup reads as being on top of it
-/// rather than beside it.
 pub fn dim(frame: &mut Frame, area: Rect) {
     let buffer = frame.buffer_mut();
     for y in area.top()..area.bottom() {
@@ -132,10 +116,6 @@ pub fn dim(frame: &mut Frame, area: Rect) {
     }
 }
 
-/// The help popup: the keys for wherever you are.
-///
-/// Shown whether or not the guidance is, because a key you cannot find is a key
-/// you do not have.
 pub fn draw_help(
     frame: &mut Frame,
     area: Rect,
@@ -188,13 +168,6 @@ pub fn draw_help(
     popup
 }
 
-/// A box a percentage of the width and a fixed height, centred.
-///
-/// The frame a modal wears: a rounded border with what it is at the top.
-///
-/// The keys that work are not printed here. They belong to the frame at the
-/// bottom of the screen, which every screen shares, so a modal cannot invent its
-/// own keys or fall out of step with them.
 pub fn modal(title: impl Into<String>) -> Block<'static> {
     Block::bordered()
         .border_type(BorderType::Rounded)
@@ -209,10 +182,6 @@ pub fn centered(area: Rect, percent_x: u16, height: u16) -> Rect {
     centered_at_most(area, percent_x, u16::MAX, height)
 }
 
-/// The same box, never wider than `max_width` columns.
-///
-/// A share of the width is a share of whatever the terminal is, and a paragraph
-/// in a box that wide is a line the eye loses its place in.
 pub fn centered_at_most(area: Rect, percent_x: u16, max_width: u16, height: u16) -> Rect {
     let width = (area.width * percent_x / 100).min(max_width).max(1);
     let [vertical] = Layout::vertical([Constraint::Length(height.min(area.height))])
@@ -225,19 +194,11 @@ pub fn centered_at_most(area: Rect, percent_x: u16, max_width: u16, height: u16)
 }
 
 pub struct Body {
-    /// What the modal says, one empty row from the top of the frame.
     pub content: Rect,
-    /// The row between the words and the rule. Empty unless a page closes with
-    /// a note, which belongs to what was said rather than to the answers.
     pub note: Rect,
     pub actions: Rect,
 }
 
-/// Splits the inside of a modal into what it says and how it is answered.
-///
-/// One empty row above the words and one below them, everywhere, so no two
-/// modals are spaced differently. A modal that laid this out itself would be the
-/// one that drifts.
 pub fn body(inner: Rect) -> Body {
     let [_, content, note, actions] = Layout::vertical([
         Constraint::Length(1),
@@ -253,8 +214,6 @@ pub fn body(inner: Rect) -> Body {
     }
 }
 
-/// The height a modal needs to say `rows` of words: a border on each side, an
-/// empty row above and below the words, and the rule and answers under them.
 pub fn modal_height(rows: u16) -> u16 {
     rows.saturating_add(6)
 }

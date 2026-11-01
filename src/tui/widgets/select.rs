@@ -1,22 +1,3 @@
-//! Choosing one of a few known things: a value you press, and a list you step
-//! through or type at.
-//!
-//! A page draws the value as a small box and gives this widget the keys while
-//! the focus is on it: enter opens the list, j/k or the arrows move through it,
-//! and enter again takes what is under the keys. The box is the same one the
-//! prompt wears, because a border is how this interface says a thing can be
-//! acted on rather than read. A list long enough to be worth
-//! narrowing takes the first letters as a query instead, because stepping
-//! through a dozen machines is not how anyone finds one. The list floats over
-//! the page rather than taking a row of it, so opening it does not move what the
-//! operator was reading.
-//!
-//! The offers are the page's; this widget only knows what each one is called and
-//! whether it can be chosen, so one control serves a project, an agent and a
-//! machine alike. A page whose offers are rebuilt from the network keeps its
-//! choice by value rather than by position, so a remote that dropped out of the
-//! list cannot quietly become a different one.
-
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     Frame,
@@ -29,11 +10,6 @@ use ratatui::{
 
 use crate::tui::widgets::{chrome, palette, utils::truncate};
 
-/// A pill that shows a value whose list is a page of its own.
-///
-/// The same box a [`Select`] wears, for a field whose choices are a browser
-/// rather than a list: the operator should not have to learn two ways of reading
-/// "this is a value you can change".
 pub fn shown_pill(buffer: &mut Buffer, area: Rect, value: &str, focused: bool) {
     let room = usize::from(area.width).saturating_sub(3);
     let (value_style, quiet) = if focused {
@@ -53,7 +29,6 @@ pub fn shown_pill(buffer: &mut Buffer, area: Rect, value: &str, focused: bool) {
     );
 }
 
-/// The fill and the spans, which is what makes a row a pill.
 fn pill_in(buffer: &mut Buffer, area: Rect, spans: &[Span<'static>], focused: bool) {
     if area.height == 0 || area.width == 0 {
         return;
@@ -69,9 +44,6 @@ fn pill_in(buffer: &mut Buffer, area: Rect, spans: &[Span<'static>], focused: bo
         .render(area, buffer);
 }
 
-/// How many offers a list needs before typing narrows it. Under that, j/k and
-/// the arrows are worth more than a query: the list is already short enough to
-/// step through, and a search box over three rows is a mode to remember.
 const SEARCH_FROM: usize = 5;
 
 const OPENS: char = '▼';
@@ -79,8 +51,6 @@ const OPENS: char = '▼';
 pub struct Offer<T> {
     pub value: T,
     pub label: String,
-    /// Whether it can be taken. One that cannot is still listed, because the
-    /// reason it cannot is worth reading.
     pub ready: bool,
 }
 
@@ -99,14 +69,8 @@ pub struct Select<T> {
     offers: Vec<Offer<T>>,
     chosen: usize,
     open: bool,
-    /// What has been typed to narrow a list that is searched. A short list never
-    /// has anything here: its keys are for moving.
     query: String,
-    /// Which match the keys are on, as an index into the matches rather than
-    /// into the offers.
     at: usize,
-    /// How many offers it takes before typing narrows the list. A filter of
-    /// seven known values wants j/k; a list of machines wants a query.
     search_from: usize,
 }
 
@@ -123,9 +87,6 @@ impl<T> Select<T> {
         }
     }
 
-    /// Keep every key for stepping, even when the list is longer than the search
-    /// threshold. For a short, known set of values, a query is a mode to
-    /// remember for no gain.
     pub fn without_search(mut self) -> Self {
         self.search_from = usize::MAX;
         self
@@ -149,10 +110,6 @@ impl<T> Select<T> {
         }
     }
 
-    /// Replace the offers, keeping the chosen position in range.
-    ///
-    /// What was chosen is the page's to keep: it is the one that knows what still
-    /// exists. A query is dropped with the offers it narrowed.
     pub fn set_offers(&mut self, offers: Vec<Offer<T>>) {
         self.offers = offers;
         self.chosen = self.chosen.min(self.offers.len().saturating_sub(1));
@@ -164,12 +121,6 @@ impl<T> Select<T> {
         self.offers.is_empty()
     }
 
-    /// Take a mouse event against the rows the last draw returned.
-    ///
-    /// A click on a row is a choice, because a list that wants a click and then a
-    /// key is a list that lies about what it is. The wheel moves the keys. Answers
-    /// whether the event was the list's, so a page can fall through to what is
-    /// behind it.
     pub fn mouse(&mut self, mouse: MouseEvent, rows: &[(Rect, usize)]) -> bool {
         if !self.open {
             return false;
@@ -200,11 +151,6 @@ impl<T> Select<T> {
         }
     }
 
-    /// What the keys do while this list is open.
-    ///
-    /// The widget's own rule, because only it knows whether this list is long
-    /// enough that letters narrow it. A page that showed its own version would be
-    /// guessing, and would drift the day the threshold changed.
     pub fn hints(&self) -> Vec<chrome::Hint> {
         if !self.open {
             return Vec::new();
@@ -225,8 +171,6 @@ impl<T> Select<T> {
         self.open
     }
 
-    /// Whether this list is long enough that typing narrows it, which is what
-    /// decides whether the keys are a query or a way through.
     pub fn is_searching(&self) -> bool {
         self.open && self.offers.len() >= self.search_from
     }
@@ -243,10 +187,6 @@ impl<T> Select<T> {
         self.at = 0;
     }
 
-    /// Take a key while the list is open, answering whether it was the list's.
-    ///
-    /// Every key is the list's while it is open, escape included: it closes the
-    /// list rather than the page, which is what a dropdown does everywhere else.
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
         if !self.open {
             return false;
@@ -306,8 +246,6 @@ impl<T> Select<T> {
         }
     }
 
-    /// Move the keys one match, and round again at either end: a list of three
-    /// is quicker to run round than to hit its last row and stop.
     fn step(&mut self, forward: bool, matches: usize) {
         if matches == 0 {
             self.at = 0;
@@ -331,14 +269,10 @@ impl<T> Select<T> {
             .collect()
     }
 
-    /// How wide this pill wants to be: its name when there is room for one, its
-    /// value, and the mark that it opens.
     pub fn pill_width(&self, with_name: bool) -> u16 {
         (self.name_width(with_name) + self.label().chars().count() + 3) as u16
     }
 
-    /// How much of a pill its name takes: the word and the space around it, or
-    /// the space before the value when there is no room for the name.
     fn name_width(&self, with_name: bool) -> usize {
         if with_name {
             self.name.chars().count() + 2
@@ -347,20 +281,10 @@ impl<T> Select<T> {
         }
     }
 
-    /// Draws the chosen value as a pill: its name, what it is set to, and a mark
-    /// that it opens.
-    ///
-    /// The accent fill is the same one a button or a list row uses when it holds
-    /// the keys, so "the keys are here" is one thing to recognise across the
-    /// interface. Inside, the name is quiet and the value is not, which is the
-    /// whole difference between the two.
     pub fn draw_pill(&self, frame: &mut Frame, area: Rect, focused: bool, with_name: bool) {
         self.draw_pill_in(frame.buffer_mut(), area, focused, with_name);
     }
 
-    /// The same pill, for a page that draws into a buffer of its own rather than
-    /// onto the frame — a form that scrolls its fields composes the whole page
-    /// before it is shown.
     pub fn draw_pill_in(&self, buffer: &mut Buffer, area: Rect, focused: bool, with_name: bool) {
         pill_in(
             buffer,
@@ -370,9 +294,6 @@ impl<T> Select<T> {
         );
     }
 
-    /// The pill as spans, for a page that composes a line of its own: the same
-    /// value, the same name, and the same mark that says it opens, without
-    /// copying the character that happens to be the mark.
     pub fn pill_spans(&self, focused: bool, with_name: bool, room: usize) -> Vec<Span<'static>> {
         let chosen = self.chosen_offer();
         let (value_style, quiet) = if focused {
@@ -397,8 +318,6 @@ impl<T> Select<T> {
         spans
     }
 
-    /// Add pasted text to the query, as one line: a list is narrowed by words,
-    /// not by whatever line breaks came with them.
     pub fn paste(&mut self, text: &str) {
         if self.is_searching() {
             self.query.push_str(&text.replace(['\r', '\n'], " "));
@@ -406,15 +325,10 @@ impl<T> Select<T> {
         }
     }
 
-    /// Draws the open list over `area`, opening upwards from `anchor`, and
-    /// answers with where each offer was drawn so a click can find it.
     pub fn draw_list(&self, frame: &mut Frame, area: Rect, anchor: Rect) -> Vec<(Rect, usize)> {
         self.draw_list_in(frame, area, anchor, true)
     }
 
-    /// Draws the open list downwards from `anchor`, for a pill above the content
-    /// it filters. It is as tall as its matches and no taller, and as wide as its
-    /// widest row so it does not paper over the page it is drawn on.
     pub fn draw_list_below(
         &self,
         frame: &mut Frame,

@@ -1,11 +1,3 @@
-//! What a task is work on: the code it changes, the tools it needs, and the state
-//! that outlives one task.
-//!
-//! A project is configured in `config.toml` and recorded on every task it founds,
-//! so a task that is transferred keeps the setup, repository, and shared caches it
-//! was started with. Storage is keyed by the id; the name is what an operator
-//! reads, and renaming one changes nothing about the work in flight.
-
 use crate::{
     agent::AgentKind,
     credentials::{Service, describe},
@@ -19,12 +11,6 @@ use std::{
 };
 use uuid::Uuid;
 
-/// The caches a new project starts with.
-///
-/// Paths rather than tools: these are where cargo, npm, pip, uv, go, and pnpm
-/// already write, so the common ecosystems are warm without configuring anything.
-/// A project that needs none of them removes them, and any other tool's cache is
-/// one more path.
 pub const DEFAULT_CACHES: &[&str] = &[
     "~/.cargo",
     "~/.cache",
@@ -43,26 +29,12 @@ pub struct Project {
     pub repository: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub caches: Vec<String>,
-    /// What the operator wants known about this work, given to the agent as part
-    /// of its system prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
-    /// The harness a task here runs.
-    ///
-    /// Settings settle it from the identity the project names, so a project that
-    /// has been stored or read always answers what it runs; `agent_credential` is
-    /// the login that answer needs. It is absent only on a project that has not
-    /// reached the file yet, and on the throwaway builds that are not projects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentKind>,
-    /// The coding-agent identity new tasks here use. Absent is the installation's
-    /// default for the slot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_credential: Option<String>,
-    /// The machine this project's tasks run on. Absent is this machine.
-    ///
-    /// A task does not choose: work goes where its project runs, so moving a
-    /// project is moving its work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -71,8 +43,6 @@ pub struct Project {
     pub vcs_credential: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracker: Option<TrackerBinding>,
-    /// The identity commits made here carry, when it differs from the
-    /// installation's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commits: Option<ProjectCommits>,
 }
@@ -87,26 +57,12 @@ pub struct ProjectCommits {
     pub signing_key: Option<String>,
 }
 
-/// Work arriving from a task tracker, and what it may do here.
-///
-/// A binding is a claim: this project, and only this one, is what issues from that
-/// scope become. Without one, a delegated issue starts nothing and says so.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct TrackerBinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<String>,
-    /// The provider's scope, by id or by the name a person types: a Linear team, a
-    /// Jira project, a GitHub repository.
-    ///
-    /// Absent claims the whole account, which is what a workspace with one team
-    /// needs and what keeps this from being a field about Linear.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
-    /// Whether a delegated issue may start work without an operator at the
-    /// keyboard.
-    ///
-    /// Off until the operator says otherwise. The binding alone says which scope
-    /// the project is for; this says whether Altitude may act on it unattended.
     #[serde(default)]
     pub accepts_delegated_work: bool,
 }
@@ -156,20 +112,10 @@ impl Project {
         }
     }
 
-    /// The build shared by every sandbox that runs a profile's own tools.
-    ///
-    /// A sign-in, a login check, and a repository listing are the same image for
-    /// the same profile, and giving them one id is what stops the CLI being
-    /// installed once per gesture.
     pub fn profile_build() -> Self {
         Self::profile_only("credentials")
     }
 
-    /// A build that belongs to no project: one CLI's own tools, and nothing else.
-    ///
-    /// A sign-in and an observer need a sandbox but not a project's code, setup, or
-    /// caches. They share this shape so they also share a build, and so neither is
-    /// recorded as work done in whatever project a task happens to run in.
     pub fn profile_only(name: &str) -> Self {
         Self {
             id: name.to_owned(),
@@ -192,26 +138,14 @@ impl Project {
         self.vcs.unwrap_or_else(VcsProviderKind::sole)
     }
 
-    /// The key two names are compared by.
-    ///
-    /// Case-insensitive because a tab bar and a settings list are read by a
-    /// person, and two entries that differ only in case read as one project.
     pub fn key(&self) -> String {
         self.name.to_ascii_lowercase()
     }
 
-    /// How the repository reads: the provider, then the owner and the name.
-    ///
-    /// `github:gitsquared/altitude` rather than a URL: the protocol is not the
-    /// fact, and where a repository lives is not worth a line of `https://`.
     pub fn repository_display(&self) -> Option<String> {
         repository_display(self.vcs_provider(), self.repository.as_deref()?)
     }
 
-    /// The directory the repository is cloned into, when there is one.
-    ///
-    /// Derived from the repository rather than configured: one less thing to
-    /// keep in step with the URL, and the same place every time a task starts.
     pub fn checkout_path(&self) -> Option<String> {
         self.repository_name().map(|name| format!("~/{name}"))
     }
@@ -224,11 +158,6 @@ impl Project {
             .map(str::to_owned)
     }
 
-    /// What the agent is told about the project at the start of a turn.
-    ///
-    /// Written into the sandbox as a file and carried in the system prompt, so an
-    /// agent that never opens the file still knows what built its sandbox and
-    /// what the operator can change.
     pub fn brief(&self, checkout: Option<&str>) -> String {
         let mut brief = format!("# Project: {}\n\n", self.name);
         if let (Some(repository), Some(checkout)) = (&self.repository, checkout) {
@@ -347,15 +276,6 @@ impl Project {
     }
 }
 
-/// The canonical form of a repository, so the same repository written two ways is
-/// one string.
-///
-/// A trailing slash and a `.git` suffix name the same repository as the URL
-/// without them, and a task's history should not record which spelling was typed.
-/// How a repository reads, for a URL that has not been saved yet.
-///
-/// The same words `Project::repository_display` uses, so the form shows what the
-/// list will show once the form is saved.
 pub fn repository_display(provider: VcsProviderKind, repository: &str) -> Option<String> {
     let short = short_repository(repository)?;
     let (owner, name) = short.split_once('/')?;
@@ -366,7 +286,6 @@ pub fn repository_display(provider: VcsProviderKind, repository: &str) -> Option
     ))
 }
 
-/// The owner and the name, with the URL and the suffix taken off.
 fn short_repository(repository: &str) -> Option<String> {
     let short = repository
         .strip_prefix("https://github.com/")

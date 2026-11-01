@@ -97,8 +97,6 @@ pub async fn task_resume<T>(
     .await
 }
 
-/// Show a labelled status while one operation finishes, and let the operator give
-/// up on it: `q` or ctrl-c returns nothing rather than an answer.
 async fn wait_for<T>(
     terminal: &mut DefaultTerminal,
     terminate: &mut Signal,
@@ -143,10 +141,6 @@ async fn wait_for<T>(
     }
 }
 
-/// Ask one question before the interface is up, and answer which answer was chosen.
-///
-/// Two answers and nothing else: a boot that has found something wrong stops until
-/// somebody decides. Escape and `q` are the way out, which is the first answer.
 pub async fn confirm(
     terminal: &mut DefaultTerminal,
     terminate: &mut Signal,

@@ -1,9 +1,3 @@
-//! Composing a project into a sandbox: the profiles it mounts, the caches it shares,
-//! and the brief and checkout a task starts with.
-//!
-//! The isolation engine calls this for every sandbox it makes. Nothing here talks to a
-//! runtime, and nothing here decides when a sandbox exists.
-
 use std::{
     collections::HashSet,
     fs::{self, OpenOptions},
@@ -30,17 +24,9 @@ const GUEST_HOME: &str = "/root";
 const OPENER: &str = "/usr/local/bin/xdg-open";
 pub const REFRESH_AFTER: Duration = Duration::from_secs(72 * 60 * 60);
 
-/// What a credential shell runs to sign a profile in.
-///
-/// It replaces the login shell the sandbox would otherwise open, so the operator
-/// lands in the CLI's own sign-in rather than at a prompt to type it into.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignInCommand {
-    /// A command that signs in and exits on its own, so the terminal lasts exactly
-    /// as long as the sign-in does.
     Direct(&'static str),
-    /// A CLI whose own interface has to be driven, so the operator is told what to
-    /// do there before the terminal opens.
     Interactive(&'static str),
 }
 
@@ -51,8 +37,6 @@ impl SignInCommand {
         }
     }
 
-    /// Whether the sign-in is a screen the operator drives rather than a command
-    /// that finishes on its own.
     pub fn is_interactive(self) -> bool {
         matches!(self, Self::Interactive(_))
     }
@@ -61,14 +45,9 @@ impl SignInCommand {
 #[derive(Clone)]
 pub struct ProfileRecipe {
     pub profile: String,
-    /// What this profile is called where an operator reads it, which is the name
-    /// the settings list shows and the shell that sets it up names.
     pub display: &'static str,
     pub sign_in: &'static str,
     pub sign_in_command: SignInCommand,
-    /// A command that exits 0 when this profile is signed in, and prints what it
-    /// found. Run in a sandbox with the profile mounted, so it sees the login a task
-    /// would see and never its contents: what it prints is what an operator reads.
     pub status_command: &'static str,
     pub label: &'static str,
     pub setup_command: &'static str,
@@ -87,8 +66,6 @@ pub struct PersistentDirectory {
     pub relative_path: &'static str,
     pub guest_path: GuestPath,
     pub defaults: Vec<DefaultFile>,
-    /// Files Altitude owns and refreshes on every provisioning, unlike a default
-    /// the operator may have edited.
     pub managed: Vec<(&'static str, &'static str)>,
     pub instructions: &'static str,
     pub task_local_subdirectories: Vec<&'static str>,
@@ -148,9 +125,6 @@ struct SandboxPlan {
     options: SandboxOptions,
     defaults: Vec<(PathBuf, &'static str)>,
     managed_files: Vec<(PathBuf, String)>,
-    /// Subdirectories that must not reach the shared profile, as the path they
-    /// have under whichever root the sandbox gives them, and where a task sees
-    /// them.
     local_mounts: Vec<(String, String)>,
 }
 
@@ -386,12 +360,6 @@ impl SandboxPlan {
     }
 }
 
-/// The opener every sandbox is given: what a browser would do, handed to the
-/// terminal Altitude streams instead.
-///
-/// Written per sandbox rather than built into the environment, because it is
-/// Altitude's plumbing and travels with Altitude's code rather than with a
-/// snapshot. It goes in through a quoted heredoc, so the script is the file.
 fn opener_script() -> String {
     format!(
         "mkdir -p /usr/local/bin\ncat > {OPENER} <<'ALTITUDE_OPENER'\n{}ALTITUDE_OPENER\nchmod 0755 {OPENER}\n",
@@ -433,12 +401,6 @@ fn io_error(error: io::Error) -> IsolationError {
     IsolationError::new(error.to_string())
 }
 
-/// Builds a project's snapshot without making a sandbox for a task.
-///
-/// A machine that has just been sent a configuration builds what that configuration
-/// asks for before it can be given work, and this is that build: the same one a task
-/// would wait for, done ahead of the task. The snapshot is the project's, shared by
-/// every task that runs in it and refreshed on the same clock.
 pub async fn ensure_project(
     engine: &impl IsolationEngine,
     config: &Config,
@@ -452,21 +414,13 @@ pub async fn ensure_project(
 }
 
 enum SnapshotSource {
-    /// A task's own snapshot: it was taken here, so it runs here.
     Capsule(String),
-    /// An environment already built here, taken as it is. A sign-in or a check
-    /// reads or writes a login, which is no less true of a day-old image, so no
-    /// build is asked about and no boundary is read: that belongs to a capsule.
     Environment(String),
 }
 
-/// What a sandbox is for, which decides where its own state goes and whether it
-/// records the environment it was built on.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SandboxKind {
     Task,
-    /// A credential shell's. Its own state goes nowhere, and it is thrown away
-    /// where it was made.
     Shell,
 }
 
@@ -479,8 +433,6 @@ impl SandboxKind {
     }
 }
 
-/// What one provisioning call builds: the sandbox's identity, and what goes in
-/// it.
 pub(super) struct ProvisionRequest {
     pub id: String,
     pub snapshot: Option<String>,
@@ -516,10 +468,6 @@ pub(super) async fn provision(
     .await
 }
 
-/// The build a set of recipes describes.
-///
-/// What a project *is*: its setup steps are its identity, so this is what says
-/// whether one is already built here, and it is also what a sandbox is made from.
 pub(super) fn composed_recipe(
     config: &Config,
     project: Project,
@@ -528,14 +476,6 @@ pub(super) fn composed_recipe(
     SandboxPlan::compose(config, project, recipes).map(|plan| plan.recipe)
 }
 
-/// What profiles' own checks say about them, run in one sandbox that is thrown away
-/// after them.
-///
-/// The sandbox is the one a credential shell would get, so a report is what opening
-/// one would find. It is made from the environment's snapshot as it is rather than
-/// from a build: a check reads a login, and an environment a few days past its
-/// refresh can still answer. Nothing of the check is kept: each command prints what
-/// it found, and the operator reads that.
 pub(super) async fn credential_reports(
     engine: &impl IsolationEngine,
     config: &Config,
@@ -590,15 +530,6 @@ pub(super) async fn credential_reports(
     Ok(Some(reports))
 }
 
-/// A sandbox for setting up one profile's credentials, and the command that opens
-/// a shell in it.
-///
-/// It mounts everything a task mounts, so what is signed in to here is what a task
-/// will use, and it is not a task: no capsule, no record, and it is thrown away
-/// when the shell ends. The subdirectories a task keeps on its own disk go to a
-/// scratch directory instead, because a login shell writes session files and they
-/// must not reach the profile every task shares.
-///
 pub(super) async fn credential_shell(
     engine: &impl IsolationEngine,
     config: &Config,
@@ -638,13 +569,6 @@ pub(super) async fn credential_shell(
     Ok(super::with_helper(command))
 }
 
-/// A sandbox that answers a provider's read commands with an owner's profile
-/// mounted.
-///
-/// The shell shape is deliberate: it mounts the profile a task would mount and
-/// keeps its own state out of it, but it is not a task, so it has no capsule and
-/// nothing travels from it. The caller scopes the config to one owner first, so
-/// the profile it mounts is that owner's alone.
 pub(super) async fn watcher(
     engine: &impl IsolationEngine,
     config: &Config,
@@ -660,8 +584,6 @@ pub(super) async fn watcher(
     create(engine, config, id, plan, SandboxKind::Shell, None, progress).await
 }
 
-/// Creates a sandbox shaped the way Altitude expects, and binds the subdirectories
-/// that must not reach the shared profile.
 async fn create(
     engine: &impl IsolationEngine,
     config: &Config,
@@ -714,12 +636,6 @@ async fn create(
     Ok(())
 }
 
-/// Put a project's commit identity into the environment every git command in the
-/// sandbox reads.
-///
-/// Git applies `GIT_CONFIG_*` pairs on top of the profile's global config, so a
-/// project overrides the name and email while the signing key and its format stay
-/// with the profile that holds the key.
 fn add_commits_env(environment: &mut Vec<(String, String)>, commits: &ProjectCommits) {
     let name = commits.name.trim();
     let email = commits.email.trim();
@@ -757,11 +673,6 @@ pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-/// Where a project's paths are inside the sandbox.
-///
-/// A project writes `~/` because that is how it reads on the host; the sandbox's
-/// home is the guest home, and an absolute path is already the guest's.
-/// The same path the sandbox calls it, for callers outside this module.
 pub(crate) fn guest_absolute(path: &str) -> Result<String, IsolationError> {
     Ok(expand_guest_path(path)?.to_string_lossy().into_owned())
 }
@@ -781,10 +692,6 @@ fn expand_guest_path(path: &str) -> Result<PathBuf, IsolationError> {
     Ok(expanded)
 }
 
-/// Where a cache's host directory lives under the project's cache root.
-///
-/// The path is mirrored rather than hashed so a directory listing says what it
-/// holds: `home/.cargo` is the sandbox's `~/.cargo`.
 fn cache_storage_path(cache: &str) -> PathBuf {
     let cache = cache.trim().trim_end_matches('/');
     match cache.strip_prefix("~/") {
@@ -793,12 +700,6 @@ fn cache_storage_path(cache: &str) -> PathBuf {
     }
 }
 
-/// What a task's sandbox is told about its project, and the checkout it starts from.
-///
-/// The brief is written into the capsule rather than mounted, because it is
-/// Altitude's note to the agent and not the operator's file. The clone is
-/// guarded on the checkout, so resuming a paused capsule or landing a transferred
-/// one leaves the work already there alone.
 fn project_scripts(project: &Project) -> Result<String, IsolationError> {
     let checkout = project
         .checkout_path()
@@ -854,8 +755,6 @@ fi
     Ok(script)
 }
 
-/// Runs a command to completion, answering with its exit status and everything it
-/// printed. A check is a command that answers a question, so its output is the point.
 async fn run_to_end(
     engine: &impl IsolationEngine,
     id: String,
@@ -865,12 +764,6 @@ async fn run_to_end(
     Ok((status, output + &errors))
 }
 
-/// Runs a command to completion, answering with its exit status and what it
-/// printed on each stream.
-///
-/// The streams are kept apart because a provider's answer is JSON on one and its
-/// warnings are prose on the other, and a caller reading one must not have to
-/// parse the other.
 pub(crate) async fn run_collecting(
     engine: &impl IsolationEngine,
     id: String,
@@ -897,12 +790,6 @@ pub(crate) async fn run_collecting(
     ))
 }
 
-/// How long a sandbox's own directory setup may take before it counts as stuck.
-///
-/// A command waiting on something that will never come looks exactly like a slow
-/// one from here, and a task still being prepared holds its slot while it waits.
-/// The clone this runs is the slow part, so the limit is generous: it is here to
-/// end a wait, not to hurry a large repository.
 const SETUP_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 async fn run_setup(

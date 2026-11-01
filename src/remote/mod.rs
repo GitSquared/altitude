@@ -1,10 +1,3 @@
-//! Task transport between independently owned installations.
-//!
-//! The source retains ownership while the destination synchronizes the exact base,
-//! imports the disk delta, and durably stages its history. The destination cannot
-//! run work until the source commits relinquishment. Prepared transfers bind all
-//! downloads and acknowledgements to one recipient and survive process restarts.
-
 mod admin;
 mod admission;
 mod announce;

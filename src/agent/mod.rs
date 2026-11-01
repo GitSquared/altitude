@@ -12,33 +12,18 @@ pub mod tools;
 use claude::ClaudeCode;
 use pi::PiCode;
 
-/// The harnesses an installation can be set up to run, in the order the
-/// interface lists them. One catalog, so no two screens can offer a different
-/// set.
 pub const AGENTS: [AgentKind; 2] = [AgentKind::Pi, AgentKind::Claude];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Type, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Type, Serialize, Deserialize)]
 #[sqlx(type_name = "TEXT", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum AgentKind {
     Claude,
+    #[default]
     Pi,
 }
 
-impl Default for AgentKind {
-    /// An environment that names no harness gets Pi, which needs no provider
-    /// selection of its own.
-    fn default() -> Self {
-        Self::Pi
-    }
-}
-
 impl AgentKind {
-    /// The profile this harness's login lives in.
-    ///
-    /// The interface asks this so it never has to spell a profile name; the recipe
-    /// a harness contributes repeats it for the build, which is the one place the
-    /// name has to exist besides here.
     pub fn profile(self) -> &'static str {
         match self {
             Self::Claude => "agents/claude",
@@ -48,8 +33,6 @@ impl AgentKind {
 }
 
 impl fmt::Display for AgentKind {
-    /// How the operator reads this harness in the interface, which is not how
-    /// it is spelled in settings, where the serde name is lowercase.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Claude => "Claude",
@@ -89,12 +72,6 @@ impl fmt::Display for AgentError {
 
 impl StdError for AgentError {}
 
-/// What every harness is told about the place it is running in.
-///
-/// The task context says where the work is; this says what kind of place the
-/// sandbox is and which decisions belong to the operator. An agent that does not
-/// know a project's setup is durable will install a toolchain into a capsule that
-/// is about to be thrown away, or into a cache other tasks share.
 const ALTITUDE_CONTEXT: &str = "## How Altitude runs you
 
 Altitude is the operator's control plane for delegated coding work. Each task runs in its own isolated Linux sandbox on one machine. `~` is the sandbox's home. The project's shared caches and Altitude's own profile mounts persist across tasks; everything else in the sandbox is local to this task and is thrown away with it. Altitude's interface, settings, and project configuration live outside the sandbox: you cannot open or change them.
@@ -113,11 +90,6 @@ Your words reach them as a message in the task's thread, so write the message an
 ";
 
 const AUTOPILOT_SYSTEM_PROMPT: &str = "Altitude owns this task. It keeps the task's record, decides when your turns run, and carries signals between you and the operator, who is usually away from the terminal. You cannot close a task; only the operator can. Continue autonomously whenever the next action is reasonably implied by the original task. Match the precision of the operator's expressed intent. Investigate and take reasonable defaults instead of asking for confirmation. Altitude will ask for a structured task report after this work turn ends. To ask a blocking question or request final review, finish this work turn with a concise account of the question or result; the following report turn creates the signal and pauses execution. Use `tasks_signal` with action=open for updates and decisions during the work turn; a blocking question or review request belongs in the report that ends it. Keep your plan current with `tasks_plan`: a short checklist the operator can watch, replaced as the work changes. Do not wait inside a command for the operator. You are one harness in an isolated sandbox on one machine, working one task; Altitude gives you the task's context and its tools at the start of each turn, and that is the whole of what it knows about your situation. When you create or find a pull request for this task, call `vcs_link_pull_request` with its full URL, once for each pull request, including ones opened from a fork or a different branch. Altitude watches the linked pull requests and will wake you when checks fail or the branch needs attention, so do not run your own CI watcher or poll for check status: the current state of every linked pull request is in the task context you were given. The operator's interface names this task by its title, and until you set one it shows the task's id instead, so set a title with `tasks_title` before you do anything else: at most six words saying what this task is. Refresh it through the same tool as the work becomes something else, keeping it a short summary of what the task has become rather than a restatement of the original request. Altitude carries your words to the operator only through signals, and it delivers every one of them: the operator sees them in their interface and, when this task is delegated, in the issue's thread. So a signal you have already sent needs no second telling. Do not recap the signals you have raised in a later message, and do not report what is still waiting on the operator — quoting \"one point is open\" in a review means they read the same thing twice and cannot tell whether it is news. Say what the work is; Altitude is what shows the state. Decisions and updates are taken as accepted until the operator challenges them: an unresolved decision is an assumption you have taken and they have not reviewed yet, not a blocker, so take the assumption and keep going. Only a blocking question stops the work, and only until they answer it. When the task context names a project repository, it is already checked out at the path given and the caches listed are shared with other tasks: do not clone it again, and never clear a shared cache.";
-/// How Altitude runs a task, then what the operator said about this project.
-///
-/// Policy rather than situation, so it belongs in the system prompt: it survives
-/// a long conversation and reads the same on every turn. The task's own context
-/// stays the account of where the work is now.
 fn system_prompt(base: &str, context: &TaskAgentTurnContext) -> String {
     let mut prompt = format!("{base}\n\n{ALTITUDE_CONTEXT}");
     if let Some(project) = &context.project {
@@ -171,11 +143,6 @@ A task ends only when the operator accepts a review request, so work that is fin
 One request is one thread. If you already opened a thread that stops the task this turn — asking for a project change, for example — that thread is the request: report no signal. Do not raise a blocked signal to announce that you are waiting, and do not repeat what an open thread already says.
 
 The body of an operator signal is the message itself."#;
-/// The report contract, written once for every harness.
-///
-/// Claude enforces it through its own CLI and Pi through a tool extension, but
-/// both return the same object. The signal is the only thing that says whether
-/// the task waits, so the model cannot contradict itself.
 const REPORT_SCHEMA: &str = r#"{
   "type": "object",
   "additionalProperties": false,
@@ -199,11 +166,6 @@ const REPORT_SCHEMA: &str = r#"{
   "required": ["operator_signal"]
 }"#;
 
-/// What Altitude needs from a coding harness.
-///
-/// Altitude owns the intent of a turn and the shape of a task report; a harness
-/// owns how its own command line, session storage, and output encoding express
-/// them. Nothing outside this module knows which harness is running.
 pub trait AgentEngine: Send + Sync {
     fn profile_recipe(&self) -> ProfileRecipe;
     fn new_conversation_id(&self) -> String;
@@ -217,18 +179,10 @@ pub trait AgentEngine: Send + Sync {
     ) -> String;
     fn report_command(&self, conversation_id: &str, context: &TaskAgentTurnContext) -> String;
     fn operator_command(&self, conversation_id: &str) -> String;
-    /// Whether handing the terminal to the operator needs an existing
-    /// conversation. Claude resumes one specific conversation and fails without
-    /// it; Pi creates the session on demand, which is what lets an operator log
-    /// in before a task's first turn has ever succeeded.
     fn operator_requires_conversation(&self) -> bool;
     fn report_decoder(&self) -> Box<dyn TaskReportDecoder>;
 }
 
-/// Decodes a harness's output into task reports and failure diagnostics.
-///
-/// Harnesses encode the report differently, so each owns the decoding while
-/// Altitude owns the report itself.
 pub trait TaskReportDecoder: Send {
     fn process(&mut self, bytes: &[u8]);
     fn report(self: Box<Self>) -> Result<TaskAgentTurnReport, String>;

@@ -1,13 +1,3 @@
-//! Whether a comment that arrived from a tracker is for this task's agent.
-//!
-//! The rules are deliberately conservative. A comment that is not clearly
-//! addressed to the agent stays context: a shared issue is a human space, and a
-//! wrong wake is more expensive than a missed one because the operator can
-//! always mention the agent explicitly.
-//!
-//! This module is pure. The coordinator gathers the facts and performs the
-//! decision; keeping the decision here makes the policy reviewable in one place.
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Actor {
     Operator,
@@ -38,34 +28,13 @@ impl Admission {
 pub struct InputFacts {
     pub actor: Actor,
     pub is_mention: bool,
-    /// The root of this thread was written by the app, so a reply is a
-    /// conversation with the agent rather than a comment on an issue.
     pub is_agent_thread: bool,
     pub is_agent_document_comment: bool,
-    /// A signal root this task published and tracks. Reserved for the signal
-    /// binding ledger; false until signal comments exist.
     pub is_tracked_signal: bool,
-    /// The comment is on the issue this task is bound to, rather than in a
-    /// document or a thread under it.
     pub is_task_issue: bool,
-    /// Any human other than the operator has spoken in this thread or document.
-    /// Unknown is treated as true so an uncertain answer cannot cause a wake.
     pub has_other_humans: bool,
 }
 
-/// Decide before any reaction or wake.
-///
-/// Order matters:
-/// 1. An explicit mention is the operator's strongest signal, and a non-operator
-///    mention is the one case that deserves a reply the agent did not otherwise
-///    earn.
-/// 2. A tracked signal root is the operator↔agent channel.
-/// 3. A reply in a one-to-one agent thread, or a top-level comment on a
-///    one-to-one agent document, is a conversation with the agent.
-/// 4. The operator writing on the task's own issue is talking to the task: an
-///    issue is where the work is described, and a person who owns that work
-///    adding a sentence to it is not making conversation with a crowd.
-/// 5. Everything else is context.
 pub fn decide(facts: &InputFacts) -> Admission {
     if facts.actor == Actor::Agent {
         return Admission::Ignore;

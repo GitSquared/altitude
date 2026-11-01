@@ -1,44 +1,3 @@
-//! Creating a task: what to do, what drives it, and which project it is for.
-//!
-//! One question, asked with the project already in place. The prompt is the
-//! question, so it gets the room: an intent is prose, and it is the only thing
-//! here that is written rather than chosen. The choice below it is named, because
-//! a value on a line says nothing about what it is.
-//!
-//! What drives the task and where it runs are not choices here: the project
-//! answers both, and a task does not overrule the project it belongs to. They are
-//! said under the pill as a caption to it.
-//!
-//! The same page can also bind a Linear issue instead of writing an intent. The
-//! prompt becomes the search box, the results take the room the prompt had, and
-//! the choices stay exactly where they were. It opens that way from `ctrl-l`, or
-//! by typing an issue identifier rather than a sentence.
-//!
-//! Searching is a network call, so this page never makes one. It says when a
-//! query is due and what came back, and the loop in `run` does the waiting.
-//! Every answer carries the popup and the query it was asked for, so a reply
-//! that arrives after the query changed, or after this page closed, is dropped
-//! rather than shown under the wrong question.
-//!
-//! The choice is a pill rather than a row: what is chosen is the thing you press,
-//! and enter opens it into a list you can narrow by typing. It sits under the
-//! prompt, so the list opens up over what has been written rather than down over
-//! the actions. It has a chord of its own, so reaching it does not mean tabbing
-//! past the prompt.
-//!
-//! Enter is a line in the prompt, because an intent is prose, and ctrl-enter
-//! answers, so the keys that start a task are never the keys that write one.
-//! That chord is the one key here a terminal has to be told to report as a key of
-//! its own, which is why the page asks for that protocol while it is open.
-//!
-//! The issue page has no such split: its prompt is one line of query, which a
-//! carriage return has no business in, so enter is the answer there and the chord
-//! does nothing. Given the same page twice, the lighter key is the one to press.
-//!
-//! Everything drawn here can also be clicked: the pill, the offers under it, the
-//! prompt and the two answers. The rectangles come from the last frame, so a
-//! click lands on what the operator saw rather than on what the layout would be.
-
 use std::{
     mem,
     sync::atomic::{AtomicU64, Ordering},
@@ -67,22 +26,12 @@ use crate::{
     tracker::{IssueReference, IssueSummary},
 };
 
-/// The page's width, as a share of the terminal. Wider than a question about one
-/// value, because the answer to this one is a paragraph.
 const WIDTH_PERCENT: u16 = 70;
-/// How wide it may get. The prompt is read a line at a time, so past a legible
-/// measure a wider window only makes the line harder to follow.
 const MAX_WIDTH: u16 = 88;
-/// Its height, which is the prompt's room plus the spacing, the project pill, the
-/// caption under it and the actions. The prompt takes what is left of it.
 const HEIGHT: u16 = 18;
-/// How long a query rests before it is searched, so a word typed a letter at a
-/// time is one search rather than ten.
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
 
 static NEXT_POPUP: AtomicU64 = AtomicU64::new(1);
-/// Which read is which, so a snapshot that arrives after the question was
-/// dismissed cannot still create a task.
 static NEXT_SUBMISSION: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -104,15 +53,9 @@ pub(in crate::tui) enum Hit {
     Create,
 }
 
-/// A machine a task could be sent to.
-///
-/// The creation page no longer chooses one, because a task runs where its project
-/// runs; the send chooser still does, for the one move a task has.
 pub struct Host {
     pub address: Option<String>,
     pub label: String,
-    /// Whether it can be given work. One that is syncing or unreachable is shown and
-    /// cannot be chosen: a task given to it would not run.
     pub ready: bool,
 }
 
@@ -129,8 +72,6 @@ enum IssuePhase {
     Failed(String),
 }
 
-/// A snapshot being read before the task is founded, so the page can be reset
-/// without losing what the operator chose.
 pub(in crate::tui) struct Submission {
     pub(in crate::tui) token: u64,
     reference: IssueReference,
@@ -141,18 +82,11 @@ pub(in crate::tui) struct Submission {
 pub struct NewTask {
     task: TextBox,
     project: Select<Project>,
-    /// The machines this installation delegates to, so the one the chosen
-    /// project runs on can be named rather than its address shown.
     hosts: Vec<Host>,
-    /// Whether the question has been answered with nothing to answer yet. The
-    /// page says what is missing only then, because until then it is not missing:
-    /// it has not been asked for.
     refused: bool,
     focus: Focus,
 
     popup_id: u64,
-    /// Bumped whenever the query changes, so a reply about the old query is not
-    /// shown under the new one.
     generation: u64,
     issue: bool,
     phase: IssuePhase,
@@ -161,11 +95,7 @@ pub struct NewTask {
     query_due: Option<Instant>,
     search_in_flight: bool,
     submission: Option<Submission>,
-    /// A submission asked for while the search was still out, waiting for the
-    /// first result.
     queued_submit: bool,
-    /// Where the keys were before a chord jumped to a pill, so closing its list
-    /// puts them back: a chord is a detour, tabbing is a move.
     focus_return: Option<Focus>,
     read_error: Option<String>,
 }
@@ -177,18 +107,12 @@ pub enum Answer {
         project: Box<Project>,
         agent: AgentKind,
     },
-    /// Read this issue's snapshot before founding the task. The token says which
-    /// submission the snapshot belongs to.
     ReadIssue {
         token: u64,
     },
 }
 
 impl NewTask {
-    /// Ask, with the configured defaults already chosen.
-    ///
-    /// `default_project` is the project in front: the tabs are the context a task
-    /// is created in, so the question opens on the one being looked at.
     pub fn new(projects: Vec<Project>, default_project: &str, hosts: Vec<Host>) -> Self {
         let chosen = projects
             .iter()
@@ -226,12 +150,6 @@ impl NewTask {
         }
     }
 
-    /// Where the chosen project's tasks start, and whether that machine can take
-    /// one now.
-    ///
-    /// The page does not choose a machine, so this is not a setting: it is what
-    /// the answer already implies, said where the operator can see it before
-    /// pressing create.
     fn machine(&self) -> (String, bool) {
         let Some(project) = self.project.chosen_value() else {
             return ("this machine".to_owned(), true);
@@ -249,15 +167,11 @@ impl NewTask {
         }
     }
 
-    /// Ask the issue page instead of the prompt: the same question, reached from
-    /// a task that wants a tracker link rather than a free intent.
     pub(in crate::tui) fn linking(mut self) -> Self {
         self.activate_issue();
         self
     }
 
-    /// Whether something here is taking characters, in which case `?` and `q`
-    /// are characters too.
     pub(in crate::tui) fn is_typing(&self) -> bool {
         self.focus == Focus::Task || self.list_open()
     }
@@ -266,14 +180,10 @@ impl NewTask {
         self.focus == Focus::Project && self.project.is_open()
     }
 
-    /// Whether a search or a snapshot read is still out, which is what keeps the
-    /// wait visible.
     pub(in crate::tui) fn is_awaiting(&self) -> bool {
         self.issue && (self.submission.is_some() || matches!(self.phase, IssuePhase::Searching))
     }
 
-    /// The keys that work here, for the guidance line. They follow the focus,
-    /// because enter is only a new line while the prompt has the caret.
     pub fn hints(&self) -> Vec<chrome::Hint> {
         // An open list explains itself, and the widget is the one that knows
         // whether its keys are a query or a way through.
@@ -499,8 +409,6 @@ impl NewTask {
         }
     }
 
-    /// A key while the prompt has the caret. Every letter is a letter: the only
-    /// keys that do something else here are the ones that cannot be typed.
     fn prompt_key(&mut self, key: KeyEvent) -> Option<Answer> {
         match key.code {
             // The issue page's prompt is one line of query, so enter is not a
@@ -535,8 +443,6 @@ impl NewTask {
         }
     }
 
-    /// What changed after a keystroke or a paste: a query to search, or a prompt
-    /// that has just become an issue on its own.
     fn after_edit(&mut self) {
         if !self.issue && looks_like_issue(self.task.value().trim()) {
             self.activate_issue();
@@ -554,10 +460,6 @@ impl NewTask {
         self.query_changed();
     }
 
-    /// A new query invalidates every answer that is out about the old one,
-    /// including a snapshot read the operator has already asked for: an edit
-    /// means the issue they meant to link is not the one in flight, so it is
-    /// dropped rather than founded when it lands.
     fn query_changed(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.search_in_flight = false;
@@ -603,9 +505,6 @@ impl NewTask {
         self.issue && token.popup == self.popup_id && token.generation == self.generation
     }
 
-    /// Take a search answer, or drop it if the query has moved on. When a
-    /// submission was queued while the search was out, its read starts here and
-    /// the token comes back so the loop starts it exactly once.
     pub(in crate::tui) fn apply_search(
         &mut self,
         token: SearchToken,
@@ -630,14 +529,10 @@ impl NewTask {
         }
     }
 
-    /// Whether the query is still resting before a search, or out on the wire,
-    /// so an answer has to wait for its first result.
     fn is_search_pending(&self) -> bool {
         matches!(self.phase, IssuePhase::Searching) || self.query_due.is_some()
     }
 
-    /// Answer a submission queued while the search was out, now that there is a
-    /// first result. Nothing is read when the search found nothing.
     fn take_queued_submit(&mut self) -> Option<u64> {
         if !mem::take(&mut self.queued_submit) || self.results.is_empty() {
             return None;
@@ -645,8 +540,6 @@ impl NewTask {
         self.begin_submission()
     }
 
-    /// Say that there is no credential to search with, which is a state of its
-    /// own rather than an empty result.
     pub(in crate::tui) fn search_unavailable(&mut self, token: SearchToken, message: String) {
         if !self.is_current(token) {
             return;
@@ -656,8 +549,6 @@ impl NewTask {
         self.phase = IssuePhase::Failed(message);
     }
 
-    /// The reference a submission is reading, if the token is still the one in
-    /// front of the operator.
     pub(in crate::tui) fn submission_reference(&self, token: u64) -> Option<IssueReference> {
         self.submission
             .as_ref()
@@ -665,8 +556,6 @@ impl NewTask {
             .map(|submission| submission.reference.clone())
     }
 
-    /// Take the submission once its snapshot has arrived, or nothing if the
-    /// question was dismissed while it was out.
     pub(in crate::tui) fn take_submission(&mut self, token: u64) -> Option<Submission> {
         match &self.submission {
             Some(submission) if submission.token == token => self.submission.take(),
@@ -674,8 +563,6 @@ impl NewTask {
         }
     }
 
-    /// A snapshot read that produced none, whether it failed or could not start,
-    /// leaving the results in place to try again.
     pub(in crate::tui) fn read_failed(&mut self, token: u64, error: String) {
         if self.submission.as_ref().is_some_and(|s| s.token == token) {
             self.submission = None;
@@ -683,8 +570,6 @@ impl NewTask {
         }
     }
 
-    /// Put the keys back where a chord found them, if it was a chord that moved
-    /// them here.
     fn restore_focus(&mut self) {
         if let Some(focus) = self.focus_return.take() {
             self.focus = focus;
@@ -772,15 +657,12 @@ impl NewTask {
         Some((project, agent))
     }
 
-    /// The harness the chosen project runs, which the project answers itself.
     fn agent(&self) -> Option<AgentKind> {
         self.project
             .chosen_value()
             .and_then(|project| project.agent)
     }
 
-    /// The open list, over the prompt above the pill it belongs to, and where
-    /// each offer was drawn.
     fn draw_open_list(&self, frame: &mut Frame, area: Rect, anchor: Rect) -> Vec<(Rect, usize)> {
         if self.project.is_open() {
             return self.project.draw_list(frame, area, anchor);
@@ -1002,9 +884,6 @@ fn draw_choices(frame: &mut Frame, area: Rect, new_task: &NewTask) -> Rect {
     project
 }
 
-/// Whether text is shaped like something Linear can be asked about directly: an
-/// issue URL, or an issue identifier. A prompt that happens to contain either is
-/// not one of these, so the page only changes mode when the whole field is.
 fn looks_like_issue(value: &str) -> bool {
     if value.starts_with("https://linear.app/") && value.contains("/issue/") {
         return true;

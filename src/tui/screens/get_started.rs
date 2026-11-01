@@ -1,12 +1,3 @@
-//! The first thing a new installation shows, and the only thing it shows until
-//! the work could actually start.
-//!
-//! A card rather than a wizard: the name and the commit identity are edited where
-//! they are read, and a row that asks a question opens its own picker over the
-//! card before the sign-in that follows it. The card is not dismissible while a
-//! task would not run: a first question that can be answered by accident is not
-//! a question.
-
 use std::slice;
 
 use ratatui::{
@@ -36,35 +27,18 @@ use crate::{
 
 use super::settings::GitIdentity;
 
-/// How wide the card is allowed to get. Content, not a panel: at this width the
-/// eye has a column to read, and the task list behind it keeps its own.
 const CARD_WIDTH: u16 = 80;
 
 const LABEL_WIDTH: usize = 15;
 
 const ACTION_WIDTH: usize = 16;
 
-/// The rows the help under the steps keeps, whatever it says.
-///
-/// The longest help is the remote one, five lines at the card's width; the sixth
-/// is spare so a slightly narrower terminal does not clip it. It is a constant,
-/// not measured per draw, because its whole job is to stop the footer moving
-/// when the words change.
 const HELP_ROWS: u16 = 6;
 
-/// What a row's mark says about it.
-///
-/// Focus is the bold value, not the mark: a mark that changed when the caret
-/// moved would say one thing about a row and then another without anything
-/// having happened.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Marker {
     Done,
-    /// Chosen, but whether it is usable is not known yet: a check is out, or no
-    /// answer came.
     Blocking,
-    /// Nothing has been answered here yet. Whether anything depends on it is
-    /// what the row's copy says.
     Unset,
     Question,
 }
@@ -111,10 +85,6 @@ pub struct RemoteOffer {
     pub address: String,
 }
 
-/// What the screen has to say about the installation it is setting up.
-///
-/// Owned values rather than the application's, because the screen is drawn while
-/// the foreground is borrowed, and the two things it reads are small.
 #[derive(Clone)]
 pub struct SetupState {
     pub agent: Option<AgentKind>,
@@ -189,22 +159,16 @@ impl Commits {
 pub struct GetStarted {
     pub focus: Focus,
     pub name: Field,
-    /// Whether the name is taking letters, as opposed to being the row the keys
-    /// are on. Typing is a state you enter, not one the caret is always in.
     pub name_editing: bool,
     pub agent: Select<AgentKind>,
     pub vcs: Select<VcsProviderKind>,
     pub tracker: Select<TrackerKind>,
-    /// The repository this project works in, shown as the pill it is rather than
-    /// as text with a copied mark.
     pub repository: Select<Repository>,
     pub commits: Commits,
     pub repositories: Option<Repositories>,
 }
 
 impl GetStarted {
-    /// Open on the first thing still missing, so the card starts where the work
-    /// is rather than at the top of a list.
     pub fn new(
         name: &str,
         agent: Option<AgentKind>,
@@ -275,8 +239,6 @@ impl GetStarted {
         self.focus = ROWS[next];
     }
 
-    /// Whether the keys are characters here: the name, or a list long enough
-    /// that typing narrows it.
     pub fn is_typing(&self) -> bool {
         self.name_editing
             || (self.commits.open && self.commits.takes_text())
@@ -409,8 +371,6 @@ pub fn ready(setup: &SetupState, name: &Field) -> bool {
         && setup.commits.is_set()
 }
 
-/// Whether a profile's login is known to work. A file on disk counts until a
-/// check says otherwise, because that is what a task would mount.
 pub fn signed_in(status: &CredentialStatus) -> bool {
     matches!(
         status,
@@ -751,8 +711,6 @@ fn draw_footer(frame: &mut Frame, area: Rect, panel: &GetStarted, setup: &SetupS
     );
 }
 
-/// A row whose value is already spans, so a widget can print its own pill or a
-/// status that moves.
 fn row_spans(
     marker: Marker,
     label: &str,
@@ -782,8 +740,6 @@ fn row_spans(
     Line::from(spans)
 }
 
-/// The repository pill's offers: what the cache knows, plus whatever the project
-/// already names when the cache has not caught up.
 fn repository_select(cached: &[Repository], current: Option<&str>) -> Select<Repository> {
     let mut offers: Vec<Offer<Repository>> = cached
         .iter()
@@ -1014,8 +970,6 @@ fn detail_text(focus: Focus, setup: &SetupState) -> String {
     }
 }
 
-/// How many rows a paragraph takes at this width, so the card can be as tall as
-/// its content and no taller.
 fn wrapped_height(text: &str, width: u16) -> u16 {
     if width == 0 {
         return 0;

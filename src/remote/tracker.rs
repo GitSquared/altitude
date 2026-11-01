@@ -1,18 +1,3 @@
-//! The remote's Linear coordinator: signed webhooks in, task host out.
-//!
-//! A serve role has no person at the keyboard. Work arrives as a Linear
-//! AgentSessionEvent, an Issue status change, or a comment notification, is
-//! durably recorded before the webhook is acknowledged, and is then handed to the
-//! task host that owns the capsule. Comments pass through
-//! [`super::admission`] before anything reacts or wakes. This module owns only the
-//! mapping between an external issue/session and a local task, a client, and a
-//! tracker user — one [`Cursor`] per task — and the task's own state is
-//! always read back from the host, never cached here.
-//!
-//! The coordinator calls the host through [`Host`], a small callback surface the
-//! serve role implements over its task event loop. Keeping the two apart is what
-//! lets the execution core stay the source of operational truth.
-
 use std::{
     cmp::Reverse,
     collections::{HashMap, HashSet},
@@ -67,56 +52,28 @@ const MAX_WEBHOOK_BYTES: usize = 1024 * 1024;
 const SIGNATURE_HEADER: &str = "linear-signature";
 
 const TICK: Duration = Duration::from_secs(10);
-/// How often this machine asks the tracker what it may have missed, in ticks.
 const DELEGATION_SWEEP_TICKS: u32 = 6;
-/// How many passes may fail on one event before it is skipped. A tracker that will
-/// not take an event is news; a machine asking again forever is not.
 const EVENT_ATTEMPTS: usize = 3;
-/// How long a lapsed delegation is waited on before it ends the task.
 const UNHOOK_GRACE_MS: i64 = 60_000;
-/// A failed delivery is retried at a fixed pace: the work is already durable on
-/// disk, so a tracker outage should not produce a request storm.
 const RETRY: Duration = Duration::from_secs(10);
-/// Completed deliveries and terminated sessions are kept long enough that a
-/// redelivery or a replay is still recognised.
 const DONE_RETENTION: Duration = Duration::from_secs(600);
 const TERMINATED_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_DONE: usize = 512;
 const MAX_TERMINATED: usize = 1024;
 const WEBHOOK_MAX_AGE: Duration = Duration::from_secs(300);
 
-/// Everything the coordinator needs that the serve role already owns.
-///
-/// The token, workspace, and app user live inside [`LinearAutomation`], which
-/// is why they are not repeated here: a webhook is validated against the same
-/// handle the API calls go through, so the two cannot disagree.
 pub struct RemoteTrackerConfig {
     pub automation: Arc<LinearAutomation>,
     pub webhook_secret: Vec<u8>,
     pub oauth_client_id: String,
     pub storage_path: PathBuf,
-    /// Where each peer's pushed configuration lives, because that is where the
-    /// account a peer is signed in as is written down.
     pub operators_dir: PathBuf,
     pub host_label: String,
 }
 
-/// The task operations the coordinator asks of the machine that owns the capsule.
-///
-/// Every method returns a boxed future so the trait stays object-safe without
-/// `async fn`, matching the tracker provider's own shape. The host derives each
-/// answer from the task's own history; nothing here is a cache.
 pub type HostFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
 
 pub trait Host: Send + Sync + 'static {
-    /// Found a task for `issue` on the machine reached through `peer`.
-    ///
-    /// The host chooses the environment and agent: a remote runs what it was
-    /// pushed, and the client does not get to name it. The label is the signed
-    /// human name the work belongs to, so a task card reads a person rather than
-    /// the peer's key.
-    /// Found a task for `issue`, under the delegation that asked for it when a
-    /// tracker delegation did: the task carries it, so nothing downstream infers it.
     fn start_issue(
         &self,
         peer: EndpointId,
@@ -124,33 +81,18 @@ pub trait Host: Send + Sync + 'static {
         label: String,
         delegation: Option<String>,
     ) -> super::StartFuture<'_, String>;
-    /// Stop a task this machine no longer runs. The reason is kept in the task's
-    /// own record, so an ending that happened here can be read here.
     fn stop(&self, task_id: String, reason: TaskExecutionPauseReason) -> HostFuture<'_, ()>;
-    /// Record in the task's own history that the issue now says `status`, so a
-    /// card can show what the tracker says instead of asking it again.
     fn record_status(&self, task_id: String, status: TrackerStatus) -> HostFuture<'_, ()>;
-    /// Every thread this task raised, open and closed. The caller filters: which
-    /// ones are waiting is a question about the answer, not about the task.
     fn signal_threads(&self, task_id: String) -> HostFuture<'_, Vec<TaskOperatorSignalThread>>;
-    /// Reopen a thread the operator has come back to, so this machine's state
-    /// follows the conversation rather than remembering an answer it no longer has.
     fn reopen_signal(&self, task_id: String, signal_id: String) -> HostFuture<'_, ()>;
     fn events(&self, task_id: String) -> HostFuture<'_, Vec<(i64, TaskHistoryEvent)>>;
     fn instruct(&self, task_id: String, instruction: String) -> HostFuture<'_, ()>;
     fn reply(&self, task_id: String, signal_id: String, answer: String) -> HostFuture<'_, ()>;
     fn accept(&self, task_id: String, signal_id: String) -> HostFuture<'_, ()>;
-    /// Whether the task's record is still kept on this machine. A completed task
-    /// is kept, which is what lets its ending be reported before it is dropped.
     fn is_kept(&self, task_id: String) -> HostFuture<'_, bool>;
 
-    /// The tasks here that are bound to a tracker issue, with the client whose
-    /// work each one is. Reporting is adopted from this list.
     fn bound_tasks(&self) -> HostFuture<'_, Vec<BoundTask>>;
-    /// The delegation a task belongs to, when a delegation asked for it.
     fn delegation_of(&self, task_id: String) -> HostFuture<'_, Option<String>>;
-    /// The work an issue has right now: the task in play for one of these
-    /// delegations, or for any of them when none are named.
     fn work_for_issue(
         &self,
         issue_id: String,
@@ -159,15 +101,10 @@ pub trait Host: Send + Sync + 'static {
     fn session_agent(&self, task_id: String) -> HostFuture<'_, Option<String>>;
 }
 
-/// The tracker comment this machine publishes a signal thread under.
-///
-/// Derived rather than recorded: both sides of the conversation can work it out
-/// from the task and the signal, so there is no table to keep in step.
 fn published_comment_id(task_id: &str, signal_id: &str) -> String {
     stable_id("comment", &format!("signal:{task_id}:{signal_id}"))
 }
 
-/// What the session says when a task stops working, by why it stopped.
 fn pause_notice(reason: &TaskExecutionPauseReason) -> &'static str {
     match reason {
         TaskExecutionPauseReason::AwaitingOperator => "Waiting for your reply on this task.",
@@ -196,23 +133,14 @@ fn pause_notice(reason: &TaskExecutionPauseReason) -> &'static str {
     }
 }
 
-/// Whether asking a tracker again could work.
-///
-/// A revoked token, a rate limit, and a tracker having a bad day are all worth
-/// another pass. An issue the tracker no longer has is not: the task will not
-/// become reportable by waiting.
 fn worth_retrying(refusal: &str) -> bool {
     !refusal.contains("not found") && !refusal.contains("Entity not found")
 }
 
-/// A task this machine holds that is bound to a tracker issue.
 pub struct BoundTask {
     pub task_id: String,
-    /// The client whose login reports it, as the peer id it arrived as.
     pub owner: String,
     pub issue: IssueReference,
-    /// The delegation that asked for this work, when one did: it is the session the
-    /// work is told to, so recovering a lost cursor does not open a second one.
     pub delegation: Option<String>,
     pub session_agent: Option<String>,
 }
@@ -221,22 +149,11 @@ pub struct RemoteTracker {
     config: RemoteTrackerConfig,
     ledger: Mutex<Ledger>,
     notify: Notify,
-    /// Why a task could not be adopted, so a tracker that keeps refusing one task
-    /// says so once instead of every tick. A task is still retried: the reason may
-    /// go away, and silence about a failure is worse than a second line about it.
     refusals: Mutex<HashMap<String, String>>,
-    /// Whether anything has arrived since this process started. The first
-    /// delivery is said at info because it is the only proof a freshly installed
-    /// app can reach this machine, and a silent first install is indistinguishable
-    /// from a broken proxy.
     delivered: AtomicBool,
 }
 
 impl RemoteTracker {
-    /// Open the coordinator over an already-verified API handle.
-    ///
-    /// A missing ledger starts empty; one that cannot be read is an error, so a
-    /// corrupt file is never silently replaced by an empty one.
     pub fn new(config: RemoteTrackerConfig) -> Result<Arc<Self>, String> {
         let ledger = Ledger::load(&config.storage_path)?;
         Ok(Arc::new(Self {
@@ -248,10 +165,6 @@ impl RemoteTracker {
         }))
     }
 
-    /// The HTTP surface a serve role mounts beside its other routes.
-    ///
-    /// The body limit is applied here rather than trusted from the caller, so a
-    /// router built without care cannot hand the handler an unbounded body.
     pub fn webhook_router(self: &Arc<Self>) -> Router {
         Router::new()
             .route(WEBHOOK_ROUTE, post(webhook))
@@ -259,14 +172,6 @@ impl RemoteTracker {
             .with_state(Arc::clone(self))
     }
 
-    /// Sponsor a session on an issue for a task a client started here.
-    ///
-    /// The peer must have synced a tracker account: a report needs a tracker user
-    /// who can answer it, and a peer that has pushed none has nobody. The session
-    /// is made through the public Agent API so an issue this app was never
-    /// delegated can still be reported on, and the human assignee is left alone. A
-    /// report that already holds the task or the issue is left as it is, so a retry
-    /// cannot sponsor a second session once one has been recorded.
     pub async fn start_reporting(
         &self,
         owner: &str,
@@ -322,12 +227,6 @@ impl RemoteTracker {
         Ok(())
     }
 
-    /// A task was deleted here: close what the tracker knows about it.
-    ///
-    /// Deleting a task is the operator saying the work is gone, so the issue stops
-    /// pointing at this machine and the report closes rather than waiting for a
-    /// history that will never advance. Best-effort by design: the task is already
-    /// deleted, and an unreachable tracker must not resurrect it.
     pub async fn forget_task(&self, task_id: &str) {
         let Some(report) = self.report_for_task(task_id) else {
             return;
@@ -359,11 +258,6 @@ impl RemoteTracker {
         }
     }
 
-    /// Drain queued webhooks and report task life, forever.
-    ///
-    /// A webhook wakes the loop at once; a tracker or API outage is logged and
-    /// retried on the next pass, and never stops the loop, because the work it is
-    /// reporting on keeps running.
     pub async fn run(self: Arc<Self>, host: Arc<dyn Host>) {
         let mut tick = interval(TICK);
         tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -387,18 +281,6 @@ impl RemoteTracker {
         }
     }
 
-    /// Pick up work that was delegated to this app while it was not listening.
-    ///
-    /// A delegation arrives as a webhook, and Linear does not keep trying: a
-    /// delivery that lands during a restart is gone, and the issue sits delegated
-    /// to the app with no task, no session, and nothing to say so. So the machine
-    /// asks the tracker which issues are delegated to it and starts the ones it has
-    /// never seen — through the login it holds, since that is the person whose work
-    /// it would be reporting.
-    ///
-    /// Silent when it cannot tell whose work it is. One login is an answer; two
-    /// mean a machine serving several people, and picking one would put a task in
-    /// front of the wrong person.
     async fn recover_delegations(&self, host: &dyn Host) {
         let delegated = match self.config.automation.delegated_issues().await {
             Ok(delegated) => delegated,
@@ -498,7 +380,6 @@ impl RemoteTracker {
         }
     }
 
-    /// The one login this machine holds, when it holds exactly one.
     fn sole_login(&self) -> Option<Login> {
         let mut logins = logins(&self.config.operators_dir);
         if logins.len() != 1 {
@@ -507,13 +388,6 @@ impl RemoteTracker {
         logins.pop()
     }
 
-    /// Start reporting on the tasks that are bound to an issue and are not being
-    /// reported on.
-    ///
-    /// A report is written when the task is created, which is one chance: a task
-    /// created while this machine held no account for its client had none, and a
-    /// ledger that was lost takes every report with it. Reading the tasks this
-    /// machine holds is what gives it a second chance.
     async fn adopt_bound_tasks(&self, host: &dyn Host) {
         let bound = match host.bound_tasks().await {
             Ok(bound) => bound,
@@ -582,10 +456,6 @@ impl RemoteTracker {
             .map_err(|_| "the tracker ledger lock was poisoned".to_owned())
     }
 
-    /// Change the ledger and write it before the change is visible in memory.
-    ///
-    /// A failed write leaves the previous ledger in place, so a caller that gets
-    /// an error knows nothing was recorded and can retry.
     fn mutate<T>(&self, change: impl FnOnce(&mut Ledger) -> T) -> Result<T, String> {
         let mut ledger = self.lock()?;
         let mut next = (*ledger).clone();
@@ -599,10 +469,6 @@ impl RemoteTracker {
         persist(&self.config.storage_path, ledger)
     }
 
-    /// Accept a signed delivery before the webhook is acknowledged.
-    ///
-    /// Returns whether the delivery is new; a redelivery is acknowledged without
-    /// being queued twice.
     fn enqueue(&self, key: String, event: StoredEvent) -> Result<bool, String> {
         let now = now_ms();
         let is_new = self.mutate(|ledger| {
@@ -656,11 +522,6 @@ impl RemoteTracker {
         })
     }
 
-    /// Handle every pending delivery that is due, in arrival order.
-    ///
-    /// Each delivery stands on its own: one that fails is deferred and the rest
-    /// still run, so a single bad issue cannot block another operator's stop or
-    /// cancellation.
     async fn process_deliveries(&self, host: &dyn Host) {
         for delivery in self.pending() {
             if delivery.next_attempt_at_ms > now_ms() {
@@ -708,11 +569,6 @@ impl RemoteTracker {
         }
     }
 
-    /// Reopen the thread a comment landed on, when this machine had closed it.
-    ///
-    /// The comment is matched to its signal by the id this machine gave the thread
-    /// it published, so no table of published comments has to be kept: the ids are
-    /// derived from the task and the signal, and either side can work them out.
     async fn reopen_closed_thread(&self, report: &Cursor, site: &CommentSite, host: &dyn Host) {
         let root = site.root_comment_id.as_str();
         let Ok(threads) = host.signal_threads(report.task_id.clone()).await else {
@@ -737,11 +593,6 @@ impl RemoteTracker {
         );
     }
 
-    /// A stop is a cancellation, never an acceptance or a status restore.
-    ///
-    /// Only the delegation operator may stop the work; a teammate's stop is not the
-    /// operator's judgment and is ignored. The report closes only after the stop and
-    /// its notice have both succeeded, so nothing writes to it again.
     async fn handle_stop(&self, event: &SessionEvent, host: &dyn Host) -> Result<(), String> {
         let Some(report) = self.report_for_session(&event.session_id) else {
             if event
@@ -895,11 +746,6 @@ impl RemoteTracker {
             .await
     }
 
-    /// Start (or restart) the task for an issue under `author`'s remote.
-    ///
-    /// Shared by a `created` delegation and by the retry an operator's prompt
-    /// makes, so both paths behave identically and a failed start can be tried
-    /// again.
     async fn delegate(
         &self,
         issue_id: &str,
@@ -1142,17 +988,6 @@ impl RemoteTracker {
             .await
     }
 
-    /// The operator moved an issue's workflow state.
-    ///
-    /// Only the operator's own change is the operator's judgment — a teammate's
-    /// status change is not a decision about their work — and only a state the
-    /// tracker itself reports as an ending closes this cycle.
-    ///
-    /// An ending means the issue is finished or canceled, and there are two ways to
-    /// honour it: a review that was waiting is accepted, because moving the issue
-    /// to Done is how a person says yes; anything else stops the task, because no
-    /// more work is being asked for. Both record the ending first, so nothing here
-    /// writes over it afterwards.
     async fn handle_issue_state(
         &self,
         issue_id: &str,
@@ -1202,10 +1037,6 @@ impl RemoteTracker {
         self.stop_for_ending(host, &report, is_done).await
     }
 
-    /// The review signal that was already waiting when the issue was closed.
-    ///
-    /// A review raised after the operator moved the issue belongs to a later cycle,
-    /// and a task that was not waiting on one is not accepting anything.
     async fn waiting_review(
         &self,
         report: &Cursor,
@@ -1246,10 +1077,6 @@ impl RemoteTracker {
             }))
     }
 
-    /// Stop a task because the operator ended its issue.
-    ///
-    /// The session says what happened, so the tracker does not look like it is
-    /// still thinking while the sandbox disappears.
     async fn stop_for_ending(
         &self,
         host: &dyn Host,
@@ -1284,8 +1111,6 @@ impl RemoteTracker {
         self.finish_report(report)
     }
 
-    /// A comment reached a task's issue or document. Decide whether it is for
-    /// the agent before reacting or waking anyone.
     async fn handle_comment(&self, event: &CommentInput, host: &dyn Host) -> Result<(), String> {
         let site = self
             .config
@@ -1478,11 +1303,6 @@ impl RemoteTracker {
         }
     }
 
-    /// Report task life outward, and stop work the issue no longer delegates.
-    ///
-    /// A completed issue is not accepted here: a poll cannot prove who changed
-    /// the state. It is only ignored, so it never blocks the other tasks'
-    /// reporting.
     async fn poll_reports(&self, host: &dyn Host) {
         for report in self.cursors().into_iter().filter(|report| !report.finished) {
             // A task the operator removed is no longer work: stop writing about
@@ -1563,11 +1383,6 @@ impl RemoteTracker {
         }
     }
 
-    /// Whether a delegation that lapsed has stayed lapsed long enough to act on.
-    ///
-    /// The first time it is seen, the lapse is recorded rather than acted on: a
-    /// toggle the operator was still making up their mind about would otherwise
-    /// stop a task and start another one a moment later.
     fn unhook_held(&self, report: &Cursor) -> Result<bool, String> {
         let now = now_ms();
         let mut held_for = None;
@@ -1584,7 +1399,6 @@ impl RemoteTracker {
         Ok(held_for.is_some_and(|held_for| held_for >= UNHOOK_GRACE_MS))
     }
 
-    /// The delegation is back, so the lapse it lapsed from never happened.
     fn clear_unhook(&self, report: &Cursor) -> Result<(), String> {
         if report.unhooked_at.is_none() {
             return Ok(());
@@ -1600,11 +1414,6 @@ impl RemoteTracker {
         })
     }
 
-    /// The issue is no longer delegated to this app. Stop once, say so once,
-    /// then drop the report so nothing writes to it again.
-    ///
-    /// A failed stop leaves the report in place so the next pass retries it; the
-    /// notice is only posted after the work is actually stopped.
     async fn unhook(&self, host: &dyn Host, report: &Cursor) {
         if host
             .stop(
@@ -1638,13 +1447,6 @@ impl RemoteTracker {
         }
     }
 
-    /// Report new task history outward, advancing the cursor only after each
-    /// event's action succeeded.
-    ///
-    /// The operator's acceptance is read from the task's own history, whether it
-    /// came from a tracker reply or the local interface, and produces the one
-    /// Done transition, final response, and unhook. An agent run ending is not an
-    /// ending and never implies Done.
     async fn sync_report(&self, host: &dyn Host, report: &Cursor) -> Result<(), String> {
         let events = host.events(report.task_id.clone()).await?;
         // A cursor past the end means the history it counted is gone, which is not a
@@ -1688,12 +1490,6 @@ impl RemoteTracker {
         Ok(())
     }
 
-    /// Give up on an event after it has been refused enough times.
-    ///
-    /// A tracker that will not accept one event — an issue that was deleted, a
-    /// comment it says is gone — used to hold the cursor there forever: the same
-    /// write every ten seconds, and nothing after it ever reported. Skipping is
-    /// loud and bounded, which is the better failure.
     fn refused_event(&self, report: &Cursor, index: usize, error: String) -> Result<(), String> {
         let attempts = if report.failed_at == Some(index) {
             report.failed_attempts + 1
@@ -1732,9 +1528,6 @@ impl RemoteTracker {
         self.set_cursor(&report.task_id, index + 1)
     }
 
-    /// Report one event of a task's history.
-    ///
-    /// `Some(())` means the event was the task's ending, which closes the report.
     async fn report_event(
         &self,
         host: &dyn Host,
@@ -1878,8 +1671,6 @@ impl RemoteTracker {
         Ok(None)
     }
 
-    /// The destination still owes the operator whatever is waiting, even though the
-    /// rest of the history was already reported at the source.
     async fn replay_signals(
         &self,
         host: &dyn Host,
@@ -1909,8 +1700,6 @@ impl RemoteTracker {
         self.set_cursor(&report.task_id, events.len())
     }
 
-    /// The task moved to another machine: say so and drop the report without
-    /// stopping the work or marking the issue Done.
     async fn finish_transferred(&self, report: &Cursor) -> Result<(), String> {
         self.config
             .automation
@@ -1928,9 +1717,6 @@ impl RemoteTracker {
         self.finish_report(report)
     }
 
-    /// Publish one signal on the tracker, and answer the status the issue should
-    /// now have. The status is the caller's to write: it is the report's business
-    /// whether the issue moves, not one comment's.
     async fn publish_signal(
         &self,
         report: &Cursor,
@@ -1999,11 +1785,6 @@ impl RemoteTracker {
         }
     }
 
-    /// Close or reopen the tracker's thread for one signal.
-    ///
-    /// A log has no thread to close; everything else follows what the operator did
-    /// in the interface, so the tracker and this machine say the same thing about
-    /// whether a question is still waiting.
     async fn set_signal_comment_state(
         &self,
         report: &Cursor,
@@ -2062,10 +1843,6 @@ impl RemoteTracker {
         }
     }
 
-    /// Put a status on the issue, unless the issue already says it.
-    ///
-    /// Says nothing when there is nothing to say: a repeat is a write nobody asked
-    /// for, and a tracker's history is read by people.
     async fn set_status(
         &self,
         host: &dyn Host,
@@ -2102,8 +1879,6 @@ impl RemoteTracker {
         Ok(())
     }
 
-    /// The operator moved the issue, so what this machine last said is no longer
-    /// what it says. Forgetting it is what lets altitude answer them later.
     fn forget_status(&self, issue_id: &str) -> Result<(), String> {
         self.mutate(|ledger| {
             for held in ledger
@@ -2116,8 +1891,6 @@ impl RemoteTracker {
         })
     }
 
-    /// Say the task is running again, unless the operator has already ended the
-    /// issue: an issue nobody has moved since is the one this machine may write to.
     async fn say_task_is_running(&self, host: &dyn Host, report: &Cursor) {
         if self.is_settled(&report.issue_id) {
             return;
@@ -2130,13 +1903,6 @@ impl RemoteTracker {
         }
     }
 
-    /// Write the one ending an issue gets, and only once.
-    ///
-    /// A report replays its history, and a pass that stops before advancing its
-    /// cursor replays the same acceptance: writing Done each time is how a machine
-    /// fought an operator who had moved the issue themselves. The issue is recorded
-    /// as settled when its ending is written, and a later acceptance for a task on
-    /// the same issue says nothing new.
     async fn finish_accepted(
         &self,
         host: &dyn Host,
@@ -2206,8 +1972,6 @@ impl RemoteTracker {
             .map_err(|error| error.to_string())
     }
 
-    /// A remote could not start the work; say what to fix instead of retrying
-    /// forever.
     async fn post_start_guidance(
         &self,
         session_id: &str,
@@ -2228,11 +1992,6 @@ impl RemoteTracker {
             .map_err(|error| error.to_string())
     }
 
-    /// The client whose login answers for a tracker account.
-    ///
-    /// The login that arrived most recently wins, so a client that has just signed
-    /// in answers for the account; a tie is broken by the client's own key, so the
-    /// answer does not depend on directory order.
     fn owner_for_user(&self, tracker_user_id: &str) -> Option<String> {
         logins(&self.config.operators_dir)
             .into_iter()
@@ -2245,8 +2004,6 @@ impl RemoteTracker {
             .map(|login| login.owner)
     }
 
-    /// Whether this client has synced a tracker account, which is what a report
-    /// needs to be answerable.
     pub fn has_account(&self, owner: &str) -> bool {
         self.user_for_owner(owner).is_some()
     }
@@ -2258,7 +2015,6 @@ impl RemoteTracker {
             .map(|login| login.account.user_id)
     }
 
-    /// Record that an issue's ending is written, whoever wrote it.
     fn settle(&self, issue_id: &str) -> Result<(), String> {
         self.mutate(|ledger| {
             if !ledger.settled_issues.iter().any(|id| id == issue_id) {
@@ -2267,8 +2023,6 @@ impl RemoteTracker {
         })
     }
 
-    /// Whether this issue's ending has been written, which is what stops a machine
-    /// from contradicting an operator who has moved the issue since.
     fn is_settled(&self, issue_id: &str) -> bool {
         self.lock()
             .map(|ledger| ledger.settled_issues.iter().any(|id| id == issue_id))
@@ -2299,11 +2053,6 @@ impl RemoteTracker {
             .unwrap_or_default()
     }
 
-    /// Record one task's reporting, replacing what this task had before.
-    ///
-    /// Keyed by task, not by issue: a finished task keeps its report so it is never
-    /// adopted again, and a second task started from the same issue gets one of its
-    /// own.
     fn upsert_report(&self, report: Cursor) -> Result<(), String> {
         self.mutate(|ledger| {
             ledger
@@ -2313,11 +2062,6 @@ impl RemoteTracker {
         })
     }
 
-    /// Note that a task's life is fully told, and stop writing about it.
-    ///
-    /// The report stays in the ledger, finished: the task is still here, and a
-    /// report that was thrown away looks exactly like one that was never made, so
-    /// the next pass would open another session and tell the same story again.
     fn finish_report(&self, report: &Cursor) -> Result<(), String> {
         self.mutate(|ledger| {
             for existing in &mut ledger.cursors {
@@ -2364,10 +2108,6 @@ impl RemoteTracker {
         })
     }
 
-    /// A reference used only to address an issue by id.
-    ///
-    /// The API reads and writes by id and checks the workspace from the issue it
-    /// returns, so the empty identifier and url are never read.
     fn issue_reference(&self, issue_id: &str) -> IssueReference {
         IssueReference {
             provider: TrackerKind::Linear,
@@ -2433,13 +2173,6 @@ async fn webhook(
     StatusCode::OK.into_response()
 }
 
-/// What a signed webhook turns into, or why it turns into nothing.
-///
-/// The reasons are logged where the outcome is returned, so the operator reading
-/// the log can tell a misconfiguration (a warning) from chatter (debug). A
-/// rejection carries its detail because the only person who can fix a body this
-/// machine cannot read is the one reading that line; an ignore is a fixed phrase
-/// about a delivery that was handled correctly.
 enum WebhookOutcome {
     Store(StoredEvent),
     Ignore(&'static str),
@@ -2584,8 +2317,6 @@ impl IssueEvent {
             <= WEBHOOK_MAX_AGE.as_millis() as f64
     }
 
-    /// Only a state change made by a human becomes work; anything else is not
-    /// this coordinator's business.
     fn into_stored(self) -> Option<StoredEvent> {
         if self.actor.actor_type != "user" {
             return None;
@@ -2607,10 +2338,6 @@ impl IssueEvent {
     }
 }
 
-/// An `AppUserNotification` webhook, as far as the coordinator trusts it.
-///
-/// Only notifications that carry a comment are turned into input. A status or
-/// assignment notification is lifecycle, not a message to the agent.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AppNotificationEvent {
@@ -2666,8 +2393,6 @@ impl AppNotificationEvent {
             <= WEBHOOK_MAX_AGE.as_millis() as f64
     }
 
-    /// Turn the notification into the comment input it carries, if it carries
-    /// one. Everything else is left to the lifecycle handlers.
     fn into_stored(self) -> Option<StoredEvent> {
         let is_mention = matches!(
             self.action.as_str(),
@@ -2704,20 +2429,12 @@ impl AppNotificationEvent {
 
 // ------------------------------------------------------------------- storage
 
-/// A tracker login a client has pushed to this machine.
 pub struct Login {
     pub owner: String,
     pub account: TrackerAccount,
-    /// When the login last arrived here, which is how this machine tells two
-    /// clients signed in as the same person apart.
     pub arrived: SystemTime,
 }
 
-/// The tracker logins this machine holds, read from the profiles that arrived.
-///
-/// The login on disk is the fact. A record of it beside the login is a second copy,
-/// and a second copy can be missing while the fact is there — which is exactly how
-/// one machine spent a day reporting nothing while holding the login all along.
 pub fn logins(operators_dir: &Path) -> Vec<Login> {
     let Ok(entries) = fs::read_dir(operators_dir) else {
         return Vec::new();
@@ -2735,11 +2452,6 @@ pub fn logins(operators_dir: &Path) -> Vec<Login> {
         .collect()
 }
 
-/// One client's logins of one tracker, oldest name first.
-///
-/// A login its client has yielded to another is not a claim and is left out: the
-/// credential is still theirs to use, but their work here is no longer attributed
-/// to that account.
 pub fn logins_of(operator_dir: &Path, owner: &str, provider: TrackerKind) -> Vec<Login> {
     if yielded_providers(operator_dir).contains(&provider) {
         return Vec::new();
@@ -2767,17 +2479,10 @@ pub fn logins_of(operator_dir: &Path, owner: &str, provider: TrackerKind) -> Vec
     logins
 }
 
-/// Note that this client no longer claims a tracker, because another client took
-/// it over.
-///
-/// What the client pushed stays where it is: the login is the same account, and
-/// which client a task is attributed to is the question here, not who holds the
-/// credentials.
 pub fn yield_account(operator_dir: &Path, provider: TrackerKind) -> io::Result<()> {
     set_yielded(operator_dir, provider, true)
 }
 
-/// A client that pushes a login again claims it again.
 pub fn claim_account(operator_dir: &Path, provider: TrackerKind) -> io::Result<()> {
     set_yielded(operator_dir, provider, false)
 }
@@ -2832,8 +2537,6 @@ struct Ledger {
     cursors: Vec<Cursor>,
     #[serde(default)]
     terminated_sessions: Vec<TerminatedSession>,
-    /// The issues whose ending has been written. One issue gets one ending, however
-    /// many passes replay how it got there.
     #[serde(default)]
     settled_issues: Vec<String>,
 }
@@ -2860,8 +2563,6 @@ impl Ledger {
         self.prune_terminated(now);
     }
 
-    /// Keep pending deliveries in arrival order and retain only recent finished
-    /// ones, so a redelivery is still deduped without the file growing forever.
     fn prune_done(&mut self, now: i64) {
         let cutoff = now - DONE_RETENTION.as_millis() as i64;
         let mut pending = Vec::new();
@@ -2902,49 +2603,24 @@ struct Delivery {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-/// One task being told to one tracker issue.
-///
-/// The task's own history is what happened; this is how much of it has been told,
-/// through which tracker session, and whose login is telling it. It is written
-/// once, when the task is created or imported, and dropped when the task ends.
 struct Cursor {
-    /// The issue in the tracker's own terms, which is what the API takes.
     issue_id: String,
-    /// The name people know it by, `ALT-12`. Reported through because it is what a
-    /// reference made from a search carries, and a report has to answer to either.
     #[serde(default)]
     issue_identifier: String,
-    /// The session this work is told to: the delegation that asked for it, or the one
-    /// this machine opened when a client asked for the work itself.
     session: String,
-    /// The client whose pushed login reports this task: a report speaks as the
-    /// person the work belongs to, not as the machine.
     owner: String,
     tracker_user_id: String,
     task_id: String,
-    /// How many events of the task's history have been reported. Reporting resumes
-    /// here, so a failure repeats one event rather than the whole history.
     #[serde(default)]
     reported_events: usize,
-    /// Whether this task has ended and there is nothing left to tell. A finished
-    /// report stays: dropping it would make the task look unreported, and a task
-    /// is reported once.
     #[serde(default)]
     finished: bool,
-    /// The event a pass is stuck on, and how many passes have refused it. An event
-    /// the tracker will not take is skipped rather than pinning the report forever.
     #[serde(default)]
     failed_at: Option<usize>,
     #[serde(default)]
     failed_attempts: usize,
-    /// The status this machine last put on the issue. An agent run that starts
-    /// writes In Progress, and a task with ten runs must not write it ten times:
-    /// the tracker's history is not a log of altitude's clock.
     #[serde(default)]
     last_status: Option<TrackerStatus>,
-    /// When the issue was first seen not delegated to this app. A lapse is waited
-    /// out before it ends the task, so a delegation toggled twice in a minute
-    /// leaves the work alone.
     #[serde(default)]
     unhooked_at: Option<i64>,
 }
@@ -2955,10 +2631,6 @@ struct TerminatedSession {
     terminated_at_ms: i64,
 }
 
-/// What a signed webhook left behind after the request is over.
-///
-/// The raw body is not kept: the webhook user carries an email, and a delivery
-/// ledger is not the place for it. Only ids and the operator's own words remain.
 #[derive(Clone, Serialize, Deserialize)]
 enum StoredEvent {
     Session(Box<SessionEvent>),
@@ -2967,8 +2639,6 @@ enum StoredEvent {
 }
 
 impl StoredEvent {
-    /// What arrived, by id, for a log line that says what happened without
-    /// repeating what the delivery said.
     fn describe(&self) -> String {
         match self {
             StoredEvent::Session(event) => {
@@ -3023,12 +2693,8 @@ struct SessionEvent {
     signal: Option<String>,
     #[serde(default)]
     source_comment_id: Option<String>,
-    /// The signed activity id, which is a prompt's own identity: a redelivery is
-    /// the same activity whatever the unsigned delivery header says.
     #[serde(default)]
     activity_id: Option<String>,
-    /// When the signed webhook happened, for ordering a prompt against the
-    /// signal it means to answer.
     #[serde(default)]
     occurred_at_ms: i64,
 }
@@ -3041,10 +2707,6 @@ struct IssueStateChanged {
     occurred_at_ms: i64,
 }
 
-/// A comment notification reduced to what admission needs.
-///
-/// The body is kept because a wake hands the operator's words to the task. It
-/// is never written to a log line.
 #[derive(Clone, Serialize, Deserialize)]
 struct CommentInput {
     comment_id: String,
@@ -3058,8 +2720,6 @@ struct CommentInput {
 }
 
 impl SessionEvent {
-    /// A stop is the operator's own word or Linear's stop signal, never the
-    /// session's status.
     fn is_stop(&self) -> bool {
         if self.signal.as_deref() == Some("stop") {
             return true;
@@ -3091,11 +2751,6 @@ impl SessionEvent {
         self.prompt_author_id.as_deref() == Some(tracker_user_id)
     }
 
-    /// What makes this the same signed event as one already recorded.
-    ///
-    /// A creation is the session's action; a prompt is the activity itself, so
-    /// two prompts with the same words are still two answers; a stop names the
-    /// activity that carried it.
     fn dedupe_key(&self) -> String {
         if self.is_stop() {
             return format!(
@@ -3164,8 +2819,6 @@ fn signal_kind(
     })
 }
 
-/// A UUID that is stable for one tracker object, so a lost response can be
-/// retried without creating a second activity, comment, or reaction.
 fn stable_id(namespace: &str, discriminator: &str) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(namespace.as_bytes());
@@ -3180,11 +2833,6 @@ fn stable_id(namespace: &str, discriminator: &str) -> String {
     uuid::Uuid::from_bytes(bytes).to_string()
 }
 
-/// Whether this history crossed machines, which is what makes replaying it
-/// would-be duplicate reporting rather than news.
-///
-/// The arrival itself records a staged transfer, so the destination sees one
-/// even though the source's own transfer events were left behind.
 fn was_transferred(events: &[(i64, TaskHistoryEvent)]) -> bool {
     events.iter().any(|(_, event)| {
         matches!(

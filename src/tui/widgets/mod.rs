@@ -1,5 +1,3 @@
-//! The pieces every surface is drawn from.
-
 pub mod alert;
 pub mod button;
 pub mod card;

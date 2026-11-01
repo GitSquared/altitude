@@ -1,5 +1,3 @@
-//! The server side: accept a connection and answer one request.
-
 use std::{
     collections::HashSet,
     fmt, fs,
@@ -47,8 +45,6 @@ use crate::{
 
 enum ConfigWrite {
     Written {
-        /// The operator keeps no project here, so the logins that arrived with
-        /// this configuration are no longer this machine's to hold.
         forget_logins: bool,
     },
     LinkedElsewhere {
@@ -57,11 +53,6 @@ enum ConfigWrite {
     },
 }
 
-/// The tracker account each tracker profile in a configuration names.
-///
-/// Read from the files that arrived rather than asked of the client: the account
-/// is whatever the pushed login says it is, and the check that follows has to
-/// happen before anything is written.
 fn arriving_accounts(decoded: &[(PathBuf, Vec<u8>)]) -> Vec<(TrackerKind, Option<TrackerAccount>)> {
     let logins: Vec<(String, &[u8])> = decoded
         .iter()
@@ -88,11 +79,6 @@ fn arriving_accounts(decoded: &[(PathBuf, Vec<u8>)]) -> Vec<(TrackerKind, Option
         .collect()
 }
 
-/// Whether a pushed configuration may carry this profile.
-///
-/// A pushed file is a login, and only one a task mounts here is one. A tracker
-/// profile is the exception: it travels so a remote can route tracker work, and
-/// is never mounted.
 fn is_allowed_profile(profile: &str) -> bool {
     // A pushed profile is a credential id, and the id says which service it
     // belongs to. The path checks below keep it confined; this keeps it a
@@ -102,13 +88,6 @@ fn is_allowed_profile(profile: &str) -> bool {
 
 // ------------------------------------------------------------- the server side
 
-/// Binds the operator's address, and the same port on the other family when they
-/// asked for every interface.
-///
-/// A server that answered on only one family would be unreachable from a client
-/// that has only the other, and a client's configured `host:port` names one
-/// port. IPv6 is probed first, because a host without it fails the bind rather
-/// than ignoring it.
 fn bind(builder: Builder, listen: SocketAddr) -> LinkResult<Builder> {
     let builder = builder
         .clear_ip_transports()
@@ -123,10 +102,6 @@ fn bind(builder: Builder, listen: SocketAddr) -> LinkResult<Builder> {
     Ok(builder)
 }
 
-/// Whether this host can bind IPv6 at all.
-///
-/// Probed rather than assumed, because a host without it fails the bind instead
-/// of ignoring it.
 fn ipv6_available() -> bool {
     UdpSocket::bind("[::]:0").is_ok()
 }
@@ -134,8 +109,6 @@ fn ipv6_available() -> bool {
 #[derive(Clone)]
 struct LinkHandler {
     id: EndpointId,
-    /// Where pushed configurations and logins are written, one directory per
-    /// operator.
     data_dir: PathBuf,
     config_lock: Arc<AsyncMutex<()>>,
     tasks: Arc<dyn TaskHost>,
@@ -163,12 +136,6 @@ impl ProtocolHandler for LinkHandler {
 }
 
 impl LinkHandler {
-    /// Takes a configuration a client sent: the settings, and the profiles this
-    /// machine is missing.
-    ///
-    /// A profile's files are credentials, so they are written for this user alone and
-    /// moved into place rather than written in place: nothing should read half a
-    /// login.
     fn write_config(
         &self,
         peer: EndpointId,
@@ -283,8 +250,6 @@ impl LinkHandler {
         })
     }
 
-    /// Other clients that already claim a tracker account this configuration
-    /// carries: the operator directory, the provider, and the name it goes by.
     fn tracker_holders(
         &self,
         peer: EndpointId,
@@ -349,19 +314,12 @@ pub struct ServerParts {
     pub clients: ClientRecord,
     pub listen: SocketAddr,
     pub label: String,
-    /// Where pushed configurations and logins are written, one directory per
-    /// operator.
     pub data_dir: PathBuf,
     pub state: watch::Receiver<RemoteState>,
     pub trackers: Vec<TrackerConnection>,
     pub tasks: Arc<dyn TaskHost>,
 }
 
-/// What a link can ask of the machine it is running on.
-///
-/// The link carries a request and an answer; what a machine does with a task is that
-/// machine's business, which is why this is a trait rather than the link reaching
-/// into a task service it should know nothing about.
 pub trait TaskHost: Send + Sync + 'static {
     fn signal_threads(
         &self,
@@ -379,8 +337,6 @@ pub trait TaskHost: Send + Sync + 'static {
         task_id: String,
         body: String,
     ) -> BoxFuture<Result<(), String>>;
-    /// Build what a peer's pushed configuration asks for, and forget what it no
-    /// longer runs. `forget_logins` says the peer keeps no project here.
     fn configure(&self, peer: EndpointId, forget_logins: bool) -> BoxFuture<Result<(), String>>;
     fn run(&self, peer: EndpointId, request: TaskRequest) -> BoxFuture<Result<(), String>>;
     fn list(&self, peer: EndpointId) -> BoxFuture<Result<Vec<TaskSummary>, String>>;
@@ -421,11 +377,6 @@ pub trait TaskHost: Send + Sync + 'static {
     -> BoxFuture<Result<(), String>>;
 }
 
-/// A peer's view of the tasks it may see: what the machine holds now, and the
-/// changes after that.
-///
-/// The snapshot is taken after the listener is registered, so a change made while
-/// it is being read is queued behind it rather than lost.
 pub struct Watching {
     pub snapshot: Vec<TaskSummary>,
     pub changes: UnboundedReceiver<WatchEvent>,
@@ -433,8 +384,6 @@ pub struct Watching {
 
 pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
-/// Writes a file beside the real one and moves it into place, so nothing ever reads
-/// half of it. Credentials are written for this user alone.
 fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -703,8 +652,6 @@ async fn answer(
     Ok(())
 }
 
-/// The server side of the link: an endpoint that accepts connections and the
-/// blobs it holds.
 pub struct LinkServer {
     router: Router,
     identity: InstallationKey,
@@ -712,11 +659,6 @@ pub struct LinkServer {
 }
 
 impl LinkServer {
-    /// Binds an endpoint for `identity` at `listen` and starts accepting link
-    /// connections.
-    ///
-    /// `listen` is the operator's, not the operating system's: a port nobody can
-    /// predict is a port nobody can configure a client to reach.
     pub async fn serve(parts: ServerParts) -> LinkResult<Self> {
         let ServerParts {
             identity,
@@ -786,9 +728,6 @@ impl LinkServer {
         RemoteTicket::new(self.addr())
     }
 
-    /// How to reach the server right now: its key plus whatever addresses are
-    /// currently known. Not public: a caller wants the ticket, which is the
-    /// address rendered as something it can carry.
     fn addr(&self) -> EndpointAddr {
         self.router.endpoint().addr()
     }

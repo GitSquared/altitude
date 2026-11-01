@@ -1,10 +1,3 @@
-//! How the program is invoked.
-//!
-//! Altitude is one binary in two roles, and the role is not a preference: a
-//! client wants a terminal and a person at it, a server wants neither. So the role
-//! is chosen on the command line rather than inferred from a config file that
-//! one role cannot sensibly read anyway.
-
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -44,9 +37,6 @@ pub enum Command {
     Serve(ServeArgs),
 }
 
-/// What a tracker-integrated remote needs, which is the same shape for any
-/// provider: an app its owner administers, an address that reaches this machine,
-/// and one command that installs it here.
 const SERVE_AFTER_HELP: &str = "\
 A remote can run work delegated from a task tracker. That needs, on this machine:
 \x20 1. an OAuth application in the tracker, owned by whoever administers it here
@@ -73,28 +63,15 @@ Altitude shows anywhere, but the addresses, ports and logins are this host's own
 
 #[derive(Debug, Args)]
 pub struct ServeArgs {
-    /// Settings file to read instead of the default `~/.config/altitude/serve.toml`.
-    ///
-    /// `$XDG_CONFIG_HOME/altitude/serve.toml` and `$ALTITUDE_CONFIG_DIR/serve.toml`
-    /// are where that default comes from, so setting either moves it.
     #[arg(long, value_name = "PATH", display_order = 1)]
     pub config: Option<PathBuf>,
 
-    /// Address and port to listen on, as `address:port`. Defaults to
-    /// `0.0.0.0:25848`, with discovery over TCP and the task connection over UDP.
-    /// Overrides the settings file.
     #[arg(long, value_name = "ADDR:PORT", display_order = 2)]
     pub listen: Option<String>,
 
-    /// Data directory to use instead of the default, where the serve role keeps its
-    /// key and its record of clients.
     #[arg(long, value_name = "PATH", display_order = 3)]
     pub data_dir: Option<PathBuf>,
 
-    /// Something to do instead of serving.
-    ///
-    /// Housekeeping and installing belong to this role rather than to a run of it,
-    /// so they are subcommands: a run has options, and these do not serve at all.
     #[command(subcommand)]
     pub command: Option<ServeCommand>,
 }
@@ -105,20 +82,8 @@ pub enum ServeCommand {
     Evict {
         key: String,
     },
-    /// Install Altitude as a service on this machine, then exit
-    ///
-    /// Asks whether it should run for this user or for the whole machine, then
-    /// starts it. Needs a terminal, and writes nothing before you agree.
     Install,
-    /// Remove the service this machine runs, keeping everything it holds
-    ///
-    /// Finds what is installed here, stops it and removes it, and leaves the
-    /// tasks, logins and settings alone. Needs a terminal.
     Uninstall,
-    /// Install a task tracker's shared app on this machine, then exit
-    ///
-    /// Prints what this machine holds, walks through the application's setup steps,
-    /// and saves the login here.
     #[command(after_help = CONNECT_AFTER_HELP)]
     Connect(ConnectArgs),
 }

@@ -1,7 +1,3 @@
-//! What the third column says about each row, and the words the setup helpers
-//! print. A page is one shape: what the thing is, whether it is connected, and
-//! the one next step.
-
 use std::{
     env,
     path::Path,
@@ -27,14 +23,10 @@ use crate::{
 
 use super::rows::{Credential, CredentialKind, GitIdentity, View, mark};
 
-/// A small heading inside a page, so a page that has to say several things can
-/// be read in the order it means them.
 pub(super) fn section_heading(text: &str) -> Line<'static> {
     Line::styled(text.to_owned(), palette::primary().bold())
 }
 
-/// The projects a credential is effectively bound to, named in the one colour
-/// the panel uses for a value that belongs to the operator.
 pub(super) fn used_by_lines(projects: &[String]) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(""), section_heading("Used by")];
     if projects.is_empty() {
@@ -57,25 +49,15 @@ fn field(label: &str, value: String) -> Line<'static> {
     ])
 }
 
-/// The third column's page for anything with a connection to maintain: a login,
-/// a remote, or this installation.
-///
-/// They all open the same way — what it is, whether it is connected, and the one
-/// next step — so an operator reads one shape rather than five, and the
-/// technical detail waits at the bottom where it does not push the status down.
 pub(super) struct Connector {
     title: String,
     reach: Reach,
     status: String,
     status_value: Option<String>,
-    /// A public name the provider reports, when the check printed one. Never
-    /// guessed: absent when the report does not name one.
     identity: Option<String>,
     note: Option<String>,
     action: Option<&'static str>,
     purpose: &'static str,
-    /// Projects whose effective binding is this identity, when it is one. A
-    /// remote or an installation has no projects of its own.
     used_by: Option<Vec<String>>,
     fields: Vec<(&'static str, String)>,
 }
@@ -119,8 +101,6 @@ impl Connector {
         lines
     }
 
-    /// The status is the page's verdict, so it is bold and monochrome with the
-    /// same dot the list uses; only the value beside it, if any, is accented.
     fn status_line(&self, tick: Option<usize>) -> Line<'static> {
         let mut spans = mark(self.reach == Reach::On, self.reach == Reach::Asking).spans(tick);
         if self.reach == Reach::Asking {
@@ -144,10 +124,6 @@ impl Connector {
         Line::from(spans)
     }
 }
-/// Instructions shown after opening the remote setup helper.
-///
-/// Only getting a remote running: the shared task tracker is set up afterwards,
-/// on the remote it belongs to, and lives in its own helper.
 pub(in crate::tui) fn remote_setup_lines() -> Vec<Line<'static>> {
     vec![
         Line::from(vec![
@@ -185,12 +161,6 @@ pub(in crate::tui) fn remote_setup_lines() -> Vec<Line<'static>> {
     ]
 }
 
-/// The provider's manual, styled for this panel.
-///
-/// The words are the ones `altitude serve connect linear` prints on the machine
-/// that performs the steps, so the two cannot drift. Nothing here depends on what
-/// a particular remote is configured with: the guide is the same everywhere, and
-/// the values that fill it in are printed where they belong.
 pub(in crate::tui) fn remote_tracker_setup_lines(kind: TrackerKind) -> Vec<Line<'static>> {
     let guide = kind.guide();
     let mut lines = Vec::new();
@@ -223,10 +193,6 @@ pub(in crate::tui) fn remote_tracker_setup_lines(kind: TrackerKind) -> Vec<Line<
     lines
 }
 
-/// A project's page: what the work is, and the machine state it runs in.
-///
-/// Read here and edited in the form, so the page always says what the file says
-/// rather than what a form remembers.
 pub(super) fn project_lines(
     project: &Project,
     view: &View,
@@ -370,8 +336,6 @@ pub(super) fn project_lines(
     lines
 }
 
-/// A login a task signs in with, as its page reads it. The same shape serves a
-/// coding agent and the GitHub CLI.
 pub(super) fn profile_connector(
     title: String,
     purpose: &'static str,
@@ -553,8 +517,6 @@ pub(super) fn tracker_connector(state: TrackerState, profile_dir: &Path) -> Conn
     }
 }
 
-/// A remote, as the page reads it: what it is, whether it answered, and the
-/// address and key the list keeps for it.
 pub(super) fn remote_connector(
     title: String,
     address: &str,
@@ -637,8 +599,6 @@ pub(super) fn remote_connector(
     }
 }
 
-/// The mark for what a remote's announcement said about one tracker: connected,
-/// not connected, or unknown because the remote has not answered at all.
 pub(in crate::tui) fn tracker_dot(is_ready: Option<bool>) -> Dot {
     match is_ready {
         Some(true) => Dot::still('●', palette::primary()),
@@ -647,8 +607,6 @@ pub(in crate::tui) fn tracker_dot(is_ready: Option<bool>) -> Dot {
     }
 }
 
-/// The remote's shared trackers, under its primary details: a status line in the
-/// same shape as the first, not a page of its own.
 pub(super) fn tracker_summary(
     trackers: Option<&[TrackerConnection]>,
     tick: Option<usize>,
@@ -695,8 +653,6 @@ pub(super) fn tracker_summary(
     Line::from(spans)
 }
 
-/// What a profile is for, in one line, so a page opens by saying what the
-/// operator is looking at.
 fn profile_purpose(profile: &str) -> &'static str {
     match Service::from_id(profile) {
         Some(Service::VersionControl(_)) => {
@@ -708,9 +664,6 @@ fn profile_purpose(profile: &str) -> &'static str {
     }
 }
 
-/// A public name a check printed, when it printed one in a shape the profile's
-/// CLI is known to use. Anything else yields nothing rather than a guess:
-/// signed in without a name is still true.
 pub(super) fn public_identity(profile: &str, output: &str) -> Option<String> {
     match Service::from_id(profile)? {
         Service::VersionControl(_) => github_account(output),
@@ -754,9 +707,6 @@ pub(super) fn hostname() -> String {
     }
 }
 
-/// A path as the operator would type it: the home directory's prefix is replaced
-/// with `~`, component by component so `/home/gaby-other` is not mistaken for a
-/// path under `/home/gaby`.
 fn tilde(path: &str) -> String {
     let Some(home) = env::var_os("HOME") else {
         return path.to_owned();
@@ -770,8 +720,6 @@ fn tilde(path: &str) -> String {
     Path::new("~").join(rest).display().to_string()
 }
 
-/// The head of a key, long enough to tell two apart and short enough to read on
-/// the status line. The whole key stays in the fields below.
 fn short_key(key: &str) -> String {
     const KEEP: usize = 12;
     let head = key.chars().take(KEEP).collect::<String>();

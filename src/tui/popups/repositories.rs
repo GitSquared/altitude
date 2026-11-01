@@ -1,10 +1,3 @@
-//! The repositories a version-control login can reach, as a list.
-//!
-//! A component rather than a page: a project's settings and a new installation's
-//! first screen both ask the same question, and both want the same list, the same
-//! keys, and the same "still listing" state. What differs is where the answer
-//! goes, which is the caller's business.
-
 use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
 use ratatui::{
     Frame,
@@ -98,8 +91,6 @@ impl Repositories {
         Key::Closed
     }
 
-    /// Take a mouse event against the rows the last draw returned, answering the
-    /// repository a line was clicked on.
     pub fn mouse(&mut self, mouse: MouseEvent) -> Option<Repository> {
         let rows = mem::take(&mut self.rows);
         if !self.select.mouse(mouse, &rows) {

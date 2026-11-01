@@ -1,5 +1,3 @@
-//! Establish the exact environment, stage a usable capsule, then transfer ownership.
-
 use crate::{
     config::DEFAULT_PORT,
     isolation::IsolationEngine,
@@ -81,11 +79,6 @@ where
     outcome
 }
 
-/// Take everything a prepared transfer offers, and land it here.
-///
-/// Apart from `bring_home` so a stop can be answered where it happened: the
-/// machine that stopped the transfer still owns the task, and has to run it
-/// again rather than hold it stopped for a transfer nobody is making.
 async fn receive<E>(
     peer: &iroh::EndpointAddr,
     handover: &Handover,
@@ -213,12 +206,6 @@ where
     Ok(task.id)
 }
 
-/// Hand a take over back to the machine that still owns the task.
-///
-/// Best effort, and said out loud when it fails: the source keeps the task until
-/// this machine lands it, so a failure to say so costs it a wait rather than the
-/// task. Doing nothing is what leaves a task paused in a transfer nobody is
-/// making, with the operator looking at two copies of the same work.
 async fn give_back(peer: &iroh::EndpointAddr, transfer_id: &str, client: &LinkClient) {
     if let Err(error) = client.abandon_take(peer, transfer_id).await {
         tracing::warn!(%error, transfer_id, "could not give a transfer back to its owner");

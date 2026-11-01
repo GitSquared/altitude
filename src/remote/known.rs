@@ -1,32 +1,11 @@
-//! Whether a remote's key is the one you remember for its address.
-//!
-//! A key learned from an announcement is unauthenticated — that is what makes a
-//! first sighting possible at all — so the protection is not that the first
-//! answer was trustworthy but that a *different* answer later is noticed. This
-//! says whether it is different. Remembering is the caller's business, because
-//! the first sighting is the part that cannot be authenticated and so the
-//! operator is the one who decides.
-//!
-//! Nothing here stores anything, which is why a machine with no database can use
-//! the link. A client keeps what it remembers in the database, and a server keeps
-//! its own record of who connected in a file; this module keeps neither.
-
 use iroh::EndpointId;
 
 use super::{LinkResult, announce::Announcement, compat::Compatibility, protocol::RemoteTicket};
 
-/// How the key a remote answered with stands next to the one recorded for its
-/// address.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemoteKeyStatus {
     New,
     Known,
-    /// A different key.
-    ///
-    /// A remote that was replaced and a remote that was never the one you thought
-    /// look identical from here, so this is reported and never followed
-    /// silently. The operator decides. The key it changed from is the record the
-    /// caller compared against, and is not repeated here.
     Changed,
 }
 
@@ -47,13 +26,6 @@ pub struct Sighting {
     pub compatibility: Compatibility,
 }
 
-/// Meets a remote at an address, and says how its key compares to what was
-/// remembered there.
-///
-/// `remembered` is the key previously seen for this address, which the caller
-/// looks up wherever it keeps such things. Learning and remembering are separate
-/// on purpose: the first sighting is unauthenticated, so keeping it is a
-/// decision rather than a side effect.
 pub async fn meet(
     address: &str,
     default_port: u16,

@@ -1,11 +1,3 @@
-//! A credential is one named instance of one service: "Work Linear", "Claude
-//! Work", "GitHub".
-//!
-//! The service is what knows how to sign in and check; the credential is what an
-//! operator names, binds to a project, and sees in a list. The id encodes the
-//! service because it also names the profile directory, travels in a task, and
-//! has to be understood by a machine that has never seen this settings file.
-
 use crate::{agent::AgentKind, tracker::TrackerKind, vcs::VcsProviderKind};
 use serde::{Deserialize, Serialize};
 
@@ -59,8 +51,6 @@ impl Service {
         }
     }
 
-    /// Whether a task mounts this credential's directory, as opposed to the host
-    /// using it as a session.
     pub fn is_mounted(self) -> bool {
         !matches!(self, Self::Tracker(_))
     }
@@ -75,15 +65,6 @@ impl Service {
     }
 }
 
-/// How a login reads wherever it is shown: `service:group/identity`.
-///
-/// The service says which tool, the group says where it lives — a workspace, an
-/// organisation — and the identity says whose it is. A part the provider does
-/// not name is left out rather than borrowed from somewhere else, and an
-/// identity that only repeats the service is not printed twice: `linear:` +
-/// `carbonfact` + `gaby` is `linear:carbonfact/gaby`, a GitHub login whose
-/// organisation nobody reports is `github:gitsquared`, and an agent login that
-/// is nothing but its tool is `pi`.
 pub fn describe(service: Service, group: Option<&str>, identity: &str) -> String {
     let name = match service {
         Service::Agent(AgentKind::Claude) => "claude",
@@ -106,11 +87,6 @@ pub fn describe(service: Service, group: Option<&str>, identity: &str) -> String
     }
 }
 
-/// The coding agent an identity is a login for, when it is one.
-///
-/// A project names a harness and an identity separately; the harness is what the
-/// identity's tools are, so a project that names only the identity is answered by
-/// this rather than left without one.
 pub fn agent_of(credential: Option<&str>) -> Option<AgentKind> {
     match credential.and_then(Service::from_id) {
         Some(Service::Agent(kind)) => Some(kind),
@@ -122,8 +98,6 @@ pub fn agent_of(credential: Option<&str>) -> Option<AgentKind> {
 pub struct Credential {
     pub id: String,
     pub label: String,
-    /// Whether the label is still the one the service or the fallback chose.
-    /// A rename turns this off, so a later account hint does not overwrite it.
     #[serde(default = "default_true")]
     pub label_auto: bool,
 }
@@ -166,8 +140,6 @@ impl Credential {
     }
 }
 
-/// Build the id for a new credential of `service`, using a slug of its label and
-/// a short suffix when that is taken.
 pub fn new_id(service: Service, label: &str, taken: impl Fn(&str) -> bool) -> String {
     let slug: String = label
         .trim()

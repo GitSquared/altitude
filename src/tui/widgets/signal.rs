@@ -1,9 +1,3 @@
-//! How a signal kind reads on screen.
-//!
-//! The kind is the agent's word for what it is doing; this table is the
-//! operator's. It is shared by the task list and the signals screen so a blocked
-//! task and a blocked thread cannot end up with different names or colours.
-
 use ratatui::style::Style;
 
 use super::palette;
@@ -11,8 +5,6 @@ use crate::task::TaskOperatorSignalKind;
 
 pub struct SignalView {
     pub label: &'static str,
-    /// The same kind as a task card reads it, where there is no group heading to
-    /// carry the action.
     pub task_label: &'static str,
     pub symbol: char,
     pub tone: Style,

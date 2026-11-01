@@ -1,10 +1,3 @@
-//! Asking before something is destroyed.
-//!
-//! One question, two answers, and the same keys as everywhere else: escape
-//! cancels, and `d`, delete or backspace go through with it. What it is about to
-//! do is the caller's business, so the caller keeps the action and hands this
-//! only the words.
-
 use std::mem;
 
 use tokio::sync::mpsc;
@@ -151,8 +144,6 @@ impl PendingConfirm {
         }
     }
 
-    /// Confirming deletes a task another machine holds, which is that machine's
-    /// to dispose of.
     pub(in crate::tui) fn removing_remote(
         address: String,
         task_id: String,
@@ -164,8 +155,6 @@ impl PendingConfirm {
         }
     }
 
-    /// Confirming replaces the key remembered for an address with the one that
-    /// answered.
     pub(in crate::tui) fn replacing_key(address: String, question: String) -> Self {
         Self {
             dialog: Confirm::new(question, "accept"),
@@ -173,8 +162,6 @@ impl PendingConfirm {
         }
     }
 
-    /// Confirming takes a task over from the machine running it: the files and the
-    /// conversation move here, and the agent stops there.
     pub(in crate::tui) fn pulling(task_id: String, question: String) -> Self {
         Self {
             dialog: Confirm::new(question, "take over"),
@@ -189,8 +176,6 @@ impl PendingConfirm {
         }
     }
 
-    /// Confirming accepts a wrap-up request: the task closes and its capsule
-    /// goes. The only way a task ends, which is why it is asked.
     pub(in crate::tui) fn confirming_signal(
         task_id: String,
         signal_id: String,
@@ -224,8 +209,6 @@ impl PendingConfirm {
     }
 }
 
-/// What confirming would do. The dialog knows the words; the application knows
-/// the consequences.
 enum ConfirmAction {
     RemoveTask { id: String },
     RemoveRemoteTask { address: String, task_id: String },

@@ -30,11 +30,6 @@ use crate::{
 
 const MIN_CARD_WIDTH: u16 = 26;
 
-/// How the cards are laid out in an area.
-///
-/// A card is wider than it is tall, but not by so much that the title has to be
-/// squeezed into a strip above the border. The grid pages rather than scrolling
-/// by a card, and the page is what fits.
 fn grid(area: Rect) -> (usize, u16, u16) {
     let columns = (area.width / MIN_CARD_WIDTH).max(1) as usize;
     let card_width = area.width / columns as u16;
@@ -61,11 +56,6 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     draw_tasks(frame, body, app, columns, card_width, height);
 }
 
-/// The projects, as tabs over the task list.
-///
-/// The one in front is inverted and the others are quiet, and a project whose
-/// tasks are blocking on the operator says how many. Choosing a project narrows
-/// everything under the bar, including where a new task is founded.
 fn draw_tabs(frame: &mut Frame, area: Rect, pane: Rect, app: &mut App) {
     // The tabs own their row: the gutter to their right is solid rather than a
     // window onto the field, so a contour never moves behind a project name.
@@ -150,11 +140,6 @@ fn draw_tasks(
     }
 }
 
-/// What a card draws, whichever machine owns the task.
-///
-/// Built from a [`TaskSummary`], which is what a remote answers with and what a
-/// local task projects to, so a card cannot say one thing about a task here and
-/// another about the same kind of task on another machine.
 struct Card {
     title: String,
     project: String,
@@ -162,17 +147,12 @@ struct Card {
     model: Option<String>,
     host: String,
     issue: Option<String>,
-    /// Whether this task is asking for a person loudly enough to be marked out by
-    /// its frame rather than only by a line inside it.
     is_alarm: bool,
     status: Line<'static>,
     extras: Vec<Line<'static>>,
 }
 
 impl Card {
-    /// `at_capacity` is whether the machine this card is drawn on has room for
-    /// another sandbox. It is only ever true of this machine's tasks: a remote
-    /// reports its own reasons for a task that is not starting.
     fn of(
         summary: &TaskSummary,
         at_capacity: bool,
@@ -200,11 +180,6 @@ impl Card {
     }
 }
 
-/// The list: this machine's tasks, then what the remotes are holding.
-///
-/// A remote's tasks are read from it rather than copied, so they are here because it
-/// answered and they are gone when it does not. Its card is built from the same
-/// summary this machine builds for its own.
 fn cards(app: &App) -> Vec<Card> {
     let occupied = app
         .tasks
@@ -292,9 +267,6 @@ fn draw_card(frame: &mut Frame, area: Rect, card: &Card, focused: bool) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
-/// The one line under a task's title: how it is going, or which signal is
-/// holding it. The signal's own mark and tone are reused so a blocked task and
-/// a blocked thread read alike.
 fn card_summary(
     summary: &TaskSummary,
     at_capacity: bool,
@@ -329,10 +301,6 @@ fn card_summary(
     line
 }
 
-/// How a task is going, in the words a card has room for.
-///
-/// `build` is this machine's own progress building the environment, which only
-/// exists here: a task on another machine is built there.
 fn card_status(
     summary: &TaskSummary,
     at_capacity: bool,
@@ -377,10 +345,6 @@ fn card_status(
     }
 }
 
-/// Whether the task is asking for a person loudly enough to be marked out.
-///
-/// The frame and the word inside it read one answer, so a card cannot be outlined
-/// as an alarm without saying what it is.
 fn is_alarming(summary: &TaskSummary) -> bool {
     summary.status == TaskExecutionStatus::Paused
         && summary.pause_reason.as_ref() == Some(&TaskExecutionPauseReason::AwaitingOperator)

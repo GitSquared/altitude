@@ -41,17 +41,11 @@ pub struct CommandSession {
     pub events: mpsc::UnboundedReceiver<CommandEvent>,
 }
 
-/// The composed recipe for a reusable sandbox environment.
-///
-/// Isolation owns image refreshes, snapshot promotion, and cleanup. An agent
-/// contributes package installation and persistent configuration requirements.
 #[derive(Clone, Debug)]
 pub struct BaseSandboxRecipe {
     pub name: String,
     pub snapshots_dir: PathBuf,
     pub refresh_after: Duration,
-    /// Run in order, each in its own shell. Their commands are also this
-    /// recipe's identity: a snapshot is reused only while they are unchanged.
     pub steps: Vec<SetupStep>,
 }
 
@@ -79,26 +73,17 @@ impl BaseSandboxRecipe {
     }
 }
 
-/// One command in an environment build, named so that an operator waiting on
-/// the build can see what the wait is for.
 #[derive(Clone, Debug)]
 pub struct SetupStep {
     pub label: String,
     pub command: String,
 }
 
-/// A sandbox made for a profile's login: where it runs, and what it is made from.
-///
-/// The pieces travel together because a sign-in and a check are the same sandbox
-/// with a different command, and because a sandbox id, the profiles it mounts, and
-/// an optional snapshot is one thing rather than three.
 #[derive(Clone)]
 pub struct CredentialSandbox {
     pub id: String,
     pub recipes: Vec<ProfileRecipe>,
     pub snapshot: Option<String>,
-    /// Channels the sandbox's own programs reach this machine through. A shell
-    /// gets the relay that makes its ports reachable; a check needs none.
     pub vsock: Vec<VsockRoute>,
 }
 
@@ -118,8 +103,6 @@ pub struct EnvironmentProgress {
     pub total: usize,
 }
 
-/// Receives build progress. Isolation reports it; the task layer decides where
-/// it goes, and a build nobody waits on can ignore it.
 pub trait EnvironmentProgressSink: Send + Sync {
     fn report(&self, progress: EnvironmentProgress);
 }
@@ -130,23 +113,14 @@ impl EnvironmentProgressSink for Unwatched {
     fn report(&self, _progress: EnvironmentProgress) {}
 }
 
-/// How many files have moved, and how much they weigh.
-///
-/// A task's files are counted rather than weighed: what an operator waits for
-/// while work is carried between machines is mostly "how many are left", and the
-/// bytes come along for the estimate.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FileTally {
     pub files: u64,
     pub bytes: u64,
 }
 
-/// Watches files carried out of, or into, one sandbox.
 pub trait FileTransferSink: Send + Sync {
-    /// What the whole of it is, once known: the walk has finished and the moves
-    /// are about to start.
     fn counted(&self, whole: FileTally);
-    /// What one step moved, however many files it covered.
     fn moved(&self, step: FileTally);
 }
 
@@ -161,41 +135,21 @@ impl FileTransferSink for UnwatchedFiles {
 pub struct BaseSandboxSnapshot {
     pub path: PathBuf,
     pub created_at_ms: i64,
-    /// What the snapshot reported about its image and packages, empty when it
-    /// could not be asked. See [`EnvironmentDescription`].
     pub os_release: String,
     pub packages: String,
     pub setup_command: String,
 }
 
-/// A profile a task mounts into its sandbox: where it lives on this machine, and
-/// where a task sees it.
-///
-/// A profile is how a login survives between tasks, so this is the shape of the
-/// answer to "what identity is logged in": the names and the places, never the
-/// contents.
 #[derive(Clone, Debug)]
 pub struct ProfileSummary {
     pub profile: String,
     pub display: &'static str,
     pub sign_in: &'static str,
-    /// How this profile's sign-in is run, which decides whether it needs telling
-    /// first.
     pub sign_in_command: SignInCommand,
 }
 
-/// What a sandbox made for credentials is called: the shell an operator signs in in,
-/// and the one a profile's login is checked in.
-///
-/// Named by prefix rather than by profile so that one a client left behind can be told
-/// from every other sandbox without knowing which profiles exist.
 pub const CREDENTIAL_PREFIX: &str = "credentials-";
 
-/// What a sandbox made to observe a provider is called.
-///
-/// One per credential owner, reused by every review that owner is holding, and
-/// thrown away when the host stops. The prefix is what tells a leftover from a
-/// sandbox that is in use.
 pub const WATCHER_PREFIX: &str = "watcher-";
 
 #[derive(Clone, Debug)]
@@ -204,22 +158,12 @@ pub struct CredentialReport {
     pub signed_in: bool,
 }
 
-/// One profile's login check, as the sandbox should run it.
-///
-/// Several travel together because one sandbox can answer them all: making a
-/// sandbox is the expensive part of asking, not running a command in it.
 #[derive(Clone, Debug)]
 pub struct CredentialCheck {
     pub profile: String,
     pub command: String,
 }
 
-/// What a built environment says about itself.
-///
-/// Read back from the snapshot rather than derived from configuration, because
-/// it records what was installed rather than what was asked for. Nothing else
-/// can answer this: the image is a rolling tag and the setup commands name no
-/// versions.
 #[derive(Clone, Debug)]
 pub struct EnvironmentDescription {
     pub os_release: String,
@@ -233,19 +177,10 @@ pub struct SandboxOptions {
     pub network_enabled: bool,
     pub mounts: Vec<SandboxMount>,
     pub environment: Vec<(String, String)>,
-    /// Host sockets this sandbox can reach as host CID 2, for channels that are
-    /// not the network. See [`VsockRoute`].
     pub vsock: Vec<VsockRoute>,
     pub size: SandboxSize,
 }
 
-/// What a sandbox is created with.
-///
-/// Ceilings the sandbox enforces, not reservations: most work uses a fraction of
-/// them most of the time, which is why how many run at once is observed rather
-/// than derived from these. The values are arbitrary. There are two sizes
-/// because the work differs by an order of magnitude, and a host watching many
-/// reviews should not hold a capsule's memory for each one.
 #[derive(Clone, Copy, Debug)]
 pub struct SandboxSize {
     pub cpus: u8,
@@ -264,29 +199,12 @@ impl SandboxSize {
     };
 }
 
-/// A host local socket published to one sandbox on a guest vsock port.
-///
-/// This is a channel rather than a service: only the sandbox it was created for
-/// can reach it, and it exists without the sandbox having a network at all.
 #[derive(Clone, Debug)]
 pub struct VsockRoute {
     pub host_socket: PathBuf,
     pub guest_port: u32,
 }
 
-/// Gives a sandbox this machine's shared git object cache.
-///
-/// A capsule is disposable, so the repository cloned into it is too, and a
-/// machine given task after task over the same few repositories would pull each
-/// one from the network every time. The cache is where this machine keeps what
-/// it has already pulled, and a capsule's git clones through it.
-///
-/// Mounted rather than built into a snapshot, because it belongs to this machine
-/// and a snapshot can be moved to another one.
-///
-/// A failure here is not a failure to create a sandbox: a sandbox without a
-/// cache is the sandbox there was before, and the git it runs clones as it always
-/// did.
 pub(crate) fn mount_git_cache(options: &mut SandboxOptions, cache_dir: &Path) {
     match git_cache::ready(cache_dir) {
         Ok(host_path) => {
@@ -305,17 +223,6 @@ pub(crate) fn mount_git_cache(options: &mut SandboxOptions, cache_dir: &Path) {
     }
 }
 
-/// Gives a sandbox the extra roots this machine trusts.
-///
-/// A machine whose traffic is inspected — by an endpoint agent, or a proxy — verifies
-/// against roots no base image has, and a task that cannot verify a registry cannot
-/// install anything. The roots are collected into one bundle and mounted into every
-/// sandbox, build or run, rather than built into a snapshot: a snapshot can be moved
-/// to another machine, and one host's inspection root must never travel to another.
-///
-/// `NODE_EXTRA_CA_CERTS` adds to a store rather than replacing it, which is why it is
-/// safe here where `SSL_CERT_FILE` would not be. Tools that read the system store —
-/// curl, apt, git — need the bundle appended to that store, which a build step does.
 pub(crate) fn trust_host_roots(options: &mut SandboxOptions, data_dir: &Path) -> bool {
     let roots: Vec<PathBuf> = ["NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "CURL_CA_BUNDLE"]
         .into_iter()
@@ -387,15 +294,13 @@ impl SandboxOptions {
 }
 
 #[derive(Clone, Debug)]
+// Nothing a guest can write is mounted from the host: mounted files travel through
+// `sandbox.fs()` one at a time, because a guest-writable host directory is a way out
+// of the sandbox and a place to plant a hook the host will run.
 pub struct SandboxMount {
     pub host_path: PathBuf,
     pub guest_path: String,
-    /// A mount the sandbox may read but not write. Used for data this machine
-    /// supplies rather than state a task keeps.
     pub readonly: bool,
-    /// Nothing on this mount may be executed directly. A cache is written by one
-    /// task and read by the next, so it is the one place where a file planted by
-    /// an agent could be run by later work.
     pub noexec: bool,
 }
 
@@ -448,11 +353,6 @@ pub trait IsolationEngine: Send + Sync {
         progress: &dyn EnvironmentProgressSink,
     ) -> impl Future<Output = Result<(), IsolationError>> + Send;
 
-    /// A view of this engine that builds and mounts for one operator.
-    ///
-    /// The default is this engine unchanged: an engine that does not separate
-    /// operators keeps one set of directories for everyone. An engine that
-    /// serves several peers overrides this.
     fn for_operator(&self, owner: &str) -> Result<Self, IsolationError>
     where
         Self: Sized + Clone,
@@ -461,11 +361,6 @@ pub trait IsolationEngine: Send + Sync {
         Ok(self.clone())
     }
 
-    /// Make a sandbox for setting up one profile's credentials, and answer with
-    /// the command that opens a shell in it.
-    ///
-    /// Not a task: nothing records it, nothing travels from it, and it is meant to
-    /// be thrown away when the shell ends.
     fn credential_shell(
         &self,
         sandbox: CredentialSandbox,
@@ -473,14 +368,6 @@ pub trait IsolationEngine: Send + Sync {
         progress: &dyn EnvironmentProgressSink,
     ) -> impl Future<Output = Result<String, IsolationError>> + Send;
 
-    /// Make a sandbox that runs a provider's read commands with an owner's
-    /// profile mounted, and keep it until the host removes it.
-    ///
-    /// The same shell shape a credential shell gets, minus the shell: it is not a
-    /// task, nothing travels from it, and its only job is to answer what a linked
-    /// contribution looks like now. It is scoped to one owner by the caller, so a
-    /// machine serving several peers never lets one peer's login answer for
-    /// another's.
     fn watcher(
         &self,
         id: String,
@@ -500,13 +387,6 @@ pub trait IsolationEngine: Send + Sync {
         options: SandboxOptions,
     ) -> impl Future<Output = Result<(), IsolationError>> + Send;
 
-    /// Build a project's snapshot if it is not already here, and say where it is.
-    ///
-    /// A capsule travelling from another machine leaves out the environment it was
-    /// built on, because every machine builds that environment for itself from the same
-    /// configuration. Landing one therefore needs the environment here first — the work
-    /// a task would do on its first run, done ahead of the capsule rather than by it —
-    /// and the snapshot it lands on is what resolves the layers that stayed behind.
     fn ensure_project(
         &self,
         project: Project,
@@ -520,11 +400,6 @@ pub trait IsolationEngine: Send + Sync {
         progress: &dyn EnvironmentProgressSink,
     ) -> impl Future<Output = Result<BaseSandboxSnapshot, IsolationError>> + Send;
 
-    /// What the workspace base says about itself, if it has been built.
-    ///
-    /// Synchronous because it reads a manifest rather than a machine: the answer
-    /// was recorded when the snapshot was built, because only a live sandbox can
-    /// say it and by the time an operator asks there is none.
     fn base_description(&self) -> Option<EnvironmentDescription>;
 
     fn run_command(
@@ -533,23 +408,8 @@ pub trait IsolationEngine: Send + Sync {
         command: String,
     ) -> impl Future<Output = Result<CommandSession, IsolationError>> + Send;
 
-    /// The project's snapshot path, if one is built here.
-    ///
-    /// Asked instead of building one: a check that a profile can be read has to be
-    /// able to answer "not built here" rather than start a build, because looking at
-    /// a page is not the place for minutes of work. A snapshot past its refresh is
-    /// still answered with: it runs, and the check only reads a login.
     fn project_snapshot(&self, project: Project, recipes: Vec<ProfileRecipe>) -> Option<String>;
 
-    /// Run profiles' own check commands in one sandbox that is thrown away after
-    /// them.
-    ///
-    /// The same sandbox a credential shell would get, so a report is what opening one
-    /// would find, and one sandbox answers every profile asked about rather than one
-    /// each. Given the environment's snapshot it uses that as it is rather than
-    /// building, which is what lets a page ask a profile whose environment is only due
-    /// for a refresh. With no snapshot it answers with nothing rather than starting
-    /// the build a page must not start.
     fn credential_reports(
         &self,
         sandbox: CredentialSandbox,
@@ -557,12 +417,6 @@ pub trait IsolationEngine: Send + Sync {
         progress: &dyn EnvironmentProgressSink,
     ) -> impl Future<Output = Result<Option<Vec<(String, CredentialReport)>>, IsolationError>> + Send;
 
-    /// Throw away sandboxes a client left behind.
-    ///
-    /// A credential shell lives as long as the terminal in front of it, and a
-    /// watcher sandbox lives as long as the host that made it, so one still here
-    /// when the host is starting up belongs to a process that is gone. Nothing
-    /// else holds these.
     fn remove_leftover_sandboxes(&self) -> impl Future<Output = ()> + Send;
 
     fn remove(&self, id: String) -> impl Future<Output = Result<(), IsolationError>> + Send;
@@ -585,15 +439,6 @@ pub trait IsolationEngine: Send + Sync {
         path: String,
     ) -> impl Future<Output = Result<bool, IsolationError>> + Send;
 
-    /// Carry the files under `root` out of a sandbox into a host directory.
-    ///
-    /// Through the sandbox's own filesystem channel, one file at a time: nothing
-    /// is executed in the guest and no host directory is shared with it, which is
-    /// what a task's files crossing a machine boundary needs. Paths in `excluded`
-    /// are left behind — a cache is a shortcut, not knowledge.
-    ///
-    /// Modes and symlinks are written as they were found, so what arrives is the
-    /// tree the agent left rather than a copy of its bytes.
     fn collect_files(
         &self,
         id: String,
@@ -603,7 +448,6 @@ pub trait IsolationEngine: Send + Sync {
         progress: &dyn FileTransferSink,
     ) -> impl Future<Output = Result<FileTally, IsolationError>> + Send;
 
-    /// Carry one file out of a sandbox, answering how much moved.
     fn collect_file(
         &self,
         id: String,
@@ -611,7 +455,6 @@ pub trait IsolationEngine: Send + Sync {
         host_path: PathBuf,
     ) -> impl Future<Output = Result<u64, IsolationError>> + Send;
 
-    /// Put one host file into a sandbox, making its directory if it is missing.
     fn deliver_file(
         &self,
         id: String,
@@ -619,11 +462,6 @@ pub trait IsolationEngine: Send + Sync {
         guest_path: String,
     ) -> impl Future<Output = Result<(), IsolationError>> + Send;
 
-    /// Write a host directory into a sandbox, under `root`.
-    ///
-    /// The other half of [`Self::collect_files`], and the same channel: the tree
-    /// a task left behind appears in the guest as it was, so a task that arrives
-    /// finds its work rather than a clone of it.
     fn deliver_files(
         &self,
         id: String,

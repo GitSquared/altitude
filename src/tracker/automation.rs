@@ -1,17 +1,3 @@
-//! Linear's native agent API: an app-token GraphQL transport, the signed
-//! AgentSessionEvent webhook, and the comment/reaction calls the coordinator
-//! needs to answer a human in a shared issue.
-//!
-//! The MCP adapter in [`super::Linear`] serves the interactive client, where a
-//! person signs in. A remote coordinator has no person and no browser: it acts
-//! as the OAuth app itself, with an app-actor token the infrastructure owns, and
-//! receives its work through Linear's signed webhooks. This module is that path,
-//! kept concrete until a second tracker or a second caller shows the shared
-//! shape.
-//!
-//! The token is a credential. It lives in [`LinearAutomation`], is never logged,
-//! never written to a task capsule, and never handed to a delegated agent.
-
 use std::{
     error::Error,
     fmt,
@@ -142,11 +128,6 @@ impl LinearAutomation {
         })
     }
 
-    /// Confirm the token authenticates as the expected app user in the expected
-    /// workspace.
-    ///
-    /// The viewer of an app-actor token is the app user, so `viewer.app` must be
-    /// true: a personal token would otherwise read and write as that person.
     pub async fn verify(&self) -> Result<(), TrackerError> {
         let data = self.graphql(VIEWER_QUERY, json!({})).await?;
         let viewer = data
@@ -195,11 +176,6 @@ impl LinearAutomation {
         })
     }
 
-    /// The issues this app is delegated to, as the tracker has them now.
-    ///
-    /// Each comes with the session the operator delegated into, when the tracker
-    /// made one: that session is where they are watching, so answering in it is
-    /// answering where they asked.
     pub async fn delegated_issues(&self) -> Result<Vec<DelegatedIssue>, TrackerError> {
         let data = self
             .graphql(DELEGATED_ISSUES_QUERY, json!({ "app": self.app_user_id }))
@@ -288,13 +264,6 @@ impl LinearAutomation {
         Ok(())
     }
 
-    /// Take this app off an issue, so the tracker stops pointing at a task that is
-    /// no longer running.
-    ///
-    /// A stop ends the work here; the issue then belongs to whoever owns it rather
-    /// than to a machine that stopped listening. Clearing the delegate says that,
-    /// and it is the operator's own view of the issue that has to change for it to
-    /// be true.
     pub async fn release_issue(&self, reference: &IssueReference) -> Result<(), TrackerError> {
         let data = self
             .graphql(
@@ -306,10 +275,6 @@ impl LinearAutomation {
         Ok(())
     }
 
-    /// The thread, document, and authors around one comment.
-    ///
-    /// Admission needs facts, not a cached copy of the issue. Every call is a
-    /// point-in-time read of the discussion as Linear has it now.
     pub async fn comment_site(&self, comment_id: &str) -> Result<CommentSite, TrackerError> {
         let data = self
             .graphql(COMMENT_SITE_QUERY, json!({ "id": comment_id }))
@@ -415,11 +380,6 @@ impl LinearAutomation {
         })
     }
 
-    /// Reply in an issue or document comment thread.
-    ///
-    /// `parentId` alone is not enough: Linear requires exactly one parent entity
-    /// id beside it, so the caller passes the issue or document content the
-    /// thread belongs to.
     pub async fn comment_reply(
         &self,
         issue_id: Option<&str>,
@@ -464,10 +424,6 @@ impl LinearAutomation {
         Ok(())
     }
 
-    /// Post a top-level issue comment under a stable id.
-    ///
-    /// A signal is re-raised into the same thread, so an existing comment is
-    /// updated and reopened rather than duplicated.
     pub async fn comment_on_issue(
         &self,
         issue_id: &str,
@@ -519,7 +475,6 @@ impl LinearAutomation {
         Ok(())
     }
 
-    /// The comment with this id, or nothing when it was never published.
     pub async fn comment(&self, comment_id: &str) -> Result<Option<Value>, TrackerError> {
         let data = self
             .graphql(COMMENT_EXISTS_QUERY, json!({ "id": comment_id }))
@@ -547,10 +502,6 @@ impl LinearAutomation {
         mutation_succeeded(&data, "commentResolve").map(|_| ())
     }
 
-    /// Reopen a thread, so the tracker and this machine agree that it is waiting.
-    ///
-    /// Asked only when the thread is closed: a reply in the tracker reopens it by
-    /// itself, and un-resolving an open thread is a call that can only fail.
     pub async fn reopen_comment(&self, comment_id: &str) -> Result<(), TrackerError> {
         let Some(comment) = self.comment(comment_id).await? else {
             return Ok(());
@@ -564,8 +515,6 @@ impl LinearAutomation {
         mutation_succeeded(&data, "commentUnresolve").map(|_| ())
     }
 
-    /// Add one reaction to a comment, optionally under a stable id so a retry is
-    /// the same reaction rather than a second one.
     pub async fn react_to_comment(
         &self,
         comment_id: &str,
@@ -582,8 +531,6 @@ impl LinearAutomation {
         mutation_succeeded(&data, "reactionCreate").map(|_| ())
     }
 
-    /// Set the session title. The model row in Linear's details is internal;
-    /// the title is the public place to name what is running.
     pub async fn update_session_summary(
         &self,
         session_id: &str,
@@ -626,15 +573,6 @@ impl LinearAutomation {
         mutation_succeeded(&data, "agentSessionUpdate").map(|_| ())
     }
 
-    /// The profile URL Linear uses for a person.
-    ///
-    /// A bare profile URL in Markdown renders as a mention, which is how the
-    /// redirect names the operator without guessing a workspace slug.
-    /// A person, written the way Linear writes a mention of them.
-    ///
-    /// A profile link is shown as a link; the `mention://` form is what a mention
-    /// is in Linear's own markdown, and it is what makes a name notify the person
-    /// it names.
     pub async fn user_url(&self, user_id: &str) -> Result<String, TrackerError> {
         let data = self
             .graphql(USER_URL_QUERY, json!({ "id": user_id }))
@@ -658,14 +596,6 @@ impl LinearAutomation {
         Ok(format!("[@{name}](mention://user/{user_id})"))
     }
 
-    /// Sponsor an agent session on an issue through the public Agent API.
-    ///
-    /// This is how a task that began on a client is reported from the remote
-    /// that runs it: the issue need not be delegated to this app, and the
-    /// human assignee is left where the operator put them. Linear has no way to
-    /// make this idempotent, so a response lost after the session was created
-    /// leaves a second session behind; the caller records a binding before it
-    /// retries so it does not ask twice.
     pub async fn create_session_on_issue(&self, issue_id: &str) -> Result<String, TrackerError> {
         let data = self
             .graphql(
@@ -681,10 +611,6 @@ impl LinearAutomation {
             .ok_or_else(|| TrackerError::new("Linear created the agent session but returned no id"))
     }
 
-    /// Create one durable agent activity under `activity_id`.
-    ///
-    /// The id is supplied by the caller so a retry after a lost response is the
-    /// same activity rather than a second one.
     pub async fn create_activity(
         &self,
         agent_session_id: &str,
@@ -844,7 +770,6 @@ impl LinearAutomation {
     }
 }
 
-/// An issue delegated to this app, and the session it was delegated into.
 #[derive(Clone, Debug)]
 pub struct DelegatedIssue {
     pub reference: IssueReference,
@@ -865,10 +790,6 @@ pub struct WorkflowState {
     pub state_type: String,
 }
 
-/// The facts around one comment that admission is allowed to use.
-///
-/// The body is included because a wake hands the operator's words to the task;
-/// the coordinator never logs it.
 #[derive(Clone, Debug)]
 pub struct CommentSite {
     pub comment_id: String,
@@ -882,8 +803,6 @@ pub struct CommentSite {
     pub document_creator_id: Option<String>,
     pub author_name: Option<String>,
     pub is_artificial_session_root: bool,
-    /// A busy thread may have more authors than one page returned. Truncated is
-    /// treated as shared because an unknown participant must not cause a wake.
     pub authors_truncated: bool,
     pub human_authors: Vec<String>,
 }
@@ -930,11 +849,6 @@ impl AgentSessionEvent {
         Ok(())
     }
 
-    /// The human who delegated the work, from the session's `creatorId`.
-    ///
-    /// The issue's assignee is never a fallback: an automation- or agent-started
-    /// session has no responsible human, and inventing one would attribute the
-    /// work to whoever happens to be assigned.
     pub fn delegation_author_id(&self) -> Option<&str> {
         self.agent_session.creator_id.as_deref()
     }
@@ -954,11 +868,6 @@ impl AgentSessionEvent {
     }
 }
 
-/// The session a webhook event belongs to, as far as the coordinator reads it.
-///
-/// Only the fields below are parsed. Linear's published schema also marks the
-/// session's `type` as required, and its own deliveries omit it: reading a field
-/// the coordinator does not use is how a valid delivery becomes unreadable.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSession {
@@ -1028,11 +937,6 @@ impl fmt::Display for WebhookError {
 
 impl Error for WebhookError {}
 
-/// Verify Linear's `linear-signature` header against the exact request body.
-///
-/// `body` must be the raw bytes Linear signed, before any JSON parsing, and the
-/// caller must bound its length before calling. Comparison is constant-time
-/// through [`Mac::verify_slice`].
 pub fn verify_signature(secret: &[u8], signature: Option<&str>, body: &[u8]) -> bool {
     let Some(signature) = signature.and_then(decode_signature) else {
         return false;
@@ -1044,12 +948,6 @@ pub fn verify_signature(secret: &[u8], signature: Option<&str>, body: &[u8]) -> 
     mac.verify_slice(&signature).is_ok()
 }
 
-/// Parse a verified body into the typed event.
-///
-/// The envelope's `type` is read first so a webhook for another resource is
-/// rejected as unsupported rather than reported as malformed. Freshness and
-/// identity are checked by [`AgentSessionEvent::validate`]. The caller bounds
-/// the body before calling.
 pub fn parse_agent_session_event(body: &[u8]) -> Result<AgentSessionEvent, WebhookError> {
     #[derive(Deserialize)]
     struct Envelope {
@@ -1157,7 +1055,6 @@ fn mutation_succeeded<'a>(data: &'a Value, field: &str) -> Result<&'a Value, Tra
     Ok(payload)
 }
 
-/// What a refused response said, in one line.
 fn describe_refusal(payload: &Value) -> String {
     if let Some(errors) = payload.get("errors").and_then(Value::as_array) {
         let messages: Vec<String> = errors

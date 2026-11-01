@@ -1,12 +1,3 @@
-//! One message of a conversation, in a card.
-//!
-//! The card is a rounded edge with the author and the time on it, and the body
-//! inside. It holds no fill, so the backdrop stays visible around it, and the
-//! border says which side of the conversation wrote it: the operator's cards are
-//! accented, the agent's are quiet. A card can be taller than the screen, so it
-//! is drawn into its own buffer and only the visible rows are copied out; that
-//! is what lets a conversation scroll by the row instead of by the message.
-
 use ratatui::{
     Frame,
     buffer::Buffer,
@@ -18,10 +9,6 @@ use ratatui::{
 
 use crate::tui::widgets::palette;
 
-/// How far the operator's message got.
-///
-/// One mark means Altitude recorded it; two mean the agent has it; two in the
-/// accent mean the agent has answered on the thread.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tick {
     Sent,
@@ -51,20 +38,10 @@ pub struct Message<'a> {
     pub body: &'a str,
     pub from_operator: bool,
     pub focused: bool,
-    /// What the operator's message says about its journey. Absent for the
-    /// agent's side, which is not waiting on anyone.
     pub tick: Option<Tick>,
-    /// Something the message carries besides its words — a change the agent is
-    /// asking for — drawn inside the same card so it reads as part of what was
-    /// said rather than as a second message.
     pub nested: Option<Nested<'a>>,
 }
 
-/// A block inside a card: the machine-readable part of a message.
-///
-/// The lines are already fitted to the width by whoever built them, because the
-/// card lays itself out by counting rows rather than by wrapping what it is
-/// given.
 pub struct Nested<'a> {
     pub title: &'a str,
     pub lines: Vec<Line<'a>>,
@@ -89,12 +66,6 @@ pub fn height(width: u16, body: &str, nested: Option<&Nested<'_>>) -> u16 {
         .saturating_add(nested)
 }
 
-/// Draw a card into its own buffer, copying only the rows that meet `visible`.
-///
-/// The conversation scrolls by the row, so a card may start above the viewport
-/// or end below it. `top_offset` is how many of the card's rows are hidden above
-/// `visible`; the whole card is still laid out, so its border, title, and
-/// wrapped body stay intact while it is only partly on screen.
 pub fn draw_clipped(
     frame: &mut Frame,
     visible: Rect,

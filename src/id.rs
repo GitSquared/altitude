@@ -1,10 +1,3 @@
-//! Identifiers that people and agents can say out loud.
-//!
-//! A task can move between machines, so its id has to be unique without a
-//! coordinator. Three words from the English BIP39 list give that room without
-//! a disambiguator. A signal lives inside one task, so two words are enough; a
-//! message lives inside one thread, so its position is its id.
-
 use rand::RngExt;
 
 use bip39::Language;
@@ -20,9 +13,6 @@ pub fn signal() -> String {
     words("signal", SIGNAL_WORDS)
 }
 
-/// The words of an id, without the prefix that says what kind of thing it is.
-///
-/// A task is called by its id until it has a title, and nobody says the prefix.
 pub fn name(id: &str) -> &str {
     id.split_once('_').map_or(id, |(_, name)| name)
 }

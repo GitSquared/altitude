@@ -1,10 +1,3 @@
-//! Choosing the machine that will continue a task that is already here.
-//!
-//! A transfer is not a copy: the task stops here, its files and conversation travel, and it
-//! continues there. So this page names the task it is about and the machines that
-//! could take it, and nothing leaves until enter is pressed. Escape is a way out
-//! that sends nothing.
-
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,
@@ -103,8 +96,6 @@ impl SendTask {
         self.hosts.iter().any(|host| host.ready)
     }
 
-    /// Step to the next machine that can take work, rather than onto one that
-    /// cannot: choosing it would mean enter does nothing.
     fn step(&mut self, forward: bool) {
         let count = self.hosts.len();
         if count == 0 {

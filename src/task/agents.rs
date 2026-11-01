@@ -1,6 +1,3 @@
-//! How a service talks to a harness: which engine drives a task, and the
-//! conversation it is driving.
-
 use crate::{
     agent::{AgentEngine, AgentKind, TaskReportDecoder},
     isolation::IsolationEngine,
@@ -12,8 +9,6 @@ impl<E> TaskService<E>
 where
     E: IsolationEngine + Clone,
 {
-    /// The task's conversation in its harness, after confirming that the
-    /// harness can still resume it.
     pub(super) async fn agent_conversation(
         &self,
         task: &Task,

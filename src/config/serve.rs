@@ -1,9 +1,3 @@
-//! What the serve role reads.
-//!
-//! Its own file rather than the client's. The serve role has no projects of its own
-//! and no task prompt; a client has no listening address. Sharing one file would mean
-//! each role carrying fields it cannot interpret.
-
 use std::{
     env, fmt, fs,
     io::{self, Write},
@@ -15,12 +9,6 @@ use serde::{Deserialize, Serialize};
 
 use super::SettingsError;
 
-/// The port the link speaks, in both roles.
-///
-/// 25848 is unassigned, which is all a port has to be, and it is one number to
-/// remember: on a phone keypad `ALTIT` is 25848. TCP and UDP both use it, so an
-/// operator has a single address to make reachable and a client has a single
-/// thing to be told.
 pub const DEFAULT_PORT: u16 = 25848;
 
 pub fn default_listen() -> String {
@@ -31,13 +19,6 @@ pub fn default_listen() -> String {
 pub struct ServeSettings {
     pub listen: String,
     pub linear: Option<LinearSettings>,
-    /// Whether this machine has been told to stop starting work for a tracker.
-    ///
-    /// Absent means it accepts what its operator assigns to it, because a remote has
-    /// no opinion about work the operator consented to on their own machine. This is
-    /// the brake, not the authorisation: the project's own switch is what a person
-    /// turns on, and this is what the machine's operator pulls when something is
-    /// going wrong — including when the client is asleep and a teammate delegates.
     #[serde(default)]
     pub pause_delegated_work: bool,
 }
@@ -53,11 +34,6 @@ impl Default for ServeSettings {
 }
 
 impl ServeSettings {
-    /// Reads the settings, writing a default file first if there is none.
-    ///
-    /// Written rather than assumed so that a fresh serve role leaves something to edit
-    /// and something to point at, instead of behaviour that lives only in a
-    /// binary's defaults.
     pub fn load_or_create(path: &Path) -> Result<Self, SettingsError> {
         match fs::read_to_string(path) {
             Ok(source) => toml::from_str(&source).map_err(SettingsError::Parse),
@@ -70,13 +46,6 @@ impl ServeSettings {
     }
 }
 
-/// What a host starts from: the one setting it must have, and the shape of the
-/// tracker section it will probably want.
-///
-/// Written out rather than serialised from the defaults, so the file that is left
-/// behind teaches the next step. The section is commented, so an untouched file
-/// is still exactly the default one, and no host is told about a tracker it does
-/// not run.
 fn template() -> String {
     format!(
         "# Where clients reach this remote: discovery over TCP, tasks over UDP.\n\
@@ -114,12 +83,6 @@ fn write_new(path: &Path, contents: &str) -> Result<(), SettingsError> {
     Ok(())
 }
 
-/// The shared Linear app a remote runs.
-///
-/// The secrets live in this file, which is created 0600, so a host does not have
-/// to carry them through its service manager as well. The environment is read
-/// when they are absent, for a host that would rather keep them out of a file an
-/// operator might copy.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct LinearSettings {
     pub client_id: String,

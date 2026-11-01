@@ -1,16 +1,3 @@
-//! Sending a task that is already here to a machine that can carry it, and
-//! receiving one.
-//!
-//! A transfer is not a copy. The source stops the task and keeps ownership while
-//! the destination stages the exact environment, imports the disk delta, and
-//! boots it; only then does the source relinquish, and only then does the
-//! destination begin. Either side can stop between any two steps, and what was
-//! recorded is enough to finish the acknowledgement or leave the work stopped
-//! for the operator to retry deliberately.
-//!
-//! The coordinator wires this to the link and the task loop; nothing here opens
-//! a connection of its own or decides when a task runs.
-
 use std::{
     fmt, fs,
     io::{self, Read, Seek, SeekFrom, Write},
@@ -48,8 +35,6 @@ fn message(error: impl fmt::Display) -> String {
     error.to_string()
 }
 
-/// What the source keeps so a restarted client can finish an outgoing transfer
-/// whose final acknowledgement was lost.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct OutgoingTransfer {
     task_id: String,
@@ -63,11 +48,6 @@ struct IncomingTransfer {
     handover: Handover,
 }
 
-/// Send an existing local task to a remote, and return the id the remote gave it.
-///
-/// The remote must be the one this address was approved as, and it must hold this
-/// client's setup: what travels is the task's files and conversation, and the
-/// sandbox it continues in is built there from the same configuration.
 pub async fn send_to_remote<E>(
     address: &str,
     task_id: &str,
@@ -254,12 +234,6 @@ async fn upload_handover(
     Ok(())
 }
 
-/// Finish outgoing transfers the source already committed but never
-/// acknowledged, after a client restart.
-///
-/// Only transfers whose source history records the commitment are touched, and
-/// only the acknowledgement is retried. One still stopped at the source is left
-/// where the operator can see it and decide.
 pub async fn resume_outgoing<E>(
     config: &Config,
     client: &LinkClient,
@@ -313,11 +287,6 @@ where
     Ok(())
 }
 
-/// The receiving side of one machine's incoming transfers.
-///
-/// Every file it writes is under one directory named by a validated transfer id,
-/// and every request is bound to the peer that authenticated it. It never reads
-/// or writes a path a caller supplied.
 #[derive(Clone)]
 pub struct IncomingTransfers {
     config: Config,
@@ -334,13 +303,6 @@ impl IncomingTransfers {
         }
     }
 
-    /// Accept the shape of a transfer, write down who sent it, and say whether
-    /// the environment archive has to travel.
-    ///
-    /// Accept a transfer before any of it arrives.
-    ///
-    /// Nothing image-shaped travels, so there is nothing for this machine to check
-    /// it already has: the environment is built here from the same configuration.
     pub async fn prepare(&self, peer: EndpointId, handover: Handover) -> Result<(), String> {
         let _serialized = self.lock.lock().await;
         let transfer_id = validated_transfer_id(&handover.transfer_id)?;
@@ -401,10 +363,6 @@ impl IncomingTransfers {
         )
     }
 
-    /// Drop a staged import the source stopped sending.
-    ///
-    /// Nothing here has been landed, so there is nothing to undo: the staging
-    /// directory goes and the source keeps its task.
     pub async fn abandon(&self, peer: EndpointId, transfer_id: &str) -> Result<(), String> {
         let _serialized = self.lock.lock().await;
         let transfer_id = validated_transfer_id(transfer_id)?;
@@ -416,11 +374,6 @@ impl IncomingTransfers {
         }
     }
 
-    /// Verify the arriving archives, land the task on the exact environment, and
-    /// boot it, returning the id this machine gave it.
-    ///
-    /// Landing and booting happen before any acknowledgement, because the source
-    /// keeps ownership until the recipient has really run something.
     pub async fn stage(&self, peer: EndpointId, transfer_id: &str) -> Result<String, String> {
         let _serialized = self.lock.lock().await;
         let transfer_id = validated_transfer_id(transfer_id)?;
@@ -484,11 +437,6 @@ impl IncomingTransfers {
         Ok(task.id)
     }
 
-    /// Begin the landed task, and only now let its archives go.
-    ///
-    /// The committed marker is written and flushed before the archives are
-    /// removed, so a repeated commit after a crash finds either the archives
-    /// still there or a record that they are not needed.
     pub async fn commit(&self, peer: EndpointId, transfer_id: &str) -> Result<(), String> {
         let _serialized = self.lock.lock().await;
         let transfer_id = validated_transfer_id(transfer_id)?;
@@ -540,8 +488,6 @@ impl IncomingTransfers {
         Ok(metadata)
     }
 
-    /// The task this transfer already landed here, derived from its own history
-    /// rather than kept as a second fact that could disagree.
     async fn landed_task(&self, transfer_id: &str, peer: &str) -> Result<Option<Task>, String> {
         for task in self.tasks.list().await.map_err(message)? {
             let history = self.tasks.events(&task.id).await.map_err(message)?;
@@ -558,11 +504,6 @@ impl IncomingTransfers {
     }
 }
 
-/// Unpack what arrived so the sandbox this task gets can be given it.
-///
-/// The archive is expanded here, on the host, and the tree it makes is handed to
-/// the arrival: provisioning writes it into the guest through the same filesystem
-/// channel it came out of.
 fn unpack_task_files(directory: &Path, handover: &Handover) -> Result<Option<PathBuf>, String> {
     if handover.work.len == 0 && handover.transcript.len == 0 {
         return Ok(None);
@@ -592,10 +533,6 @@ fn unpack_task_files(directory: &Path, handover: &Handover) -> Result<Option<Pat
     Ok(Some(files))
 }
 
-/// Refuse history founded under an identity other than the one that authenticated.
-///
-/// A caller can prove who it is but not who it was, so a task founded by another
-/// operator is never adopted under the sender's key.
 fn refuse_foreign_founder(history: &[(i64, TaskHistoryEvent)], peer: &str) -> Result<(), String> {
     let founder = history.iter().find_map(|(_, event)| match event {
         TaskHistoryEvent::IntentExpressed { identity_id, .. } => Some(identity_id.as_str()),

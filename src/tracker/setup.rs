@@ -1,11 +1,3 @@
-//! The manual for installing a tracker's shared app on a remote.
-//!
-//! One copy of the words, read by the command that performs the setup and by the
-//! client that explains what the remote's owner has to do. Every field is static,
-//! so instance facts — this machine's address, port, secrets, what it installed —
-//! are printed beside a guide and never inside one. That is what lets the client
-//! show the same guide without carrying anything from the host it is about.
-
 use super::TrackerKind;
 
 pub(crate) struct Guide {

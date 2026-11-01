@@ -1,9 +1,3 @@
-//! Where each profile's CLI writes its sign-in.
-//!
-//! A file name is not a credential: Altitude reads presence and size, never contents.
-//! Naming them here is what lets a saved login be recognised without a sandbox, and
-//! removed without touching anything else the profile keeps.
-
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -11,11 +5,6 @@ use std::{
 
 use crate::{agent::AgentKind, credentials::Service};
 
-/// The login files a profile's CLI writes, relative to its host directory.
-///
-/// Only a sign-in: settings, models, managed MCP files, and environment setup are not
-/// credentials and stay. A profile absent here has no login Altitude knows how to
-/// recognise or remove.
 pub(super) fn login_files(profile: &str) -> Option<&'static [&'static str]> {
     // A named identity has a suffix after the service it belongs to, but it
     // keeps that service's login file in its own directory.
@@ -32,11 +21,6 @@ pub(super) fn login_files(profile: &str) -> Option<&'static [&'static str]> {
     }
 }
 
-/// Whether a profile has a login file on disk that a task would mount.
-///
-/// The same question a profile's own check asks of the file it keeps its sign-in in,
-/// answered without a sandbox. A file here says a login is saved, not that the CLI
-/// would still accept it.
 pub(super) fn has_saved_login(directory: &Path, profile: &str) -> bool {
     login_files(profile).is_some_and(|files| {
         files

@@ -1,10 +1,3 @@
-//! Listing the repositories a provider's login can reach.
-//!
-//! A picker needs the list before a project can name one, and the login that can
-//! see it lives in a profile rather than on this machine. So the command runs
-//! where the login does: in a throwaway sandbox built from the same profile a
-//! sign-in uses, which is also why opening the list costs an install at most once.
-
 use std::{error::Error, fmt};
 
 use crate::{
@@ -15,10 +8,6 @@ use crate::{
 
 use super::answering;
 
-/// The repositories a provider's login can reach, newest first.
-///
-/// The profile-only project is the one a sign-in builds, so the list reuses what
-/// signing in already installed instead of paying for a second sandbox image.
 pub async fn repositories<E>(
     engine: &E,
     kind: VcsProviderKind,

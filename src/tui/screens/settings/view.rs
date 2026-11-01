@@ -1,7 +1,3 @@
-//! The panel's rows, assembled from the application's own state: what the
-//! settings file holds, what each remote last answered, and what the built base
-//! image is made of.
-
 use crate::{
     credentials::{Credential as NamedCredential, Service, Slot},
     project::ProjectCommits,
@@ -21,8 +17,6 @@ use super::{
 };
 
 impl App {
-    /// Everything the panel draws, assembled from the settings file and from
-    /// what was read back about each remote and about the built base image.
     pub(in crate::tui) fn settings_view(&self) -> View {
         let rows = match self.panel.section {
             Section::Agents | Section::VersionControl | Section::Trackers => {
@@ -74,8 +68,6 @@ impl App {
         }
     }
 
-    /// What a project with no binding of its own uses. The page shows the
-    /// identity this names, never the fact that it was inherited.
     pub(in crate::tui) fn project_defaults(&self) -> ProjectDefaults {
         let settings = self.settings_file.as_ref().map(|file| file.settings());
         ProjectDefaults {
@@ -92,9 +84,6 @@ impl App {
         }
     }
 
-    /// The projects whose effective binding for this slot is the identity. A
-    /// project that inherits the installation's fallback is bound to it in what
-    /// it does, so it is listed here even though the project file says nothing.
     fn projects_bound_to(&self, id: &str, slot: Slot) -> Vec<String> {
         let fallback = self
             .settings_file
@@ -116,8 +105,6 @@ impl App {
             .collect()
     }
 
-    /// The identities one service section holds, with the git identity above the
-    /// version-control logins it commits through.
     fn identity_rows(&self, section: Section) -> Vec<Row> {
         let mut rows = Vec::new();
         if section == Section::VersionControl {
@@ -185,9 +172,6 @@ impl App {
         }
     }
 
-    /// One named login, with the service it belongs to, the place it lives, and
-    /// what its own check last said. The label is the operator's; the service is
-    /// the fallback that keeps two same-named identities readable.
     fn identity_row(&self, credential: NamedCredential, service: Service) -> Row {
         let label = credential.label.clone();
         let id = credential.id;
@@ -264,8 +248,6 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// The remotes list: detected remotes go last, so adopting one never
-    /// reorders the remotes the operator configured.
     fn remote_rows(&self) -> Vec<Row> {
         let installation = self.installation_credential();
         // This installation comes first: it is the identity a remote knows this
@@ -315,12 +297,6 @@ impl App {
         rows
     }
 
-    /// The tracker work this machine has bound to one remote.
-    ///
-    /// Read from the projects that run there: the login each one's binding names,
-    /// and the team it claims. A remote with the app and no project of ours is
-    /// bound to nothing, which is a different answer from a remote without the
-    /// app.
     fn tracker_binding(&self, address: &str) -> Option<TrackerBinding> {
         let projects: Vec<_> = self
             .projects()
@@ -383,8 +359,6 @@ impl App {
         })
     }
 
-    /// Discovered remotes, ordered by the name they announce so the list does
-    /// not reshuffle as announcements arrive.
     fn discovered_rows(&self) -> Vec<Row> {
         let configured = self.configured_remotes();
         let mut discovered = self
@@ -423,10 +397,6 @@ impl App {
             .collect()
     }
 
-    /// How many rows the focused list holds, which is what moving needs.
-    ///
-    /// Read from the view the list is drawn from, so a section that gains a row
-    /// cannot be counted wrong by a second list that has to be kept in step.
     pub(in crate::tui) fn row_count(&self) -> usize {
         self.settings_view().rows.len()
     }

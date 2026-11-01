@@ -1,10 +1,3 @@
-//! How the serve role talks to a terminal.
-//!
-//! Tracker installation and service installation are both guides: they report what
-//! this machine holds, ask one question at a time, and have to keep working when
-//! nobody is at the keyboard. Everything they print or ask lives here, so the two
-//! read the same way and a new guide inherits the shape.
-
 use std::{
     env, fmt,
     io::{self, IsTerminal, Write},
@@ -17,8 +10,6 @@ pub fn has_terminal() -> bool {
     io::stdin().is_terminal()
 }
 
-/// Whether this output can carry emphasis: a terminal on stdout, with colour not
-/// turned off the way the rest of the CLI turns it off.
 fn styled() -> bool {
     io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none()
 }
@@ -44,11 +35,6 @@ fn line(prompt: &str) -> io::Result<Option<String>> {
     Ok(Some(answer.trim().to_owned()))
 }
 
-/// A yes or no, where pressing enter means `default`.
-///
-/// A run with no terminal answers with `default` instead of waiting for a keypress
-/// nobody is there to make. A step that writes to the machine checks for a
-/// terminal itself rather than trusting this.
 pub fn ask(prompt: &str, default: bool) -> io::Result<bool> {
     Ok(match line(prompt)? {
         None => default,
@@ -57,9 +43,6 @@ pub fn ask(prompt: &str, default: bool) -> io::Result<bool> {
     })
 }
 
-/// A question with a small number of answers, given by their number.
-///
-/// An answer that is not one of them is asked for again rather than guessed at.
 pub fn choose(prompt: &str, count: usize, default: usize) -> io::Result<usize> {
     loop {
         match line(prompt)? {
@@ -81,8 +64,6 @@ pub fn paragraph(text: &str) {
     prose(text, "", "");
 }
 
-/// A wrapped paragraph whose first line is led by `lead` and whose other lines start
-/// with `indent`, for text that sits beside a number or a label.
 pub fn prose(text: &str, lead: &str, indent: &str) {
     let mut lines = wrap(text, WIDTH.saturating_sub(lead.chars().count())).into_iter();
     if let Some(first) = lines.next() {
