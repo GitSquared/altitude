@@ -301,7 +301,9 @@ fn draw_plan(frame: &mut Frame, area: Rect, app: &App) {
         width: area.width.saturating_sub(PLAN_PADDING * 2),
         ..area
     };
-    let [title, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(text);
+    // The plan shares the conversation's header band, so its steps and its empty
+    // line sit on the same rows as the conversation beside it.
+    let [title, body] = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(text);
     let plan = app.signal_plan();
     let done = plan
         .iter()
