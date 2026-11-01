@@ -1341,6 +1341,29 @@ impl RemoteTracker {
                 } else {
                     event.body.clone()
                 };
+                // An answered question is answered wherever the operator typed it.
+                // A question answered on the issue itself would otherwise stay open
+                // and park the task after every turn, which reads as the agent
+                // ignoring them while it is the record that never closed.
+                let answering = host
+                    .signal_threads(report.task_id.clone())
+                    .await?
+                    .into_iter()
+                    .filter(TaskOperatorSignalThread::is_unresolved)
+                    .find(|thread| {
+                        matches!(
+                            thread.kind,
+                            TaskOperatorSignalKind::Blocked
+                                | TaskOperatorSignalKind::Decision
+                                | TaskOperatorSignalKind::InReview
+                        ) && !thread
+                            .messages
+                            .iter()
+                            .any(|message| message.author == TaskOperatorSignalAuthor::Operator)
+                    });
+                if let Some(thread) = answering {
+                    return host.reply(report.task_id, thread.id, body).await;
+                }
                 let source = if site.document_id.is_some() {
                     "document"
                 } else {
@@ -1721,7 +1744,10 @@ impl RemoteTracker {
                     .automation
                     .create_activity(
                         &report.tracker_session_id,
-                        &stable_id(&report.task_id, "paused"),
+                        // Per pause, not per task: a thread that says nothing the
+                        // second time it waits is a thread the operator thinks is
+                        // still thinking.
+                        &stable_id(&format!("{}-{index}", report.task_id), "paused"),
                         AgentActivityContent::Response {
                             body: pause_notice(execution_pause_reason).to_owned(),
                         },
