@@ -2143,6 +2143,9 @@ impl RemoteTracker {
         report: &Cursor,
         events: &[(i64, TaskHistoryEvent)],
     ) -> Result<(), String> {
+        // Accepted is finished, whichever door the acceptance came through, so the
+        // threads the task was waiting in close here rather than in each caller.
+        self.resolve_signal_comments(report, events).await;
         if !self.is_settled(&report.issue_id) {
             self.set_status(host, report, TrackerStatus::Done).await?;
             self.settle(&report.issue_id)?;
