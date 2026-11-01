@@ -122,6 +122,31 @@ have it and the other takes the name of the job it does: `TrackerBinding`,
 what happened, and a short name that needs a paragraph of context is longer than
 that. Renaming to get there is part of the work, not a chore that follows it.
 
+## Layout
+
+Group files by the job they do, not by the kind of thing they hold. A folder is
+one part of the system, and the files in it are the parts of that part: `remote`
+is not sixty modules called after nouns, it is `link` (two machines talking),
+`acting` (a client doing something to another machine) and `host` (being that
+machine). `task` is `store`, `agent`, `run` and `mirror`.
+
+- **A folder is created when it has three or more files that belong together**, and
+  it is named for the job, never for the layer (`utils`, `helpers`, `common`,
+  `misc`, `models`, `services` are not jobs). Two files stay where they are.
+- **A file that reaches seven hundred lines is telling you it has more than one
+  job.** Split it into `name/` with a `mod.rs` and the jobs beside it — before it
+  reaches a thousand, while the seams are still visible.
+- **A child module sees its parent's private items**, so a method stays a method
+  when it moves: no getters invented to cross a file, and no `pub` where `pub(super)`
+  or `pub(crate)` says what is actually meant. Widening visibility to make a move
+  compile is a sign the move crossed a boundary that should have stayed.
+- **Keep the old path working while the move is fresh** — a re-export in the parent
+  means a reorganise does not become an edit of every caller. Delete the aliases
+  once nothing outside the folder uses them.
+- **Ask where a file would be looked for, not where it was put.** `send` is not in
+  `remote` because it sends: it is there because sending is a client acting on a
+  machine, and that is the folder an operator would open to find it.
+
 ## Tooling
 
 - Use Rust for the active core, with Ratatui, Microsandbox, and Iroh as the
