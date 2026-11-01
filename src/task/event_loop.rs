@@ -32,11 +32,11 @@ use crate::{
 };
 
 pub enum TaskExecutionUpdate {
-    /// The operator is done with a task that came from another machine: send it home.
-    HandBack {
-        task_id: String,
+    /// A task taken over from another machine is being sent back to it, so the
+    /// interface can watch the move it did not start.
+    HandingBack {
         address: String,
-        title: String,
+        transfer: super::super::remote::Watching,
     },
     Created(Result<Task, TaskServiceError>),
     Started(Result<Task, TaskServiceError>),
@@ -86,6 +86,7 @@ pub struct TaskEventLoop<E> {
     starting: Arc<Mutex<HashSet<String>>>,
     watchers: Arc<Watchers<E>>,
     review_waits: Arc<ReviewWaits>,
+    sends_home: Arc<Mutex<Option<Arc<dyn super::SendsTasksHome>>>>,
 }
 
 struct ActiveRun {
@@ -129,6 +130,7 @@ where
             starting: Arc::new(Mutex::new(HashSet::new())),
             watchers,
             review_waits: Arc::new(ReviewWaits::default()),
+            sends_home: Arc::new(Mutex::new(None)),
         };
         event_loop.watch_host_capacity();
         event_loop.watch_held_reviews();
@@ -175,6 +177,27 @@ where
     pub fn enable_admission(&self) {
         self.admission_enabled.store(true, Ordering::Release);
         self.admit();
+    }
+
+    /// Tell the interface a transfer has started that it did not start, so the
+    /// operator still sees the move rather than work vanishing for a minute.
+    pub fn share_transfer(&self, address: String, transfer: super::super::remote::Watching) {
+        let _ = self
+            .events
+            .send(TaskExecutionUpdate::HandingBack { address, transfer });
+    }
+
+    /// Attach the way back to the machine a task was taken over from. A client with
+    /// remotes has one; a remote itself never does, and a handback it somehow owed
+    /// would leave the task here rather than invent a machine to send it to.
+    pub fn attach_sends_home(&self, home: Arc<dyn super::SendsTasksHome>) {
+        if let Ok(mut slot) = self.sends_home.lock() {
+            *slot = Some(home);
+        }
+    }
+
+    fn sends_home(&self) -> Option<Arc<dyn super::SendsTasksHome>> {
+        self.sends_home.lock().ok().and_then(|slot| slot.clone())
     }
 
     pub fn admit(&self) {
@@ -1688,19 +1711,23 @@ where
                     task.id.clone(),
                     Ok(task.clone()),
                 ));
-                // A task that was carried here belongs to the machine it came from: when
-                // the operator leaves, it goes back rather than running on the client
-                // that borrowed it. The client does the moving; asking is the loop's job.
-                if let Some(address) = task.facts.arrived_from.clone() {
+                // A task carried here belongs to the machine it came from: when the
+                // operator leaves, it goes back rather than running where it was
+                // borrowed to. The task layer owns that decision; the client only
+                // supplies the way to make it.
+                if task.facts.arrived_from.is_some() {
                     let _ = self
                         .service
                         .record(&task.id, &[TaskHistoryEvent::TaskHandedBack])
                         .await;
-                    let _ = self.events.send(TaskExecutionUpdate::HandBack {
-                        task_id: task.id.clone(),
-                        address,
-                        title: task.title().to_owned(),
-                    });
+                    if let Some(home) = self.sends_home() {
+                        let returned = task.clone();
+                        tokio::spawn(async move {
+                            if let Err(error) = home.send_home(returned).await {
+                                tracing::warn!(%error, "could not hand a task back to its machine");
+                            }
+                        });
+                    }
                     return Ok(());
                 }
                 // The next turn is told what happened to it, so the agent picks up from

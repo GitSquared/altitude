@@ -42,6 +42,7 @@ pub use {
     server::LinkServer,
     takeover::bring_home,
     transfer::Transfer,
+    transfer::Watching,
 };
 
 pub type LinkError = Box<dyn Error + Send + Sync>;

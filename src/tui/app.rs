@@ -2576,6 +2576,22 @@ impl App {
         moving
     }
 
+    /// Watch a transfer the task layer started: the same card, without owning the
+    /// decision. Nothing to stop either — the move is not the interface's to cancel.
+    fn watch_transfer(&mut self, title: String, label: String, watching: transfer::Watching) {
+        let update = watching.updates.borrow().clone();
+        self.transfer = Some(TransferView {
+            title,
+            label,
+            watching,
+            update,
+            measured: None,
+            rate: None,
+            is_stopping: false,
+            opens_terminal: false,
+        });
+    }
+
     pub(in crate::tui) fn observe_transfer(&mut self) -> bool {
         self.transfer.as_mut().is_some_and(TransferView::observe)
     }
@@ -7240,7 +7256,6 @@ impl App {
         update: TaskExecutionUpdate,
         terminal: &mut DefaultTerminal,
         event_loop: &TaskEventLoop<E>,
-        sends: &mpsc::Sender<SendTaskReply>,
     ) -> io::Result<()>
     where
         E: IsolationEngine + Clone + 'static,
@@ -7288,12 +7303,13 @@ impl App {
                     self.send_shell_input(&id, reply, event_loop);
                 }
             }
-            TaskExecutionUpdate::HandBack {
-                task_id,
-                address,
-                title,
-            } => {
-                self.begin_send_to_remote(address, task_id, title, event_loop, sends);
+            TaskExecutionUpdate::HandingBack { address, transfer } => {
+                // The task layer started this one; the interface only watches it.
+                self.watch_transfer(
+                    format!("Handing back to {}", self.remote_name(&address)),
+                    address,
+                    transfer,
+                );
             }
             TaskExecutionUpdate::OperatorReady(task) => {
                 let id = task.id.clone();

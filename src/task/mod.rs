@@ -10,6 +10,7 @@ use crate::{
     tracker::{IssueReader, TrackerProvider},
     vcs::{self, Repository, VcsProviderKind, tools::VcsAgentTools},
 };
+use futures_util::future::BoxFuture;
 use std::{
     collections::HashMap,
     error::Error,
@@ -30,6 +31,14 @@ mod signals;
 mod state;
 mod turns;
 pub use event_loop::{TaskEventLoop, TaskExecutionUpdate};
+
+/// Sends a task back to the machine it was taken over from. The task layer decides
+/// when; only a client that has remotes can say how.
+pub type HomeFuture = BoxFuture<'static, Result<(), String>>;
+
+pub trait SendsTasksHome: Send + Sync {
+    fn send_home(&self, task: Task) -> HomeFuture;
+}
 mod progress;
 mod queue;
 mod review;

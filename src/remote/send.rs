@@ -19,7 +19,7 @@ use crate::{
         RemoteKeyStatus, RemoteKeys, Transfer, TransferArchive, TransferPart, meet,
         protocol::{MAX_BLOB_BYTES, TRANSFER_PIECE_BYTES},
     },
-    task::{Task, TaskArrival, TaskEventLoop, TaskHistoryEvent},
+    task::{HomeFuture, SendsTasksHome, Task, TaskArrival, TaskEventLoop, TaskHistoryEvent},
 };
 
 const TRANSFERS_DIRECTORY: &str = "transfers";
@@ -46,6 +46,53 @@ struct OutgoingTransfer {
 struct IncomingTransfer {
     peer: String,
     handover: Handover,
+}
+
+/// How this client hands a task back: it owns the link, the address book and the
+/// transfer, so the task layer can say "this one goes home" without knowing any of it.
+pub struct HomeSender<E: IsolationEngine + Clone + 'static> {
+    config: Arc<Config>,
+    keys: RemoteKeys,
+    client: LinkClient,
+    tasks: TaskEventLoop<E>,
+}
+
+impl<E: IsolationEngine + Clone + 'static> HomeSender<E> {
+    pub fn new(
+        config: Arc<Config>,
+        keys: RemoteKeys,
+        client: LinkClient,
+        tasks: TaskEventLoop<E>,
+    ) -> Self {
+        Self {
+            config,
+            keys,
+            client,
+            tasks,
+        }
+    }
+}
+
+impl<E: IsolationEngine + Clone + 'static> SendsTasksHome for HomeSender<E> {
+    fn send_home(&self, task: Task) -> HomeFuture {
+        let Some(address) = task.facts.arrived_from.clone() else {
+            return Box::pin(async { Ok(()) });
+        };
+        let (transfer, _) = Transfer::start("handing the task back…");
+        self.tasks
+            .share_transfer(address.clone(), transfer.watching());
+        let config = Arc::clone(&self.config);
+        let keys = self.keys.clone();
+        let client = self.client.clone();
+        let tasks = self.tasks.clone();
+        Box::pin(async move {
+            send_to_remote(
+                &address, &task.id, &config, &keys, &client, &tasks, &transfer,
+            )
+            .await
+            .map(|_| ())
+        })
+    }
 }
 
 pub async fn send_to_remote<E>(

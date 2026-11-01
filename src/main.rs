@@ -174,6 +174,14 @@ async fn client() -> Result<(), Box<dyn Error>> {
         )
         .await
         .map_err(io::Error::other)?;
+        // The task layer owns when a taken-over task goes home; this is how it gets
+        // there. Attached here because only a client has a link and an address book.
+        event_loop.attach_sends_home(Arc::new(remote::send::HomeSender::new(
+            Arc::new(config.clone()),
+            remote_keys.clone(),
+            link.clone(),
+            event_loop.clone(),
+        )));
         // Finish any outgoing transfer whose final acknowledgement was lost to a
         // crash. The source already committed, so this retries only the import
         // commit; a task still stopped at the source is left where the operator can

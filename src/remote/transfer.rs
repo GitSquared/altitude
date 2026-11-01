@@ -81,6 +81,14 @@ impl Transfer {
         self.updates.send_modify(|update| update.stage = stage);
     }
 
+    /// Watch a transfer someone else started.
+    pub fn watching(&self) -> Watching {
+        Watching {
+            updates: self.updates.subscribe(),
+            stopped: Arc::clone(&self.stopped),
+        }
+    }
+
     /// A second handle on the same transfer, for something that reports into it
     /// while the caller is blocked waiting on the work.
     pub fn watcher(&self) -> Self {
