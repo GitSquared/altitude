@@ -372,12 +372,13 @@ where
         }
     }
     /// Whether the agent has gone quiet: many turns in a row that end by asking for
-    /// another one, with nothing from the operator since they started.
+    /// another one, with nothing in between that the operator could read.
     ///
     /// A turn that asks to continue is a step only while the work is moving. When a
-    /// run of them has produced nothing for the operator to read, the next one starts
-    /// from the same state and says the same thing, so the loop is broken here and
-    /// the decision goes back to the only one who can change it.
+    /// run of them has left the task exactly as it was — no signal, no plan, nothing
+    /// the operator could read — the next one starts from the same state and says the
+    /// same thing. Generous on purpose: silent turns are a normal way to work, and
+    /// this is the backstop for an agent with nothing left to do, not a step limit.
     pub async fn went_quiet(&self, task: &Task) -> Result<bool, TaskServiceError> {
         let events = self.events(&task.id).await?;
         let mut turns = 0;
@@ -387,12 +388,15 @@ where
                     requested_action: TaskAgentRequestedAction::Continue,
                     ..
                 } => turns += 1,
-                // Anything the operator said is the state changing under the agent,
-                // so the count starts again.
-                TaskHistoryEvent::TaskInputExpressed { .. }
-                | TaskHistoryEvent::OperatorSignalConfirmed { .. }
-                | TaskHistoryEvent::OperatorSignalResolved { .. } => break,
-                _ => continue,
+                // The bookkeeping a turn leaves whether or not it did anything is
+                // skipped; anything else is the task changing, which is what makes
+                // the next turn a step rather than a repeat.
+                TaskHistoryEvent::AgentRunStarted { .. }
+                | TaskHistoryEvent::AgentRunEnded { .. }
+                | TaskHistoryEvent::AgentModelObserved { .. }
+                | TaskHistoryEvent::TrackerSynced { .. }
+                | TaskHistoryEvent::ExecutionRecovered { .. } => continue,
+                _ => break,
             }
             if turns >= TURNS_BEFORE_THE_OPERATOR {
                 return Ok(true);
