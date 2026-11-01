@@ -216,10 +216,6 @@ pub struct RemoteTracker {
     /// says so once instead of every tick. A task is still retried: the reason may
     /// go away, and silence about a failure is worse than a second line about it.
     refusals: Mutex<HashMap<String, String>>,
-    /// Issues a delegation was recovered for in this process. One pass is enough:
-    /// the pass exists for a webhook that arrived while this machine was not
-    /// listening, and a second pass would ask the same question every minute.
-    recovered: Mutex<HashSet<String>>,
     /// Whether anything has arrived since this process started. The first
     /// delivery is said at info because it is the only proof a freshly installed
     /// app can reach this machine, and a silent first install is indistinguishable
@@ -238,7 +234,6 @@ impl RemoteTracker {
             config,
             ledger: Mutex::new(ledger),
             refusals: Mutex::new(HashMap::new()),
-            recovered: Mutex::new(HashSet::new()),
             notify: Notify::new(),
             delivered: AtomicBool::new(false),
         }))
@@ -415,21 +410,6 @@ impl RemoteTracker {
             if own_work.is_some() {
                 continue;
             }
-            let redelegated = match host.work_for_issue(reference.id.clone(), Vec::new()).await {
-                Ok(work) => work.is_some(),
-                Err(error) => {
-                    tracing::debug!(issue = %reference.identifier, %error, "could not ask which task an issue has");
-                    continue;
-                }
-            };
-            let first_try = self
-                .recovered
-                .lock()
-                .map(|mut recovered| recovered.insert(reference.id.clone()))
-                .unwrap_or(false);
-            if !first_try {
-                continue;
-            }
             let Some(login) = self.sole_login() else {
                 tracing::info!(
                     issue = %reference.identifier,
@@ -465,7 +445,6 @@ impl RemoteTracker {
             };
             tracing::info!(
                 issue = %reference.identifier,
-                redelegated,
                 "recovered a delegation that arrived while this machine was not listening"
             );
             let started = self
@@ -475,10 +454,6 @@ impl RemoteTracker {
                     &login.account.user_id,
                     &login.account.display_name,
                     host,
-                    // A redelegation replaces what is running, so it is the second
-                    // ask rather than the first: the other guard is for a first
-                    // delegation arriving on work a person has taken over.
-                    redelegated,
                 )
                 .await;
             let Err(error) = started else {
@@ -500,7 +475,6 @@ impl RemoteTracker {
                         &login.account.user_id,
                         &login.account.display_name,
                         host,
-                        redelegated,
                     )
                     .await
                     .is_ok()
@@ -899,7 +873,7 @@ impl RemoteTracker {
                 .map_err(|error| error.to_string())?;
             return Ok(());
         }
-        self.delegate(issue_id, &event.session_id, author, label, host, false)
+        self.delegate(issue_id, &event.session_id, author, label, host)
             .await
     }
 
@@ -915,7 +889,6 @@ impl RemoteTracker {
         author: &str,
         label: &str,
         host: &dyn Host,
-        is_retry: bool,
     ) -> Result<(), String> {
         if self.is_terminated(session_id) {
             return Ok(());
@@ -927,29 +900,6 @@ impl RemoteTracker {
             .await?
             .is_some()
         {
-            return Ok(());
-        }
-
-        // An issue whose work the operator took over is being driven on their own
-        // machine. Deleting that out from under them would be Altitude deciding
-        // what their take over meant, so the first delegation says what it sees and
-        // waits to be asked again — replying on the session is that ask.
-        let taken_over = self.taken_over(issue_id, host).await;
-        if taken_over && !is_retry {
-            self.config
-                .automation
-                .create_activity(
-                    session_id,
-                    &stable_id(session_id, "taken-over"),
-                    AgentActivityContent::Response {
-                        body: "The operator took this issue's task over on their own machine, \
-                               so it is being driven there. Nothing starts here unless you ask \
-                               for a second task: reply here and Altitude will start one."
-                            .to_owned(),
-                    },
-                )
-                .await
-                .map_err(|error| error.to_string())?;
             return Ok(());
         }
 
@@ -977,12 +927,8 @@ impl RemoteTracker {
                 continue;
             }
             if let Some(report) = self.report_for_task(&task.task_id) {
-                let body = if taken_over {
-                    "This issue's work was taken over on another machine, and a newer \
-                     delegation asked for a task here, so a second one has started."
-                } else {
-                    "A newer delegation replaced this one, so Altitude stopped this task."
-                };
+                let body = "A newer delegation replaced this one, so Altitude stopped this \
+                            task.";
                 if let Err(error) = self
                     .config
                     .automation
@@ -1121,7 +1067,7 @@ impl RemoteTracker {
             {
                 let label = event.creator_name.as_deref().unwrap_or(author);
                 return self
-                    .delegate(issue_id, &event.session_id, author, label, host, true)
+                    .delegate(issue_id, &event.session_id, author, label, host)
                     .await;
             }
             return Ok(());
@@ -2155,32 +2101,6 @@ impl RemoteTracker {
                 held.last_status = None;
             }
         })
-    }
-
-    /// Whether this issue's task was taken over, and handed to a person's machine.
-    ///
-    /// The commitment is what a take over records once the other machine has landed
-    /// the task, so it is the one fact that says the work left here for an operator,
-    /// rather than being stopped or replaced.
-    async fn taken_over(&self, issue_id: &str, host: &dyn Host) -> bool {
-        // The newest report on the issue, not whichever one reporting prefers: a
-        // take over is the last thing that happened to this work, and an older
-        // task that was taken over says nothing about the one after it.
-        let Some(report) = self.lock().ok().and_then(|ledger| {
-            ledger
-                .reports
-                .iter()
-                .rev()
-                .find(|report| report.issue_id == issue_id || report.issue_identifier == issue_id)
-                .cloned()
-        }) else {
-            return false;
-        };
-        host.events(report.task_id)
-            .await
-            .unwrap_or_default()
-            .iter()
-            .any(|(_, event)| matches!(event, TaskHistoryEvent::TransferCommitted { .. }))
     }
 
     /// Say the task is running again, unless the operator has already ended the
