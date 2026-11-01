@@ -107,6 +107,10 @@ fn published_comment_id(task_id: &str, signal_id: &str) -> String {
 
 fn pause_notice(reason: &TaskExecutionPauseReason) -> &'static str {
     match reason {
+        TaskExecutionPauseReason::HandedBack => {
+            "The operator finished with this task here; it has gone back to the machine \
+             that owns it."
+        }
         TaskExecutionPauseReason::AwaitingOperator => "Waiting for your reply on this task.",
         TaskExecutionPauseReason::AwaitingReviewChecks => {
             "Waiting for the pull request checks to settle."

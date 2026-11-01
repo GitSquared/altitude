@@ -1137,6 +1137,34 @@ where
         Ok(())
     }
 
+    /// The machine that owns a handed-back task runs it again: the person who borrowed
+    /// it is gone, so nothing is waited for.
+    pub async fn resume_after_handback(&self, task: Task) -> Result<(), TaskServiceError> {
+        if task.facts.arrived_from.is_some()
+            && self
+                .service
+                .events(&task.id)
+                .await?
+                .iter()
+                .any(|(_, event)| matches!(event, TaskHistoryEvent::TaskHandedBack))
+        {
+            self.service
+                .record(
+                    &task.id,
+                    &[TaskHistoryEvent::ExecutionPaused {
+                        execution_status: TaskExecutionStatus::Paused,
+                        sandbox_available: task.facts.sandbox_available,
+                        snapshot_available: task.facts.snapshot_available,
+                        execution_pause_reason: TaskExecutionPauseReason::HandedBack,
+                        snapshot_path: task.facts.snapshot_path.clone().unwrap_or_default(),
+                    }],
+                )
+                .await?;
+            self.admit();
+        }
+        Ok(())
+    }
+
     pub async fn finish_transfer(
         &self,
         task_id: &str,
@@ -1680,6 +1708,10 @@ where
                 // the operator leaves, it goes back rather than running on the client
                 // that borrowed it. The client does the moving; asking is the loop's job.
                 if let Some(address) = task.facts.arrived_from.clone() {
+                    let _ = self
+                        .service
+                        .record(&task.id, &[TaskHistoryEvent::TaskHandedBack])
+                        .await;
                     let _ = self.events.send(TaskExecutionUpdate::HandBack {
                         task_id: task.id.clone(),
                         address,

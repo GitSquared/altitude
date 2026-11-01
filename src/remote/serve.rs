@@ -535,7 +535,19 @@ impl TaskHost for OwnTasks {
         transfer_id: String,
     ) -> BoxFuture<Result<(), String>> {
         let incoming = self.incoming.clone();
-        Box::pin(async move { incoming.commit(peer, &transfer_id).await })
+        let tasks = Arc::clone(&self.tasks);
+        Box::pin(async move {
+            incoming.commit(peer, &transfer_id).await?;
+            // A task the operator handed back was finished with by a person, not
+            // staged for one: the machine that owns it runs it again.
+            for task in tasks.list().await.map_err(|e| e.to_string())? {
+                tasks
+                    .resume_after_handback(task)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        })
     }
 
     fn handed_over(&self, peer: EndpointId, transfer_id: String) -> BoxFuture<Result<(), String>> {

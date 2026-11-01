@@ -129,6 +129,9 @@ pub enum TaskExecutionPauseReason {
     // same thing again from the same state.
     AgentWentQuiet,
     Transfer,
+    /// The operator finished with a taken-over task and it went back to the machine
+    /// that owns it, which runs it again. Not a wait: nobody has to act.
+    HandedBack,
     // The endings a tracker hands down keep the task: what happened elsewhere is something
     // the operator can read here, rather than work that quietly disappears.
     TrackerEnded,
@@ -449,6 +452,8 @@ pub enum TaskHistoryEvent {
     TaskArrivedFrom {
         address: String,
     },
+    /// The operator left a taken-over task; the machine it belongs to resumes it.
+    TaskHandedBack,
     TrackerIssueBound {
         issue: IssueSnapshot,
         #[serde(default)]
