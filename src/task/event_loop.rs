@@ -208,25 +208,20 @@ where
             .isolation
             .sandbox_capacity()
             .free_slots_after(taken);
-        // A task with a held review is the scheduler's: admission must not start
-        // an agent turn for it while the review is still waiting.
-        let mut waiting: Vec<Task> = tasks
+        // The queue is the one the screens show: same order, same rule about who
+        // is waiting for room. Only the tasks already being started drop out.
+        let starting = self
+            .starting
+            .lock()
+            .expect("starting lock poisoned")
+            .clone();
+        let waiting: Vec<&Task> = super::tasks_waiting_to_start(&tasks)
             .into_iter()
-            .filter(|task| task.facts.execution_status == TaskExecutionStatus::Pending)
-            .filter(|task| task.facts.deferred_review.is_none())
-            .filter(|task| {
-                !self
-                    .starting
-                    .lock()
-                    .expect("starting lock poisoned")
-                    .contains(&task.id)
-            })
+            .filter(|task| !starting.contains(&task.id))
             .collect();
-        // The list arrives newest first; the queue is served oldest first.
-        waiting.reverse();
         let mut fresh = 0;
         for task in waiting {
-            if !task.facts.sandbox_available {
+            if super::waits_for_room(task) {
                 if fresh >= room {
                     continue;
                 }
@@ -244,6 +239,7 @@ where
                 continue;
             }
             let event_loop = self.clone();
+            let task = task.clone();
             tokio::spawn(async move {
                 let result = event_loop.service.start(task.clone()).await;
                 event_loop.watch_agent_run(result);

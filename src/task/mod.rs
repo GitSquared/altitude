@@ -31,6 +31,7 @@ mod state;
 mod turns;
 pub use event_loop::{TaskEventLoop, TaskExecutionUpdate};
 mod progress;
+mod queue;
 mod review;
 mod store;
 mod tools;
@@ -177,6 +178,8 @@ impl fmt::Display for TaskServiceError {
 impl Error for TaskServiceError {}
 
 // Execution policy consumes recorded values; the store does not infer these decisions.
+
+pub(crate) use queue::{tasks_ahead_in_queue, tasks_waiting_to_start, waits_for_room};
 
 pub(crate) fn wants_a_slot(task: &Task) -> bool {
     matches!(
