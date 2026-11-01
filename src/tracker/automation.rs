@@ -226,7 +226,7 @@ impl LinearAutomation {
                 .and_then(|sessions| {
                     sessions.iter().max_by_key(|session| {
                         session
-                            .get("updatedAt")
+                            .get("createdAt")
                             .and_then(Value::as_str)
                             .unwrap_or_default()
                             .to_owned()
@@ -519,6 +519,17 @@ impl LinearAutomation {
         Ok(())
     }
 
+    /// The comment with this id, or nothing when it was never published.
+    pub async fn comment(&self, comment_id: &str) -> Result<Option<Value>, TrackerError> {
+        let data = self
+            .graphql(COMMENT_EXISTS_QUERY, json!({ "id": comment_id }))
+            .await?;
+        Ok(data
+            .get("comment")
+            .filter(|comment| !comment.is_null())
+            .cloned())
+    }
+
     pub async fn resolve_comment(
         &self,
         comment_id: &str,
@@ -541,15 +552,10 @@ impl LinearAutomation {
     /// Asked only when the thread is closed: a reply in the tracker reopens it by
     /// itself, and un-resolving an open thread is a call that can only fail.
     pub async fn reopen_comment(&self, comment_id: &str) -> Result<(), TrackerError> {
-        let existing = self
-            .graphql(COMMENT_EXISTS_QUERY, json!({ "id": comment_id }))
-            .await?;
-        let comment = existing.get("comment").filter(|comment| !comment.is_null());
-        if comment.is_none()
-            || comment
-                .and_then(|comment| comment.get("resolvedAt"))
-                .is_some_and(Value::is_null)
-        {
+        let Some(comment) = self.comment(comment_id).await? else {
+            return Ok(());
+        };
+        if comment.get("resolvedAt").is_some_and(Value::is_null) {
             return Ok(());
         }
         let data = self

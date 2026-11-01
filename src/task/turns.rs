@@ -9,6 +9,11 @@ use crate::{
 };
 use uuid::Uuid;
 
+/// How many turns an agent may end by asking for another one before the operator is
+/// asked instead. Generous on purpose: silent turns are a normal way to work, and this
+/// is the backstop for an agent that has run out of things to do, not a step limit.
+const TURNS_BEFORE_THE_OPERATOR: usize = 12;
+
 use super::{
     IsolationError, Task, TaskAgentRequestedAction, TaskAgentRun, TaskAgentRunOutcome,
     TaskAgentTurnReport, TaskError, TaskExecutionMode, TaskExecutionPauseReason,
@@ -366,10 +371,45 @@ where
             }
         }
     }
+    /// Whether the agent has gone quiet: many turns in a row that end by asking for
+    /// another one, with nothing in between that the operator could read.
+    ///
+    /// A turn that asks to continue is a step only while the work is moving. When a
+    /// run of them has left the task exactly as it was — no signal, no plan, nothing
+    /// the operator could read — the next one starts from the same state and says the
+    /// same thing. Generous on purpose: silent turns are a normal way to work, and
+    /// this is the backstop for an agent with nothing left to do, not a step limit.
+    pub async fn went_quiet(&self, task: &Task) -> Result<bool, TaskServiceError> {
+        let events = self.events(&task.id).await?;
+        let mut turns = 0;
+        for (_, event) in events.iter().rev() {
+            match event {
+                TaskHistoryEvent::AgentTurnReported {
+                    requested_action: TaskAgentRequestedAction::Continue,
+                    ..
+                } => turns += 1,
+                // The bookkeeping a turn leaves whether or not it did anything is
+                // skipped; anything else is the task changing, which is what makes
+                // the next turn a step rather than a repeat.
+                TaskHistoryEvent::AgentRunStarted { .. }
+                | TaskHistoryEvent::AgentRunEnded { .. }
+                | TaskHistoryEvent::AgentModelObserved { .. }
+                | TaskHistoryEvent::TrackerSynced { .. }
+                | TaskHistoryEvent::ExecutionRecovered { .. } => continue,
+                _ => break,
+            }
+            if turns >= TURNS_BEFORE_THE_OPERATOR {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub async fn await_operator(
         &self,
         task: &Task,
         agent_run: &TaskAgentRun,
+        reason: TaskExecutionPauseReason,
     ) -> Result<Task, TaskServiceError> {
         let snapshot_path = self.suspend_capsule(task).await?;
         let task = self
@@ -381,7 +421,7 @@ where
                         execution_status: TaskExecutionStatus::Paused,
                         sandbox_available: false,
                         snapshot_available: true,
-                        execution_pause_reason: TaskExecutionPauseReason::AwaitingOperator,
+                        execution_pause_reason: reason,
                         snapshot_path,
                     },
                 ],

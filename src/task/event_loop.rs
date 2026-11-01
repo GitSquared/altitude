@@ -384,16 +384,65 @@ where
         project: Project,
         agent: AgentKind,
         operator: InstallationIdentity,
+        delegation: Option<String>,
     ) -> Result<Task, TaskServiceError> {
         let task = self
             .service
-            .create_from_issue_as_operator(issue, project, agent, Some(operator))
+            .create_from_issue_bound(issue, project, agent, Some(operator), delegation)
             .await?;
         let _ = self
             .events
             .send(TaskExecutionUpdate::Created(Ok(task.clone())));
         self.admit();
         Ok(task)
+    }
+
+    /// The work an issue has right now: the task in play that belongs to one of the
+    /// delegations named, if any — or to no delegation at all, when none are named.
+    ///
+    /// One question, answered from the tasks themselves. Callers bring the
+    /// delegation they are asking about, so "is this delegation already being
+    /// worked?" and "which task does this issue have?" are the same call.
+    ///
+    /// `tracker_delegation` being absent means "no delegation asked for this work",
+    /// never "unknown": a task linked from the operator's own machine is reported by
+    /// that machine, as its own login, and must never be mistaken for the work a
+    /// delegation is already getting. An unbound task has no issue at all, so every
+    /// question here leaves local work alone.
+    pub async fn work_for_issue(
+        &self,
+        issue_id: &str,
+        delegations: &[&str],
+    ) -> Result<Option<Task>, TaskServiceError> {
+        Ok(self
+            .list()
+            .await?
+            .into_iter()
+            .find(|task| {
+                task.facts.execution_pause_reason.is_none()
+                    || !matches!(
+                        task.facts.execution_pause_reason,
+                        Some(
+                            TaskExecutionPauseReason::TrackerEnded
+                                | TaskExecutionPauseReason::StoppedInTracker
+                                | TaskExecutionPauseReason::DelegationWithdrawn
+                        )
+                    )
+            })
+            .filter(|task| {
+                task.facts
+                    .tracker_issue
+                    .as_ref()
+                    .is_some_and(|bound| bound.id == issue_id || bound.identifier == issue_id)
+            })
+            .filter(|task| {
+                delegations.is_empty()
+                    || task
+                        .facts
+                        .tracker_delegation
+                        .as_deref()
+                        .is_some_and(|held| delegations.contains(&held))
+            }))
     }
 
     pub async fn list(&self) -> Result<Vec<Task>, TaskServiceError> {
@@ -1674,6 +1723,20 @@ where
                     .events
                     .send(TaskExecutionUpdate::Report { task: task.clone() });
                 match action {
+                    // Another turn is a step only while the work is moving. A run of
+                    // turns that each ask for one and say nothing between them starts
+                    // the next from the same state, so the operator is asked instead.
+                    TaskAgentRequestedAction::Continue
+                        if self.service.went_quiet(&task).await? =>
+                    {
+                        let result = self
+                            .service
+                            .await_operator(&task, run, TaskExecutionPauseReason::AgentWentQuiet)
+                            .await;
+                        let _ = self
+                            .events
+                            .send(TaskExecutionUpdate::Finished(task.id, result));
+                    }
                     TaskAgentRequestedAction::Continue => {
                         self.service.continue_turn(run).await?;
                         self.watch_agent_run(self.service.continue_autopilot(task).await);
@@ -1690,7 +1753,10 @@ where
                             .send(TaskExecutionUpdate::Finished(task.id, result));
                     }
                     TaskAgentRequestedAction::AwaitOperator => {
-                        let result = self.service.await_operator(&task, run).await;
+                        let result = self
+                            .service
+                            .await_operator(&task, run, TaskExecutionPauseReason::AwaitingOperator)
+                            .await;
                         let _ = self
                             .events
                             .send(TaskExecutionUpdate::Finished(task.id, result));

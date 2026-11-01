@@ -712,7 +712,7 @@ impl TaskHost for OwnTasks {
                 }
                 super::protocol::TaskOrigin::Issue(issue) => {
                     let task = tasks
-                        .create_issue_for_operator(*issue, project, request.agent, operator)
+                        .create_issue_for_operator(*issue, project, request.agent, operator, None)
                         .await
                         .map_err(|error| error.to_string())?;
                     report_issue_task(tracker.as_deref(), peer, &task).await;
@@ -793,6 +793,7 @@ impl super::tracker::Host for OwnTasks {
         peer: EndpointId,
         issue: IssueSnapshot,
         label: String,
+        delegation: Option<String>,
     ) -> super::StartFuture<'_, String> {
         Box::pin(async move {
             if self.delegation_paused {
@@ -865,6 +866,7 @@ impl super::tracker::Host for OwnTasks {
                         id: owner.clone(),
                         label,
                     },
+                    delegation,
                 )
                 .await
                 .map_err(|error| super::StartRefusal::Unavailable {
@@ -984,6 +986,42 @@ impl super::tracker::Host for OwnTasks {
         })
     }
 
+    fn delegation_of(&self, task_id: String) -> super::tracker::HostFuture<'_, Option<String>> {
+        Box::pin(async move {
+            Ok(self
+                .tasks
+                .task(&task_id)
+                .await
+                .map_err(|error| error.to_string())?
+                .and_then(|task| task.facts.tracker_delegation.clone()))
+        })
+    }
+
+    fn work_for_issue(
+        &self,
+        issue_id: String,
+        delegations: Vec<String>,
+    ) -> super::tracker::HostFuture<'_, Option<super::tracker::BoundTask>> {
+        Box::pin(async move {
+            let wanted: Vec<&str> = delegations.iter().map(String::as_str).collect();
+            let task = self
+                .tasks
+                .work_for_issue(&issue_id, &wanted)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(task.and_then(|task| {
+                let issue = task.facts.tracker_issue.clone()?;
+                Some(super::tracker::BoundTask {
+                    task_id: task.id.clone(),
+                    owner: task.operator_id()?.to_owned(),
+                    issue,
+                    delegation: task.facts.tracker_delegation.clone(),
+                    session_agent: task.session_agent(),
+                })
+            }))
+        })
+    }
+
     fn session_agent(&self, task_id: String) -> super::tracker::HostFuture<'_, Option<String>> {
         Box::pin(async move {
             Ok(self
@@ -1018,14 +1056,12 @@ impl super::tracker::Host for OwnTasks {
                     // Paused is not the same as in play: a task the tracker ended,
                     // replaced or undelegated is a record, and adopting it again
                     // hands a new delegation's session to work that is over.
-                    if matches!(
-                        task.facts.execution_pause_reason,
-                        Some(
-                            TaskExecutionPauseReason::TrackerEnded
-                                | TaskExecutionPauseReason::StoppedInTracker
-                                | TaskExecutionPauseReason::DelegationWithdrawn
-                        )
-                    ) {
+                    if task
+                        .facts
+                        .execution_pause_reason
+                        .as_ref()
+                        .is_some_and(TaskExecutionPauseReason::is_out_of_play)
+                    {
                         return None;
                     }
                     let issue = task.facts.tracker_issue.clone()?;
@@ -1034,6 +1070,7 @@ impl super::tracker::Host for OwnTasks {
                         task_id: task.id.clone(),
                         owner,
                         issue,
+                        delegation: task.facts.tracker_delegation.clone(),
                         session_agent: task.session_agent(),
                     })
                 })
@@ -1111,6 +1148,7 @@ async fn report_issue_task(
             &peer.to_string(),
             task.id.clone(),
             reference,
+            task.facts.tracker_delegation.clone(),
             task.session_agent(),
         )
         .await

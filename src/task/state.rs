@@ -149,6 +149,10 @@ pub enum TaskExecutionPauseReason {
     /// requests. The capsule is in a snapshot, so the wait costs no capacity.
     AwaitingReviewChecks,
     ApplicationShutdown,
+    /// The agent kept ending turns by asking for another one with nothing said in
+    /// between. The next turn starts from the same state and says the same thing,
+    /// so the loop is broken here instead of being left to run.
+    AgentWentQuiet,
     Transfer,
     /// The operator closed the issue in the tracker. The task is kept so the
     /// ending is something they can read in Altitude rather than something that
@@ -160,6 +164,22 @@ pub enum TaskExecutionPauseReason {
     /// The issue stopped being delegated to Altitude. The task is kept for the
     /// same reason, and delegating it again founds a new one.
     DelegationWithdrawn,
+}
+
+impl TaskExecutionPauseReason {
+    /// Whether a task paused for this reason is out of play.
+    ///
+    /// The tracker ended this work: it was replaced by a newer delegation, it was
+    /// undelegated, or its issue was closed. The task is kept as a record, and every
+    /// question about "the work an issue has" has to leave it out — one rule, in one
+    /// place, because the three questions that ask it used to each keep their own
+    /// copy of this list.
+    pub fn is_out_of_play(&self) -> bool {
+        matches!(
+            self,
+            Self::TrackerEnded | Self::StoppedInTracker | Self::DelegationWithdrawn
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
@@ -354,6 +374,9 @@ pub struct TaskFacts {
     /// arrived by transfer carries where it belongs with the rest of its history.
     #[sqlx(json(nullable))]
     pub tracker_issue: Option<IssueReference>,
+    /// The delegation the bound work belongs to, so the tracker never has to infer
+    /// which task its session is about.
+    pub tracker_delegation: Option<String>,
     /// The state the bound issue was last told to have, which is the last thing
     /// either side said about it.
     #[sqlx(default)]
@@ -568,6 +591,12 @@ pub enum TaskHistoryEvent {
     /// from, and what the tracker's later state is compared against.
     TrackerIssueBound {
         issue: IssueSnapshot,
+        /// The delegation that asked for this work: the tracker's own session, when
+        /// there is one. It is what makes "delegate it again" a new delegation rather
+        /// than a second guess at which report is current, and it is a fact about the
+        /// task, so it survives a lost ledger.
+        #[serde(default)]
+        delegation: Option<String>,
     },
     /// How far this task's tracker binding has been reported, by history position.
     ///
