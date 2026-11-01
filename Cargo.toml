@@ -17,8 +17,8 @@ arboard = { version = "3.6.1", default-features = false }
 async-trait = "0.1"
 base64 = "0.23.1"
 cap-std = "4.0.3"
-microsandbox-image = "=0.7.9"
-microsandbox-utils = "=0.7.9"
+microsandbox-image = "=0.7.13"
+microsandbox-utils = "=0.7.13"
 tempfile = "3"
 blake3 = "1.8"
 crossterm = { version = "0.29.0", features = ["event-stream"] }
@@ -31,9 +31,9 @@ iroh-mdns-address-lookup = "0.6"
 socket2 = "0.6"
 hmac = "0.13"
 hex = "0.4"
-microsandbox = { version = "=0.7.9", default-features = false, features = ["local", "net"] }
+microsandbox = { version = "=0.7.13", default-features = false, features = ["local", "net"] }
 # Embed Microsandbox's guest helper without running its host-runtime installer at build time.
-microsandbox-filesystem = { version = "=0.7.9", default-features = false, features = ["download-binaries"] }
+microsandbox-filesystem = { version = "=0.7.13", default-features = false, features = ["download-binaries"] }
 ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "form"] }
 rmcp = { version = "3.5.1", default-features = false, features = ["client", "auth", "transport-streamable-http-client-reqwest"] }
@@ -43,7 +43,7 @@ sha2 = "0.11"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
 # Host CPU and memory readings, on every platform Altitude runs on. Replaces the
 # hand-rolled /proc parsing and the platforms it could not measure.
-sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 terminput = "0.5.15"
 terminput-crossterm = "0.4.11"
 throbber-widgets-tui = { version = "0.11.1", default-features = false }
@@ -68,5 +68,5 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 whoami = "2.1.3"
 tachyonfx = "0.25.2"
-bip39 = "2"
+bip39 = "3"
 rand = "0.10"

@@ -122,17 +122,12 @@ pub struct HostSampler {
 }
 
 impl HostSampler {
-    pub fn new() -> Self {
-        Self {
-            system: System::new(),
+    pub fn new() -> Option<Self> {
+        let system = System::new().ok()?;
+        Some(Self {
+            system,
             last_refresh: None,
-        }
-    }
-}
-
-impl Default for HostSampler {
-    fn default() -> Self {
-        Self::new()
+        })
     }
 }
 

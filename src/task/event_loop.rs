@@ -142,7 +142,11 @@ where
     fn watch_host_capacity(&self) {
         let event_loop = self.clone();
         tokio::spawn(async move {
-            let mut sampler = HostSampler::new();
+            // A host whose readings cannot be established has no capacity to
+            // measure, and the limit is left where it is.
+            let Some(mut sampler) = HostSampler::new() else {
+                return;
+            };
             let mut tick = time::interval(SAMPLE_INTERVAL);
             loop {
                 tick.tick().await;
