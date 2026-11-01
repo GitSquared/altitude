@@ -17,7 +17,7 @@ use crate::{
 use super::{
     BaseSandboxRecipe, BaseSandboxSnapshot, CommandEvent, CredentialCheck, CredentialReport,
     CredentialSandbox, EnvironmentProgressSink, IsolationEngine, IsolationError, OutputStream,
-    PORT_RELAY_GUEST_PORT, SandboxMount, SandboxOptions, SandboxSize, SetupStep, VsockRoute,
+    PORT_RELAY_GUEST_PORT, SandboxMount, SandboxOptions, SandboxPurpose, SetupStep, VsockRoute,
 };
 
 const GUEST_HOME: &str = "/root";
@@ -184,7 +184,6 @@ impl SandboxPlan {
                 mounts: Vec::new(),
                 environment,
                 vsock: Vec::new(),
-                size: SandboxSize::CAPSULE,
             },
             defaults: Vec::new(),
             managed_files: Vec::new(),
@@ -427,6 +426,13 @@ enum SandboxKind {
 }
 
 impl SandboxKind {
+    fn purpose(self) -> SandboxPurpose {
+        match self {
+            Self::Task => SandboxPurpose::Capsule,
+            Self::Shell => SandboxPurpose::Command,
+        }
+    }
+
     fn state_root(self) -> &'static str {
         match self {
             Self::Task => "/altitude/task-state",
@@ -494,10 +500,9 @@ pub(super) async fn credential_reports(
     let Some(snapshot) = snapshot else {
         return Ok(None);
     };
-    let mut plan = SandboxPlan::compose(config, Project::profile_build(), recipes)?;
+    let plan = SandboxPlan::compose(config, Project::profile_build(), recipes)?;
     // One command and nothing else, so it is sized like the provider watcher
     // rather than like a task.
-    plan.options.size = SandboxSize::COMMAND;
     create(
         engine,
         config,
@@ -579,10 +584,9 @@ pub(super) async fn watcher(
     recipes: Vec<ProfileRecipe>,
     progress: &dyn EnvironmentProgressSink,
 ) -> Result<(), IsolationError> {
-    let mut plan = SandboxPlan::compose(config, project, recipes)?;
+    let plan = SandboxPlan::compose(config, project, recipes)?;
     // This sandbox runs a provider's read command and nothing else, so it is
     // sized for one command rather than for an agent.
-    plan.options.size = SandboxSize::COMMAND;
     create(engine, config, id, plan, SandboxKind::Shell, None, progress).await
 }
 
@@ -612,7 +616,9 @@ async fn create(
         .iter()
         .any(|route| route.guest_port == PORT_RELAY_GUEST_PORT);
     plan.options.snapshot_path = Some(path);
-    engine.create(id.clone(), plan.options).await?;
+    engine
+        .create(id.clone(), plan.options, kind.purpose())
+        .await?;
     let mut command = String::from("set -eu\n");
     command.push_str(&opener_script());
     if relay {

@@ -1,6 +1,7 @@
 use crate::{
     agent::AgentKind,
     remote::TaskSummary,
+    task::tasks_ahead_in_queue,
     tui::{
         App,
         app::PendingTask,
@@ -173,10 +174,19 @@ struct Card {
     extras: Vec<Line<'static>>,
 }
 
+/// Where a task stands while it waits for room on the host.
+#[derive(Clone, Copy)]
+enum Standing {
+    /// Not waiting for room: starting, running, or done.
+    NotQueued,
+    /// Waiting, with this many tasks served before it.
+    Queued { ahead: usize, has_room: bool },
+}
+
 impl Card {
     fn of(
         summary: &TaskSummary,
-        at_capacity: bool,
+        standing: Standing,
         tick: Option<usize>,
         build: Option<&EnvironmentProgress>,
         now_ms: i64,
@@ -195,7 +205,7 @@ impl Card {
                     None => format!("{} · Linear", issue.identifier),
                 }),
             is_alarm: is_alarming(summary),
-            status: card_summary(summary, at_capacity, tick, build),
+            status: card_summary(summary, standing, tick, build),
             extras: card_extras(summary, now_ms),
         }
     }
@@ -207,16 +217,22 @@ fn cards(app: &App) -> Vec<Card> {
         .iter()
         .filter(|task| task.facts.sandbox_available)
         .count();
-    let at_capacity = app.capacity.is_some_and(|limit| occupied >= limit);
+    let has_room = app
+        .capacity
+        .is_none_or(|capacity| capacity.free_slots_after(occupied) > 0);
     let tick = app.animation_tick();
     let now = now_ms();
     let mut cards: Vec<Card> = app
         .visible_tasks()
         .map(|task| {
             let summary = TaskSummary::of(task);
+            let standing = match tasks_ahead_in_queue(&app.tasks, &task.id) {
+                Some(ahead) => Standing::Queued { ahead, has_room },
+                None => Standing::NotQueued,
+            };
             Card::of(
                 &summary,
-                at_capacity,
+                standing,
                 tick,
                 app.environment_builds.get(&task.id),
                 now,
@@ -225,7 +241,7 @@ fn cards(app: &App) -> Vec<Card> {
         .collect();
     cards.extend(
         app.visible_remote_tasks()
-            .map(|held| Card::of(&held.summary, false, tick, None, now)),
+            .map(|held| Card::of(&held.summary, Standing::NotQueued, tick, None, now)),
     );
     cards
 }
@@ -323,7 +339,7 @@ fn draw_card(frame: &mut Frame, area: Rect, card: &Card, focused: bool) {
 
 fn card_summary(
     summary: &TaskSummary,
-    at_capacity: bool,
+    standing: Standing,
     tick: Option<usize>,
     build: Option<&EnvironmentProgress>,
 ) -> Line<'static> {
@@ -334,7 +350,7 @@ fn card_summary(
             view.tone.bold(),
         ))
     } else {
-        card_status(summary, at_capacity, tick, build)
+        card_status(summary, standing, tick, build)
     };
     if summary.unresolved_signal_count > 0 {
         let count = summary.unresolved_signal_count;
@@ -357,7 +373,7 @@ fn card_summary(
 
 fn card_status(
     summary: &TaskSummary,
-    at_capacity: bool,
+    standing: Standing,
     tick: Option<usize>,
     build: Option<&EnvironmentProgress>,
 ) -> Line<'static> {
@@ -366,15 +382,20 @@ fn card_status(
     }
     match summary.status {
         TaskExecutionStatus::Pending => {
-            // Both are recorded as `Pending`; the only difference is whether the
-            // host has room yet, and neither lasts long enough to be worth
-            // distinguishing further.
-            let label = if at_capacity {
-                "waiting for capacity…"
-            } else {
-                "starting up…"
+            // Waiting for room and starting are both recorded as `Pending`; how
+            // many tasks are served first is the whole difference to the person
+            // watching, so it is what the card says.
+            let label = match standing {
+                Standing::Queued {
+                    ahead: 0,
+                    has_room: false,
+                } => "next up · waiting for capacity…".to_owned(),
+                Standing::Queued { ahead, .. } if ahead > 0 => {
+                    format!("waiting for capacity · {ahead} ahead")
+                }
+                _ => "starting up…".to_owned(),
             };
-            Line::from_iter(shimmer(label, tick))
+            Line::from_iter(shimmer(&label, tick))
         }
         TaskExecutionStatus::Running => Line::from(match summary.mode {
             TaskExecutionMode::Autopilot => "autopilot · working",

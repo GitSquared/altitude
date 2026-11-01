@@ -12,10 +12,9 @@ use crate::{
     config::InstallationIdentity,
     isolation::{
         Command, CommandEvent, CommandSession, FileTransferSink, IsolationEngine, OutputStream,
-        guest_absolute,
+        SandboxCapacity, capacity::SAMPLE_INTERVAL, guest_absolute,
     },
     project::Project,
-    task::capacity::{HostCapacity, HostSampler, SAMPLE_INTERVAL},
     task::review::{
         Look, OBSERVATION_ATTEMPTS, REVIEW_POLL_INTERVAL, ReviewWaits, Watchers, unreadable,
         wake_reason,
@@ -84,7 +83,6 @@ pub struct TaskEventLoop<E> {
     runs: Arc<Mutex<HashMap<String, ActiveRun>>>,
     control_requests: Arc<Mutex<HashMap<String, RequestedControl>>>,
     terminal_output: Arc<Mutex<HashMap<String, CachedTerminalOutput>>>,
-    capacity: Arc<Mutex<HostCapacity>>,
     starting: Arc<Mutex<HashSet<String>>>,
     watchers: Arc<Watchers<E>>,
     review_waits: Arc<ReviewWaits>,
@@ -128,7 +126,6 @@ where
             runs: Arc::new(Mutex::new(HashMap::new())),
             control_requests: Arc::new(Mutex::new(HashMap::new())),
             terminal_output: Arc::new(Mutex::new(HashMap::new())),
-            capacity: Arc::new(Mutex::new(HostCapacity::new())),
             starting: Arc::new(Mutex::new(HashSet::new())),
             watchers,
             review_waits: Arc::new(ReviewWaits::default()),
@@ -138,24 +135,18 @@ where
         (event_loop, receiver)
     }
 
-    pub fn capacity_limit(&self) -> usize {
-        self.capacity
-            .lock()
-            .expect("capacity lock poisoned")
-            .limit()
+    pub fn sandbox_capacity(&self) -> SandboxCapacity {
+        self.service.isolation.sandbox_capacity()
     }
 
     fn watch_host_capacity(&self) {
         let event_loop = self.clone();
         tokio::spawn(async move {
-            // A host whose readings cannot be established has no capacity to
-            // measure, and the limit is left where it is.
-            let Some(mut sampler) = HostSampler::new() else {
-                return;
-            };
             let mut tick = time::interval(SAMPLE_INTERVAL);
             loop {
                 tick.tick().await;
+                // Demand is the queue's business; how much room that leaves is
+                // the host's, and only the second half is asked for here.
                 let demand = match event_loop.service.list().await {
                     Ok(tasks) => tasks
                         .iter()
@@ -168,16 +159,14 @@ where
                         continue;
                     }
                 };
-                // A host that cannot be read leaves the limit where it is.
-                let Some(sample) = sampler.sample() else {
-                    continue;
-                };
-                let limit = event_loop
-                    .capacity
-                    .lock()
-                    .expect("capacity lock poisoned")
-                    .observe(sample, demand);
-                tracing::debug!(limit, demand, "observed host capacity");
+                let capacity = event_loop.service.isolation.observe_demand(demand);
+                tracing::debug!(
+                    slots = capacity.slots,
+                    ceiling_cpus = capacity.ceiling.cpus,
+                    ceiling_mib = capacity.ceiling.memory_mib,
+                    demand,
+                    "observed host capacity"
+                );
                 event_loop.admit();
             }
         });
@@ -207,11 +196,6 @@ where
                 return;
             }
         };
-        let limit = self
-            .capacity
-            .lock()
-            .expect("capacity lock poisoned")
-            .limit();
         // A capsule that exists is a slot in use. A task being started has no
         // capsule yet but is about to want one, so it counts too.
         let occupied = tasks
@@ -219,26 +203,25 @@ where
             .filter(|task| task.facts.sandbox_available)
             .count();
         let taken = occupied + self.starting.lock().expect("starting lock poisoned").len();
-        let room = limit.saturating_sub(taken);
-        // A task with a held review is the scheduler's: admission must not start
-        // an agent turn for it while the review is still waiting.
-        let mut waiting: Vec<Task> = tasks
+        let room = self
+            .service
+            .isolation
+            .sandbox_capacity()
+            .free_slots_after(taken);
+        // The queue is the one the screens show: same order, same rule about who
+        // is waiting for room. Only the tasks already being started drop out.
+        let starting = self
+            .starting
+            .lock()
+            .expect("starting lock poisoned")
+            .clone();
+        let waiting: Vec<&Task> = super::tasks_waiting_to_start(&tasks)
             .into_iter()
-            .filter(|task| task.facts.execution_status == TaskExecutionStatus::Pending)
-            .filter(|task| task.facts.deferred_review.is_none())
-            .filter(|task| {
-                !self
-                    .starting
-                    .lock()
-                    .expect("starting lock poisoned")
-                    .contains(&task.id)
-            })
+            .filter(|task| !starting.contains(&task.id))
             .collect();
-        // The list arrives newest first; the queue is served oldest first.
-        waiting.reverse();
         let mut fresh = 0;
         for task in waiting {
-            if !task.facts.sandbox_available {
+            if super::waits_for_room(task) {
                 if fresh >= room {
                     continue;
                 }
@@ -256,6 +239,7 @@ where
                 continue;
             }
             let event_loop = self.clone();
+            let task = task.clone();
             tokio::spawn(async move {
                 let result = event_loop.service.start(task.clone()).await;
                 event_loop.watch_agent_run(result);

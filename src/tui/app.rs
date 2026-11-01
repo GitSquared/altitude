@@ -19,6 +19,7 @@ use crate::{
         Credential, CredentialAnswer, CredentialShell, CredentialShellCancel, CredentialShellEvent,
         Service, Slot, credential_shell_id, describe, new_id,
     },
+    isolation::SandboxCapacity,
     isolation::{EnvironmentDescription, EnvironmentProgress, IsolationEngine, ProfileSummary},
     project::{Project, ProjectCommits, TrackerBinding, normalize_repository},
     remote::{
@@ -466,7 +467,7 @@ pub struct App {
     pub(in crate::tui) shimmer: usize,
     pub(in crate::tui) terrain: Terrain,
     pub(in crate::tui) help_scroll: u16,
-    pub(in crate::tui) capacity: Option<usize>,
+    pub(in crate::tui) capacity: Option<SandboxCapacity>,
     pub(in crate::tui) alert: Option<Alert>,
     pub(in crate::tui) removing: HashSet<String>,
     pub(in crate::tui) selected: usize,

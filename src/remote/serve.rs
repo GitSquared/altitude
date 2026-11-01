@@ -10,6 +10,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use crate::task::tasks_ahead_in_queue;
 use crate::{
     isolation::{FileTally, FileTransferSink},
     task::{TaskExecutionPauseReason, TaskExecutionStatus},
@@ -1042,6 +1043,16 @@ impl super::tracker::Host for OwnTasks {
                 .into_iter()
                 .find(|task| task.id == task_id)
                 .and_then(|task| task.session_agent()))
+        })
+    }
+
+    fn tasks_ahead_in_queue(
+        &self,
+        task_id: String,
+    ) -> super::tracker::HostFuture<'_, Option<usize>> {
+        Box::pin(async move {
+            let tasks = self.tasks.list().await.map_err(|error| error.to_string())?;
+            Ok(tasks_ahead_in_queue(&tasks, &task_id))
         })
     }
 

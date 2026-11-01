@@ -4,6 +4,7 @@ use std::{
     os::unix::fs::{PermissionsExt, symlink},
     path::{Path, PathBuf},
     process,
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -37,8 +38,10 @@ use super::{
     BaseSandboxRecipe, BaseSandboxSnapshot, CREDENTIAL_PREFIX, Command, CommandEvent,
     CommandSession, CredentialCheck, CredentialReport, CredentialSandbox, EnvironmentDescription,
     EnvironmentProgress, EnvironmentProgressSink, FileTally, FileTransferSink, IsolationEngine,
-    IsolationError, IsolationStatus, OutputStream, ProfileRecipe, SandboxOptions, SetupStep,
-    VsockRoute, WATCHER_PREFIX, mount_git_cache,
+    IsolationError, IsolationStatus, OutputStream, ProfileRecipe, SandboxCapacity, SandboxCeiling,
+    SandboxOptions, SandboxPurpose, SetupStep, VsockRoute, WATCHER_PREFIX,
+    capacity::HostCapacity,
+    mount_git_cache,
     sandbox::{self, REFRESH_AFTER, private_directory},
     trust_host_roots,
 };
@@ -206,8 +209,6 @@ const COPY_CONCURRENCY: usize = 8;
 
 const BASE_IMAGE: &str = "ubuntu:24.04";
 
-const CAPSULE_DISK_MIB: u32 = 15 * 1_024;
-
 const WORKSPACE_PACKAGES: &[&str] = &[
     "bash",
     "ca-certificates",
@@ -266,6 +267,9 @@ pub struct MicrosandboxIsolation {
     cache_home: PathBuf,
     socket_safe_home: PathBuf,
     build_lock: BuildLock,
+    // Shared rather than per view: how much this machine can take is the same
+    // answer for every operator on it.
+    host_capacity: Arc<Mutex<HostCapacity>>,
 }
 
 #[derive(Clone)]
@@ -375,7 +379,21 @@ impl MicrosandboxIsolation {
             cache_home: config.isolation_cache_dir(),
             socket_safe_home: config.microsandbox_socket_dir(),
             build_lock: BuildLock::new(config),
+            host_capacity: Arc::new(Mutex::new(HostCapacity::new())),
         }
+    }
+
+    /// The ceilings a sandbox gets on this host now.
+    ///
+    /// Decided when a sandbox is created and never revisited: a guest that is
+    /// already running is not resized under the agent working in it, so the
+    /// count can move freely around it.
+    fn sandbox_ceiling(&self) -> SandboxCeiling {
+        self.host_capacity
+            .lock()
+            .expect("capacity lock poisoned")
+            .sandbox_capacity()
+            .ceiling
     }
 
     fn credential_shell_channel(&self, id: &str) -> Option<VsockRoute> {
@@ -393,17 +411,18 @@ impl MicrosandboxIsolation {
         &self,
         id: String,
         mut options: SandboxOptions,
+        ceiling: SandboxCeiling,
         pull_policy: PullPolicy,
     ) -> Result<(), IsolationError> {
         mount_git_cache(&mut options, &self.config.git_cache_dir());
         let trusted = trust_host_roots(&mut options, self.config.data_dir());
-        tracing::debug!(sandbox_id = %id, network_enabled = options.network_enabled, cpus = options.size.cpus, memory_mib = options.size.memory_mib, "creating sandbox");
+        tracing::debug!(sandbox_id = %id, network_enabled = options.network_enabled, cpus = ceiling.cpus, memory_mib = ceiling.memory_mib, "creating sandbox");
         let result = match options.snapshot_path {
             Some(snapshot_path) => {
                 let mut restore = Sandbox::restore(snapshot_path)
                     .name(&id)
-                    .cpus(options.size.cpus)
-                    .memory(options.size.memory_mib);
+                    .cpus(ceiling.cpus)
+                    .memory(ceiling.memory_mib);
                 if !options.network_enabled {
                     restore = restore.disable_network();
                 }
@@ -440,10 +459,10 @@ impl MicrosandboxIsolation {
             }
             None => {
                 let mut builder = Sandbox::builder(&id)
-                    .cpus(options.size.cpus)
-                    .memory(options.size.memory_mib)
+                    .cpus(ceiling.cpus)
+                    .memory(ceiling.memory_mib)
                     .image(BASE_IMAGE)
-                    .root_disk(CAPSULE_DISK_MIB)
+                    .root_disk(ceiling.disk_mib)
                     .pull_policy(pull_policy);
                 if !options.network_enabled {
                     builder = builder.disable_network();
@@ -567,7 +586,11 @@ impl MicrosandboxIsolation {
             parent.map(|snapshot| snapshot.path.to_string_lossy().into_owned()),
         );
         options.network_enabled = true;
-        self.create_sandbox(sandbox_id.clone(), options, PullPolicy::Always)
+        // An environment build is a sandbox like any other, so it takes the same
+        // ceiling: it runs apt and a package manager, which is exactly the work
+        // that wants the room.
+        let ceiling = self.sandbox_ceiling();
+        self.create_sandbox(sandbox_id.clone(), options, ceiling, PullPolicy::Always)
             .await?;
         let result = async {
             for (completed, step) in steps.iter().enumerate() {
@@ -860,6 +883,19 @@ fn now_ms() -> i64 {
 }
 
 impl IsolationEngine for MicrosandboxIsolation {
+    fn sandbox_capacity(&self) -> SandboxCapacity {
+        self.host_capacity
+            .lock()
+            .expect("capacity lock poisoned")
+            .sandbox_capacity()
+    }
+
+    fn observe_demand(&self, queued_tasks: usize) -> SandboxCapacity {
+        let mut capacity = self.host_capacity.lock().expect("capacity lock poisoned");
+        capacity.observe(queued_tasks);
+        capacity.sandbox_capacity()
+    }
+
     fn for_operator(&self, owner: &str) -> Result<Self, IsolationError> {
         if !self.config.serves_operators() {
             return Ok(self.clone());
@@ -877,6 +913,7 @@ impl IsolationEngine for MicrosandboxIsolation {
             cache_home: self.cache_home.clone(),
             socket_safe_home: self.socket_safe_home.clone(),
             build_lock: self.build_lock.clone(),
+            host_capacity: Arc::clone(&self.host_capacity),
         })
     }
 
@@ -1031,11 +1068,21 @@ impl IsolationEngine for MicrosandboxIsolation {
         Ok(())
     }
 
-    async fn create(&self, id: String, mut options: SandboxOptions) -> Result<(), IsolationError> {
+    async fn create(
+        &self,
+        id: String,
+        mut options: SandboxOptions,
+        purpose: SandboxPurpose,
+    ) -> Result<(), IsolationError> {
+        let ceiling = match purpose {
+            SandboxPurpose::Capsule => self.sandbox_ceiling(),
+            SandboxPurpose::Command => SandboxCeiling::COMMAND,
+        };
         if let Some(route) = self.credential_shell_channel(&id) {
             options.vsock.push(route);
         }
-        self.create_sandbox(id, options, PullPolicy::Never).await
+        self.create_sandbox(id, options, ceiling, PullPolicy::Never)
+            .await
     }
 
     fn base_description(&self) -> Option<EnvironmentDescription> {

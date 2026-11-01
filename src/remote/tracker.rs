@@ -10,7 +10,7 @@ use std::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -52,6 +52,21 @@ const MAX_WEBHOOK_BYTES: usize = 1024 * 1024;
 const SIGNATURE_HEADER: &str = "linear-signature";
 
 const TICK: Duration = Duration::from_secs(10);
+
+/// How often a queued task's place in the queue is put in front of the person.
+///
+/// The number moves only when a task ahead finishes, so this bounds the talking:
+/// a queue of sixty tasks would otherwise write sixty activities every time one
+/// of them started. While a task is next up it is repeated faster, because that
+/// is the moment its operator is watching the issue.
+const QUEUE_NOTICE_INTERVAL: Duration = Duration::from_secs(300);
+const NEXT_UP_NOTICE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// What was last said about a task's place, so it is only repeated when it moved.
+struct QueueNotice {
+    ahead: usize,
+    at: Instant,
+}
 const DELEGATION_SWEEP_TICKS: u32 = 6;
 const EVENT_ATTEMPTS: usize = 3;
 const UNHOOK_GRACE_MS: i64 = 60_000;
@@ -99,6 +114,9 @@ pub trait Host: Send + Sync + 'static {
         delegations: Vec<String>,
     ) -> HostFuture<'_, Option<BoundTask>>;
     fn session_agent(&self, task_id: String) -> HostFuture<'_, Option<String>>;
+
+    /// How many tasks are ahead of this one in the queue, if it is waiting.
+    fn tasks_ahead_in_queue(&self, task_id: String) -> HostFuture<'_, Option<usize>>;
 }
 
 fn published_comment_id(task_id: &str, signal_id: &str) -> String {
@@ -151,6 +169,7 @@ pub struct BoundTask {
 
 pub struct RemoteTracker {
     config: RemoteTrackerConfig,
+    queue_notices: Mutex<HashMap<String, QueueNotice>>,
     ledger: Mutex<Ledger>,
     notify: Notify,
     refusals: Mutex<HashMap<String, String>>,
@@ -162,6 +181,7 @@ impl RemoteTracker {
         let ledger = Ledger::load(&config.storage_path)?;
         Ok(Arc::new(Self {
             config,
+            queue_notices: Mutex::new(HashMap::new()),
             ledger: Mutex::new(ledger),
             refusals: Mutex::new(HashMap::new()),
             notify: Notify::new(),
@@ -262,6 +282,88 @@ impl RemoteTracker {
         }
     }
 
+    /// Say where a waiting task stands, and let the next activity take it away.
+    ///
+    /// A queued task emits nothing, so without this its session is silent exactly
+    /// when its operator is waiting on it — and Linear marks a session that says
+    /// nothing as unresponsive. The activity is ephemeral: the agent's own next
+    /// thought replaces it, so a task that starts needs no cleanup.
+    async fn report_queue_standing(&self, host: &dyn Host) {
+        let bound = match host.bound_tasks().await {
+            Ok(bound) => bound,
+            Err(error) => {
+                tracing::debug!(%error, "could not read bound tasks to report queue standing");
+                return;
+            }
+        };
+        for task in bound {
+            let ahead = match host.tasks_ahead_in_queue(task.task_id.clone()).await {
+                Ok(ahead) => ahead,
+                Err(error) => {
+                    tracing::debug!(task = %task.task_id, %error, "could not read a task's queue standing");
+                    continue;
+                }
+            };
+            let Some(report) = self.report_for_task(&task.task_id) else {
+                continue;
+            };
+            let Some(ahead) = ahead else {
+                self.queue_notices
+                    .lock()
+                    .expect("queue notices lock poisoned")
+                    .remove(&task.task_id);
+                continue;
+            };
+            if !self.queue_notice_is_due(&task.task_id, ahead) {
+                continue;
+            }
+            let body = if ahead == 0 {
+                "Next up on the remote · waiting for a sandbox to free.".to_owned()
+            } else if ahead == 1 {
+                "Queued on the remote · 1 task ahead.".to_owned()
+            } else {
+                format!("Queued on the remote · {ahead} tasks ahead.")
+            };
+            let stamp = now_ms();
+            let activity_id = stable_id(&report.session, &format!("queue-{stamp}-{ahead}"));
+            if let Err(error) = self
+                .config
+                .automation
+                .create_ephemeral_thought(&report.session, &activity_id, body.clone())
+                .await
+            {
+                tracing::debug!(task = %task.task_id, %error, "could not say where a task stands");
+                continue;
+            }
+            self.queue_notices
+                .lock()
+                .expect("queue notices lock poisoned")
+                .insert(
+                    task.task_id.clone(),
+                    QueueNotice {
+                        ahead,
+                        at: Instant::now(),
+                    },
+                );
+        }
+    }
+
+    fn queue_notice_is_due(&self, task_id: &str, ahead: usize) -> bool {
+        let notices = self
+            .queue_notices
+            .lock()
+            .expect("queue notices lock poisoned");
+        let Some(last) = notices.get(task_id) else {
+            return true;
+        };
+        let interval = if ahead == 0 {
+            NEXT_UP_NOTICE_INTERVAL
+        } else {
+            QUEUE_NOTICE_INTERVAL
+        };
+        last.ahead != ahead || last.at.elapsed() >= interval
+    }
+
     pub async fn run(self: Arc<Self>, host: Arc<dyn Host>) {
         let mut tick = interval(TICK);
         tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -273,6 +375,7 @@ impl RemoteTracker {
             }
             self.process_deliveries(host.as_ref()).await;
             self.adopt_bound_tasks(host.as_ref()).await;
+            self.report_queue_standing(host.as_ref()).await;
             self.poll_reports(host.as_ref()).await;
             // A delegation is delivered by webhook, and a webhook that arrives
             // while this machine is restarting is gone. Asking the tracker which
