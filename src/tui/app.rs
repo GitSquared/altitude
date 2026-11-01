@@ -29,10 +29,10 @@ use crate::{
     isolation::{EnvironmentDescription, EnvironmentProgress, IsolationEngine, ProfileSummary},
     project::{Project, ProjectCommits, TrackerBinding, normalize_repository},
     remote::{
-        Announcement, ConfigBundle, ConfigPush, DiscoveredRemote, DiscoveryEvent, LinkClient,
-        RemoteKey, RemoteKeyStatus, RemoteKeys, RemoteState, TaskOrigin, TaskRequest, TaskSummary,
-        TrackerConnection, WatchEvent, bring_home, meet, send::send_to_remote, transfer,
-        transfer::TransferUpdate,
+        Announcement, Compatibility, ConfigBundle, ConfigPush, DiscoveredRemote, DiscoveryEvent,
+        LOCAL_VERSION, LinkClient, RemoteKey, RemoteKeyStatus, RemoteKeys, RemoteState, TaskOrigin,
+        TaskRequest, TaskSummary, TrackerConnection, WatchEvent, bring_home, meet,
+        send::send_to_remote, transfer, transfer::TransferUpdate,
     },
     task::{
         SignalTransition, Task, TaskEventLoop, TaskExecutionMode, TaskExecutionPauseReason,
@@ -177,6 +177,7 @@ pub(in crate::tui) enum RemoteStatus {
     Reached,
     Syncing,
     Changed,
+    Incompatible { local: String, remote: String },
     Silent(String),
 }
 
@@ -427,6 +428,7 @@ pub enum WatchedTasks {
         address: String,
         announcement: Box<Announcement>,
         key_status: RemoteKeyStatus,
+        compatibility: Compatibility,
     },
     Ready {
         address: String,
@@ -456,6 +458,7 @@ enum WatchEnd {
     /// It answered with a key that is not the one remembered, so there is nothing
     /// to listen to until the operator decides which key this machine is.
     UnapprovedKey,
+    Incompatible,
     Lost,
 }
 
@@ -2421,6 +2424,14 @@ impl App {
                 self.check_remote(&address).await
             }
             Some(RowKind::Discovered(remote)) => {
+                if remote.compatibility == Compatibility::RequiresUpdate {
+                    self.say(format!(
+                        "{} runs Altitude v{}, and this machine runs v{}. Update both to the \
+                         same version to use it",
+                        remote.label, remote.version, LOCAL_VERSION
+                    ));
+                    return;
+                }
                 if let Some(file) = self.settings_file.as_mut() {
                     let mut proposed = file.settings().clone();
                     proposed.add_remote(&remote.address);
@@ -2486,6 +2497,9 @@ impl App {
                 Some(RemoteStatus::Syncing) => (format!("{name} (syncing)"), false),
                 Some(RemoteStatus::Asking) => (format!("{name} (asking)"), false),
                 Some(RemoteStatus::Changed) => (format!("{name} (identity changed)"), false),
+                Some(RemoteStatus::Incompatible { .. }) => {
+                    (format!("{name} (update required)"), false)
+                }
                 Some(RemoteStatus::Unknown) | Some(RemoteStatus::Silent(_)) | None => {
                     (format!("{name} (unreachable)"), false)
                 }
@@ -2520,9 +2534,8 @@ impl App {
                 match Self::watch_once(&watching, &keys, &client, &events).await {
                     // Nothing is reading any more, which is the interface ending.
                     WatchEnd::Closed => break,
-                    // Dialling again will get the same answer until the operator
-                    // says which key this machine is.
-                    WatchEnd::UnapprovedKey => break,
+                    // Retrying cannot resolve an identity or version mismatch.
+                    WatchEnd::UnapprovedKey | WatchEnd::Incompatible => break,
                     WatchEnd::Lost => {
                         // A watch that ran for a while was working, and its retry
                         // should be quick; one that failed at once backs off.
@@ -2575,13 +2588,18 @@ impl App {
         // What it said is reported before the key is judged, so a machine that
         // answered with a different one can be seen and decided about.
         let key_status = sighting.key_status;
+        let compatibility = sighting.compatibility;
         let _ = events.send(WatchedTasks::Reached {
             address: address.to_owned(),
             announcement: Box::new(sighting.announcement.clone()),
             key_status: key_status.clone(),
+            compatibility,
         });
         if key_status == RemoteKeyStatus::Changed {
             return WatchEnd::UnapprovedKey;
+        }
+        if compatibility == Compatibility::RequiresUpdate {
+            return WatchEnd::Incompatible;
         }
         let (said, mut receiving) = mpsc::unbounded_channel();
         let watching = client.watch_tasks(sighting.ticket, said);
@@ -2640,15 +2658,28 @@ impl App {
                 address,
                 announcement,
                 key_status,
+                compatibility,
             } => match key_status {
                 RemoteKeyStatus::New | RemoteKeyStatus::Known => {
                     self.remember(&address, &announcement).await;
-                    self.note_remote_trackers(&address, &announcement);
-                    let status = match announcement.state {
-                        RemoteState::Preparing => RemoteStatus::Syncing,
-                        RemoteState::Ready => RemoteStatus::Reached,
-                    };
-                    self.remote_status.insert(address, status);
+                    if compatibility == Compatibility::RequiresUpdate {
+                        self.clear_remote_trackers(&address);
+                        self.remote_synced.remove(&address);
+                        self.remote_status.insert(
+                            address.clone(),
+                            RemoteStatus::Incompatible {
+                                local: LOCAL_VERSION.to_owned(),
+                                remote: announcement.version.clone(),
+                            },
+                        );
+                    } else {
+                        self.note_remote_trackers(&address, &announcement);
+                        let status = match announcement.state {
+                            RemoteState::Preparing => RemoteStatus::Syncing,
+                            RemoteState::Ready => RemoteStatus::Reached,
+                        };
+                        self.remote_status.insert(address, status);
+                    }
                     self.reload_remembered_keys().await;
                 }
                 // Reported, and not written: accepting a changed key means
@@ -2949,6 +2980,12 @@ impl App {
             return Err(format!(
                 "{address} is not the machine this client knew; accept its identity \
                  in Settings → Remotes first"
+            ));
+        }
+        if sighting.compatibility == Compatibility::RequiresUpdate {
+            return Err(format!(
+                "{} needs an update before it can take tasks",
+                sighting.announcement.label_or_address(address)
             ));
         }
         // Whose work this is travels as a label. The machine it came from is the
@@ -3283,7 +3320,7 @@ impl App {
         if !self.remote_config_inflight.remove(&reply.address)
             || matches!(
                 self.remote_status.get(&reply.address),
-                Some(RemoteStatus::Changed)
+                Some(RemoteStatus::Changed | RemoteStatus::Incompatible { .. })
             )
             || !self.configured_remotes().contains(&reply.address)
         {
@@ -5035,6 +5072,7 @@ impl App {
             .discovered_remotes
             .values()
             .filter(|remote| !configured.contains(&remote.address))
+            .filter(|remote| remote.compatibility.is_compatible())
             .min_by(|left, right| left.label.cmp(&right.label))
             .map(|remote| RemoteOffer {
                 label: remote.label.clone(),
@@ -8014,6 +8052,12 @@ async fn deliver_config(
         return Err(format!(
             "{address} is not the machine this client knew; accept its identity in \
              Settings → Remotes first"
+        ));
+    }
+    if sighting.compatibility == Compatibility::RequiresUpdate {
+        return Err(format!(
+            "{} needs an update before it can receive this configuration",
+            sighting.announcement.label_or_address(address)
         ));
     }
     let peer: EndpointAddr = sighting.ticket.into();

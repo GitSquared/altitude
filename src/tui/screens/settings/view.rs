@@ -413,7 +413,11 @@ impl App {
                 } else {
                     remote.label.clone()
                 },
-                detail: Some(remote.address.clone()),
+                detail: Some(if remote.compatibility.is_compatible() {
+                    remote.address.clone()
+                } else {
+                    format!("{} · update required", remote.address)
+                }),
                 kind: RowKind::Discovered(remote),
             })
             .collect()

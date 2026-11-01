@@ -4,8 +4,8 @@ use crate::{
     config::DEFAULT_PORT,
     isolation::IsolationEngine,
     remote::{
-        Handover, HandoverRecord, LinkClient, RemoteKeyStatus, RemoteKeys, TaskSummary, Transfer,
-        TransferPart, meet,
+        Compatibility, Handover, HandoverRecord, LinkClient, RemoteKeyStatus, RemoteKeys,
+        TaskSummary, Transfer, TransferPart, meet,
     },
     task::{Task, TaskArrival, TaskEventLoop, TaskHistoryEvent},
 };
@@ -28,6 +28,12 @@ where
         .map_err(|e| e.to_string())?;
     if sighting.key_status == RemoteKeyStatus::Changed {
         return Err("the remote's key changed; approve its identity before taking a task".into());
+    }
+    if sighting.compatibility == Compatibility::RequiresUpdate {
+        return Err(format!(
+            "{} needs an update before it can hand a task over",
+            sighting.announcement.label_or_address(address)
+        ));
     }
     let peer: iroh::EndpointAddr = sighting.ticket.into();
     let handover = client

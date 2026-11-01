@@ -13,7 +13,7 @@
 
 use iroh::EndpointId;
 
-use super::{LinkResult, announce::Announcement, protocol::RemoteTicket};
+use super::{LinkResult, announce::Announcement, compat::Compatibility, protocol::RemoteTicket};
 
 /// How the key a remote answered with stands next to the one recorded for its
 /// address.
@@ -44,6 +44,7 @@ pub struct Sighting {
     pub ticket: RemoteTicket,
     pub announcement: Announcement,
     pub key_status: RemoteKeyStatus,
+    pub compatibility: Compatibility,
 }
 
 /// Meets a remote at an address, and says how its key compares to what was
@@ -63,9 +64,11 @@ pub async fn meet(
         .id
         .parse()
         .map_err(|error| format!("{address} announced an unreadable key: {error}"))?;
+    let compatibility = Compatibility::with_local_version(&announcement.version);
     Ok(Sighting {
         ticket,
         announcement,
         key_status: RemoteKeyStatus::classify(remembered, &id),
+        compatibility,
     })
 }

@@ -205,23 +205,29 @@ impl Row {
             RowKind::Remote {
                 status, trackers, ..
             } => {
+                let enter_action = match status {
+                    RemoteStatus::Changed => "accept identity",
+                    RemoteStatus::Incompatible { .. } => "check again",
+                    _ => "connect",
+                };
                 let mut hints = vec![
-                    chrome::Hint::new(
-                        "enter",
-                        if *status == RemoteStatus::Changed {
-                            "accept identity"
-                        } else {
-                            "connect"
-                        },
-                    ),
+                    chrome::Hint::new("enter", enter_action),
                     chrome::Hint::new("e", "edit"),
                 ];
-                if !tracker_is_set_up(trackers.as_deref()) {
+                if !tracker_is_set_up(trackers.as_deref())
+                    && !matches!(status, RemoteStatus::Incompatible { .. })
+                {
                     hints.insert(1, chrome::Hint::new("t", "set up guide"));
                 }
                 hints
             }
-            RowKind::Discovered(_) => vec![chrome::Hint::new("enter", "use remote")],
+            RowKind::Discovered(remote) => {
+                if remote.compatibility.is_compatible() {
+                    vec![chrome::Hint::new("enter", "use remote")]
+                } else {
+                    Vec::new()
+                }
+            }
             RowKind::Switch { .. } => vec![chrome::Hint::new("enter", "toggle")],
         }
     }
@@ -369,9 +375,10 @@ fn remote_mark(status: &RemoteStatus) -> Dot {
     match status {
         RemoteStatus::Asking | RemoteStatus::Syncing => mark(false, true),
         RemoteStatus::Reached => mark(true, false),
-        RemoteStatus::Unknown | RemoteStatus::Changed | RemoteStatus::Silent(_) => {
-            mark(false, false)
-        }
+        RemoteStatus::Unknown
+        | RemoteStatus::Changed
+        | RemoteStatus::Incompatible { .. }
+        | RemoteStatus::Silent(_) => mark(false, false),
     }
 }
 

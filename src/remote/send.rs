@@ -28,8 +28,8 @@ use crate::{
     config::{Config, DEFAULT_PORT},
     isolation::{IsolationEngine, MicrosandboxIsolation, UnwatchedFiles},
     remote::{
-        ConfigBundle, ConfigPush, Handover, HandoverRecord, LinkClient, RemoteKeyStatus,
-        RemoteKeys, Transfer, TransferArchive, TransferPart, meet,
+        Compatibility, ConfigBundle, ConfigPush, Handover, HandoverRecord, LinkClient,
+        RemoteKeyStatus, RemoteKeys, Transfer, TransferArchive, TransferPart, meet,
         protocol::{MAX_BLOB_BYTES, TRANSFER_PIECE_BYTES},
     },
     task::{Task, TaskArrival, TaskEventLoop, TaskHistoryEvent},
@@ -86,6 +86,12 @@ where
         .map_err(message)?;
     if sighting.key_status == RemoteKeyStatus::Changed {
         return Err("the remote's key changed; approve its identity before sending a task".into());
+    }
+    if sighting.compatibility == Compatibility::RequiresUpdate {
+        return Err(format!(
+            "{} needs an update before it can take tasks",
+            sighting.announcement.label_or_address(address)
+        ));
     }
     let peer: EndpointAddr = sighting.ticket.into();
 

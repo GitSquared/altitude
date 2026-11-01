@@ -48,6 +48,13 @@ pub struct Announcement {
     pub trackers: Vec<TrackerConnection>,
 }
 
+impl Announcement {
+    pub fn label_or_address<'a>(&'a self, address: &'a str) -> &'a str {
+        let label = self.label.trim();
+        if label.is_empty() { address } else { label }
+    }
+}
+
 /// What a remote's tracker can do right now.
 ///
 /// Setup is checked when the remote starts, so this says how far its owner got,

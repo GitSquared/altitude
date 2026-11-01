@@ -589,6 +589,14 @@ pub(super) fn remote_connector(
             Some("It is not the machine this client knew.".to_owned()),
             Some("Press enter to accept its identity."),
         ),
+        RemoteStatus::Incompatible { local, remote } => (
+            Reach::Off,
+            "update required",
+            Some(format!(
+                "This machine runs Altitude v{local}; {title} runs v{remote}."
+            )),
+            Some("Update both machines to the same version."),
+        ),
         RemoteStatus::Silent(reason) => (
             Reach::Off,
             "disconnected",

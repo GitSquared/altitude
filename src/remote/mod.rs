@@ -11,6 +11,7 @@ mod announce;
 mod bundle;
 pub(crate) use bundle::{HeldConfig, Logins};
 mod clients;
+mod compat;
 mod console;
 mod discovery;
 mod identity;
@@ -36,6 +37,7 @@ pub use {
     bundle::ConfigBundle,
     client::LinkClient,
     clients::ClientRecord,
+    compat::{Compatibility, LOCAL_VERSION},
     discovery::{DiscoveredRemote, DiscoveryEvent, Scan},
     identity::InstallationKey,
     keys::{RemoteKey, RemoteKeys},

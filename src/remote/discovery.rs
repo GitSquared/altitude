@@ -16,7 +16,10 @@ use tokio::{
     time::{Instant, timeout_at},
 };
 
-use crate::{config::DEFAULT_PORT, remote::LinkResult};
+use crate::{
+    config::DEFAULT_PORT,
+    remote::{LinkResult, compat::Compatibility},
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiscoveredRemote {
@@ -24,6 +27,7 @@ pub struct DiscoveredRemote {
     pub label: String,
     pub version: String,
     pub address: String,
+    pub compatibility: Compatibility,
 }
 
 #[derive(Clone, Debug)]

@@ -75,7 +75,7 @@ and implementer of bounded pieces—not an autonomous author of the whole v1.
 ## Writing
 
 A comment says **why**. If it says **what**, either the code says it or the name
-should. Four kinds, and what happens to each:
+should. Three kinds, and what happens to each:
 
 - **A decision** — why this and not the obvious thing — stays. Delete it and the
   code looks like a mistake: the missing relay, the epoch that was deliberately
@@ -86,20 +86,15 @@ should. Four kinds, and what happens to each:
   goes stale.
 - **A compensation** — a comment that explains a name — means the name is wrong.
   Change the name.
-- **A module doc** says what the module is for and who calls it. It does not
-  list what is inside; the file already does that.
 
-Two kinds of comment, and the difference is not a matter of taste:
+Altitude is an application, not a library. Do not add `///` item documentation
+or `//!` module documentation. Keep comments sparse: use `//` only when a
+non-obvious decision, constraint, or invariant genuinely helps the reader
+understand the surrounding code. Do not replace deleted documentation with
+ordinary comments that say the same thing.
 
-- `///` and `//!` are documentation. They belong to an item — a type, a field, a
-  variant, a function, a module — and rustdoc reads them. Attributes may sit
-  between a doc and the item it documents; that is still its doc.
-- `//` is a note to whoever reads this body next. It belongs inside a function,
-  beside the line it is about.
-
-A note where documentation belongs is invisible to rustdoc. Documentation where
-a note belongs is read by it, on an item nobody meant to document. Neither is a
-judgement call.
+Prefer longer, explicit function and variable names over short names explained
+by comments. Before adding a comment, try making the code or its names clearer.
 
 A comment sits on the line it explains. When a comment describes something the
 line under it has nothing to do with, it has drifted — the code moved and the
