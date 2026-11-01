@@ -78,6 +78,10 @@ pub enum LinkRequest {
     TakeTask {
         task_id: String,
     },
+    /// How far the machine handing a task over has got in collecting it.
+    TakeProgress {
+        task_id: String,
+    },
     FetchTransferPart {
         transfer_id: String,
         part: TransferPart,
@@ -170,6 +174,12 @@ pub enum LinkResponse {
     },
     TransferPiece {
         len: u64,
+    },
+    Collecting {
+        stage: String,
+        done: u64,
+        total: u64,
+        unit: String,
     },
     Rejected {
         reason: String,

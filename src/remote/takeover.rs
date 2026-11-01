@@ -1,3 +1,12 @@
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
+use tokio::time::sleep;
+
 use crate::{
     config::DEFAULT_PORT,
     isolation::IsolationEngine,
@@ -34,10 +43,30 @@ where
         ));
     }
     let peer: iroh::EndpointAddr = sighting.ticket.into();
+    // While the other machine collects, the bar reports what it reports rather than
+    // standing still: the files are being walked over there, not here.
+    let polling = {
+        let client = client.clone();
+        let peer = peer.clone();
+        let task_id = summary.id.clone();
+        let transfer = transfer.watcher();
+        let done = Arc::new(AtomicBool::new(false));
+        let finished = Arc::clone(&done);
+        tokio::spawn(async move {
+            while !finished.load(Ordering::Relaxed) {
+                if let Some(update) = client.take_progress(&peer, &task_id).await {
+                    transfer.reported(update);
+                }
+                sleep(Duration::from_millis(300)).await;
+            }
+        });
+        done
+    };
     let handover = client
         .prepare_take(&peer, &summary.id)
         .await
         .map_err(|e| e.to_string())?;
+    polling.store(true, Ordering::Relaxed);
     if handover.task_id != summary.id {
         return Err("the remote prepared another task".into());
     }

@@ -11,7 +11,7 @@ use std::{
 };
 
 use crate::{
-    isolation::{FileTransferSink, UnwatchedFiles},
+    isolation::{FileTally, FileTransferSink},
     task::{TaskExecutionPauseReason, TaskExecutionStatus},
     vcs::now_ms,
     version::VERSION,
@@ -61,12 +61,43 @@ struct PreparedTransfer {
 
 const TRANSFER_IDLE_MS: i64 = 120_000;
 
+/// What a task being handed over has got through, for the machine waiting on it.
+struct WatchedCollect {
+    task_id: String,
+    collecting: Arc<Mutex<HashMap<String, super::transfer::TransferUpdate>>>,
+}
+
+impl FileTransferSink for WatchedCollect {
+    fn counted(&self, whole: FileTally) {
+        self.record(|update| {
+            update.total = whole.files;
+            update.done = 0;
+            update.unit = super::transfer::Unit::Files;
+            update.stage = "collecting the working files…".to_owned();
+        });
+    }
+
+    fn moved(&self, step: FileTally) {
+        self.record(|update| update.done = update.done.saturating_add(step.files));
+    }
+}
+
+impl WatchedCollect {
+    fn record(&self, change: impl FnOnce(&mut super::transfer::TransferUpdate)) {
+        if let Ok(mut collecting) = self.collecting.lock() {
+            let update = collecting.entry(self.task_id.clone()).or_default();
+            change(update);
+        }
+    }
+}
+
 struct OwnTasks {
     config: Arc<Config>,
     tasks: Arc<TaskEventLoop<MicrosandboxIsolation>>,
     incoming: IncomingTransfers,
     preparation_lock: Arc<AsyncMutex<()>>,
     activity: Arc<Mutex<HashMap<String, i64>>>,
+    collecting: Arc<Mutex<HashMap<String, super::transfer::TransferUpdate>>>,
     watchers: Arc<Watchers>,
     read_slots: Arc<Semaphore>,
     readiness: watch::Sender<RemoteState>,
@@ -325,11 +356,19 @@ impl TaskHost for OwnTasks {
         })
     }
 
+    fn take_progress(&self, task_id: &str) -> Option<super::transfer::TransferUpdate> {
+        self.collecting
+            .lock()
+            .ok()
+            .and_then(|collecting| collecting.get(task_id).cloned())
+    }
+
     fn hand_over(&self, peer: EndpointId, task_id: String) -> BoxFuture<Result<Handover, String>> {
         let tasks = self.tasks.clone();
         let config = self.config.clone();
         let lock = self.preparation_lock.clone();
         let activity = Arc::clone(&self.activity);
+        let collecting = Arc::clone(&self.collecting);
         Box::pin(async move {
             let _preparing = lock.lock().await;
             if let Some(task) = tasks
@@ -342,14 +381,16 @@ impl TaskHost for OwnTasks {
             {
                 return Err("that task belongs to another operator".into());
             }
-            let handover = export_task(
-                &config,
-                &tasks,
-                &task_id,
-                &peer.to_string(),
-                &UnwatchedFiles,
-            )
-            .await?;
+            let watched = WatchedCollect {
+                task_id: task_id.clone(),
+                collecting: Arc::clone(&collecting),
+            };
+            let handover =
+                export_task(&config, &tasks, &task_id, &peer.to_string(), &watched).await;
+            if let Ok(mut held) = collecting.lock() {
+                held.remove(&task_id);
+            }
+            let handover = handover?;
             // Packaging is done, so the wait for the first piece starts now rather
             // than from when the task was staged.
             activity
@@ -1385,6 +1426,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         incoming,
         preparation_lock: Arc::new(AsyncMutex::new(())),
         activity: Arc::new(Mutex::new(HashMap::new())),
+        collecting: Arc::new(Mutex::new(HashMap::new())),
         watchers,
         read_slots: Arc::new(Semaphore::new(4)),
         readiness: state,

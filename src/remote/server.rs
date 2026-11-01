@@ -342,6 +342,7 @@ pub trait TaskHost: Send + Sync + 'static {
     fn list(&self, peer: EndpointId) -> BoxFuture<Result<Vec<TaskSummary>, String>>;
     fn watch(&self, peer: EndpointId) -> BoxFuture<Result<Watching, String>>;
     fn remove(&self, peer: EndpointId, task_id: String) -> BoxFuture<Result<(), String>>;
+    fn take_progress(&self, task_id: &str) -> Option<super::transfer::TransferUpdate>;
     fn hand_over(&self, peer: EndpointId, task_id: String) -> BoxFuture<Result<Handover, String>>;
     fn transfer_piece(
         &self,
@@ -511,6 +512,23 @@ async fn answer(
             let response = match handler.tasks.remove(peer, task_id).await {
                 Ok(()) => LinkResponse::Removed,
                 Err(reason) => LinkResponse::Rejected { reason },
+            };
+            write_frame(&mut send, &response).await?;
+        }
+        LinkRequest::TakeProgress { task_id } => {
+            let response = match handler.tasks.take_progress(&task_id) {
+                Some(progress) => LinkResponse::Collecting {
+                    stage: progress.stage,
+                    done: progress.done,
+                    total: progress.total,
+                    unit: match progress.unit {
+                        super::transfer::Unit::Bytes => "bytes".to_owned(),
+                        super::transfer::Unit::Files => "files".to_owned(),
+                    },
+                },
+                None => LinkResponse::Rejected {
+                    reason: "nothing is being collected for that task".to_owned(),
+                },
             };
             write_frame(&mut send, &response).await?;
         }

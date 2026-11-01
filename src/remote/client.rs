@@ -205,6 +205,40 @@ impl LinkClient {
         }
     }
 
+    pub async fn take_progress(
+        &self,
+        peer: &EndpointAddr,
+        task_id: &str,
+    ) -> Option<super::transfer::TransferUpdate> {
+        let answer = self
+            .say(
+                peer.clone(),
+                &LinkRequest::TakeProgress {
+                    task_id: task_id.to_owned(),
+                },
+            )
+            .await
+            .ok()?;
+        match answer {
+            LinkResponse::Collecting {
+                stage,
+                done,
+                total,
+                unit,
+            } => Some(super::transfer::TransferUpdate {
+                stage,
+                done,
+                total,
+                unit: if unit == "files" {
+                    super::transfer::Unit::Files
+                } else {
+                    super::transfer::Unit::Bytes
+                },
+            }),
+            _ => None,
+        }
+    }
+
     pub async fn fetch_part(
         &self,
         peer: &EndpointAddr,

@@ -81,6 +81,21 @@ impl Transfer {
         self.updates.send_modify(|update| update.stage = stage);
     }
 
+    /// A second handle on the same transfer, for something that reports into it
+    /// while the caller is blocked waiting on the work.
+    pub fn watcher(&self) -> Self {
+        Self {
+            updates: self.updates.clone(),
+            stopped: Arc::clone(&self.stopped),
+        }
+    }
+
+    /// Take what the machine doing the work says it has done: the waiting side
+    /// cannot count files it cannot see.
+    pub fn reported(&self, update: TransferUpdate) {
+        self.updates.send_modify(|held| *held = update);
+    }
+
     pub fn advanced(&self, bytes: u64) {
         self.updates.send_modify(|update| update.done += bytes);
     }
