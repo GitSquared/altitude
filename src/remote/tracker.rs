@@ -136,6 +136,15 @@ pub trait Host: Send + Sync + 'static {
     fn events(&self, task_id: String) -> HostFuture<'_, Vec<(i64, TaskHistoryEvent)>>;
     fn instruct(&self, task_id: String, instruction: String) -> HostFuture<'_, ()>;
     fn reply(&self, task_id: String, signal_id: String, answer: String) -> HostFuture<'_, ()>;
+    /// Answer a question and settle it in one act, which is what a reply the
+    /// operator typed in the tracker means: they have answered, and the task is
+    /// no longer waiting on them.
+    fn settle_signal(
+        &self,
+        task_id: String,
+        signal_id: String,
+        answer: String,
+    ) -> HostFuture<'_, ()>;
     fn accept(&self, task_id: String, signal_id: String) -> HostFuture<'_, ()>;
     /// Whether the task's record is still kept on this machine. A completed task
     /// is kept, which is what lets its ending be reported before it is dropped.
@@ -1306,6 +1315,18 @@ impl RemoteTracker {
         // reply in a closed thread is exactly that: nobody writes into an answered
         // question unless it is being asked again.
         self.reopen_closed_thread(&report, &site, host).await;
+        // A reply inside a thread this machine published is an answer to the
+        // question that thread asked, and the thread is which question it is. The
+        // ids are derived from the task and the signal, so either side can work
+        // them out and no table of published comments has to be kept.
+        let root = site.root_comment_id.clone();
+        let answered = host
+            .signal_threads(report.task_id.clone())
+            .await?
+            .into_iter()
+            .find(|thread| {
+                thread.is_unresolved() && published_comment_id(&report.task_id, &thread.id) == root
+            });
         let facts = InputFacts {
             actor,
             is_mention: event.is_mention,
@@ -1313,9 +1334,7 @@ impl RemoteTracker {
             is_agent_document_comment: site.document_content_id.is_some()
                 && site.parent_id.is_none()
                 && site.document_creator_id.as_deref() == Some(app_user_id),
-            // Signal comments do not exist yet; the binding ledger will set this
-            // when they do.
-            is_tracked_signal: false,
+            is_tracked_signal: answered.is_some(),
             is_task_issue: site.document_content_id.is_none()
                 && site.issue_id.as_deref() == Some(issue_id.as_str())
                 && site.parent_id.is_none(),
@@ -1341,28 +1360,10 @@ impl RemoteTracker {
                 } else {
                     event.body.clone()
                 };
-                // An answered question is answered wherever the operator typed it.
-                // A question answered on the issue itself would otherwise stay open
-                // and park the task after every turn, which reads as the agent
-                // ignoring them while it is the record that never closed.
-                let answering = host
-                    .signal_threads(report.task_id.clone())
-                    .await?
-                    .into_iter()
-                    .filter(TaskOperatorSignalThread::is_unresolved)
-                    .find(|thread| {
-                        matches!(
-                            thread.kind,
-                            TaskOperatorSignalKind::Blocked
-                                | TaskOperatorSignalKind::Decision
-                                | TaskOperatorSignalKind::InReview
-                        ) && !thread
-                            .messages
-                            .iter()
-                            .any(|message| message.author == TaskOperatorSignalAuthor::Operator)
-                    });
-                if let Some(thread) = answering {
-                    return host.reply(report.task_id, thread.id, body).await;
+                if let Some(thread) = &answered {
+                    return host
+                        .settle_signal(report.task_id, thread.id.clone(), body)
+                        .await;
                 }
                 let source = if site.document_id.is_some() {
                     "document"
@@ -1943,7 +1944,8 @@ impl RemoteTracker {
                 // A question is not a review: the work is still in progress, and
                 // moving the issue would tell a reader the milestone is finished.
                 // The comment is what asks for attention.
-                let body = format!("**? Needs you:** {}\n\n{}", title.trim(), body.trim());
+                let who = self.operator_mention(&report.tracker_user_id).await;
+                let body = format!("**? Needs you:** {}\n\n{who} {}", title.trim(), body.trim());
                 self.config
                     .automation
                     .comment_on_issue(&report.issue_id, &body, &comment_id)
@@ -1952,8 +1954,12 @@ impl RemoteTracker {
                 Ok(None)
             }
             TaskOperatorSignalKind::InReview => {
-                let mut body =
-                    format!("**◆ Ready to review:** {}\n\n{}", title.trim(), body.trim());
+                let who = self.operator_mention(&report.tracker_user_id).await;
+                let mut body = format!(
+                    "**◆ Ready to review:** {}\n\n{who} {}",
+                    title.trim(),
+                    body.trim()
+                );
                 append_contributions(&mut body, contributions);
                 self.config
                     .automation
