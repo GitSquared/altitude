@@ -935,36 +935,50 @@ impl RemoteTracker {
         }
 
         // A different session on an issue that already has work is a
-        // redelegation: stop the old task before the new one starts, so two
-        // capsules never own the same issue.
-        let redelegation = if let Some(existing) = self.report_for_issue(issue_id) {
-            host.stop(
-                existing.task_id.clone(),
-                TaskExecutionPauseReason::StoppedInTracker,
-            )
-            .await?;
-            let body = if taken_over {
-                "This issue's work was taken over on another machine, and a newer delegation \
-                 asked for a task here, so a second one has started."
-            } else {
-                "A newer delegation replaced this one, so Altitude stopped this task."
-            };
-            self.config
-                .automation
-                .create_activity(
-                    &existing.tracker_session_id,
-                    &stable_id(&existing.task_id, "redelegated"),
-                    AgentActivityContent::Response {
-                        body: body.to_owned(),
-                    },
+        // redelegation: every task still bound to the issue stops before the new
+        // one starts, so two capsules never own the same issue — and so the work
+        // that starts is the new delegation rather than one an older task quietly
+        // inherited, because a task leaves the issue to whoever founds it next only
+        // once it is out of play.
+        let replaced = self.replaced_tasks(issue_id, host).await;
+        let redelegation = !replaced.is_empty();
+        for task in &replaced {
+            if let Err(error) = host
+                .stop(
+                    task.task_id.clone(),
+                    TaskExecutionPauseReason::StoppedInTracker,
                 )
                 .await
-                .map_err(|error| error.to_string())?;
-            self.retire_report(&existing)?;
-            true
-        } else {
-            false
-        };
+            {
+                tracing::warn!(task = %task.task_id, %error, "could not stop a replaced task");
+                continue;
+            }
+            if let Some(report) = self.report_for_task(&task.task_id) {
+                let body = if taken_over {
+                    "This issue's work was taken over on another machine, and a newer \
+                     delegation asked for a task here, so a second one has started."
+                } else {
+                    "A newer delegation replaced this one, so Altitude stopped this task."
+                };
+                if let Err(error) = self
+                    .config
+                    .automation
+                    .create_activity(
+                        &report.tracker_session_id,
+                        &stable_id(&task.task_id, "redelegated"),
+                        AgentActivityContent::Response {
+                            body: body.to_owned(),
+                        },
+                    )
+                    .await
+                {
+                    tracing::warn!(task = %task.task_id, %error, "could not say a task was replaced");
+                }
+                if let Err(error) = self.retire_report(&report) {
+                    tracing::warn!(task = %task.task_id, %error, "could not retire a replaced task's report");
+                }
+            }
+        }
 
         let Some(owner) = self.owner_for_user(author) else {
             self.post_sync_guidance(session_id).await?;
@@ -2110,6 +2124,21 @@ impl RemoteTracker {
                 held.last_status = None;
             }
         })
+    }
+
+    /// Every task this machine still has in play on an issue.
+    ///
+    /// Read from the tasks themselves rather than from the ledger: a task can be
+    /// bound to an issue without a report (a start that never got that far), and one
+    /// of those left running is exactly what a redelegation must not inherit.
+    async fn replaced_tasks(&self, issue_id: &str, host: &dyn Host) -> Vec<BoundTask> {
+        let Ok(bound) = host.bound_tasks().await else {
+            return Vec::new();
+        };
+        bound
+            .into_iter()
+            .filter(|task| task.issue.id == issue_id || task.issue.identifier == issue_id)
+            .collect()
     }
 
     /// Whether this issue's task was taken over, and handed to a person's machine.
