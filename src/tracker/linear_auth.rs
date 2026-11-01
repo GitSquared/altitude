@@ -81,14 +81,17 @@ pub(super) fn grant_changed_at(profile: &Path) -> Option<SystemTime> {
 pub(super) async fn authorized_client(
     profile: &Path,
 ) -> Result<AuthClient<reqwest::Client>, TrackerError> {
-    let mut manager = manager(profile).await?;
-    let restored = manager.initialize_from_store().await.map_err(|error| {
-        TrackerError::new(format!("could not read the Linear sign-in: {error}"))
-    })?;
+    let mut authorization = authorization(profile).await?;
+    let restored = authorization
+        .initialize_from_store()
+        .await
+        .map_err(|error| {
+            TrackerError::new(format!("could not read the Linear sign-in: {error}"))
+        })?;
     if !restored {
-        manager = sign_in(manager).await?;
+        authorization = sign_in(authorization).await?;
     }
-    Ok(AuthClient::new(reqwest::Client::new(), manager))
+    Ok(AuthClient::new(reqwest::Client::new(), authorization))
 }
 
 pub(super) fn transport(
@@ -100,19 +103,21 @@ pub(super) fn transport(
     )
 }
 
-async fn manager(profile: &Path) -> Result<AuthorizationManager, TrackerError> {
-    let mut manager = AuthorizationManager::new(MCP_URL).await.map_err(|error| {
+async fn authorization(profile: &Path) -> Result<AuthorizationManager, TrackerError> {
+    let mut authorization = AuthorizationManager::new(MCP_URL).await.map_err(|error| {
         TrackerError::new(format!("could not prepare the Linear sign-in: {error}"))
     })?;
-    manager.set_credential_store(Grant::new(profile));
-    Ok(manager)
+    authorization.set_credential_store(Grant::new(profile));
+    Ok(authorization)
 }
 
-async fn sign_in(mut manager: AuthorizationManager) -> Result<AuthorizationManager, TrackerError> {
-    let resolution = manager.resolve_metadata().await.map_err(|error| {
+async fn sign_in(
+    mut authorization: AuthorizationManager,
+) -> Result<AuthorizationManager, TrackerError> {
+    let resolution = authorization.resolve_metadata().await.map_err(|error| {
         TrackerError::new(format!("Linear did not describe how to sign in: {error}"))
     })?;
-    manager.set_metadata(resolution.metadata);
+    authorization.set_metadata(resolution.metadata);
 
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.map_err(|error| {
         TrackerError::new(format!("could not listen for the Linear sign-in: {error}"))
@@ -125,7 +130,7 @@ async fn sign_in(mut manager: AuthorizationManager) -> Result<AuthorizationManag
         .port();
     let request = AuthorizationRequest::new(format!("http://127.0.0.1:{port}/callback"))
         .with_client_name("Altitude");
-    let session = AuthorizationSession::new(manager, request)
+    let session = AuthorizationSession::new(authorization, request)
         .await
         .map_err(|(_, error)| {
             TrackerError::new(format!("Linear refused the sign-in request: {error}"))

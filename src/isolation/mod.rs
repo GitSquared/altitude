@@ -186,23 +186,12 @@ pub struct SandboxOptions {
     pub vsock: Vec<VsockRoute>,
 }
 
-/// What a sandbox is for, which is what decides its ceiling.
-///
-/// It travels with the sandbox rather than becoming a size the caller picks:
-/// a capsule is sized from what the host can spare at that moment, while a shell
-/// run to check a credential needs almost nothing and must not take a capsule's
-/// place in that reckoning.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SandboxPurpose {
     Capsule,
     Command,
 }
 
-/// The most one sandbox may be given, which the guest sees as its own size.
-///
-/// A ceiling, not a reservation: the host backs memory as the guest touches it
-/// and runs a virtual CPU only while it has work, so these bound the worst case
-/// rather than setting aside anything.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SandboxCeiling {
     pub cpus: u8,
@@ -211,7 +200,6 @@ pub struct SandboxCeiling {
 }
 
 impl SandboxCeiling {
-    /// A shell, not a workspace: enough to run a command and read its answer.
     pub const COMMAND: Self = Self {
         cpus: 1,
         memory_mib: 512,
@@ -362,14 +350,8 @@ impl fmt::Display for IsolationError {
 impl StdError for IsolationError {}
 
 pub trait IsolationEngine: Send + Sync {
-    /// What a sandbox may be given on this host right now, and how many may run.
-    ///
-    /// The queue asks this rather than knowing what a vCPU is: what fits is the
-    /// host's business, and the ceilings come back with the count so the caller
-    /// never has to pick a size.
     fn sandbox_capacity(&self) -> SandboxCapacity;
 
-    /// Re-measure the host with `queued_tasks` waiting, and say what it takes.
     fn observe_demand(&self, queued_tasks: usize) -> SandboxCapacity;
 
     fn provision(
@@ -410,11 +392,6 @@ pub trait IsolationEngine: Send + Sync {
         status: &watch::Sender<IsolationStatus>,
     ) -> impl Future<Output = Result<(), IsolationError>> + Send;
 
-    /// Create the sandbox, choosing the ceiling from what it is for.
-    ///
-    /// `purpose` is the caller's only say in the size: what a capsule may take is
-    /// the host's answer at this moment, and a command shell is sized like a
-    /// command shell.
     fn create(
         &self,
         id: String,

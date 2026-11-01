@@ -174,12 +174,9 @@ struct Card {
     extras: Vec<Line<'static>>,
 }
 
-/// Where a task stands while it waits for room on the host.
 #[derive(Clone, Copy)]
 enum Standing {
-    /// Not waiting for room: starting, running, or done.
     NotQueued,
-    /// Waiting, with this many tasks served before it.
     Queued { ahead: usize, has_room: bool },
 }
 
@@ -246,8 +243,6 @@ fn cards(app: &App) -> Vec<Card> {
     cards
 }
 
-/// A task that has been asked for and is not here yet: the card it will be, dimmed,
-/// with what it will be called while it is being made.
 fn draw_pending(frame: &mut Frame, area: Rect, pending: &PendingTask, tick: Option<usize>) {
     frame.render_widget(Clear, area);
     let block = Block::bordered()

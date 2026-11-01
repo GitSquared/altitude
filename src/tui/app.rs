@@ -253,8 +253,6 @@ pub(in crate::tui) const NO_TRACKER: &str =
 
 const ASK_AFTER: Duration = Duration::from_millis(400);
 
-/// Two blinks of the border: long enough to notice, short enough not to wait for.
-/// How long a task that was asked for may stay unlanded before the row gives up.
 const PENDING_PATIENCE: Duration = Duration::from_secs(60);
 
 const MESSAGE_FLASH: Duration = Duration::from_millis(480);
@@ -494,8 +492,6 @@ pub struct App {
     pub(in crate::tui) signal_plan_tabs: bool,
     pub(in crate::tui) signal_focus: SignalFocus,
     pub(in crate::tui) signal_message_cursor: usize,
-    /// The message whose border is flashing, after a copy: the confirmation is the
-    /// message saying it happened rather than a window saying it did.
     pub(in crate::tui) signal_message_flash: Option<usize>,
     signal_flash_started: Option<Instant>,
     pub(in crate::tui) signal_targets: Targets<SignalHit>,
@@ -513,9 +509,6 @@ pub struct App {
     pub(in crate::tui) foreground: Foreground,
     shell_behind: Behind<Foreground>,
     pub(in crate::tui) transfer: Option<TransferView>,
-    /// Work that has been asked for and is not in the list yet: a remote founds the
-    /// task on its own machine, which takes a moment, and a list that stays empty
-    /// until then looks like nothing happened.
     pub(in crate::tui) pending_tasks: Vec<PendingTask>,
     pub(in crate::tui) remote_status: HashMap<String, RemoteStatus>,
     pub(in crate::tui) remote_trackers: HashMap<String, Vec<TrackerConnection>>,
@@ -2576,8 +2569,6 @@ impl App {
         moving
     }
 
-    /// Watch a transfer the task layer started: the same card, without owning the
-    /// decision. Nothing to stop either — the move is not the interface's to cancel.
     fn watch_transfer(&mut self, title: String, label: String, watching: transfer::Watching) {
         let update = watching.updates.borrow().clone();
         self.transfer = Some(TransferView {
@@ -5203,8 +5194,6 @@ impl App {
         self.signal_message_flash = None;
     }
 
-    /// The flash ends itself: the frame that finds it over clears it, so nothing
-    /// else has to remember when the copy was.
     pub(in crate::tui) fn expire_message_flash(&mut self) {
         // A row that never became anything is a lie after a while: the send either
         // came back (and was taken) or it failed and said so.
@@ -5219,8 +5208,6 @@ impl App {
         }
     }
 
-    /// Whether the copied message is lit right now: on and off twice, so the border
-    /// blinks rather than staying lit as though it were selected.
     pub(in crate::tui) fn message_flash_is_lit(&self) -> bool {
         self.signal_flash_started.is_some_and(|started| {
             let elapsed = started.elapsed();
@@ -5229,8 +5216,6 @@ impl App {
         })
     }
 
-    /// Moving between messages is the detail screen's job: scrolling by a row left a
-    /// thread shorter than the screen with nothing to move to.
     fn move_signal_message(&mut self, forward: bool) {
         let len = self
             .signal_thread()
@@ -7530,8 +7515,6 @@ fn credential_status(answer: CredentialAnswer) -> CredentialStatus {
     }
 }
 
-/// The first line of what was asked for, which is what a task is called until the
-/// agent names it.
 fn origin_label(origin: &TaskOrigin) -> String {
     match origin {
         TaskOrigin::Intent(intent) => first_line(intent),

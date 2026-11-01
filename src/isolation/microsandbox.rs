@@ -203,8 +203,6 @@ fn permissions(mode: u32) -> fs::Permissions {
     fs::Permissions::from_mode(mode)
 }
 
-/// How many files a transfer has in flight at once. Enough to fill a round trip,
-/// few enough that the guest's file server is not the thing being measured.
 const COPY_CONCURRENCY: usize = 8;
 
 const BASE_IMAGE: &str = "ubuntu:24.04";
@@ -383,11 +381,6 @@ impl MicrosandboxIsolation {
         }
     }
 
-    /// The ceilings a sandbox gets on this host now.
-    ///
-    /// Decided when a sandbox is created and never revisited: a guest that is
-    /// already running is not resized under the agent working in it, so the
-    /// count can move freely around it.
     fn sandbox_ceiling(&self) -> SandboxCeiling {
         self.host_capacity
             .lock()

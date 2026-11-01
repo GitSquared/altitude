@@ -32,8 +32,6 @@ mod state;
 mod turns;
 pub use event_loop::{TaskEventLoop, TaskExecutionUpdate};
 
-/// Sends a task back to the machine it was taken over from. The task layer decides
-/// when; only a client that has remotes can say how.
 pub type HomeFuture = BoxFuture<'static, Result<(), String>>;
 
 pub trait SendsTasksHome: Send + Sync {
@@ -76,9 +74,6 @@ pub struct TaskService<E> {
     trackers: Option<Arc<dyn TrackerHost>>,
     issue_reader: Option<Arc<dyn IssueReader>>,
     signal_changes: broadcast::Sender<String>,
-    /// Status changes a tracker would not take, counted per task. A refused status
-    /// is not news on every pass: after a few tries the checkpoint moves past it and
-    /// the operator hears about it once.
     refused_status_syncs: Arc<Mutex<HashMap<String, usize>>>,
 }
 

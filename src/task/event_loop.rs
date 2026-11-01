@@ -32,8 +32,6 @@ use crate::{
 };
 
 pub enum TaskExecutionUpdate {
-    /// A task taken over from another machine is being sent back to it, so the
-    /// interface can watch the move it did not start.
     HandingBack {
         address: String,
         transfer: super::super::remote::Watching,
@@ -179,16 +177,12 @@ where
         self.admit();
     }
 
-    /// Tell the interface a transfer has started that it did not start, so the
-    /// operator still sees the move rather than work vanishing for a minute.
-    pub fn share_transfer(&self, address: String, transfer: super::super::remote::Watching) {
+    pub fn announce_transfer(&self, address: String, transfer: super::super::remote::Watching) {
         let _ = self
             .events
             .send(TaskExecutionUpdate::HandingBack { address, transfer });
     }
 
-    /// Attach the way back to the machine a task was taken over from. Only an
-    /// operator's machine takes a task over, so only a client has one of these.
     pub fn attach_sends_home(&self, home: Arc<dyn super::SendsTasksHome>) {
         if let Ok(mut slot) = self.sends_home.lock() {
             *slot = Some(home);
@@ -1143,8 +1137,6 @@ where
         Ok(())
     }
 
-    /// The machine that owns a handed-back task runs it again: the person who borrowed
-    /// it is gone, so nothing is waited for.
     pub async fn resume_after_handback(&self, task: Task) -> Result<(), TaskServiceError> {
         if task.facts.arrived_from.is_some()
             && self

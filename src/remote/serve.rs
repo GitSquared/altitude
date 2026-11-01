@@ -62,7 +62,6 @@ struct PreparedTransfer {
 
 const TRANSFER_IDLE_MS: i64 = 120_000;
 
-/// What a task being handed over has got through, for the machine waiting on it.
 struct WatchedCollect {
     task_id: String,
     collecting: Arc<Mutex<HashMap<String, super::transfer::TransferUpdate>>>,
@@ -539,13 +538,27 @@ impl TaskHost for OwnTasks {
         let tasks = Arc::clone(&self.tasks);
         Box::pin(async move {
             incoming.commit(peer, &transfer_id).await?;
-            // A task the operator handed back was finished with by a person, not
-            // staged for one: the machine that owns it runs it again.
+            // The task this transfer landed, named by the transfer rather than guessed
+            // from which one looks like an arrival: it was finished with by a person
+            // rather than staged for one, so the machine that owns it runs it.
             for task in tasks.list().await.map_err(|e| e.to_string())? {
-                tasks
-                    .resume_after_handback(task)
+                let landed_here = tasks
+                    .events(&task.id)
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| e.to_string())?
+                    .iter()
+                    .any(|(_, event)| {
+                        matches!(event,
+                            TaskHistoryEvent::TransferStaged { transfer_id: landed, .. }
+                            if landed == &transfer_id)
+                    });
+                if landed_here {
+                    tasks
+                        .resume_after_handback(task)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    break;
+                }
             }
             Ok(())
         })

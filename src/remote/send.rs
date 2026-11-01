@@ -48,8 +48,6 @@ struct IncomingTransfer {
     handover: Handover,
 }
 
-/// How this client hands a task back: it owns the link, the address book and the
-/// transfer, so the task layer can say "this one goes home" without knowing any of it.
 pub struct HomeSender<E: IsolationEngine + Clone + 'static> {
     config: Arc<Config>,
     keys: RemoteKeys,
@@ -80,7 +78,7 @@ impl<E: IsolationEngine + Clone + 'static> SendsTasksHome for HomeSender<E> {
         };
         let (transfer, _) = Transfer::start("handing the task back…");
         self.tasks
-            .share_transfer(address.clone(), transfer.watching());
+            .announce_transfer(address.clone(), transfer.watching());
         let config = Arc::clone(&self.config);
         let keys = self.keys.clone();
         let client = self.client.clone();

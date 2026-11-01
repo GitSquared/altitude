@@ -81,7 +81,6 @@ impl Transfer {
         self.updates.send_modify(|update| update.stage = stage);
     }
 
-    /// Watch a transfer someone else started.
     pub fn watching(&self) -> Watching {
         Watching {
             updates: self.updates.subscribe(),
@@ -89,8 +88,6 @@ impl Transfer {
         }
     }
 
-    /// A second handle on the same transfer, for something that reports into it
-    /// while the caller is blocked waiting on the work.
     pub fn watcher(&self) -> Self {
         Self {
             updates: self.updates.clone(),
@@ -98,8 +95,6 @@ impl Transfer {
         }
     }
 
-    /// Take what the machine doing the work says it has done: the waiting side
-    /// cannot count files it cannot see.
     pub fn reported(&self, update: TransferUpdate) {
         self.updates.send_modify(|held| *held = update);
     }

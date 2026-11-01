@@ -214,7 +214,5 @@ pub trait TrackerProvider: IssueReader {
         status: TrackerStatus,
     ) -> TrackerFuture<'a, ()>;
 
-    /// Put the issue on the login this machine is signed in as: a task linked to an
-    /// issue is work the operator has in hand, and the tracker should say so.
     fn assign_to_self<'a>(&'a self, reference: &'a IssueReference) -> TrackerFuture<'a, ()>;
 }

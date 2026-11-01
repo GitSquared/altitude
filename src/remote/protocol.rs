@@ -78,7 +78,6 @@ pub enum LinkRequest {
     TakeTask {
         task_id: String,
     },
-    /// How far the machine handing a task over has got in collecting it.
     TakeProgress {
         task_id: String,
     },

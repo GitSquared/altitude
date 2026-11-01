@@ -621,11 +621,6 @@ impl LinearAutomation {
             .await
     }
 
-    /// A thought that the next activity replaces, for a state that keeps moving.
-    ///
-    /// Linear shows it until the agent says something else and then forgets it,
-    /// which is what a queue position wants: the number is worth showing while it
-    /// is true and worth nothing once the task starts.
     pub async fn create_ephemeral_thought(
         &self,
         agent_session_id: &str,

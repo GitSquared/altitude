@@ -149,8 +149,6 @@ where
         Ok(task)
     }
 
-    /// A failed assignment says so in the log and nowhere else: a task the operator
-    /// asked for is not worth failing over the tracker's opinion of who owns it.
     async fn assign_linked_issue(&self, task: &Task) {
         let Some(host) = self.trackers.clone() else {
             return;
@@ -308,8 +306,6 @@ impl<E> TaskService<E> {
     }
 }
 
-/// How many passes a refused status change is retried on. The first few can be a
-/// tracker having a bad minute; after that it is the tracker saying no.
 const STATUS_SYNC_ATTEMPTS: usize = 3;
 
 fn checkpoint(events: &[(i64, TaskHistoryEvent)]) -> usize {

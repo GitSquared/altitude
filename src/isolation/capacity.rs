@@ -58,14 +58,12 @@ impl SampleWindow {
     }
 }
 
-/// What the machine has to divide up, read once: it does not change under us.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HostTotals {
     pub cpus: usize,
     pub memory_mib: u64,
 }
 
-/// The same machine's own numbers as sysinfo reports them.
 impl HostTotals {
     fn of(system: &mut System) -> Self {
         system.refresh_memory();
@@ -80,12 +78,6 @@ fn total_memory_mib(system: &System) -> u64 {
     system.total_memory() / (1024 * 1024)
 }
 
-/// What a sandbox may be given on this host, and how many may run at once.
-///
-/// Both answers come from the same two numbers — the machine's totals and the
-/// count the policy has settled on — so the worst case is bounded by the last
-/// ceiling handed out times the count in force, and neither can drift from the
-/// other. A defaulted value means this host could not be read.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SandboxCapacity {
     pub slots: usize,
@@ -107,11 +99,6 @@ impl Default for SandboxCapacity {
     }
 }
 
-/// The ceiling a host that cannot be read still gets.
-///
-/// Small rather than generous: a machine whose own numbers are unavailable is
-/// not one to hand a large guest to, and the floor is what can still run an
-/// agent at all.
 fn smallest_ceiling() -> SandboxCeiling {
     SandboxCeiling {
         cpus: 1,
@@ -120,10 +107,6 @@ fn smallest_ceiling() -> SandboxCeiling {
     }
 }
 
-/// What one sandbox's own disk may grow to.
-///
-/// Not divided by the count like the others: a capsule outlives the slot it ran
-/// in, so the number of them is not the number of tasks running now.
 pub const SANDBOX_DISK_CEILING_MIB: u32 = 15 * 1_024;
 
 pub const MEMORY_SHARE_OF_HOST: u64 = 80;
@@ -159,10 +142,6 @@ fn percentile_75(values: impl Iterator<Item = f64>) -> Option<f64> {
     sorted.get(rank.checked_sub(1)?).copied()
 }
 
-/// How many sandboxes this host will run at once, and why.
-///
-/// The sampling belongs here with the rule: a host that cannot read itself is
-/// not an empty host, and that judgement has no business in the task queue.
 #[derive(Debug)]
 pub struct HostCapacity {
     sampler: Option<HostSampler>,
@@ -189,11 +168,6 @@ impl HostCapacity {
         }
     }
 
-    /// What one sandbox may be given, dividing the host by the count in force.
-    ///
-    /// Dividing by the count is what keeps the ceilings and the number of
-    /// sandboxes from disagreeing: letting another sandbox run also narrows
-    /// every later one, without touching a sandbox already running.
     fn ceiling(&self) -> SandboxCeiling {
         if self.totals.memory_mib == 0 {
             return smallest_ceiling();
@@ -222,10 +196,6 @@ impl HostCapacity {
         }
     }
 
-    /// Re-measure the host and let the policy move the count.
-    ///
-    /// Returns `None` when this host cannot be read, which leaves the count
-    /// where it is: an unreadable machine is not an empty one.
     pub fn observe(&mut self, demand: usize) -> Option<usize> {
         let sample = self.sampler.as_mut()?.sample()?;
         self.window.push(sample);

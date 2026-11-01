@@ -53,16 +53,9 @@ const SIGNATURE_HEADER: &str = "linear-signature";
 
 const TICK: Duration = Duration::from_secs(10);
 
-/// How often a queued task's place in the queue is put in front of the person.
-///
-/// The number moves only when a task ahead finishes, so this bounds the talking:
-/// a queue of sixty tasks would otherwise write sixty activities every time one
-/// of them started. While a task is next up it is repeated faster, because that
-/// is the moment its operator is watching the issue.
 const QUEUE_NOTICE_INTERVAL: Duration = Duration::from_secs(300);
 const NEXT_UP_NOTICE_INTERVAL: Duration = Duration::from_secs(30);
 
-/// What was last said about a task's place, so it is only repeated when it moved.
 struct QueueNotice {
     ahead: usize,
     at: Instant,
@@ -115,7 +108,6 @@ pub trait Host: Send + Sync + 'static {
     ) -> HostFuture<'_, Option<BoundTask>>;
     fn session_agent(&self, task_id: String) -> HostFuture<'_, Option<String>>;
 
-    /// How many tasks are ahead of this one in the queue, if it is waiting.
     fn tasks_ahead_in_queue(&self, task_id: String) -> HostFuture<'_, Option<usize>>;
 }
 
@@ -282,12 +274,6 @@ impl RemoteTracker {
         }
     }
 
-    /// Say where a waiting task stands, and let the next activity take it away.
-    ///
-    /// A queued task emits nothing, so without this its session is silent exactly
-    /// when its operator is waiting on it — and Linear marks a session that says
-    /// nothing as unresponsive. The activity is ephemeral: the agent's own next
-    /// thought replaces it, so a task that starts needs no cleanup.
     async fn report_queue_standing(&self, host: &dyn Host) {
         let bound = match host.bound_tasks().await {
             Ok(bound) => bound,
