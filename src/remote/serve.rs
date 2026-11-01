@@ -986,6 +986,17 @@ impl super::tracker::Host for OwnTasks {
         })
     }
 
+    fn delegation_of(&self, task_id: String) -> super::tracker::HostFuture<'_, Option<String>> {
+        Box::pin(async move {
+            Ok(self
+                .tasks
+                .task(&task_id)
+                .await
+                .map_err(|error| error.to_string())?
+                .and_then(|task| task.facts.tracker_delegation.clone()))
+        })
+    }
+
     fn work_for_issue(
         &self,
         issue_id: String,
@@ -1004,6 +1015,7 @@ impl super::tracker::Host for OwnTasks {
                     task_id: task.id.clone(),
                     owner: task.operator_id()?.to_owned(),
                     issue,
+                    delegation: task.facts.tracker_delegation.clone(),
                     session_agent: task.session_agent(),
                 })
             }))
@@ -1058,6 +1070,7 @@ impl super::tracker::Host for OwnTasks {
                         task_id: task.id.clone(),
                         owner,
                         issue,
+                        delegation: task.facts.tracker_delegation.clone(),
                         session_agent: task.session_agent(),
                     })
                 })
@@ -1135,6 +1148,7 @@ async fn report_issue_task(
             &peer.to_string(),
             task.id.clone(),
             reference,
+            task.facts.tracker_delegation.clone(),
             task.session_agent(),
         )
         .await
