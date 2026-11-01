@@ -1,6 +1,6 @@
 use std::{fs, io, path::Path};
 
-use super::LinkResult;
+use crate::remote::LinkResult;
 use crate::{
     config::Config,
     db::Database,

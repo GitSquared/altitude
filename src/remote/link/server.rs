@@ -9,39 +9,41 @@ use std::{
     sync::Arc,
 };
 
+use crate::remote::TransferPart;
 use cap_std::fs::{Dir, OpenOptions, OpenOptionsExt, Permissions, PermissionsExt};
 use tokio::sync::{Mutex as AsyncMutex, mpsc::UnboundedReceiver, watch};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 
+use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{
     EndpointAddr, EndpointId,
     endpoint::{Builder, Connection, RecvStream, SendStream},
-    protocol::{AcceptError, ProtocolHandler, Router},
 };
 
 use crate::config::Settings;
 
+use crate::remote::host::clients::{ClientLog, ClientRecord};
 use crate::task::TaskOperatorSignalThread;
 
-use super::{
+use crate::remote::{
     LinkResult,
     announce::{Announcement, Broadcast, RemoteState, TrackerConnection},
     bundle::{ConfigBundle, HeldConfig, ProfileDigest},
-    clients::{ClientLog, ClientRecord},
     discovery,
     identity::InstallationKey,
-    protocol::{
-        BlobHash, Handover, LINK_ALPN, LinkRequest, LinkResponse, MAX_BLOB_BYTES, RemoteTicket,
-        TRANSFER_PIECE_BYTES, TaskRequest, TaskSummary, WatchEvent, builder, read_body, read_frame,
-        write_frame,
-    },
 };
 
-use crate::{
-    credentials::Service,
-    tracker::{ACCOUNT_FILE, TrackerAccount, TrackerKind},
+use crate::credentials::Service;
+use crate::remote::protocol::SignalCommand;
+use crate::remote::protocol::{
+    BlobHash, Handover, LINK_ALPN, LinkRequest, LinkResponse, MAX_BLOB_BYTES, RemoteTicket,
+    TRANSFER_PIECE_BYTES, TaskRequest, TaskSummary, WatchEvent, builder, read_body, read_frame,
+    write_frame,
 };
+use crate::remote::tracker::{claim_account, logins_of, yield_account};
+use crate::remote::transfer::{TransferUpdate, Unit};
+use crate::tracker::{ACCOUNT_FILE, TrackerAccount, TrackerKind};
 
 enum ConfigWrite {
     Written {
@@ -232,7 +234,7 @@ impl LinkHandler {
         // same account, and deleting another client's credentials is not what a
         // question about attribution should be able to authorise.
         for (other, provider, _) in &holders {
-            if let Err(error) = super::tracker::yield_account(other, *provider) {
+            if let Err(error) = yield_account(other, *provider) {
                 tracing::warn!(%error, operator = %other.display(), "could not release a taken-over tracker account");
             }
         }
@@ -240,7 +242,7 @@ impl LinkHandler {
         // paired, yielded an account and is paired again is not left silent.
         for (provider, account) in &arriving {
             if account.is_some()
-                && let Err(error) = super::tracker::claim_account(&operator_dir, *provider)
+                && let Err(error) = claim_account(&operator_dir, *provider)
             {
                 tracing::warn!(%error, operator = %operator_dir.display(), "could not record a claim on a tracker account");
             }
@@ -271,7 +273,7 @@ impl LinkHandler {
             let owner = entry.file_name().to_string_lossy().into_owned();
             for (provider, account) in pushed {
                 let Some(account) = account else { continue };
-                if super::tracker::logins_of(&directory, &owner, *provider)
+                if logins_of(&directory, &owner, *provider)
                     .iter()
                     .any(|login| login.account.user_id == account.user_id)
                 {
@@ -326,11 +328,7 @@ pub trait TaskHost: Send + Sync + 'static {
         peer: EndpointId,
         task_id: String,
     ) -> BoxFuture<Result<Vec<TaskOperatorSignalThread>, String>>;
-    fn signal(
-        &self,
-        peer: EndpointId,
-        command: super::protocol::SignalCommand,
-    ) -> BoxFuture<Result<(), String>>;
+    fn signal(&self, peer: EndpointId, command: SignalCommand) -> BoxFuture<Result<(), String>>;
     fn input(
         &self,
         peer: EndpointId,
@@ -342,13 +340,13 @@ pub trait TaskHost: Send + Sync + 'static {
     fn list(&self, peer: EndpointId) -> BoxFuture<Result<Vec<TaskSummary>, String>>;
     fn watch(&self, peer: EndpointId) -> BoxFuture<Result<Watching, String>>;
     fn remove(&self, peer: EndpointId, task_id: String) -> BoxFuture<Result<(), String>>;
-    fn take_progress(&self, task_id: &str) -> Option<super::transfer::TransferUpdate>;
+    fn take_progress(&self, task_id: &str) -> Option<TransferUpdate>;
     fn hand_over(&self, peer: EndpointId, task_id: String) -> BoxFuture<Result<Handover, String>>;
     fn transfer_piece(
         &self,
         peer: EndpointId,
         transfer_id: String,
-        part: super::TransferPart,
+        part: TransferPart,
         offset: u64,
         len: u64,
     ) -> BoxFuture<Result<Vec<u8>, String>>;
@@ -365,7 +363,7 @@ pub trait TaskHost: Send + Sync + 'static {
         &self,
         peer: EndpointId,
         transfer_id: String,
-        part: super::TransferPart,
+        part: TransferPart,
         offset: u64,
         bytes: Vec<u8>,
     ) -> BoxFuture<Result<(), String>>;
@@ -522,8 +520,8 @@ async fn answer(
                     done: progress.done,
                     total: progress.total,
                     unit: match progress.unit {
-                        super::transfer::Unit::Bytes => "bytes".to_owned(),
-                        super::transfer::Unit::Files => "files".to_owned(),
+                        Unit::Bytes => "bytes".to_owned(),
+                        Unit::Files => "files".to_owned(),
                     },
                 },
                 None => LinkResponse::Rejected {

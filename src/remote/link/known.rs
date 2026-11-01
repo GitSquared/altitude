@@ -1,6 +1,8 @@
 use iroh::EndpointId;
 
-use super::{LinkResult, announce::Announcement, compat::Compatibility, protocol::RemoteTicket};
+use crate::remote::{
+    LinkResult, announce::Announcement, compat::Compatibility, protocol::RemoteTicket,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemoteKeyStatus {

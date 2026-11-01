@@ -15,9 +15,10 @@ use crate::{
     config::{Config, DEFAULT_PORT},
     isolation::{IsolationEngine, MicrosandboxIsolation, UnwatchedFiles},
     remote::{
-        Compatibility, ConfigBundle, ConfigPush, Handover, HandoverRecord, LinkClient,
+        Compatibility, ConfigBundle, ConfigPush, Handover, HandoverRecord, LinkClient, Logins,
         RemoteKeyStatus, RemoteKeys, Transfer, TransferArchive, TransferPart, meet,
         protocol::{MAX_BLOB_BYTES, TRANSFER_PIECE_BYTES},
+        serve, transfer,
     },
     task::{HomeFuture, SendsTasksHome, Task, TaskArrival, TaskEventLoop, TaskHistoryEvent},
 };
@@ -156,7 +157,7 @@ where
         config.data_dir(),
         &held,
         Some(address),
-        super::Logins::Always,
+        Logins::Always,
     )
     .map_err(message)?;
     let config_bytes = serde_json::to_vec(&bundle).map_err(message)?;
@@ -179,8 +180,7 @@ where
 
     transfer.waiting("collecting the working files…");
     let handover =
-        super::serve::export_task(config, event_loop, task_id, &peer.id.to_string(), transfer)
-            .await?;
+        serve::export_task(config, event_loop, task_id, &peer.id.to_string(), transfer).await?;
     let directory = transfer_directory(config, &handover.transfer_id)?;
     // Written before a single byte travels: a client that restarts after the
     // source committed but before the recipient acknowledged needs to know where
@@ -264,7 +264,7 @@ async fn upload_handover(
         let mut offset = 0u64;
         while offset < archive.len {
             if transfer.is_stopped() {
-                return Err(super::transfer::STOPPED.to_owned());
+                return Err(transfer::STOPPED.to_owned());
             }
             let length = TRANSFER_PIECE_BYTES.min(archive.len - offset) as usize;
             file.read_exact(&mut piece[..length]).map_err(message)?;

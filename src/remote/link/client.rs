@@ -1,18 +1,24 @@
 use std::{fmt, fs, io::Write, path::Path};
 
+use crate::remote::InstallationKey;
+use crate::remote::Transfer;
+use crate::remote::TransferPart;
 use iroh::{Endpoint, EndpointAddr, EndpointId, endpoint::Connection};
 use tokio::sync::mpsc;
 
 use crate::task::TaskOperatorSignalThread;
 
-use super::{
+use crate::remote::protocol::SignalCommand;
+use crate::remote::protocol::{
+    BlobHash, CHUNK_BYTES, ConfigPush, Handover, LINK_ALPN, LinkRequest, LinkResponse,
+    TRANSFER_PIECE_BYTES, TaskRequest, TransferArchive, WatchEvent, builder, read_body, read_frame,
+    write_frame,
+};
+use crate::remote::transfer::{STOPPED, TransferUpdate, Unit};
+use crate::remote::{
     LinkResult,
     bundle::ProfileDigest,
     discovery::{self, Scan},
-    protocol::{
-        BlobHash, CHUNK_BYTES, ConfigPush, Handover, LINK_ALPN, LinkRequest, LinkResponse,
-        TaskRequest, TransferArchive, WatchEvent, builder, read_body, read_frame, write_frame,
-    },
 };
 
 // ------------------------------------------------------------- the client side
@@ -62,7 +68,7 @@ pub struct LinkClient {
 }
 
 impl LinkClient {
-    pub async fn bind(identity: &super::InstallationKey) -> LinkResult<Self> {
+    pub async fn bind(identity: &InstallationKey) -> LinkResult<Self> {
         let endpoint = builder()
             .secret_key(identity.secret_key().clone())
             .bind()
@@ -125,7 +131,7 @@ impl LinkClient {
         send.finish()?;
         match read_frame::<_, LinkResponse>(&mut recv).await? {
             LinkResponse::TransferPiece { len } => {
-                read_body(&mut recv, len, super::protocol::TRANSFER_PIECE_BYTES).await
+                read_body(&mut recv, len, TRANSFER_PIECE_BYTES).await
             }
             LinkResponse::Rejected { reason } => Err(reason.into()),
             other => Err(format!("unexpected answer: {other:?}").into()),
@@ -209,7 +215,7 @@ impl LinkClient {
         &self,
         peer: &EndpointAddr,
         task_id: &str,
-    ) -> Option<super::transfer::TransferUpdate> {
+    ) -> Option<TransferUpdate> {
         let answer = self
             .say(
                 peer.clone(),
@@ -225,14 +231,14 @@ impl LinkClient {
                 done,
                 total,
                 unit,
-            } => Some(super::transfer::TransferUpdate {
+            } => Some(TransferUpdate {
                 stage,
                 done,
                 total,
                 unit: if unit == "files" {
-                    super::transfer::Unit::Files
+                    Unit::Files
                 } else {
-                    super::transfer::Unit::Bytes
+                    Unit::Bytes
                 },
             }),
             _ => None,
@@ -243,10 +249,10 @@ impl LinkClient {
         &self,
         peer: &EndpointAddr,
         transfer_id: &str,
-        part: super::TransferPart,
+        part: TransferPart,
         archive: &TransferArchive,
         landing: &Path,
-        transfer: &super::Transfer,
+        transfer: &Transfer,
     ) -> LinkResult<()> {
         if let Some(parent) = landing.parent() {
             fs::create_dir_all(parent)?;
@@ -256,9 +262,9 @@ impl LinkClient {
         let mut offset = 0;
         while offset < archive.len {
             if transfer.is_stopped() {
-                return Err(super::transfer::STOPPED.into());
+                return Err(STOPPED.into());
             }
-            let len = super::protocol::TRANSFER_PIECE_BYTES.min(archive.len - offset);
+            let len = TRANSFER_PIECE_BYTES.min(archive.len - offset);
             let bytes = self
                 .ask_for_body(
                     peer.clone(),
@@ -355,7 +361,7 @@ impl LinkClient {
         &self,
         peer: &EndpointAddr,
         transfer_id: &str,
-        part: super::TransferPart,
+        part: TransferPart,
         offset: u64,
         bytes: &[u8],
     ) -> LinkResult<()> {
@@ -445,7 +451,7 @@ impl LinkClient {
     async fn signal(
         &self,
         peer: impl Into<EndpointAddr>,
-        command: super::protocol::SignalCommand,
+        command: SignalCommand,
     ) -> LinkResult<()> {
         match self.say(peer, &LinkRequest::Signal { command }).await? {
             LinkResponse::Accepted => Ok(()),
@@ -485,7 +491,7 @@ impl LinkClient {
     ) -> LinkResult<()> {
         self.signal(
             peer,
-            super::protocol::SignalCommand::Reply {
+            SignalCommand::Reply {
                 task_id: task_id.into(),
                 signal_id: signal_id.into(),
                 body: body.into(),
@@ -503,7 +509,7 @@ impl LinkClient {
     ) -> LinkResult<()> {
         self.signal(
             peer,
-            super::protocol::SignalCommand::Resolve {
+            SignalCommand::Resolve {
                 task_id: task_id.into(),
                 signal_id: signal_id.into(),
                 resolved,
@@ -520,7 +526,7 @@ impl LinkClient {
     ) -> LinkResult<()> {
         self.signal(
             peer,
-            super::protocol::SignalCommand::Accept {
+            SignalCommand::Accept {
                 task_id: task_id.into(),
                 signal_id: signal_id.into(),
             },

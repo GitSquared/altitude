@@ -10,6 +10,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use crate::remote::StartFuture;
+use crate::remote::StartRefusal;
 mod ledger;
 mod logins;
 mod webhook;
@@ -50,10 +52,8 @@ use crate::{
     },
 };
 
-use super::{
-    admission::{self, Actor, Admission, InputFacts},
-    identity::write_private,
-};
+use super::admission::{self, Actor, Admission, InputFacts};
+use crate::remote::identity::write_private;
 
 const WEBHOOK_ROUTE: &str = "/altitude/linear/webhook";
 const MAX_WEBHOOK_BYTES: usize = 1024 * 1024;
@@ -96,7 +96,7 @@ pub trait Host: Send + Sync + 'static {
         issue: IssueSnapshot,
         label: String,
         delegation: Option<String>,
-    ) -> super::StartFuture<'_, String>;
+    ) -> StartFuture<'_, String>;
     fn stop(&self, task_id: String, reason: TaskExecutionPauseReason) -> HostFuture<'_, ()>;
     fn record_status(&self, task_id: String, status: TrackerStatus) -> HostFuture<'_, ()>;
     fn signal_threads(&self, task_id: String) -> HostFuture<'_, Vec<TaskOperatorSignalThread>>;
@@ -2087,7 +2087,7 @@ impl RemoteTracker {
     async fn post_start_guidance(
         &self,
         session_id: &str,
-        refusal: &super::StartRefusal,
+        refusal: &StartRefusal,
     ) -> Result<(), String> {
         let body = format!(
             "**Nothing was started.**\n\n{refusal}\n\n\

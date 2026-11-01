@@ -8,7 +8,7 @@ use crate::{
     },
 };
 
-use super::console::{ask, bold, field, has_terminal, paragraph, prose};
+use crate::remote::console::{ask, bold, field, has_terminal, paragraph, prose};
 
 pub async fn connect_linear(
     settings: &ServeSettings,

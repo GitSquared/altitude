@@ -1,46 +1,36 @@
-mod admin;
-mod admission;
-mod announce;
+mod acting;
 mod bundle;
-pub(crate) use bundle::{HeldConfig, Logins};
-mod clients;
-mod compat;
-mod console;
-mod discovery;
-mod identity;
-mod keys;
-pub mod send;
-pub mod serve;
-mod server;
-mod start;
-mod takeover;
-mod tracker;
-mod tracker_setup;
-pub mod transfer;
+mod host;
+pub(crate) mod identity;
+pub(crate) use host::tracker;
+mod link;
+pub(crate) mod transfer;
 
-mod client;
-mod known;
-mod protocol;
-mod service;
+pub(crate) use acting::send;
+pub(crate) use bundle::{HeldConfig, Logins};
+pub(crate) use host::console;
+pub use host::serve;
+pub(crate) use host::start::{StartFuture, StartRefusal};
+pub(crate) use link::{announce, client, compat, discovery, known, protocol, server};
 
 use std::error::Error;
 
 pub use {
+    acting::keys::{RemoteKey, RemoteKeys},
+    acting::takeover::bring_home,
     announce::{Announcement, RemoteState, TrackerConnection, TrackerReadiness},
     bundle::ConfigBundle,
     client::LinkClient,
-    clients::ClientRecord,
     compat::{Compatibility, LOCAL_VERSION},
     discovery::{DiscoveredRemote, DiscoveryEvent, Scan},
+    host::clients::ClientRecord,
     identity::InstallationKey,
-    keys::{RemoteKey, RemoteKeys},
     known::{RemoteKeyStatus, meet},
     protocol::{
         ConfigPush, Handover, HandoverDraft, HandoverRecord, RecordedEvent, TaskOrigin,
         TaskRequest, TaskSummary, TransferArchive, TransferPart, WatchEvent,
     },
     server::LinkServer,
-    takeover::bring_home,
     transfer::Transfer,
     transfer::Watching,
 };
@@ -48,5 +38,3 @@ pub use {
 pub type LinkError = Box<dyn Error + Send + Sync>;
 
 pub type LinkResult<T> = Result<T, LinkError>;
-
-pub(crate) use start::{StartFuture, StartRefusal};

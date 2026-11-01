@@ -13,7 +13,7 @@ use crate::{
     config::{Config, ServeSettings},
 };
 
-use super::console::{ask, choose, field, has_terminal, paragraph};
+use crate::remote::console::{ask, choose, field, has_terminal, paragraph};
 
 const UNIT: &str = "altitude.service";
 const LABEL: &str = "dev.saillard.altitude.remote";

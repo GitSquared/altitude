@@ -12,7 +12,7 @@ use iroh::{
     endpoint::{AfterHandshakeOutcome, Connection, EndpointHooks},
 };
 
-use super::{LinkResult, identity::write_private};
+use crate::remote::{LinkResult, identity::write_private};
 
 #[derive(Clone, Debug)]
 pub struct ClientRecord {
@@ -70,8 +70,8 @@ fn parse_record(text: &str) -> LinkResult<BTreeSet<EndpointId>> {
 }
 
 #[derive(Debug)]
-pub(super) struct ClientLog {
-    pub(super) record: ClientRecord,
+pub(crate) struct ClientLog {
+    pub(crate) record: ClientRecord,
 }
 
 impl EndpointHooks for ClientLog {

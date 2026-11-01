@@ -11,7 +11,7 @@ use tokio::{
     time::{sleep, timeout},
 };
 
-use super::LinkResult;
+use crate::remote::LinkResult;
 use crate::tracker::TrackerKind;
 
 const EXCHANGE_LIMIT: Duration = Duration::from_secs(5);

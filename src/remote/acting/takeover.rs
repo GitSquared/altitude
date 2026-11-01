@@ -12,7 +12,7 @@ use crate::{
     isolation::IsolationEngine,
     remote::{
         Compatibility, Handover, HandoverRecord, LinkClient, RemoteKeyStatus, RemoteKeys,
-        TaskSummary, Transfer, TransferPart, meet,
+        TaskSummary, Transfer, TransferPart, meet, protocol,
     },
     task::{Task, TaskArrival, TaskEventLoop, TaskHistoryEvent},
 };
@@ -120,7 +120,7 @@ where
     E: IsolationEngine + Clone + 'static,
 {
     let landing = tempfile::tempdir().map_err(|e| e.to_string())?;
-    if handover.history.len > super::protocol::MAX_BLOB_BYTES {
+    if handover.history.len > protocol::MAX_BLOB_BYTES {
         return Err("task history exceeds the transfer limit".into());
     }
     // The history is the smallest part and it decides the rest, so it arrives

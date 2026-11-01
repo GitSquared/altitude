@@ -1,3 +1,9 @@
+use super::tracker;
+
+use crate::remote::protocol::{self, SignalCommand};
+use crate::remote::server::Watching;
+use crate::remote::{HandoverRecord, HeldConfig, StartFuture, StartRefusal, TransferPart};
+
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
@@ -23,8 +29,8 @@ use tokio::{
     task::spawn_blocking,
 };
 
-use super::send::IncomingTransfers;
-use super::{Handover, HandoverDraft, RecordedEvent, TransferArchive, WatchEvent};
+use crate::remote::send::IncomingTransfers;
+use crate::remote::{Handover, HandoverDraft, RecordedEvent, TransferArchive, WatchEvent};
 
 use tokio::{
     net::TcpListener,
@@ -64,7 +70,7 @@ const TRANSFER_IDLE_MS: i64 = 120_000;
 
 struct WatchedCollect {
     task_id: String,
-    collecting: Arc<Mutex<HashMap<String, super::transfer::TransferUpdate>>>,
+    collecting: Arc<Mutex<HashMap<String, super::super::transfer::TransferUpdate>>>,
 }
 
 impl FileTransferSink for WatchedCollect {
@@ -72,7 +78,7 @@ impl FileTransferSink for WatchedCollect {
         self.record(|update| {
             update.total = whole.files;
             update.done = 0;
-            update.unit = super::transfer::Unit::Files;
+            update.unit = super::super::transfer::Unit::Files;
             update.stage = "collecting the working files…".to_owned();
         });
     }
@@ -83,7 +89,7 @@ impl FileTransferSink for WatchedCollect {
 }
 
 impl WatchedCollect {
-    fn record(&self, change: impl FnOnce(&mut super::transfer::TransferUpdate)) {
+    fn record(&self, change: impl FnOnce(&mut super::super::transfer::TransferUpdate)) {
         if let Ok(mut collecting) = self.collecting.lock() {
             let update = collecting.entry(self.task_id.clone()).or_default();
             change(update);
@@ -97,12 +103,12 @@ struct OwnTasks {
     incoming: IncomingTransfers,
     preparation_lock: Arc<AsyncMutex<()>>,
     activity: Arc<Mutex<HashMap<String, i64>>>,
-    collecting: Arc<Mutex<HashMap<String, super::transfer::TransferUpdate>>>,
+    collecting: Arc<Mutex<HashMap<String, super::super::transfer::TransferUpdate>>>,
     watchers: Arc<Watchers>,
     read_slots: Arc<Semaphore>,
     readiness: watch::Sender<RemoteState>,
     runtime: watch::Receiver<IsolationStatus>,
-    tracker: Option<Arc<super::tracker::RemoteTracker>>,
+    tracker: Option<Arc<tracker::RemoteTracker>>,
     delegation_paused: bool,
 }
 
@@ -269,11 +275,10 @@ impl TaskHost for OwnTasks {
     fn signal(
         &self,
         peer: EndpointId,
-        command: super::protocol::SignalCommand,
+        command: protocol::SignalCommand,
     ) -> BoxFuture<Result<(), String>> {
         let tasks = self.tasks.clone();
         Box::pin(async move {
-            use super::protocol::SignalCommand;
             let task = match &command {
                 SignalCommand::Reply {
                     task_id, signal_id, ..
@@ -356,7 +361,7 @@ impl TaskHost for OwnTasks {
         })
     }
 
-    fn take_progress(&self, task_id: &str) -> Option<super::transfer::TransferUpdate> {
+    fn take_progress(&self, task_id: &str) -> Option<super::super::transfer::TransferUpdate> {
         self.collecting
             .lock()
             .ok()
@@ -405,7 +410,7 @@ impl TaskHost for OwnTasks {
         &self,
         peer: EndpointId,
         transfer_id: String,
-        part: super::TransferPart,
+        part: TransferPart,
         offset: u64,
         len: u64,
     ) -> BoxFuture<Result<Vec<u8>, String>> {
@@ -413,7 +418,7 @@ impl TaskHost for OwnTasks {
         let read_slots = Arc::clone(&self.read_slots);
         let activity = Arc::clone(&self.activity);
         Box::pin(async move {
-            if len == 0 || len > super::protocol::TRANSFER_PIECE_BYTES {
+            if len == 0 || len > protocol::TRANSFER_PIECE_BYTES {
                 return Err("invalid transfer piece length".into());
             }
             let _permit = read_slots
@@ -433,9 +438,9 @@ impl TaskHost for OwnTasks {
                 .expect("transfer activity lock poisoned")
                 .insert(transfer_id.clone(), now_ms());
             let filename = match part {
-                super::TransferPart::History => "history.json",
-                super::TransferPart::Work => "work.tar.zst",
-                super::TransferPart::Transcript => "transcript.jsonl",
+                TransferPart::History => "history.json",
+                TransferPart::Work => "work.tar.zst",
+                TransferPart::Transcript => "transcript.jsonl",
             };
             let path = directory.join(filename);
             spawn_blocking(move || {
@@ -468,7 +473,7 @@ impl TaskHost for OwnTasks {
         &self,
         peer: EndpointId,
         transfer_id: String,
-        part: super::TransferPart,
+        part: TransferPart,
         offset: u64,
         bytes: Vec<u8>,
     ) -> BoxFuture<Result<(), String>> {
@@ -679,7 +684,7 @@ impl TaskHost for OwnTasks {
                     // What this machine said it held is gone with the files, or a
                     // later push would think they were still here and skip them.
                     let held_path = directory.join("profiles.json");
-                    let mut held = super::HeldConfig::load(&held_path);
+                    let mut held = HeldConfig::load(&held_path);
                     let profiles = held
                         .profiles
                         .iter()
@@ -723,7 +728,7 @@ impl TaskHost for OwnTasks {
                 label: request.identity_label,
             };
             match request.origin {
-                super::protocol::TaskOrigin::Intent(intent) => {
+                protocol::TaskOrigin::Intent(intent) => {
                     tasks
                         .service()
                         .create(intent, project, request.agent, Some(operator))
@@ -735,7 +740,7 @@ impl TaskHost for OwnTasks {
                 // work was asked for on the client, so that is where its conversation
                 // and its action stay. Only a delegation makes the tracker the place
                 // the work is talked about.
-                super::protocol::TaskOrigin::Issue(issue) => {
+                protocol::TaskOrigin::Issue(issue) => {
                     tasks
                         .create_issue_for_operator(*issue, project, request.agent, operator, None)
                         .await
@@ -761,7 +766,7 @@ impl TaskHost for OwnTasks {
         })
     }
 
-    fn watch(&self, peer: EndpointId) -> BoxFuture<Result<super::server::Watching, String>> {
+    fn watch(&self, peer: EndpointId) -> BoxFuture<Result<Watching, String>> {
         let tasks = Arc::clone(&self.tasks);
         let watchers = Arc::clone(&self.watchers);
         Box::pin(async move {
@@ -777,7 +782,7 @@ impl TaskHost for OwnTasks {
                 .filter(|task| task.operator_id() == Some(owner.as_str()))
                 .map(TaskSummary::of)
                 .collect();
-            Ok(super::server::Watching { snapshot, changes })
+            Ok(Watching { snapshot, changes })
         })
     }
 
@@ -811,34 +816,36 @@ impl TaskHost for OwnTasks {
     }
 }
 
-impl super::tracker::Host for OwnTasks {
+impl tracker::Host for OwnTasks {
     fn start_issue(
         &self,
         peer: EndpointId,
         issue: IssueSnapshot,
         label: String,
         delegation: Option<String>,
-    ) -> super::StartFuture<'_, String> {
+    ) -> StartFuture<'_, String> {
         Box::pin(async move {
             if self.delegation_paused {
-                return Err(super::StartRefusal::Paused);
+                return Err(StartRefusal::Paused);
             }
             let owner = peer.to_string();
-            let scoped = self.config.for_operator(&owner).map_err(|error| {
-                super::StartRefusal::Unavailable {
-                    reason: error.to_string(),
-                }
-            })?;
+            let scoped =
+                self.config
+                    .for_operator(&owner)
+                    .map_err(|error| StartRefusal::Unavailable {
+                        reason: error.to_string(),
+                    })?;
             if !scoped.settings_path().is_file() {
-                return Err(super::StartRefusal::NoSetup);
+                return Err(StartRefusal::NoSetup);
             }
-            let settings = scoped.load_or_create_settings().map_err(|error| {
-                super::StartRefusal::Unavailable {
-                    reason: error.to_string(),
-                }
-            })?;
+            let settings =
+                scoped
+                    .load_or_create_settings()
+                    .map_err(|error| StartRefusal::Unavailable {
+                        reason: error.to_string(),
+                    })?;
             let Some(scope) = issue.issue.scope.as_ref() else {
-                return Err(super::StartRefusal::NoScope);
+                return Err(StartRefusal::NoScope);
             };
             // An exact claim beats a project that claims its whole account, so a
             // workspace that grows a second scope does not start sending both to
@@ -862,7 +869,7 @@ impl super::tracker::Host for OwnTasks {
                 })
                 .cloned();
             let Some(project) = project else {
-                return Err(super::StartRefusal::NoProject {
+                return Err(StartRefusal::NoProject {
                     scope: scope.label.clone(),
                 });
             };
@@ -871,7 +878,7 @@ impl super::tracker::Host for OwnTasks {
                 .as_ref()
                 .is_some_and(|route| route.accepts_delegated_work)
             {
-                return Err(super::StartRefusal::NotAccepting {
+                return Err(StartRefusal::NotAccepting {
                     project: project.name.clone(),
                     scope: scope.label.clone(),
                 });
@@ -879,7 +886,7 @@ impl super::tracker::Host for OwnTasks {
             let agent = project
                 .agent
                 .or_else(|| settings.settings().agent())
-                .ok_or(super::StartRefusal::NoAgent)?;
+                .ok_or(StartRefusal::NoAgent)?;
             let task = self
                 .tasks
                 .create_issue_for_operator(
@@ -893,7 +900,7 @@ impl super::tracker::Host for OwnTasks {
                     delegation,
                 )
                 .await
-                .map_err(|error| super::StartRefusal::Unavailable {
+                .map_err(|error| StartRefusal::Unavailable {
                     reason: error.to_string(),
                 })?;
             Ok(task.id)
@@ -904,7 +911,7 @@ impl super::tracker::Host for OwnTasks {
         &self,
         task_id: String,
         reason: TaskExecutionPauseReason,
-    ) -> super::tracker::HostFuture<'_, ()> {
+    ) -> tracker::HostFuture<'_, ()> {
         Box::pin(async move {
             if let Some(task) = self
                 .tasks
@@ -923,11 +930,7 @@ impl super::tracker::Host for OwnTasks {
         })
     }
 
-    fn record_status(
-        &self,
-        task_id: String,
-        status: TrackerStatus,
-    ) -> super::tracker::HostFuture<'_, ()> {
+    fn record_status(&self, task_id: String, status: TrackerStatus) -> tracker::HostFuture<'_, ()> {
         Box::pin(async move {
             self.tasks
                 .record_status(&task_id, status)
@@ -939,7 +942,7 @@ impl super::tracker::Host for OwnTasks {
     fn signal_threads(
         &self,
         task_id: String,
-    ) -> super::tracker::HostFuture<'_, Vec<TaskOperatorSignalThread>> {
+    ) -> tracker::HostFuture<'_, Vec<TaskOperatorSignalThread>> {
         Box::pin(async move {
             self.tasks
                 .service()
@@ -949,11 +952,7 @@ impl super::tracker::Host for OwnTasks {
         })
     }
 
-    fn reopen_signal(
-        &self,
-        task_id: String,
-        signal_id: String,
-    ) -> super::tracker::HostFuture<'_, ()> {
+    fn reopen_signal(&self, task_id: String, signal_id: String) -> tracker::HostFuture<'_, ()> {
         Box::pin(async move {
             self.tasks
                 .service()
@@ -964,10 +963,7 @@ impl super::tracker::Host for OwnTasks {
         })
     }
 
-    fn events(
-        &self,
-        task_id: String,
-    ) -> super::tracker::HostFuture<'_, Vec<(i64, TaskHistoryEvent)>> {
+    fn events(&self, task_id: String) -> tracker::HostFuture<'_, Vec<(i64, TaskHistoryEvent)>> {
         Box::pin(async move {
             self.tasks
                 .events(&task_id)
@@ -976,7 +972,7 @@ impl super::tracker::Host for OwnTasks {
         })
     }
 
-    fn instruct(&self, task_id: String, instruction: String) -> super::tracker::HostFuture<'_, ()> {
+    fn instruct(&self, task_id: String, instruction: String) -> tracker::HostFuture<'_, ()> {
         Box::pin(async move {
             self.tasks
                 .update_intent(&task_id, instruction)
@@ -990,7 +986,7 @@ impl super::tracker::Host for OwnTasks {
         task_id: String,
         signal_id: String,
         answer: String,
-    ) -> super::tracker::HostFuture<'_, ()> {
+    ) -> tracker::HostFuture<'_, ()> {
         Box::pin(async move {
             self.tasks
                 .reply(&task_id, &signal_id, answer)
@@ -999,7 +995,7 @@ impl super::tracker::Host for OwnTasks {
         })
     }
 
-    fn accept(&self, task_id: String, signal_id: String) -> super::tracker::HostFuture<'_, ()> {
+    fn accept(&self, task_id: String, signal_id: String) -> tracker::HostFuture<'_, ()> {
         Box::pin(async move {
             self.tasks
                 .service()
@@ -1010,7 +1006,7 @@ impl super::tracker::Host for OwnTasks {
         })
     }
 
-    fn delegation_of(&self, task_id: String) -> super::tracker::HostFuture<'_, Option<String>> {
+    fn delegation_of(&self, task_id: String) -> tracker::HostFuture<'_, Option<String>> {
         Box::pin(async move {
             Ok(self
                 .tasks
@@ -1025,7 +1021,7 @@ impl super::tracker::Host for OwnTasks {
         &self,
         issue_id: String,
         delegations: Vec<String>,
-    ) -> super::tracker::HostFuture<'_, Option<super::tracker::BoundTask>> {
+    ) -> tracker::HostFuture<'_, Option<tracker::BoundTask>> {
         Box::pin(async move {
             let wanted: Vec<&str> = delegations.iter().map(String::as_str).collect();
             let task = self
@@ -1035,7 +1031,7 @@ impl super::tracker::Host for OwnTasks {
                 .map_err(|error| error.to_string())?;
             Ok(task.and_then(|task| {
                 let issue = task.facts.tracker_issue.clone()?;
-                Some(super::tracker::BoundTask {
+                Some(tracker::BoundTask {
                     task_id: task.id.clone(),
                     owner: task.operator_id()?.to_owned(),
                     issue,
@@ -1046,7 +1042,7 @@ impl super::tracker::Host for OwnTasks {
         })
     }
 
-    fn session_agent(&self, task_id: String) -> super::tracker::HostFuture<'_, Option<String>> {
+    fn session_agent(&self, task_id: String) -> tracker::HostFuture<'_, Option<String>> {
         Box::pin(async move {
             Ok(self
                 .tasks
@@ -1059,17 +1055,14 @@ impl super::tracker::Host for OwnTasks {
         })
     }
 
-    fn tasks_ahead_in_queue(
-        &self,
-        task_id: String,
-    ) -> super::tracker::HostFuture<'_, Option<usize>> {
+    fn tasks_ahead_in_queue(&self, task_id: String) -> tracker::HostFuture<'_, Option<usize>> {
         Box::pin(async move {
             let tasks = self.tasks.list().await.map_err(|error| error.to_string())?;
             Ok(tasks_ahead_in_queue(&tasks, &task_id))
         })
     }
 
-    fn bound_tasks(&self) -> super::tracker::HostFuture<'_, Vec<super::tracker::BoundTask>> {
+    fn bound_tasks(&self) -> tracker::HostFuture<'_, Vec<tracker::BoundTask>> {
         Box::pin(async move {
             let tasks = self.tasks.list().await.map_err(|error| error.to_string())?;
             Ok(tasks
@@ -1100,7 +1093,7 @@ impl super::tracker::Host for OwnTasks {
                     }
                     let issue = task.facts.tracker_issue.clone()?;
                     let owner = task.operator_id()?.to_owned();
-                    Some(super::tracker::BoundTask {
+                    Some(tracker::BoundTask {
                         task_id: task.id.clone(),
                         owner,
                         issue,
@@ -1112,7 +1105,7 @@ impl super::tracker::Host for OwnTasks {
         })
     }
 
-    fn is_kept(&self, task_id: String) -> super::tracker::HostFuture<'_, bool> {
+    fn is_kept(&self, task_id: String) -> tracker::HostFuture<'_, bool> {
         Box::pin(async move {
             Ok(self
                 .tasks
@@ -1273,8 +1266,12 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
             // A service definition carries this machine's own paths, so it is
             // written by the process that has them rather than from a template
             // somebody downloaded.
-            ServeCommand::Install => return super::service::install(&args, &base).await,
-            ServeCommand::Uninstall => return super::service::uninstall(&args, &base).await,
+            ServeCommand::Install => {
+                return super::install::install(&args, &base).await;
+            }
+            ServeCommand::Uninstall => {
+                return super::install::uninstall(&args, &base).await;
+            }
             ServeCommand::Connect(connect) => {
                 let settings = ServeSettings::load_or_create(&settings_path)?;
                 let credentials_path = config.data_dir().join("trackers/linear/oauth.json");
@@ -1477,7 +1474,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     });
     if let Some(runtime) = linear_runtime {
         let tracker = runtime.tracker.clone();
-        let delegated_host: Arc<dyn super::tracker::Host> = host.clone();
+        let delegated_host: Arc<dyn tracker::Host> = host.clone();
         tokio::spawn(tracker.run(delegated_host));
         tokio::spawn(async move {
             if let Err(error) =
@@ -1661,7 +1658,7 @@ impl TrackerHost for PushedTrackers {
 
 struct LinearRuntime {
     automation: Arc<LinearAutomation>,
-    tracker: Arc<super::tracker::RemoteTracker>,
+    tracker: Arc<tracker::RemoteTracker>,
     listener: TcpListener,
     workspace_name: String,
 }
@@ -1685,7 +1682,7 @@ async fn connect_tracker(
     let listener = TcpListener::bind(&settings.listen)
         .await
         .map_err(|error| format!("could not listen for Linear webhooks: {error}"))?;
-    let tracker = super::tracker::RemoteTracker::new(super::tracker::RemoteTrackerConfig {
+    let tracker = tracker::RemoteTracker::new(tracker::RemoteTrackerConfig {
         automation: automation.clone(),
         webhook_secret: settings.webhook_secret()?.into_bytes(),
         oauth_client_id: settings.client_id.clone(),
@@ -1721,7 +1718,7 @@ async fn connect_tracker(
     })
 }
 
-pub(super) async fn export_task<E>(
+pub(crate) async fn export_task<E>(
     config: &Config,
     tasks: &TaskEventLoop<E>,
     task_id: &str,
@@ -1806,7 +1803,7 @@ where
             event,
         })
         .collect();
-    let record = super::HandoverRecord {
+    let record = HandoverRecord {
         draft: HandoverDraft {
             intent: stopped.facts.intent.clone(),
             project: stopped
@@ -1823,7 +1820,7 @@ where
     serde_json::to_writer(&file, &record).map_err(|e| e.to_string())?;
     file.sync_all().map_err(|e| e.to_string())?;
     let history = archive_description(&history_path)?;
-    if history.len > super::protocol::MAX_BLOB_BYTES {
+    if history.len > protocol::MAX_BLOB_BYTES {
         return Err("task history exceeds the transfer limit".into());
     }
     let (work, transcript) = bundle_task_files(tasks, &stopped, &directory, progress).await?;

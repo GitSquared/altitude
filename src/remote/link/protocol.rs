@@ -17,7 +17,7 @@ use crate::vcs::ContributionState;
 use crate::{agent::AgentKind, project::Project};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use super::{
+use crate::remote::{
     LinkError, LinkResult,
     announce::{self, Announcement},
     bundle::ProfileDigest,
@@ -26,9 +26,9 @@ use super::{
 pub const LINK_ALPN: &[u8] = b"altitude/link/1";
 
 const MAX_FRAME_BYTES: usize = 64 * 1024;
-pub(super) const MAX_BLOB_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_BLOB_BYTES: u64 = 64 * 1024 * 1024;
 pub(super) const CHUNK_BYTES: usize = 64 * 1024;
-pub(super) const TRANSFER_PIECE_BYTES: u64 = 4 * 1024 * 1024;
+pub(crate) const TRANSFER_PIECE_BYTES: u64 = 4 * 1024 * 1024;
 
 pub(super) fn builder() -> Builder {
     Endpoint::builder(presets::Minimal)
