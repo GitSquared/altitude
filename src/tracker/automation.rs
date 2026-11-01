@@ -54,7 +54,7 @@ const ISSUE_DELEGATION_QUERY: &str = "query IssueDelegation($id: String!) { \
 const DELEGATED_ISSUES_QUERY: &str = "query DelegatedIssues($app: ID!) { \
     issues(filter: { delegate: { id: { eq: $app } } }, first: 25) { \
     nodes { id identifier title url project { name } \
-    agentSessions(first: 10) { nodes { id updatedAt } } \
+    agentSessions(first: 10) { nodes { id createdAt } } \
     team { id key name organization { id } } } } }";
 
 const ISSUE_STATES_QUERY: &str = "query IssueStates($id: String!) { \
@@ -217,7 +217,9 @@ impl LinearAutomation {
             };
             // The newest session, not the first one the API happens to list: a
             // delegation makes a new session each time, and answering in an old one
-            // is answering in a thread the operator has moved on from.
+            // is answering in a thread the operator has moved on from. By creation
+            // and not by the last word in it: a session nobody has written into yet
+            // is exactly what a delegation that has not been picked up looks like.
             let session = node
                 .pointer("/agentSessions/nodes")
                 .and_then(Value::as_array)
