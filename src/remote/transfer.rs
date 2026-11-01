@@ -27,6 +27,7 @@ pub struct Transfer {
     stopped: Arc<AtomicBool>,
 }
 
+#[derive(Clone)]
 pub struct Watching {
     pub updates: watch::Receiver<TransferUpdate>,
     stopped: Arc<AtomicBool>,

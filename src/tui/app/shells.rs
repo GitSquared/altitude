@@ -82,8 +82,23 @@ impl App {
         if screens::shell::is_exit_key(key) {
             match &id {
                 ShellId::Task(task_id) => {
-                    if !event_loop.return_to_autopilot(task_id) {
-                        self.say("This task is no longer running; control stayed with autopilot");
+                    // A task that was carried here belongs to the machine it came
+                    // from: leaving it hands it back rather than piloting it here.
+                    let borrowed = self
+                        .tasks
+                        .iter()
+                        .find(|task| task.id == *task_id)
+                        .filter(|task| task.facts.arrived_from.is_some())
+                        .cloned();
+                    match borrowed {
+                        Some(task) => event_loop.hand_back(task),
+                        None => {
+                            if !event_loop.return_to_autopilot(task_id) {
+                                self.say(
+                                    "This task is no longer running; control stayed with autopilot",
+                                );
+                            }
+                        }
                     }
                     self.hide_shell();
                 }

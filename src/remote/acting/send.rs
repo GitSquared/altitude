@@ -79,7 +79,7 @@ impl<E: IsolationEngine + Clone + 'static> SendsTasksHome for HomeSender<E> {
         };
         let (transfer, _) = Transfer::start("handing the task back…");
         self.tasks
-            .announce_transfer(address.clone(), transfer.watching());
+            .announce_transfer(task.id.clone(), address.clone(), transfer.watching());
         let config = Arc::clone(&self.config);
         let keys = self.keys.clone();
         let client = self.client.clone();

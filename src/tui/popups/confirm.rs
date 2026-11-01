@@ -78,14 +78,23 @@ impl Confirm {
 }
 
 pub fn draw(frame: &mut Frame, area: Rect, confirm: &Confirm) -> Rect {
+    // A question is as wide as the question: a fixed share of the screen made a
+    // sentence about one task read like a paragraph about the whole machine.
     let width_percent = 60;
-    let width = (area.width * width_percent / 100).max(20);
+    let wanted = confirm
+        .question
+        .lines()
+        .map(|line| u16::try_from(line.chars().count()).unwrap_or(u16::MAX))
+        .max()
+        .unwrap_or(0)
+        .saturating_add(6);
+    let width = wanted.clamp(24, (area.width * width_percent / 100).max(24));
     let text_width = width.saturating_sub(4).max(1);
     let rows = Paragraph::new(confirm.question.clone())
         .wrap(Wrap { trim: true })
         .line_count(text_width);
     let height = chrome::modal_height(u16::try_from(rows).unwrap_or(u16::MAX));
-    let popup = chrome::centered(area, width_percent, height.min(area.height));
+    let popup = chrome::centered_at_most(area, width_percent, width, height.min(area.height));
     frame.render_widget(Clear, popup);
     let block = chrome::modal("Are you sure?");
     let inner = block.inner(popup);

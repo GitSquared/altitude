@@ -170,6 +170,7 @@ struct Card {
     host: String,
     issue: Option<String>,
     is_alarm: bool,
+    moving: Option<String>,
     status: Line<'static>,
     extras: Vec<Line<'static>>,
 }
@@ -202,10 +203,29 @@ impl Card {
                     None => format!("{} · Linear", issue.identifier),
                 }),
             is_alarm: is_alarming(summary),
+            moving: None,
             status: card_summary(summary, standing, tick, build),
             extras: card_extras(summary, now_ms),
         }
     }
+}
+
+fn moving_stage(app: &App, task_id: &str) -> Option<String> {
+    let moving = app.moving.as_ref()?;
+    if moving.task_id != task_id {
+        return None;
+    }
+    let update = moving.watching.updates.borrow().clone();
+    Some(if update.total == 0 {
+        update.stage
+    } else {
+        format!(
+            "{} {}/{}",
+            update.stage.trim_end_matches('…'),
+            update.done,
+            update.total
+        )
+    })
 }
 
 fn cards(app: &App) -> Vec<Card> {
@@ -227,13 +247,18 @@ fn cards(app: &App) -> Vec<Card> {
                 Some(ahead) => Standing::Queued { ahead, has_room },
                 None => Standing::NotQueued,
             };
-            Card::of(
+            let mut card = Card::of(
                 &summary,
                 standing,
                 tick,
                 app.environment_builds.get(&task.id),
                 now,
-            )
+            );
+            if let Some(stage) = moving_stage(app, &task.id) {
+                card.status = Line::styled(stage, palette::muted());
+                card.moving = Some(task.id.clone());
+            }
+            card
         })
         .collect();
     cards.extend(
@@ -279,10 +304,11 @@ fn draw_card(frame: &mut Frame, area: Rect, card: &Card, focused: bool) {
     // What has to be looked at is marked out by its frame, so it can be found
     // without reading every card. Focus still owns the accent, and the alarm
     // keeps the title, so the two do not cancel each other on the card in front.
-    let border = match (focused, card.is_alarm) {
-        (true, _) => palette::accent(),
-        (false, true) => palette::bad(),
-        (false, false) => palette::muted(),
+    let border = match (focused, card.is_alarm, card.moving.is_some()) {
+        (_, _, true) => palette::muted(),
+        (true, _, false) => palette::accent(),
+        (false, true, false) => palette::bad(),
+        (false, false, false) => palette::muted(),
     };
     let title_style = match (focused, card.is_alarm) {
         (_, true) => palette::bad().bold(),

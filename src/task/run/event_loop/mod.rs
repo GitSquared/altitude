@@ -38,6 +38,7 @@ use crate::{
 
 pub enum TaskExecutionUpdate {
     HandingBack {
+        task_id: String,
         address: String,
         transfer: Watching,
     },
@@ -123,10 +124,30 @@ where
         (event_loop, receiver)
     }
 
-    pub fn announce_transfer(&self, address: String, transfer: Watching) {
-        let _ = self
-            .events
-            .send(TaskExecutionUpdate::HandingBack { address, transfer });
+    pub fn announce_transfer(&self, task_id: String, address: String, transfer: Watching) {
+        let _ = self.events.send(TaskExecutionUpdate::HandingBack {
+            task_id,
+            address,
+            transfer,
+        });
+    }
+
+    /// Hand a borrowed task back to the machine it came from. The interface asks for
+    /// this when the operator leaves; the run ending asks for it too.
+    pub fn hand_back(&self, task: Task) {
+        let Some(home) = self.sends_home() else {
+            return;
+        };
+        let loop_ = self.clone();
+        tokio::spawn(async move {
+            let _ = loop_
+                .service
+                .record(&task.id, &[TaskHistoryEvent::TaskHandedBack])
+                .await;
+            if let Err(error) = home.send_home(task).await {
+                tracing::warn!(%error, "could not hand a task back to its machine");
+            }
+        });
     }
 
     pub fn attach_sends_home(&self, home: Arc<dyn SendsTasksHome>) {
@@ -1535,19 +1556,8 @@ where
                 // work towards a person, and a remote has none. So the way home is
                 // attached here or not at all, and where it is not, the task is simply
                 // piloted where it is.
-                if task.facts.arrived_from.is_some()
-                    && let Some(home) = self.sends_home()
-                {
-                    let _ = self
-                        .service
-                        .record(&task.id, &[TaskHistoryEvent::TaskHandedBack])
-                        .await;
-                    let returned = task.clone();
-                    tokio::spawn(async move {
-                        if let Err(error) = home.send_home(returned).await {
-                            tracing::warn!(%error, "could not hand a task back to its machine");
-                        }
-                    });
+                if task.facts.arrived_from.is_some() && self.sends_home().is_some() {
+                    self.hand_back(task.clone());
                     return Ok(());
                 }
                 // The next turn is told what happened to it, so the agent picks up from

@@ -286,6 +286,11 @@ pub(in crate::tui) enum CredentialShellState {
     Open(CredentialShell),
 }
 
+pub(in crate::tui) struct Moving {
+    pub task_id: String,
+    pub watching: transfer::Watching,
+}
+
 pub(in crate::tui) struct PendingTask {
     pub label: String,
     pub address: Option<String>,
@@ -512,6 +517,9 @@ pub struct App {
     pub(in crate::tui) foreground: Foreground,
     shell_behind: Behind<Foreground>,
     pub(in crate::tui) transfer: Option<TransferView>,
+    /// The task that is on its way to another machine, with the progress to show on
+    /// its card. One at a time: a handback is something the operator started.
+    pub(in crate::tui) moving: Option<Moving>,
     pub(in crate::tui) pending_tasks: Vec<PendingTask>,
     pub(in crate::tui) remote_status: HashMap<String, RemoteStatus>,
     pub(in crate::tui) remote_trackers: HashMap<String, Vec<TrackerConnection>>,
@@ -658,6 +666,7 @@ impl App {
             foreground: Foreground::default(),
             shell_behind: Behind::default(),
             transfer: None,
+            moving: None,
             pending_tasks: Vec::new(),
             remote_status: HashMap::new(),
             remote_trackers: HashMap::new(),
@@ -984,9 +993,13 @@ impl App {
     }
 
     pub(in crate::tui) fn visible_remote_tasks(&self) -> impl Iterator<Item = &HeldTask> {
-        self.remote_tasks
-            .iter()
-            .filter(|held| self.in_active_tab(held.summary.project_id.as_deref()))
+        self.remote_tasks.iter().filter(|held| {
+            // A task that has landed here is no longer another machine's to show: the
+            // source keeps listing it until it gives the task up, and two cards for
+            // one task is the shape of a mistake the operator has to explain away.
+            !self.tasks.iter().any(|task| task.id == held.summary.id)
+                && self.in_active_tab(held.summary.project_id.as_deref())
+        })
     }
 
     fn visible_counts(&self) -> (usize, usize) {
@@ -1090,6 +1103,7 @@ impl App {
                 .and_then(|form| form.scopes.as_ref())
                 .is_some_and(Scopes::is_listing)
             || self.is_awaiting_progress()
+            || self.moving.is_some()
             || !self.environment_builds.is_empty()
             || self
                 .remote_tasks
@@ -5797,6 +5811,13 @@ impl App {
             TaskExecutionUpdate::Started(Ok(task)) => self.replace_task(task),
             TaskExecutionUpdate::Started(Err(error)) => self.problem(error.to_string()),
             TaskExecutionUpdate::Finished(id, Ok(task)) if !self.is_removing(&id) => {
+                if self
+                    .moving
+                    .as_ref()
+                    .is_some_and(|moving| moving.task_id == id)
+                {
+                    self.moving = None;
+                }
                 self.remove_shell(&id);
                 self.replace_task(task);
             }
@@ -5822,8 +5843,18 @@ impl App {
                     self.send_shell_input(&id, reply, event_loop);
                 }
             }
-            TaskExecutionUpdate::HandingBack { address, transfer } => {
-                // The task layer started this one; the interface only watches it.
+            TaskExecutionUpdate::HandingBack {
+                task_id,
+                address,
+                transfer,
+            } => {
+                // The task layer started this one; the interface only watches it, and
+                // says on the card which task is leaving so the list does not look as
+                // though the task vanished.
+                self.moving = Some(Moving {
+                    task_id,
+                    watching: transfer.clone(),
+                });
                 self.watch_transfer(
                     format!("Handing back to {}", self.remote_name(&address)),
                     address,
