@@ -2510,15 +2510,12 @@ impl App {
         self.selected = self.selected.min((local + remote).saturating_sub(1));
     }
 
-    fn ask_to_take_over(&mut self, id: &str, title: &str, from: Option<String>) {
+    fn ask_to_take_over(&mut self, id: &str, title: &str, agent: &str, from: Option<String>) {
         let question = match from {
-            Some(name) => {
-                format!("Take over \"{title}\"? It stops on {name} and moves here first.")
-            }
-            None => format!(
-                "Take over \"{title}\"? The agent stops and the terminal is yours; \
-                 ctrl-a hands it back."
+            Some(name) => format!(
+                "Take over {title} and speak directly to {agent}? It moves here from {name} first."
             ),
+            None => format!("Take over {title} and speak directly to {agent}?"),
         };
         self.foreground = Foreground::Confirm(PendingConfirm::taking_over(id.to_owned(), question));
     }
@@ -6598,18 +6595,32 @@ impl App {
         // over has to move it here first, and its question says so.
         if is_secondary(key) {
             let asked = self.selected_held().map(|held| {
+                let agent = held
+                    .summary
+                    .agent
+                    .map(|kind| kind.to_string().to_ascii_lowercase())
+                    .unwrap_or_else(|| "the agent".to_owned());
                 (
                     held.summary.id.clone(),
                     held.summary.title.clone(),
+                    agent,
                     Some(self.remote_name(&held.address)),
                 )
             });
             let asked = asked.or_else(|| {
-                self.selected_task()
-                    .map(|task| (task.id.clone(), task.title().to_owned(), None))
+                self.selected_task().map(|task| {
+                    (
+                        task.id.clone(),
+                        task.title().to_owned(),
+                        task.agent_kind
+                            .map(|kind| kind.to_string().to_ascii_lowercase())
+                            .unwrap_or_else(|| "the agent".to_owned()),
+                        None,
+                    )
+                })
             });
-            if let Some((id, title, from)) = asked {
-                self.ask_to_take_over(&id, &title, from);
+            if let Some((id, title, agent, from)) = asked {
+                self.ask_to_take_over(&id, &title, &agent, from);
             }
             return Ok(false);
         }

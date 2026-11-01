@@ -1657,6 +1657,14 @@ where
             // carries on under autopilot rather than the task being closed out.
             TaskExecutionMode::Operator => {
                 self.service.continue_turn(run).await?;
+                // Exiting the harness is leaving the terminal: the take over is over,
+                // so the shell that was the operator's closes and the task carries on
+                // headless. Without this the autopilot run that follows paints its
+                // conversation into a terminal nobody is holding.
+                let _ = self.events.send(TaskExecutionUpdate::Finished(
+                    task.id.clone(),
+                    Ok(task.clone()),
+                ));
                 self.watch_agent_run(self.service.resume_autopilot_after_operator(task).await);
             }
         }
