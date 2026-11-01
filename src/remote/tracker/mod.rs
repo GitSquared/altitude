@@ -1,9 +1,6 @@
 use std::{
-    cmp::Reverse,
     collections::{HashMap, HashSet},
-    fs,
     future::Future,
-    io::{self, ErrorKind},
     path::{Path, PathBuf},
     pin::Pin,
     sync::{
@@ -12,6 +9,16 @@ use std::{
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+mod ledger;
+mod logins;
+
+use ledger::{
+    CommentInput, Cursor, Delivery, IssueStateChanged, Ledger, SessionEvent, StoredEvent,
+    TerminatedSession,
+};
+pub use logins::{Login, logins, logins_of};
+pub use logins::{claim_account, yield_account};
 
 use axum::{
     Router,
@@ -22,7 +29,7 @@ use axum::{
     routing::post,
 };
 use iroh::EndpointId;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio::{
     sync::Notify,
     time::{MissedTickBehavior, interval},
@@ -34,7 +41,7 @@ use crate::{
         TaskOperatorSignalKind, TaskOperatorSignalThread,
     },
     tracker::{
-        ACCOUNT_FILE, IssueReference, IssueSnapshot, TrackerAccount, TrackerKind, TrackerStatus,
+        IssueReference, IssueSnapshot, TrackerKind, TrackerStatus,
         automation::{
             AgentActivityContent, AgentSessionEvent, CommentSite, LinearAutomation, WebhookError,
             parse_agent_session_event, verify_signature,
@@ -2528,296 +2535,6 @@ impl AppNotificationEvent {
 }
 
 // ------------------------------------------------------------------- storage
-
-pub struct Login {
-    pub owner: String,
-    pub account: TrackerAccount,
-    pub arrived: SystemTime,
-}
-
-pub fn logins(operators_dir: &Path) -> Vec<Login> {
-    let Ok(entries) = fs::read_dir(operators_dir) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-        .flat_map(|entry| {
-            let owner = entry.file_name().to_string_lossy().into_owned();
-            TrackerKind::ALL
-                .iter()
-                .flat_map(move |provider| logins_of(&entry.path(), &owner, *provider))
-                .collect::<Vec<_>>()
-        })
-        .collect()
-}
-
-pub fn logins_of(operator_dir: &Path, owner: &str, provider: TrackerKind) -> Vec<Login> {
-    if yielded_providers(operator_dir).contains(&provider) {
-        return Vec::new();
-    }
-    let Ok(entries) = fs::read_dir(operator_dir.join(provider.profile())) else {
-        return Vec::new();
-    };
-    let mut logins: Vec<Login> = entries
-        .flatten()
-        .filter_map(|login| {
-            let identity = login.path().join("profile").join(ACCOUNT_FILE);
-            let arrived = fs::metadata(&identity).ok()?.modified().ok()?;
-            let account = fs::read(&identity)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<TrackerAccount>(&bytes).ok())
-                .filter(|account| account.provider == provider)?;
-            Some(Login {
-                owner: owner.to_owned(),
-                account,
-                arrived,
-            })
-        })
-        .collect();
-    logins.sort_by(|left, right| left.account.user_id.cmp(&right.account.user_id));
-    logins
-}
-
-pub fn yield_account(operator_dir: &Path, provider: TrackerKind) -> io::Result<()> {
-    remember_yielded(operator_dir, provider, true)
-}
-
-pub fn claim_account(operator_dir: &Path, provider: TrackerKind) -> io::Result<()> {
-    remember_yielded(operator_dir, provider, false)
-}
-
-#[derive(Default, Serialize, Deserialize)]
-struct Yielded {
-    #[serde(default)]
-    providers: Vec<TrackerKind>,
-}
-
-fn yielded_path(operator_dir: &Path) -> PathBuf {
-    operator_dir.join("yielded.json")
-}
-
-fn yielded_providers(operator_dir: &Path) -> Vec<TrackerKind> {
-    fs::read_to_string(yielded_path(operator_dir))
-        .ok()
-        .and_then(|text| serde_json::from_str::<Yielded>(&text).ok())
-        .map(|yielded| yielded.providers)
-        .unwrap_or_default()
-}
-
-fn remember_yielded(operator_dir: &Path, provider: TrackerKind, yielded: bool) -> io::Result<()> {
-    let path = yielded_path(operator_dir);
-    let mut held = yielded_providers(operator_dir);
-    let had = held.contains(&provider);
-    if yielded == had {
-        return Ok(());
-    }
-    if yielded {
-        held.push(provider);
-    } else {
-        held.retain(|held| *held != provider);
-    }
-    if held.is_empty() {
-        return match fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error),
-        };
-    }
-    let text =
-        serde_json::to_string_pretty(&Yielded { providers: held }).map_err(io::Error::other)?;
-    super::identity::write_private(&path, &text).map_err(io::Error::other)
-}
-
-#[derive(Clone, Default, Serialize, Deserialize)]
-struct Ledger {
-    #[serde(default)]
-    deliveries: Vec<Delivery>,
-    #[serde(default)]
-    cursors: Vec<Cursor>,
-    #[serde(default)]
-    terminated_sessions: Vec<TerminatedSession>,
-    #[serde(default)]
-    settled_issues: Vec<String>,
-}
-
-impl Ledger {
-    fn load(path: &Path) -> Result<Self, String> {
-        match fs::read_to_string(path) {
-            Ok(text) => serde_json::from_str(&text).map_err(|error| {
-                format!(
-                    "could not read the tracker ledger at {}: {error}",
-                    path.display()
-                )
-            }),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(format!(
-                "could not read the tracker ledger at {}: {error}",
-                path.display()
-            )),
-        }
-    }
-
-    fn prune(&mut self, now: i64) {
-        self.prune_done(now);
-        self.prune_terminated(now);
-    }
-
-    fn prune_done(&mut self, now: i64) {
-        let cutoff = now - DONE_RETENTION.as_millis() as i64;
-        let mut pending = Vec::new();
-        let mut done = Vec::new();
-        for delivery in self.deliveries.drain(..) {
-            if delivery.done {
-                if delivery.received_at_ms >= cutoff {
-                    done.push(delivery);
-                }
-            } else {
-                pending.push(delivery);
-            }
-        }
-        done.sort_by_key(|delivery| Reverse(delivery.received_at_ms));
-        done.truncate(MAX_DONE);
-        pending.extend(done);
-        self.deliveries = pending;
-    }
-
-    fn prune_terminated(&mut self, now: i64) {
-        let cutoff = now - TERMINATED_RETENTION.as_millis() as i64;
-        self.terminated_sessions
-            .retain(|session| session.terminated_at_ms >= cutoff);
-        if self.terminated_sessions.len() > MAX_TERMINATED {
-            let excess = self.terminated_sessions.len() - MAX_TERMINATED;
-            self.terminated_sessions.drain(..excess);
-        }
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct Delivery {
-    key: String,
-    received_at_ms: i64,
-    next_attempt_at_ms: i64,
-    done: bool,
-    event: StoredEvent,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct Cursor {
-    issue_id: String,
-    #[serde(default)]
-    issue_identifier: String,
-    session: String,
-    owner: String,
-    tracker_user_id: String,
-    task_id: String,
-    #[serde(default)]
-    reported_events: usize,
-    #[serde(default)]
-    finished: bool,
-    #[serde(default)]
-    failed_at: Option<usize>,
-    #[serde(default)]
-    failed_attempts: usize,
-    #[serde(default)]
-    last_status: Option<TrackerStatus>,
-    #[serde(default)]
-    unhooked_at: Option<i64>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct TerminatedSession {
-    session_id: String,
-    terminated_at_ms: i64,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-enum StoredEvent {
-    Session(Box<SessionEvent>),
-    IssueStateChanged(IssueStateChanged),
-    Comment(CommentInput),
-}
-
-impl StoredEvent {
-    fn describe(&self) -> String {
-        match self {
-            StoredEvent::Session(event) => {
-                format!("session {} · {}", event.session_id, event.action)
-            }
-            StoredEvent::IssueStateChanged(change) => {
-                format!("issue {} · state {}", change.issue_id, change.state_id)
-            }
-            StoredEvent::Comment(comment) => {
-                format!(
-                    "comment {} · {}",
-                    comment.comment_id,
-                    if comment.is_mention {
-                        "mention"
-                    } else {
-                        "comment"
-                    }
-                )
-            }
-        }
-    }
-
-    fn dedupe_key(&self) -> String {
-        match self {
-            StoredEvent::Session(session) => session.dedupe_key(),
-            StoredEvent::IssueStateChanged(change) => format!(
-                "issue:{}:{}:{}:{}",
-                change.issue_id, change.state_id, change.actor_id, change.occurred_at_ms
-            ),
-            StoredEvent::Comment(comment) => format!("comment:{}", comment.comment_id),
-        }
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct SessionEvent {
-    action: String,
-    session_id: String,
-    #[serde(default)]
-    issue_id: Option<String>,
-    #[serde(default)]
-    comment_id: Option<String>,
-    #[serde(default)]
-    creator_id: Option<String>,
-    #[serde(default)]
-    creator_name: Option<String>,
-    #[serde(default)]
-    prompt_author_id: Option<String>,
-    #[serde(default)]
-    prompt_body: Option<String>,
-    #[serde(default)]
-    signal: Option<String>,
-    #[serde(default)]
-    source_comment_id: Option<String>,
-    #[serde(default)]
-    activity_id: Option<String>,
-    #[serde(default)]
-    occurred_at_ms: i64,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct IssueStateChanged {
-    issue_id: String,
-    state_id: String,
-    actor_id: String,
-    occurred_at_ms: i64,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct CommentInput {
-    comment_id: String,
-    #[serde(default)]
-    issue_id: Option<String>,
-    #[serde(default)]
-    document_id: Option<String>,
-    actor_id: String,
-    is_mention: bool,
-    body: String,
-}
 
 impl SessionEvent {
     fn is_stop(&self) -> bool {
