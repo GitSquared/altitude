@@ -1723,6 +1723,20 @@ where
                     .events
                     .send(TaskExecutionUpdate::Report { task: task.clone() });
                 match action {
+                    // Another turn is a step only while the work is moving. A run of
+                    // turns that each ask for one and say nothing between them starts
+                    // the next from the same state, so the operator is asked instead.
+                    TaskAgentRequestedAction::Continue
+                        if self.service.went_quiet(&task).await? =>
+                    {
+                        let result = self
+                            .service
+                            .await_operator(&task, run, TaskExecutionPauseReason::AgentWentQuiet)
+                            .await;
+                        let _ = self
+                            .events
+                            .send(TaskExecutionUpdate::Finished(task.id, result));
+                    }
                     TaskAgentRequestedAction::Continue => {
                         self.service.continue_turn(run).await?;
                         self.watch_agent_run(self.service.continue_autopilot(task).await);
@@ -1739,7 +1753,10 @@ where
                             .send(TaskExecutionUpdate::Finished(task.id, result));
                     }
                     TaskAgentRequestedAction::AwaitOperator => {
-                        let result = self.service.await_operator(&task, run).await;
+                        let result = self
+                            .service
+                            .await_operator(&task, run, TaskExecutionPauseReason::AwaitingOperator)
+                            .await;
                         let _ = self
                             .events
                             .send(TaskExecutionUpdate::Finished(task.id, result));

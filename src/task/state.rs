@@ -149,6 +149,10 @@ pub enum TaskExecutionPauseReason {
     /// requests. The capsule is in a snapshot, so the wait costs no capacity.
     AwaitingReviewChecks,
     ApplicationShutdown,
+    /// The agent kept ending turns by asking for another one with nothing said in
+    /// between. The next turn starts from the same state and says the same thing,
+    /// so the loop is broken here instead of being left to run.
+    AgentWentQuiet,
     Transfer,
     /// The operator closed the issue in the tracker. The task is kept so the
     /// ending is something they can read in Altitude rather than something that

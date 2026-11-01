@@ -174,6 +174,10 @@ fn pause_notice(reason: &TaskExecutionPauseReason) -> &'static str {
         TaskExecutionPauseReason::AwaitingReviewChecks => {
             "Waiting for the pull request checks to settle."
         }
+        TaskExecutionPauseReason::AgentWentQuiet => {
+            "The agent kept taking turns without anything to report, so the task stopped \
+             here. Tell it what to do next."
+        }
         TaskExecutionPauseReason::ApplicationShutdown => {
             "The machine running this task restarted. The task resumes when it is back."
         }
