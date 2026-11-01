@@ -1443,8 +1443,8 @@ impl RemoteTracker {
     }
 
     async fn operator_mention(&self, user_id: &str) -> String {
-        match self.config.automation.user_url(user_id).await {
-            Ok(url) if !url.is_empty() => url,
+        match self.config.automation.user_mention(user_id).await {
+            Ok(mention) if !mention.is_empty() => mention,
             Ok(_) | Err(_) => {
                 tracing::warn!(user = user_id, "could not read the operator's profile URL");
                 "the person who delegated it".to_owned()

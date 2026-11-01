@@ -622,6 +622,11 @@ impl LinearAutomation {
     ///
     /// A bare profile URL in Markdown renders as a mention, which is how the
     /// redirect names the operator without guessing a workspace slug.
+    /// A person, written the way Linear writes a mention of them.
+    ///
+    /// A profile link is shown as a link; the `mention://` form is what a mention
+    /// is in Linear's own markdown, and it is what makes a name notify the person
+    /// it names.
     pub async fn user_url(&self, user_id: &str) -> Result<String, TrackerError> {
         let data = self
             .graphql(USER_URL_QUERY, json!({ "id": user_id }))
@@ -630,6 +635,19 @@ impl LinearAutomation {
             .and_then(Value::as_str)
             .map(str::to_owned)
             .ok_or_else(|| TrackerError::new("Linear returned no profile URL for that user"))
+    }
+
+    pub async fn user_mention(&self, user_id: &str) -> Result<String, TrackerError> {
+        let data = self
+            .graphql(USER_URL_QUERY, json!({ "id": user_id }))
+            .await?;
+        let name = data
+            .pointer("/user/name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("the operator")
+            .to_owned();
+        Ok(format!("[@{name}](mention://user/{user_id})"))
     }
 
     /// Sponsor an agent session on an issue through the public Agent API.
