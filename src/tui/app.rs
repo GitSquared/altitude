@@ -5656,8 +5656,14 @@ impl App {
                             delegations,
                         );
                     }
-                    // Founded here, so whose work it is needs no saying.
+                    // Founded here, so whose work it is needs no saying. It is
+                    // still a task that does not exist yet, so the list says so.
                     Ok(None) => {
+                        self.pending_tasks.push(PendingTask {
+                            label: first_line(&task),
+                            address: None,
+                            started: Instant::now(),
+                        });
                         event_loop.create(task, *project, agent, None);
                     }
                     // The answer was fine; the machine is not. The question stays
@@ -5782,6 +5788,11 @@ impl App {
                         self.foreground = Foreground::Tasks;
                     }
                     Ok(None) => {
+                        self.pending_tasks.push(PendingTask {
+                            label: first_line(&snapshot.issue.title),
+                            address: None,
+                            started: Instant::now(),
+                        });
                         event_loop.create_from_issue(
                             snapshot,
                             submission.project,
@@ -7476,10 +7487,13 @@ fn credential_status(answer: CredentialAnswer) -> CredentialStatus {
 /// The first line of what was asked for, which is what a task is called until the
 /// agent names it.
 fn origin_label(origin: &TaskOrigin) -> String {
-    let text = match origin {
-        TaskOrigin::Intent(intent) => intent.as_str(),
-        TaskOrigin::Issue(issue) => issue.issue.title.as_str(),
-    };
+    match origin {
+        TaskOrigin::Intent(intent) => first_line(intent),
+        TaskOrigin::Issue(issue) => first_line(&issue.issue.title),
+    }
+}
+
+fn first_line(text: &str) -> String {
     let first = text.lines().next().unwrap_or_default().trim();
     first.chars().take(64).collect()
 }
