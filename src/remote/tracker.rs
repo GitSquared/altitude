@@ -454,7 +454,7 @@ impl RemoteTracker {
             };
             tracing::info!(
                 issue = %reference.identifier,
-                "recovered a delegation that arrived while this machine was not listening"
+                "picked up a delegation the webhook did not bring"
             );
             let started = self
                 .delegate(
