@@ -617,10 +617,42 @@ impl LinearAutomation {
         activity_id: &str,
         content: AgentActivityContent,
     ) -> Result<(), TrackerError> {
+        self.create_activity_with(agent_session_id, activity_id, content, false)
+            .await
+    }
+
+    /// A thought that the next activity replaces, for a state that keeps moving.
+    ///
+    /// Linear shows it until the agent says something else and then forgets it,
+    /// which is what a queue position wants: the number is worth showing while it
+    /// is true and worth nothing once the task starts.
+    pub async fn create_ephemeral_thought(
+        &self,
+        agent_session_id: &str,
+        activity_id: &str,
+        body: String,
+    ) -> Result<(), TrackerError> {
+        self.create_activity_with(
+            agent_session_id,
+            activity_id,
+            AgentActivityContent::Thought { body },
+            true,
+        )
+        .await
+    }
+
+    async fn create_activity_with(
+        &self,
+        agent_session_id: &str,
+        activity_id: &str,
+        content: AgentActivityContent,
+        ephemeral: bool,
+    ) -> Result<(), TrackerError> {
         let input = json!({
             "agentSessionId": agent_session_id,
             "id": activity_id,
             "content": content,
+            "ephemeral": ephemeral,
         });
         let outcome = self
             .graphql(CREATE_ACTIVITY_MUTATION, json!({ "input": input }))
