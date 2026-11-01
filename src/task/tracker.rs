@@ -152,7 +152,10 @@ where
             .map_err(|error| TrackerError::new(error.to_string()))?;
         let mut first_error = None;
         for task in tasks {
-            if task.facts.tracker_issue.is_none() {
+            // Only a delegation makes the tracker a place this task is talked about.
+            // A task a client started, or linked to an issue, lives in the client: the
+            // issue is a reference it keeps, not somewhere its work is reported.
+            if task.facts.tracker_issue.is_none() || task.facts.tracker_delegation.is_none() {
                 continue;
             }
             // A task is reported through the account of the peer that owns it,
@@ -214,9 +217,34 @@ where
         if !active {
             return Ok(());
         }
-        if let Some(status) = target.filter(|_| status_changed) {
-            provider.status(reference, status).await?;
+        if let Some(status) = target.filter(|_| status_changed)
+            && let Err(error) = provider.status(reference, status).await
+        {
+            // A tracker that will not take a status will not take it on the next
+            // pass either. After a few tries the checkpoint moves past the change
+            // so the queue ends, and the operator is told once.
+            let refusals = self.record_refusal(&task.id);
+            if refusals < STATUS_SYNC_ATTEMPTS {
+                return Err(error);
+            }
+            tracing::warn!(
+                task = %task.id,
+                %error,
+                "stopped trying to set this task's issue status"
+            );
+            self.store
+                .append_events(
+                    &task.id,
+                    &[TaskHistoryEvent::TrackerSynced {
+                        event_count: events.len(),
+                        status: reported,
+                    }],
+                )
+                .await
+                .map_err(|error| TrackerError::new(error.to_string()))?;
+            return Ok(());
         }
+        self.forget_refusals(&task.id);
         self.store
             .append_events(
                 &task.id,
@@ -230,6 +258,27 @@ where
         Ok(())
     }
 }
+
+impl<E> TaskService<E> {
+    fn record_refusal(&self, task_id: &str) -> usize {
+        let Ok(mut refusals) = self.refused_status_syncs.lock() else {
+            return STATUS_SYNC_ATTEMPTS;
+        };
+        let count = refusals.entry(task_id.to_owned()).or_insert(0);
+        *count += 1;
+        *count
+    }
+
+    fn forget_refusals(&self, task_id: &str) {
+        if let Ok(mut refusals) = self.refused_status_syncs.lock() {
+            refusals.remove(task_id);
+        }
+    }
+}
+
+/// How many passes a refused status change is retried on. The first few can be a
+/// tracker having a bad minute; after that it is the tracker saying no.
+const STATUS_SYNC_ATTEMPTS: usize = 3;
 
 fn checkpoint(events: &[(i64, TaskHistoryEvent)]) -> usize {
     events

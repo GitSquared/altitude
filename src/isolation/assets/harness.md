@@ -46,8 +46,10 @@ lands in a signal instead of on the operator's desk.
 
 ## Your signals
 
-Every signal you raise reaches the operator: Altitude carries it to their
-interface, and on a task delegated from a tracker it also appears on the issue.
+Every signal you raise reaches the operator in Altitude. On a task the tracker
+delegated to them, the signal is mirrored to the issue as well, because that is where
+they asked for the work; a task they started themselves, or one merely linked to an
+issue, is talked about in Altitude only.
 Nothing you have already sent needs a second telling, so do not recap your signals
 in a later message and do not report what is still waiting on them — a review that
 quotes its own open decision makes the operator read the same thing twice and

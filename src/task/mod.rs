@@ -16,7 +16,7 @@ use std::{
     fmt, fs, io,
     os::unix::fs::symlink,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -67,6 +67,10 @@ pub struct TaskService<E> {
     trackers: Option<Arc<dyn TrackerHost>>,
     issue_reader: Option<Arc<dyn IssueReader>>,
     signal_changes: broadcast::Sender<String>,
+    /// Status changes a tracker would not take, counted per task. A refused status
+    /// is not news on every pass: after a few tries the checkpoint moves past it and
+    /// the operator hears about it once.
+    refused_status_syncs: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 pub(crate) fn copy_tree(source: &Path, destination: &Path) -> io::Result<()> {
@@ -225,6 +229,7 @@ where
             // Small on purpose: a receiver that falls behind more than this has
             // missed changes it can read from the store anyway.
             signal_changes: broadcast::channel(32).0,
+            refused_status_syncs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 

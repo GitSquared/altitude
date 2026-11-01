@@ -414,6 +414,7 @@ impl RemoteTracker {
             // the tracker did not just ask for is what attached new work to an old
             // one.
             if self.report_for_task(&task.task_id).is_some()
+                || task.delegation.is_none()
                 || self.user_for_owner(&task.owner).is_none()
             {
                 continue;
@@ -2012,10 +2013,6 @@ impl RemoteTracker {
                     .then_with(|| right.owner.cmp(&left.owner))
             })
             .map(|login| login.owner)
-    }
-
-    pub fn has_account(&self, owner: &str) -> bool {
-        self.user_for_owner(owner).is_some()
     }
 
     fn user_for_owner(&self, owner: &str) -> Option<String> {

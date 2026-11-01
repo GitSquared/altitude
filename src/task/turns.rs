@@ -396,9 +396,6 @@ where
                 ],
             )
             .await?;
-        // The sandbox is gone, so nothing can reach the channel until the task
-        // is provisioned again.
-        self.release_agent_channel(&task.id);
         Ok(task)
     }
 
@@ -424,11 +421,16 @@ where
             snapshot_path,
         });
         let task = self.record_snapshot(task, &events).await?;
-        self.release_agent_channel(&task.id);
         Ok(task)
     }
 
     async fn suspend_capsule(&self, task: &Task) -> Result<String, TaskServiceError> {
+        // Everything this machine holds open in the guest is closed first. An agent
+        // channel or a port relay is a session the guest is still serving, and a
+        // guest with something to serve does not quiesce for a graceful stop — which
+        // is what left a snapshot waiting on a shutdown that never came.
+        self.release_agent_channel(&task.id);
+        self.release_ports(task);
         let sandbox_id = task
             .facts
             .sandbox_id

@@ -485,23 +485,7 @@ impl TaskHost for OwnTasks {
         transfer_id: String,
     ) -> BoxFuture<Result<String, String>> {
         let incoming = self.incoming.clone();
-        let tasks = Arc::clone(&self.tasks);
-        let tracker = self.tracker.clone();
-        Box::pin(async move {
-            let task_id = incoming.stage(peer, &transfer_id).await?;
-            // A task that arrives already bound to an issue is reported here now,
-            // through a session on that issue, without replaying its history.
-            if let Some(task) = tasks
-                .list()
-                .await
-                .map_err(|error| error.to_string())?
-                .into_iter()
-                .find(|task| task.id == task_id)
-            {
-                report_issue_task(tracker.as_deref(), peer, &task).await;
-            }
-            Ok(task_id)
-        })
+        Box::pin(async move { incoming.stage(peer, &transfer_id).await })
     }
 
     fn commit_import(
@@ -651,7 +635,6 @@ impl TaskHost for OwnTasks {
     fn run(&self, peer: EndpointId, request: TaskRequest) -> BoxFuture<Result<(), String>> {
         let config = Arc::clone(&self.config);
         let tasks = Arc::clone(&self.tasks);
-        let tracker = self.tracker.clone();
         Box::pin(async move {
             let owner = peer.to_string();
             let settings = config
@@ -681,12 +664,15 @@ impl TaskHost for OwnTasks {
                         .map_err(|error| error.to_string())?;
                     tasks.admit();
                 }
+                // An issue a client linked is a reference it keeps to itself: the
+                // work was asked for on the client, so that is where its conversation
+                // and its action stay. Only a delegation makes the tracker the place
+                // the work is talked about.
                 super::protocol::TaskOrigin::Issue(issue) => {
-                    let task = tasks
+                    tasks
                         .create_issue_for_operator(*issue, project, request.agent, operator, None)
                         .await
                         .map_err(|error| error.to_string())?;
-                    report_issue_task(tracker.as_deref(), peer, &task).await;
                 }
             }
             Ok(())
@@ -1086,43 +1072,6 @@ async fn transfer_committed(
             TaskHistoryEvent::TransferCommitted { transfer_id, recipient }
             if transfer_id == &prepared.handover.transfer_id && recipient == &prepared.recipient)
     }))
-}
-
-async fn report_issue_task(
-    tracker: Option<&super::tracker::RemoteTracker>,
-    peer: EndpointId,
-    task: &Task,
-) {
-    let Some(reference) = task.facts.tracker_issue.clone() else {
-        return;
-    };
-    let Some(tracker) = tracker else {
-        tracing::warn!(
-            task = %task.id,
-            "this machine has no tracker app of its own, so the issue will not be reported on"
-        );
-        return;
-    };
-    if !tracker.has_account(&peer.to_string()) {
-        tracing::warn!(
-            task = %task.id,
-            "the client that started this task has synced no tracker account, so the issue \
-             will not be reported on"
-        );
-        return;
-    }
-    if let Err(error) = tracker
-        .start_reporting(
-            &peer.to_string(),
-            task.id.clone(),
-            reference,
-            task.facts.tracker_delegation.clone(),
-            task.session_agent(),
-        )
-        .await
-    {
-        tracing::warn!(task = %task.id, %error, "could not open a session on the task's issue");
-    }
 }
 
 fn is_machine_local_event(event: &TaskHistoryEvent) -> bool {
