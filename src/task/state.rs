@@ -291,6 +291,7 @@ pub struct TaskFacts {
     // None means no delegation asked for this task, never one that is unknown: it is
     // what keeps local work out of every question about delegations.
     pub tracker_delegation: Option<String>,
+    pub arrived_from: Option<String>,
     #[sqlx(default)]
     pub tracker_status: Option<TrackerStatus>,
     pub blocking_signal_kind: Option<TaskOperatorSignalKind>,
@@ -443,6 +444,10 @@ pub enum TaskHistoryEvent {
     },
     TaskCompleted {
         execution_status: TaskExecutionStatus,
+    },
+    /// Where this task arrived from, when it was carried here from another machine.
+    TaskArrivedFrom {
+        address: String,
     },
     TrackerIssueBound {
         issue: IssueSnapshot,

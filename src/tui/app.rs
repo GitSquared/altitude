@@ -7239,6 +7239,7 @@ impl App {
         update: TaskExecutionUpdate,
         terminal: &mut DefaultTerminal,
         event_loop: &TaskEventLoop<E>,
+        sends: &mpsc::Sender<SendTaskReply>,
     ) -> io::Result<()>
     where
         E: IsolationEngine + Clone + 'static,
@@ -7285,6 +7286,13 @@ impl App {
                 for reply in self.forward_shell_output(&id, bytes) {
                     self.send_shell_input(&id, reply, event_loop);
                 }
+            }
+            TaskExecutionUpdate::HandBack {
+                task_id,
+                address,
+                title,
+            } => {
+                self.begin_send_to_remote(address, task_id, title, event_loop, sends);
             }
             TaskExecutionUpdate::OperatorReady(task) => {
                 let id = task.id.clone();

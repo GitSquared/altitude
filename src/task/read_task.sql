@@ -116,6 +116,10 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      FROM task_event_logs
      WHERE task_id = tasks.id AND event_type = 'tracker_synced'
      ORDER BY sequence DESC LIMIT 1) AS tracker_status,
+    (SELECT payload ->> '$.data.address'
+     FROM task_event_logs
+     WHERE task_id = tasks.id AND event_type = 'task_arrived_from'
+     ORDER BY sequence DESC LIMIT 1) AS arrived_from,
     (SELECT kind
      FROM task_operator_signals
      WHERE task_id = tasks.id

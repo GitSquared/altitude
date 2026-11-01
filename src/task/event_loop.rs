@@ -33,6 +33,12 @@ use crate::{
 };
 
 pub enum TaskExecutionUpdate {
+    /// The operator is done with a task that came from another machine: send it home.
+    HandBack {
+        task_id: String,
+        address: String,
+        title: String,
+    },
     Created(Result<Task, TaskServiceError>),
     Started(Result<Task, TaskServiceError>),
     Finished(String, Result<Task, TaskServiceError>),
@@ -1135,17 +1141,22 @@ where
         &self,
         task_id: &str,
         transfer_id: &str,
+        from: &str,
     ) -> Result<(), TaskServiceError> {
-        self.service
-            .record(
-                task_id,
-                &[TaskHistoryEvent::TransferLanded {
-                    transfer_id: transfer_id.to_owned(),
-                    execution_status: TaskExecutionStatus::Paused,
-                    execution_pause_reason: super::TaskExecutionPauseReason::AwaitingOperator,
-                }],
-            )
-            .await?;
+        let mut arrival = vec![TaskHistoryEvent::TransferLanded {
+            transfer_id: transfer_id.to_owned(),
+            execution_status: TaskExecutionStatus::Paused,
+            execution_pause_reason: super::TaskExecutionPauseReason::AwaitingOperator,
+        }];
+        // Kept so the task can be handed back where it came from when the operator is
+        // done with it. A landing resumed from a staged record does not know the
+        // address it was dialled by, and nothing is invented for it.
+        if !from.is_empty() {
+            arrival.push(TaskHistoryEvent::TaskArrivedFrom {
+                address: from.to_owned(),
+            });
+        }
+        self.service.record(task_id, &arrival).await?;
         Ok(())
     }
 
@@ -1665,6 +1676,17 @@ where
                     task.id.clone(),
                     Ok(task.clone()),
                 ));
+                // A task that was carried here belongs to the machine it came from: when
+                // the operator leaves, it goes back rather than running on the client
+                // that borrowed it. The client does the moving; asking is the loop's job.
+                if let Some(address) = task.facts.arrived_from.clone() {
+                    let _ = self.events.send(TaskExecutionUpdate::HandBack {
+                        task_id: task.id.clone(),
+                        address,
+                        title: task.title().to_owned(),
+                    });
+                    return Ok(());
+                }
                 // The next turn is told what happened to it, so the agent picks up from
                 // the conversation rather than wondering why the operator went quiet.
                 let _ = self

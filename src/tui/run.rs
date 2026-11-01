@@ -778,7 +778,7 @@ where
                 redraw = true;
             }
             Some(update) = task_execution_updates.recv() => {
-                app.apply(update, terminal, &event_loop).await?;
+                app.apply(update, terminal, &event_loop, &sends).await?;
                 redraw = true;
             }
             notice = port_notices.recv() => {

@@ -96,6 +96,7 @@ where
                 event_loop,
                 &task,
                 transfer,
+                address,
             )
             .await?;
         }
@@ -220,6 +221,7 @@ where
         event_loop,
         &task,
         transfer,
+        "",
     )
     .await
     {
@@ -248,6 +250,7 @@ async fn complete_landing<E>(
     event_loop: &TaskEventLoop<E>,
     task: &Task,
     transfer: &Transfer,
+    address: &str,
 ) -> Result<(), String>
 where
     E: IsolationEngine + Clone + 'static,
@@ -268,7 +271,7 @@ where
         .await
         .map_err(|e| e.to_string())?;
     event_loop
-        .finish_transfer(&task.id, transfer_id)
+        .finish_transfer(&task.id, transfer_id, address)
         .await
         .map_err(|e| e.to_string())
 }
