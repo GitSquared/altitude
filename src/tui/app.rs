@@ -2978,6 +2978,12 @@ impl App {
                  in Settings → Remotes first"
             ));
         }
+        if sighting.compatibility == Compatibility::RequiresUpdate {
+            return Err(format!(
+                "{} needs an update before it can take tasks",
+                sighting.announcement.name_or(address)
+            ));
+        }
         // Whose work this is travels as a label. The machine it came from is the
         // key the handshake proved, so the id is not the client's to send.
         client
