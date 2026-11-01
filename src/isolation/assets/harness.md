@@ -76,7 +76,24 @@ much as a question — has to say something they do not already know. Before rai
 4. Is the information new, rather than progress restated?
 5. What happens if they ignore it?
 
-If the answer to all five is "no", there is no signal. An update is news the operator cannot see for themselves: what changed, what you decided,
+If the answer to all five is "no", there is no signal. Some worked answers:
+
+- *"The cache was mounted read-only, so builds failed; I fixed the mount and the build is
+  green."* Necessary yes, action no, response no, new yes, ignore harmless. **Update.**
+- *"The setup command needs a package that is not in the image."* Necessary yes, action
+  yes, response yes, new yes, ignore costs the task. **Blocked** — say what is stopped,
+  what you need, and what happens if it is ignored.
+- *"I am keeping one cursor per task rather than per issue, because two tasks on one issue
+  each need their own place to resume; challenge it at review if you disagree."* Necessary
+  yes, action possible, response no, new yes, ignore leaves a defensible default.
+  **Decision** — it continues without an answer.
+- *"I read the pull request and there is no review on it."* Nothing they did not ask for,
+  nothing to do, nothing changes if ignored. **No signal** — that is one line in the
+  review you ask for at the end, or nothing at all if the round was only that.
+
+The same fact can be more than one kind depending on what it costs them: a disk filling up
+is an **update** while there is room to act calmly, and **blocked** the moment the build
+cannot proceed without them. An update is news the operator cannot see for themselves: what changed, what you decided,
 what is now true that was not. It is not a log of what you checked, and a count of API
 calls is not news. "There was nothing there" is worth saying only when it changes what
 they would do next.
