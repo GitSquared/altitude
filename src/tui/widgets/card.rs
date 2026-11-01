@@ -38,6 +38,7 @@ pub struct Message<'a> {
     pub body: &'a str,
     pub from_operator: bool,
     pub focused: bool,
+    pub flashing: bool,
     pub tick: Option<Tick>,
     pub nested: Option<Nested<'a>>,
 }
@@ -77,10 +78,12 @@ pub fn draw_clipped(
         return;
     }
     let mut buffer = Buffer::empty(Rect::new(0, 0, visible.width, full_height));
-    let style = if message.focused {
+    // Accent is the selection and nothing else; the operator's own words are
+    // simply not dimmed, which is enough to tell whose turn it is.
+    let style = if message.focused || message.flashing {
         palette::accent().add_modifier(Modifier::BOLD)
     } else if message.from_operator {
-        palette::accent()
+        palette::primary()
     } else {
         palette::muted()
     };

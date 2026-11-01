@@ -401,10 +401,14 @@ impl TaskStore {
             });
         }
         // A run that is answering a thread keeps speaking on it. The thread id is
-        // reused only while it is unresolved: one the operator resolved meanwhile
-        // is a conversation that ended, and this report starts a new one.
+        // reused only while it is unresolved, and never for a review: a review is the
+        // operator's to close, so the agent's next words open a thread of their own.
         let continuing = match &agent_run.answering_signal_id {
-            Some(signal_id) if self.is_signal_unresolved(task_id, signal_id).await? => {
+            Some(signal_id)
+                if self.is_signal_unresolved(task_id, signal_id).await?
+                    && self.thread_of(task_id, signal_id).await?.kind
+                        != TaskOperatorSignalKind::InReview =>
+            {
                 Some(signal_id.clone())
             }
             _ => None,

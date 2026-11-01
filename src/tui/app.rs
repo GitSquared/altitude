@@ -252,7 +252,9 @@ pub(in crate::tui) const NO_TRACKER: &str =
 
 const ASK_AFTER: Duration = Duration::from_millis(400);
 
-const SIGNAL_SCROLL_STEP: i32 = 1;
+/// Two blinks of the border: long enough to notice, short enough not to wait for.
+const MESSAGE_FLASH: Duration = Duration::from_millis(480);
+const MESSAGE_FLASH_BLINK: Duration = Duration::from_millis(120);
 
 const CHECK_RETRY_AFTER: Duration = Duration::from_secs(15);
 const CHECK_FRESH_FOR: Duration = Duration::from_secs(10 * 60);
@@ -482,6 +484,10 @@ pub struct App {
     pub(in crate::tui) signal_plan_tabs: bool,
     pub(in crate::tui) signal_focus: SignalFocus,
     pub(in crate::tui) signal_message_cursor: usize,
+    /// The message whose border is flashing, after a copy: the confirmation is the
+    /// message saying it happened rather than a window saying it did.
+    pub(in crate::tui) signal_message_flash: Option<usize>,
+    signal_flash_started: Option<Instant>,
     pub(in crate::tui) signal_targets: Targets<SignalHit>,
     pub(in crate::tui) task_targets: Targets<usize>,
     pub(in crate::tui) project_targets: Targets<usize>,
@@ -626,6 +632,8 @@ impl App {
             signal_plan_tabs: false,
             signal_focus: SignalFocus::List,
             signal_message_cursor: 0,
+            signal_message_flash: None,
+            signal_flash_started: None,
             signal_targets: Targets::default(),
             task_targets: Targets::default(),
             settings_targets: Targets::default(),
@@ -1077,6 +1085,7 @@ impl App {
                 .iter()
                 .any(|held| held.summary.status == TaskExecutionStatus::Pending)
             || self.signal_agent_working()
+            || self.signal_message_flash.is_some()
     }
 
     pub(in crate::tui) fn hints(&self) -> Vec<Hint> {
@@ -1307,7 +1316,6 @@ impl App {
                 // Drawn from different places, but acted on the same way: a task is
                 // moved across with one key, and deleted by the machine holding it.
                 if self.selected_is_remote() {
-                    hints.push(Hint::new("p", "take over"));
                     hints.push(Hint::new("d", "delete"));
                     if self
                         .selected_held()
@@ -2501,24 +2509,6 @@ impl App {
         self.foreground = Foreground::Confirm(PendingConfirm::taking_over(id.to_owned(), question));
     }
 
-    pub(in crate::tui) fn pull_task<E>(
-        &mut self,
-        id: &str,
-        event_loop: &TaskEventLoop<E>,
-        landings: &mpsc::UnboundedSender<Result<String, String>>,
-    ) where
-        E: IsolationEngine + Clone + 'static,
-    {
-        if let Some(held) = self
-            .remote_tasks
-            .iter()
-            .find(|held| held.summary.id == id)
-            .cloned()
-        {
-            self.ask_for_task(&held, event_loop, landings, false);
-        }
-    }
-
     fn ask_for_task<E>(
         &mut self,
         held: &HeldTask,
@@ -2536,8 +2526,8 @@ impl App {
         let landings = landings.clone();
         self.alert = None;
         let transfer = self.begin_transfer(
-            &format!("Taking over on {}", self.remote_name(&address)),
-            &summary.title,
+            &format!("Taking over: {}", summary.title),
+            &self.remote_name(&address),
             "collecting the working files…",
             opens_terminal,
         );
@@ -5174,6 +5164,46 @@ impl App {
             .signal_thread()
             .map_or(0, |thread| thread.messages.len().saturating_sub(1));
         self.signal_scroll = u16::MAX;
+        self.signal_message_flash = None;
+    }
+
+    /// The flash ends itself: the frame that finds it over clears it, so nothing
+    /// else has to remember when the copy was.
+    pub(in crate::tui) fn expire_message_flash(&mut self) {
+        if self
+            .signal_flash_started
+            .is_some_and(|started| started.elapsed() >= MESSAGE_FLASH)
+        {
+            self.signal_message_flash = None;
+            self.signal_flash_started = None;
+        }
+    }
+
+    /// Whether the copied message is lit right now: on and off twice, so the border
+    /// blinks rather than staying lit as though it were selected.
+    pub(in crate::tui) fn message_flash_is_lit(&self) -> bool {
+        self.signal_flash_started.is_some_and(|started| {
+            let elapsed = started.elapsed();
+            elapsed < MESSAGE_FLASH
+                && (elapsed.as_millis() / MESSAGE_FLASH_BLINK.as_millis()).is_multiple_of(2)
+        })
+    }
+
+    /// Moving between messages is the detail screen's job: scrolling by a row left a
+    /// thread shorter than the screen with nothing to move to.
+    fn move_signal_message(&mut self, forward: bool) {
+        let len = self
+            .signal_thread()
+            .map_or(0, |thread| thread.messages.len());
+        if len == 0 {
+            return;
+        }
+        self.signal_message_cursor = if forward {
+            (self.signal_message_cursor + 1).min(len - 1)
+        } else {
+            self.signal_message_cursor.saturating_sub(1)
+        };
+        self.reveal_signal_message();
     }
 
     fn copy_signal_message(&mut self) {
@@ -5185,7 +5215,10 @@ impl App {
             return;
         };
         match copy_to_clipboard(body) {
-            Ok(()) => self.say("Message copied"),
+            Ok(()) => {
+                self.signal_message_flash = Some(self.signal_message_cursor);
+                self.signal_flash_started = Some(Instant::now());
+            }
             Err(error) => self.problem(format!("Could not copy the message: {error}")),
         }
     }
@@ -6295,7 +6328,7 @@ impl App {
                         self.move_signal_cursor(true);
                     }
                 }
-                SignalFocus::Detail => self.scroll_signal(SIGNAL_SCROLL_STEP),
+                SignalFocus::Detail => self.move_signal_message(true),
                 SignalFocus::Action(_) => self.move_signal_focus(true),
                 SignalFocus::Filter | SignalFocus::Sort => {
                     self.signal_focus = SignalFocus::List;
@@ -6309,7 +6342,7 @@ impl App {
                         self.move_signal_cursor(false);
                     }
                 }
-                SignalFocus::Detail => self.scroll_signal(-SIGNAL_SCROLL_STEP),
+                SignalFocus::Detail => self.move_signal_message(false),
                 SignalFocus::Action(_) => self.move_signal_focus(false),
                 SignalFocus::Filter | SignalFocus::Sort => {}
             },
@@ -6543,22 +6576,6 @@ impl App {
         }
 
         if self.selected_is_remote() {
-            // Moving a task here without its terminal is the one action a card on
-            // another machine has that this machine's cards do not.
-            if key.code == KeyCode::Char('p')
-                && let Some(held) = self.selected_held()
-            {
-                self.foreground = Foreground::Confirm(PendingConfirm::pulling(
-                    held.summary.id.clone(),
-                    format!(
-                        "Take over \"{}\" on this machine? The agent stops on {} and you \
-                         continue with it here.",
-                        held.summary.title,
-                        self.remote_name(&held.address)
-                    ),
-                ));
-                return Ok(false);
-            }
             // The same screen this machine's tasks use, for a task whose actions
             // travel to the machine that owns it.
             if key.code == KeyCode::Enter || key.code == KeyCode::Char('i') {

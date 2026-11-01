@@ -223,13 +223,15 @@ async fn complete_landing<E>(
 where
     E: IsolationEngine + Clone + 'static,
 {
-    event_loop
+    // Provisioning is part of landing: the sandbox a task arrives with was the
+    // other machine's, so the task that comes back says which one is here.
+    let task = event_loop
         .verify_landing(task.clone())
         .await
         .map_err(|e| e.to_string())?;
     transfer.waiting("putting the files in…");
     event_loop
-        .deliver_arrivals(task, transfer)
+        .deliver_arrivals(&task, transfer)
         .await
         .map_err(|e| e.to_string())?;
     client

@@ -1061,7 +1061,7 @@ where
         Ok(())
     }
 
-    pub async fn verify_landing(&self, task: Task) -> Result<(), TaskServiceError> {
+    pub async fn verify_landing(&self, task: Task) -> Result<Task, TaskServiceError> {
         let task = if task.facts.sandbox_available {
             task
         } else {
@@ -1080,7 +1080,7 @@ where
             .map_err(TaskServiceError::Isolation)?;
         while let Some(event) = session.events.recv().await {
             match event {
-                CommandEvent::Exited(0) => return Ok(()),
+                CommandEvent::Exited(0) => return Ok(task),
                 CommandEvent::Output { .. } => {}
                 _ => {
                     return Err(TaskServiceError::Task(super::TaskError::OperationRejected(

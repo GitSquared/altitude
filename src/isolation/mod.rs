@@ -212,7 +212,7 @@ pub(crate) fn mount_git_cache(options: &mut SandboxOptions, cache_dir: &Path) {
                 host_path,
                 guest_path: git_cache::GUEST_PATH.to_owned(),
                 readonly: false,
-                noexec: true,
+                noexec: false,
             });
             options.environment.push((
                 git_cache::ENVIRONMENT.to_owned(),

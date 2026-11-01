@@ -410,6 +410,9 @@ where
             }
         }
         let keep_snapshot = can_patch;
+        // A copied message flashes for a moment and then stops on its own, so the
+        // frame is where it ends rather than anything remembering to end it.
+        app.expire_message_flash();
         draw_when(&mut redraw, terminal, |frame| {
             let hints = app.hints();
             let content = widgets::chrome::draw(frame, &hints, app.keyboard_hints());

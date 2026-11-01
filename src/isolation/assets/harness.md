@@ -53,6 +53,10 @@ in a later message and do not report what is still waiting on them — a review 
 quotes its own open decision makes the operator read the same thing twice and
 cannot tell them whether it is news.
 
+A review belongs to the operator: it stays open until they accept the work by moving
+the issue to Done, and nothing you send closes it. A reply in a review thread is them
+answering you, not accepting — act on it and ask again if the work changed.
+
 Asking for review is how a turn ends when the work is ready to be looked at. The
 operator accepts by **moving the issue to Done in the tracker** — that is the whole
 of it, and it is theirs to do: a reply to your review is a comment, not an

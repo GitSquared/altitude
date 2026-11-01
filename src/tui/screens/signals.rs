@@ -523,11 +523,7 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
         Paragraph::new(Line::styled(
             heading,
             if app.signal_thread().is_some() {
-                if app.signal_focus == SignalFocus::Detail {
-                    palette::accent()
-                } else {
-                    palette::heading()
-                }
+                palette::primary()
             } else {
                 palette::muted()
             },
@@ -594,6 +590,9 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
             project: project.as_ref(),
             agent: &agent,
             selected: selected_message,
+            flashing: app
+                .signal_message_flash
+                .filter(|_| app.message_flash_is_lit()),
             working,
             tick: app.animation_tick(),
         },
@@ -666,6 +665,7 @@ struct Conversation<'a> {
     project: Option<&'a Project>,
     agent: &'a str,
     selected: Option<usize>,
+    flashing: Option<usize>,
     working: bool,
     tick: Option<usize>,
 }
@@ -769,6 +769,7 @@ fn draw_messages(
         project,
         agent,
         selected,
+        flashing,
         working,
         tick,
     } = conversation;
@@ -868,6 +869,7 @@ fn draw_messages(
                 body: &message.body,
                 from_operator,
                 focused: selected == Some(index),
+                flashing: flashing == Some(index),
                 tick,
                 nested: proposed
                     .as_ref()

@@ -303,19 +303,15 @@ where
         if let Some(checkout) = checkout
             && work.is_dir()
         {
-            match isolation
+            let tally = isolation
                 .deliver_files(sandbox_id.to_owned(), work, checkout, progress)
                 .await
-            {
-                Ok(tally) => tracing::info!(
-                    task = %task.id,
-                    files = tally.files,
-                    "put the files this task arrived with into its sandbox"
-                ),
-                Err(error) => {
-                    tracing::warn!(task = %task.id, %error, "could not put a task's files into its sandbox")
-                }
-            }
+                .map_err(TaskServiceError::Isolation)?;
+            tracing::info!(
+                task = %task.id,
+                files = tally.files,
+                "put the files this task arrived with into its sandbox"
+            );
         }
         let transcript = arrivals.join("transcript.jsonl");
         if let (true, Some(kind), Some(conversation)) = (
@@ -327,13 +323,13 @@ where
                 .agents
                 .engine(kind)
                 .conversation_transcript_path(conversation);
-            if let Err(error) = isolation
+            isolation
                 .deliver_file(sandbox_id.to_owned(), transcript, guest)
                 .await
-            {
-                tracing::warn!(task = %task.id, %error, "could not put a task's conversation into its sandbox");
-            }
+                .map_err(TaskServiceError::Isolation)?;
         }
+        // The arrivals are the only copy of what came off the other machine, so they
+        // are dropped once they are in the sandbox and not before.
         let _ = fs::remove_dir_all(&arrivals);
         Ok(())
     }

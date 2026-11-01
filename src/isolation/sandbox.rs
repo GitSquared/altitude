@@ -307,9 +307,11 @@ impl SandboxPlan {
                 host_path,
                 guest_path: guest_path.to_string_lossy().into_owned(),
                 readonly: false,
-                // A cache is written by one task and read by the next: the place
-                // where a file one agent leaves behind could be run by later work.
-                noexec: true,
+                // Build output, which a build has to be able to run: `target` holds
+                // the scripts and binaries a compiler produced. Refusing to execute
+                // here stops the tool and protects nothing — the sandbox can copy a
+                // file out and run it, so the operator's cache is theirs to share.
+                noexec: false,
             });
         }
         Ok(plan)
