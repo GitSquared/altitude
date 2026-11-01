@@ -933,7 +933,7 @@ impl RemoteTracker {
             if let Err(error) = host
                 .stop(
                     task.task_id.clone(),
-                    TaskExecutionPauseReason::StoppedInTracker,
+                    TaskExecutionPauseReason::DelegationWithdrawn,
                 )
                 .await
             {
