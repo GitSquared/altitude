@@ -419,7 +419,13 @@ impl RemoteTracker {
             // The session the operator delegated into is where they are watching,
             // so answering in it is answering where they asked. One is opened only
             // when the tracker made none.
-            let adopted = delegated.session.clone();
+            // A session this machine has already reported into belongs to the task
+            // that used it, and a finished task's session is not a thread to answer
+            // in: the delegation made a new one, or this machine makes it.
+            let adopted = delegated
+                .session
+                .clone()
+                .filter(|session| self.report_for_session(session).is_none());
             let session = match &adopted {
                 Some(session) => session.clone(),
                 None => match self

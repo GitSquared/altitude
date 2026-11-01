@@ -54,7 +54,7 @@ const ISSUE_DELEGATION_QUERY: &str = "query IssueDelegation($id: String!) { \
 const DELEGATED_ISSUES_QUERY: &str = "query DelegatedIssues($app: ID!) { \
     issues(filter: { delegate: { id: { eq: $app } } }, first: 25) { \
     nodes { id identifier title url project { name } \
-    agentSessions(first: 1) { nodes { id } } \
+    agentSessions(first: 10) { nodes { id updatedAt } } \
     team { id key name organization { id } } } } }";
 
 const ISSUE_STATES_QUERY: &str = "query IssueStates($id: String!) { \
@@ -215,8 +215,22 @@ impl LinearAutomation {
             let Ok(issue) = summary_of(&node) else {
                 continue;
             };
+            // The newest session, not the first one the API happens to list: a
+            // delegation makes a new session each time, and answering in an old one
+            // is answering in a thread the operator has moved on from.
             let session = node
-                .pointer("/agentSessions/nodes/0/id")
+                .pointer("/agentSessions/nodes")
+                .and_then(Value::as_array)
+                .and_then(|sessions| {
+                    sessions.iter().max_by_key(|session| {
+                        session
+                            .get("updatedAt")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned()
+                    })
+                })
+                .and_then(|session| session.get("id"))
                 .and_then(Value::as_str)
                 .map(str::to_owned);
             issues.push(DelegatedIssue {
