@@ -253,6 +253,9 @@ pub(in crate::tui) const NO_TRACKER: &str =
 const ASK_AFTER: Duration = Duration::from_millis(400);
 
 /// Two blinks of the border: long enough to notice, short enough not to wait for.
+/// How long a task that was asked for may stay unlanded before the row gives up.
+const PENDING_PATIENCE: Duration = Duration::from_secs(60);
+
 const MESSAGE_FLASH: Duration = Duration::from_millis(480);
 const MESSAGE_FLASH_BLINK: Duration = Duration::from_millis(120);
 
@@ -2694,6 +2697,11 @@ impl App {
     }
 
     pub(in crate::tui) fn task_delegation_resolved(&mut self, reply: TaskDelegationReply) {
+        // The machine has taken it, so the row that stood in for the task has done
+        // its job: the task itself arrives in the list it was sent to.
+        let machine = self.remote_name(&reply.address);
+        self.pending_tasks
+            .retain(|pending| pending.address.as_deref() != Some(machine.as_str()));
         // Nothing is said when it works: the task the remote founded is in the
         // list, so a modal saying so is a keypress to dismiss what is already on
         // the screen. A refusal is the operator's to act on.
@@ -5186,6 +5194,10 @@ impl App {
     /// The flash ends itself: the frame that finds it over clears it, so nothing
     /// else has to remember when the copy was.
     pub(in crate::tui) fn expire_message_flash(&mut self) {
+        // A row that never became anything is a lie after a while: the send either
+        // came back (and was taken) or it failed and said so.
+        self.pending_tasks
+            .retain(|pending| pending.started.elapsed() < PENDING_PATIENCE);
         if self
             .signal_flash_started
             .is_some_and(|started| started.elapsed() >= MESSAGE_FLASH)

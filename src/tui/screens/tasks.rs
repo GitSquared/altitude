@@ -3,6 +3,7 @@ use crate::{
     remote::TaskSummary,
     tui::{
         App,
+        app::PendingTask,
         widgets::{
             empty, palette, signal,
             surface::{self, Surface},
@@ -91,44 +92,6 @@ fn draw_tasks(
     card_width: u16,
     height: u16,
 ) {
-    // What has been asked for and is not here yet goes above the grid: a send takes
-    // a moment on another machine, and an empty list looks like nothing happened.
-    let announced = app
-        .pending_tasks
-        .len()
-        .min(usize::from(area.height.saturating_sub(2)) / 2);
-    let area = if announced == 0 {
-        area
-    } else {
-        let strip = Rect {
-            height: announced as u16,
-            ..area
-        };
-        let tick = app.animation_tick();
-        for (index, pending) in app.pending_tasks.iter().take(announced).enumerate() {
-            let line = Rect {
-                y: strip.y + index as u16,
-                height: 1,
-                ..strip
-            };
-            let waited = pending.started.elapsed().as_secs();
-            let where_to = match (&pending.address, waited) {
-                (Some(address), 0..=4) => format!(" · sending to {address}"),
-                (Some(address), seconds) => format!(" · sending to {address} · {seconds}s"),
-                (None, 0..=4) => " · starting".to_owned(),
-                (None, seconds) => format!(" · starting · {seconds}s"),
-            };
-            let mut spans = vec![Span::styled("· ", palette::muted())];
-            spans.extend(shimmer(&pending.label, tick));
-            spans.push(Span::styled(where_to, palette::muted()));
-            frame.render_widget(Paragraph::new(Line::from(spans)), line);
-        }
-        Rect {
-            y: area.y + announced as u16,
-            height: area.height.saturating_sub(announced as u16),
-            ..area
-        }
-    };
     let cards = cards(app);
     let total = cards.len();
     if total == 0 {
@@ -145,6 +108,8 @@ fn draw_tasks(
     let first = selected_page.min(page_count.saturating_sub(1)) * page;
     app.first_visible_task = first;
 
+    // A task that has been asked for takes the next place in the grid, not a row
+    // above it: the list is a grid of cards, and one more is what it looks like.
     for (offset, card) in cards.iter().skip(first).take(page).enumerate() {
         let row = offset / columns;
         let column = offset % columns;
@@ -157,6 +122,24 @@ fn draw_tasks(
         let focused = first + offset == selected;
         app.task_targets.add(area, first + offset);
         draw_card(frame, area, card, focused);
+    }
+    let drawn = cards.len().saturating_sub(first).min(page);
+    for (offset, waiting) in app
+        .pending_tasks
+        .iter()
+        .take(page.saturating_sub(drawn))
+        .enumerate()
+    {
+        let place = drawn + offset;
+        let row = place / columns;
+        let column = place % columns;
+        let area = Rect {
+            x: area.x + column as u16 * card_width,
+            y: area.y + row as u16 * (height + 1),
+            width: card_width.saturating_sub(1),
+            height,
+        };
+        draw_pending(frame, area, waiting, app.animation_tick());
     }
 
     // Which page of how many, when there is more than one.
@@ -245,6 +228,39 @@ fn cards(app: &App) -> Vec<Card> {
             .map(|held| Card::of(&held.summary, false, tick, None, now)),
     );
     cards
+}
+
+/// A task that has been asked for and is not here yet: the card it will be, dimmed,
+/// with what it will be called while it is being made.
+fn draw_pending(frame: &mut Frame, area: Rect, pending: &PendingTask, tick: Option<usize>) {
+    frame.render_widget(Clear, area);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(palette::muted())
+        .padding(Padding::horizontal(1));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height == 0 {
+        return;
+    }
+    let label = Rect { height: 1, ..inner };
+    frame.render_widget(
+        Paragraph::new(Line::from(shimmer(&pending.label, tick))).wrap(Wrap { trim: true }),
+        label,
+    );
+    let where_to = match &pending.address {
+        Some(address) => format!("sending to {address}…"),
+        None => "starting…".to_owned(),
+    };
+    let below = Rect {
+        y: inner.y.saturating_add(1),
+        height: 1,
+        ..inner
+    };
+    frame.render_widget(
+        Paragraph::new(Line::styled(where_to, palette::muted())),
+        below,
+    );
 }
 
 fn draw_card(frame: &mut Frame, area: Rect, card: &Card, focused: bool) {
