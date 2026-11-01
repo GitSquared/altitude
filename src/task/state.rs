@@ -162,6 +162,22 @@ pub enum TaskExecutionPauseReason {
     DelegationWithdrawn,
 }
 
+impl TaskExecutionPauseReason {
+    /// Whether a task paused for this reason is out of play.
+    ///
+    /// The tracker ended this work: it was replaced by a newer delegation, it was
+    /// undelegated, or its issue was closed. The task is kept as a record, and every
+    /// question about "the work an issue has" has to leave it out — one rule, in one
+    /// place, because the three questions that ask it used to each keep their own
+    /// copy of this list.
+    pub fn is_out_of_play(&self) -> bool {
+        matches!(
+            self,
+            Self::TrackerEnded | Self::StoppedInTracker | Self::DelegationWithdrawn
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
 #[sqlx(rename_all = "snake_case")]

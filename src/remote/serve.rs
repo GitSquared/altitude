@@ -1044,14 +1044,12 @@ impl super::tracker::Host for OwnTasks {
                     // Paused is not the same as in play: a task the tracker ended,
                     // replaced or undelegated is a record, and adopting it again
                     // hands a new delegation's session to work that is over.
-                    if matches!(
-                        task.facts.execution_pause_reason,
-                        Some(
-                            TaskExecutionPauseReason::TrackerEnded
-                                | TaskExecutionPauseReason::StoppedInTracker
-                                | TaskExecutionPauseReason::DelegationWithdrawn
-                        )
-                    ) {
+                    if task
+                        .facts
+                        .execution_pause_reason
+                        .as_ref()
+                        .is_some_and(TaskExecutionPauseReason::is_out_of_play)
+                    {
                         return None;
                     }
                     let issue = task.facts.tracker_issue.clone()?;

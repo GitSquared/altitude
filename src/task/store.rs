@@ -5,8 +5,8 @@ use uuid::Uuid;
 
 use super::{
     ProjectProposal, SignalTransition, Task, TaskAgentRun, TaskAgentTurnReport, TaskError,
-    TaskExecutionMode, TaskExecutionStatus, TaskFacts, TaskHistoryEvent, TaskInput,
-    TaskInputAuthor, TaskInputSource, TaskOperatorAttentionLevel, TaskOperatorSignal,
+    TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus, TaskFacts, TaskHistoryEvent,
+    TaskInput, TaskInputAuthor, TaskInputSource, TaskOperatorAttentionLevel, TaskOperatorSignal,
     TaskOperatorSignalAuthor, TaskOperatorSignalDraft, TaskOperatorSignalKind,
     TaskOperatorSignalMessage, TaskOperatorSignalThread, TaskPlanStep,
 };
@@ -246,22 +246,16 @@ impl TaskStore {
             Ok(_) => unreachable!("a tracker kind serializes to a string"),
             Err(error) => return Err(TaskError::HistoryData(error)),
         };
-        sqlx::query_as::<_, TaskRow>(concat!(
+        // The reasons that mean "the tracker ended this" are a rule about a task, not
+        // about a query: the newest candidates come back and the rule leaves out the
+        // ones that are records rather than work, so one list serves every caller.
+        let rows = sqlx::query_as::<_, TaskRow>(concat!(
             include_str!("read_task.sql"),
             r#" WHERE tasks.removed_at_ms IS NULL
                   AND NOT EXISTS (
                       SELECT 1 FROM task_event_logs AS finished
                       WHERE finished.task_id = tasks.id
                         AND finished.event_type IN ('operator_signal_confirmed', 'task_completed')
-                  )
-                  -- A task the tracker ended is a record, not work in play. The
-                  -- issue can be delegated again without foundering on it.
-                  AND NOT EXISTS (
-                      SELECT 1 FROM task_event_logs AS ended
-                      WHERE ended.task_id = tasks.id
-                        AND ended.event_type = 'execution_paused'
-                        AND ended.payload ->> '$.data.execution_pause_reason'
-                            IN ('tracker_ended', 'stopped_in_tracker', 'delegation_withdrawn')
                   )
                   AND EXISTS (
                       SELECT 1 FROM task_event_logs AS bound
@@ -272,15 +266,21 @@ impl TaskStore {
                         AND bound.payload ->> '$.data.issue.issue.reference.id' = ?3
                   )
                 ORDER BY tasks.created_at_ms DESC
-                LIMIT 1"#
+                LIMIT 5"#
         ))
         .bind(provider)
         .bind(&reference.workspace_id)
         .bind(&reference.id)
-        .fetch_optional(&mut **transaction)
+        .fetch_all(&mut **transaction)
         .await
-        .map_err(TaskError::Database)
-        .map(|row| row.map(Task::from))
+        .map_err(TaskError::Database)?;
+        Ok(rows.into_iter().map(Task::from).find(|task| {
+            !task
+                .facts
+                .execution_pause_reason
+                .as_ref()
+                .is_some_and(TaskExecutionPauseReason::is_out_of_play)
+        }))
     }
 
     /// Whether the task's record is still kept here.
