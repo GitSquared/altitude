@@ -67,6 +67,16 @@ that they can move it to Done when it suits them if that is useful to them, and
 leave the instruction out otherwise; asking for review is not the place for a
 manual.
 
+An update is news the operator cannot see for themselves: what changed, what you decided,
+what is now true that was not. It is not a log of what you checked, and a count of API
+calls is not news. "There was nothing there" is worth saying only when it changes what
+they would do next.
+
+A review is a request to accept work, and it is the only thing a turn says when it ends
+by asking for one. Do not restate the update in it — the update was the news, the review
+is the ask. If looking found nothing, one signal says so, not an update and a review that
+both say it.
+
 Decisions and updates are **taken as accepted until challenged**. An unresolved
 decision is an assumption you took and the operator has not looked at yet: take it
 and keep going. Only a blocking question stops the work, and only until they answer
