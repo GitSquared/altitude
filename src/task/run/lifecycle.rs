@@ -14,7 +14,7 @@ use crate::isolation::Unwatched;
 use std::{fs, path::PathBuf};
 use uuid::Uuid;
 
-use super::{
+use crate::task::{
     Task, TaskAgentRun, TaskAgentRunOutcome, TaskDraft, TaskError, TaskExecutionMode,
     TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent, TaskService, TaskServiceError,
     failure_events, run_ended, should_resume, should_suspend, snapshot_name,
@@ -24,7 +24,7 @@ impl<E> TaskService<E>
 where
     E: IsolationEngine + Clone,
 {
-    pub(super) fn draft(
+    pub(crate) fn draft(
         &self,
         intent: String,
         project: Project,
@@ -45,7 +45,7 @@ where
         }
     }
 
-    pub(super) async fn adopt(
+    pub(crate) async fn adopt(
         &self,
         draft: TaskDraft,
         history: Option<&[(i64, TaskHistoryEvent)]>,
@@ -72,7 +72,7 @@ where
         .await
     }
 
-    pub(super) fn as_operator(&self, owner: &str) -> Result<Self, TaskServiceError> {
+    pub(crate) fn as_operator(&self, owner: &str) -> Result<Self, TaskServiceError> {
         Ok(Self {
             isolation: self
                 .isolation
@@ -109,7 +109,7 @@ where
             .await
     }
 
-    pub(super) async fn record(
+    pub(crate) async fn record(
         &self,
         task_id: &str,
         events: &[TaskHistoryEvent],
@@ -156,7 +156,7 @@ where
         self.launch(task, command, TaskExecutionMode::Autopilot, None)
             .await
     }
-    pub(super) fn arrivals_dir(&self, task_id: &str) -> PathBuf {
+    pub(crate) fn arrivals_dir(&self, task_id: &str) -> PathBuf {
         self.credentials
             .config()
             .data_dir()
@@ -164,7 +164,7 @@ where
             .join(task_id)
     }
 
-    pub(super) async fn provision(&self, task: Task) -> Result<Task, TaskServiceError> {
+    pub(crate) async fn provision(&self, task: Task) -> Result<Task, TaskServiceError> {
         if task.facts.accepted {
             return Err(TaskServiceError::Task(TaskError::OperationRejected(
                 "this task has already been accepted",
@@ -288,7 +288,7 @@ where
             }
         }
     }
-    pub(super) async fn deliver_arrivals(
+    pub(crate) async fn deliver_arrivals(
         &self,
         isolation: &E,
         task: &Task,
@@ -373,7 +373,7 @@ where
         self.release_resources(&task).await?;
         Ok(())
     }
-    pub(super) async fn release_resources(&self, task: &Task) -> Result<Task, TaskServiceError> {
+    pub(crate) async fn release_resources(&self, task: &Task) -> Result<Task, TaskServiceError> {
         self.release_agent_channel(&task.id);
         self.release_ports(task);
         let mut task = task.clone();
@@ -557,7 +557,7 @@ where
         }))
         .await
     }
-    pub(super) async fn record_snapshot(
+    pub(crate) async fn record_snapshot(
         &self,
         task: &Task,
         events: &[TaskHistoryEvent],
@@ -575,7 +575,7 @@ where
         }
         Ok(updated)
     }
-    pub(super) async fn fail(&self, task: &Task, error: String) -> Result<Task, TaskServiceError> {
+    pub(crate) async fn fail(&self, task: &Task, error: String) -> Result<Task, TaskServiceError> {
         tracing::error!(task_id = %task.id, %error, "task execution failed");
         let events = self.stopped_events(task, error).await?;
         self.record(&task.id, &events).await

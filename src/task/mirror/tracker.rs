@@ -11,7 +11,9 @@ use crate::{
     tracker::{IssueSnapshot, Linear, TrackerError, TrackerProvider, TrackerStatus},
 };
 
-use super::{Task, TaskExecutionPauseReason, TaskHistoryEvent, TaskService, TaskServiceError};
+use crate::task::{
+    Task, TaskError, TaskExecutionPauseReason, TaskHistoryEvent, TaskService, TaskServiceError,
+};
 
 pub trait TrackerHost: Send + Sync + 'static {
     fn for_credential(&self, operator: &str, credential: &str) -> Option<Arc<dyn TrackerProvider>>;
@@ -136,7 +138,7 @@ where
             )
             .await?;
         if task.operator_id() != Some(operator.id.as_str()) {
-            return Err(TaskServiceError::Task(super::TaskError::OperationRejected(
+            return Err(TaskServiceError::Task(TaskError::OperationRejected(
                 "this issue is already being worked on for another operator",
             )));
         }

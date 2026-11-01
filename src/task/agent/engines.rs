@@ -3,13 +3,13 @@ use crate::{
     isolation::IsolationEngine,
 };
 
-use super::{AgentError, Task, TaskError, TaskService, TaskServiceError};
+use crate::task::{AgentError, Task, TaskError, TaskService, TaskServiceError};
 
 impl<E> TaskService<E>
 where
     E: IsolationEngine + Clone,
 {
-    pub(super) async fn agent_conversation(
+    pub(crate) async fn agent_conversation(
         &self,
         task: &Task,
         require_transcript: bool,
@@ -38,10 +38,10 @@ where
             Err(error) => self.conversation_failure(task, format!("could not read {kind} conversation transcript: {error}")).await,
         }
     }
-    pub(super) fn engine(&self, task: &Task) -> Result<&dyn AgentEngine, TaskServiceError> {
+    pub(crate) fn engine(&self, task: &Task) -> Result<&dyn AgentEngine, TaskServiceError> {
         Ok(self.agents.engine(self.agent_kind(task)?))
     }
-    pub(super) fn agent_kind(&self, task: &Task) -> Result<AgentKind, TaskServiceError> {
+    pub(crate) fn agent_kind(&self, task: &Task) -> Result<AgentKind, TaskServiceError> {
         task.agent_kind
             .ok_or(TaskServiceError::Task(TaskError::MissingAgent))
     }
@@ -49,7 +49,7 @@ where
         task.agent_kind
             .map(|kind| self.agents.engine(kind).report_decoder())
     }
-    pub(super) async fn conversation_failure<T>(
+    pub(crate) async fn conversation_failure<T>(
         &self,
         task: &Task,
         message: impl Into<String>,

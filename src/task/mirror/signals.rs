@@ -1,6 +1,6 @@
 use crate::isolation::{CommandSession, IsolationEngine};
 
-use super::{
+use crate::task::{
     Task, TaskAgentRun, TaskError, TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent,
     TaskInput, TaskInputAuthor, TaskInputSource, TaskOperatorSignalAuthor,
     TaskOperatorSignalThread, TaskService, TaskServiceError,

@@ -10,15 +10,15 @@ use crate::task::{
     wants_a_slot,
 };
 
-use super::TaskEventLoop;
 use crate::isolation::capacity::SAMPLE_INTERVAL;
+use crate::task::TaskEventLoop;
 
 impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
     pub fn sandbox_capacity(&self) -> SandboxCapacity {
         self.service.isolation.sandbox_capacity()
     }
 
-    pub(super) fn watch_host_capacity(&self) {
+    pub(crate) fn watch_host_capacity(&self) {
         let event_loop = self.clone();
         tokio::spawn(async move {
             let mut tick = time::interval(SAMPLE_INTERVAL);

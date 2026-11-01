@@ -2,10 +2,11 @@ use std::collections::VecDeque;
 
 use crate::isolation::IsolationEngine;
 
-use super::{Command, TaskEventLoop};
+use crate::isolation::Command;
+use crate::task::TaskEventLoop;
 
 #[derive(Default)]
-pub(super) struct CachedTerminalOutput {
+pub(crate) struct CachedTerminalOutput {
     chunks: VecDeque<Vec<u8>>,
     byte_count: usize,
 }
@@ -36,7 +37,7 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
             .unwrap_or_default()
     }
 
-    pub(super) fn cache_terminal_output(&self, task_id: &str, bytes: &[u8]) {
+    pub(crate) fn cache_terminal_output(&self, task_id: &str, bytes: &[u8]) {
         self.terminal_output
             .lock()
             .expect("terminal output lock poisoned")

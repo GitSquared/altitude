@@ -3,15 +3,15 @@ use std::cmp::Ordering;
 use sqlx::{FromRow, Sqlite, SqlitePool, Transaction, types::Json};
 use uuid::Uuid;
 
-use super::{
+use crate::id;
+use crate::project::Project;
+use crate::task::{
     ProjectProposal, SignalTransition, Task, TaskAgentRun, TaskAgentTurnReport, TaskError,
     TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus, TaskFacts, TaskHistoryEvent,
     TaskInput, TaskInputAuthor, TaskInputSource, TaskOperatorAttentionLevel, TaskOperatorSignal,
     TaskOperatorSignalAuthor, TaskOperatorSignalDraft, TaskOperatorSignalKind,
     TaskOperatorSignalMessage, TaskOperatorSignalThread, TaskPlanStep,
 };
-use crate::id;
-use crate::project::Project;
 use crate::{
     agent::AgentKind,
     db::Database,
@@ -855,7 +855,7 @@ impl TaskStore {
         .await
     }
 
-    pub(super) async fn next_signal_id(&self, task_id: &str) -> Result<String, TaskError> {
+    pub(crate) async fn next_signal_id(&self, task_id: &str) -> Result<String, TaskError> {
         loop {
             let candidate = id::signal();
             let exists: Option<i64> = sqlx::query_scalar(

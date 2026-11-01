@@ -5,6 +5,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use crate::remote::Watching;
+use crate::task::{
+    SendsTasksHome, TaskArrival, TaskError, TaskOperatorSignalKind, TaskOperatorSignalThread,
+    copy_tree, should_suspend,
+};
 use tokio::{sync::mpsc, time};
 
 use crate::{
@@ -15,7 +20,7 @@ use crate::{
         guest_absolute,
     },
     project::Project,
-    task::review::{
+    task::mirror::review::{
         Look, OBSERVATION_ATTEMPTS, REVIEW_POLL_INTERVAL, ReviewWaits, Watchers, unreadable,
         wake_reason,
     },
@@ -34,7 +39,7 @@ use crate::{
 pub enum TaskExecutionUpdate {
     HandingBack {
         address: String,
-        transfer: super::super::remote::Watching,
+        transfer: Watching,
     },
     Created(Result<Task, TaskServiceError>),
     Started(Result<Task, TaskServiceError>),
@@ -67,7 +72,7 @@ pub struct TaskEventLoop<E> {
     starting: Arc<Mutex<HashSet<String>>>,
     watchers: Arc<Watchers<E>>,
     review_waits: Arc<ReviewWaits>,
-    sends_home: Arc<Mutex<Option<Arc<dyn super::SendsTasksHome>>>>,
+    sends_home: Arc<Mutex<Option<Arc<dyn SendsTasksHome>>>>,
 }
 
 struct ActiveRun {
@@ -118,19 +123,19 @@ where
         (event_loop, receiver)
     }
 
-    pub fn announce_transfer(&self, address: String, transfer: super::super::remote::Watching) {
+    pub fn announce_transfer(&self, address: String, transfer: Watching) {
         let _ = self
             .events
             .send(TaskExecutionUpdate::HandingBack { address, transfer });
     }
 
-    pub fn attach_sends_home(&self, home: Arc<dyn super::SendsTasksHome>) {
+    pub fn attach_sends_home(&self, home: Arc<dyn SendsTasksHome>) {
         if let Ok(mut slot) = self.sends_home.lock() {
             *slot = Some(home);
         }
     }
 
-    fn sends_home(&self) -> Option<Arc<dyn super::SendsTasksHome>> {
+    fn sends_home(&self) -> Option<Arc<dyn SendsTasksHome>> {
         self.sends_home.lock().ok().and_then(|slot| slot.clone())
     }
 
@@ -148,11 +153,11 @@ where
             .await?
             .into_iter()
             .find(|task| task.id == task_id)
-            .ok_or(TaskServiceError::Task(super::TaskError::OperationRejected(
+            .ok_or(TaskServiceError::Task(TaskError::OperationRejected(
                 "this task is no longer active",
             )))?;
         if task.facts.accepted {
-            return Err(TaskServiceError::Task(super::TaskError::OperationRejected(
+            return Err(TaskServiceError::Task(TaskError::OperationRejected(
                 "this task has already been accepted",
             )));
         }
@@ -163,7 +168,7 @@ where
             .await?
             .into_iter()
             .find(|task| task.id == task_id)
-            .ok_or(TaskServiceError::Task(super::TaskError::OperationRejected(
+            .ok_or(TaskServiceError::Task(TaskError::OperationRejected(
                 "this task is no longer active",
             )))?;
         self.service
@@ -177,12 +182,12 @@ where
                     project: task
                         .project()
                         .cloned()
-                        .ok_or(TaskServiceError::Task(super::TaskError::MissingProject))?,
+                        .ok_or(TaskServiceError::Task(TaskError::MissingProject))?,
                     identity_id: task
                         .facts
                         .operator_id
                         .clone()
-                        .ok_or(TaskServiceError::Task(super::TaskError::OperationRejected(
+                        .ok_or(TaskServiceError::Task(TaskError::OperationRejected(
                             "this task has no operator",
                         )))?,
                     identity_label: task.facts.operator_label.clone().unwrap_or_default(),
@@ -202,7 +207,7 @@ where
     pub async fn signal_threads(
         &self,
         task_id: &str,
-    ) -> Result<Vec<super::TaskOperatorSignalThread>, TaskServiceError> {
+    ) -> Result<Vec<TaskOperatorSignalThread>, TaskServiceError> {
         self.service.signal_threads(task_id).await
     }
 
@@ -565,7 +570,7 @@ where
         if task.facts.execution_pause_reason.as_ref() == Some(&reason) {
             return Ok(());
         }
-        if super::should_suspend(&task) {
+        if should_suspend(&task) {
             self.suspend(task, reason).await?;
             return Ok(());
         }
@@ -595,9 +600,9 @@ where
             .await?
             .into_iter()
             .find(|task| task.id == task_id)
-            .ok_or(TaskServiceError::Task(super::TaskError::MissingSandbox))?;
+            .ok_or(TaskServiceError::Task(TaskError::MissingSandbox))?;
         let is_staged =
-            task.facts.execution_pause_reason == Some(super::TaskExecutionPauseReason::Transfer);
+            task.facts.execution_pause_reason == Some(TaskExecutionPauseReason::Transfer);
         if is_staged && !task.facts.sandbox_available {
             return Ok(task);
         }
@@ -608,7 +613,7 @@ where
                 .expect("starting lock poisoned")
                 .insert(task.id.clone())
         {
-            return Err(TaskServiceError::Task(super::TaskError::OperationRejected(
+            return Err(TaskServiceError::Task(TaskError::OperationRejected(
                 "the task is still starting",
             )));
         }
@@ -619,7 +624,7 @@ where
                     transfer_id: transfer_id.to_owned(),
                     peer: peer.to_owned(),
                     execution_status: TaskExecutionStatus::Paused,
-                    execution_pause_reason: super::TaskExecutionPauseReason::Transfer,
+                    execution_pause_reason: TaskExecutionPauseReason::Transfer,
                     execution_mode: task.facts.execution_mode,
                     sandbox_available: task.facts.sandbox_available,
                     snapshot_available: task.facts.snapshot_available,
@@ -638,7 +643,7 @@ where
             .await?
             .into_iter()
             .find(|task| task.id == task_id)
-            .ok_or(TaskServiceError::Task(super::TaskError::MissingSandbox))?;
+            .ok_or(TaskServiceError::Task(TaskError::MissingSandbox))?;
         self.service
             .record(
                 task_id,
@@ -646,7 +651,7 @@ where
                     transfer_id: transfer_id.to_owned(),
                     peer: peer.to_owned(),
                     execution_status: TaskExecutionStatus::Paused,
-                    execution_pause_reason: super::TaskExecutionPauseReason::Transfer,
+                    execution_pause_reason: TaskExecutionPauseReason::Transfer,
                     execution_mode: stopped.facts.execution_mode,
                     sandbox_available: false,
                     snapshot_available: stopped.facts.snapshot_available,
@@ -662,9 +667,11 @@ where
         destination: &Path,
         progress: &dyn FileTransferSink,
     ) -> Result<(), TaskServiceError> {
-        let owner = task.operator_id().ok_or(TaskServiceError::Task(
-            super::TaskError::OperationRejected("the task records no operator to pack for"),
-        ))?;
+        let owner =
+            task.operator_id()
+                .ok_or(TaskServiceError::Task(TaskError::OperationRejected(
+                    "the task records no operator to pack for",
+                )))?;
         let isolation = self
             .service
             .isolation
@@ -675,7 +682,7 @@ where
             .facts
             .sandbox_id
             .clone()
-            .ok_or(TaskServiceError::Task(super::TaskError::MissingSandbox))?;
+            .ok_or(TaskServiceError::Task(TaskError::MissingSandbox))?;
         let packed = self
             .pack_into(
                 &isolation,
@@ -719,7 +726,7 @@ where
     ) -> Result<(), TaskServiceError> {
         let project = task
             .project()
-            .ok_or(TaskServiceError::Task(super::TaskError::MissingProject))?;
+            .ok_or(TaskServiceError::Task(TaskError::MissingProject))?;
         if let Some(checkout) = project.checkout_path() {
             let checkout = guest_absolute(&checkout).map_err(TaskServiceError::Isolation)?;
             let mut excluded = Vec::new();
@@ -758,9 +765,11 @@ where
         task: &Task,
         progress: &dyn FileTransferSink,
     ) -> Result<(), TaskServiceError> {
-        let owner = task.operator_id().ok_or(TaskServiceError::Task(
-            super::TaskError::OperationRejected("the task records no operator to deliver for"),
-        ))?;
+        let owner =
+            task.operator_id()
+                .ok_or(TaskServiceError::Task(TaskError::OperationRejected(
+                    "the task records no operator to deliver for",
+                )))?;
         let isolation = self
             .service
             .isolation
@@ -770,7 +779,7 @@ where
             .facts
             .sandbox_id
             .clone()
-            .ok_or(TaskServiceError::Task(super::TaskError::MissingSandbox))?;
+            .ok_or(TaskServiceError::Task(TaskError::MissingSandbox))?;
         self.service
             .deliver_arrivals(&isolation, task, &sandbox_id, progress)
             .await
@@ -819,8 +828,8 @@ where
             .await
     }
 
-    pub async fn land(&self, arrival: super::TaskArrival) -> Result<Task, TaskServiceError> {
-        let super::TaskArrival {
+    pub async fn land(&self, arrival: TaskArrival) -> Result<Task, TaskServiceError> {
+        let TaskArrival {
             intent,
             project,
             agent,
@@ -840,7 +849,7 @@ where
                     transfer_id: transfer_id.to_owned(),
                     peer: peer.to_owned(),
                     execution_status: TaskExecutionStatus::Paused,
-                    execution_pause_reason: super::TaskExecutionPauseReason::Transfer,
+                    execution_pause_reason: TaskExecutionPauseReason::Transfer,
                     execution_mode: TaskExecutionMode::Operator,
                     sandbox_available: false,
                     snapshot_available: false,
@@ -853,7 +862,7 @@ where
         // it does.
         if let Some(files) = files {
             let arrivals = self.service.arrivals_dir(&task.id);
-            if let Err(error) = super::copy_tree(&files, &arrivals) {
+            if let Err(error) = copy_tree(&files, &arrivals) {
                 tracing::warn!(task = %task.id, %error, "could not keep the files this task arrived with");
             }
         }
@@ -870,7 +879,7 @@ where
             .await?
             .into_iter()
             .find(|task| task.id == task_id)
-            .ok_or(TaskServiceError::Task(super::TaskError::MissingSandbox))?;
+            .ok_or(TaskServiceError::Task(TaskError::MissingSandbox))?;
         self.service
             .record(
                 task_id,
@@ -897,7 +906,7 @@ where
             .facts
             .sandbox_id
             .clone()
-            .ok_or(TaskServiceError::Task(super::TaskError::MissingSandbox))?;
+            .ok_or(TaskServiceError::Task(TaskError::MissingSandbox))?;
         let mut session = self
             .service
             .isolation
@@ -909,13 +918,13 @@ where
                 CommandEvent::Exited(0) => return Ok(task),
                 CommandEvent::Output { .. } => {}
                 _ => {
-                    return Err(TaskServiceError::Task(super::TaskError::OperationRejected(
+                    return Err(TaskServiceError::Task(TaskError::OperationRejected(
                         "the transferred sandbox did not boot",
                     )));
                 }
             }
         }
-        Err(TaskServiceError::Task(super::TaskError::MissingSandbox))
+        Err(TaskServiceError::Task(TaskError::MissingSandbox))
     }
 
     pub async fn finish_remote_transfer(
@@ -931,8 +940,7 @@ where
             .any(|thread| {
                 matches!(
                     thread.kind,
-                    super::TaskOperatorSignalKind::Blocked
-                        | super::TaskOperatorSignalKind::InReview
+                    TaskOperatorSignalKind::Blocked | TaskOperatorSignalKind::InReview
                 )
             });
         self.service
@@ -946,9 +954,9 @@ where
                         TaskExecutionStatus::Pending
                     },
                     execution_pause_reason: if blocked {
-                        super::TaskExecutionPauseReason::AwaitingOperator
+                        TaskExecutionPauseReason::AwaitingOperator
                     } else {
-                        super::TaskExecutionPauseReason::Transfer
+                        TaskExecutionPauseReason::Transfer
                     },
                 }],
             )
@@ -992,7 +1000,7 @@ where
         let mut arrival = vec![TaskHistoryEvent::TransferLanded {
             transfer_id: transfer_id.to_owned(),
             execution_status: TaskExecutionStatus::Paused,
-            execution_pause_reason: super::TaskExecutionPauseReason::AwaitingOperator,
+            execution_pause_reason: TaskExecutionPauseReason::AwaitingOperator,
         }];
         // Kept so the task can be handed back where it came from when the operator is
         // done with it. A landing resumed from a staged record does not know the
@@ -1018,7 +1026,7 @@ where
         let tasks = self.list().await?;
         // The flag lives on the run it describes, so a task suspended now and
         // resumed later does not carry a stale reason for its next ending.
-        for task in tasks.iter().filter(|task| super::should_suspend(task)) {
+        for task in tasks.iter().filter(|task| should_suspend(task)) {
             self.mark_suspending(&task.id);
         }
         // Every task is attempted even when one cannot be stopped: most of the
@@ -1361,7 +1369,7 @@ where
                 execution_status: TaskExecutionStatus::Paused,
                 sandbox_available: false,
                 snapshot_available: task.facts.snapshot_available,
-                execution_pause_reason: super::TaskExecutionPauseReason::AwaitingOperator,
+                execution_pause_reason: TaskExecutionPauseReason::AwaitingOperator,
                 snapshot_path: task.facts.snapshot_path.clone().unwrap_or_default(),
             },
         ];

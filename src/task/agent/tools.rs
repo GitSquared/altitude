@@ -3,11 +3,12 @@ use std::fmt;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
-use super::{
-    ProjectProposal, TaskHistoryEvent, TaskOperatorSignalAuthor, TaskOperatorSignalKind,
+use crate::agent::tools::{AgentTool, AgentToolError, AgentToolFuture, AgentToolProvider};
+use crate::project::validate_cache;
+use crate::task::{
+    ProjectProposal, Task, TaskHistoryEvent, TaskOperatorSignalAuthor, TaskOperatorSignalKind,
     TaskOperatorSignalThread, TaskPlanStatus, TaskPlanStep, TaskStore, normalize_title,
 };
-use crate::agent::tools::{AgentTool, AgentToolError, AgentToolFuture, AgentToolProvider};
 use crate::tracker::IssueReader;
 
 pub struct TaskAgentTools {
@@ -311,8 +312,7 @@ impl TaskAgentTools {
                     let path = entry.as_str().ok_or_else(|| {
                         AgentToolError::new("every cache must be a path, as a string")
                     })?;
-                    super::super::project::validate_cache(path)
-                        .map_err(|error| AgentToolError::new(error.to_string()))?;
+                    validate_cache(path).map_err(|error| AgentToolError::new(error.to_string()))?;
                     paths.push(path.trim().to_owned());
                 }
                 Some(paths)
@@ -355,7 +355,7 @@ impl TaskAgentTools {
             .ok_or_else(|| AgentToolError::new("no signal thread with that id on this task"))
     }
 
-    async fn task(&self) -> Result<super::Task, AgentToolError> {
+    async fn task(&self) -> Result<Task, AgentToolError> {
         self.store
             .get(&self.task_id)
             .await

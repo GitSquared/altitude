@@ -11,7 +11,7 @@ use uuid::Uuid;
 // backstop for an agent out of things to do, not a step limit.
 const TURNS_BEFORE_THE_OPERATOR: usize = 12;
 
-use super::{
+use crate::task::{
     IsolationError, Task, TaskAgentRequestedAction, TaskAgentRun, TaskAgentRunOutcome,
     TaskAgentTurnReport, TaskError, TaskExecutionMode, TaskExecutionPauseReason,
     TaskExecutionStatus, TaskHistoryEvent, TaskOperatorAttentionLevel, TaskOperatorSignalAuthor,
@@ -113,7 +113,7 @@ where
     ) -> Result<(Task, TaskAgentRun, CommandSession), TaskServiceError> {
         self.start_autopilot_turn(task, "The operator has returned control to Altitude. Review the preceding conversation and current workspace state, then continue the task autonomously wherever the original intent reasonably permits. Do not wait for routine confirmation.", None).await
     }
-    pub(super) async fn run_captured(
+    pub(crate) async fn run_captured(
         &self,
         sandbox_id: &str,
         command: String,
@@ -183,7 +183,7 @@ where
         }
         observations
     }
-    pub(super) async fn observe_code_contributions(&self, task: Task) -> Task {
+    pub(crate) async fn observe_code_contributions(&self, task: Task) -> Task {
         let observations = self.contribution_observations(&task).await;
         if observations.is_empty() {
             return task;
@@ -200,7 +200,7 @@ where
             }
         }
     }
-    pub(super) async fn start_autopilot_turn(
+    pub(crate) async fn start_autopilot_turn(
         &self,
         task: Task,
         prompt: &str,
@@ -308,7 +308,7 @@ where
         }
         launched
     }
-    pub(super) async fn launch(
+    pub(crate) async fn launch(
         &self,
         task: Task,
         command: String,
@@ -316,7 +316,7 @@ where
         answering_signal_id: Option<String>,
     ) -> Result<(Task, TaskAgentRun, CommandSession), TaskServiceError> {
         if task.facts.accepted {
-            return Err(TaskServiceError::Task(super::TaskError::OperationRejected(
+            return Err(TaskServiceError::Task(TaskError::OperationRejected(
                 "this task has already been accepted",
             )));
         }
@@ -403,7 +403,7 @@ where
         Ok(task)
     }
 
-    pub(super) async fn hold_review_checks(
+    pub(crate) async fn hold_review_checks(
         &self,
         task: &Task,
         agent_run: Option<&TaskAgentRun>,
@@ -457,7 +457,7 @@ where
         }
     }
 
-    pub(super) async fn open_watcher(
+    pub(crate) async fn open_watcher(
         &self,
         id: String,
         vcs_credential: &str,

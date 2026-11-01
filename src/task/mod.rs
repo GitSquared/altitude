@@ -22,15 +22,13 @@ use std::{
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use tools::TaskAgentTools;
-
-mod agents;
-mod event_loop;
-mod lifecycle;
-mod signals;
+mod agent;
+mod mirror;
+mod run;
 mod state;
-mod turns;
-pub use event_loop::{TaskEventLoop, TaskExecutionUpdate};
+
+use agent::tools::TaskAgentTools;
+pub use run::event_loop::{TaskEventLoop, TaskExecutionUpdate};
 
 pub type HomeFuture = BoxFuture<'static, Result<(), String>>;
 
@@ -39,12 +37,11 @@ pub trait SendsTasksHome: Send + Sync {
 }
 mod progress;
 mod queue;
-mod review;
-mod store;
-mod tools;
-mod tracker;
+pub(crate) mod store;
 pub use state::*;
 pub use store::{TaskDraft, TaskStore};
+
+pub(crate) use mirror::tracker;
 pub(crate) use tracker::{OwnTrackers, TrackerHost};
 
 use progress::EnvironmentProgressRegistry;
@@ -300,21 +297,21 @@ where
         tools
     }
 
-    pub(super) fn bind_agent_channel(&self, task_id: &str) -> Result<PathBuf, TaskServiceError> {
+    pub(crate) fn bind_agent_channel(&self, task_id: &str) -> Result<PathBuf, TaskServiceError> {
         self.agent_channels
             .bind(task_id, self.agent_tools(task_id))
             .map_err(TaskServiceError::AgentChannel)
     }
 
-    pub(super) fn release_agent_channel(&self, task_id: &str) {
+    pub(crate) fn release_agent_channel(&self, task_id: &str) {
         self.agent_channels.release(task_id);
     }
 
-    pub(super) fn relay_channel(&self, sandbox_id: &str) -> VsockRoute {
+    pub(crate) fn relay_channel(&self, sandbox_id: &str) -> VsockRoute {
         self.port_relays.channel(sandbox_id)
     }
 
-    pub(super) fn bind_ports(&self, sandbox_id: &str) -> Result<(), TaskServiceError> {
+    pub(crate) fn bind_ports(&self, sandbox_id: &str) -> Result<(), TaskServiceError> {
         self.port_relays
             .bind(sandbox_id)
             .map(|_| ())
@@ -325,7 +322,7 @@ where
         self.port_relays.subscribe()
     }
 
-    pub(super) fn release_ports(&self, task: &Task) {
+    pub(crate) fn release_ports(&self, task: &Task) {
         if let Some(sandbox_id) = &task.facts.sandbox_id {
             self.port_relays.release(sandbox_id);
         }

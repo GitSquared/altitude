@@ -11,24 +11,24 @@ use crate::{
     vcs::{CodeContribution, ContributionObservation, ProviderBatch},
 };
 
-use super::{TaskOperatorSignal, TaskService, TaskServiceError};
+use crate::task::{TaskError, TaskOperatorSignal, TaskService, TaskServiceError};
 
-pub(super) const REVIEW_POLL_INTERVAL: Duration = Duration::from_secs(30);
+pub(crate) const REVIEW_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 const REVIEW_POLL_CEILING: Duration = Duration::from_secs(600);
 
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
-pub(super) const OBSERVATION_ATTEMPTS: u32 = 5;
+pub(crate) const OBSERVATION_ATTEMPTS: u32 = 5;
 
-pub(super) enum Look {
+pub(crate) enum Look {
     Read(Vec<ContributionObservation>),
     Unreadable,
     NotAsked,
     GivenUp,
 }
 
-pub(super) struct Watchers<E> {
+pub(crate) struct Watchers<E> {
     service: TaskService<E>,
     owners: Mutex<HashMap<String, Owner>>,
     stopped: AtomicBool,
@@ -46,7 +46,7 @@ impl<E> Watchers<E>
 where
     E: IsolationEngine + Clone,
 {
-    pub(super) fn new(service: TaskService<E>) -> Self {
+    pub(crate) fn new(service: TaskService<E>) -> Self {
         Self {
             service,
             owners: Mutex::new(HashMap::new()),
@@ -54,11 +54,11 @@ where
         }
     }
 
-    pub(super) fn is_stopped(&self) -> bool {
+    pub(crate) fn is_stopped(&self) -> bool {
         self.stopped.load(Ordering::Acquire)
     }
 
-    pub(super) async fn look(&self, owner: &str, contributions: &[CodeContribution]) -> Look {
+    pub(crate) async fn look(&self, owner: &str, contributions: &[CodeContribution]) -> Look {
         let mut owners = self.owners.lock().await;
         if self.is_stopped() {
             return Look::NotAsked;
@@ -102,7 +102,7 @@ where
         }
     }
 
-    pub(super) async fn last_failure(&self, owner: &str) -> Option<String> {
+    pub(crate) async fn last_failure(&self, owner: &str) -> Option<String> {
         self.owners
             .lock()
             .await
@@ -110,7 +110,7 @@ where
             .and_then(|entry| entry.last_failure.clone())
     }
 
-    pub(super) async fn retain(&self, owners: &HashSet<String>) {
+    pub(crate) async fn retain(&self, owners: &HashSet<String>) {
         let mut live = self.owners.lock().await;
         let dropped: Vec<String> = live
             .keys()
@@ -124,7 +124,7 @@ where
         }
     }
 
-    pub(super) async fn shutdown(&self) {
+    pub(crate) async fn shutdown(&self) {
         self.stopped.store(true, Ordering::Release);
         let ids: Vec<String> = self
             .owners
@@ -156,7 +156,7 @@ where
     async fn open(&self, owner: &str) -> Result<String, TaskServiceError> {
         let (operator, credential) = owner
             .split_once('\0')
-            .ok_or_else(|| TaskServiceError::Task(super::TaskError::MissingProject))?;
+            .ok_or_else(|| TaskServiceError::Task(TaskError::MissingProject))?;
         let service = self.service.as_operator(operator)?;
         let id = watcher_sandbox_id(owner);
         service.open_watcher(id.clone(), credential).await?;
@@ -210,12 +210,12 @@ fn backoff(failures: u32) -> Duration {
 }
 
 #[derive(Default)]
-pub(super) struct ReviewWaits {
+pub(crate) struct ReviewWaits {
     waits: Mutex<HashMap<String, ReviewWait>>,
 }
 
 impl ReviewWaits {
-    pub(super) async fn due(&self, watched: &HashSet<String>) -> HashSet<String> {
+    pub(crate) async fn due(&self, watched: &HashSet<String>) -> HashSet<String> {
         let now = Instant::now();
         let mut waits = self.waits.lock().await;
         waits.retain(|task_id, _| watched.contains(task_id));
@@ -231,7 +231,7 @@ impl ReviewWaits {
             .collect()
     }
 
-    pub(super) async fn looked(&self, task_id: &str, moved: bool) {
+    pub(crate) async fn looked(&self, task_id: &str, moved: bool) {
         if let Some(wait) = self.waits.lock().await.get_mut(task_id) {
             if moved {
                 wait.moved();
@@ -271,14 +271,14 @@ impl ReviewWait {
     }
 }
 
-pub(super) fn wake_reason(needing_action: &[String]) -> String {
+pub(crate) fn wake_reason(needing_action: &[String]) -> String {
     format!(
         "A linked pull request needs attention before it can be reviewed: {}. Fix what is in scope and return the pull requests to a state a human can review.",
         needing_action.join("; ")
     )
 }
 
-pub(super) fn unreadable(signal: &TaskOperatorSignal, reason: &str) -> TaskOperatorSignal {
+pub(crate) fn unreadable(signal: &TaskOperatorSignal, reason: &str) -> TaskOperatorSignal {
     let mut signal = signal.clone();
     signal.body = format!(
         "{}\n\nAltitude could not read this task's pull requests after {OBSERVATION_ATTEMPTS} attempts, so it has stopped waiting on them. What the provider said: {reason}",
