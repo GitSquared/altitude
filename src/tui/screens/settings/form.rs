@@ -297,6 +297,9 @@ impl Form {
             .as_ref()
             .and_then(|binding| binding.credential.clone())
             .or(defaults.tracker.clone());
+        // A team is the tracker's, so a form with no tracker has no team and
+        // nothing to delegate to.
+        let has_tracker = tracker_credential.is_some();
         let mut host_choices = remotes.to_vec();
         if let Some(host) = &project.host
             && !host_choices.contains(host)
@@ -310,13 +313,15 @@ impl Form {
             setup: TextBox::new(&project.setup_command),
             caches: TextBox::new(&project.caches.join("\n")),
             instructions: TextBox::new(project.instructions.as_deref().unwrap_or_default()),
-            scope: Field::with(
+            scope: Field::with(if has_tracker {
                 project
                     .tracker
                     .as_ref()
                     .and_then(|binding| binding.scope.as_deref())
-                    .unwrap_or_default(),
-            ),
+                    .unwrap_or_default()
+            } else {
+                ""
+            }),
             agent: credential_pick(
                 "agent",
                 Slot::Agent,
@@ -341,10 +346,11 @@ impl Form {
             identity: identity_pick(&identities, identity_at),
             host: host_pick(&host_choices, project.host.as_deref()),
             identity_choices: identities,
-            accepts_delegated_work: project
-                .tracker
-                .as_ref()
-                .is_some_and(|binding| binding.accepts_delegated_work),
+            accepts_delegated_work: has_tracker
+                && project
+                    .tracker
+                    .as_ref()
+                    .is_some_and(|binding| binding.accepts_delegated_work),
             focus: Focus::Primary,
             scroll: 0,
             free_scroll: false,
@@ -389,17 +395,29 @@ impl Form {
         } else {
             &PROJECT_FIELDS
         };
-        let at = fields
+        let usable: Vec<Focus> = fields
+            .iter()
+            .copied()
+            .filter(|focus| self.is_enabled(*focus))
+            .collect();
+        if usable.is_empty() {
+            return;
+        }
+        let at = usable
             .iter()
             .position(|focus| *focus == self.focus)
             .unwrap_or(0);
         let next = if forward {
-            (at + 1) % fields.len()
+            (at + 1) % usable.len()
         } else {
-            (at + fields.len() - 1) % fields.len()
+            (at + usable.len() - 1) % usable.len()
         };
-        self.focus = fields[next];
+        self.focus = usable[next];
         self.free_scroll = false;
+    }
+
+    fn is_enabled(&self, focus: Focus) -> bool {
+        !matches!(focus, Focus::Scope | Focus::Accept) || self.has_tracker()
     }
 
     pub fn scroll_by(&mut self, up: bool) {
@@ -480,6 +498,10 @@ impl Form {
         self.tracker.chosen_value().cloned().flatten()
     }
 
+    pub fn has_tracker(&self) -> bool {
+        self.tracker_credential().is_some()
+    }
+
     pub fn list_open(&self) -> bool {
         match self.focus {
             Focus::Agent => self.agent.is_open(),
@@ -503,6 +525,7 @@ impl Form {
     }
 
     pub fn list_key(&mut self, key: KeyEvent) -> bool {
+        let tracker = self.tracker_credential();
         let handled = match self.focus {
             Focus::Agent => self.agent.handle_key(key),
             Focus::VcsIdentity => self.vcs.handle_key(key),
@@ -511,10 +534,17 @@ impl Form {
             Focus::Host => self.host.handle_key(key),
             _ => false,
         };
-        // A team belongs to the tracker it came from, so choosing another one —
-        // or none at all — leaves no team behind.
         if handled && self.focus == Focus::TrackerIdentity && !self.tracker.is_open() {
-            self.scope = Field::with("");
+            // A team belongs to the tracker it came from, so choosing another
+            // one — or none at all — leaves no team behind. Closing the list is
+            // not choosing.
+            if self.tracker_credential() != tracker {
+                self.scope = Field::with("");
+            }
+            // Nothing is delegated when there is no tracker to delegate from.
+            if self.tracker_credential().is_none() {
+                self.accepts_delegated_work = false;
+            }
         }
         handled
     }
@@ -765,7 +795,9 @@ pub(super) fn draw_form(frame: &mut Frame, area: Rect, form: &mut Form, tick: Op
                 height: heights[index],
                 ..fields
             };
-            form.hits.push((anchor, group.focus));
+            if form.is_enabled(group.focus) {
+                form.hits.push((anchor, group.focus));
+            }
             if group.focus == Focus::Repository {
                 repository_anchor = Some(anchor);
             }
@@ -875,11 +907,15 @@ fn draw_group(buffer: &mut Buffer, area: Rect, form: &Form, group: &Group) -> Op
                     }
                 }
                 Focus::Scope => {
-                    let scope = form.scope.value();
-                    if scope.trim().is_empty() {
-                        "whole account".to_owned()
+                    if form.has_tracker() {
+                        let scope = form.scope.value();
+                        if scope.trim().is_empty() {
+                            "whole account".to_owned()
+                        } else {
+                            scope.to_owned()
+                        }
                     } else {
-                        scope.to_owned()
+                        "—".to_owned()
                     }
                 }
                 focus => form.pick_value(focus),
