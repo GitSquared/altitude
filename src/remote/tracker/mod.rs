@@ -12,13 +12,14 @@ use std::{
 
 mod ledger;
 mod logins;
+mod webhook;
 
 use ledger::{
     CommentInput, Cursor, Delivery, IssueStateChanged, Ledger, SessionEvent, StoredEvent,
     TerminatedSession,
 };
-pub use logins::{Login, logins, logins_of};
-pub use logins::{claim_account, yield_account};
+pub use logins::{Login, claim_account, logins, logins_of, yield_account};
+use webhook::{parse_app_notification, parse_issue_event};
 
 use axum::{
     Router,
@@ -2376,165 +2377,6 @@ fn webhook_event_type(body: &[u8]) -> Option<String> {
         .ok()
         .map(|envelope| envelope.event_type)
 }
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct IssueEvent {
-    organization_id: String,
-    webhook_timestamp: f64,
-    created_at: String,
-    actor: IssueActor,
-    data: IssueData,
-    #[serde(default)]
-    updated_from: Option<IssueUpdatedFrom>,
-}
-
-#[derive(Deserialize)]
-struct IssueActor {
-    id: String,
-    #[serde(rename = "type")]
-    actor_type: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct IssueData {
-    id: String,
-    #[serde(default)]
-    state_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct IssueUpdatedFrom {
-    #[serde(default)]
-    state_id: Option<String>,
-}
-
-fn parse_issue_event(body: &[u8]) -> Result<IssueEvent, serde_json::Error> {
-    serde_json::from_slice(body)
-}
-
-impl IssueEvent {
-    fn is_fresh(&self) -> bool {
-        let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
-            return false;
-        };
-        (now.as_millis() as f64 - self.webhook_timestamp).abs()
-            <= WEBHOOK_MAX_AGE.as_millis() as f64
-    }
-
-    fn into_stored(self) -> Option<StoredEvent> {
-        if self.actor.actor_type != "user" {
-            return None;
-        }
-        let state_id = self.data.state_id?;
-        let previous_state_id = self.updated_from?.state_id?;
-        if previous_state_id == state_id {
-            return None;
-        }
-        let occurred_at_ms = chrono::DateTime::parse_from_rfc3339(&self.created_at)
-            .ok()?
-            .timestamp_millis();
-        Some(StoredEvent::IssueStateChanged(IssueStateChanged {
-            issue_id: self.data.id,
-            state_id,
-            actor_id: self.actor.id,
-            occurred_at_ms,
-        }))
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AppNotificationEvent {
-    organization_id: String,
-    app_user_id: String,
-    #[serde(default)]
-    oauth_client_id: Option<String>,
-    webhook_timestamp: f64,
-    action: String,
-    notification: AppNotification,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AppNotification {
-    #[serde(rename = "type")]
-    notification_type: String,
-    #[serde(default)]
-    actor_id: Option<String>,
-    #[serde(default)]
-    comment_id: Option<String>,
-    #[serde(default)]
-    issue_id: Option<String>,
-    #[serde(default)]
-    document_id: Option<String>,
-    #[serde(default)]
-    comment: Option<NotificationComment>,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct NotificationComment {
-    #[serde(default)]
-    id: String,
-    #[serde(default)]
-    body: String,
-    #[serde(default)]
-    user_id: Option<String>,
-    #[serde(default)]
-    issue_id: Option<String>,
-}
-
-fn parse_app_notification(body: &[u8]) -> Result<AppNotificationEvent, serde_json::Error> {
-    serde_json::from_slice(body)
-}
-
-impl AppNotificationEvent {
-    fn is_fresh(&self) -> bool {
-        let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
-            return false;
-        };
-        (now.as_millis() as f64 - self.webhook_timestamp).abs()
-            <= WEBHOOK_MAX_AGE.as_millis() as f64
-    }
-
-    fn into_stored(self) -> Option<StoredEvent> {
-        let is_mention = matches!(
-            self.action.as_str(),
-            "issueCommentMention" | "documentCommentMention"
-        ) || self.notification.notification_type.ends_with("Mention");
-        let is_new_comment = matches!(
-            self.action.as_str(),
-            "issueNewComment" | "documentNewComment"
-        );
-        if !is_mention && !is_new_comment {
-            return None;
-        }
-        let comment = self.notification.comment.unwrap_or_default();
-        let comment_id = self
-            .notification
-            .comment_id
-            .or_else(|| (!comment.id.is_empty()).then_some(comment.id))?;
-        let actor_id = self
-            .notification
-            .actor_id
-            .or(comment.user_id)
-            .filter(|id| !id.is_empty())?;
-        let issue_id = self.notification.issue_id.or(comment.issue_id);
-        Some(StoredEvent::Comment(CommentInput {
-            comment_id,
-            issue_id,
-            document_id: self.notification.document_id,
-            actor_id,
-            is_mention,
-            body: comment.body,
-        }))
-    }
-}
-
-// ------------------------------------------------------------------- storage
 
 impl SessionEvent {
     fn is_stop(&self) -> bool {
