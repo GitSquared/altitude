@@ -387,6 +387,21 @@ impl Linear {
         })
     }
 
+    async fn assign_to_self_impl(&self, reference: &IssueReference) -> Result<(), TrackerError> {
+        let session = self.session_or_reconnect().await?;
+        let account = read_account(&session).await?;
+        let issue = fetch_issue(&session, &reference.id).await?;
+        self.ensure_workspace(reference, &issue_url(&issue)?)?;
+        let mut arguments = Map::new();
+        arguments.insert("id".to_owned(), json!(reference.id));
+        arguments.insert("assignee".to_owned(), json!(account.user_id));
+        let result = session.call(SAVE_ISSUE, arguments).await?;
+        if result.get("success").and_then(Value::as_bool) != Some(true) {
+            return Err(TrackerError::new("Linear did not confirm the assignee"));
+        }
+        Ok(())
+    }
+
     async fn status_impl(
         &self,
         reference: &IssueReference,
@@ -494,6 +509,10 @@ impl TrackerProvider for Linear {
 
     fn scopes<'a>(&'a self) -> TrackerFuture<'a, Vec<ScopeSummary>> {
         Box::pin(self.scopes_impl())
+    }
+
+    fn assign_to_self<'a>(&'a self, reference: &'a IssueReference) -> TrackerFuture<'a, ()> {
+        Box::pin(self.assign_to_self_impl(reference))
     }
 
     fn status<'a>(

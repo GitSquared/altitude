@@ -123,6 +123,7 @@ where
         let title = issue.issue.title.trim().to_owned();
         // The issue is what the work is called. A list that names a linked task by
         // its id is a list of file names, and the operator asked for the issue.
+        let was_delegated = delegation.is_some();
         let mut arrival = vec![TaskHistoryEvent::TrackerIssueBound { issue, delegation }];
         if !title.is_empty() {
             arrival.push(TaskHistoryEvent::TaskTitleSet { title });
@@ -139,7 +140,38 @@ where
                 "this issue is already being worked on for another operator",
             )));
         }
+        // Nothing was delegated to this machine, so nothing will be reported: the
+        // issue is a reference the operator keeps. Putting it on their name is the
+        // one thing the tracker still needs to know.
+        if !was_delegated {
+            self.assign_linked_issue(&task).await;
+        }
         Ok(task)
+    }
+
+    /// A failed assignment says so in the log and nowhere else: a task the operator
+    /// asked for is not worth failing over the tracker's opinion of who owns it.
+    async fn assign_linked_issue(&self, task: &Task) {
+        let Some(host) = self.trackers.clone() else {
+            return;
+        };
+        let Some(reference) = task.facts.tracker_issue.as_ref() else {
+            return;
+        };
+        let credential = task
+            .project()
+            .and_then(|project| project.tracker.as_ref())
+            .and_then(|binding| binding.credential.as_deref())
+            .unwrap_or("trackers/linear");
+        let Some(provider) = task
+            .operator_id()
+            .and_then(|owner| host.for_credential(owner, credential))
+        else {
+            return;
+        };
+        if let Err(error) = provider.assign_to_self(reference).await {
+            tracing::warn!(task = %task.id, %error, "could not put this issue on the operator's name");
+        }
     }
 
     pub async fn sync_tracker(&self) -> Result<(), TrackerError> {
