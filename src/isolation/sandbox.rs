@@ -566,7 +566,7 @@ pub(super) async fn credential_shell(
     if !relay {
         return Ok(command.to_owned());
     }
-    Ok(super::with_helper(command))
+    Ok(super::with_port_relay(command))
 }
 
 pub(super) async fn watcher(

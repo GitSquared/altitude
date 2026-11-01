@@ -736,7 +736,7 @@ impl App {
                 if let Some(index) = self.project_targets.at(mouse.column, mouse.row).copied() {
                     let id = self.projects().get(index).map(|project| project.id.clone());
                     if let Some(id) = id {
-                        self.set_active_project(&id);
+                        self.focus_project(&id);
                     }
                 } else if let Some(index) = self.task_targets.at(mouse.column, mouse.row).copied() {
                     self.selected = index;
@@ -770,7 +770,7 @@ impl App {
                 if let Some(repository) = chosen
                     && let Some(form) = self.panel.form.as_mut()
                 {
-                    form.set_repository(&repository.url);
+                    form.choose_repository(&repository.url);
                 }
                 return;
             }
@@ -926,7 +926,7 @@ impl App {
             .unwrap_or_default()
     }
 
-    pub(in crate::tui) fn set_active_project(&mut self, id: &str) {
+    pub(in crate::tui) fn focus_project(&mut self, id: &str) {
         if self.active_project.as_deref() != Some(id) {
             self.active_project = Some(id.to_owned());
             self.selected = 0;
@@ -948,7 +948,7 @@ impl App {
         } else {
             (at + projects.len() - 1) % projects.len()
         };
-        self.set_active_project(&projects[next].id);
+        self.focus_project(&projects[next].id);
     }
 
     fn in_active_tab(&self, project_id: Option<&str>) -> bool {
@@ -1028,13 +1028,13 @@ impl App {
             .and_then(|file| file.settings().agent())
     }
 
-    pub(in crate::tui) fn set_agent(&mut self, agent: AgentKind) {
+    pub(in crate::tui) fn choose_agent(&mut self, agent: AgentKind) {
         let Some(file) = self.settings_file.as_mut() else {
             self.problem("Settings are unavailable; fix the file and reopen");
             return;
         };
         let mut proposed = file.settings().clone();
-        proposed.set_agent(agent);
+        proposed.choose_agent(agent);
         match file.save(proposed) {
             Ok(()) => self.alert = None,
             Err(error) => self.problem(error.to_string()),
@@ -1917,7 +1917,7 @@ impl App {
                 self.alert = None;
             }
             CredentialShellEvent::Output { id, bytes } => {
-                let replies = self.process_shell_output(&ShellId::Credentials(id), bytes);
+                let replies = self.forward_shell_output(&ShellId::Credentials(id), bytes);
                 for reply in replies {
                     if let CredentialShellState::Open(shell) = &self.credential_shell {
                         shell.input(reply);
@@ -2052,7 +2052,7 @@ impl App {
                         .selected_row()
                         .is_some_and(|row| matches!(row.kind, RowKind::Credential(_))) =>
             {
-                self.set_default_identity()
+                self.choose_default_identity()
             }
             KeyCode::Char('r')
                 if self.panel.section.slot().is_some()
@@ -2472,7 +2472,7 @@ impl App {
             .find(|held| held.address == address && held.summary.id == id)
             .and_then(|held| held.summary.project_id.clone());
         if let Some(project_id) = project_id {
-            self.set_active_project(&project_id);
+            self.focus_project(&project_id);
         }
         let (local, _) = self.visible_counts();
         let index = self
@@ -3339,7 +3339,7 @@ impl App {
                 .is_some_and(|row| row.forgets_credentials())
     }
 
-    fn set_default_identity(&mut self) {
+    fn choose_default_identity(&mut self) {
         let Some(row) = self.selected_row() else {
             return;
         };
@@ -3351,7 +3351,7 @@ impl App {
             return;
         };
         let mut proposed = file.settings().clone();
-        match proposed.set_default_credential(&id) {
+        match proposed.choose_default_credential(&id) {
             Ok(()) => match file.save(proposed) {
                 Ok(()) => self.say("Default identity updated"),
                 Err(error) => self.problem(error.to_string()),
@@ -3511,8 +3511,8 @@ impl App {
         };
         let mut proposed = file.settings().clone();
         match setting {
-            Setting::KeyboardHints => proposed.set_keyboard_hints(on),
-            Setting::Animations => proposed.set_animations(on),
+            Setting::KeyboardHints => proposed.show_keyboard_hints(on),
+            Setting::Animations => proposed.animate_interface(on),
         }
         match file.save(proposed) {
             Ok(()) => self.alert = None,
@@ -3572,7 +3572,7 @@ impl App {
                 }
                 RepositoriesKey::Chosen(repository) => {
                     form.repositories = None;
-                    form.set_repository(&repository.url);
+                    form.choose_repository(&repository.url);
                     self.panel.form = Some(form);
                     return;
                 }
@@ -3800,14 +3800,14 @@ impl App {
             .or_else(|| self.agent())
     }
 
-    fn set_active_agent(&mut self, agent: AgentKind) {
+    fn choose_active_agent(&mut self, agent: AgentKind) {
         let active = self.active_project_id();
         let pinned = self
             .projects()
             .into_iter()
             .any(|project| project.id == active && project.agent.is_some());
         if !pinned {
-            self.set_agent(agent);
+            self.choose_agent(agent);
             return;
         }
         let Some(file) = self.settings_file.as_mut() else {
@@ -3846,10 +3846,10 @@ impl App {
     }
 
     pub(in crate::tui) fn open_get_started(&mut self) {
-        self.foreground = Foreground::GetStarted(self.get_started_panel());
+        self.foreground = Foreground::GetStarted(self.started_panel());
     }
 
-    pub(in crate::tui) fn get_started_panel(&self) -> Box<GetStarted> {
+    pub(in crate::tui) fn started_panel(&self) -> Box<GetStarted> {
         let repositories = self.repositories.clone().unwrap_or_default();
         Box::new(GetStarted::new(
             &self.active_project_name(),
@@ -3906,7 +3906,7 @@ impl App {
         }
     }
 
-    pub(in crate::tui) async fn get_started_key<E>(
+    pub(in crate::tui) async fn started_key<E>(
         &mut self,
         key: KeyEvent,
         task_service: &TaskService<E>,
@@ -3942,8 +3942,8 @@ impl App {
                 RepositoriesKey::Save => panel.repositories = None,
                 RepositoriesKey::Chosen(repository) => {
                     panel.repositories = None;
-                    self.set_project_repository(&repository.url);
-                    panel.set_repository(&repository);
+                    self.bind_project_repository(&repository.url);
+                    panel.choose_repository(&repository);
                     panel.focus = SetupFocus::Ready;
                 }
             }
@@ -3957,7 +3957,7 @@ impl App {
                 && let Some(chosen) = panel.agent.chosen_value().copied()
                 && before != Some(chosen)
             {
-                self.set_active_agent(chosen);
+                self.choose_active_agent(chosen);
                 self.foreground = Foreground::GetStarted(panel);
                 // The picker comes first; the sign-in it needs comes after, over
                 // the card rather than over anything else.
@@ -4102,7 +4102,7 @@ impl App {
                 SetupFocus::Remote => match self.setup().offer {
                     Some(offer) if self.setup().host.is_none() => {
                         if self.adopt_remote(&offer) {
-                            self.set_project_remote(&offer.address);
+                            self.bind_project_remote(&offer.address);
                             let address = offer.address.clone();
                             self.check_remote(&address).await;
                             self.watch_remote(&address);
@@ -4686,7 +4686,7 @@ impl App {
         }
     }
 
-    fn set_project_remote(&mut self, address: &str) {
+    fn bind_project_remote(&mut self, address: &str) {
         let active = self.active_project_id();
         let Some(file) = self.settings_file.as_mut() else {
             return;
@@ -4720,7 +4720,7 @@ impl App {
             .and_then(|project| project.repository)
     }
 
-    fn set_project_repository(&mut self, url: &str) {
+    fn bind_project_repository(&mut self, url: &str) {
         let active = self.active_project_id();
         let Some(file) = self.settings_file.as_mut() else {
             return;
@@ -5354,7 +5354,7 @@ impl App {
                     Foreground::Setup(setup) if setup.returns_to_card()
                 );
                 if to_card {
-                    self.foreground = Foreground::GetStarted(self.get_started_panel());
+                    self.foreground = Foreground::GetStarted(self.started_panel());
                 } else {
                     self.foreground = Foreground::Panel;
                 }
@@ -5468,7 +5468,7 @@ impl App {
         }
     }
 
-    pub(in crate::tui) fn get_started_mouse(&mut self, mouse: MouseEvent) {
+    pub(in crate::tui) fn started_mouse(&mut self, mouse: MouseEvent) {
         let Foreground::GetStarted(mut panel) = mem::take(&mut self.foreground) else {
             return;
         };
@@ -5478,8 +5478,8 @@ impl App {
         };
         if let Some(repository) = browser.mouse(mouse) {
             panel.repositories = None;
-            self.set_project_repository(&repository.url);
-            panel.set_repository(&repository);
+            self.bind_project_repository(&repository.url);
+            panel.choose_repository(&repository);
             panel.focus = SetupFocus::Ready;
         }
         self.foreground = Foreground::GetStarted(panel);
@@ -5590,7 +5590,7 @@ impl App {
             }) => {
                 // The tab follows the answer, so the task is where the operator
                 // is looking. The project pill can name another one.
-                self.set_active_project(&project.id);
+                self.focus_project(&project.id);
                 match self.project_machine(&project) {
                     // A task for a remote is founded there, off this loop. Nothing
                     // is copied: the machine that runs it owns it.
@@ -5716,7 +5716,7 @@ impl App {
                 let Some(submission) = submission else {
                     return;
                 };
-                self.set_active_project(&submission.project.id);
+                self.focus_project(&submission.project.id);
                 match self.project_machine(&submission.project) {
                     Ok(Some(address)) => {
                         self.begin_delegation(
@@ -7211,7 +7211,7 @@ impl App {
             } => {
                 let _ = stream;
                 let id = ShellId::Task(task_id);
-                for reply in self.process_shell_output(&id, bytes) {
+                for reply in self.forward_shell_output(&id, bytes) {
                     self.send_shell_input(&id, reply, event_loop);
                 }
             }
@@ -7337,7 +7337,7 @@ impl App {
         }
     }
 
-    fn process_shell_output(&mut self, id: &ShellId, bytes: Vec<u8>) -> Vec<Vec<u8>> {
+    fn forward_shell_output(&mut self, id: &ShellId, bytes: Vec<u8>) -> Vec<Vec<u8>> {
         let mut asked_to_open = None;
         let mut replies = Vec::new();
         {

@@ -599,7 +599,7 @@ impl Form {
         }
     }
 
-    pub fn set_repository(&mut self, url: &str) {
+    pub fn choose_repository(&mut self, url: &str) {
         self.repository = Field::with(url);
     }
 

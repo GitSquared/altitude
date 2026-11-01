@@ -43,7 +43,7 @@ impl Scopes {
     }
 
     pub fn fill(&mut self, scopes: &[ScopeSummary]) {
-        self.select.set_offers(offers(scopes));
+        self.select.offer_choices(offers(scopes));
         self.error = None;
     }
 

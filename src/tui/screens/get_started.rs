@@ -251,7 +251,7 @@ impl GetStarted {
                 .is_some_and(|browser| browser.select.is_searching())
     }
 
-    pub fn set_repository(&mut self, repository: &Repository) {
+    pub fn choose_repository(&mut self, repository: &Repository) {
         self.repository = repository_select(slice::from_ref(repository), Some(&repository.url));
     }
 

@@ -44,12 +44,12 @@ impl TaskAgentTools {
         })
     }
 
-    async fn get_title(&self) -> Result<Value, AgentToolError> {
+    async fn read_title(&self) -> Result<Value, AgentToolError> {
         let task = self.task().await?;
         Ok(json!({ "title": task.title() }))
     }
 
-    async fn set_title(&self, arguments: &Value) -> Result<Value, AgentToolError> {
+    async fn write_title(&self, arguments: &Value) -> Result<Value, AgentToolError> {
         let requested = arguments
             .get("title")
             .and_then(Value::as_str)
@@ -142,7 +142,7 @@ impl TaskAgentTools {
                 }
                 let task = self
                     .store
-                    .set_plan(&self.task_id, plan)
+                    .record_plan(&self.task_id, plan)
                     .await
                     .map_err(tool_failure)?;
                 self.announce();
@@ -268,8 +268,8 @@ impl TaskAgentTools {
 
     async fn title(&self, arguments: &Value) -> Result<Value, AgentToolError> {
         match arguments.get("action").and_then(Value::as_str) {
-            Some("get") => self.get_title().await,
-            Some("set") => self.set_title(arguments).await,
+            Some("get") => self.read_title().await,
+            Some("set") => self.write_title(arguments).await,
             Some(other) => Err(AgentToolError::new(format!(
                 "unknown title action {other:?}; use get or set"
             ))),

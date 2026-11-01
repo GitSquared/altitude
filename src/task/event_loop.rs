@@ -1254,7 +1254,7 @@ where
                             return;
                         }
                         if let Err(error) = event_loop
-                            .handle_run_termination(
+                            .settle_finished_run(
                                 task.clone(),
                                 &run,
                                 mode,
@@ -1546,7 +1546,7 @@ where
         }
     }
 
-    async fn handle_run_termination(
+    async fn settle_finished_run(
         &self,
         task: Task,
         run: &TaskAgentRun,

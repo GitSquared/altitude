@@ -775,7 +775,7 @@ impl TaskStore {
             .await
     }
 
-    pub async fn set_plan(
+    pub async fn record_plan(
         &self,
         task_id: &str,
         steps: Vec<TaskPlanStep>,

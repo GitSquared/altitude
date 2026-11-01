@@ -481,7 +481,7 @@ where
                 if let Foreground::GetStarted(panel) = &mut app.foreground {
                     screens::get_started::draw(frame, content, panel, &setup, tick);
                 } else if app.git_identity_over_card() {
-                    let mut panel = app.get_started_panel();
+                    let mut panel = app.started_panel();
                     screens::get_started::draw(frame, content, &mut panel, &setup, tick);
                 }
                 if let super::app::CredentialShellState::Opening {
@@ -1025,7 +1025,7 @@ where
             return Ok(false);
         }
         if matches!(app.foreground, Foreground::GetStarted(_)) {
-            app.get_started_mouse(mouse);
+            app.started_mouse(mouse);
             return Ok(false);
         }
         if let Some(id) = app.open_shell().cloned() {
@@ -1107,7 +1107,7 @@ where
         }
         Foreground::GetStarted(_) => {
             if app
-                .get_started_key(
+                .started_key(
                     key,
                     task_service,
                     credential_events,

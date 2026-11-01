@@ -28,7 +28,7 @@ pub(crate) fn install_script() -> String {
     )
 }
 
-pub(crate) fn with_helper(command: &str) -> String {
+pub(crate) fn with_port_relay(command: &str) -> String {
     format!(
         "if command -v python3 >/dev/null 2>&1; then\n\
          \tpython3 {HELPER} </dev/null >/tmp/altitude-ports.log 2>&1 &\n\

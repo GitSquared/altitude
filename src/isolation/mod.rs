@@ -18,7 +18,7 @@ mod relay;
 mod sandbox;
 
 pub use microsandbox::MicrosandboxIsolation;
-pub(crate) use relay::{PORT_RELAY_GUEST_PORT, install_script, with_helper};
+pub(crate) use relay::{PORT_RELAY_GUEST_PORT, install_script, with_port_relay};
 pub use relay::{PortNotice, PortRelays};
 pub(crate) use sandbox::guest_absolute;
 pub(crate) use sandbox::private_directory;

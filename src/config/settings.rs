@@ -262,7 +262,7 @@ impl Settings {
                 .map(|credential| credential.id.clone())
                 .collect();
             if let [id] = only.as_slice() {
-                let _ = self.set_default_credential(id);
+                let _ = self.choose_default_credential(id);
             }
         }
     }
@@ -396,7 +396,7 @@ impl Settings {
         }
     }
 
-    pub fn set_default_credential(&mut self, id: &str) -> Result<(), SettingsError> {
+    pub fn choose_default_credential(&mut self, id: &str) -> Result<(), SettingsError> {
         let Some(credential) = self.credential(id) else {
             return Err(SettingsError::Invalid(format!("no credential {id:?}")));
         };
@@ -527,7 +527,7 @@ impl Settings {
         self.defaults.agent
     }
 
-    pub fn set_agent(&mut self, agent: AgentKind) {
+    pub fn choose_agent(&mut self, agent: AgentKind) {
         self.defaults.agent = Some(agent);
     }
 
@@ -575,11 +575,11 @@ impl Settings {
         &self.interface
     }
 
-    pub fn set_keyboard_hints(&mut self, on: bool) {
+    pub fn show_keyboard_hints(&mut self, on: bool) {
         self.interface.keyboard_hints = on;
     }
 
-    pub fn set_animations(&mut self, on: bool) {
+    pub fn animate_interface(&mut self, on: bool) {
         self.interface.animations = on;
     }
 

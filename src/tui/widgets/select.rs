@@ -110,7 +110,7 @@ impl<T> Select<T> {
         }
     }
 
-    pub fn set_offers(&mut self, offers: Vec<Offer<T>>) {
+    pub fn offer_choices(&mut self, offers: Vec<Offer<T>>) {
         self.offers = offers;
         self.chosen = self.chosen.min(self.offers.len().saturating_sub(1));
         self.at = 0;

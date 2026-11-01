@@ -1,6 +1,6 @@
 use crate::{
     isolation::{
-        CommandEvent, CommandSession, IsolationEngine, OutputStream, Unwatched, with_helper,
+        CommandEvent, CommandSession, IsolationEngine, OutputStream, Unwatched, with_port_relay,
     },
     project::Project,
     vcs::{ContributionObservation, ProviderBatch},
@@ -285,7 +285,7 @@ where
             Some(sandbox_id) => match self.bind_ports(sandbox_id) {
                 Ok(()) => {
                     bound = Some(sandbox_id.to_owned());
-                    with_helper(&command)
+                    with_port_relay(&command)
                 }
                 Err(error) => {
                     tracing::warn!(%error, "a taken-over task's ports stay in its sandbox");

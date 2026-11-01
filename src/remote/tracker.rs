@@ -219,7 +219,7 @@ impl RemoteTracker {
         // this by starting it.
         self.mutate(|ledger| ledger.settled_issues.retain(|id| id != &issue.id))?;
         if let Err(error) = self
-            .set_session_summary(&session_id, &tracker_user_id, session_agent.as_deref())
+            .summarise_session(&session_id, &tracker_user_id, session_agent.as_deref())
             .await
         {
             tracing::warn!(session = %session_id, %error, "could not name a piloted session");
@@ -527,7 +527,7 @@ impl RemoteTracker {
             if delivery.next_attempt_at_ms > now_ms() {
                 continue;
             }
-            match self.handle_delivery(&delivery.event, host).await {
+            match self.apply_delivery(&delivery.event, host).await {
                 Ok(()) => {
                     if let Err(error) = self.complete_delivery(&delivery.key) {
                         tracing::error!(delivery = %delivery.key, %error, "could not record a completed Linear delivery; it stays queued");
@@ -543,20 +543,20 @@ impl RemoteTracker {
         }
     }
 
-    async fn handle_delivery(&self, event: &StoredEvent, host: &dyn Host) -> Result<(), String> {
+    async fn apply_delivery(&self, event: &StoredEvent, host: &dyn Host) -> Result<(), String> {
         match event {
             StoredEvent::Session(session) => {
                 if session.is_stop() {
-                    return self.handle_stop(session, host).await;
+                    return self.stop_for_terminated_session(session, host).await;
                 }
                 match session.action.as_str() {
-                    "created" => self.handle_created(session, host).await,
-                    "prompted" => self.handle_prompted(session, host).await,
+                    "created" => self.delegate_new_session(session, host).await,
+                    "prompted" => self.answer_prompt(session, host).await,
                     _ => Ok(()),
                 }
             }
             StoredEvent::IssueStateChanged(change) => {
-                self.handle_issue_state(
+                self.follow_issue_state(
                     &change.issue_id,
                     &change.state_id,
                     &change.actor_id,
@@ -565,7 +565,7 @@ impl RemoteTracker {
                 )
                 .await
             }
-            StoredEvent::Comment(comment) => self.handle_comment(comment, host).await,
+            StoredEvent::Comment(comment) => self.answer_comment(comment, host).await,
         }
     }
 
@@ -593,7 +593,11 @@ impl RemoteTracker {
         );
     }
 
-    async fn handle_stop(&self, event: &SessionEvent, host: &dyn Host) -> Result<(), String> {
+    async fn stop_for_terminated_session(
+        &self,
+        event: &SessionEvent,
+        host: &dyn Host,
+    ) -> Result<(), String> {
         let Some(report) = self.report_for_session(&event.session_id) else {
             if event
                 .creator_id
@@ -644,7 +648,11 @@ impl RemoteTracker {
         self.finish_report(&report)
     }
 
-    async fn handle_created(&self, event: &SessionEvent, host: &dyn Host) -> Result<(), String> {
+    async fn delegate_new_session(
+        &self,
+        event: &SessionEvent,
+        host: &dyn Host,
+    ) -> Result<(), String> {
         let Some(issue_id) = event.issue_id.as_deref() else {
             return Ok(());
         };
@@ -877,7 +885,7 @@ impl RemoteTracker {
         self.mutate(|ledger| ledger.settled_issues.retain(|id| id != issue_id))?;
         let session_agent = host.session_agent(task_id.clone()).await?;
         if let Err(error) = self
-            .set_session_summary(session_id, author, session_agent.as_deref())
+            .summarise_session(session_id, author, session_agent.as_deref())
             .await
         {
             tracing::warn!(session = %session_id, %error, "could not name a delegated session");
@@ -898,7 +906,7 @@ impl RemoteTracker {
         Ok(())
     }
 
-    async fn handle_prompted(&self, event: &SessionEvent, host: &dyn Host) -> Result<(), String> {
+    async fn answer_prompt(&self, event: &SessionEvent, host: &dyn Host) -> Result<(), String> {
         let Some(answer) = event.prompt_body.as_deref() else {
             return Ok(());
         };
@@ -988,7 +996,7 @@ impl RemoteTracker {
             .await
     }
 
-    async fn handle_issue_state(
+    async fn follow_issue_state(
         &self,
         issue_id: &str,
         state_id: &str,
@@ -1111,7 +1119,7 @@ impl RemoteTracker {
         self.finish_report(report)
     }
 
-    async fn handle_comment(&self, event: &CommentInput, host: &dyn Host) -> Result<(), String> {
+    async fn answer_comment(&self, event: &CommentInput, host: &dyn Host) -> Result<(), String> {
         let site = self
             .config
             .automation
@@ -1264,7 +1272,7 @@ impl RemoteTracker {
         )
     }
 
-    async fn set_session_summary(
+    async fn summarise_session(
         &self,
         session_id: &str,
         operator_id: &str,
@@ -1453,7 +1461,7 @@ impl RemoteTracker {
         // reason to replay from the beginning: a replay re-writes statuses and
         // re-resolves threads the operator has since touched themselves.
         if report.reported_events > events.len() {
-            self.set_cursor(&report.task_id, events.len())?;
+            self.advance_cursor(&report.task_id, events.len())?;
             return Ok(());
         }
         // Signals still open are the only ones worth publishing; one already
@@ -1482,7 +1490,7 @@ impl RemoteTracker {
                 Ok(None) => {}
                 Err(error) => return self.refused_event(report, index, error),
             }
-            self.set_cursor(&report.task_id, index + 1)?;
+            self.advance_cursor(&report.task_id, index + 1)?;
         }
         if folded {
             self.replay_signals(host, report, &events).await?;
@@ -1525,7 +1533,7 @@ impl RemoteTracker {
                 held.failed_attempts = 0;
             }
         })?;
-        self.set_cursor(&report.task_id, index + 1)
+        self.advance_cursor(&report.task_id, index + 1)
     }
 
     async fn report_event(
@@ -1541,7 +1549,7 @@ impl RemoteTracker {
             TaskHistoryEvent::AgentModelObserved { .. } => {
                 if let Ok(Some(session_agent)) = host.session_agent(report.task_id.clone()).await
                     && let Err(error) = self
-                        .set_session_summary(
+                        .summarise_session(
                             &report.session,
                             &report.tracker_user_id,
                             Some(&session_agent),
@@ -1603,7 +1611,7 @@ impl RemoteTracker {
                         .await
                         .map_err(|error| error.to_string())?;
                 }
-                self.set_status(host, report, TrackerStatus::InProgress)
+                self.write_status(host, report, TrackerStatus::InProgress)
                     .await?;
             }
             TaskHistoryEvent::OperatorSignalRaised { signal } => {
@@ -1620,7 +1628,7 @@ impl RemoteTracker {
                         )
                         .await?
                     {
-                        self.set_status(host, report, status).await?;
+                        self.write_status(host, report, status).await?;
                     }
                 }
             }
@@ -1629,7 +1637,7 @@ impl RemoteTracker {
                 resolved: true,
                 ..
             } => {
-                self.set_signal_comment_state(report, signal_id, &events[..=index], true)
+                self.follow_signal_thread(report, signal_id, &events[..=index], true)
                     .await;
                 // Answering a question puts the work back in progress: the issue
                 // said In Review while the task was waiting, and it is not waiting
@@ -1644,16 +1652,18 @@ impl RemoteTracker {
             } => {
                 // Reopening a thread says the question is live again, so the
                 // tracker shows it open and the issue is waiting on the operator.
-                self.set_signal_comment_state(report, signal_id, &events[..=index], false)
+                self.follow_signal_thread(report, signal_id, &events[..=index], false)
                     .await;
                 if !self.is_settled(&report.issue_id)
-                    && let Err(error) = self.set_status(host, report, TrackerStatus::InReview).await
+                    && let Err(error) = self
+                        .write_status(host, report, TrackerStatus::InReview)
+                        .await
                 {
                     tracing::warn!(issue = %report.issue_id, %error, "could not say the task is waiting again");
                 }
             }
             TaskHistoryEvent::OperatorSignalConfirmed { signal_id } => {
-                self.set_signal_comment_state(report, signal_id, &events[..=index], true)
+                self.follow_signal_thread(report, signal_id, &events[..=index], true)
                     .await;
                 self.finish_accepted(host, report, &events[..=index])
                     .await?;
@@ -1694,10 +1704,10 @@ impl RemoteTracker {
                 )
                 .await?
             {
-                self.set_status(host, report, status).await?;
+                self.write_status(host, report, status).await?;
             }
         }
-        self.set_cursor(&report.task_id, events.len())
+        self.advance_cursor(&report.task_id, events.len())
     }
 
     async fn finish_transferred(&self, report: &Cursor) -> Result<(), String> {
@@ -1785,7 +1795,7 @@ impl RemoteTracker {
         }
     }
 
-    async fn set_signal_comment_state(
+    async fn follow_signal_thread(
         &self,
         report: &Cursor,
         signal_id: &str,
@@ -1838,12 +1848,12 @@ impl RemoteTracker {
             if signal.kind == TaskOperatorSignalKind::Update || !seen.insert(signal.id.clone()) {
                 continue;
             }
-            self.set_signal_comment_state(report, &signal.id, events, true)
+            self.follow_signal_thread(report, &signal.id, events, true)
                 .await;
         }
     }
 
-    async fn set_status(
+    async fn write_status(
         &self,
         host: &dyn Host,
         report: &Cursor,
@@ -1896,7 +1906,7 @@ impl RemoteTracker {
             return;
         }
         if let Err(error) = self
-            .set_status(host, report, TrackerStatus::InProgress)
+            .write_status(host, report, TrackerStatus::InProgress)
             .await
         {
             tracing::warn!(issue = %report.issue_id, %error, "could not say the task is running again");
@@ -1913,7 +1923,7 @@ impl RemoteTracker {
         // threads the task was waiting in close here rather than in each caller.
         self.resolve_signal_comments(report, events).await;
         if !self.is_settled(&report.issue_id) {
-            self.set_status(host, report, TrackerStatus::Done).await?;
+            self.write_status(host, report, TrackerStatus::Done).await?;
             self.settle(&report.issue_id)?;
         }
         // The work is accepted, so the issue stops pointing at this machine: an
@@ -2100,7 +2110,7 @@ impl RemoteTracker {
             .unwrap_or(false)
     }
 
-    fn set_cursor(&self, task_id: &str, cursor: usize) -> Result<(), String> {
+    fn advance_cursor(&self, task_id: &str, cursor: usize) -> Result<(), String> {
         self.mutate(|ledger| {
             if let Some(report) = ledger.cursors.iter_mut().find(|r| r.task_id == task_id) {
                 report.reported_events = cursor;
@@ -2480,11 +2490,11 @@ pub fn logins_of(operator_dir: &Path, owner: &str, provider: TrackerKind) -> Vec
 }
 
 pub fn yield_account(operator_dir: &Path, provider: TrackerKind) -> io::Result<()> {
-    set_yielded(operator_dir, provider, true)
+    remember_yielded(operator_dir, provider, true)
 }
 
 pub fn claim_account(operator_dir: &Path, provider: TrackerKind) -> io::Result<()> {
-    set_yielded(operator_dir, provider, false)
+    remember_yielded(operator_dir, provider, false)
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -2505,7 +2515,7 @@ fn yielded_providers(operator_dir: &Path) -> Vec<TrackerKind> {
         .unwrap_or_default()
 }
 
-fn set_yielded(operator_dir: &Path, provider: TrackerKind, yielded: bool) -> io::Result<()> {
+fn remember_yielded(operator_dir: &Path, provider: TrackerKind, yielded: bool) -> io::Result<()> {
     let path = yielded_path(operator_dir);
     let mut held = yielded_providers(operator_dir);
     let had = held.contains(&provider);

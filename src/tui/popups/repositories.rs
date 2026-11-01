@@ -55,7 +55,7 @@ impl Repositories {
             .select
             .chosen_value()
             .map(|repository| repository.url.clone());
-        self.select.set_offers(offers(repositories));
+        self.select.offer_choices(offers(repositories));
         if let Some(url) = chosen
             && let Some(index) = repositories
                 .iter()

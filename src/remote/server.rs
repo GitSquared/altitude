@@ -387,26 +387,26 @@ pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
-        set_private(parent)?;
+        make_private(parent)?;
     }
     let incoming = path.with_extension("incoming");
     {
         let mut file = fs::File::create(&incoming)?;
-        set_private(&incoming)?;
+        make_private(&incoming)?;
         file.write_all(bytes)?;
     }
     fs::rename(&incoming, path)
 }
 
 #[cfg(unix)]
-fn set_private(path: &Path) -> io::Result<()> {
+fn make_private(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mode = if path.is_dir() { 0o700 } else { 0o600 };
     fs::set_permissions(path, fs::Permissions::from_mode(mode))
 }
 
 #[cfg(not(unix))]
-fn set_private(_path: &Path) -> io::Result<()> {
+fn make_private(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
