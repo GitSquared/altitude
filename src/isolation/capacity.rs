@@ -107,6 +107,14 @@ impl HostCapacity {
     pub fn limit(&self) -> usize {
         self.limit
     }
+
+    /// How many more sandboxes this host will take, given how many hold one.
+    ///
+    /// The task queue asks this instead of subtracting a limit it would have to
+    /// know the meaning of: what fits is the host's business.
+    pub fn free_slots(&self, in_use: usize) -> usize {
+        self.limit.saturating_sub(in_use)
+    }
 }
 
 impl Default for HostCapacity {

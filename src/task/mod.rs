@@ -24,7 +24,6 @@ use uuid::Uuid;
 use tools::TaskAgentTools;
 
 mod agents;
-mod capacity;
 mod event_loop;
 mod lifecycle;
 mod signals;

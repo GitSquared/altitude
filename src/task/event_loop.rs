@@ -12,10 +12,10 @@ use crate::{
     config::InstallationIdentity,
     isolation::{
         Command, CommandEvent, CommandSession, FileTransferSink, IsolationEngine, OutputStream,
+        capacity::{HostCapacity, HostSampler, SAMPLE_INTERVAL},
         guest_absolute,
     },
     project::Project,
-    task::capacity::{HostCapacity, HostSampler, SAMPLE_INTERVAL},
     task::review::{
         Look, OBSERVATION_ATTEMPTS, REVIEW_POLL_INTERVAL, ReviewWaits, Watchers, unreadable,
         wake_reason,
@@ -207,11 +207,6 @@ where
                 return;
             }
         };
-        let limit = self
-            .capacity
-            .lock()
-            .expect("capacity lock poisoned")
-            .limit();
         // A capsule that exists is a slot in use. A task being started has no
         // capsule yet but is about to want one, so it counts too.
         let occupied = tasks
@@ -219,7 +214,11 @@ where
             .filter(|task| task.facts.sandbox_available)
             .count();
         let taken = occupied + self.starting.lock().expect("starting lock poisoned").len();
-        let room = limit.saturating_sub(taken);
+        let room = self
+            .capacity
+            .lock()
+            .expect("capacity lock poisoned")
+            .free_slots(taken);
         // A task with a held review is the scheduler's: admission must not start
         // an agent turn for it while the review is still waiting.
         let mut waiting: Vec<Task> = tasks

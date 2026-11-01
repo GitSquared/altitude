@@ -11,6 +11,10 @@ use tokio::sync::{mpsc, watch};
 
 use crate::project::Project;
 
+// How much of this host a sandbox may take, and how many may run at once. It
+// lives here rather than beside the task queue because it is a fact about the
+// machine, not about the work.
+pub(crate) mod capacity;
 mod git_cache;
 mod microsandbox;
 pub(crate) mod mounts;
