@@ -389,6 +389,18 @@ impl RemoteTracker {
         };
         for delegated in delegated {
             let reference = &delegated.reference;
+            // This machine has already worked this delegation: the session it was
+            // asked in has a cursor, so the work happened, and a task that ended is
+            // not a task to start again. Without this the sweep adopts the same
+            // finished delegation every minute it runs, forever.
+            if self.is_settled(&reference.id)
+                || delegated
+                    .session
+                    .iter()
+                    .any(|session| self.report_for_session(session).is_some())
+            {
+                continue;
+            }
             // Which work this issue has is a question the tasks answer. This
             // delegation's own work means nothing to do; work for another one means
             // the operator delegated again, which replaces it.
