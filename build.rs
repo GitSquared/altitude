@@ -12,9 +12,11 @@ fn main() {
     // The commit is part of the name the binary and the interface show, so a new
     // commit has to reach the compiler even when no source file changed.
     let package = env::var("CARGO_PKG_VERSION").expect("Cargo sets the package version");
+    // A build of a tagged commit is that release and nothing else. The commit is how
+    // two builds of one version are told apart, which a release does not have to be.
     let version = match commit() {
-        Some(commit) => format!("v{package}-{commit}"),
-        None => format!("v{package}"),
+        Some(commit) if !is_tagged_head() => format!("v{package}-{commit}"),
+        _ => format!("v{package}"),
     };
     println!("cargo::rustc-env=ALTITUDE_VERSION={version}");
 
@@ -58,6 +60,10 @@ fn watch_commits() {
             println!("cargo::rerun-if-changed={path}");
         }
     }
+}
+
+fn is_tagged_head() -> bool {
+    git(&["describe", "--tags", "--exact-match", "HEAD"]).is_some()
 }
 
 fn git(args: &[&str]) -> Option<String> {
