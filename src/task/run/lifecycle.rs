@@ -447,6 +447,16 @@ where
                             let event = resumed(&task, path.to_string_lossy().into_owned());
                             task = service.record_snapshot(&task, &[event]).await?;
                         }
+                        Err(error) if error.is_missing_sandbox() => {
+                            task = service
+                                .record(
+                                    &task.id,
+                                    &[TaskHistoryEvent::SandboxRemoved {
+                                        sandbox_available: false,
+                                    }],
+                                )
+                                .await?;
+                        }
                         Err(error) => {
                             service
                                 .fail(
@@ -544,6 +554,28 @@ where
                         };
                         service.record_snapshot(&task, &[event]).await?;
                         service.release_agent_channel(&task.id);
+                        Ok(())
+                    }
+                    Err(error) if error.is_missing_sandbox() => {
+                        // There is no capsule to stop, so there is nothing to keep:
+                        // the pause is recorded without one, and the next run builds
+                        // it again.
+                        service
+                            .record(
+                                &task.id,
+                                &[TaskHistoryEvent::ExecutionPaused {
+                                    execution_status: TaskExecutionStatus::Paused,
+                                    sandbox_available: false,
+                                    snapshot_available: task.facts.snapshot_available,
+                                    execution_pause_reason: reason.clone(),
+                                    snapshot_path: task
+                                        .facts
+                                        .snapshot_path
+                                        .clone()
+                                        .unwrap_or_default(),
+                                }],
+                            )
+                            .await?;
                         Ok(())
                     }
                     Err(error) => {

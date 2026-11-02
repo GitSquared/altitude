@@ -332,17 +332,37 @@ pub enum OutputStream {
 }
 
 #[derive(Debug)]
-pub struct IsolationError(String);
+pub struct IsolationError {
+    message: String,
+    is_missing_sandbox: bool,
+}
 
 impl IsolationError {
     pub(crate) fn new(message: impl Into<String>) -> Self {
-        Self(message.into())
+        Self {
+            message: message.into(),
+            is_missing_sandbox: false,
+        }
+    }
+
+    // The record named a sandbox the runtime has never heard of, which a hard stop
+    // leaves behind for every task that was running. Callers that only wanted to
+    // reach that sandbox are done rather than refused.
+    pub(crate) fn missing_sandbox(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            is_missing_sandbox: true,
+        }
+    }
+
+    pub(crate) fn is_missing_sandbox(&self) -> bool {
+        self.is_missing_sandbox
     }
 }
 
 impl fmt::Display for IsolationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
+        formatter.write_str(&self.message)
     }
 }
 

@@ -1386,9 +1386,13 @@ impl IsolationEngine for MicrosandboxIsolation {
     ) -> Result<PathBuf, IsolationError> {
         tracing::debug!(sandbox_id = %id, "suspending sandbox");
         private_directory(&snapshots_dir)?;
-        let sandbox = Sandbox::get(&id)
-            .await
-            .map_err(|error| IsolationError::new(error.to_string()))?;
+        let sandbox = match Sandbox::get(&id).await {
+            Ok(sandbox) => sandbox,
+            Err(microsandbox::MicrosandboxError::SandboxNotFound(message)) => {
+                return Err(IsolationError::missing_sandbox(message));
+            }
+            Err(error) => return Err(IsolationError::new(error.to_string())),
+        };
         sandbox
             .stop_with_timeout(Duration::from_secs(10))
             .await
