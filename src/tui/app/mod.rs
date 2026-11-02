@@ -575,8 +575,16 @@ impl Drop for App {
     }
 }
 
+// What the list is for: work that is still the operator's. An issue that ended elsewhere,
+// or a delegation that was withdrawn, is a record rather than a task to act on, and it is
+// read where it happened.
 fn is_listed(task: &Task) -> bool {
     task.facts.execution_status != TaskExecutionStatus::Completed
+        && !task
+            .facts
+            .execution_pause_reason
+            .as_ref()
+            .is_some_and(TaskExecutionPauseReason::is_out_of_play)
 }
 
 fn listed(tasks: Vec<Task>) -> Vec<Task> {
@@ -585,6 +593,10 @@ fn listed(tasks: Vec<Task>) -> Vec<Task> {
 
 fn is_listed_summary(summary: &TaskSummary) -> bool {
     summary.status != TaskExecutionStatus::Completed
+        && !summary
+            .pause_reason
+            .as_ref()
+            .is_some_and(TaskExecutionPauseReason::is_out_of_play)
 }
 
 impl App {

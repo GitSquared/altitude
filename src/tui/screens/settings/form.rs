@@ -322,26 +322,28 @@ impl Form {
             } else {
                 ""
             }),
+            // An agent is what runs the work: a project without one is a project
+            // that cannot start, so there is no "nothing chosen" to offer.
             agent: credential_pick(
                 "agent",
                 Slot::Agent,
                 &credentials,
                 agent_credential.as_deref(),
-                "not chosen",
+                None,
             ),
             vcs: credential_pick(
                 "version control",
                 Slot::VersionControl,
                 &credentials,
                 vcs_credential.as_deref(),
-                "none",
+                Some("none"),
             ),
             tracker: credential_pick(
                 "task tracker",
                 Slot::Tracker,
                 &credentials,
                 tracker_credential.as_deref(),
-                "none",
+                Some("none"),
             ),
             identity: identity_pick(&identities, identity_at),
             host: host_pick(&host_choices, project.host.as_deref()),
@@ -372,9 +374,15 @@ impl Form {
             instructions: TextBox::new(""),
             scope: Field::with(""),
             identity_choices: Vec::new(),
-            agent: credential_pick("agent", Slot::Agent, &[], None, "not chosen"),
-            vcs: credential_pick("version control", Slot::VersionControl, &[], None, "none"),
-            tracker: credential_pick("task tracker", Slot::Tracker, &[], None, "none"),
+            agent: credential_pick("agent", Slot::Agent, &[], None, None),
+            vcs: credential_pick(
+                "version control",
+                Slot::VersionControl,
+                &[],
+                None,
+                Some("none"),
+            ),
+            tracker: credential_pick("task tracker", Slot::Tracker, &[], None, Some("none")),
             identity: identity_pick(&[], None),
             host: host_pick(&[], None),
             accepts_delegated_work: false,
@@ -660,9 +668,13 @@ fn credential_pick(
     slot: Slot,
     credentials: &[Credential],
     chosen: Option<&str>,
-    missing: &str,
+    missing: Option<&str>,
 ) -> Select<Option<String>> {
-    let mut offers = vec![Offer::new(None, missing.to_owned())];
+    // A slot that can be left empty says so; one that cannot offers only what it can be.
+    let mut offers: Vec<Offer<Option<String>>> = missing
+        .map(|label| Offer::new(None, label.to_owned()))
+        .into_iter()
+        .collect();
     offers.extend(
         credentials
             .iter()

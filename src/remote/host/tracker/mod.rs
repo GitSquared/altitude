@@ -774,7 +774,8 @@ impl RemoteTracker {
                 .await?
                 .is_none()
             {
-                self.post_sync_guidance(&event.session_id).await?;
+                self.post_sync_guidance(&event.session_id, Unprepared::NoProjects)
+                    .await?;
             }
             return Ok(());
         };
@@ -920,7 +921,8 @@ impl RemoteTracker {
         }
 
         let Some(owner) = self.owner_for_user(author) else {
-            self.post_sync_guidance(session_id).await?;
+            self.post_sync_guidance(session_id, Unprepared::UnknownOperator)
+                .await?;
             return Ok(());
         };
         let peer: EndpointId = owner
@@ -2054,21 +2056,33 @@ impl RemoteTracker {
         self.finish_report(report)
     }
 
-    async fn post_sync_guidance(&self, session_id: &str) -> Result<(), String> {
+    async fn post_sync_guidance(&self, session_id: &str, cause: Unprepared) -> Result<(), String> {
         let tracker = TrackerKind::Linear.label();
         let host = whoami::hostname().unwrap_or_else(|_| "this remote".to_owned());
-        let body = format!(
-            "**This remote isn't set up for delegated work yet.**\n\n\
-             No one has added this remote to a project in Altitude, so it has no code, no \
-             agent, and no settings to run this issue with.\n\n\
-             On your computer:\n\n\
-             1. Open Altitude, or install it if you don't have it.\n\
-             2. In Settings → Remotes, add this remote: {host}\n\
-             3. In Settings → Task tracker, sign in to {tracker}, so Altitude knows whose \
-             work this is.\n\n\
-             Altitude passes your setup to this remote in the background. Reply here once \
-             that's done, and this issue gets picked up."
-        );
+        // Two different things stop a delegation here, and naming the wrong one sends
+        // the operator to a setting that is already right.
+        let body = match cause {
+            Unprepared::NoProjects => format!(
+                "**This remote has no projects yet.**\n\n\
+                 No one has added this remote to a project in Altitude, so it has no code, \
+                 no agent, and no settings to run this issue with.\n\n\
+                 On your computer:\n\n\
+                 1. Open Altitude, or install it if you don't have it.\n\
+                 2. In Settings → Remotes, add this remote: {host}\n\
+                 3. In Settings → Task tracker, sign in to {tracker}, so Altitude knows \
+                 whose work this is.\n\n\
+                 Altitude passes your setup to this remote in the background. Reply here \
+                 once that's done, and this issue gets picked up."
+            ),
+            Unprepared::UnknownOperator => format!(
+                "**Altitude does not know whose work this is.**\n\n\
+                 This remote holds no {tracker} login from a person it could report to, so \
+                 it cannot start a task for you.\n\n\
+                 On your computer, in Settings → Task tracker, sign in to {tracker} as \
+                 yourself. The login is passed to this remote in the background; reply \
+                 here once that's done."
+            ),
+        };
         self.config
             .automation
             .create_activity(
@@ -2275,6 +2289,14 @@ async fn webhook(
         }
     }
     StatusCode::OK.into_response()
+}
+
+// Why a delegation here cannot be started. Two answers, because they point at two
+// different settings and only one of them is the operator's to fix.
+#[derive(Clone, Copy)]
+enum Unprepared {
+    NoProjects,
+    UnknownOperator,
 }
 
 enum WebhookOutcome {
