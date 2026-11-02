@@ -224,7 +224,13 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
             count => format!("{count} threads"),
         },
     };
-    header::draw(frame, header_area, "TASK", Some(&task), Some(&count));
+    header::draw(
+        frame,
+        header_area,
+        "SIGNAL THREAD",
+        Some(&task),
+        Some(&count),
+    );
     // One frame, split by a single divider: the sections are two halves of the
     // same window rather than two windows that happen to touch.
     let inner = Surface::new().draw(frame, body);
@@ -324,14 +330,42 @@ fn split_plan_and_activity(frame: &mut Frame, area: Rect, app: &mut App) {
     draw_activity(frame, activity, app);
 }
 
-fn draw_pane_title(frame: &mut Frame, area: Rect, title: &str, detail: String) {
+fn draw_pane_title(frame: &mut Frame, area: Rect, title: &str, detail: String, focused: bool) {
     frame.render_widget(
         Paragraph::new(Line::from_iter([
-            Span::styled(title.to_owned(), palette::heading()),
+            Span::styled(
+                title.to_owned(),
+                if focused {
+                    palette::accent()
+                } else {
+                    palette::heading()
+                },
+            ),
             Span::styled(detail, palette::muted()),
         ])),
         Rect { height: 1, ..area },
     );
+}
+
+// A border would have to fight the dividers the panes already share, so the focus
+// is a rail in the padding column each pane has to itself: it runs the height of
+// the pane, it cannot collide with a corner, and it is where the eye already is
+// when it is scrolling.
+fn draw_focus_rail(frame: &mut Frame, pane: Rect, body: Rect, focused: bool) {
+    if !focused {
+        return;
+    }
+    for y in body.y..body.bottom() {
+        frame.render_widget(
+            Paragraph::new(Line::styled("▌", palette::accent())),
+            Rect {
+                x: pane.x,
+                y,
+                width: 1,
+                height: 1,
+            },
+        );
+    }
 }
 
 fn pane_body(area: Rect) -> (Rect, Rect, Rect) {
@@ -357,6 +391,7 @@ fn draw_plan(frame: &mut Frame, area: Rect, app: &mut App) {
         .filter(|step| step.status == TaskPlanStatus::Completed)
         .count();
     app.signal_focus_ring.add(SignalFocus::Plan);
+    let focused = app.signal_focus == SignalFocus::Plan;
     draw_pane_title(
         frame,
         title,
@@ -366,6 +401,7 @@ fn draw_plan(frame: &mut Frame, area: Rect, app: &mut App) {
         } else {
             format!("  {done}/{}", plan.len())
         },
+        focused,
     );
     if plan.is_empty() {
         empty::draw(frame, body, "No plan yet");
@@ -410,6 +446,7 @@ fn draw_plan(frame: &mut Frame, area: Rect, app: &mut App) {
         app.signal_plan_scroll.min(app.signal_plan_scroll_max)
     };
     app.signal_targets.add(body, SignalHit::Plan);
+    draw_focus_rail(frame, area, body, focused);
     for (offset, (mark, line, tone)) in rows
         .iter()
         .skip(usize::from(scroll))
@@ -441,9 +478,11 @@ fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App) {
     let lines = app.signal_activity().cloned().unwrap_or_default();
     let (title, _, body) = pane_body(area);
     app.signal_focus_ring.add(SignalFocus::Activity);
-    draw_pane_title(frame, title, "ACTIVITY", String::new());
+    let focused = app.signal_focus == SignalFocus::Activity;
+    draw_pane_title(frame, title, "ACTIVITY", String::new(), focused);
     app.signal_activity_rows = body.height.max(1);
     app.signal_targets.add(body, SignalHit::Activity);
+    draw_focus_rail(frame, area, body, focused);
     if lines.is_empty() {
         empty::draw(frame, body, "No activity yet");
         app.signal_activity_scroll_max = 0;
