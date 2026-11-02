@@ -1557,7 +1557,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
                 IsolationStatus::InstallingRuntime => {
                     tracing::info!("Installing sandbox runtime · first startup may take a moment")
                 }
-                IsolationStatus::PreparingBaseImage => {
+                IsolationStatus::PreparingBaseImage(_) => {
                     tracing::info!("Preparing base sandbox image")
                 }
                 IsolationStatus::PreparingBasePackages => {

@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs,
     io::{self, ErrorKind},
     os::unix::fs::{PermissionsExt, symlink},
@@ -11,7 +12,7 @@ use std::{
 use microsandbox::{
     LocalBackend, Sandbox,
     sandbox::{
-        MAX_SANDBOX_LIST_LIMIT, PullPolicy,
+        MAX_SANDBOX_LIST_LIMIT, PullPolicy, PullProgress,
         exec::ExecEvent,
         fs::{FsEntryKind, FsSetAttrs, SandboxFsOps},
     },
@@ -37,9 +38,9 @@ use crate::project::Project;
 use super::{
     BaseSandboxRecipe, BaseSandboxSnapshot, CREDENTIAL_PREFIX, Command, CommandEvent,
     CommandSession, CredentialCheck, CredentialReport, CredentialSandbox, EnvironmentDescription,
-    EnvironmentProgress, EnvironmentProgressSink, FileTally, FileTransferSink, IsolationEngine,
-    IsolationError, IsolationStatus, OutputStream, ProfileRecipe, SandboxCapacity, SandboxCeiling,
-    SandboxOptions, SandboxPurpose, SetupStep, VsockRoute, WATCHER_PREFIX,
+    EnvironmentProgress, EnvironmentProgressSink, FileTally, FileTransferSink, ImagePull,
+    IsolationEngine, IsolationError, IsolationStatus, OutputStream, ProfileRecipe, SandboxCapacity,
+    SandboxCeiling, SandboxOptions, SandboxPurpose, SetupStep, VsockRoute, WATCHER_PREFIX,
     capacity::HostCapacity,
     mount_git_cache,
     sandbox::{self, REFRESH_AFTER, private_directory},
@@ -1037,16 +1038,52 @@ impl IsolationEngine for MicrosandboxIsolation {
         // here belongs to a process that is gone.
         self.remove_leftover_sandboxes().await;
 
-        status.send_replace(IsolationStatus::PreparingBaseImage);
-        let sandbox = Sandbox::builder(PREPARATION_SANDBOX)
+        status.send_replace(IsolationStatus::PreparingBaseImage(ImagePull::default()));
+        let (mut pull, creating) = Sandbox::builder(PREPARATION_SANDBOX)
             .image(BASE_IMAGE)
             .pull_policy(PullPolicy::IfMissing)
             .disable_network()
             .ephemeral(true)
             .replace()
-            .create()
-            .await
+            .create_with_pull_progress()
             .map_err(|error| IsolationError::new(error.to_string()))?;
+        // The image comes down layer by layer, concurrently, so the total is
+        // the bytes of the whole manifest rather than of the last layer seen.
+        let reporting = status.clone();
+        let reporter = tokio::spawn(async move {
+            let mut progress = ImagePull::default();
+            let mut layers: HashMap<usize, u64> = HashMap::new();
+            while let Some(event) = pull.recv().await {
+                match event {
+                    PullProgress::Resolved {
+                        total_download_bytes,
+                        ..
+                    } => progress.total_bytes = total_download_bytes.unwrap_or(0),
+                    PullProgress::LayerDownloadProgress {
+                        layer_index,
+                        downloaded_bytes,
+                        ..
+                    }
+                    | PullProgress::LayerDownloadComplete {
+                        layer_index,
+                        downloaded_bytes,
+                        ..
+                    } => {
+                        layers.insert(layer_index, downloaded_bytes);
+                        progress.downloaded_bytes = layers.values().sum();
+                    }
+                    _ => continue,
+                }
+                reporting.send_replace(IsolationStatus::PreparingBaseImage(progress));
+            }
+        });
+        let sandbox = creating
+            .await
+            .map_err(|error| IsolationError::new(error.to_string()))?
+            .map_err(|error| IsolationError::new(error.to_string()))?;
+        // The pull channel closes with the create task, so this joins the last
+        // update before the phase that follows is announced.
+        let _ = reporter.await;
         sandbox
             .stop()
             .await
