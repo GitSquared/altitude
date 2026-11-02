@@ -36,7 +36,10 @@ pub fn draw(frame: &mut Frame, area: Rect, tabs: &[Tab], selected: usize) -> Vec
     let mut x = area.x;
     for (index, tab) in tabs.iter().enumerate() {
         if index > 0 {
-            spans.push(Span::styled("│", palette::muted()));
+            // The separator is a line, not a label: it continues the rule under the
+            // tabs, so it is drawn in the rule's own colour rather than half-lit
+            // against it.
+            spans.push(Span::styled("│", surface::outline()));
             separators.push(x);
             x = x.saturating_add(1);
         }
