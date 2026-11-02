@@ -1744,49 +1744,58 @@ impl RemoteTracker {
                     .map_err(|error| error.to_string())?;
             }
             TaskHistoryEvent::AgentRunStarted { agent_run_id, .. } => {
-                if events[..index].iter().any(|(_, event)| {
-                    matches!(
-                        event,
-                        TaskHistoryEvent::OperatorSignalMessage {
-                            author: TaskOperatorSignalAuthor::Operator,
-                            ..
-                        }
-                    )
-                }) {
-                    self.config
-                        .automation
-                        .create_activity(
-                            &report.session,
-                            &stable_id(&report.task_id, agent_run_id),
-                            AgentActivityContent::Thought {
-                                body: "Got your reply. Altitude is continuing the task.".into(),
-                            },
-                        )
-                        .await
-                        .map_err(|error| error.to_string())?;
-                } else if !events[..index]
-                    .iter()
-                    .any(|(_, event)| matches!(event, TaskHistoryEvent::AgentRunStarted { .. }))
-                {
+                let previous_run = events[..index].iter().rposition(|(_, event)| {
+                    matches!(event, TaskHistoryEvent::AgentRunStarted { .. })
+                });
+                match previous_run {
                     // The session's first run, and the one activity that replaces
                     // whatever was said while the task waited: a queue notice is
                     // ephemeral, so it stays on screen until something else is said.
-                    let agent = host
-                        .session_agent(report.task_id.clone())
-                        .await
-                        .ok()
-                        .flatten();
-                    self.config
-                        .automation
-                        .create_activity(
-                            &report.session,
-                            &stable_id(&report.task_id, "picked-up"),
-                            AgentActivityContent::Thought {
-                                body: picking_up(agent.as_deref()),
-                            },
-                        )
-                        .await
-                        .map_err(|error| error.to_string())?;
+                    None => {
+                        let agent = host
+                            .session_agent(report.task_id.clone())
+                            .await
+                            .ok()
+                            .flatten();
+                        self.config
+                            .automation
+                            .create_activity(
+                                &report.session,
+                                &stable_id(&report.task_id, "picked-up"),
+                                AgentActivityContent::Thought {
+                                    body: picking_up(agent.as_deref()),
+                                },
+                            )
+                            .await
+                            .map_err(|error| error.to_string())?;
+                    }
+                    // A run answers the reply that arrived after the last one. A message
+                    // from before that has already been answered, and saying so again on
+                    // every later run repeats a line the operator has already read.
+                    Some(previous_run)
+                        if events[previous_run + 1..index].iter().any(|(_, event)| {
+                            matches!(
+                                event,
+                                TaskHistoryEvent::OperatorSignalMessage {
+                                    author: TaskOperatorSignalAuthor::Operator,
+                                    ..
+                                }
+                            )
+                        }) =>
+                    {
+                        self.config
+                            .automation
+                            .create_activity(
+                                &report.session,
+                                &stable_id(&report.task_id, agent_run_id),
+                                AgentActivityContent::Thought {
+                                    body: "Got your reply. Altitude is continuing the task.".into(),
+                                },
+                            )
+                            .await
+                            .map_err(|error| error.to_string())?;
+                    }
+                    Some(_) => {}
                 }
                 self.write_status(host, report, TrackerStatus::InProgress)
                     .await?;
