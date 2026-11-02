@@ -161,12 +161,13 @@ fn worth_retrying(refusal: &str) -> bool {
     !refusal.contains("not found") && !refusal.contains("Entity not found")
 }
 
-fn picking_up(agent: Option<&str>) -> String {
-    let name = agent
+fn picking_up(operator: Option<&str>, agent: Option<&str>) -> String {
+    let operator = operator.map(str::trim).filter(|name| !name.is_empty());
+    // Altitude names its agents in lower case, which belongs mid-sentence in the
+    // session summary and not in a sentence the operator reads.
+    let agent = agent
         .map(str::trim)
         .filter(|agent| !agent.is_empty())
-        // Altitude names its agents in lower case, which belongs mid-sentence in the
-        // session summary and not at the start of a line the operator reads.
         .map(|agent| {
             let mut characters = agent.chars();
             match characters.next() {
@@ -174,9 +175,13 @@ fn picking_up(agent: Option<&str>) -> String {
                 None => String::new(),
             }
         })
-        .filter(|agent| !agent.is_empty())
-        .unwrap_or_else(|| "Altitude".to_owned());
-    format!("{name} is picking up this task now.")
+        .filter(|agent| !agent.is_empty());
+    match (operator, agent) {
+        (Some(operator), Some(agent)) => format!("{operator}'s {agent} is picking up this task."),
+        (None, Some(agent)) => format!("{agent} is picking up this task."),
+        (Some(operator), None) => format!("{operator}'s agent is picking up this task."),
+        (None, None) => "Altitude is picking up this task.".to_owned(),
+    }
 }
 
 pub struct BoundTask {
@@ -1755,13 +1760,19 @@ impl RemoteTracker {
                             .await
                             .ok()
                             .flatten();
+                        let operator = self
+                            .config
+                            .automation
+                            .user_name(&report.tracker_user_id)
+                            .await
+                            .ok();
                         self.config
                             .automation
                             .create_activity(
                                 &report.session,
                                 &stable_id(&report.task_id, "picked-up"),
                                 AgentActivityContent::Thought {
-                                    body: picking_up(agent.as_deref()),
+                                    body: picking_up(operator.as_deref(), agent.as_deref()),
                                 },
                             )
                             .await
