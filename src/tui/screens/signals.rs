@@ -6,7 +6,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::Style,
     text::{Line, Span},
-    widgets::{Paragraph, Wrap},
+    widgets::Paragraph,
 };
 
 use crate::{
@@ -35,8 +35,7 @@ const LIST_WIDTH: u16 = 40;
 const PLAN_WIDTH: u16 = 32;
 const PLAN_PADDING: u16 = 1;
 const PLAN_COLUMN_MIN: u16 = 112;
-const ACTIVITY_WIDTH: u16 = 36;
-const ACTIVITY_ROWS: u16 = 4;
+const PANE_TITLE_ROWS: u16 = 2;
 const LIST_PADDING: u16 = 1;
 const COMPOSER_HEIGHT: u16 = 5;
 
@@ -75,6 +74,7 @@ pub enum SignalSort {
 pub enum SignalFocus {
     List,
     Detail,
+    Plan,
     Activity,
     Action(usize),
     Filter,
@@ -82,8 +82,14 @@ pub enum SignalFocus {
 }
 
 impl SignalFocus {
-    pub fn next(self, forward: bool, actions: usize) -> Self {
-        let mut ring = vec![Self::List, Self::Detail, Self::Activity];
+    pub fn next(self, forward: bool, actions: usize, shows_plan: bool) -> Self {
+        let mut ring = vec![Self::List, Self::Detail];
+        // The plan and the activity are behind a tab on a narrow screen, and a
+        // focus ring that stops on a pane nobody can see is a ring that hides keys.
+        if shows_plan {
+            ring.push(Self::Plan);
+            ring.push(Self::Activity);
+        }
         ring.extend((0..actions).map(Self::Action));
         ring.push(Self::Filter);
         ring.push(Self::Sort);
@@ -102,6 +108,7 @@ pub enum SignalHit {
     List,
     Thread(usize),
     Detail,
+    Plan,
     Activity,
     Message(usize),
     Action(usize),
@@ -274,23 +281,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         draw_plan_tabs(frame, band, app);
         surface::cover(frame, pane);
         if app.signal_plan_open {
-            // No column to stack under here, so the activity sits beside the plan.
-            let [plan, _, activity] = Layout::horizontal([
-                Constraint::Min(0),
-                Constraint::Length(1),
-                Constraint::Length(ACTIVITY_WIDTH),
-            ])
-            .areas(pane);
-            if app.signal_activity().is_some_and(|lines| !lines.is_empty())
-                && pane.width > ACTIVITY_WIDTH * 2
-            {
-                surface::vertical_divider(frame, pane, plan.right());
-                draw_plan(frame, plan, app);
-                surface::cover(frame, activity);
-                draw_activity(frame, activity, app);
-            } else {
-                draw_plan(frame, pane, app);
-            }
+            split_plan_and_activity(frame, pane, app);
         } else {
             draw_conversation(frame, pane, app);
         }
@@ -314,99 +305,23 @@ fn draw_plan_tabs(frame: &mut Frame, area: Rect, app: &App) {
     tabs::draw(frame, area, &tabs, selected);
 }
 
-fn draw_plan(frame: &mut Frame, area: Rect, app: &App) {
-    let text = Rect {
-        x: area.x.saturating_add(PLAN_PADDING),
-        width: area.width.saturating_sub(PLAN_PADDING * 2),
-        ..area
-    };
-    // The plan shares the conversation's header band, so its steps and its empty
-    // line sit on the same rows as the conversation beside it.
-    let [title, body] = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(text);
-    let plan = app.signal_plan();
-    let done = plan
-        .iter()
-        .filter(|step| step.status == TaskPlanStatus::Completed)
-        .count();
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("PLAN", palette::heading()),
-            Span::styled(
-                if plan.is_empty() {
-                    String::new()
-                } else {
-                    format!("  {done}/{}", plan.len())
-                },
-                palette::muted(),
-            ),
-        ])),
-        title,
-    );
-    if plan.is_empty() {
-        empty::draw(frame, body, "No plan yet");
-        return;
-    }
-    // The icon gets its own column so a wrapped step stays aligned under itself
-    // rather than under the mark. Completed and canceled steps are the past, so
-    // they are the quiet ones; what is still ahead stays at full strength.
-    let icon_width = 2u16;
-    let text_width = body.width.saturating_sub(icon_width).max(1);
-    let mut y = body.y;
-    for step in &plan {
-        let (symbol, tone) = match step.status {
-            TaskPlanStatus::Pending => ('○', palette::primary()),
-            TaskPlanStatus::InProgress => ('◐', palette::heading()),
-            TaskPlanStatus::Completed => ('✓', palette::muted()),
-            TaskPlanStatus::Canceled => ('✕', palette::muted()),
-        };
-        let content = Paragraph::new(step.content.clone()).wrap(Wrap { trim: true });
-        let height = u16::try_from(content.line_count(text_width))
-            .unwrap_or(u16::MAX)
-            .max(1);
-        if y.saturating_add(height) > body.bottom() {
-            break;
-        }
-        frame.render_widget(
-            Paragraph::new(Line::styled(format!("{symbol} "), tone)),
-            Rect {
-                y,
-                height: 1,
-                ..body
-            },
-        );
-        frame.render_widget(
-            content.style(tone),
-            Rect {
-                x: body.x.saturating_add(icon_width),
-                y,
-                width: text_width,
-                height,
-            },
-        );
-        y = y.saturating_add(height);
-    }
-}
-
 fn split_plan_and_activity(frame: &mut Frame, area: Rect, app: &mut App) {
     let has_activity = app.signal_activity().is_some_and(|lines| !lines.is_empty());
-    // A plan is a list that can scroll; a live line cannot be read if it is cut
-    // short, so it keeps its rows and the plan keeps whatever is left above it.
-    let rows = match area.height {
-        _ if !has_activity => 0,
-        height if height >= 10 => ACTIVITY_ROWS,
-        height if height >= 6 => 3,
-        _ => 0,
-    };
-    if rows == 0 {
+    // Two panes of the same window, so they share it: the plan is a list that
+    // scrolls and the stream is a list that scrolls, and neither owes the other its
+    // room. Below this there is not enough height for two titles and a line each.
+    if !has_activity || area.height < PANE_TITLE_ROWS * 2 + 4 {
         app.signal_activity_scroll_max = 0;
         app.signal_activity_scroll = u16::MAX;
         draw_plan(frame, area, app);
         return;
     }
+    let usable = area.height.saturating_sub(1);
+    let plan_height = usable / 2;
     let [plan, divider, activity] = Layout::vertical([
-        Constraint::Min(0),
+        Constraint::Length(plan_height),
         Constraint::Length(1),
-        Constraint::Length(rows),
+        Constraint::Min(0),
     ])
     .areas(area);
     surface::horizontal_divider(frame, area, divider.y);
@@ -415,35 +330,144 @@ fn split_plan_and_activity(frame: &mut Frame, area: Rect, app: &mut App) {
     draw_activity(frame, activity, app);
 }
 
+fn draw_pane_title(frame: &mut Frame, area: Rect, title: &str, detail: String) {
+    frame.render_widget(
+        Paragraph::new(Line::from_iter([
+            Span::styled(title.to_owned(), palette::heading()),
+            Span::styled(detail, palette::muted()),
+        ])),
+        Rect { height: 1, ..area },
+    );
+}
+
+fn pane_body(area: Rect) -> (Rect, Rect, Rect) {
+    let text = Rect {
+        x: area.x.saturating_add(PLAN_PADDING),
+        width: area.width.saturating_sub(PLAN_PADDING * 2),
+        ..area
+    };
+    let [title, spacer, body] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(text);
+    (title, spacer, body)
+}
+
+fn draw_plan(frame: &mut Frame, area: Rect, app: &mut App) {
+    let (title, _, body) = pane_body(area);
+    let plan = app.signal_plan();
+    let done = plan
+        .iter()
+        .filter(|step| step.status == TaskPlanStatus::Completed)
+        .count();
+    draw_pane_title(
+        frame,
+        title,
+        "PLAN",
+        if plan.is_empty() {
+            String::new()
+        } else {
+            format!("  {done}/{}", plan.len())
+        },
+    );
+    if plan.is_empty() {
+        empty::draw(frame, body, "No plan yet");
+        app.signal_plan_scroll_max = 0;
+        app.signal_plan_scroll = u16::MAX;
+        return;
+    }
+    // The icon gets its own column so a wrapped step stays aligned under itself
+    // rather than under the mark. Completed and canceled steps are the past, so
+    // they are the quiet ones; what is still ahead stays at full strength.
+    let icon_width = 2u16;
+    let text_width = body.width.saturating_sub(icon_width).max(1);
+    let mut rows: Vec<(String, String, Style)> = Vec::new();
+    for step in &plan {
+        let (symbol, tone) = match step.status {
+            TaskPlanStatus::Pending => ('○', palette::primary()),
+            TaskPlanStatus::InProgress => ('◐', palette::heading()),
+            TaskPlanStatus::Completed => ('✓', palette::muted()),
+            TaskPlanStatus::Canceled => ('✕', palette::muted()),
+        };
+        for (index, line) in wrap_lines(&step.content, text_width)
+            .into_iter()
+            .enumerate()
+        {
+            rows.push((
+                if index == 0 {
+                    format!("{symbol} ")
+                } else {
+                    "  ".to_owned()
+                },
+                line,
+                tone,
+            ));
+        }
+    }
+    app.signal_plan_rows = body.height.max(1);
+    app.signal_plan_scroll_max =
+        u16::try_from(rows.len().saturating_sub(usize::from(body.height))).unwrap_or(0);
+    let scroll = if app.signal_plan_scroll == u16::MAX {
+        app.signal_plan_scroll_max
+    } else {
+        app.signal_plan_scroll.min(app.signal_plan_scroll_max)
+    };
+    app.signal_targets.add(body, SignalHit::Plan);
+    for (offset, (mark, line, tone)) in rows
+        .iter()
+        .skip(usize::from(scroll))
+        .take(usize::from(body.height))
+        .enumerate()
+    {
+        let y = body.y.saturating_add(offset as u16);
+        frame.render_widget(
+            Paragraph::new(Line::styled(mark.clone(), *tone)),
+            Rect {
+                y,
+                height: 1,
+                ..body
+            },
+        );
+        frame.render_widget(
+            Paragraph::new(Line::styled(line.clone(), *tone)),
+            Rect {
+                x: body.x.saturating_add(icon_width),
+                y,
+                width: text_width,
+                height: 1,
+            },
+        );
+    }
+}
+
 fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App) {
     let Some(lines) = app.signal_activity().cloned() else {
         return;
     };
-    let text = Rect {
-        x: area.x.saturating_add(PLAN_PADDING),
-        width: area.width.saturating_sub(PLAN_PADDING * 2).max(1),
-        ..area
-    };
-    app.signal_activity_rows = text.height.max(1);
+    let (title, _, body) = pane_body(area);
+    draw_pane_title(frame, title, "ACTIVITY", String::new());
+    app.signal_activity_rows = body.height.max(1);
     let rows: Vec<String> = lines
         .iter()
-        .flat_map(|line| wrap_lines(line, text.width))
+        .flat_map(|line| wrap_lines(line, body.width))
         .collect();
     app.signal_activity_scroll_max =
-        u16::try_from(rows.len().saturating_sub(usize::from(text.height))).unwrap_or(0);
+        u16::try_from(rows.len().saturating_sub(usize::from(body.height))).unwrap_or(0);
     let scroll = if app.signal_activity_scroll == u16::MAX {
         app.signal_activity_scroll_max
     } else {
         app.signal_activity_scroll
             .min(app.signal_activity_scroll_max)
     };
-    app.signal_targets.add(text, SignalHit::Activity);
+    app.signal_targets.add(body, SignalHit::Activity);
     let newest = rows.len().saturating_sub(1);
     let first = usize::from(scroll);
     for (offset, row) in rows
         .iter()
         .skip(first)
-        .take(usize::from(text.height))
+        .take(usize::from(body.height))
         .enumerate()
     {
         // The newest line is the one being read; everything above it is there to be
@@ -456,22 +480,21 @@ fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App) {
         frame.render_widget(
             Paragraph::new(row.clone()).style(style),
             Rect {
-                y: text.y.saturating_add(offset as u16),
+                y: body.y.saturating_add(offset as u16),
                 height: 1,
-                ..text
+                ..body
             },
         );
     }
 }
 
 fn wrap_lines(text: &str, width: u16) -> Vec<String> {
+    let width = usize::from(width.max(1));
     let mut lines = Vec::new();
     for line in text.lines() {
         let mut current = String::new();
         for word in line.split_whitespace() {
-            if !current.is_empty()
-                && current.chars().count() + 1 + word.chars().count() > usize::from(width)
-            {
+            if !current.is_empty() && current.chars().count() + 1 + word.chars().count() > width {
                 lines.push(mem::take(&mut current));
             }
             if !current.is_empty() {
