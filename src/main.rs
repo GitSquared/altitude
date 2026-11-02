@@ -182,6 +182,13 @@ async fn client() -> Result<(), Box<dyn Error>> {
             link.clone(),
             event_loop.clone(),
         )));
+        // A borrowed task is here for a desk, and a desk that is not open holds
+        // nothing: quitting mid-take-over or dying with one open leaves the task with
+        // nobody to work on it, so it goes back to the machine it came from rather
+        // than sitting here as work this machine is pretending to do.
+        for task in task_rows.iter().filter(|task| task.facts.is_borrowed()) {
+            event_loop.hand_back(task.clone());
+        }
         // Finish any outgoing transfer whose final acknowledgement was lost to a
         // crash. The source already committed, so this retries only the import
         // commit; a task still stopped at the source is left where the operator can

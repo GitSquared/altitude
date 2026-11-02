@@ -144,8 +144,12 @@ where
                 .service
                 .record(&task.id, &[TaskHistoryEvent::TaskHandedBack])
                 .await;
-            if let Err(error) = home.send_home(task).await {
-                tracing::warn!(%error, "could not hand a task back to its machine");
+            if let Err(error) = home.send_home(task.clone()).await {
+                tracing::warn!(task = %task.id, %error, "could not hand a task back to its machine");
+                // The task is here with no desk holding it, which is a state the
+                // operator has to be told about rather than left to discover: taking
+                // it over again is the way to try the move once more.
+                let _ = loop_.service.fail(&task, error).await;
             }
         });
     }
@@ -1016,22 +1020,36 @@ where
         &self,
         task_id: &str,
         transfer_id: &str,
-        from: &str,
     ) -> Result<(), TaskServiceError> {
-        let mut arrival = vec![TaskHistoryEvent::TransferLanded {
-            transfer_id: transfer_id.to_owned(),
-            execution_status: TaskExecutionStatus::Paused,
-            execution_pause_reason: TaskExecutionPauseReason::AwaitingOperator,
-        }];
-        // Kept so the task can be handed back where it came from when the operator is
-        // done with it. A landing resumed from a staged record does not know the
-        // address it was dialled by, and nothing is invented for it.
-        if !from.is_empty() {
-            arrival.push(TaskHistoryEvent::TaskArrivedFrom {
-                address: from.to_owned(),
-            });
-        }
-        self.service.record(task_id, &arrival).await?;
+        self.service
+            .record(
+                task_id,
+                &[TaskHistoryEvent::TransferLanded {
+                    transfer_id: transfer_id.to_owned(),
+                    execution_status: TaskExecutionStatus::Paused,
+                    execution_pause_reason: TaskExecutionPauseReason::AwaitingOperator,
+                }],
+            )
+            .await?;
+        Ok(())
+    }
+
+    // Only a take over makes a machine the desk a task is being worked at, and only
+    // a desk hands the task back. A task moved to the machine its project runs on has
+    // arrived home, and saying it came from somewhere would make it a second desk.
+    pub async fn note_arrived_from(
+        &self,
+        task_id: &str,
+        address: &str,
+    ) -> Result<(), TaskServiceError> {
+        self.service
+            .record(
+                task_id,
+                &[TaskHistoryEvent::TaskArrivedFrom {
+                    address: address.to_owned(),
+                }],
+            )
+            .await?;
         Ok(())
     }
 

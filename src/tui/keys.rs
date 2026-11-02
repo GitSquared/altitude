@@ -69,8 +69,7 @@ pub fn help_sections() -> Vec<HelpSection> {
                 ),
                 (
                     "p",
-                    "Send the selected task to the machine its project runs on — or hand it \
-                     back, if that is where it came from",
+                    "Send the selected task to the machine its project runs on",
                 ),
                 ("b", "Open its linked issue in your browser"),
                 (

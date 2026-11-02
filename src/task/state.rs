@@ -292,6 +292,9 @@ pub struct TaskFacts {
     // None means no delegation asked for this task, never one that is unknown: it is
     // what keeps local work out of every question about delegations.
     pub tracker_delegation: Option<String>,
+    // The machine this task was carried from to be worked at a desk here. Its work
+    // belongs there: it runs only while a person holds it, and it goes back when
+    // they stop.
     pub arrived_from: Option<String>,
     #[sqlx(default)]
     pub tracker_status: Option<TrackerStatus>,
@@ -300,6 +303,14 @@ pub struct TaskFacts {
     #[sqlx(json(nullable))]
     pub deferred_review: Option<DeferredReview>,
     pub review_wake_reason: Option<String>,
+}
+
+impl TaskFacts {
+    // A borrowed task is here for a desk, not for the queue: nothing carried to this
+    // machine is this machine's to schedule.
+    pub fn is_borrowed(&self) -> bool {
+        self.arrived_from.is_some()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

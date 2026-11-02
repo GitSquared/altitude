@@ -183,10 +183,11 @@ impl Error for TaskServiceError {}
 pub(crate) use queue::tasks_ahead_in_queue;
 
 pub(crate) fn wants_a_slot(task: &Task) -> bool {
-    matches!(
-        task.facts.execution_status,
-        TaskExecutionStatus::Pending | TaskExecutionStatus::Running
-    )
+    !task.facts.is_borrowed()
+        && matches!(
+            task.facts.execution_status,
+            TaskExecutionStatus::Pending | TaskExecutionStatus::Running
+        )
 }
 
 fn should_resume(task: &Task) -> bool {

@@ -7,6 +7,9 @@ pub fn tasks_waiting_to_start(tasks: &[Task]) -> Vec<&Task> {
         // A task with a held review is the scheduler's: it is not waiting for
         // room, it is waiting for a person or a check.
         .filter(|task| task.facts.deferred_review.is_none())
+        // A borrowed task is worked at a desk or not at all, so it never enters a
+        // queue: scheduling it would be this machine running someone else's work.
+        .filter(|task| !task.facts.is_borrowed())
         .collect();
     waiting.reverse();
     waiting

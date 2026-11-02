@@ -272,7 +272,13 @@ where
         .await
         .map_err(|e| e.to_string())?;
     event_loop
-        .finish_transfer(&task.id, transfer_id, address)
+        .finish_transfer(&task.id, transfer_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    // This machine is now the desk the task is worked at, and the address is what
+    // sends it home when the person at that desk stops.
+    event_loop
+        .note_arrived_from(&task.id, address)
         .await
         .map_err(|e| e.to_string())
 }

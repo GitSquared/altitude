@@ -935,17 +935,18 @@ impl App {
         self.remote_synced.contains_key(address)
     }
 
-    // The hint asks what the key asks, and names what the key will do: a task that
-    // came from that machine is handed back to it, and anything else is sent there.
-    fn selected_move_label(&self) -> Option<&'static str> {
-        let task = self.selected_task()?;
-        let address = self.project_machine(task.project()?).ok().flatten()?;
-        let arrived_from = task.facts.arrived_from.as_deref();
-        Some(if arrived_from == Some(address.as_str()) {
-            "hand back"
-        } else {
-            "send to remote"
-        })
+    // A task this machine is holding for someone is not the operator's to schedule
+    // and not theirs to move: it goes back where it came from when the desk stops,
+    // which is not a key.
+    fn can_send_selected(&self) -> bool {
+        let Some(task) = self
+            .selected_task()
+            .filter(|task| !task.facts.is_borrowed())
+        else {
+            return false;
+        };
+        task.project()
+            .is_some_and(|project| matches!(self.project_machine(project), Ok(Some(_))))
     }
 
     fn remotes(&self) -> Vec<String> {
@@ -1378,8 +1379,8 @@ impl App {
                         // showing only when that is a machine which can take it. A
                         // project that runs here has nothing to offer, and the key
                         // would ask a question with one possible answer.
-                        if let Some(label) = self.selected_move_label() {
-                            hints.push(Hint::new("p", label));
+                        if self.can_send_selected() {
+                            hints.push(Hint::new("p", "send to remote"));
                         }
                     }
                     if self
@@ -5330,6 +5331,20 @@ impl App {
                 let Some(task) = self.selected_task() else {
                     return Ok(false);
                 };
+                if task.facts.is_borrowed() {
+                    // The way back is leaving the take over, not a key: this task is
+                    // held here, and holding it is the only reason it is here.
+                    let from = task
+                        .facts
+                        .arrived_from
+                        .as_deref()
+                        .map(|address| self.remote_name(address))
+                        .unwrap_or_default();
+                    self.say(format!(
+                        "This task is held here from {from} until the take over ends; it goes back then"
+                    ));
+                    return Ok(false);
+                }
                 if self.transfer.is_some() {
                     self.say("A task is already on its way; let that finish first");
                     return Ok(false);
@@ -5361,10 +5376,8 @@ impl App {
                 let title = task.title().to_owned();
                 let project_name = project.name.clone();
                 let agent = task.agent_kind;
-                let is_handing_back = task.facts.arrived_from.is_some();
                 self.foreground = Foreground::SendTask(Box::new(SendTask::new(
                     task.id,
-                    is_handing_back,
                     title,
                     project_name,
                     agent,
