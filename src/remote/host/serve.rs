@@ -531,7 +531,20 @@ impl TaskHost for OwnTasks {
         transfer_id: String,
     ) -> BoxFuture<Result<String, String>> {
         let incoming = self.incoming.clone();
-        Box::pin(async move { incoming.stage(peer, &transfer_id).await })
+        let tasks = Arc::clone(&self.tasks);
+        let watchers = Arc::clone(&self.watchers);
+        Box::pin(async move {
+            let task_id = incoming.stage(peer, &transfer_id).await?;
+            // A landing is a change like any other, and the machine the task left is
+            // watching: without this the task seems to vanish until something asks
+            // again, which is the one thing a person checking on it will not do.
+            if let Ok(all) = tasks.list().await
+                && let Some(task) = all.iter().find(|task| task.id == task_id)
+            {
+                watchers.publish(task);
+            }
+            Ok(task_id)
+        })
     }
 
     fn commit_import(
