@@ -527,22 +527,30 @@ pub(super) fn remote_connector(
     let (reach, word, note, action) = match status {
         RemoteStatus::Reached if needs_config => (
             Reach::Asking,
-            "synchronizing…",
+            "sending setup…",
             // What is actually sent: the projects that run on it, and the logins
             // those projects use. Nothing else of this machine's goes.
             Some("Sending the projects that run there, and the logins they use.".to_owned()),
+            None,
+        ),
+        // It is preparing itself. Nothing here is being sent anywhere, which is the
+        // difference worth a word of its own.
+        RemoteStatus::Preparing => (
+            Reach::Asking,
+            "preparing…",
+            Some(
+                "It is building what it needs to run a task. A first build installs the \
+                 project's tools, so it takes a while and is only done once."
+                    .to_owned(),
+            ),
             None,
         ),
         RemoteStatus::Reached => (Reach::On, "synced", None, None),
         RemoteStatus::Asking => (Reach::Asking, "connecting…", None, None),
         RemoteStatus::Syncing => (
             Reach::Asking,
-            "synchronizing…",
-            Some(
-                "It is building what it needs to run a task. A first build installs the \
-                 project's tools, so it takes a while and is only done once."
-                    .to_owned(),
-            ),
+            "sending setup…",
+            Some("Sending the projects that run there, and the logins they use.".to_owned()),
             None,
         ),
         RemoteStatus::Changed => (

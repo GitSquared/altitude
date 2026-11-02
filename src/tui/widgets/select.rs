@@ -89,11 +89,6 @@ impl<T> Select<T> {
         }
     }
 
-    pub fn without_search(mut self) -> Self {
-        self.search_from = usize::MAX;
-        self
-    }
-
     pub fn chosen_offer(&self) -> Option<&Offer<T>> {
         self.offers.get(self.chosen)
     }

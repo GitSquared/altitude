@@ -23,6 +23,11 @@ use ledger::{
 pub use logins::{Login, claim_account, logins, logins_of, yield_account};
 use webhook::{parse_app_notification, parse_issue_event};
 
+// How old a delegation may be and still be picked up by a sweep. Two days is long
+// enough to cover a machine that was off for a weekend and short enough that an
+// issue delegated weeks ago stays a record rather than becoming work again.
+const STALE_DELEGATION_MS: i64 = 48 * 60 * 60 * 1000;
+
 use axum::{
     Router,
     body::Bytes,
@@ -399,6 +404,18 @@ impl RemoteTracker {
                     .iter()
                     .any(|session| self.report_for_session(session).is_some())
             {
+                continue;
+            }
+            // A delegation is news while it is new. One nobody picked up when it was
+            // made is not quietly started days later because a machine restarted.
+            if delegated
+                .delegated_at_ms
+                .is_some_and(|made| now_ms() - made > STALE_DELEGATION_MS)
+            {
+                tracing::info!(
+                    issue = %reference.identifier,
+                    "a delegation older than the sweep's patience is left alone"
+                );
                 continue;
             }
             // Which work this issue has is a question the tasks answer. This
@@ -1220,16 +1237,6 @@ impl RemoteTracker {
                 TaskExecutionPauseReason::TrackerEnded,
             )
             .await?;
-        }
-        // An issue that keeps pointing at this machine is one this machine adopts
-        // again on its next start, which is how finished work comes back to life.
-        if let Err(error) = self
-            .config
-            .automation
-            .release_issue(&self.issue_reference(&report.issue_id))
-            .await
-        {
-            tracing::warn!(issue = %report.issue_id, %error, "could not release an ended task's issue");
         }
         if let Err(error) = self
             .config
@@ -2054,17 +2061,6 @@ impl RemoteTracker {
         if !self.is_settled(&report.issue_id) {
             self.write_status(host, report, TrackerStatus::Done).await?;
             self.settle(&report.issue_id)?;
-        }
-        // The work is accepted, so the issue stops pointing at this machine: an
-        // issue left delegated to an app that has finished is one the app will
-        // adopt all over again.
-        if let Err(error) = self
-            .config
-            .automation
-            .release_issue(&self.issue_reference(&report.issue_id))
-            .await
-        {
-            tracing::warn!(issue = %report.issue_id, %error, "could not release an accepted task's issue");
         }
         // The activity is what the session shows, not the issue's state: a failure
         // to say it must not hold the cursor on an ending that has been written.

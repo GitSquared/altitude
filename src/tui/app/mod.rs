@@ -152,6 +152,10 @@ pub(in crate::tui) enum RemoteStatus {
     Unknown,
     Asking,
     Reached,
+    // It is building what it needs to run a task here. Nothing of this machine's is
+    // in flight, which is what "syncing" used to say as well.
+    Preparing,
+    // This machine is sending it the projects that run there, and their logins.
     Syncing,
     Changed,
     Incompatible { local: String, remote: String },
@@ -160,7 +164,7 @@ pub(in crate::tui) enum RemoteStatus {
 
 impl RemoteStatus {
     pub(in crate::tui) fn is_in_progress(&self) -> bool {
-        matches!(self, Self::Asking | Self::Syncing)
+        matches!(self, Self::Asking | Self::Preparing | Self::Syncing)
     }
 }
 
@@ -648,8 +652,7 @@ impl App {
                     Offer::new(SignalFilter::Resolved, "Resolved"),
                 ],
                 0,
-            )
-            .without_search(),
+            ),
             signal_sort: Select::new(
                 "Sort",
                 vec![

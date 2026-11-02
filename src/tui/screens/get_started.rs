@@ -203,8 +203,7 @@ impl GetStarted {
                     .map(|kind| Offer::new(kind, kind.to_string()))
                     .collect(),
                 chosen,
-            )
-            .without_search(),
+            ),
             vcs: Select::new(
                 "version control",
                 VcsProviderKind::ALL
@@ -213,8 +212,7 @@ impl GetStarted {
                     .map(|kind| Offer::new(kind, kind.label()))
                     .collect(),
                 0,
-            )
-            .without_search(),
+            ),
             tracker: Select::new(
                 "task tracker",
                 TrackerKind::ALL
@@ -223,8 +221,7 @@ impl GetStarted {
                     .map(|kind| Offer::new(kind, kind.label()))
                     .collect(),
                 0,
-            )
-            .without_search(),
+            ),
             repository: repository_select(cached_repositories, repository),
         }
     }

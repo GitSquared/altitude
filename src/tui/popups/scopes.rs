@@ -33,7 +33,7 @@ pub enum Key {
 
 impl Scopes {
     pub fn new() -> Self {
-        let mut select = Select::new("team", Vec::new(), 0).without_search();
+        let mut select = Select::new("team", Vec::new(), 0);
         select.open();
         Self {
             select,

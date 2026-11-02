@@ -200,7 +200,7 @@ impl LinearAutomation {
             // is answering in a thread the operator has moved on from. By creation
             // and not by the last word in it: a session nobody has written into yet
             // is exactly what a delegation that has not been picked up looks like.
-            let session = node
+            let newest = node
                 .pointer("/agentSessions/nodes")
                 .and_then(Value::as_array)
                 .and_then(|sessions| {
@@ -211,13 +211,23 @@ impl LinearAutomation {
                             .unwrap_or_default()
                             .to_owned()
                     })
-                })
+                });
+            let session = newest
                 .and_then(|session| session.get("id"))
                 .and_then(Value::as_str)
                 .map(str::to_owned);
+            let delegated_at_ms = newest
+                .and_then(|session| session.get("createdAt"))
+                .and_then(Value::as_str)
+                .and_then(|created| {
+                    chrono::DateTime::parse_from_rfc3339(created)
+                        .ok()
+                        .map(|at| at.timestamp_millis())
+                });
             issues.push(DelegatedIssue {
                 reference: issue.reference,
                 session,
+                delegated_at_ms,
             });
         }
         Ok(issues)
@@ -805,6 +815,10 @@ impl LinearAutomation {
 pub struct DelegatedIssue {
     pub reference: IssueReference,
     pub session: Option<String>,
+    // When the operator made the delegation: how old the newest session is. A
+    // delegation nobody picked up while it was news is not picked up on a boot
+    // sweep days later.
+    pub delegated_at_ms: Option<i64>,
 }
 
 pub struct IssueDelegation {

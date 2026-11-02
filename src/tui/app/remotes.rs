@@ -50,6 +50,7 @@ impl App {
                     (format!("{name} (needs config)"), false)
                 }
                 Some(RemoteStatus::Reached) => (name, true),
+                Some(RemoteStatus::Preparing) => (format!("{name} (preparing)"), false),
                 Some(RemoteStatus::Syncing) => (format!("{name} (syncing)"), false),
                 Some(RemoteStatus::Asking) => (format!("{name} (asking)"), false),
                 Some(RemoteStatus::Changed) => (format!("{name} (identity changed)"), false),
@@ -224,7 +225,7 @@ impl App {
                     } else {
                         self.note_remote_trackers(&address, &announcement);
                         let status = match announcement.state {
-                            RemoteState::Preparing => RemoteStatus::Syncing,
+                            RemoteState::Preparing => RemoteStatus::Preparing,
                             RemoteState::Ready => RemoteStatus::Reached,
                         };
                         self.remote_status.insert(address, status);
