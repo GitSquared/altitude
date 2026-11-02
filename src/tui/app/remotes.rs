@@ -50,7 +50,7 @@ impl App {
                     (format!("{name} (needs config)"), false)
                 }
                 Some(RemoteStatus::Reached) => (name, true),
-                Some(RemoteStatus::Preparing) => (format!("{name} (preparing)"), false),
+                Some(RemoteStatus::Preparing) => (format!("{name} (starting up)"), false),
                 Some(RemoteStatus::Syncing) => (format!("{name} (syncing)"), false),
                 Some(RemoteStatus::Asking) => (format!("{name} (asking)"), false),
                 Some(RemoteStatus::Changed) => (format!("{name} (identity changed)"), false),

@@ -533,11 +533,12 @@ pub(super) fn remote_connector(
             Some("Sending the projects that run there, and the logins they use.".to_owned()),
             None,
         ),
-        // It is preparing itself. Nothing here is being sent anywhere, which is the
-        // difference worth a word of its own.
+        // It is starting itself up: installing what it needs and building a base image
+        // before it can run anything. Nothing here is being sent anywhere, which is
+        // the difference this word exists for.
         RemoteStatus::Preparing => (
             Reach::Asking,
-            "preparing…",
+            "starting up…",
             Some(
                 "It is building what it needs to run a task. A first build installs the \
                  project's tools, so it takes a while and is only done once."
