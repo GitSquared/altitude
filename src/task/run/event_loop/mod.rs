@@ -173,67 +173,6 @@ where
         self.service.task(task_id).await
     }
 
-    pub async fn update_intent(
-        &self,
-        task_id: &str,
-        instruction: String,
-    ) -> Result<(), TaskServiceError> {
-        let task = self
-            .list()
-            .await?
-            .into_iter()
-            .find(|task| task.id == task_id)
-            .ok_or(TaskServiceError::Task(TaskError::OperationRejected(
-                "this task is no longer active",
-            )))?;
-        if task.facts.accepted {
-            return Err(TaskServiceError::Task(TaskError::OperationRejected(
-                "this task has already been accepted",
-            )));
-        }
-        self.suspend(task, TaskExecutionPauseReason::ApplicationShutdown)
-            .await?;
-        let task = self
-            .list()
-            .await?
-            .into_iter()
-            .find(|task| task.id == task_id)
-            .ok_or(TaskServiceError::Task(TaskError::OperationRejected(
-                "this task is no longer active",
-            )))?;
-        self.service
-            .record(
-                task_id,
-                &[TaskHistoryEvent::IntentExpressed {
-                    intent: format!(
-                        "{}\n\nThe operator added these instructions:\n{}",
-                        task.facts.intent, instruction
-                    ),
-                    project: task
-                        .project()
-                        .cloned()
-                        .ok_or(TaskServiceError::Task(TaskError::MissingProject))?,
-                    identity_id: task
-                        .facts
-                        .operator_id
-                        .clone()
-                        .ok_or(TaskServiceError::Task(TaskError::OperationRejected(
-                            "this task has no operator",
-                        )))?,
-                    identity_label: task.facts.operator_label.clone().unwrap_or_default(),
-                    agent_conversation_id: task.facts.agent_conversation_id.clone(),
-                    execution_status: TaskExecutionStatus::Pending,
-                    execution_mode: TaskExecutionMode::Autopilot,
-                    operator_attention_level: task.facts.operator_attention_level,
-                    sandbox_available: task.facts.sandbox_available,
-                    snapshot_available: task.facts.snapshot_available,
-                }],
-            )
-            .await?;
-        self.admit();
-        Ok(())
-    }
-
     pub async fn signal_threads(
         &self,
         task_id: &str,

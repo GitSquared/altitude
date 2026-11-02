@@ -991,11 +991,16 @@ impl tracker::Host for OwnTasks {
         })
     }
 
-    fn instruct(&self, task_id: String, instruction: String) -> tracker::HostFuture<'_, ()> {
+    // The same thing the interface does with a message typed into a task: it is
+    // recorded as an operator input and the agent reads it on its next turn. What it
+    // must not do is stop the run to rewrite the intent, which throws away the
+    // sandbox it was working in.
+    fn steer(&self, task_id: String, message: String) -> tracker::HostFuture<'_, ()> {
         Box::pin(async move {
             self.tasks
-                .update_intent(&task_id, instruction)
+                .express_input(&task_id, message)
                 .await
+                .map(|_| ())
                 .map_err(|error| error.to_string())
         })
     }

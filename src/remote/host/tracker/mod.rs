@@ -108,7 +108,7 @@ pub trait Host: Send + Sync + 'static {
     fn signal_threads(&self, task_id: String) -> HostFuture<'_, Vec<TaskOperatorSignalThread>>;
     fn reopen_signal(&self, task_id: String, signal_id: String) -> HostFuture<'_, ()>;
     fn events(&self, task_id: String) -> HostFuture<'_, Vec<(i64, TaskHistoryEvent)>>;
-    fn instruct(&self, task_id: String, instruction: String) -> HostFuture<'_, ()>;
+    fn steer(&self, task_id: String, message: String) -> HostFuture<'_, ()>;
     fn reply(&self, task_id: String, signal_id: String, answer: String) -> HostFuture<'_, ()>;
     fn accept(&self, task_id: String, signal_id: String) -> HostFuture<'_, ()>;
     fn is_kept(&self, task_id: String) -> HostFuture<'_, bool>;
@@ -862,7 +862,7 @@ impl RemoteTracker {
             if author == report.tracker_user_id {
                 let body = event.prompt_body.clone().unwrap_or_default();
                 if !body.trim().is_empty() {
-                    host.instruct(
+                    host.steer(
                         report.task_id,
                         format!(
                             "A mention from the task's operator:\n\n{body}\n\n\
@@ -1136,9 +1136,7 @@ impl RemoteTracker {
             .copied()
             .find(|signal| signal.kind == TaskOperatorSignalKind::InReview);
         let Some(signal) = question.or(review) else {
-            return host
-                .instruct(report.task_id.clone(), answer.to_owned())
-                .await;
+            return host.steer(report.task_id.clone(), answer.to_owned()).await;
         };
         host.reply(report.task_id.clone(), signal.id.clone(), answer.to_owned())
             .await
@@ -1386,7 +1384,7 @@ impl RemoteTracker {
                     "A comment from {author} on the task's {source}:\n\n{body}\n\n\
                      This comment was addressed to you. Continue the task with it."
                 );
-                host.instruct(report.task_id, instruction).await
+                host.steer(report.task_id, instruction).await
             }
             Admission::Redirect => {
                 self.react_eyes(&event.comment_id).await;
