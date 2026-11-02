@@ -299,11 +299,11 @@ fn split_plan_and_activity(frame: &mut Frame, area: Rect, app: &mut App) {
     // The column covers what is behind it before anything is written into it: the
     // panes inside it are text, and text does not clear the terrain it lands on.
     surface::cover(frame, area);
-    let has_activity = app.signal_activity().is_some_and(|lines| !lines.is_empty());
     // Two panes of the same window, so they share it: the plan is a list that
     // scrolls and the stream is a list that scrolls, and neither owes the other its
-    // room. Below this there is not enough height for two titles and a line each.
-    if !has_activity || area.height < PANE_TITLE_ROWS * 2 + 4 {
+    // room. Below this there is not enough height for two titles and a line each,
+    // which is the one case where the plan has the column to itself.
+    if area.height < PANE_TITLE_ROWS * 2 + 4 {
         app.signal_activity_scroll_max = 0;
         app.signal_activity_scroll = u16::MAX;
         draw_plan(frame, area, app);
@@ -437,13 +437,18 @@ fn draw_plan(frame: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App) {
-    let Some(lines) = app.signal_activity().cloned() else {
-        return;
-    };
+    let lines = app.signal_activity().cloned().unwrap_or_default();
     let (title, _, body) = pane_body(area);
     app.signal_focus_ring.add(SignalFocus::Activity);
     draw_pane_title(frame, title, "ACTIVITY", String::new());
     app.signal_activity_rows = body.height.max(1);
+    app.signal_targets.add(body, SignalHit::Activity);
+    if lines.is_empty() {
+        empty::draw(frame, body, "No activity yet");
+        app.signal_activity_scroll_max = 0;
+        app.signal_activity_scroll = u16::MAX;
+        return;
+    }
     let rows: Vec<String> = lines
         .iter()
         .flat_map(|line| wrap_lines(line, body.width))
@@ -456,7 +461,6 @@ fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App) {
         app.signal_activity_scroll
             .min(app.signal_activity_scroll_max)
     };
-    app.signal_targets.add(body, SignalHit::Activity);
     let newest = rows.len().saturating_sub(1);
     let first = usize::from(scroll);
     for (offset, row) in rows
