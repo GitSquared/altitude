@@ -5361,8 +5361,10 @@ impl App {
                 let title = task.title().to_owned();
                 let project_name = project.name.clone();
                 let agent = task.agent_kind;
+                let is_handing_back = task.facts.arrived_from.is_some();
                 self.foreground = Foreground::SendTask(Box::new(SendTask::new(
                     task.id,
+                    is_handing_back,
                     title,
                     project_name,
                     agent,

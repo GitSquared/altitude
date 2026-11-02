@@ -411,7 +411,19 @@ impl IncomingTransfers {
     pub async fn abandon(&self, peer: EndpointId, transfer_id: &str) -> Result<(), String> {
         let _serialized = self.lock.lock().await;
         let transfer_id = validated_transfer_id(transfer_id)?;
-        self.metadata(&transfer_id, peer)?;
+        let metadata = self.metadata(&transfer_id, peer)?;
+        // A sender that gives up has given up on the copy it made here too. It is
+        // not work that arrived: nobody finished with it, and leaving it behind
+        // would make one task into two, on two machines, with the same issue.
+        if let Some(task) = self.landed_task(&transfer_id, &metadata.peer).await?
+            && let Err(error) = self.tasks.remove_and_wait(task).await
+        {
+            tracing::warn!(
+                %error,
+                transfer_id,
+                "could not take back a task whose move was abandoned"
+            );
+        }
         match fs::remove_dir_all(self.incoming_directory(&transfer_id)) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),

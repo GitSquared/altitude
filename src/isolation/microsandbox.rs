@@ -1355,9 +1355,17 @@ impl IsolationEngine for MicrosandboxIsolation {
 
     async fn remove(&self, id: String) -> Result<(), IsolationError> {
         tracing::debug!(sandbox_id = %id, "removing sandbox");
-        let sandbox = Sandbox::get(&id)
-            .await
-            .map_err(|error| IsolationError::new(error.to_string()))?;
+        let sandbox = match Sandbox::get(&id).await {
+            Ok(sandbox) => sandbox,
+            // Removing what is not there has already done what it was for. A record
+            // that names a sandbox the runtime has forgotten — a restart, a machine
+            // that went away — is a sandbox the caller no longer has to worry about,
+            // and reporting it would fail a task for being tidier than expected.
+            Err(microsandbox::MicrosandboxError::SandboxNotFound(_)) => {
+                return Ok(());
+            }
+            Err(error) => return Err(IsolationError::new(error.to_string())),
+        };
         // A stop that runs out of patience is not a sandbox that will not go: the
         // removal is what makes it go, and a task must not fail because the runtime
         // was slow to acknowledge a shutdown it no longer needs to wait for.

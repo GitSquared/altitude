@@ -17,6 +17,7 @@ use crate::{
 
 pub(in crate::tui) struct SendTask {
     task_id: String,
+    is_handing_back: bool,
     title: String,
     project: String,
     agent: Option<AgentKind>,
@@ -33,6 +34,7 @@ pub(in crate::tui) enum Decision {
 impl SendTask {
     pub(in crate::tui) fn new(
         task_id: String,
+        is_handing_back: bool,
         title: String,
         project: String,
         agent: Option<AgentKind>,
@@ -43,6 +45,7 @@ impl SendTask {
         let selected = hosts.iter().position(|host| host.ready).unwrap_or(0);
         Self {
             task_id,
+            is_handing_back,
             title,
             project,
             agent,
@@ -123,7 +126,11 @@ impl SendTask {
 pub(in crate::tui) fn draw(frame: &mut Frame, area: Rect, sending: &SendTask) -> Rect {
     let popup = chrome::centered(area, 60, 15);
     frame.render_widget(Clear, popup);
-    let block = chrome::modal("Send to a remote");
+    let block = chrome::modal(if sending.is_handing_back {
+        "Hand back to a remote"
+    } else {
+        "Send to a remote"
+    });
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     if inner.height < 6 {
