@@ -1,5 +1,6 @@
 use super::{
-    AUTOPILOT_SYSTEM_PROMPT, AgentEngine, REPORT_SCHEMA, REPORT_SYSTEM_PROMPT, TaskReportDecoder,
+    AUTOPILOT_SYSTEM_PROMPT, AgentEngine, REPORT_SCHEMA, REPORT_SYSTEM_PROMPT, TaskProgressDecoder,
+    TaskReportDecoder, activity,
 };
 use crate::isolation::{
     DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand, shell_quote,
@@ -141,6 +142,122 @@ impl TaskReportDecoder for ClaudeStream {
     }
 }
 
+// Claude names a tool in `content_block_start` before it has any arguments, and
+// repeats it complete inside the assistant message; the complete one is what says
+// what the tool is aimed at, so the start only fills the gap while arguments are
+// still arriving.
+pub struct ClaudeProgress {
+    pending: String,
+    activity: Option<String>,
+    narration: String,
+}
+
+impl ClaudeProgress {
+    pub fn new() -> Self {
+        Self {
+            pending: String::new(),
+            activity: None,
+            narration: String::new(),
+        }
+    }
+
+    fn process_line(&mut self, line: &str) {
+        let Ok(message) = serde_json::from_str::<Value>(line.trim()) else {
+            return;
+        };
+        match message.get("type").and_then(Value::as_str) {
+            Some("stream_event") => {
+                let event = message.get("event");
+                match event
+                    .and_then(|event| event.get("type"))
+                    .and_then(Value::as_str)
+                {
+                    Some("content_block_start") => {
+                        let block = event.and_then(|event| event.get("content_block"));
+                        if block
+                            .and_then(|block| block.get("type"))
+                            .and_then(Value::as_str)
+                            == Some("tool_use")
+                            && let Some(tool) = block
+                                .and_then(|block| block.get("name"))
+                                .and_then(Value::as_str)
+                        {
+                            self.activity = Some(activity::tool_activity(tool, block));
+                        }
+                    }
+                    Some("content_block_delta") => {
+                        let delta = event.and_then(|event| event.get("delta"));
+                        if delta
+                            .and_then(|delta| delta.get("type"))
+                            .and_then(Value::as_str)
+                            == Some("text_delta")
+                            && let Some(text) = delta
+                                .and_then(|delta| delta.get("text"))
+                                .and_then(Value::as_str)
+                            && self.narration.chars().count() < activity::NARRATION_LIMIT
+                        {
+                            self.narration.push_str(text);
+                        }
+                    }
+                    Some("content_block_stop") => {
+                        if let Some(said) = activity::narration(&self.narration) {
+                            self.activity = Some(said);
+                        }
+                        self.narration.clear();
+                    }
+                    _ => {}
+                }
+            }
+            Some("assistant") => {
+                let blocks = message
+                    .pointer("/message/content")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let tool = blocks
+                    .iter()
+                    .rfind(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"));
+                match tool {
+                    Some(block) => {
+                        let name = block
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("a tool");
+                        self.activity = Some(activity::tool_activity(name, block.get("input")));
+                    }
+                    None => {
+                        let text = blocks
+                            .iter()
+                            .filter(|block| {
+                                block.get("type").and_then(Value::as_str) == Some("text")
+                            })
+                            .filter_map(|block| block.get("text").and_then(Value::as_str))
+                            .next_back();
+                        if let Some(said) = text.and_then(activity::narration) {
+                            self.activity = Some(said);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl TaskProgressDecoder for ClaudeProgress {
+    fn process(&mut self, bytes: &[u8]) {
+        self.pending.push_str(&String::from_utf8_lossy(bytes));
+        while let Some(newline) = self.pending.find('\n') {
+            let line = self.pending.drain(..=newline).collect::<String>();
+            self.process_line(&line);
+        }
+    }
+
+    fn take_activity(&mut self) -> Option<String> {
+        self.activity.take()
+    }
+}
+
 impl AgentEngine for ClaudeCode {
     fn autopilot_command(
         &self,
@@ -196,6 +313,10 @@ impl AgentEngine for ClaudeCode {
 
     fn report_decoder(&self) -> Box<dyn TaskReportDecoder> {
         Box::new(ClaudeStream::new())
+    }
+
+    fn progress_decoder(&self) -> Option<Box<dyn TaskProgressDecoder>> {
+        Some(Box::new(ClaudeProgress::new()))
     }
 
     fn operator_requires_conversation(&self) -> bool {

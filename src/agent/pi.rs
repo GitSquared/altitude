@@ -1,6 +1,6 @@
 use super::{
     AUTOPILOT_SYSTEM_PROMPT, AgentEngine, REPORT_SCHEMA, REPORT_SYSTEM_PROMPT, TaskProgressDecoder,
-    TaskReportDecoder,
+    TaskReportDecoder, activity,
 };
 use crate::isolation::{
     DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand, shell_quote,
@@ -197,8 +197,6 @@ pub struct PiProgress {
     narration: String,
 }
 
-const NARRATION_LIMIT: usize = 160;
-
 impl PiProgress {
     pub fn new() -> Self {
         Self {
@@ -218,30 +216,7 @@ impl PiProgress {
                     .get("toolName")
                     .and_then(Value::as_str)
                     .unwrap_or("a tool");
-                let args = event.get("args");
-                let target = args
-                    .and_then(|args| args.get("command"))
-                    .and_then(Value::as_str)
-                    .map(|command| format!("`{}`", first_line(command, 80)))
-                    .or_else(|| {
-                        args.and_then(|args| {
-                            ["file_path", "path", "pattern"]
-                                .iter()
-                                .find_map(|key| args.get(*key).and_then(Value::as_str))
-                        })
-                        .map(|target| first_line(target, 80))
-                    });
-                let verb = match tool {
-                    "bash" => "running",
-                    "read" => "reading",
-                    "edit" | "write" => "editing",
-                    "grep" | "search" => "searching for",
-                    other => other,
-                };
-                self.activity = Some(match target {
-                    Some(target) => format!("{verb} {target}"),
-                    None => verb.to_owned(),
-                });
+                self.activity = Some(activity::tool_activity(tool, event.get("args")));
             }
             Some("message_update") => {
                 let update = event.get("assistantMessageEvent");
@@ -254,15 +229,14 @@ impl PiProgress {
                         if let Some(delta) = update
                             .and_then(|update| update.get("delta"))
                             .and_then(Value::as_str)
-                            && self.narration.chars().count() < NARRATION_LIMIT
+                            && self.narration.chars().count() < activity::NARRATION_LIMIT
                         {
                             self.narration.push_str(delta);
                         }
                     }
                     Some("text_end") => {
-                        let said = first_line(&self.narration, NARRATION_LIMIT);
-                        if !said.is_empty() {
-                            self.activity = Some(format!("\"{said}\""));
+                        if let Some(said) = activity::narration(&self.narration) {
+                            self.activity = Some(said);
                         }
                     }
                     _ => {}
@@ -271,19 +245,6 @@ impl PiProgress {
             _ => {}
         }
     }
-}
-
-fn first_line(text: &str, limit: usize) -> String {
-    let line = text
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("");
-    let trimmed = line.trim();
-    let mut shortened: String = trimmed.chars().take(limit).collect();
-    if shortened.len() < trimmed.len() {
-        shortened.push('\u{2026}');
-    }
-    shortened
 }
 
 impl TaskProgressDecoder for PiProgress {

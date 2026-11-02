@@ -4,6 +4,7 @@ pub use channel::AgentChannels;
 use serde::{Deserialize, Serialize};
 use sqlx::Type;
 use std::{error::Error as StdError, fmt, str::FromStr};
+mod activity;
 mod channel;
 mod claude;
 pub mod mcp;
