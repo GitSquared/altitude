@@ -257,11 +257,6 @@ fn cards(app: &App) -> Vec<Card> {
             if let Some(stage) = moving_stage(app, &task.id) {
                 card.status = Line::styled(stage, palette::muted());
                 card.moving = Some(task.id.clone());
-            } else if summary.status == TaskExecutionStatus::Running
-                && summary.mode == TaskExecutionMode::Autopilot
-                && let Some(activity) = app.activities.get(&task.id)
-            {
-                card.status = Line::styled(activity.clone(), palette::muted());
             }
             card
         })

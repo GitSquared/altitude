@@ -1,4 +1,4 @@
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, mem, time::Duration};
 
 use chrono::Utc;
 use ratatui::{
@@ -35,6 +35,8 @@ const LIST_WIDTH: u16 = 40;
 const PLAN_WIDTH: u16 = 32;
 const PLAN_PADDING: u16 = 1;
 const PLAN_COLUMN_MIN: u16 = 112;
+const ACTIVITY_WIDTH: u16 = 36;
+const ACTIVITY_ROWS: u16 = 4;
 const LIST_PADDING: u16 = 1;
 const COMPOSER_HEIGHT: u16 = 5;
 
@@ -73,6 +75,7 @@ pub enum SignalSort {
 pub enum SignalFocus {
     List,
     Detail,
+    Activity,
     Action(usize),
     Filter,
     Sort,
@@ -80,7 +83,7 @@ pub enum SignalFocus {
 
 impl SignalFocus {
     pub fn next(self, forward: bool, actions: usize) -> Self {
-        let mut ring = vec![Self::List, Self::Detail];
+        let mut ring = vec![Self::List, Self::Detail, Self::Activity];
         ring.extend((0..actions).map(Self::Action));
         ring.push(Self::Filter);
         ring.push(Self::Sort);
@@ -99,6 +102,7 @@ pub enum SignalHit {
     List,
     Thread(usize),
     Detail,
+    Activity,
     Message(usize),
     Action(usize),
     ComposerSend,
@@ -260,8 +264,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         surface::vertical_divider(frame, inner, conversation.right());
         surface::cover(frame, conversation);
         draw_conversation(frame, conversation, app);
-        surface::cover(frame, plan);
-        draw_plan(frame, plan, app);
+        split_plan_and_activity(frame, plan, app);
     } else {
         // The tabs and the rule under them are one band, so the separators
         // between the tabs run down onto that rule.
@@ -271,7 +274,23 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         draw_plan_tabs(frame, band, app);
         surface::cover(frame, pane);
         if app.signal_plan_open {
-            draw_plan(frame, pane, app);
+            // No column to stack under here, so the activity sits beside the plan.
+            let [plan, _, activity] = Layout::horizontal([
+                Constraint::Min(0),
+                Constraint::Length(1),
+                Constraint::Length(ACTIVITY_WIDTH),
+            ])
+            .areas(pane);
+            if app.signal_activity().is_some_and(|lines| !lines.is_empty())
+                && pane.width > ACTIVITY_WIDTH * 2
+            {
+                surface::vertical_divider(frame, pane, plan.right());
+                draw_plan(frame, plan, app);
+                surface::cover(frame, activity);
+                draw_activity(frame, activity, app);
+            } else {
+                draw_plan(frame, pane, app);
+            }
         } else {
             draw_conversation(frame, pane, app);
         }
@@ -366,6 +385,106 @@ fn draw_plan(frame: &mut Frame, area: Rect, app: &App) {
         );
         y = y.saturating_add(height);
     }
+}
+
+fn split_plan_and_activity(frame: &mut Frame, area: Rect, app: &mut App) {
+    let has_activity = app.signal_activity().is_some_and(|lines| !lines.is_empty());
+    // A plan is a list that can scroll; a live line cannot be read if it is cut
+    // short, so it keeps its rows and the plan keeps whatever is left above it.
+    let rows = match area.height {
+        _ if !has_activity => 0,
+        height if height >= 10 => ACTIVITY_ROWS,
+        height if height >= 6 => 3,
+        _ => 0,
+    };
+    if rows == 0 {
+        app.signal_activity_scroll_max = 0;
+        app.signal_activity_scroll = u16::MAX;
+        draw_plan(frame, area, app);
+        return;
+    }
+    let [plan, divider, activity] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(rows),
+    ])
+    .areas(area);
+    surface::horizontal_divider(frame, area, divider.y);
+    draw_plan(frame, plan, app);
+    surface::cover(frame, activity);
+    draw_activity(frame, activity, app);
+}
+
+fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App) {
+    let Some(lines) = app.signal_activity().cloned() else {
+        return;
+    };
+    let text = Rect {
+        x: area.x.saturating_add(PLAN_PADDING),
+        width: area.width.saturating_sub(PLAN_PADDING * 2).max(1),
+        ..area
+    };
+    app.signal_activity_rows = text.height.max(1);
+    let rows: Vec<String> = lines
+        .iter()
+        .flat_map(|line| wrap_lines(line, text.width))
+        .collect();
+    app.signal_activity_scroll_max =
+        u16::try_from(rows.len().saturating_sub(usize::from(text.height))).unwrap_or(0);
+    let scroll = if app.signal_activity_scroll == u16::MAX {
+        app.signal_activity_scroll_max
+    } else {
+        app.signal_activity_scroll
+            .min(app.signal_activity_scroll_max)
+    };
+    app.signal_targets.add(text, SignalHit::Activity);
+    let newest = rows.len().saturating_sub(1);
+    let first = usize::from(scroll);
+    for (offset, row) in rows
+        .iter()
+        .skip(first)
+        .take(usize::from(text.height))
+        .enumerate()
+    {
+        // The newest line is the one being read; everything above it is there to be
+        // looked back through.
+        let style = if first + offset == newest {
+            palette::primary()
+        } else {
+            palette::muted()
+        };
+        frame.render_widget(
+            Paragraph::new(row.clone()).style(style),
+            Rect {
+                y: text.y.saturating_add(offset as u16),
+                height: 1,
+                ..text
+            },
+        );
+    }
+}
+
+fn wrap_lines(text: &str, width: u16) -> Vec<String> {
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        let mut current = String::new();
+        for word in line.split_whitespace() {
+            if !current.is_empty()
+                && current.chars().count() + 1 + word.chars().count() > usize::from(width)
+            {
+                lines.push(mem::take(&mut current));
+            }
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(word);
+        }
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
 }
 
 fn draw_controls(frame: &mut Frame, toolbar: Rect, popup_area: Rect, app: &mut App) {

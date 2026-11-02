@@ -475,8 +475,12 @@ pub struct App {
     pub(in crate::tui) grid_columns: usize,
     pub(in crate::tui) environment_builds: HashMap<String, EnvironmentProgress>,
     // What each running agent is doing, straight from its own stream. Live only:
-    // nothing here outlives the run it describes, and the card is the only reader.
-    pub(in crate::tui) activities: HashMap<String, String>,
+    // nothing here outlives the run it describes, and the task screen is the only
+    // reader. Capped, because an agent that works for an hour says a lot.
+    pub(in crate::tui) activities: HashMap<String, Vec<String>>,
+    pub(in crate::tui) signal_activity_scroll: u16,
+    pub(in crate::tui) signal_activity_scroll_max: u16,
+    pub(in crate::tui) signal_activity_rows: u16,
     pub(in crate::tui) shimmer: usize,
     pub(in crate::tui) terrain: Terrain,
     pub(in crate::tui) help_scroll: u16,
@@ -732,6 +736,9 @@ impl App {
             tracker_connect_attempt: 0,
             environment_builds: HashMap::new(),
             activities: HashMap::new(),
+            signal_activity_scroll: u16::MAX,
+            signal_activity_scroll_max: 0,
+            signal_activity_rows: 0,
             shimmer: 0,
             terrain: Terrain::default(),
             help_scroll: 0,
@@ -1316,6 +1323,7 @@ impl App {
                         match self.signal_focus {
                             SignalFocus::List => "thread",
                             SignalFocus::Detail => "scroll",
+                            SignalFocus::Activity => "activity",
                             SignalFocus::Action(_) => "button",
                             SignalFocus::Filter | SignalFocus::Sort => "control",
                         },
@@ -3689,6 +3697,30 @@ impl App {
         self.signal_task_running()
     }
 
+    // How much of an agent's own stream is worth keeping: enough to read back
+    // through, little enough that a task left running for hours stays cheap.
+    const ACTIVITY_LINES: usize = 200;
+
+    pub(in crate::tui) fn signal_activity(&self) -> Option<&Vec<String>> {
+        let task_id = self.signal_task_id.as_deref()?;
+        self.activities.get(task_id)
+    }
+
+    fn scroll_activity(&mut self, rows: i32) {
+        let current = if self.signal_activity_scroll == u16::MAX {
+            self.signal_activity_scroll_max
+        } else {
+            self.signal_activity_scroll
+        };
+        let next = (i32::from(current) + rows).clamp(0, i32::from(self.signal_activity_scroll_max));
+        self.signal_activity_scroll = u16::try_from(next).unwrap_or(0);
+    }
+
+    pub(in crate::tui) fn page_activity(&mut self, up: bool) {
+        let page = i32::from(self.signal_activity_rows.max(1));
+        self.scroll_activity(if up { -page } else { page });
+    }
+
     fn signal_task_running(&self) -> bool {
         if let Some(task) = self.signal_task() {
             return task.facts.execution_status == TaskExecutionStatus::Running;
@@ -3828,6 +3860,10 @@ impl App {
             .signal_thread()
             .map_or(0, |thread| thread.messages.len().saturating_sub(1));
         self.signal_scroll = u16::MAX;
+        // A stream belongs to the task it came from: another task's place in its
+        // own activity means nothing here.
+        self.signal_activity_scroll = u16::MAX;
+        self.signal_activity_scroll_max = 0;
         self.signal_message_flash = None;
     }
 
@@ -4787,6 +4823,10 @@ impl App {
                     Some(SignalHit::List | SignalHit::Thread(_)) => {
                         self.move_signal_cursor(!up);
                     }
+                    Some(SignalHit::Activity) => {
+                        self.signal_focus = SignalFocus::Activity;
+                        self.scroll_activity(if up { -1 } else { 1 });
+                    }
                     Some(
                         SignalHit::Action(_)
                         | SignalHit::ComposerSend
@@ -4822,6 +4862,7 @@ impl App {
                         self.reset_signal_message();
                     }
                     SignalHit::Detail => self.signal_focus = SignalFocus::Detail,
+                    SignalHit::Activity => self.signal_focus = SignalFocus::Activity,
                     SignalHit::Message(index) => {
                         self.signal_focus = SignalFocus::Detail;
                         self.signal_message_cursor = index;
@@ -4945,22 +4986,30 @@ impl App {
                 SignalFocus::List => {
                     self.page_signal_cursor(true);
                 }
+                SignalFocus::Activity => self.page_activity(false),
                 _ => self.page_signal(false),
             },
             KeyCode::PageUp => match self.signal_focus {
                 SignalFocus::List => {
                     self.page_signal_cursor(false);
                 }
+                SignalFocus::Activity => self.page_activity(true),
                 _ => self.page_signal(true),
             },
-            KeyCode::Home => {
-                self.signal_scroll = 0;
-                self.select_signal_message_at_scroll();
-            }
-            KeyCode::End => {
-                self.signal_scroll = u16::MAX;
-                self.select_signal_message_at_scroll();
-            }
+            KeyCode::Home => match self.signal_focus {
+                SignalFocus::Activity => self.scroll_activity(-i32::from(u16::MAX)),
+                _ => {
+                    self.signal_scroll = 0;
+                    self.select_signal_message_at_scroll();
+                }
+            },
+            KeyCode::End => match self.signal_focus {
+                SignalFocus::Activity => self.signal_activity_scroll = u16::MAX,
+                _ => {
+                    self.signal_scroll = u16::MAX;
+                    self.select_signal_message_at_scroll();
+                }
+            },
             _ if is_dismiss(key) || key.code == KeyCode::Char('q') => self.leave_signals(),
             KeyCode::Down | KeyCode::Char('j') => match self.signal_focus {
                 SignalFocus::List => {
@@ -4970,6 +5019,7 @@ impl App {
                     }
                 }
                 SignalFocus::Detail => self.move_signal_message(true),
+                SignalFocus::Activity => self.scroll_activity(1),
                 SignalFocus::Action(_) => self.move_signal_focus(true),
                 SignalFocus::Filter | SignalFocus::Sort => {
                     self.signal_focus = SignalFocus::List;
@@ -4984,6 +5034,7 @@ impl App {
                     }
                 }
                 SignalFocus::Detail => self.move_signal_message(false),
+                SignalFocus::Activity => self.scroll_activity(-1),
                 SignalFocus::Action(_) => self.move_signal_focus(false),
                 SignalFocus::Filter | SignalFocus::Sort => {}
             },
@@ -5021,7 +5072,7 @@ impl App {
                             .await
                     }
                 }
-                SignalFocus::List | SignalFocus::Detail => {
+                SignalFocus::List | SignalFocus::Detail | SignalFocus::Activity => {
                     if let Some(action) = self.signal_thread().and_then(primary_action) {
                         self.act_on_signal(action, task_service, remote_signals, event_loop)
                             .await
@@ -5904,7 +5955,12 @@ impl App {
                 show_task_error(self, &id, error);
             }
             TaskExecutionUpdate::Activity { task_id, activity } => {
-                self.activities.insert(task_id, activity);
+                let lines = self.activities.entry(task_id).or_default();
+                if lines.last() != Some(&activity) {
+                    lines.push(activity);
+                }
+                let excess = lines.len().saturating_sub(Self::ACTIVITY_LINES);
+                lines.drain(..excess);
             }
             TaskExecutionUpdate::Output {
                 task_id,
