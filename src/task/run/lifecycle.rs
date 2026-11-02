@@ -170,9 +170,6 @@ where
                 "this task has already been accepted",
             )));
         }
-        if task.facts.sandbox_available {
-            return Ok(task);
-        }
         let owner =
             task.operator_id()
                 .map(|owner| owner.to_owned())
@@ -183,6 +180,26 @@ where
             .isolation
             .for_operator(&owner)
             .map_err(TaskServiceError::Isolation)?;
+        // The record is not the runtime: a task whose capsule went away with a hard
+        // stop would otherwise be provisioned for the sandbox it says it has, and
+        // every later step would be reaching for something that is not there.
+        let mut task = task;
+        if task.facts.sandbox_available
+            && let Some(sandbox_id) = task.facts.sandbox_id.clone()
+            && !isolation.has_sandbox(sandbox_id).await
+        {
+            task = self
+                .record(
+                    &task.id,
+                    &[TaskHistoryEvent::SandboxRemoved {
+                        sandbox_available: false,
+                    }],
+                )
+                .await?;
+        }
+        if task.facts.sandbox_available {
+            return Ok(task);
+        }
         let sandbox_id = format!("altitude-{}", Uuid::new_v4());
         let snapshot_path = if task.facts.snapshot_available {
             task.facts.snapshot_path.clone()

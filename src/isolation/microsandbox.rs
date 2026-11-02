@@ -1353,6 +1353,10 @@ impl IsolationEngine for MicrosandboxIsolation {
         Ok(moved)
     }
 
+    async fn has_sandbox(&self, id: String) -> bool {
+        Sandbox::get(&id).await.is_ok()
+    }
+
     async fn remove(&self, id: String) -> Result<(), IsolationError> {
         tracing::debug!(sandbox_id = %id, "removing sandbox");
         let sandbox = match Sandbox::get(&id).await {

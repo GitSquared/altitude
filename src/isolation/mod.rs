@@ -452,6 +452,10 @@ pub trait IsolationEngine: Send + Sync {
 
     fn remove(&self, id: String) -> impl Future<Output = Result<(), IsolationError>> + Send;
 
+    // Whether the runtime still has this sandbox. A record can name one that a hard
+    // stop took with it, and asking is cheaper than building a new one to find out.
+    fn has_sandbox(&self, id: String) -> impl Future<Output = bool> + Send;
+
     fn suspend(
         &self,
         id: String,
