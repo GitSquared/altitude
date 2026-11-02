@@ -8,8 +8,13 @@ pub(super) const NARRATION_LIMIT: usize = 160;
 
 pub(super) fn tool_activity(tool: &str, args: Option<&Value>) -> String {
     let name = tool.to_ascii_lowercase();
+    // A shell command is the one thing here that is not a short name for the work:
+    // half of them are a pipeline of quoting the operator cannot skim, and reading
+    // one does not answer what the agent is doing any faster than the verb does.
+    if name == "bash" || name == "shell" {
+        return "running a command".to_owned();
+    }
     let verb = match name.as_str() {
-        "bash" | "shell" => "running",
         "read" => "reading",
         "edit" | "write" | "multiedit" => "editing",
         "grep" | "search" => "searching for",
@@ -37,8 +42,16 @@ pub(super) fn tool_activity(tool: &str, args: Option<&Value>) -> String {
 }
 
 pub(super) fn narration(text: &str) -> Option<String> {
+    speaking(text).map(|said| format!("\"{said}\""))
+}
+
+pub(super) fn thinking(text: &str) -> Option<String> {
+    speaking(text).map(|thought| format!("thinking: {thought}"))
+}
+
+fn speaking(text: &str) -> Option<String> {
     let said = first_line(text, NARRATION_LIMIT);
-    (!said.is_empty()).then(|| format!("\"{said}\""))
+    (!said.is_empty()).then_some(said)
 }
 
 pub(super) fn first_line(text: &str, limit: usize) -> String {

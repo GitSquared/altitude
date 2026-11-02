@@ -220,18 +220,17 @@ impl PiProgress {
             }
             Some("message_update") => {
                 let update = event.get("assistantMessageEvent");
-                match update
+                let kind = update
                     .and_then(|update| update.get("type"))
-                    .and_then(Value::as_str)
-                {
+                    .and_then(Value::as_str);
+                let delta = update
+                    .and_then(|update| update.get("delta"))
+                    .and_then(Value::as_str);
+                match kind {
                     Some("text_start") => self.narration.clear(),
                     Some("text_delta") => {
-                        if let Some(delta) = update
-                            .and_then(|update| update.get("delta"))
-                            .and_then(Value::as_str)
-                            && self.narration.chars().count() < activity::NARRATION_LIMIT
-                        {
-                            self.narration.push_str(delta);
+                        if let Some(delta) = delta {
+                            push_preview(&mut self.narration, delta);
                         }
                     }
                     Some("text_end") => {
@@ -239,11 +238,28 @@ impl PiProgress {
                             self.activity = Some(said);
                         }
                     }
+                    Some("thinking_start") => self.narration.clear(),
+                    Some("thinking_delta") => {
+                        if let Some(delta) = delta {
+                            push_preview(&mut self.narration, delta);
+                        }
+                    }
+                    Some("thinking_end") => {
+                        if let Some(thought) = activity::thinking(&self.narration) {
+                            self.activity = Some(thought);
+                        }
+                    }
                     _ => {}
                 }
             }
             _ => {}
         }
+    }
+}
+
+fn push_preview(preview: &mut String, delta: &str) {
+    if preview.chars().count() < activity::NARRATION_LIMIT {
+        preview.push_str(delta);
     }
 }
 

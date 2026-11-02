@@ -150,6 +150,9 @@ pub struct ClaudeProgress {
     pending: String,
     activity: Option<String>,
     narration: String,
+    // The same buffer holds what the model is saying and what it is thinking;
+    // which of the two it is decides how the line reads when the block closes.
+    thinking: bool,
 }
 
 impl ClaudeProgress {
@@ -158,6 +161,7 @@ impl ClaudeProgress {
             pending: String::new(),
             activity: None,
             narration: String::new(),
+            thinking: false,
         }
     }
 
@@ -187,23 +191,33 @@ impl ClaudeProgress {
                     }
                     Some("content_block_delta") => {
                         let delta = event.and_then(|event| event.get("delta"));
-                        if delta
+                        let kind = delta
                             .and_then(|delta| delta.get("type"))
-                            .and_then(Value::as_str)
-                            == Some("text_delta")
+                            .and_then(Value::as_str);
+                        let speaking = matches!(kind, Some("text_delta") | Some("thinking_delta"));
+                        if speaking
                             && let Some(text) = delta
                                 .and_then(|delta| delta.get("text"))
                                 .and_then(Value::as_str)
                             && self.narration.chars().count() < activity::NARRATION_LIMIT
                         {
+                            // The same buffer holds what the model says and what it
+                            // thinks; which one it was decides how the line reads.
+                            self.thinking = kind == Some("thinking_delta");
                             self.narration.push_str(text);
                         }
                     }
                     Some("content_block_stop") => {
-                        if let Some(said) = activity::narration(&self.narration) {
+                        let said = if self.thinking {
+                            activity::thinking(&self.narration)
+                        } else {
+                            activity::narration(&self.narration)
+                        };
+                        if let Some(said) = said {
                             self.activity = Some(said);
                         }
                         self.narration.clear();
+                        self.thinking = false;
                     }
                     _ => {}
                 }
