@@ -106,7 +106,7 @@ async fn wait_for<T>(
     operation: impl Future<Output = io::Result<T>>,
 ) -> io::Result<Option<T>> {
     let mut events = EventStream::new();
-    let mut animation = shimmer_clock();
+    let mut repaint = shimmer_clock();
     let mut backdrop = time::interval(terrain::CLOCK);
     backdrop.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     let mut terrain = terrain::Terrain::default();
@@ -126,7 +126,13 @@ async fn wait_for<T>(
             _ = terminate.recv() => return Ok(None),
             _ = interrupt.recv() => return Ok(None),
             result = &mut operation => return result.map(Some),
-            _ = animation.tick(), if animations => shimmer = shimmer.wrapping_add(1),
+            _ = repaint.tick() => {
+                // The clock repaints the screen so progress keeps moving even
+                // when animations are off; only the shimmer is animation.
+                if animations {
+                    shimmer = shimmer.wrapping_add(1);
+                }
+            },
             _ = backdrop.tick(), if animations => terrain.advance(),
             event = events.next() => {
                 let Some(event) = event else { return Ok(None) };
