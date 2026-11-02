@@ -176,19 +176,6 @@ impl ClaudeProgress {
                     .and_then(|event| event.get("type"))
                     .and_then(Value::as_str)
                 {
-                    Some("content_block_start") => {
-                        let block = event.and_then(|event| event.get("content_block"));
-                        if block
-                            .and_then(|block| block.get("type"))
-                            .and_then(Value::as_str)
-                            == Some("tool_use")
-                            && let Some(tool) = block
-                                .and_then(|block| block.get("name"))
-                                .and_then(Value::as_str)
-                        {
-                            self.activity = Some(Activity::tool(tool));
-                        }
-                    }
                     Some("content_block_delta") => {
                         let delta = event.and_then(|event| event.get("delta"));
                         let kind = delta
@@ -228,29 +215,13 @@ impl ClaudeProgress {
                     .and_then(Value::as_array)
                     .cloned()
                     .unwrap_or_default();
-                let tool = blocks
+                let text = blocks
                     .iter()
-                    .rfind(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"));
-                match tool {
-                    Some(block) => {
-                        let name = block
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .unwrap_or("a tool");
-                        self.activity = Some(Activity::tool(name));
-                    }
-                    None => {
-                        let text = blocks
-                            .iter()
-                            .filter(|block| {
-                                block.get("type").and_then(Value::as_str) == Some("text")
-                            })
-                            .filter_map(|block| block.get("text").and_then(Value::as_str))
-                            .next_back();
-                        if let Some(said) = text.and_then(activity::narration) {
-                            self.activity = Some(said);
-                        }
-                    }
+                    .rfind(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+                    .and_then(|block| block.get("text"))
+                    .and_then(Value::as_str);
+                if let Some(said) = text.and_then(activity::narration) {
+                    self.activity = Some(said);
                 }
             }
             _ => {}

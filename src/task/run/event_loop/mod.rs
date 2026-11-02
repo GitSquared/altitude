@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 use crate::remote::Watching;
@@ -77,6 +77,9 @@ pub struct TaskEventLoop<E> {
     runs: Arc<Mutex<HashMap<String, ActiveRun>>>,
     control_requests: Arc<Mutex<HashMap<String, RequestedControl>>>,
     terminal_output: Arc<Mutex<HashMap<String, CachedTerminalOutput>>>,
+    // The newest line each running agent produced. Read by the interface and by a
+    // tracker reporting on this machine, which is the same fact told twice.
+    current_activity: Arc<Mutex<HashMap<String, Activity>>>,
     starting: Arc<Mutex<HashSet<String>>>,
     watchers: Arc<Watchers<E>>,
     review_waits: Arc<ReviewWaits>,
@@ -121,6 +124,7 @@ where
             runs: Arc::new(Mutex::new(HashMap::new())),
             control_requests: Arc::new(Mutex::new(HashMap::new())),
             terminal_output: Arc::new(Mutex::new(HashMap::new())),
+            current_activity: Arc::new(Mutex::new(HashMap::new())),
             starting: Arc::new(Mutex::new(HashSet::new())),
             watchers,
             review_waits: Arc::new(ReviewWaits::default()),
@@ -1055,6 +1059,16 @@ where
         }
     }
 
+    fn activity(&self) -> MutexGuard<'_, HashMap<String, Activity>> {
+        self.current_activity
+            .lock()
+            .expect("activity lock poisoned")
+    }
+
+    pub fn current_activity(&self, task_id: &str) -> Option<Activity> {
+        self.activity().get(task_id).cloned()
+    }
+
     fn watch_agent_run(
         &self,
         result: Result<(Task, TaskAgentRun, CommandSession), TaskServiceError>,
@@ -1086,6 +1100,7 @@ where
         let mode = task.facts.execution_mode;
         let service = self.service.clone();
         let events = self.events.clone();
+        let current_activity = Arc::clone(&self.current_activity);
         let event_loop = self.clone();
         tokio::spawn(async move {
             let mut report_stream = match mode {
@@ -1115,6 +1130,10 @@ where
                                 decoder.take_activity()
                             }
                         {
+                            current_activity
+                                .lock()
+                                .expect("activity lock poisoned")
+                                .insert(task.id.clone(), activity.clone());
                             let _ = events.send(TaskExecutionUpdate::Activity {
                                 task_id: task.id.clone(),
                                 activity,

@@ -1,14 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-// What kind of thing the line is, because the three read differently: a message is
-// quoted, a thought says it is thinking, and a tool is a passing action rather than
-// something the agent said. `Remote` is a line another machine sent, which travels
-// as text and keeps no kind with it.
+// What kind of thing the line is: what the agent said, what it thought, or a line
+// another machine sent, which travels as text and keeps no kind with it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ActivityKind {
     Speech,
     Thinking,
-    Tool,
     Remote,
 }
 
@@ -19,13 +16,6 @@ pub struct Activity {
 }
 
 impl Activity {
-    pub(super) fn tool(tool: &str) -> Self {
-        Self {
-            text: tool_activity(tool),
-            kind: ActivityKind::Tool,
-        }
-    }
-
     pub fn remote(text: String) -> Self {
         Self {
             text,
@@ -34,19 +24,11 @@ impl Activity {
     }
 }
 
-// Both engines say the same three things about what they are doing — a tool they
-// started, a file or command it is aimed at, and the words around it — in two
-// different event shapes. The words the operator reads come from here so the two
-// cannot drift apart.
+// A message the agent sent and a thought it is thinking are the two things worth
+// reading; what it is holding in its hands is not, and the tool calls it makes are
+// the noisiest lines in the stream: a shell command is a pipeline of quoting, and
+// its name alone answers less than the sentence around it.
 pub(super) const NARRATION_LIMIT: usize = 160;
-
-pub(super) fn tool_activity(tool: &str) -> String {
-    // One shape for every harness's tool: what it is using, named the way its own
-    // stream names it. The arguments are not shown — a shell command is a pipeline
-    // of quoting, and a path is the tool's business rather than the operator's:
-    // neither answers "what is it doing" faster than the tool's own name.
-    format!("using {}…", tool.to_ascii_lowercase())
-}
 
 pub(super) fn narration(text: &str) -> Option<Activity> {
     speaking(text).map(|said| Activity {

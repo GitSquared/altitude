@@ -7,7 +7,7 @@ use std::{error::Error as StdError, fmt, str::FromStr};
 mod activity;
 mod channel;
 
-pub use activity::{Activity, ActivityKind};
+pub use activity::Activity;
 mod claude;
 pub mod mcp;
 mod pi;

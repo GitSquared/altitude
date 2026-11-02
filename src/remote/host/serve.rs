@@ -1079,6 +1079,10 @@ impl tracker::Host for OwnTasks {
         })
     }
 
+    fn current_activity(&self, task_id: String) -> tracker::HostFuture<'_, Option<String>> {
+        Box::pin(async move { Ok(self.tasks.current_activity(&task_id).map(|line| line.text)) })
+    }
+
     fn tasks_ahead_in_queue(&self, task_id: String) -> tracker::HostFuture<'_, Option<usize>> {
         Box::pin(async move {
             let tasks = self.tasks.list().await.map_err(|error| error.to_string())?;

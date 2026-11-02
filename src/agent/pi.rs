@@ -210,15 +210,8 @@ impl PiProgress {
         let Ok(event) = serde_json::from_str::<Value>(line.trim()) else {
             return;
         };
-        match event.get("type").and_then(Value::as_str) {
-            Some("tool_execution_start") => {
-                let tool = event
-                    .get("toolName")
-                    .and_then(Value::as_str)
-                    .unwrap_or("a tool");
-                self.activity = Some(Activity::tool(tool));
-            }
-            Some("message_update") => {
+        if event.get("type").and_then(Value::as_str) == Some("message_update") {
+            {
                 let update = event.get("assistantMessageEvent");
                 let kind = update
                     .and_then(|update| update.get("type"))
@@ -252,7 +245,6 @@ impl PiProgress {
                     _ => {}
                 }
             }
-            _ => {}
         }
     }
 }

@@ -73,6 +73,13 @@ struct QueueNotice {
     ahead: usize,
     at: Instant,
 }
+
+// The last line published for a task, and how many before it: the count is what
+// keeps two identical lines apart when the agent says the same thing twice.
+struct ActivityNotice {
+    line: String,
+    published: usize,
+}
 const DELEGATION_SWEEP_TICKS: u32 = 6;
 const EVENT_ATTEMPTS: usize = 3;
 const UNHOOK_GRACE_MS: i64 = 60_000;
@@ -123,6 +130,7 @@ pub trait Host: Send + Sync + 'static {
     fn session_agent(&self, task_id: String) -> HostFuture<'_, Option<String>>;
 
     fn tasks_ahead_in_queue(&self, task_id: String) -> HostFuture<'_, Option<usize>>;
+    fn current_activity(&self, task_id: String) -> HostFuture<'_, Option<String>>;
 }
 
 fn published_comment_id(task_id: &str, signal_id: &str) -> String {
@@ -195,6 +203,7 @@ pub struct BoundTask {
 pub struct RemoteTracker {
     config: RemoteTrackerConfig,
     queue_notices: Mutex<HashMap<String, QueueNotice>>,
+    activity_notices: Mutex<HashMap<String, ActivityNotice>>,
     ledger: Mutex<Ledger>,
     notify: Notify,
     refusals: Mutex<HashMap<String, String>>,
@@ -207,6 +216,7 @@ impl RemoteTracker {
         Ok(Arc::new(Self {
             config,
             queue_notices: Mutex::new(HashMap::new()),
+            activity_notices: Mutex::new(HashMap::new()),
             ledger: Mutex::new(ledger),
             refusals: Mutex::new(HashMap::new()),
             notify: Notify::new(),
@@ -367,6 +377,58 @@ impl RemoteTracker {
         }
     }
 
+    // What the agent is saying and thinking goes to the session as it happens: the
+    // operator watching the issue should not have to take the task over to find out
+    // whether it is still working. A thought rather than a reply, because nothing
+    // here is addressed to anybody and nothing here is news worth a notification.
+    async fn report_activity(&self, host: &dyn Host) {
+        let bound = match host.bound_tasks().await {
+            Ok(bound) => bound,
+            Err(error) => {
+                tracing::debug!(%error, "could not read bound tasks to report activity");
+                return;
+            }
+        };
+        for task in bound {
+            let line = match host.current_activity(task.task_id.clone()).await {
+                Ok(Some(line)) if !line.trim().is_empty() => line,
+                _ => continue,
+            };
+            let Some(report) = self.report_for_task(&task.task_id) else {
+                continue;
+            };
+            let published = {
+                let notices = self
+                    .activity_notices
+                    .lock()
+                    .expect("activity notices lock poisoned");
+                match notices.get(&task.task_id) {
+                    Some(notice) if notice.line == line => continue,
+                    Some(notice) => notice.published.saturating_add(1),
+                    None => 1,
+                }
+            };
+            let activity_id = stable_id(&report.task_id, &format!("activity-{published}"));
+            if let Err(error) = self
+                .config
+                .automation
+                .create_activity(
+                    &report.session,
+                    &activity_id,
+                    AgentActivityContent::Thought { body: line.clone() },
+                )
+                .await
+            {
+                tracing::debug!(task = %task.task_id, %error, "could not say what an agent is doing");
+                continue;
+            }
+            self.activity_notices
+                .lock()
+                .expect("activity notices lock poisoned")
+                .insert(task.task_id.clone(), ActivityNotice { line, published });
+        }
+    }
+
     fn queue_notice_is_due(&self, task_id: &str, ahead: usize) -> bool {
         let notices = self
             .queue_notices
@@ -395,6 +457,7 @@ impl RemoteTracker {
             self.process_deliveries(host.as_ref()).await;
             self.adopt_bound_tasks(host.as_ref()).await;
             self.report_queue_standing(host.as_ref()).await;
+            self.report_activity(host.as_ref()).await;
             self.poll_reports(host.as_ref()).await;
             // A delegation is delivered by webhook, and a webhook that arrives
             // while this machine is restarting is gone. Asking the tracker which
