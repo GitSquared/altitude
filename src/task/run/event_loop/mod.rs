@@ -42,6 +42,7 @@ pub enum TaskExecutionUpdate {
         address: String,
         transfer: Watching,
     },
+    HandedBack(String, Result<(), String>),
     Created(Result<Task, TaskServiceError>),
     Started(Result<Task, TaskServiceError>),
     Finished(String, Result<Task, TaskServiceError>),
@@ -144,13 +145,17 @@ where
                 .service
                 .record(&task.id, &[TaskHistoryEvent::TaskHandedBack])
                 .await;
-            if let Err(error) = home.send_home(task.clone()).await {
+            let outcome = home.send_home(task.clone()).await;
+            if let Err(error) = &outcome {
                 tracing::warn!(task = %task.id, %error, "could not hand a task back to its machine");
                 // The task is here with no desk holding it, which is a state the
                 // operator has to be told about rather than left to discover: taking
                 // it over again is the way to try the move once more.
-                let _ = loop_.service.fail(&task, error).await;
+                let _ = loop_.service.fail(&task, error.clone()).await;
             }
+            let _ = loop_
+                .events
+                .send(TaskExecutionUpdate::HandedBack(task.id, outcome));
         });
     }
 

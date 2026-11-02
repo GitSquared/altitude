@@ -1418,7 +1418,8 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
                     TaskExecutionUpdate::Output { .. } => {}
                     // A handback is the client's business: a remote watching this
                     // task sees the card change when the task moves, not before.
-                    TaskExecutionUpdate::HandingBack { .. } => {}
+                    TaskExecutionUpdate::HandingBack { .. }
+                    | TaskExecutionUpdate::HandedBack(..) => {}
                     TaskExecutionUpdate::Created(Ok(task))
                     | TaskExecutionUpdate::Started(Ok(task))
                     | TaskExecutionUpdate::Finished(_, Ok(task))

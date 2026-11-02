@@ -5891,6 +5891,19 @@ impl App {
                     self.send_shell_input(&id, reply, event_loop);
                 }
             }
+            TaskExecutionUpdate::HandedBack(task_id, outcome) => {
+                if self
+                    .moving
+                    .as_ref()
+                    .is_some_and(|moving| moving.task_id == task_id)
+                {
+                    self.moving = None;
+                    self.transfer = None;
+                }
+                if let Err(error) = outcome {
+                    self.problem(format!("The task could not go back: {error}"));
+                }
+            }
             TaskExecutionUpdate::HandingBack {
                 task_id,
                 address,
