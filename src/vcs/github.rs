@@ -71,26 +71,35 @@ impl VcsProvider for GitHub {
     }
 
     fn repository_list_command(&self) -> String {
-        // One request for the set, with the fields a picker reads. `pushedAt` is
-        // asked for only to order the list: the repository an operator means is
-        // almost always one they touched recently. NO_COLOR keeps gh from
-        // colouring the JSON, which it does whenever the command has a terminal
-        // (these commands run under one) and which would make it unreadable here.
-        "NO_COLOR=1 gh repo list --limit 200 --json nameWithOwner,url,isPrivate,pushedAt".to_owned()
+        // Every repository the operator can push to, which is what `gh repo list`
+        // does not answer: it lists the ones they own, so the work an operator does
+        // in an organisation's repositories is exactly what it leaves out.
+        // `--jq '.[]'` is gh's own filter, so the answer is one repository per line
+        // and no jq binary has to exist in the sandbox; the sort is by last push,
+        // because the repository someone means is almost always one they touched
+        // recently. NO_COLOR keeps gh from colouring anything a terminal invites it
+        // to.
+        "NO_COLOR=1 gh api --paginate \
+         'user/repos?affiliation=owner,collaborator,organization_member&per_page=100&sort=pushed' \
+         --jq '.[]'"
+            .to_owned()
     }
 
     fn repositories(&self, output: &str) -> Option<Vec<Repository>> {
         #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
         struct Row {
-            name_with_owner: String,
-            url: String,
-            is_private: bool,
+            full_name: String,
+            html_url: String,
+            private: bool,
             // An empty repository has never been pushed to, so it has no date.
             #[serde(default)]
             pushed_at: Option<String>,
         }
-        let mut rows: Vec<Row> = match serde_json::from_str(output) {
+        // One object per line, because the list is asked for a page at a time.
+        let mut rows: Vec<Row> = match serde_json::Deserializer::from_str(output)
+            .into_iter::<Row>()
+            .collect::<Result<Vec<_>, _>>()
+        {
             Ok(rows) => rows,
             Err(error) => {
                 tracing::warn!(%error, "could not read the repository list");
@@ -103,9 +112,9 @@ impl VcsProvider for GitHub {
         Some(
             rows.into_iter()
                 .map(|row| Repository {
-                    name: row.name_with_owner,
-                    url: row.url,
-                    is_private: row.is_private,
+                    name: row.full_name,
+                    url: row.html_url,
+                    is_private: row.private,
                 })
                 .collect(),
         )
