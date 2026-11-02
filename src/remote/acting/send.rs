@@ -483,10 +483,10 @@ impl IncomingTransfers {
             })
             .await
             .map_err(message)?;
-        self.tasks
-            .verify_landing(task.clone())
-            .await
-            .map_err(message)?;
+        // Provisioning is part of landing, and the task it returns is the one that
+        // names this machine's sandbox: delivering into the record that arrived would
+        // be reaching for the sandbox of the machine the task came from.
+        let task = self.tasks.verify_landing(task).await.map_err(message)?;
         self.tasks
             .deliver_arrivals(&task, &UnwatchedFiles)
             .await
