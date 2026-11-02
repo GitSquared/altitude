@@ -120,9 +120,16 @@ pub fn join_down(frame: &mut Frame, x: u16, y: u16, rows: u16) {
     // that meets a rule does not go pale for its last row.
     let stroke = buffer[(x, y)].style();
     for row in 0..rows {
-        // The last row is the rule the caller drew, so the stroke arrives there
-        // from above and does not continue past it.
-        let added = if row + 1 == rows { UP } else { UP | DOWN };
+        // A stroke that joins something at its ends does not continue past them: the
+        // first row is where it hangs from (a rule there becomes a tee), and the last
+        // row is the rule the caller drew (a stroke arriving there ends in a foot).
+        let added = if row + 1 == rows {
+            UP
+        } else if row == 0 {
+            DOWN
+        } else {
+            UP | DOWN
+        };
         let at = y.saturating_add(row);
         if !join(buffer, x, at, added) {
             return;
