@@ -10,6 +10,7 @@ use ratatui::{
 };
 
 use crate::{
+    agent::ActivityKind,
     project::Project,
     task::{
         ProjectProposal, SignalTransition, TaskOperatorSignalAuthor, TaskOperatorSignalKind,
@@ -494,11 +495,11 @@ fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App) {
     // newest one is at full strength across all of its rows rather than its tail.
     const MARK_WIDTH: u16 = 2;
     let text_width = body.width.saturating_sub(MARK_WIDTH).max(1);
-    let mut rows: Vec<(String, bool, bool)> = Vec::new();
+    let mut rows: Vec<(String, bool, bool, ActivityKind)> = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         let newest = index + 1 == lines.len();
-        for (part, wrapped) in wrap_lines(line, text_width).into_iter().enumerate() {
-            rows.push((wrapped, part == 0, newest));
+        for (part, wrapped) in wrap_lines(&line.text, text_width).into_iter().enumerate() {
+            rows.push((wrapped, part == 0, newest, line.kind));
         }
     }
     app.signal_activity_scroll_max =
@@ -510,7 +511,7 @@ fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App) {
             .min(app.signal_activity_scroll_max)
     };
     let first = usize::from(scroll);
-    for (offset, (row, starts, newest)) in rows
+    for (offset, (row, starts, newest, kind)) in rows
         .iter()
         .skip(first)
         .take(usize::from(body.height))
@@ -518,10 +519,13 @@ fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App) {
     {
         // The newest line is the one being read; everything above it is there to be
         // looked back through.
-        let style = if *newest {
-            palette::primary()
-        } else {
-            palette::muted()
+        let style = match (newest, kind) {
+            // What the agent says is the thing being read; a tool it is using passes
+            // by, so it leans back rather than competing with the message.
+            (true, ActivityKind::Tool) => palette::muted().italic(),
+            (true, _) => palette::primary(),
+            (false, ActivityKind::Tool) => palette::muted().italic(),
+            (false, _) => palette::muted(),
         };
         let y = body.y.saturating_add(offset as u16);
         frame.render_widget(

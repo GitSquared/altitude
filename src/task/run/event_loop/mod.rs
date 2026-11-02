@@ -13,7 +13,7 @@ use crate::task::{
 use tokio::{sync::mpsc, time};
 
 use crate::{
-    agent::{AgentKind, TaskReportDecoder},
+    agent::{Activity, AgentKind, TaskReportDecoder},
     config::InstallationIdentity,
     isolation::{
         Command, CommandEvent, CommandSession, FileTransferSink, IsolationEngine, OutputStream,
@@ -57,7 +57,7 @@ pub enum TaskExecutionUpdate {
     // is replaced by the next one and means nothing once the run ends.
     Activity {
         task_id: String,
-        activity: String,
+        activity: Activity,
     },
     Report {
         task: Task,

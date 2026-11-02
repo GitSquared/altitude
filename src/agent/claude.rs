@@ -1,6 +1,6 @@
 use super::{
-    AUTOPILOT_SYSTEM_PROMPT, AgentEngine, REPORT_SCHEMA, REPORT_SYSTEM_PROMPT, TaskProgressDecoder,
-    TaskReportDecoder, activity,
+    AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, REPORT_SCHEMA, REPORT_SYSTEM_PROMPT,
+    TaskProgressDecoder, TaskReportDecoder, activity,
 };
 use crate::isolation::{
     DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand, shell_quote,
@@ -148,7 +148,7 @@ impl TaskReportDecoder for ClaudeStream {
 // still arriving.
 pub struct ClaudeProgress {
     pending: String,
-    activity: Option<String>,
+    activity: Option<Activity>,
     narration: String,
     // The same buffer holds what the model is saying and what it is thinking;
     // which of the two it is decides how the line reads when the block closes.
@@ -186,7 +186,7 @@ impl ClaudeProgress {
                                 .and_then(|block| block.get("name"))
                                 .and_then(Value::as_str)
                         {
-                            self.activity = Some(activity::tool_activity(tool, block));
+                            self.activity = Some(Activity::tool(tool));
                         }
                     }
                     Some("content_block_delta") => {
@@ -237,7 +237,7 @@ impl ClaudeProgress {
                             .get("name")
                             .and_then(Value::as_str)
                             .unwrap_or("a tool");
-                        self.activity = Some(activity::tool_activity(name, block.get("input")));
+                        self.activity = Some(Activity::tool(name));
                     }
                     None => {
                         let text = blocks
@@ -267,7 +267,7 @@ impl TaskProgressDecoder for ClaudeProgress {
         }
     }
 
-    fn take_activity(&mut self) -> Option<String> {
+    fn take_activity(&mut self) -> Option<Activity> {
         self.activity.take()
     }
 }

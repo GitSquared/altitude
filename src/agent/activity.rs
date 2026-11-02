@@ -1,4 +1,38 @@
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
+
+// What kind of thing the line is, because the three read differently: a message is
+// quoted, a thought says it is thinking, and a tool is a passing action rather than
+// something the agent said. `Remote` is a line another machine sent, which travels
+// as text and keeps no kind with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ActivityKind {
+    Speech,
+    Thinking,
+    Tool,
+    Remote,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Activity {
+    pub text: String,
+    pub kind: ActivityKind,
+}
+
+impl Activity {
+    pub(super) fn tool(tool: &str) -> Self {
+        Self {
+            text: tool_activity(tool),
+            kind: ActivityKind::Tool,
+        }
+    }
+
+    pub fn remote(text: String) -> Self {
+        Self {
+            text,
+            kind: ActivityKind::Remote,
+        }
+    }
+}
 
 // Both engines say the same three things about what they are doing — a tool they
 // started, a file or command it is aimed at, and the words around it — in two
@@ -6,47 +40,28 @@ use serde_json::Value;
 // cannot drift apart.
 pub(super) const NARRATION_LIMIT: usize = 160;
 
-pub(super) fn tool_activity(tool: &str, args: Option<&Value>) -> String {
-    let name = tool.to_ascii_lowercase();
-    // A shell command is the one thing here that is not a short name for the work:
-    // half of them are a pipeline of quoting the operator cannot skim, and reading
-    // one does not answer what the agent is doing any faster than the verb does.
-    if name == "bash" || name == "shell" {
-        return "running a command".to_owned();
-    }
-    let verb = match name.as_str() {
-        "read" => "reading",
-        "edit" | "write" | "multiedit" => "editing",
-        "grep" | "search" => "searching for",
-        "glob" | "find" => "looking for",
-        "webfetch" | "fetch" => "fetching",
-        "task" => "briefing a subagent",
-        _ => tool,
-    };
-    let target = args
-        .and_then(|args| args.get("command"))
-        .and_then(Value::as_str)
-        .map(|command| format!("`{}`", first_line(command, 80)))
-        .or_else(|| {
-            args.and_then(|args| {
-                ["file_path", "path", "pattern"]
-                    .iter()
-                    .find_map(|key| args.get(*key).and_then(Value::as_str))
-            })
-            .map(|target| first_line(target, 80))
-        });
-    match target {
-        Some(target) if !target.is_empty() => format!("{verb} {target}"),
-        _ => verb.to_owned(),
-    }
+pub(super) fn tool_activity(tool: &str) -> String {
+    // One shape for every harness's tool: what it is using, named the way its own
+    // stream names it. The arguments are not shown — a shell command is a pipeline
+    // of quoting, and a path is the tool's business rather than the operator's:
+    // neither answers "what is it doing" faster than the tool's own name.
+    format!("using {}…", tool.to_ascii_lowercase())
 }
 
-pub(super) fn narration(text: &str) -> Option<String> {
-    speaking(text).map(|said| format!("\"{said}\""))
+pub(super) fn narration(text: &str) -> Option<Activity> {
+    speaking(text).map(|said| Activity {
+        text: format!("\"{said}\""),
+        kind: ActivityKind::Speech,
+    })
 }
 
-pub(super) fn thinking(text: &str) -> Option<String> {
-    speaking(text).map(|thought| format!("thinking: {thought}"))
+pub(super) fn thinking(text: &str) -> Option<Activity> {
+    // The word is in the line, not only in the style: a line that leaves this
+    // machine as text has to read as thinking wherever it lands.
+    speaking(text).map(|thought| Activity {
+        text: format!("thinking: {thought}"),
+        kind: ActivityKind::Thinking,
+    })
 }
 
 fn speaking(text: &str) -> Option<String> {

@@ -1,6 +1,6 @@
 use super::{
-    AUTOPILOT_SYSTEM_PROMPT, AgentEngine, REPORT_SCHEMA, REPORT_SYSTEM_PROMPT, TaskProgressDecoder,
-    TaskReportDecoder, activity,
+    AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, REPORT_SCHEMA, REPORT_SYSTEM_PROMPT,
+    TaskProgressDecoder, TaskReportDecoder, activity,
 };
 use crate::isolation::{
     DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand, shell_quote,
@@ -191,7 +191,7 @@ impl TaskReportDecoder for PiStream {
 // already arriving; nothing has to be scraped out of a terminal.
 pub struct PiProgress {
     pending: String,
-    activity: Option<String>,
+    activity: Option<Activity>,
     // The assistant's text arrives a delta at a time; only the most recent block is
     // of any interest, and only far enough to read the first line of it.
     narration: String,
@@ -216,7 +216,7 @@ impl PiProgress {
                     .get("toolName")
                     .and_then(Value::as_str)
                     .unwrap_or("a tool");
-                self.activity = Some(activity::tool_activity(tool, event.get("args")));
+                self.activity = Some(Activity::tool(tool));
             }
             Some("message_update") => {
                 let update = event.get("assistantMessageEvent");
@@ -272,7 +272,7 @@ impl TaskProgressDecoder for PiProgress {
         }
     }
 
-    fn take_activity(&mut self) -> Option<String> {
+    fn take_activity(&mut self) -> Option<Activity> {
         self.activity.take()
     }
 }

@@ -13,7 +13,7 @@ use ratatui::{DefaultTerminal, text::Line};
 use tokio::{process::Command as HostCommand, sync::mpsc, task::JoinHandle};
 
 use crate::{
-    agent::{AGENTS, AgentKind},
+    agent::{AGENTS, Activity, AgentKind},
     config::{Config, DEFAULT_PORT, SettingsError, SettingsFile},
     credentials::{
         Credential, CredentialAnswer, CredentialShell, CredentialShellCancel, CredentialShellEvent,
@@ -478,7 +478,7 @@ pub struct App {
     // What each running agent is doing, straight from its own stream. Live only:
     // nothing here outlives the run it describes, and the task screen is the only
     // reader. Capped, because an agent that works for an hour says a lot.
-    pub(in crate::tui) activities: HashMap<String, Vec<String>>,
+    pub(in crate::tui) activities: HashMap<String, Vec<Activity>>,
     pub(in crate::tui) signal_activity_scroll: u16,
     pub(in crate::tui) signal_activity_scroll_max: u16,
     pub(in crate::tui) signal_activity_rows: u16,
@@ -3713,7 +3713,7 @@ impl App {
     // through, little enough that a task left running for hours stays cheap.
     const ACTIVITY_LINES: usize = 200;
 
-    pub(in crate::tui) fn signal_activity(&self) -> Option<&Vec<String>> {
+    pub(in crate::tui) fn signal_activity(&self) -> Option<&Vec<Activity>> {
         let task_id = self.signal_task_id.as_deref()?;
         self.activities.get(task_id)
     }
