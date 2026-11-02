@@ -81,28 +81,6 @@ pub enum SignalFocus {
     Sort,
 }
 
-impl SignalFocus {
-    pub fn next(self, forward: bool, actions: usize, shows_plan: bool) -> Self {
-        let mut ring = vec![Self::List, Self::Detail];
-        // The plan and the activity are behind a tab on a narrow screen, and a
-        // focus ring that stops on a pane nobody can see is a ring that hides keys.
-        if shows_plan {
-            ring.push(Self::Plan);
-            ring.push(Self::Activity);
-        }
-        ring.extend((0..actions).map(Self::Action));
-        ring.push(Self::Filter);
-        ring.push(Self::Sort);
-        let at = ring.iter().position(|focus| *focus == self).unwrap_or(0);
-        let at = if forward {
-            (at + 1) % ring.len()
-        } else {
-            (at + ring.len() - 1) % ring.len()
-        };
-        ring[at]
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignalHit {
     List,
@@ -216,6 +194,8 @@ fn group_of(thread: &TaskOperatorSignalThread) -> Group {
 
 pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     app.signal_targets.clear();
+    app.signal_focus_ring.clear();
+    app.signal_focus_ring.add(SignalFocus::List);
     // The runner clears what was behind this screen and draws the field; the
     // surface below is what the screen puts on top of it.
     let [header_area, body] =
@@ -269,6 +249,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         ])
         .areas(detail);
         surface::vertical_divider(frame, inner, conversation.right());
+        app.signal_focus_ring.add(SignalFocus::Detail);
         surface::cover(frame, conversation);
         draw_conversation(frame, conversation, app);
         split_plan_and_activity(frame, plan, app);
@@ -283,14 +264,23 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         if app.signal_plan_open {
             split_plan_and_activity(frame, pane, app);
         } else {
+            app.signal_focus_ring.add(SignalFocus::Detail);
             draw_conversation(frame, pane, app);
         }
     }
     // The controls sit above the list they change in their own subdivision of the
     // panel; their open lists overlay the rows rather than pushing them.
     surface::cover(frame, toolbar);
+    app.signal_focus_ring.add(SignalFocus::Filter);
+    app.signal_focus_ring.add(SignalFocus::Sort);
     draw_controls(frame, toolbar, threads, app);
     surface::horizontal_divider(frame, list, divider.y);
+    // Whatever the focus was on may have gone with the last draw — a tab closed, a
+    // thread with no actions left. Saying so once here is cheaper than every key
+    // handler asking whether the thing it is about to act on is still on screen.
+    if !app.signal_focus_ring.contains(app.signal_focus) {
+        app.signal_focus = SignalFocus::List;
+    }
 }
 
 fn draw_plan_tabs(frame: &mut Frame, area: Rect, app: &App) {
@@ -362,6 +352,7 @@ fn draw_plan(frame: &mut Frame, area: Rect, app: &mut App) {
         .iter()
         .filter(|step| step.status == TaskPlanStatus::Completed)
         .count();
+    app.signal_focus_ring.add(SignalFocus::Plan);
     draw_pane_title(
         frame,
         title,
@@ -447,6 +438,7 @@ fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     };
     let (title, _, body) = pane_body(area);
+    app.signal_focus_ring.add(SignalFocus::Activity);
     draw_pane_title(frame, title, "ACTIVITY", String::new());
     app.signal_activity_rows = body.height.max(1);
     let rows: Vec<String> = lines
@@ -797,6 +789,7 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
         let rects = draw_buttons(frame, area, tail, &buttons, status.as_deref());
         for (index, rect) in rects.into_iter().enumerate() {
             app.signal_targets.add(rect, SignalHit::Action(index));
+            app.signal_focus_ring.add(SignalFocus::Action(index));
         }
     }
     app.signal_scroll = scroll;

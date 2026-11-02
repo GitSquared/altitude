@@ -41,6 +41,7 @@ use crate::{
     tui::screens,
     tui::widgets::{
         chrome::Hint,
+        focus::FocusRing,
         layers::Behind,
         pointer::Targets,
         select::{Offer, Select},
@@ -517,6 +518,9 @@ pub struct App {
     pub(in crate::tui) signal_message_flash: Option<usize>,
     signal_flash_started: Option<Instant>,
     pub(in crate::tui) signal_targets: Targets<SignalHit>,
+    // Rebuilt by every draw of the task screen, so it cannot describe a screen
+    // that is no longer on it.
+    pub(in crate::tui) signal_focus_ring: FocusRing<SignalFocus>,
     pub(in crate::tui) task_targets: Targets<usize>,
     pub(in crate::tui) project_targets: Targets<usize>,
     pub(in crate::tui) settings_targets: Targets<SettingsHit>,
@@ -685,6 +689,7 @@ impl App {
             signal_message_flash: None,
             signal_flash_started: None,
             signal_targets: Targets::default(),
+            signal_focus_ring: FocusRing::default(),
             task_targets: Targets::default(),
             settings_targets: Targets::default(),
             signal_arrivals: HashMap::new(),
@@ -3866,9 +3871,7 @@ impl App {
     }
 
     pub(in crate::tui) fn move_signal_focus(&mut self, forward: bool) {
-        let actions = self.signal_actions().len();
-        let shows_plan = !self.signal_plan_tabs || self.signal_plan_open;
-        self.signal_focus = self.signal_focus.next(forward, actions, shows_plan);
+        self.signal_focus = self.signal_focus_ring.next(self.signal_focus, forward);
         if self.signal_focus == SignalFocus::Detail {
             let len = self
                 .signal_thread()

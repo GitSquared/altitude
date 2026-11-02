@@ -4,6 +4,7 @@ pub mod card;
 pub mod chrome;
 pub mod columns;
 pub mod empty;
+pub mod focus;
 pub mod header;
 pub mod layers;
 pub mod list;
