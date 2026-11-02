@@ -98,6 +98,7 @@ pub trait Host: Send + Sync + 'static {
         delegation: Option<String>,
     ) -> StartFuture<'_, String>;
     fn stop(&self, task_id: String, reason: TaskExecutionPauseReason) -> HostFuture<'_, ()>;
+    fn complete(&self, task_id: String) -> HostFuture<'_, ()>;
     fn record_status(&self, task_id: String, status: TrackerStatus) -> HostFuture<'_, ()>;
     fn signal_threads(&self, task_id: String) -> HostFuture<'_, Vec<TaskOperatorSignalThread>>;
     fn reopen_signal(&self, task_id: String, signal_id: String) -> HostFuture<'_, ()>;
@@ -1197,11 +1198,27 @@ impl RemoteTracker {
         } else {
             "You canceled this issue, so Altitude stopped the task."
         };
-        host.stop(
-            report.task_id.clone(),
-            TaskExecutionPauseReason::TrackerEnded,
-        )
-        .await?;
+        if is_done {
+            // Done is the operator's ending, the same as accepting the work: the
+            // task is finished rather than paused for someone to interpret.
+            host.complete(report.task_id.clone()).await?;
+        } else {
+            host.stop(
+                report.task_id.clone(),
+                TaskExecutionPauseReason::TrackerEnded,
+            )
+            .await?;
+        }
+        // An issue that keeps pointing at this machine is one this machine adopts
+        // again on its next start, which is how finished work comes back to life.
+        if let Err(error) = self
+            .config
+            .automation
+            .release_issue(&self.issue_reference(&report.issue_id))
+            .await
+        {
+            tracing::warn!(issue = %report.issue_id, %error, "could not release an ended task's issue");
+        }
         if let Err(error) = self
             .config
             .automation

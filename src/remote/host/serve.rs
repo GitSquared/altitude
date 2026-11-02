@@ -917,6 +917,15 @@ impl tracker::Host for OwnTasks {
         })
     }
 
+    fn complete(&self, task_id: String) -> tracker::HostFuture<'_, ()> {
+        Box::pin(async move {
+            self.tasks
+                .complete_task(&task_id)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
     fn stop(
         &self,
         task_id: String,

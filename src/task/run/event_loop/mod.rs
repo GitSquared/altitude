@@ -592,6 +592,36 @@ where
             .map(|_| ())
     }
 
+    // The tracker is where the operator said this work is over, which is the same
+    // ending accepting it in Altitude would be: the task is done, not paused with a
+    // reason someone has to interpret later.
+    pub async fn complete_task(&self, task_id: &str) -> Result<(), TaskServiceError> {
+        let Some(task) = self
+            .list()
+            .await?
+            .into_iter()
+            .find(|task| task.id == task_id)
+        else {
+            return Ok(());
+        };
+        if task.facts.execution_status == TaskExecutionStatus::Completed {
+            return Ok(());
+        }
+        self.service.release_resources(&task).await?;
+        self.service
+            .record(
+                &task.id,
+                &[TaskHistoryEvent::TaskCompleted {
+                    execution_status: TaskExecutionStatus::Completed,
+                }],
+            )
+            .await?;
+        let _ = self
+            .events
+            .send(TaskExecutionUpdate::Removed(task.id, Ok(())));
+        Ok(())
+    }
+
     pub async fn stop(
         &self,
         task: Task,
