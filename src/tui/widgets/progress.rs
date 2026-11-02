@@ -41,14 +41,6 @@ impl Progress<'_> {
         let (done, total) = self.detail.totals();
         total > 0 && done <= total
     }
-
-    fn percent(&self) -> u16 {
-        let (done, total) = self.detail.totals();
-        if total == 0 {
-            return 0;
-        }
-        ((done.min(total) * 100) / total) as u16
-    }
 }
 
 pub fn draw(frame: &mut Frame, area: Rect, progress: &Progress<'_>, tick: Option<usize>) -> Rect {
@@ -129,28 +121,34 @@ pub fn draw(frame: &mut Frame, area: Rect, progress: &Progress<'_>, tick: Option
 }
 
 fn draw_bar(frame: &mut Frame, area: Rect, progress: &Progress<'_>) {
-    const PARTIAL: [&str; 8] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
-    let percent = format!("{:>4}%", progress.percent());
-    // A space between the bar and the numbers, and the bar is what is left.
-    let bar_width = usize::from(area.width).saturating_sub(percent.chars().count() + 1);
     let (done, total) = progress.detail.totals();
+    frame.render_widget(Paragraph::new(bar_line(area.width, done, total)), area);
+}
+
+// A bar on one line: filled cells, the eighth-of-a-cell remainder, then the
+// percentage. Shared with the boot screen, which has no room for the popup.
+pub fn bar_line(width: u16, done: u64, total: u64) -> Line<'static> {
+    const PARTIAL: [&str; 8] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
+    let percent = (done.min(total) * 100).checked_div(total).unwrap_or(0) as u16;
+    let percent = format!("{percent:>4}%");
+    // A space between the bar and the numbers, and the bar is what is left.
+    let bar_width = usize::from(width).saturating_sub(percent.chars().count() + 1);
     let eighths = (bar_width as u64 * 8 * done.min(total))
         .checked_div(total)
         .unwrap_or(0);
     let filled = usize::try_from(eighths / 8).unwrap_or(0).min(bar_width);
     let part = usize::try_from(eighths % 8).unwrap_or(0);
     let hollow = bar_width.saturating_sub(filled + usize::from(part > 0));
-    let line = Line::from(vec![
+    Line::from(vec![
         Span::styled("█".repeat(filled), palette::accent()),
         Span::styled(PARTIAL[part].to_owned(), palette::accent()),
         Span::styled("░".repeat(hollow), palette::backdrop()),
         Span::raw(" "),
         Span::styled(percent, palette::primary()),
-    ]);
-    frame.render_widget(Paragraph::new(line), area);
+    ])
 }
 
-fn amount(bytes: u64) -> String {
+pub fn amount(bytes: u64) -> String {
     const KILO: f64 = 1_000.0;
     let bytes = bytes as f64;
     match bytes {

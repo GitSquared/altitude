@@ -13,10 +13,10 @@ use tokio::{signal::unix::Signal, sync::watch, time};
 use crate::tui::{
     background::terrain,
     keys,
-    widgets::{palette, question},
+    widgets::{palette, progress, question},
 };
 use crate::{
-    isolation::IsolationStatus,
+    isolation::{ImagePull, IsolationStatus},
     tui::widgets::utils::{shimmer, shimmer_clock},
 };
 
@@ -37,7 +37,7 @@ where
         terminate,
         interrupt,
         animations,
-        || "migrating the database…",
+        || BootStatus::Working("migrating the database…"),
         async { initialize.await.map_err(io::Error::other) },
     )
     .await
@@ -59,7 +59,7 @@ pub async fn isolation(
         terminate,
         interrupt,
         animations,
-        || isolation_label(&shown.borrow()),
+        || isolation_status(&shown.borrow()),
         async move {
             loop {
                 // Read it out first: the guard would otherwise outlive the match,
@@ -91,7 +91,7 @@ pub async fn task_resume<T>(
         terminate,
         interrupt,
         animations,
-        || "resuming tasks…",
+        || BootStatus::Working("resuming tasks…"),
         async { Ok(resume.await) },
     )
     .await
@@ -102,7 +102,7 @@ async fn wait_for<T>(
     terminate: &mut Signal,
     interrupt: &mut Signal,
     animations: bool,
-    label: impl Fn() -> &'static str,
+    label: impl Fn() -> BootStatus,
     operation: impl Future<Output = io::Result<T>>,
 ) -> io::Result<Option<T>> {
     let mut events = EventStream::new();
@@ -209,18 +209,50 @@ fn draw_question(
     }
 }
 
-fn isolation_label(status: &IsolationStatus) -> &'static str {
+fn isolation_status(status: &IsolationStatus) -> BootStatus {
     match status {
-        IsolationStatus::Starting | IsolationStatus::InstallingRuntime => "starting up…",
-        IsolationStatus::PreparingBaseImage => "fetching the sandbox image…",
-        IsolationStatus::PreparingBasePackages => "installing base packages…",
-        IsolationStatus::Ready | IsolationStatus::Failed(_) => "starting up…",
+        IsolationStatus::Starting | IsolationStatus::InstallingRuntime => {
+            BootStatus::Working("starting up…")
+        }
+        IsolationStatus::PreparingBaseImage(pull) => BootStatus::Downloading {
+            label: "fetching the sandbox image…",
+            pull: *pull,
+        },
+        IsolationStatus::PreparingBasePackages => BootStatus::Working("installing base packages…"),
+        IsolationStatus::Ready | IsolationStatus::Failed(_) => BootStatus::Working("starting up…"),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum BootStatus {
+    Working(&'static str),
+    Downloading {
+        label: &'static str,
+        pull: ImagePull,
+    },
+}
+
+impl BootStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Working(label) => label,
+            Self::Downloading { label, .. } => label,
+        }
+    }
+
+    fn download(self) -> Option<(u64, u64)> {
+        match self {
+            Self::Downloading { pull, .. } if pull.total_bytes > 0 => {
+                Some((pull.downloaded_bytes, pull.total_bytes))
+            }
+            _ => None,
+        }
     }
 }
 
 fn draw(
     frame: &mut Frame,
-    label: &str,
+    status: BootStatus,
     tick: Option<usize>,
     terrain: Option<&mut terrain::Terrain>,
 ) {
@@ -228,24 +260,48 @@ fn draw(
     if let Some(terrain) = terrain.as_ref() {
         terrain.mark(frame.buffer_mut(), area);
     }
-    let [_, title_area, _, status, _] = Layout::vertical([
+    let download = status.download();
+    let mut rows = vec![
         Constraint::Fill(1),
         Constraint::Length(1),
         Constraint::Length(3),
         Constraint::Length(1),
-        Constraint::Fill(1),
-    ])
-    .areas(frame.area());
+    ];
+    if download.is_some() {
+        rows.push(Constraint::Length(1));
+        rows.push(Constraint::Length(1));
+    }
+    rows.push(Constraint::Fill(1));
+    let rows = Layout::vertical(rows).split(area);
 
     frame.render_widget(
         Paragraph::new(Line::styled(TITLE, palette::heading())).centered(),
-        title_area,
+        rows[1],
     );
 
     frame.render_widget(
-        Paragraph::new(Line::from_iter(shimmer(label, tick))).centered(),
-        status,
+        Paragraph::new(Line::from_iter(shimmer(status.label(), tick))).centered(),
+        rows[3],
     );
+
+    if let Some((done, total)) = download {
+        // Wide enough to read as a measurement rather than a dialog, and the
+        // numbers below repeat what the bar cannot show exactly.
+        let width = 40.min(area.width);
+        frame.render_widget(
+            Paragraph::new(progress::bar_line(width, done, total)).centered(),
+            rows[4],
+        );
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                format!("{} of {}", progress::amount(done), progress::amount(total)),
+                palette::muted(),
+            ))
+            .centered(),
+            rows[5],
+        );
+    }
+
     if let Some(terrain) = terrain {
         terrain.draw(frame.buffer_mut(), area);
     }

@@ -35,10 +35,18 @@ pub(crate) use sandbox::{run_collecting, shell_quote};
 pub enum IsolationStatus {
     Starting,
     InstallingRuntime,
-    PreparingBaseImage,
+    PreparingBaseImage(ImagePull),
     PreparingBasePackages,
     Ready,
     Failed(String),
+}
+
+// How far the base image has come down. The bytes are unknown until the manifest
+// is read, and the image is fetched only once, so both halves may be zero.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ImagePull {
+    pub downloaded_bytes: u64,
+    pub total_bytes: u64,
 }
 
 pub struct CommandSession {
