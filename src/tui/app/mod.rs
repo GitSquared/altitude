@@ -5330,6 +5330,10 @@ impl App {
                 let Some(task) = self.selected_task() else {
                     return Ok(false);
                 };
+                if self.transfer.is_some() {
+                    self.say("A task is already on its way; let that finish first");
+                    return Ok(false);
+                }
                 // A task goes where its project runs, and nowhere else. So this
                 // either offers that one machine or says why there is no move.
                 let Some(project) = task.project().cloned() else {
@@ -5395,6 +5399,12 @@ impl App {
     ) where
         E: IsolationEngine + Clone + 'static,
     {
+        // Two takes at once pack the same task twice and race the sandbox each one
+        // makes, so a move that is already running has to finish.
+        if self.transfer.is_some() {
+            self.say("A task is already on its way; let that finish first");
+            return;
+        }
         // A task on another machine has to travel before it can be taken over, and
         // travelling is a wait rather than a keystroke.
         if let Some(held) = self
