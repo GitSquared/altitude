@@ -37,8 +37,12 @@ const ISSUE_DELEGATION_QUERY: &str = "query IssueDelegation($id: String!) { \
 // Issues the app has been asked to work on. A delegation is delivered by webhook,
 // and a webhook that arrives while this machine is restarting is gone: this is how
 // the machine finds out what it was asked to do while it was not listening.
+// Only work that is still work. An issue that reached a completed or cancelled state
+// keeps its delegation, and picking one of those up on the next start is starting
+// something somebody already finished.
 const DELEGATED_ISSUES_QUERY: &str = "query DelegatedIssues($app: ID!) { \
-    issues(filter: { delegate: { id: { eq: $app } } }, first: 25) { \
+    issues(filter: { delegate: { id: { eq: $app } }, \
+                    state: { type: { nin: [\"completed\", \"canceled\"] } } }, first: 25) { \
     nodes { id identifier title url project { name } \
     agentSessions(first: 10) { nodes { id createdAt } } \
     team { id key name organization { id } } } } }";
