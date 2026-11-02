@@ -17,7 +17,9 @@ use crate::{
         popups::{repositories::Repositories, scopes::Scopes},
         screens::settings::rows::ProjectDefaults,
         widgets::{
-            button, chrome, palette,
+            button, chrome,
+            focus::FocusRing,
+            palette,
             select::{self, Offer, Select},
             text::{Field, FieldStyle, TextBox},
             utils::truncate,
@@ -229,25 +231,6 @@ pub struct Form {
     pub scopes: Option<Scopes>,
 }
 
-const PROJECT_FIELDS: [Focus; 14] = [
-    Focus::Primary,
-    Focus::Agent,
-    Focus::VcsIdentity,
-    Focus::Repository,
-    Focus::Identity,
-    Focus::TrackerIdentity,
-    Focus::Scope,
-    Focus::Host,
-    Focus::Accept,
-    Focus::Instructions,
-    Focus::Setup,
-    Focus::Caches,
-    Focus::Cancel,
-    Focus::Save,
-];
-
-const REMOTE_FIELDS: [Focus; 3] = [Focus::Primary, Focus::Cancel, Focus::Save];
-
 impl Form {
     pub fn new_project(
         scope_label: &str,
@@ -397,30 +380,24 @@ impl Form {
         }
     }
 
-    pub fn move_focus(&mut self, forward: bool) {
-        let fields: &[Focus] = if self.target.is_remote() {
-            &REMOTE_FIELDS
-        } else {
-            &PROJECT_FIELDS
-        };
-        let usable: Vec<Focus> = fields
-            .iter()
-            .copied()
-            .filter(|focus| self.is_enabled(*focus))
-            .collect();
-        if usable.is_empty() {
-            return;
+    // A form is a list that scrolls, so what is on screen is a window over it and
+    // not the list itself: the ring is the fields the form has, in the order they
+    // are drawn, which is the order `groups` puts them in. Focusing one that is
+    // scrolled out of sight is how the keyboard scrolls the form.
+    fn focus_ring(&self) -> FocusRing<Focus> {
+        let mut ring = FocusRing::default();
+        for group in groups(!self.target.is_remote()) {
+            if self.is_enabled(group.focus) {
+                ring.add(group.focus);
+            }
         }
-        let at = usable
-            .iter()
-            .position(|focus| *focus == self.focus)
-            .unwrap_or(0);
-        let next = if forward {
-            (at + 1) % usable.len()
-        } else {
-            (at + usable.len() - 1) % usable.len()
-        };
-        self.focus = usable[next];
+        ring.add(Focus::Cancel);
+        ring.add(Focus::Save);
+        ring
+    }
+
+    pub fn move_focus(&mut self, forward: bool) {
+        self.focus = self.focus_ring().next(self.focus, forward);
         self.free_scroll = false;
     }
 

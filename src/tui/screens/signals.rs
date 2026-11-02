@@ -296,6 +296,9 @@ fn draw_plan_tabs(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn split_plan_and_activity(frame: &mut Frame, area: Rect, app: &mut App) {
+    // The column covers what is behind it before anything is written into it: the
+    // panes inside it are text, and text does not clear the terrain it lands on.
+    surface::cover(frame, area);
     let has_activity = app.signal_activity().is_some_and(|lines| !lines.is_empty());
     // Two panes of the same window, so they share it: the plan is a list that
     // scrolls and the stream is a list that scrolls, and neither owes the other its

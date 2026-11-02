@@ -16,6 +16,7 @@ use crate::{
         widgets::{
             button::Button,
             chrome::Hint,
+            focus::FocusRing,
             palette,
             select::{Offer, Select},
             text::Field,
@@ -65,19 +66,6 @@ pub enum Focus {
     Ready,
     Settings,
 }
-
-const ROWS: [Focus; 8] = [
-    Focus::Name,
-    Focus::Agent,
-    Focus::VersionControl,
-    Focus::Commits,
-    Focus::Tracker,
-    Focus::Remote,
-    // The footer reads left to right: Settings is the left button and starts the
-    // work is the right one, whatever the primary weight says.
-    Focus::Settings,
-    Focus::Ready,
-];
 
 #[derive(Clone)]
 pub struct RemoteOffer {
@@ -158,6 +146,9 @@ impl Commits {
 
 pub struct GetStarted {
     pub focus: Focus,
+    // Rebuilt by every draw, so it describes the card on screen rather than the
+    // card as it was when someone last edited a constant beside it.
+    focus_ring: FocusRing<Focus>,
     pub name: Field,
     pub name_editing: bool,
     pub agent: Select<AgentKind>,
@@ -191,6 +182,7 @@ impl GetStarted {
         };
         Self {
             focus,
+            focus_ring: FocusRing::default(),
             name: Field::with(name),
             name_editing: false,
             commits: Commits::from(identity),
@@ -227,13 +219,7 @@ impl GetStarted {
     }
 
     pub fn move_focus(&mut self, forward: bool) {
-        let at = ROWS.iter().position(|row| *row == self.focus).unwrap_or(0);
-        let next = if forward {
-            (at + 1) % ROWS.len()
-        } else {
-            (at + ROWS.len() - 1) % ROWS.len()
-        };
-        self.focus = ROWS[next];
+        self.focus = self.focus_ring.next(self.focus, forward);
     }
 
     pub fn is_typing(&self) -> bool {
@@ -390,8 +376,15 @@ pub fn draw(
 
     let subtitle = subtitle();
     let subtitle_height = wrapped_height(subtitle_plain(), width);
-    let rows = checklist(panel, setup, width, tick);
+    let (rows, row_focuses) = checklist(panel, setup, width, tick);
     let rows_height = rows.len() as u16;
+    // The ring is the rows that were drawn, in the order they were drawn: a row
+    // added to the checklist is focusable the moment it exists, and one taken
+    // away cannot be focused at all.
+    panel.focus_ring.clear();
+    for focus in row_focuses {
+        panel.focus_ring.add(focus);
+    }
     let detail = if panel.commits.open {
         "Commits carry this name and email, and signing marks them as yours. The key lives in \
          your version-control profile, not in a task. Enter saves; Esc puts back what is saved."
@@ -484,8 +477,9 @@ fn checklist(
     setup: &SetupState,
     width: u16,
     tick: Option<usize>,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, Vec<Focus>) {
     let mut lines = Vec::new();
+    let mut focuses = Vec::new();
     let focused = panel.focus;
 
     let name_value = if panel.name_editing {
@@ -509,6 +503,7 @@ fn checklist(
         focused == Focus::Name,
         width,
     ));
+    focuses.push(Focus::Name);
 
     // A negative answer never reaches here: the card has already put the row
     // back to the picker, so what remains is signed in, being checked, or a
@@ -552,6 +547,7 @@ fn checklist(
         focused == Focus::Agent,
         width,
     ));
+    focuses.push(Focus::Agent);
 
     let vcs_signed_in = signed_in(&setup.vcs_status);
     let listing = panel
@@ -568,6 +564,7 @@ fn checklist(
             focused == Focus::VersionControl,
             width,
         ));
+        focuses.push(Focus::VersionControl);
     } else if setup.vcs_status == CredentialStatus::Checking {
         lines.push(row_spans(
             Marker::Blocking,
@@ -577,6 +574,7 @@ fn checklist(
             focused == Focus::VersionControl,
             width,
         ));
+        focuses.push(Focus::VersionControl);
     } else if vcs_signed_in {
         let prefix = 1 + 2 + LABEL_WIDTH + 2;
         let room = usize::from(width).saturating_sub(prefix + ACTION_WIDTH);
@@ -595,6 +593,7 @@ fn checklist(
             focused == Focus::VersionControl,
             width,
         ));
+        focuses.push(Focus::VersionControl);
     } else {
         lines.push(row(
             Marker::Unset,
@@ -604,6 +603,7 @@ fn checklist(
             focused == Focus::VersionControl,
             width,
         ));
+        focuses.push(Focus::VersionControl);
     }
 
     // Shown, not gated: the identity is installation-wide and usually already
@@ -631,6 +631,7 @@ fn checklist(
         focused == Focus::Commits,
         width,
     ));
+    focuses.push(Focus::Commits);
     if panel.commits.open {
         lines.extend(commits_editor(&panel.commits, setup, width));
     }
@@ -657,6 +658,7 @@ fn checklist(
         focused == Focus::Tracker,
         width,
     ));
+    focuses.push(Focus::Tracker);
 
     let remote_value = match (&setup.host, &setup.offer) {
         (Some(host), _) => host.clone(),
@@ -679,11 +681,14 @@ fn checklist(
         focused == Focus::Remote,
         width,
     ));
+    focuses.push(Focus::Remote);
 
-    lines
+    (lines, focuses)
 }
 
-fn draw_footer(frame: &mut Frame, area: Rect, panel: &GetStarted, setup: &SetupState) {
+fn draw_footer(frame: &mut Frame, area: Rect, panel: &mut GetStarted, setup: &SetupState) {
+    panel.focus_ring.add(Focus::Settings);
+    panel.focus_ring.add(Focus::Ready);
     let settings = Button::secondary("Open Settings").focused(panel.focus == Focus::Settings);
     let go = Button::primary("Ready, set, go")
         .focused(panel.focus == Focus::Ready)
