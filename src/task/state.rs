@@ -129,7 +129,6 @@ pub enum TaskExecutionPauseReason {
     // same thing again from the same state.
     AgentWentQuiet,
     Transfer,
-    HandedBack,
     // The endings a tracker hands down keep the task: what happened elsewhere is something
     // the operator can read here, rather than work that quietly disappears.
     TrackerEnded,

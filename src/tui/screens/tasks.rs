@@ -426,7 +426,6 @@ fn card_status(
         .style(palette::good()),
         TaskExecutionStatus::Paused => Line::from(match summary.pause_reason {
             Some(TaskExecutionPauseReason::AwaitingOperator) => "paused · awaiting operator",
-            Some(TaskExecutionPauseReason::HandedBack) => "handed back",
             Some(TaskExecutionPauseReason::AwaitingReviewChecks) => "paused · watching PRs",
             Some(TaskExecutionPauseReason::ApplicationShutdown) => "paused · machine restarted",
             Some(TaskExecutionPauseReason::AgentWentQuiet) => "paused · the agent went quiet",

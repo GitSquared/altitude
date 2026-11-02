@@ -197,10 +197,7 @@ fn should_resume(task: &Task) -> bool {
     ) || (task.facts.execution_status == TaskExecutionStatus::Paused
         && matches!(
             task.facts.execution_pause_reason,
-            Some(
-                TaskExecutionPauseReason::ApplicationShutdown
-                    | TaskExecutionPauseReason::HandedBack
-            )
+            Some(TaskExecutionPauseReason::ApplicationShutdown)
         ))
 }
 
