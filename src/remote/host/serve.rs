@@ -1444,9 +1444,16 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
                     // Bytes for a terminal are not a card: what a watcher reads is
                     // the task, and only the events that carry one change it.
                     TaskExecutionUpdate::Output { .. } => {}
-                    // Live activity is for the interface holding the task, and a
-                    // remote's card is built from what the task records.
-                    TaskExecutionUpdate::Activity { .. } => {}
+                    TaskExecutionUpdate::Activity { task_id, activity } => {
+                        if let Ok(all) = tasks.list().await
+                            && let Some(task) = all.iter().find(|task| task.id == task_id)
+                            && let Some(operator) = task.operator_id()
+                        {
+                            let mut summary = TaskSummary::of(task);
+                            summary.activity = Some(activity);
+                            watchers.changed(operator, summary);
+                        }
+                    }
                     // A handback is the client's business: a remote watching this
                     // task sees the card change when the task moves, not before.
                     TaskExecutionUpdate::HandingBack { .. }

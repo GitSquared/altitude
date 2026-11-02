@@ -234,6 +234,10 @@ pub struct TaskSummary {
     pub mode: TaskExecutionMode,
     #[serde(default)]
     pub pause_reason: Option<TaskExecutionPauseReason>,
+    // What the agent is doing right now. Live only: it is replaced by the next
+    // line, and a summary that has none describes a task that is not working.
+    #[serde(default)]
+    pub activity: Option<String>,
     pub attention: TaskOperatorAttentionLevel,
     #[serde(default)]
     pub blocking_signal_kind: Option<TaskOperatorSignalKind>,
@@ -283,6 +287,7 @@ impl TaskSummary {
             status: task.facts.execution_status.clone(),
             mode: task.facts.execution_mode,
             pause_reason: task.facts.execution_pause_reason.clone(),
+            activity: None,
             attention: task.facts.operator_attention_level.clone(),
             blocking_signal_kind: task.facts.blocking_signal_kind,
             unresolved_signal_count: task.facts.unresolved_signal_count,

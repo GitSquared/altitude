@@ -247,6 +247,14 @@ impl App {
             }
             WatchedTasks::Snapshot { address, summaries } => self.holding(address, summaries),
             WatchedTasks::Changed { address, summary } => {
+                if let Some(activity) = summary.activity.clone() {
+                    let lines = self.activities.entry(summary.id.clone()).or_default();
+                    if lines.last() != Some(&activity) {
+                        lines.push(activity);
+                    }
+                    let excess = lines.len().saturating_sub(Self::ACTIVITY_LINES);
+                    lines.drain(..excess);
+                }
                 let held = HeldTask {
                     address: address.clone(),
                     summary: *summary,
