@@ -166,6 +166,26 @@ machine). `task` is `store`, `agent`, `run` and `mirror`.
 - Write proper documentation later as an explicitly agreed, scoped task.
   Do not create separate documentation files to bypass this boundary.
 
+## Releases
+
+- Tagging `vX.Y.Z` publishes the release: the workflow builds the three archives,
+  writes `SHA256SUMS`, publishes the GitHub release and regenerates the formula from
+  those checksums. `Cargo.toml`'s version must be bumped and committed before the tag,
+  and `tag.forceSignAnnotated` means every tag needs `-m`.
+- Write the release notes by hand. The generated notes are a commit dump; a release is
+  read by someone deciding whether to upgrade.
+- Group the notes by the part of the system the change belongs to, named the way the
+  source is: `Tracker`, `Remotes`, `Tasks and agents`, `Interface`, `Isolation`,
+  `Settings and projects`. That is roughly the folders under `src/`, and a reader
+  should be able to find the paragraph about the thing that broke for them.
+- Say what the operator can now do, or what no longer goes wrong, in their words. Not
+  "refactored the ledger"; "a delegation this machine already answered is not picked
+  up again".
+- Lead with what someone upgrading will notice, and keep the mechanical work — layout,
+  dependencies, comment passes — in an `Internal` section at the end.
+- Never claim verification that did not happen. If a fix is compiled and reasoned but
+  not exercised, say so in the session rather than dressing it up in the notes.
+
 ## Verification
 
 - Judge progress through working user journeys: delegation, switching views,
