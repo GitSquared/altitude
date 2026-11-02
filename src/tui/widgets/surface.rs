@@ -116,13 +116,18 @@ pub fn vertical_divider(frame: &mut Frame, inner: Rect, x: u16) {
 
 pub fn join_down(frame: &mut Frame, x: u16, y: u16, rows: u16) {
     let buffer = frame.buffer_mut();
+    // One stroke, one colour: the cell it starts in owns the style, so a separator
+    // that meets a rule does not go pale for its last row.
+    let stroke = buffer[(x, y)].style();
     for row in 0..rows {
         // The last row is the rule the caller drew, so the stroke arrives there
         // from above and does not continue past it.
         let added = if row + 1 == rows { UP } else { UP | DOWN };
-        if !join(buffer, x, y.saturating_add(row), added) {
+        let at = y.saturating_add(row);
+        if !join(buffer, x, at, added) {
             return;
         }
+        buffer[(x, at)].set_style(stroke);
     }
 }
 
