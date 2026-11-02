@@ -558,10 +558,7 @@ impl TaskHost for OwnTasks {
                             if landed == &transfer_id)
                     });
                 if landed_here {
-                    tasks
-                        .resume_after_handback(task)
-                        .await
-                        .map_err(|e| e.to_string())?;
+                    tasks.admit();
                     break;
                 }
             }
@@ -1158,6 +1155,10 @@ fn is_machine_local_event(event: &TaskHistoryEvent) -> bool {
             | TaskHistoryEvent::SandboxProvisioned { .. }
             | TaskHistoryEvent::SandboxRemoved { .. }
             | TaskHistoryEvent::SnapshotRemoved { .. }
+            // Facts about the desk this copy was at, which the machine receiving the
+            // task is not: the arrival describes itself with its own landing.
+            | TaskHistoryEvent::TaskArrivedFrom { .. }
+            | TaskHistoryEvent::TaskHandedBack
     )
 }
 

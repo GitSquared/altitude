@@ -1005,32 +1005,6 @@ where
         Ok(())
     }
 
-    pub async fn resume_after_handback(&self, task: Task) -> Result<(), TaskServiceError> {
-        if task.facts.arrived_from.is_some()
-            && self
-                .service
-                .events(&task.id)
-                .await?
-                .iter()
-                .any(|(_, event)| matches!(event, TaskHistoryEvent::TaskHandedBack))
-        {
-            self.service
-                .record(
-                    &task.id,
-                    &[TaskHistoryEvent::ExecutionPaused {
-                        execution_status: TaskExecutionStatus::Paused,
-                        sandbox_available: task.facts.sandbox_available,
-                        snapshot_available: task.facts.snapshot_available,
-                        execution_pause_reason: TaskExecutionPauseReason::HandedBack,
-                        snapshot_path: task.facts.snapshot_path.clone().unwrap_or_default(),
-                    }],
-                )
-                .await?;
-            self.admit();
-        }
-        Ok(())
-    }
-
     pub async fn finish_transfer(
         &self,
         task_id: &str,
