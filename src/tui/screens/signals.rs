@@ -489,10 +489,18 @@ fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App) {
         app.signal_activity_scroll = u16::MAX;
         return;
     }
-    let rows: Vec<String> = lines
-        .iter()
-        .flat_map(|line| wrap_lines(line, body.width))
-        .collect();
+    // A line the agent reported is one reading, however many rows it needs: it gets a
+    // mark where it starts so a wrapped row is not mistaken for a new one, and the
+    // newest one is at full strength across all of its rows rather than its tail.
+    const MARK_WIDTH: u16 = 2;
+    let text_width = body.width.saturating_sub(MARK_WIDTH).max(1);
+    let mut rows: Vec<(String, bool, bool)> = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let newest = index + 1 == lines.len();
+        for (part, wrapped) in wrap_lines(line, text_width).into_iter().enumerate() {
+            rows.push((wrapped, part == 0, newest));
+        }
+    }
     app.signal_activity_scroll_max =
         u16::try_from(rows.len().saturating_sub(usize::from(body.height))).unwrap_or(0);
     let scroll = if app.signal_activity_scroll == u16::MAX {
@@ -501,9 +509,8 @@ fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App) {
         app.signal_activity_scroll
             .min(app.signal_activity_scroll_max)
     };
-    let newest = rows.len().saturating_sub(1);
     let first = usize::from(scroll);
-    for (offset, row) in rows
+    for (offset, (row, starts, newest)) in rows
         .iter()
         .skip(first)
         .take(usize::from(body.height))
@@ -511,17 +518,31 @@ fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App) {
     {
         // The newest line is the one being read; everything above it is there to be
         // looked back through.
-        let style = if first + offset == newest {
+        let style = if *newest {
             palette::primary()
         } else {
             palette::muted()
         };
+        let y = body.y.saturating_add(offset as u16);
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                if *starts { "› " } else { "  " }.to_owned(),
+                style,
+            )),
+            Rect {
+                x: body.x,
+                y,
+                width: MARK_WIDTH,
+                height: 1,
+            },
+        );
         frame.render_widget(
             Paragraph::new(row.clone()).style(style),
             Rect {
-                y: body.y.saturating_add(offset as u16),
+                x: body.x.saturating_add(MARK_WIDTH),
+                y,
+                width: text_width,
                 height: 1,
-                ..body
             },
         );
     }
