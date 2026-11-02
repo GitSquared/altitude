@@ -32,9 +32,10 @@ use crate::{
 };
 
 const LIST_WIDTH: u16 = 40;
-const PLAN_WIDTH: u16 = 32;
 const PLAN_PADDING: u16 = 1;
-const PLAN_COLUMN_MIN: u16 = 112;
+// Wide enough for the list, the conversation and a side column of the same width as
+// the list: the two halves of the window are meant to look like halves.
+const PLAN_COLUMN_MIN: u16 = 122;
 const PANE_TITLE_ROWS: u16 = 2;
 const LIST_PADDING: u16 = 1;
 const COMPOSER_HEIGHT: u16 = 5;
@@ -245,7 +246,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         let [conversation, _, plan] = Layout::horizontal([
             Constraint::Min(0),
             Constraint::Length(1),
-            Constraint::Length(PLAN_WIDTH),
+            Constraint::Length(LIST_WIDTH),
         ])
         .areas(detail);
         surface::vertical_divider(frame, inner, conversation.right());
