@@ -17,7 +17,7 @@ use crate::{
     config::InstallationIdentity,
     isolation::{
         Command, CommandEvent, CommandSession, FileTransferSink, IsolationEngine, OutputStream,
-        guest_absolute,
+        guest_absolute, shell_quote,
     },
     project::Project,
     task::mirror::review::{
@@ -777,10 +777,20 @@ where
                 .agents
                 .engine(kind)
                 .conversation_transcript_path(conversation);
-            isolation
-                .collect_file(sandbox_id, guest, destination.join("transcript.jsonl"))
+            // A conversation that has not written a transcript yet has nothing to
+            // carry, and a move must not fail over the file it was never given: a
+            // task that failed before its first turn still has work worth taking.
+            let exists = self
+                .service
+                .run_captured(&sandbox_id, format!("test -f {}", shell_quote(&guest)))
                 .await
-                .map_err(TaskServiceError::Isolation)?;
+                .is_ok();
+            if exists {
+                isolation
+                    .collect_file(sandbox_id, guest, destination.join("transcript.jsonl"))
+                    .await
+                    .map_err(TaskServiceError::Isolation)?;
+            }
         }
         Ok(())
     }
