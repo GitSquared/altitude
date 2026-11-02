@@ -11,14 +11,6 @@ use std::{
 };
 use uuid::Uuid;
 
-pub const DEFAULT_CACHES: &[&str] = &[
-    "~/.cargo",
-    "~/.cache",
-    "~/.npm",
-    "~/.local/share/pnpm",
-    "~/go/pkg/mod",
-];
-
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Project {
     pub id: String,
@@ -97,10 +89,10 @@ impl Project {
             name: name.into(),
             setup_command: String::new(),
             repository: None,
-            caches: DEFAULT_CACHES
-                .iter()
-                .map(|path| (*path).to_owned())
-                .collect(),
+            // Nothing is shared until the project says what: a cache is a directory
+            // written by one project and read by the next, and guessing which ones
+            // a project wants is how a build ends up lying about its own state.
+            caches: Vec::new(),
             instructions: None,
             agent: None,
             agent_credential: None,

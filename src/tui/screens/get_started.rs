@@ -779,7 +779,7 @@ fn repository_select(cached: &[Repository], current: Option<&str>) -> Select<Rep
     let chosen = current
         .and_then(|url| offers.iter().position(|offer| offer.value.url == url))
         .unwrap_or(0);
-    Select::new("repository", offers, chosen).without_search()
+    Select::new("repository", offers, chosen)
 }
 
 fn row(

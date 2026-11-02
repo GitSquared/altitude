@@ -257,13 +257,23 @@ impl<T> Select<T> {
             // the delete key do nothing rather than move a caret this list does
             // not have.
             KeyCode::Char(character)
-                if self.filtering
-                    && !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER) =>
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER) =>
             {
-                self.query.push(character);
-                self.at = 0;
+                // Typing narrows the list without being announced first: a picker
+                // whose list is long is one somebody types into, and asking them to
+                // find `/` for that is asking them to read the hints to use a list.
+                // The movement keys are taken above, so this is text.
+                if !self.filtering && self.is_searchable() {
+                    self.filtering = true;
+                    self.query.clear();
+                    self.at = 0;
+                }
+                if self.filtering {
+                    self.query.push(character);
+                    self.at = 0;
+                }
             }
             _ => {}
         }
