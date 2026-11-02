@@ -181,12 +181,25 @@ pub trait AgentEngine: Send + Sync {
     fn operator_command(&self, conversation_id: &str, opening: &str) -> String;
     fn operator_requires_conversation(&self) -> bool;
     fn report_decoder(&self) -> Box<dyn TaskReportDecoder>;
+    // Engines that speak while they work say so in the same stream the report is
+    // read from. One that does not need only return None.
+    fn progress_decoder(&self) -> Option<Box<dyn TaskProgressDecoder>> {
+        None
+    }
 }
 
 pub trait TaskReportDecoder: Send {
     fn process(&mut self, bytes: &[u8]);
     fn report(self: Box<Self>) -> Result<TaskAgentTurnReport, String>;
     fn failure_message(&mut self) -> Option<&str>;
+}
+
+// What the agent is doing, as it works, for someone who wants to look without
+// taking the terminal. It is a line to read and throw away, never a record: the
+// task's own history is where anything worth keeping is written.
+pub trait TaskProgressDecoder: Send {
+    fn process(&mut self, bytes: &[u8]);
+    fn take_activity(&mut self) -> Option<String>;
 }
 
 #[derive(Clone)]

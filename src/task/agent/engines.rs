@@ -1,5 +1,5 @@
 use crate::{
-    agent::{AgentEngine, AgentKind, TaskReportDecoder},
+    agent::{AgentEngine, AgentKind, TaskProgressDecoder, TaskReportDecoder},
     isolation::IsolationEngine,
 };
 
@@ -45,6 +45,12 @@ where
         task.agent_kind
             .ok_or(TaskServiceError::Task(TaskError::MissingAgent))
     }
+    pub fn progress_decoder(&self, task: &Task) -> Option<Box<dyn TaskProgressDecoder>> {
+        self.agent_kind(task)
+            .ok()
+            .and_then(|kind| self.agents.engine(kind).progress_decoder())
+    }
+
     pub fn report_decoder(&self, task: &Task) -> Option<Box<dyn TaskReportDecoder>> {
         task.agent_kind
             .map(|kind| self.agents.engine(kind).report_decoder())

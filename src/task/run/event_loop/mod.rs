@@ -53,6 +53,12 @@ pub enum TaskExecutionUpdate {
         bytes: Vec<u8>,
     },
     OperatorReady(Task),
+    // What the agent is doing right now, for anyone watching. Not history: it
+    // is replaced by the next one and means nothing once the run ends.
+    Activity {
+        task_id: String,
+        activity: String,
+    },
     Report {
         task: Task,
     },
@@ -1088,6 +1094,10 @@ where
                 }
                 _ => None,
             };
+            let mut progress = match mode {
+                TaskExecutionMode::Autopilot => service.progress_decoder(&task),
+                _ => None,
+            };
             loop {
                 let event = session.events.recv().await.unwrap_or_else(|| {
                     CommandEvent::Failed(
@@ -1098,6 +1108,17 @@ where
                     CommandEvent::Output { stream, bytes } => {
                         if let Some(decoder) = &mut report_stream {
                             decoder.process(&bytes);
+                        }
+                        if let Some(decoder) = &mut progress
+                            && let Some(activity) = {
+                                decoder.process(&bytes);
+                                decoder.take_activity()
+                            }
+                        {
+                            let _ = events.send(TaskExecutionUpdate::Activity {
+                                task_id: task.id.clone(),
+                                activity,
+                            });
                         }
                         event_loop.cache_terminal_output(&task.id, &bytes);
                         let _ = events.send(TaskExecutionUpdate::Output {

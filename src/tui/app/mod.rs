@@ -474,6 +474,9 @@ pub struct App {
     active_project: Option<String>,
     pub(in crate::tui) grid_columns: usize,
     pub(in crate::tui) environment_builds: HashMap<String, EnvironmentProgress>,
+    // What each running agent is doing, straight from its own stream. Live only:
+    // nothing here outlives the run it describes, and the card is the only reader.
+    pub(in crate::tui) activities: HashMap<String, String>,
     pub(in crate::tui) shimmer: usize,
     pub(in crate::tui) terrain: Terrain,
     pub(in crate::tui) help_scroll: u16,
@@ -728,6 +731,7 @@ impl App {
             tracker_connecting: None,
             tracker_connect_attempt: 0,
             environment_builds: HashMap::new(),
+            activities: HashMap::new(),
             shimmer: 0,
             terrain: Terrain::default(),
             help_scroll: 0,
@@ -5874,6 +5878,7 @@ impl App {
             TaskExecutionUpdate::Started(Ok(task)) => self.replace_task(task),
             TaskExecutionUpdate::Started(Err(error)) => self.problem(error.to_string()),
             TaskExecutionUpdate::Finished(id, Ok(task)) if !self.is_removing(&id) => {
+                self.activities.remove(&id);
                 if self
                     .moving
                     .as_ref()
@@ -5890,10 +5895,16 @@ impl App {
             TaskExecutionUpdate::Finished(id, Err(error)) if !self.is_removing(&id) => {
                 tracing::warn!(task_id = %id, %error, "a task's run ended with an error");
             }
-            TaskExecutionUpdate::Removed(id, Ok(())) => self.remove_task(&id),
+            TaskExecutionUpdate::Removed(id, Ok(())) => {
+                self.activities.remove(&id);
+                self.remove_task(&id);
+            }
             TaskExecutionUpdate::Removed(id, Err(error)) => {
                 self.cancel_removing(&id);
                 show_task_error(self, &id, error);
+            }
+            TaskExecutionUpdate::Activity { task_id, activity } => {
+                self.activities.insert(task_id, activity);
             }
             TaskExecutionUpdate::Output {
                 task_id,

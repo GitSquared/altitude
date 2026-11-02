@@ -1,5 +1,6 @@
 use super::{
-    AUTOPILOT_SYSTEM_PROMPT, AgentEngine, REPORT_SCHEMA, REPORT_SYSTEM_PROMPT, TaskReportDecoder,
+    AUTOPILOT_SYSTEM_PROMPT, AgentEngine, REPORT_SCHEMA, REPORT_SYSTEM_PROMPT, TaskProgressDecoder,
+    TaskReportDecoder,
 };
 use crate::isolation::{
     DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand, shell_quote,
@@ -186,6 +187,119 @@ impl TaskReportDecoder for PiStream {
     }
 }
 
+// The work turn is `--mode json` like the report turn, so what the agent does is
+// already arriving; nothing has to be scraped out of a terminal.
+pub struct PiProgress {
+    pending: String,
+    activity: Option<String>,
+    // The assistant's text arrives a delta at a time; only the most recent block is
+    // of any interest, and only far enough to read the first line of it.
+    narration: String,
+}
+
+const NARRATION_LIMIT: usize = 160;
+
+impl PiProgress {
+    pub fn new() -> Self {
+        Self {
+            pending: String::new(),
+            activity: None,
+            narration: String::new(),
+        }
+    }
+
+    fn process_line(&mut self, line: &str) {
+        let Ok(event) = serde_json::from_str::<Value>(line.trim()) else {
+            return;
+        };
+        match event.get("type").and_then(Value::as_str) {
+            Some("tool_execution_start") => {
+                let tool = event
+                    .get("toolName")
+                    .and_then(Value::as_str)
+                    .unwrap_or("a tool");
+                let args = event.get("args");
+                let target = args
+                    .and_then(|args| args.get("command"))
+                    .and_then(Value::as_str)
+                    .map(|command| format!("`{}`", first_line(command, 80)))
+                    .or_else(|| {
+                        args.and_then(|args| {
+                            ["file_path", "path", "pattern"]
+                                .iter()
+                                .find_map(|key| args.get(*key).and_then(Value::as_str))
+                        })
+                        .map(|target| first_line(target, 80))
+                    });
+                let verb = match tool {
+                    "bash" => "running",
+                    "read" => "reading",
+                    "edit" | "write" => "editing",
+                    "grep" | "search" => "searching for",
+                    other => other,
+                };
+                self.activity = Some(match target {
+                    Some(target) => format!("{verb} {target}"),
+                    None => verb.to_owned(),
+                });
+            }
+            Some("message_update") => {
+                let update = event.get("assistantMessageEvent");
+                match update
+                    .and_then(|update| update.get("type"))
+                    .and_then(Value::as_str)
+                {
+                    Some("text_start") => self.narration.clear(),
+                    Some("text_delta") => {
+                        if let Some(delta) = update
+                            .and_then(|update| update.get("delta"))
+                            .and_then(Value::as_str)
+                            && self.narration.chars().count() < NARRATION_LIMIT
+                        {
+                            self.narration.push_str(delta);
+                        }
+                    }
+                    Some("text_end") => {
+                        let said = first_line(&self.narration, NARRATION_LIMIT);
+                        if !said.is_empty() {
+                            self.activity = Some(format!("\"{said}\""));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn first_line(text: &str, limit: usize) -> String {
+    let line = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("");
+    let trimmed = line.trim();
+    let mut shortened: String = trimmed.chars().take(limit).collect();
+    if shortened.len() < trimmed.len() {
+        shortened.push('\u{2026}');
+    }
+    shortened
+}
+
+impl TaskProgressDecoder for PiProgress {
+    fn process(&mut self, bytes: &[u8]) {
+        self.pending.push_str(&String::from_utf8_lossy(bytes));
+        while let Some(newline) = self.pending.find('\n') {
+            let line = self.pending.drain(..=newline).collect::<String>();
+            self.process_line(&line);
+        }
+    }
+
+    fn take_activity(&mut self) -> Option<String> {
+        self.activity.take()
+    }
+}
+
 impl AgentEngine for PiCode {
     fn autopilot_command(
         &self,
@@ -241,6 +355,10 @@ impl AgentEngine for PiCode {
 
     fn report_decoder(&self) -> Box<dyn TaskReportDecoder> {
         Box::new(PiStream::new())
+    }
+
+    fn progress_decoder(&self) -> Option<Box<dyn TaskProgressDecoder>> {
+        Some(Box::new(PiProgress::new()))
     }
 
     fn operator_requires_conversation(&self) -> bool {
