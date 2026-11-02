@@ -161,6 +161,24 @@ fn worth_retrying(refusal: &str) -> bool {
     !refusal.contains("not found") && !refusal.contains("Entity not found")
 }
 
+fn picking_up(agent: Option<&str>) -> String {
+    let name = agent
+        .map(str::trim)
+        .filter(|agent| !agent.is_empty())
+        // Altitude names its agents in lower case, which belongs mid-sentence in the
+        // session summary and not at the start of a line the operator reads.
+        .map(|agent| {
+            let mut characters = agent.chars();
+            match characters.next() {
+                Some(first) => format!("{}{}", first.to_uppercase(), characters.as_str()),
+                None => String::new(),
+            }
+        })
+        .filter(|agent| !agent.is_empty())
+        .unwrap_or_else(|| "Altitude".to_owned());
+    format!("{name} is picking up this task now.")
+}
+
 pub struct BoundTask {
     pub task_id: String,
     pub owner: String,
@@ -1742,6 +1760,29 @@ impl RemoteTracker {
                             &stable_id(&report.task_id, agent_run_id),
                             AgentActivityContent::Thought {
                                 body: "Got your reply. Altitude is continuing the task.".into(),
+                            },
+                        )
+                        .await
+                        .map_err(|error| error.to_string())?;
+                } else if !events[..index]
+                    .iter()
+                    .any(|(_, event)| matches!(event, TaskHistoryEvent::AgentRunStarted { .. }))
+                {
+                    // The session's first run, and the one activity that replaces
+                    // whatever was said while the task waited: a queue notice is
+                    // ephemeral, so it stays on screen until something else is said.
+                    let agent = host
+                        .session_agent(report.task_id.clone())
+                        .await
+                        .ok()
+                        .flatten();
+                    self.config
+                        .automation
+                        .create_activity(
+                            &report.session,
+                            &stable_id(&report.task_id, "picked-up"),
+                            AgentActivityContent::Thought {
+                                body: picking_up(agent.as_deref()),
                             },
                         )
                         .await
