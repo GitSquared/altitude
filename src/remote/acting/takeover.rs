@@ -102,7 +102,7 @@ where
         }
         return Ok(task.id);
     }
-    let outcome = receive(&peer, &handover, client, event_loop, transfer).await;
+    let outcome = receive(&peer, &handover, client, event_loop, transfer, address).await;
     if outcome.is_err() {
         give_back(&peer, &handover.transfer_id, client).await;
     }
@@ -115,6 +115,7 @@ async fn receive<E>(
     client: &LinkClient,
     event_loop: &TaskEventLoop<E>,
     transfer: &Transfer,
+    address: &str,
 ) -> Result<String, String>
 where
     E: IsolationEngine + Clone + 'static,
@@ -221,7 +222,7 @@ where
         event_loop,
         &task,
         transfer,
-        "",
+        address,
     )
     .await
     {

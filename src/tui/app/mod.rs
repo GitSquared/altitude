@@ -520,6 +520,13 @@ pub struct App {
     /// The task that is on its way to another machine, with the progress to show on
     /// its card. One at a time: a handback is something the operator started.
     pub(in crate::tui) moving: Option<Moving>,
+    /// What this machine has taken over, by the machine it came from and the id it
+    /// had there. A landing is a task of its own with its own id, so the copy the
+    /// source still lists cannot be recognised by what it is — only by where it was.
+    pub(in crate::tui) superseded: Vec<(String, String)>,
+    /// The take over that is under way, if any: hidden from the moment it is asked
+    /// for, so the list never shows the task twice.
+    pub(in crate::tui) pending_take: Option<(String, String)>,
     pub(in crate::tui) pending_tasks: Vec<PendingTask>,
     pub(in crate::tui) remote_status: HashMap<String, RemoteStatus>,
     pub(in crate::tui) remote_trackers: HashMap<String, Vec<TrackerConnection>>,
@@ -667,6 +674,8 @@ impl App {
             shell_behind: Behind::default(),
             transfer: None,
             moving: None,
+            superseded: Vec::new(),
+            pending_take: None,
             pending_tasks: Vec::new(),
             remote_status: HashMap::new(),
             remote_trackers: HashMap::new(),
@@ -999,14 +1008,21 @@ impl App {
             .filter(|task| self.in_active_tab(task.project().map(|project| project.id.as_str())))
     }
 
+    fn is_taken_over(&self, address: &str, id: &str) -> bool {
+        self.superseded
+            .iter()
+            .any(|(from, taken)| from == address && taken == id)
+            || self
+                .pending_take
+                .as_ref()
+                .is_some_and(|(from, taking)| from == address && taking == id)
+    }
+
     pub(in crate::tui) fn visible_remote_tasks(&self) -> impl Iterator<Item = &HeldTask> {
-        self.remote_tasks.iter().filter(|held| {
-            // A task that has landed here is no longer another machine's to show: the
-            // source keeps listing it until it gives the task up, and two cards for
-            // one task is the shape of a mistake the operator has to explain away.
-            !self.tasks.iter().any(|task| task.id == held.summary.id)
-                && self.in_active_tab(held.summary.project_id.as_deref())
-        })
+        self.remote_tasks
+            .iter()
+            .filter(|held| !self.is_taken_over(&held.address, &held.summary.id))
+            .filter(|held| self.in_active_tab(held.summary.project_id.as_deref()))
     }
 
     fn visible_counts(&self) -> (usize, usize) {

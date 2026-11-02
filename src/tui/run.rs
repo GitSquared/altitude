@@ -731,14 +731,17 @@ where
                         if let Ok(tasks) = event_loop.list().await {
                             app.list_tasks(tasks);
                         }
+                        app.settle_take(true);
                         app.task_landed(&id, terminal, &event_loop, &landings);
                     }
                     Err(error) if error == transfer::STOPPED => {
                         // The operator pressed the key that stops it, and the task
                         // is where they left it: the bar going is the answer.
+                        app.settle_take(false);
                         app.transfer = None;
                     }
                     Err(error) => {
+                        app.settle_take(false);
                         app.transfer = None;
                         app.problem(format!("could not pull the task: {error}"));
                     }

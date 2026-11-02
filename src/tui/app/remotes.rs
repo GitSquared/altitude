@@ -285,6 +285,12 @@ impl App {
     }
 
     pub(in crate::tui) fn holding(&mut self, address: String, summaries: Vec<TaskSummary>) {
+        // A take over is done when the machine it came from stops listing the task:
+        // until then the record here is the only card, and after it there is nothing
+        // left to hide.
+        self.superseded.retain(|(from, taken)| {
+            from != &address || summaries.iter().any(|summary| &summary.id == taken)
+        });
         let at = self
             .remote_tasks
             .iter()
@@ -359,6 +365,9 @@ impl App {
         let client = self.link.clone();
         let event_loop = event_loop.clone();
         let landings = landings.clone();
+        // Asked for is as good as taken: the source keeps listing the task until it
+        // lets go, and the operator has just decided where it lives.
+        self.pending_take = Some((address.clone(), summary.id.clone()));
         self.alert = None;
         let transfer = self.begin_transfer(
             &format!("Taking over: {}", summary.title),
@@ -433,6 +442,17 @@ impl App {
 
     pub(in crate::tui) fn transfer_progress(&self) -> Option<progress::Progress<'_>> {
         self.transfer.as_ref().map(TransferView::progress)
+    }
+
+    /// The take over that was under way finished, or it did not: either way it is no
+    /// longer pending, and a task that arrived stays hidden on the machine it left.
+    pub(in crate::tui) fn settle_take(&mut self, arrived: bool) {
+        let Some((address, id)) = self.pending_take.take() else {
+            return;
+        };
+        if arrived {
+            self.superseded.push((address, id));
+        }
     }
 
     pub(in crate::tui) fn task_landed<E>(

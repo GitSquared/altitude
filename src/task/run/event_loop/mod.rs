@@ -1447,6 +1447,13 @@ where
     ) -> Result<(), TaskServiceError> {
         if let Some(target) = control {
             self.service.continue_turn(run).await?;
+            // Handing control back ends the take over: the terminal closes before the
+            // next run starts, so what the agent says next goes to the signals rather
+            // than into a terminal the operator has already left.
+            let _ = self.events.send(TaskExecutionUpdate::Finished(
+                task.id.clone(),
+                Ok(task.clone()),
+            ));
             let result = match target {
                 TaskExecutionMode::Autopilot => {
                     self.service.resume_autopilot_after_operator(task).await
