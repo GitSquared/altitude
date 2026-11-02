@@ -70,7 +70,10 @@ pub fn draw(frame: &mut Frame, area: Rect, tabs: &[Tab], selected: usize) -> Vec
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
     for x in separators {
-        surface::join_down(frame, x, area.y, area.height);
+        // From the pane's own top border down to the rule under the tabs: a stroke
+        // that stops one row short reads as a line hanging in mid-air rather than as
+        // the edge of a tab.
+        surface::join_down(frame, x, area.y.saturating_sub(1), area.height + 1);
     }
     targets
 }
