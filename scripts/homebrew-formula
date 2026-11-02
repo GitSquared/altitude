@@ -33,7 +33,9 @@ class Altitude < Formula
   depends_on arch: :arm64
 
   def install
-    bin.install "altitude-${version}-aarch64-apple-darwin/altitude"
+    # Homebrew stages a single-root archive inside that root, so the binary is either
+    # here or one directory down; an archive that renames its root still installs.
+    bin.install Dir["altitude", "*/altitude"].first
   end
 
   test do
