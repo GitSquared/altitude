@@ -5,6 +5,7 @@ use serde::Deserialize;
 use super::{IssueStateChanged, StoredEvent, WEBHOOK_MAX_AGE, ledger::CommentInput};
 
 #[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct IssueEvent {
     pub(super) organization_id: String,
     pub(super) webhook_timestamp: f64,
