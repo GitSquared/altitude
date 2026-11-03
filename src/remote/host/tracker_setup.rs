@@ -2,10 +2,7 @@ use std::{error::Error, io, path::Path, time::SystemTime};
 
 use crate::{
     config::{LinearSettings, ServeSettings},
-    tracker::{
-        TrackerKind, oauth,
-        setup::{Guide, Item, Step},
-    },
+    tracker::{Guide, Item, Step, TrackerKind, providers::linear::oauth},
 };
 
 use crate::remote::console::{ask, bold, field, has_terminal, paragraph, prose};

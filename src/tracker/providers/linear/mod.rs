@@ -7,6 +7,11 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+pub(crate) mod auth;
+pub(crate) mod automation;
+pub(crate) mod oauth;
+pub(crate) mod setup;
+
 use crate::isolation::private_directory;
 use rmcp::{
     RoleClient, ServiceExt,
@@ -19,7 +24,6 @@ use tokio::{
     time::{sleep, timeout},
 };
 
-use super::linear_auth;
 use crate::tracker::{
     ACCOUNT_FILE, IssueComment, IssueReader, IssueReference, IssueScope, IssueSnapshot,
     IssueSummary, ScopeSummary, TrackerAccount, TrackerError, TrackerFuture, TrackerKind,
@@ -56,8 +60,8 @@ struct Session {
 
 impl Session {
     async fn start(profile: &Path) -> Result<Self, TrackerError> {
-        let client = linear_auth::authorized_client(profile).await?;
-        let transport = linear_auth::transport(client);
+        let client = auth::authorized_client(profile).await?;
+        let transport = auth::transport(client);
         let mut client = ().serve(transport).await.map_err(|_| {
             TrackerError::new(
                 "could not connect to Linear; sign in again from Settings → Task tracker",
@@ -166,7 +170,7 @@ impl Linear {
     }
 
     fn has_saved_auth(&self) -> bool {
-        linear_auth::has_grant(&self.profile)
+        auth::has_grant(&self.profile)
     }
 
     pub fn is_signed_in(&self) -> bool {
@@ -174,7 +178,7 @@ impl Linear {
     }
 
     pub fn sign_in_changed_at(&self) -> Option<SystemTime> {
-        linear_auth::grant_changed_at(&self.profile)
+        auth::grant_changed_at(&self.profile)
     }
 
     async fn session_or_reconnect(&self) -> Result<Arc<Session>, TrackerError> {

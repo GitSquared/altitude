@@ -50,7 +50,7 @@ use crate::{
     },
     tracker::{
         IssueReference, IssueSnapshot, TrackerKind, TrackerStatus,
-        automation::{
+        providers::linear::automation::{
             AgentActivityContent, AgentSessionEvent, CommentSite, LinearAutomation, WebhookError,
             parse_agent_session_event, verify_signature,
         },

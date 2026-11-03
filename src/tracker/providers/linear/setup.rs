@@ -1,23 +1,4 @@
-use super::TrackerKind;
-
-pub(crate) struct Guide {
-    pub title: &'static str,
-    pub intro: &'static [&'static str],
-    pub steps: &'static [Step],
-    pub closing: &'static [&'static str],
-}
-
-pub(crate) struct Step {
-    pub title: &'static str,
-    pub items: &'static [Item],
-}
-
-pub(crate) enum Item {
-    Text(&'static str),
-    Bullet(&'static str),
-    Detail(&'static str),
-    Code(&'static str),
-}
+use crate::tracker::{Guide, Item, Step, TrackerKind};
 
 impl TrackerKind {
     pub(crate) fn guide(self) -> &'static Guide {

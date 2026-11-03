@@ -10,11 +10,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::Sha256;
 
-use super::{
-    IssueComment, IssueReader, IssueReference, IssueSnapshot, IssueSummary, TrackerError,
-    TrackerKind, TrackerStatus, providers::scope_of,
-};
+use super::scope_of;
 use crate::task::{TaskPlanStatus, TaskPlanStep};
+use crate::tracker::{
+    IssueComment, IssueReader, IssueReference, IssueSnapshot, IssueSummary, TrackerError,
+    TrackerKind, TrackerStatus,
+};
 
 const LINEAR_GRAPHQL_URL: &str = "https://api.linear.app/graphql";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);

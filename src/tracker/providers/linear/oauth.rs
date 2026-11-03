@@ -21,8 +21,9 @@ use tokio::{
     time::timeout,
 };
 
-use super::{TrackerError, automation::LinearAutomation};
+use super::automation::LinearAutomation;
 use crate::config::LinearSettings;
+use crate::tracker::TrackerError;
 
 const TOKEN_URL: &str = "https://api.linear.app/oauth/token";
 

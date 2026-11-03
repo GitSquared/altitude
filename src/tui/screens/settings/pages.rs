@@ -11,7 +11,7 @@ use crate::{
     credentials::Service,
     project::Project,
     remote::{Phase, RemoteKey, TrackerConnection, TrackerReadiness},
-    tracker::{TrackerKind, setup::Item},
+    tracker::{Item, TrackerKind},
     tui::{
         app::{CredentialStatus, RemoteStatus, Sync, TrackerState},
         widgets::{

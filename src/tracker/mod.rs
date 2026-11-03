@@ -1,9 +1,6 @@
-pub(crate) mod automation;
-pub(crate) mod oauth;
-mod providers;
-pub(crate) mod setup;
+pub(crate) mod providers;
 
-pub use providers::Linear;
+pub use providers::linear::Linear;
 
 use std::{error::Error, fmt, future::Future, pin::Pin};
 
@@ -44,6 +41,28 @@ impl TrackerKind {
 }
 
 pub const ACCOUNT_FILE: &str = "identity.json";
+
+// What a remote's owner has to do by hand to connect a tracker to it, as the
+// interface draws it and the remote's setup command prints it. The words are the
+// tracker's; the shape is every tracker's.
+pub(crate) struct Guide {
+    pub title: &'static str,
+    pub intro: &'static [&'static str],
+    pub steps: &'static [Step],
+    pub closing: &'static [&'static str],
+}
+
+pub(crate) struct Step {
+    pub title: &'static str,
+    pub items: &'static [Item],
+}
+
+pub(crate) enum Item {
+    Text(&'static str),
+    Bullet(&'static str),
+    Detail(&'static str),
+    Code(&'static str),
+}
 
 #[derive(Clone, Debug)]
 pub struct ScopeSummary {

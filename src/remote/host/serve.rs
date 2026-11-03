@@ -57,7 +57,7 @@ use crate::{
     task::{TaskHistoryEvent, TaskOperatorSignalThread, TrackerHost},
     tracker::{
         IssueReader, IssueSnapshot, Linear, TrackerKind, TrackerProvider, TrackerStatus,
-        automation::LinearAutomation, oauth,
+        providers::linear::{automation::LinearAutomation, oauth},
     },
 };
 
