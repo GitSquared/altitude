@@ -3855,18 +3855,15 @@ impl App {
     // subscription's money is not shown, because a harness prices those at list rates
     // whether or not anyone is paying: the tokens are what a plan actually spends.
     pub(in crate::tui) fn signal_task_spend(&self) -> Option<String> {
-        let (usage, agent) = match self.signal_task() {
-            Some(task) => (&task.facts.usage, task.agent_kind),
-            None => {
-                let held = self.signal_held()?;
-                (&held.summary.usage, held.summary.agent)
-            }
+        let usage = match self.signal_task() {
+            Some(task) => &task.facts.usage,
+            None => &self.signal_held()?.summary.usage,
         };
         if usage.is_unpriced() && usage.total_tokens == 0 {
             return None;
         }
         let mut parts = Vec::new();
-        if !usage.is_unpriced() && agent == Some(AgentKind::Pi) {
+        if !usage.is_unpriced() && usage.is_charged {
             let dollars = usage.cost_usd_micros as f64 / 1_000_000.0;
             parts.push(if usage.cost_from_provider {
                 format!("${dollars:.2}")

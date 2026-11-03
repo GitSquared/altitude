@@ -74,6 +74,24 @@ impl ClaudeCode {
 }
 
 impl ClaudeStream {
+    // A plan's prices are list prices: nothing is being paid unless the account is
+    // spending usage credits on top of it. A session that reported no windows at all
+    // is an API key or a cloud provider, whose number is what it is.
+    fn is_charged(&self) -> bool {
+        let Some(limit) = self.limit.as_ref() else {
+            return true;
+        };
+        let on_plan = limit
+            .get("unifiedWindows")
+            .and_then(Value::as_object)
+            .is_some_and(|windows| !windows.is_empty());
+        let using_overage = limit
+            .get("isUsingOverage")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        !on_plan || using_overage
+    }
+
     pub fn new(recorded: &TaskUsage) -> Self {
         Self {
             pending: String::new(),
@@ -162,6 +180,7 @@ impl TaskReportDecoder for ClaudeStream {
             cost_usd_micros: self.cost_usd_micros,
             total_tokens: self.total_tokens,
             cost_from_provider: false,
+            is_charged: self.is_charged(),
         }
         .since(&self.recorded);
         (!usage.is_empty()).then_some(usage)

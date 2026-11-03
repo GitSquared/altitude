@@ -99,7 +99,9 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
          'total_tokens', coalesce(SUM(json_extract(payload, '$.data.total_tokens')), 0),
          -- The total is the provider's figure only if every part of it was: one run
          -- priced by the harness's own table makes the sum an estimate.
-         'cost_from_provider', coalesce(MIN(json_extract(payload, '$.data.cost_from_provider')), 0))
+         'cost_from_provider', coalesce(MIN(json_extract(payload, '$.data.cost_from_provider')), 0),
+         -- And it is charged for only if every part of it was, for the same reason.
+         'is_charged', coalesce(MIN(json_extract(payload, '$.data.is_charged')), 0))
      FROM task_event_logs
      WHERE task_id = tasks.id
        AND event_type = 'agent_usage_reported') AS usage,
