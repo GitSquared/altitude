@@ -1,9 +1,9 @@
-use std::{collections::HashMap, iter, mem, time::Duration};
+use std::{collections::HashMap, mem, time::Duration};
 
 use chrono::Utc;
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Layout, Rect, Size},
     style::Style,
     text::{Line, Span},
     widgets::Paragraph,
@@ -1026,22 +1026,17 @@ fn draw_messages(
         title: "proposed change",
         lines: proposal_lines(proposal, project, usize::from(width.saturating_sub(6))),
     });
-    // A diagram the terminal can draw leaves the text and becomes its own entry
-    // under the message that carried it. Everywhere else the fence stays put.
-    let bodies: Vec<(String, Vec<String>)> = thread
+    // A diagram this terminal can draw leaves the text and becomes a picture
+    // inside the card that carried it. A message whose diagrams will not all draw
+    // keeps its fences, so the source is never lost to a render that failed.
+    let bodies: Vec<Body> = thread
         .messages
         .iter()
-        .map(|message| {
-            if pictures.has_pictures() {
-                markdown::take_diagrams(&message.body)
-            } else {
-                (message.body.clone(), Vec::new())
-            }
-        })
+        .map(|message| Body::of(&message.body, pictures, width.saturating_sub(4).max(1)))
         .collect();
     // A close or a reopen is part of the conversation, not a message: it sits
     // between the cards at the point it happened, as a quiet line.
-    let entries = conversation_entries(thread, &bodies);
+    let entries = conversation_entries(thread);
     let mut rows = vec![(0u16, 0u16); thread.messages.len()];
     let mut layout: Vec<(Entry, u16, u16)> = Vec::with_capacity(entries.len());
     let mut cursor = 0u32;
@@ -1049,12 +1044,9 @@ fn draw_messages(
         let height = match entry {
             Entry::Message(index) => {
                 let nested = proposed.as_ref().filter(|_| Some(index) == last_agent);
-                let height = card::height(width, &bodies[index].0, nested);
+                let height = card::height(width, &bodies[index].text, nested, &bodies[index].sizes);
                 rows[index] = (u16::try_from(cursor).unwrap_or(u16::MAX), height);
                 height
-            }
-            Entry::Diagram(message, diagram) => {
-                diagram_height(pictures, &bodies[message].1[diagram], width)
             }
             Entry::Transition(_) => 1,
         };
@@ -1094,17 +1086,6 @@ fn draw_messages(
             ..area
         };
         let index = match entry {
-            Entry::Diagram(message, diagram) => {
-                draw_diagram(
-                    frame,
-                    area,
-                    visible,
-                    pictures,
-                    &bodies[message].1[diagram],
-                    entry_top - viewport_top,
-                );
-                continue;
-            }
             Entry::Transition(transition) => {
                 frame.render_widget(
                     Paragraph::new(transition_line(transition, agent, now)),
@@ -1125,7 +1106,8 @@ fn draw_messages(
                 card::Tick::Sent
             }
         });
-        card::draw_clipped(
+        let body = &bodies[index];
+        let slots = card::draw_clipped(
             frame,
             visible,
             height,
@@ -1133,7 +1115,7 @@ fn draw_messages(
             &card::Message {
                 author: if from_operator { "you" } else { agent },
                 when: &ago(message.at_ms, now),
-                body: &bodies[index].0,
+                body: &body.text,
                 from_operator,
                 focused: selected == Some(index),
                 flashing: flashing == Some(index),
@@ -1145,8 +1127,19 @@ fn draw_messages(
                         title: nested.title,
                         lines: nested.lines.clone(),
                     }),
+                pictures: &body.sizes,
             },
         );
+        for slot in slots {
+            pictures.draw(
+                frame,
+                area,
+                &body.sources[slot.index],
+                slot.width,
+                i16::try_from(i32::from(slot.x) - i32::from(area.x)).unwrap_or(0),
+                i16::try_from(slot.top - viewport_top).unwrap_or(0),
+            );
+        }
         hitboxes.push((visible, index));
     }
 
@@ -1176,25 +1169,53 @@ fn draw_messages(
 #[derive(Clone, Copy)]
 enum Entry {
     Message(usize),
-    Diagram(usize, usize),
     Transition(SignalTransition),
 }
 
-fn conversation_entries(
-    thread: &TaskOperatorSignalThread,
-    diagrams: &[(String, Vec<String>)],
-) -> Vec<Entry> {
+struct Body {
+    text: String,
+    sources: Vec<String>,
+    sizes: Vec<Size>,
+}
+
+impl Body {
+    fn of(body: &str, pictures: &mut Pictures, width: u16) -> Self {
+        if !pictures.has_pictures() {
+            return Self::fenced(body);
+        }
+        let (text, sources) = markdown::take_diagrams(body);
+        if sources.is_empty() {
+            return Self::fenced(body);
+        }
+        let sizes: Option<Vec<Size>> = sources
+            .iter()
+            .map(|source| pictures.size(source, width))
+            .collect();
+        match sizes {
+            Some(sizes) => Self {
+                text,
+                sources,
+                sizes,
+            },
+            None => Self::fenced(body),
+        }
+    }
+
+    fn fenced(body: &str) -> Self {
+        Self {
+            text: body.to_owned(),
+            sources: Vec::new(),
+            sizes: Vec::new(),
+        }
+    }
+}
+
+fn conversation_entries(thread: &TaskOperatorSignalThread) -> Vec<Entry> {
     let mut entries: Vec<(i64, Entry)> = thread
         .messages
         .iter()
         .enumerate()
-        .flat_map(|(index, message)| {
-            let drawn = diagrams.get(index).map_or(0, |(_, sources)| sources.len());
-            // In order, so a stable sort keeps each diagram under its own message.
-            iter::once((message.at_ms, Entry::Message(index))).chain(
-                (0..drawn).map(move |diagram| (message.at_ms, Entry::Diagram(index, diagram))),
-            )
-        })
+        .map(|(index, message)| (message.at_ms, Entry::Message(index)))
         .chain(
             thread
                 .transitions
@@ -1204,42 +1225,6 @@ fn conversation_entries(
         .collect();
     entries.sort_by_key(|(at_ms, _)| *at_ms);
     entries.into_iter().map(|(_, entry)| entry).collect()
-}
-
-fn fence(source: &str) -> String {
-    format!("```mermaid\n{source}\n```")
-}
-
-fn diagram_height(pictures: &mut Pictures, source: &str, width: u16) -> u16 {
-    let width = width.saturating_sub(2).max(1);
-    if let Some(size) = pictures.size(source, width) {
-        return size.height;
-    }
-    u16::try_from(markdown::lines(&fence(source), width).len()).unwrap_or(u16::MAX)
-}
-
-fn draw_diagram(
-    frame: &mut Frame,
-    area: Rect,
-    visible: Rect,
-    pictures: &mut Pictures,
-    source: &str,
-    top: i32,
-) {
-    let width = area.width.saturating_sub(2).max(1);
-    if pictures.size(source, width).is_some() {
-        pictures.draw(frame, area, source, width, i16::try_from(top).unwrap_or(0));
-        return;
-    }
-    // A diagram that will not render keeps its source where the picture would be.
-    frame.render_widget(
-        Paragraph::new(markdown::lines(&fence(source), width)),
-        Rect {
-            x: visible.x.saturating_add(1),
-            width,
-            ..visible
-        },
-    );
 }
 
 fn transition_line(transition: SignalTransition, agent: &str, now: i64) -> Line<'static> {

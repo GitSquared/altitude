@@ -13,6 +13,9 @@ use super::mermaid;
 
 // A diagram taller than this is a document, not a picture in a conversation.
 const LONGEST: u16 = 60;
+// A diagram is drawn a little larger than its own size, so a small one reads as
+// part of the card rather than as a stamp in the corner of it.
+const LARGEST_SCALE: f32 = 1.2;
 // Long enough for a terminal across an ssh link to answer, short enough that one
 // that never answers does not hold the interface up.
 const ANSWER_TIMEOUT: Duration = Duration::from_millis(800);
@@ -78,13 +81,14 @@ impl Pictures {
         viewport: Rect,
         source: &str,
         columns: u16,
+        left: i16,
         top: i16,
     ) {
         let Some(picture) = self.picture(source, columns) else {
             return;
         };
         frame.render_widget(
-            SlicedImage::new(&picture.protocol, SignedPosition::from((1, top))),
+            SlicedImage::new(&picture.protocol, SignedPosition::from((left, top))),
             viewport,
         );
     }
@@ -121,7 +125,7 @@ fn fit(natural: Size, columns: u16, rows: u16) -> Size {
     let allowance = |limit: u16, value: u16| f32::from(limit.max(1)) / f32::from(value.max(1));
     let scale = allowance(columns, natural.width)
         .min(allowance(rows, natural.height))
-        .min(1.0);
+        .min(LARGEST_SCALE);
     let scaled = |value: u16| {
         u16::try_from((f32::from(value) * scale).ceil().max(1.0) as u32)
             .unwrap_or(1)

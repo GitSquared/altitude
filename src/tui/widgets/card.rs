@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     buffer::Buffer,
-    layout::Rect,
+    layout::{Rect, Size},
     style::{Modifier, Style},
     text::Line,
     widgets::{Block, BorderType, Padding, Paragraph, Widget},
@@ -41,6 +41,17 @@ pub struct Message<'a> {
     pub flashing: bool,
     pub tick: Option<Tick>,
     pub nested: Option<Nested<'a>>,
+    pub pictures: &'a [Size],
+}
+
+// Where a picture goes, in the frame's own coordinates rather than the card's: a
+// picture is drawn onto the terminal after the card has been copied there, not
+// into the card's scratch buffer.
+pub struct PictureSlot {
+    pub index: usize,
+    pub x: u16,
+    pub width: u16,
+    pub top: i32,
 }
 
 pub struct Nested<'a> {
@@ -48,7 +59,7 @@ pub struct Nested<'a> {
     pub lines: Vec<Line<'a>>,
 }
 
-pub fn height(width: u16, body: &str, nested: Option<&Nested<'_>>) -> u16 {
+pub fn height(width: u16, body: &str, nested: Option<&Nested<'_>>, pictures: &[Size]) -> u16 {
     // The border takes two columns and the padding takes two more.
     let text_width = width.saturating_sub(4).max(1);
     let rows = markdown::lines(body, text_width).len();
@@ -62,7 +73,15 @@ pub fn height(width: u16, body: &str, nested: Option<&Nested<'_>>) -> u16 {
     u16::try_from(rows)
         .unwrap_or(u16::MAX)
         .saturating_add(2)
+        .saturating_add(pictures_height(pictures))
         .saturating_add(nested)
+}
+
+// A blank line and then the picture, once per picture.
+fn pictures_height(pictures: &[Size]) -> u16 {
+    pictures.iter().fold(0, |total, picture| {
+        total.saturating_add(picture.height).saturating_add(1)
+    })
 }
 
 pub fn draw_clipped(
@@ -71,9 +90,9 @@ pub fn draw_clipped(
     full_height: u16,
     top_offset: u16,
     message: &Message<'_>,
-) {
+) -> Vec<PictureSlot> {
     if visible.width == 0 || visible.height == 0 || full_height == 0 {
-        return;
+        return Vec::new();
     }
     let mut buffer = Buffer::empty(Rect::new(0, 0, visible.width, full_height));
     // Accent is the selection and nothing else; the operator's own words are
@@ -106,6 +125,21 @@ pub fn draw_clipped(
     let body = markdown::lines(message.body, inner.width.max(1));
     let rows = u16::try_from(body.len()).unwrap_or(u16::MAX);
     Paragraph::new(body).render(inner, &mut buffer);
+    let mut below = rows.saturating_add(1);
+    let mut slots = Vec::with_capacity(message.pictures.len());
+    for (index, picture) in message.pictures.iter().enumerate() {
+        // The rows the picture will cover are left empty here; the picture itself
+        // is drawn once this card has reached the frame.
+        let frame_top =
+            i32::from(visible.y) - i32::from(top_offset) + i32::from(inner.y) + i32::from(below);
+        slots.push(PictureSlot {
+            index,
+            x: visible.x.saturating_add(inner.x),
+            width: inner.width,
+            top: frame_top,
+        });
+        below = below.saturating_add(picture.height).saturating_add(1);
+    }
     if let Some(nested) = &message.nested {
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
@@ -113,7 +147,7 @@ pub fn draw_clipped(
             .title(Line::styled(format!(" {} ", nested.title), nested_style));
         let area = Rect {
             x: inner.x,
-            y: inner.y.saturating_add(rows).saturating_add(1),
+            y: inner.y.saturating_add(below),
             width: inner.width,
             height: u16::try_from(nested.lines.len())
                 .unwrap_or(u16::MAX)
@@ -131,6 +165,7 @@ pub fn draw_clipped(
                 buffer[(column, top_offset + row)].clone();
         }
     }
+    slots
 }
 
 fn stamp_tick(buffer: &mut Buffer, tick: Tick) {
