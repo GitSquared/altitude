@@ -428,7 +428,6 @@ pub enum TaskHistoryEvent {
     },
     AgentUsageReported {
         cost_usd_micros: i64,
-        total_tokens: i64,
         cost_from_provider: bool,
         is_charged: bool,
     },
@@ -508,7 +507,6 @@ impl From<&AgentUsage> for TaskHistoryEvent {
     fn from(usage: &AgentUsage) -> Self {
         Self::AgentUsageReported {
             cost_usd_micros: usage.cost_usd_micros,
-            total_tokens: usage.total_tokens,
             cost_from_provider: usage.cost_from_provider,
             is_charged: usage.is_charged,
         }

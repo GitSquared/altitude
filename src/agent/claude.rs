@@ -26,7 +26,6 @@ pub struct ClaudeStream {
     // says whether the refusal is the end.
     limit: Option<Value>,
     cost_usd_micros: i64,
-    total_tokens: i64,
     // Claude Code counts the conversation, not the run, so what this run spent is
     // what the conversation has reached less what it had reached before.
     recorded: TaskUsage,
@@ -101,7 +100,6 @@ impl ClaudeStream {
             error: None,
             limit: None,
             cost_usd_micros: 0,
-            total_tokens: 0,
             recorded: recorded.clone(),
         }
     }
@@ -121,20 +119,6 @@ impl ClaudeStream {
                 .get("total_cost_usd")
                 .and_then(Value::as_f64)
                 .map(|dollars| (dollars * 1_000_000.0).round() as i64)
-                .unwrap_or_default();
-            self.total_tokens = message
-                .get("usage")
-                .map(|usage| {
-                    [
-                        "input_tokens",
-                        "output_tokens",
-                        "cache_creation_input_tokens",
-                        "cache_read_input_tokens",
-                    ]
-                    .iter()
-                    .filter_map(|key| usage.get(*key).and_then(Value::as_i64))
-                    .sum()
-                })
                 .unwrap_or_default();
             self.model = message
                 .get("model")
@@ -194,26 +178,17 @@ impl TaskReportDecoder for ClaudeStream {
                     .iter()
                     .filter_map(|(name, window)| {
                         let used = window.get("utilization").and_then(Value::as_f64);
-                        let clears_at_ms = window
-                            .get("resetsAt")
-                            .and_then(Value::as_i64)
-                            .map(|seconds| seconds.saturating_mul(1000));
-                        (used.is_some() || clears_at_ms.is_some()).then(|| AgentWindowReading {
+                        used.map(|used| AgentWindowReading {
                             window: AgentWindow::of(Some(name)),
                             // The header's utilization is a fraction; the record keeps
-                            // the percentage every harness can be compared on.
-                            used_percent: used.map(|fraction| fraction * 100.0),
-                            clears_at_ms,
+                            // the percentage a person reads.
+                            used_percent: Some(used * 100.0),
                         })
                     })
                     .collect()
             })
             .unwrap_or_default();
         Some(AgentStanding {
-            provider: Some("anthropic".to_owned()),
-            // Windows are what a subscription has and an API key does not: absent for
-            // keys, Bedrock and Vertex alike.
-            on_plan: Some(!windows.is_empty()),
             observed_at_ms: now_ms(),
             windows,
         })
@@ -227,12 +202,11 @@ impl TaskReportDecoder for ClaudeStream {
         // being paid, so this is always its figure and never the provider's.
         let usage = AgentUsage {
             cost_usd_micros: self.cost_usd_micros,
-            total_tokens: self.total_tokens,
             cost_from_provider: false,
             is_charged: self.is_charged(),
         }
         .since(&self.recorded);
-        (!usage.is_empty()).then_some(usage)
+        (!usage.is_unpriced()).then_some(usage)
     }
 
     fn refusal(&mut self) -> Option<AgentRefusal> {

@@ -20,8 +20,8 @@ pub enum AgentWindow {
 impl AgentWindow {
     pub fn of(name: Option<&str>) -> Self {
         match name {
-            Some("five_hour" | "session") => Self::Session,
-            Some("seven_day" | "weekly") => Self::Weekly,
+            Some("five_hour") => Self::Session,
+            Some("seven_day") => Self::Weekly,
             Some("seven_day_opus") => Self::WeeklyOpus,
             Some("seven_day_sonnet") => Self::WeeklySonnet,
             Some("overage" | "seven_day_overage_included") => Self::Overage,
@@ -41,29 +41,21 @@ impl AgentWindow {
     }
 }
 
-// One window of an account's standing, as a harness reported it: how much of the
-// allowance is gone and when it comes back. Nothing here is inferred from prose.
+// One window of an account's standing, as a harness reported it: which allowance it
+// is and how much of it is gone. Nothing here is inferred from prose.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AgentWindowReading {
     pub window: AgentWindow,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub used_percent: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub clears_at_ms: Option<i64>,
 }
 
-// The account an agent runs on, as its harness last described it: which windows are
-// open, how much of each is gone, and whether the harness itself says this credential
-// is a plan. Claude reports this on its own stream; pi reports nothing of the kind
-// without an extension of ours, and a harness that says nothing says nothing here.
+// The account an agent runs on, as its harness last described it: which of its
+// windows are open and how much of each is gone, with the time it was read. Claude
+// reports this on its own stream; pi reports nothing of the kind, and a harness that
+// says nothing says nothing here.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AgentStanding {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    // Some only when the harness said so: a plan is priced at list rates and an API
-    // key is not, and this is the fact that separates them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_plan: Option<bool>,
     pub observed_at_ms: i64,
     #[serde(default)]
     pub windows: Vec<AgentWindowReading>,

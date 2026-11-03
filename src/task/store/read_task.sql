@@ -101,7 +101,6 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      ORDER BY sequence DESC LIMIT 1) AS standing,
     (SELECT json_object(
          'cost_usd_micros', coalesce(SUM(json_extract(payload, '$.data.cost_usd_micros')), 0),
-         'total_tokens', coalesce(SUM(json_extract(payload, '$.data.total_tokens')), 0),
          -- The total is the provider's figure only if every part of it was: one run
          -- priced by the harness's own table makes the sum an estimate.
          'cost_from_provider', coalesce(MIN(json_extract(payload, '$.data.cost_from_provider')), 0),

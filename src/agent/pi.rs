@@ -138,10 +138,6 @@ impl PiStream {
                         .and_then(Value::as_f64)
                         .map(|dollars| (dollars * 1_000_000.0).round() as i64)
                         .unwrap_or_default();
-                    self.spent.total_tokens += usage
-                        .get("totalTokens")
-                        .and_then(Value::as_i64)
-                        .unwrap_or_default();
                     self.spent.cost_from_provider &= usage
                         .pointer("/cost/totalFromProvider")
                         .and_then(Value::as_bool)
@@ -175,7 +171,7 @@ impl PiStream {
 
 impl TaskReportDecoder for PiStream {
     fn take_usage(&mut self) -> Option<AgentUsage> {
-        (!self.spent.is_empty()).then(|| self.spent.clone())
+        (!self.spent.is_unpriced()).then(|| self.spent.clone())
     }
 
     fn failure_message(&mut self) -> Option<&str> {

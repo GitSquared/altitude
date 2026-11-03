@@ -10,8 +10,6 @@ pub struct TaskUsage {
     // running total drifts.
     #[serde(default)]
     pub cost_usd_micros: i64,
-    #[serde(default)]
-    pub total_tokens: i64,
     // Whether the provider priced the run itself, rather than the harness pricing it
     // from its own table. An estimate is shown as one.
     #[serde(default)]
@@ -34,14 +32,13 @@ impl TaskUsage {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AgentUsage {
     pub cost_usd_micros: i64,
-    pub total_tokens: i64,
     pub cost_from_provider: bool,
     pub is_charged: bool,
 }
 
 impl AgentUsage {
-    pub fn is_empty(&self) -> bool {
-        self.cost_usd_micros == 0 && self.total_tokens == 0
+    pub fn is_unpriced(&self) -> bool {
+        self.cost_usd_micros == 0
     }
 
     // A run resumed from a conversation the harness counts cumulatively can report a
@@ -50,7 +47,6 @@ impl AgentUsage {
     pub fn since(&self, previous: &TaskUsage) -> Self {
         Self {
             cost_usd_micros: (self.cost_usd_micros - previous.cost_usd_micros).max(0),
-            total_tokens: (self.total_tokens - previous.total_tokens).max(0),
             cost_from_provider: self.cost_from_provider,
             is_charged: self.is_charged,
         }
