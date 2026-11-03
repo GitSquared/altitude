@@ -43,11 +43,21 @@ const DEFAULT_MCP: &str = r#"{
 "#;
 
 impl ClaudeCode {
+    // Claude Code publishes no major-version channel of its own, so the major is
+    // checked here rather than assumed: the vendor's stable pointer names a
+    // release, the refresh takes the newest 2.x it names, and the day it names a
+    // 3.x this build stops instead of taking the major for us.
     fn install_command() -> &'static str {
-        "export HOME=/root && \\
-         curl -fsSL https://claude.ai/install.sh -o /tmp/install-claude && \\
-         bash /tmp/install-claude && \\
-         test -x /root/.local/bin/claude && \\
+        "export HOME=/root\n\
+         version=$(curl -fsSL https://downloads.claude.ai/claude-code-releases/stable)\n\
+         case \"$version\" in\n\
+           2.*) ;;\n\
+           *) echo \"Claude Code's stable release is $version, not 2.x; decide the major here\" >&2\n\
+              exit 1 ;;\n\
+         esac\n\
+         curl -fsSL https://claude.ai/install.sh -o /tmp/install-claude\n\
+         bash /tmp/install-claude \"$version\"\n\
+         test -x /root/.local/bin/claude\n\
          rm /tmp/install-claude"
     }
 }

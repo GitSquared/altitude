@@ -10,9 +10,11 @@ use serde_json::Value;
 use std::mem;
 use uuid::Uuid;
 
+// A major is a decision, not a schedule: the 72-hour environment refresh takes the
+// newest 1.x on its own, and moving to 2.x is an edit someone makes here.
 const INSTALL_COMMAND: &str = concat!(
     "npm install -g --ignore-scripts --no-fund --no-audit --no-progress --color=false ",
-    "@earendil-works/pi-coding-agent@0.99.1",
+    "@earendil-works/pi-coding-agent@1",
     " && command -v pi >/dev/null"
 );
 
