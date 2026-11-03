@@ -142,3 +142,13 @@ pub fn clock(at_ms: i64) -> String {
         .map(|at| at.with_timezone(&chrono::Local).format("%H:%M").to_string())
         .unwrap_or_default()
 }
+
+// A count of tokens is read for its size, not its digits: what matters is whether a
+// task spent thousands or millions.
+pub fn tokens(count: i64) -> String {
+    match count {
+        ..=999 => count.to_string(),
+        1_000..=999_999 => format!("{:.1}k", count as f64 / 1_000.0),
+        _ => format!("{:.1}M", count as f64 / 1_000_000.0),
+    }
+}

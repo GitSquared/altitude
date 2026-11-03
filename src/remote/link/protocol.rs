@@ -15,7 +15,7 @@ use crate::task::{
 use crate::tracker::{IssueReference, IssueSnapshot, TrackerKind, TrackerStatus};
 use crate::vcs::ContributionState;
 use crate::{
-    agent::{AgentKind, AgentWindow},
+    agent::{AgentKind, AgentWindow, TaskUsage},
     project::Project,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -243,6 +243,10 @@ pub struct TaskSummary {
     pub resumes_at_ms: Option<i64>,
     #[serde(default)]
     pub limit_window: Option<AgentWindow>,
+    // What the task has spent, carried so a machine holding someone else's task can
+    // say the same thing about it as the machine that ran it.
+    #[serde(default)]
+    pub usage: TaskUsage,
     // What the agent is doing right now. Live only: it is replaced by the next
     // line, and a summary that has none describes a task that is not working.
     #[serde(default)]
@@ -298,6 +302,7 @@ impl TaskSummary {
             pause_reason: task.facts.execution_pause_reason.clone(),
             resumes_at_ms: task.facts.resumes_at_ms,
             limit_window: task.facts.limit_window.clone(),
+            usage: task.facts.usage.clone(),
             activity: None,
             attention: task.facts.operator_attention_level.clone(),
             blocking_signal_kind: task.facts.blocking_signal_kind,

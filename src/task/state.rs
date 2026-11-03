@@ -2,7 +2,7 @@ use chrono::{Local, SecondsFormat};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use crate::agent::{AgentKind, AgentWindow};
+use crate::agent::{AgentKind, AgentUsage, AgentWindow, TaskUsage};
 use crate::id;
 use crate::project::Project;
 use crate::tracker::{IssueReference, IssueSnapshot, TrackerKind, TrackerStatus};
@@ -292,6 +292,10 @@ pub struct TaskFacts {
     // nobody is waiting on.
     pub resumes_at_ms: Option<i64>,
     pub limit_window: Option<AgentWindow>,
+    // What this task has spent, as its harnesses counted it. A sum of every run's
+    // report, because a run is what a harness knows the cost of.
+    #[sqlx(json)]
+    pub usage: TaskUsage,
     pub last_error: Option<String>,
     #[sqlx(json(nullable))]
     pub latest_operator_message: Option<TaskOperatorSignalMessage>,
@@ -418,6 +422,11 @@ pub enum TaskHistoryEvent {
         window: AgentWindow,
         clears_at_ms: i64,
     },
+    AgentUsageReported {
+        cost_usd_micros: i64,
+        total_tokens: i64,
+        cost_from_provider: bool,
+    },
     ExecutionRecovered {
         execution_status: TaskExecutionStatus,
         sandbox_available: bool,
@@ -485,6 +494,16 @@ pub enum TaskHistoryEvent {
         #[serde(default)]
         status: Option<TrackerStatus>,
     },
+}
+
+impl From<&AgentUsage> for TaskHistoryEvent {
+    fn from(usage: &AgentUsage) -> Self {
+        Self::AgentUsageReported {
+            cost_usd_micros: usage.cost_usd_micros,
+            total_tokens: usage.total_tokens,
+            cost_from_provider: usage.cost_from_provider,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

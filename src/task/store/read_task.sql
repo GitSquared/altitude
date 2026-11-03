@@ -94,6 +94,15 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      WHERE task_id = tasks.id
        AND event_type = 'limit_held'
      ORDER BY sequence DESC LIMIT 1) AS limit_window,
+    (SELECT json_object(
+         'cost_usd_micros', coalesce(SUM(json_extract(payload, '$.data.cost_usd_micros')), 0),
+         'total_tokens', coalesce(SUM(json_extract(payload, '$.data.total_tokens')), 0),
+         -- The total is the provider's figure only if every part of it was: one run
+         -- priced by the harness's own table makes the sum an estimate.
+         'cost_from_provider', coalesce(MIN(json_extract(payload, '$.data.cost_from_provider')), 0))
+     FROM task_event_logs
+     WHERE task_id = tasks.id
+       AND event_type = 'agent_usage_reported') AS usage,
     (SELECT payload ->> '$.data.error'
      FROM task_event_logs
      WHERE task_id = tasks.id

@@ -1,6 +1,7 @@
 use super::{
-    AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, AgentRefusal, AgentWindow, REPORT_SCHEMA,
-    REPORT_SYSTEM_PROMPT, TaskProgressDecoder, TaskReportDecoder, activity,
+    AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, AgentRefusal, AgentUsage, AgentWindow,
+    REPORT_SCHEMA, REPORT_SYSTEM_PROMPT, TaskProgressDecoder, TaskReportDecoder, TaskUsage,
+    activity,
 };
 use crate::isolation::{
     DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand, shell_quote,
@@ -24,6 +25,11 @@ pub struct ClaudeStream {
     // while it works and again when it is refused, so the last word is the one that
     // says whether the refusal is the end.
     limit: Option<Value>,
+    cost_usd_micros: i64,
+    total_tokens: i64,
+    // Claude Code counts the conversation, not the run, so what this run spent is
+    // what the conversation has reached less what it had reached before.
+    recorded: TaskUsage,
 }
 
 const DEFAULT_SETTINGS: &str = r#"{
@@ -68,7 +74,7 @@ impl ClaudeCode {
 }
 
 impl ClaudeStream {
-    pub fn new() -> Self {
+    pub fn new(recorded: &TaskUsage) -> Self {
         Self {
             pending: String::new(),
             report: None,
@@ -76,6 +82,9 @@ impl ClaudeStream {
             model: None,
             error: None,
             limit: None,
+            cost_usd_micros: 0,
+            total_tokens: 0,
+            recorded: recorded.clone(),
         }
     }
 
@@ -90,6 +99,25 @@ impl ClaudeStream {
         }
         if message.get("type").and_then(Value::as_str) == Some("result") {
             self.received_result = true;
+            self.cost_usd_micros = message
+                .get("total_cost_usd")
+                .and_then(Value::as_f64)
+                .map(|dollars| (dollars * 1_000_000.0).round() as i64)
+                .unwrap_or_default();
+            self.total_tokens = message
+                .get("usage")
+                .map(|usage| {
+                    [
+                        "input_tokens",
+                        "output_tokens",
+                        "cache_creation_input_tokens",
+                        "cache_read_input_tokens",
+                    ]
+                    .iter()
+                    .filter_map(|key| usage.get(*key).and_then(Value::as_i64))
+                    .sum()
+                })
+                .unwrap_or_default();
             self.model = message
                 .get("model")
                 .and_then(Value::as_str)
@@ -124,6 +152,21 @@ impl ClaudeStream {
 }
 
 impl TaskReportDecoder for ClaudeStream {
+    fn take_usage(&mut self) -> Option<AgentUsage> {
+        if !self.received_result {
+            return None;
+        }
+        // Claude Code prices a conversation at list rates whether or not anything is
+        // being paid, so this is always its figure and never the provider's.
+        let usage = AgentUsage {
+            cost_usd_micros: self.cost_usd_micros,
+            total_tokens: self.total_tokens,
+            cost_from_provider: false,
+        }
+        .since(&self.recorded);
+        (!usage.is_empty()).then_some(usage)
+    }
+
     fn refusal(&mut self) -> Option<AgentRefusal> {
         if !self.pending.is_empty() {
             let line = mem::take(&mut self.pending);
@@ -355,8 +398,8 @@ impl AgentEngine for ClaudeCode {
         )
     }
 
-    fn report_decoder(&self) -> Box<dyn TaskReportDecoder> {
-        Box::new(ClaudeStream::new())
+    fn report_decoder(&self, recorded: &TaskUsage) -> Box<dyn TaskReportDecoder> {
+        Box::new(ClaudeStream::new(recorded))
     }
 
     fn progress_decoder(&self) -> Option<Box<dyn TaskProgressDecoder>> {

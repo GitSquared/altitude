@@ -1,6 +1,7 @@
 use super::{
-    AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, AgentRefusal, AgentWindow, REPORT_SCHEMA,
-    REPORT_SYSTEM_PROMPT, TaskProgressDecoder, TaskReportDecoder, activity,
+    AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, AgentRefusal, AgentUsage, AgentWindow,
+    REPORT_SCHEMA, REPORT_SYSTEM_PROMPT, TaskProgressDecoder, TaskReportDecoder, TaskUsage,
+    activity,
 };
 use crate::isolation::{
     DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand, shell_quote,
@@ -77,6 +78,10 @@ pub struct PiStream {
     // What the provider said when it refused, in its own words: pi passes the
     // sentence through, and it is where the only thing a refusal can tell us lives.
     said: Option<String>,
+    // Pi prices every assistant message as it arrives, so the run's spend is their
+    // sum. It says whether the price came from the provider or from its own table,
+    // and one table-priced message makes the total an estimate.
+    spent: AgentUsage,
 }
 
 impl PiStream {
@@ -88,6 +93,10 @@ impl PiStream {
             model: None,
             error: None,
             said: None,
+            spent: AgentUsage {
+                cost_from_provider: true,
+                ..AgentUsage::default()
+            },
         }
     }
 
@@ -128,6 +137,21 @@ impl PiStream {
                     .and_then(|message| message.get("model"))
                     .and_then(Value::as_str)
                     .map(str::to_owned);
+                if let Some(usage) = message.and_then(|message| message.get("usage")) {
+                    self.spent.cost_usd_micros += usage
+                        .pointer("/cost/total")
+                        .and_then(Value::as_f64)
+                        .map(|dollars| (dollars * 1_000_000.0).round() as i64)
+                        .unwrap_or_default();
+                    self.spent.total_tokens += usage
+                        .get("totalTokens")
+                        .and_then(Value::as_i64)
+                        .unwrap_or_default();
+                    self.spent.cost_from_provider &= usage
+                        .pointer("/cost/totalFromProvider")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                }
                 let stop_reason = message
                     .and_then(|message| message.get("stopReason"))
                     .and_then(Value::as_str);
@@ -195,6 +219,10 @@ fn retry_minutes(said: &str) -> Option<i64> {
 }
 
 impl TaskReportDecoder for PiStream {
+    fn take_usage(&mut self) -> Option<AgentUsage> {
+        (!self.spent.is_empty()).then(|| self.spent.clone())
+    }
+
     fn refusal(&mut self) -> Option<AgentRefusal> {
         if !self.pending.is_empty() {
             let line = mem::take(&mut self.pending);
@@ -377,7 +405,7 @@ impl AgentEngine for PiCode {
         )
     }
 
-    fn report_decoder(&self) -> Box<dyn TaskReportDecoder> {
+    fn report_decoder(&self, _recorded: &TaskUsage) -> Box<dyn TaskReportDecoder> {
         Box::new(PiStream::new())
     }
 

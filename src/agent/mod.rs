@@ -13,9 +13,11 @@ mod limits;
 pub mod mcp;
 mod pi;
 pub mod tools;
+mod usage;
 use claude::ClaudeCode;
 pub use limits::{AgentRefusal, AgentWindow};
 use pi::PiCode;
+pub use usage::{AgentUsage, TaskUsage};
 
 pub const AGENTS: [AgentKind; 2] = [AgentKind::Pi, AgentKind::Claude];
 
@@ -185,7 +187,9 @@ pub trait AgentEngine: Send + Sync {
     fn report_command(&self, conversation_id: &str, context: &TaskAgentTurnContext) -> String;
     fn operator_command(&self, conversation_id: &str, opening: &str) -> String;
     fn operator_requires_conversation(&self) -> bool;
-    fn report_decoder(&self) -> Box<dyn TaskReportDecoder>;
+    // The totals already recorded, for a harness whose own numbers are cumulative and
+    // have to be turned into a delta before anyone can add them up.
+    fn report_decoder(&self, recorded: &TaskUsage) -> Box<dyn TaskReportDecoder>;
     // Engines that speak while they work say so in the same stream the report is
     // read from. One that does not need only return None.
     fn progress_decoder(&self) -> Option<Box<dyn TaskProgressDecoder>> {
@@ -201,6 +205,11 @@ pub trait TaskReportDecoder: Send {
     // run ends short: a harness that was told nothing, or that was told in words it
     // cannot read, leaves a run that failed and no more than that.
     fn refusal(&mut self) -> Option<AgentRefusal> {
+        None
+    }
+    // What the run cost, in the harness's own accounting, as a delta: what the task
+    // has spent is the sum of these, whatever the harness counts internally.
+    fn take_usage(&mut self) -> Option<AgentUsage> {
         None
     }
 }

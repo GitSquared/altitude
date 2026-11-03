@@ -53,7 +53,7 @@ where
 
     pub fn report_decoder(&self, task: &Task) -> Option<Box<dyn TaskReportDecoder>> {
         task.agent_kind
-            .map(|kind| self.agents.engine(kind).report_decoder())
+            .map(|kind| self.agents.engine(kind).report_decoder(&task.facts.usage))
     }
     pub(crate) async fn conversation_failure<T>(
         &self,

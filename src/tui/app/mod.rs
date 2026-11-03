@@ -46,7 +46,11 @@ use crate::{
         pointer::Targets,
         select::{Offer, Select},
     },
-    tui::widgets::{palette, text::Field, utils::plain},
+    tui::widgets::{
+        palette,
+        text::Field,
+        utils::{plain, tokens},
+    },
     vcs::{Repository, VcsProviderKind},
 };
 
@@ -3844,6 +3848,36 @@ impl App {
             held.limit_window.unwrap_or(AgentWindow::Other),
             held.resumes_at_ms?,
         ))
+    }
+
+    // What the task has spent, in the harness's own accounting: the money, marked as
+    // an estimate when the provider did not price it, and the tokens behind it. A
+    // subscription's money is not shown, because a harness prices those at list rates
+    // whether or not anyone is paying: the tokens are what a plan actually spends.
+    pub(in crate::tui) fn signal_task_spend(&self) -> Option<String> {
+        let (usage, agent) = match self.signal_task() {
+            Some(task) => (&task.facts.usage, task.agent_kind),
+            None => {
+                let held = self.signal_held()?;
+                (&held.summary.usage, held.summary.agent)
+            }
+        };
+        if usage.is_unpriced() && usage.total_tokens == 0 {
+            return None;
+        }
+        let mut parts = Vec::new();
+        if !usage.is_unpriced() && agent == Some(AgentKind::Pi) {
+            let dollars = usage.cost_usd_micros as f64 / 1_000_000.0;
+            parts.push(if usage.cost_from_provider {
+                format!("${dollars:.2}")
+            } else {
+                format!("~${dollars:.2}")
+            });
+        }
+        if usage.total_tokens > 0 {
+            parts.push(tokens(usage.total_tokens));
+        }
+        Some(parts.join(" · "))
     }
 
     pub(in crate::tui) fn signal_agent_label(&self) -> String {

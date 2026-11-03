@@ -1461,6 +1461,25 @@ where
         mut report_stream: Option<Box<dyn TaskReportDecoder>>,
         event: CommandEvent,
     ) -> Result<(), TaskServiceError> {
+        // What the run spent is recorded before anything is decided about it: a run
+        // that ends in a pause or a refusal has still cost what it cost.
+        let task = match report_stream
+            .as_mut()
+            .and_then(|decoder| decoder.take_usage())
+        {
+            Some(usage) => match self
+                .service
+                .record(&task.id, &[TaskHistoryEvent::from(&usage)])
+                .await
+            {
+                Ok(task) => task,
+                Err(error) => {
+                    tracing::warn!(task_id = %task.id, %error, "could not record what a run cost");
+                    task
+                }
+            },
+            None => task,
+        };
         if let Some(target) = control {
             self.service.continue_turn(run).await?;
             // Handing control back ends the take over: the terminal closes before the

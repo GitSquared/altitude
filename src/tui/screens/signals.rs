@@ -733,15 +733,19 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
         )),
         title,
     );
-    // What the account the task runs on is doing, in the one line this pane has to
-    // spare: it says nothing at all unless a limit is actually holding the task.
+    // What the account the task runs on is costing and, when one is holding it, which
+    // of its windows ran out and the hour it lets go: the one line this pane has to
+    // spare, and it says nothing at all about a plain task.
+    let mut standing_parts = vec![app.signal_agent_label()];
+    if let Some(spend) = app.signal_task_spend() {
+        standing_parts.push(spend);
+    }
     if let Some((window, clears_at_ms)) = app.signal_task_limit() {
-        let line = format!(
-            "{} · {} limit · resumes {}",
-            app.signal_agent_label(),
-            window.word(),
-            clock(clears_at_ms)
-        );
+        standing_parts.push(format!("{} limit", window.word()));
+        standing_parts.push(format!("resumes {}", clock(clears_at_ms)));
+    }
+    if standing_parts.len() > 1 {
+        let line = standing_parts.join(" · ");
         frame.render_widget(
             Paragraph::new(Line::styled(
                 truncate(&line, usize::from(standing.width)),
