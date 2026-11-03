@@ -10,7 +10,6 @@ use ratatui::{
 };
 
 use crate::{
-    agent::AgentWindowState,
     project::Project,
     task::{
         ProjectProposal, SignalTransition, TaskOperatorSignalAuthor, TaskOperatorSignalKind,
@@ -746,11 +745,6 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
             .windows
             .iter()
             .map(|reading| match reading.used_percent {
-                // Claude says which of its windows is running out; the rest only
-                // count, so only the one that said it is marked.
-                Some(used) if reading.state == Some(AgentWindowState::Warning) => {
-                    format!("{} {used:.0}% running out", reading.window.word())
-                }
                 Some(used) => format!("{} {used:.0}%", reading.window.word()),
                 None => reading.window.word().to_owned(),
             })

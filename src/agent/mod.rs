@@ -15,7 +15,7 @@ mod pi;
 pub mod tools;
 mod usage;
 use claude::ClaudeCode;
-pub use limits::{AgentRefusal, AgentStanding, AgentWindow, AgentWindowReading, AgentWindowState};
+pub use limits::{AgentRefusal, AgentStanding, AgentWindow, AgentWindowReading};
 use pi::PiCode;
 pub use usage::{AgentUsage, TaskUsage};
 

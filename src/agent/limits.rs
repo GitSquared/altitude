@@ -41,17 +41,6 @@ impl AgentWindow {
     }
 }
 
-// What a harness said about a window beyond how much of it is gone. Only some of
-// them say it, so it is a reading and not a rule: the percentage is the common
-// denominator and this is Claude's own verdict on top of it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentWindowState {
-    Allowed,
-    Warning,
-    Spent,
-}
-
 // One window of an account's standing, as a harness reported it: how much of the
 // allowance is gone and when it comes back. Nothing here is inferred from prose.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -61,14 +50,14 @@ pub struct AgentWindowReading {
     pub used_percent: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clears_at_ms: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state: Option<AgentWindowState>,
 }
 
 impl AgentWindowReading {
+    // A window is spent when it says so, and the percentage is the only thing every
+    // harness reports. How close a window is to that is the operator's business at a
+    // desk, not something an unattended task can act on.
     pub fn is_spent(&self) -> bool {
-        self.state == Some(AgentWindowState::Spent)
-            || self.used_percent.is_some_and(|used| used >= 100.0)
+        self.used_percent.is_some_and(|used| used >= 100.0)
     }
 }
 

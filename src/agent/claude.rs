@@ -1,7 +1,7 @@
 use super::{
     AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, AgentRefusal, AgentStanding, AgentUsage,
-    AgentWindow, AgentWindowReading, AgentWindowState, REPORT_SCHEMA, REPORT_SYSTEM_PROMPT,
-    TaskProgressDecoder, TaskReportDecoder, TaskUsage, activity,
+    AgentWindow, AgentWindowReading, REPORT_SCHEMA, REPORT_SYSTEM_PROMPT, TaskProgressDecoder,
+    TaskReportDecoder, TaskUsage, activity,
 };
 use crate::isolation::{
     DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand, shell_quote,
@@ -169,15 +169,6 @@ impl ClaudeStream {
     }
 }
 
-fn window_state(status: &str) -> Option<AgentWindowState> {
-    match status {
-        "allowed" => Some(AgentWindowState::Allowed),
-        "allowed_warning" => Some(AgentWindowState::Warning),
-        "rejected" => Some(AgentWindowState::Spent),
-        _ => None,
-    }
-}
-
 impl TaskReportDecoder for ClaudeStream {
     // Every window Claude tracks, on every observation, not only the one that is
     // limiting: `unifiedWindows` is the account's standing and the top-level fields
@@ -200,17 +191,12 @@ impl TaskReportDecoder for ClaudeStream {
                             .get("resetsAt")
                             .and_then(Value::as_i64)
                             .map(|seconds| seconds.saturating_mul(1000));
-                        let state = window
-                            .get("status")
-                            .and_then(Value::as_str)
-                            .and_then(window_state);
                         (used.is_some() || clears_at_ms.is_some()).then(|| AgentWindowReading {
                             window: AgentWindow::of(Some(name)),
                             // The header's utilization is a fraction; the record keeps
                             // the percentage every harness can be compared on.
                             used_percent: used.map(|fraction| fraction * 100.0),
                             clears_at_ms,
-                            state,
                         })
                     })
                     .collect()
