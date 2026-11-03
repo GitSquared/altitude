@@ -217,15 +217,14 @@ impl Pictures {
         // over two measured cells. The height follows from the width on one scale, so
         // the box has the picture's own proportions instead of two rounded guesses.
         let wide = raster.picture.width() as f32 / (f32::from(self.cell.width.max(1)) * 2.0);
+        // Cells are not square, so the picture's proportions in cells are its
+        // proportions in pixels turned by the ratio of a cell's sides.
+        let turned = f32::from(self.cell.width.max(1)) / f32::from(self.cell.height.max(1));
+        let tall =
+            wide * raster.picture.height() as f32 / raster.picture.width().max(1) as f32 * turned;
         let natural = Size::new(
-            u16::try_from((wide.round().max(1.0)) as u32).ok()?,
-            u16::try_from(
-                (wide.max(1.0) * raster.picture.height() as f32
-                    / raster.picture.width().max(1) as f32)
-                    .round()
-                    .max(1.0) as u32,
-            )
-            .ok()?,
+            u16::try_from(wide.round().max(1.0) as u32).ok()?,
+            u16::try_from(tall.round().max(1.0) as u32).ok()?,
         );
         Some(Warm { raster, natural })
     }
