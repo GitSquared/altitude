@@ -8,7 +8,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use super::palette;
-use crate::task::PICTURE;
+use crate::task::picture;
 
 pub fn lines(body: &str, width: u16) -> Vec<Line<'static>> {
     let mut options = Options::empty();
@@ -60,34 +60,14 @@ pub fn take_pictures(body: &str) -> (String, Vec<String>) {
     (text, diagrams)
 }
 
-// A stored picture is written as markdown would write it, so the words stay readable
-// in any surface that cannot draw it.
+// A stored picture is written as markdown writes one, so a surface that cannot draw
+// it still reads as words.
 fn take_stored(body: String) -> (String, Vec<String>) {
-    let mut text = String::with_capacity(body.len());
-    let mut sources = Vec::new();
-    let mut rest = body.as_str();
-    loop {
-        let Some(start) = rest.find("![") else {
-            text.push_str(rest);
-            break;
-        };
-        let after = &rest[start..];
-        let Some(close) = after.find("](") else {
-            text.push_str(rest);
-            break;
-        };
-        let Some(end) = after[close..].find(')').map(|at| close + at) else {
-            text.push_str(rest);
-            break;
-        };
-        let target = &after[close + 2..end];
-        text.push_str(&rest[..start]);
-        match target.strip_prefix(PICTURE) {
-            Some(digest) => sources.push(format!("{}{digest}", PICTURE)),
-            None => text.push_str(&after[..=end]),
-        }
-        rest = &after[end + 1..];
-    }
+    let (text, pictures) = picture::take(&body);
+    let sources = pictures
+        .into_iter()
+        .map(|stored| format!("{}{}", picture::PREFIX, stored.id))
+        .collect();
     (text, sources)
 }
 

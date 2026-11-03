@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use std::fmt;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::fs;
@@ -12,9 +12,8 @@ use crate::isolation::IsolationEngine;
 use crate::agent::tools::{AgentTool, AgentToolError, AgentToolFuture, AgentToolProvider};
 use crate::project::validate_cache;
 use crate::task::{
-    PICTURE, ProjectProposal, Task, TaskHistoryEvent, TaskOperatorSignalAuthor,
-    TaskOperatorSignalKind, TaskOperatorSignalThread, TaskPlanStatus, TaskPlanStep, TaskStore,
-    normalize_title,
+    ProjectProposal, Task, TaskHistoryEvent, TaskOperatorSignalAuthor, TaskOperatorSignalKind,
+    TaskOperatorSignalThread, TaskPlanStatus, TaskPlanStep, TaskStore, normalize_title, picture,
 };
 use crate::tracker::IssueReader;
 
@@ -268,14 +267,17 @@ impl TaskAgentTools {
             .await
             .map_err(tool_failure)?;
         Ok(json!({
-            "signals": threads.iter().map(thread_json).collect::<Vec<_>>(),
+            "signals": threads
+                .iter()
+                .map(|thread| thread_json(thread, &self.attachments_dir))
+                .collect::<Vec<_>>(),
         }))
     }
 
     async fn read_signal(&self, arguments: &Value) -> Result<Value, AgentToolError> {
         self.ensure_active().await?;
         let thread = self.thread(argument(arguments, "signal_id")?).await?;
-        Ok(json!({ "signal": thread_json(&thread) }))
+        Ok(json!({ "signal": thread_json(&thread, &self.attachments_dir) }))
     }
 
     async fn reply_signal(&self, arguments: &Value) -> Result<Value, AgentToolError> {
@@ -289,7 +291,7 @@ impl TaskAgentTools {
             .map_err(tool_failure)?;
         self.announce();
         let thread = self.thread(signal_id).await?;
-        Ok(json!({ "signal": thread_json(&thread), "pictures": pictures }))
+        Ok(json!({ "signal": thread_json(&thread, &self.attachments_dir), "pictures": pictures }))
     }
 
     async fn open_signal(&self, arguments: &Value) -> Result<Value, AgentToolError> {
@@ -318,7 +320,7 @@ impl TaskAgentTools {
             .map_err(tool_failure)?;
         self.announce();
         let thread = self.thread(&signal_id).await?;
-        Ok(json!({ "signal": thread_json(&thread), "pictures": pictures }))
+        Ok(json!({ "signal": thread_json(&thread, &self.attachments_dir), "pictures": pictures }))
     }
 
     // A picture in a message is written the way markdown writes one, with a path in
@@ -352,7 +354,7 @@ impl TaskAgentTools {
             };
             match self.settle_picture(&attachments, &sandbox, &path).await {
                 Ok(digest) => {
-                    settled.replace_range(start..end, &format!("{}{digest}", PICTURE));
+                    settled.replace_range(start..end, &format!("{}{digest}", picture::PREFIX));
                     report.push(json!({ "path": path, "id": digest }));
                 }
                 Err(error) => report.push(json!({ "path": path, "error": error.to_string() })),
@@ -393,15 +395,10 @@ impl TaskAgentTools {
                 "that file is not a picture; png, jpeg, gif, webp and bmp are read",
             ));
         }
-        let digest = blake3::hash(&contents).to_hex().to_string();
-        let stored = self.attachments_dir.join(&digest);
-        if stored.exists() {
-            let _ = fs::remove_file(&staged).await;
-        } else {
-            fs::rename(&staged, &stored).await.map_err(|error| {
-                AgentToolError::new(format!("could not store that picture: {error}"))
-            })?;
-        }
+        let digest = picture::store(&self.attachments_dir, &contents).map_err(|error| {
+            AgentToolError::new(format!("could not store that picture: {error}"))
+        })?;
+        let _ = fs::remove_file(&staged).await;
         Ok(digest)
     }
 
@@ -437,7 +434,7 @@ impl TaskAgentTools {
             .map_err(tool_failure)?;
         self.announce();
         let thread = self.thread(signal_id).await?;
-        Ok(json!({ "signal": thread_json(&thread) }))
+        Ok(json!({ "signal": thread_json(&thread, &self.attachments_dir) }))
     }
 
     async fn title(&self, arguments: &Value) -> Result<Value, AgentToolError> {
@@ -515,7 +512,7 @@ impl TaskAgentTools {
         self.announce();
         let thread = self.thread(&signal_id).await?;
         Ok(json!({
-            "signal": thread_json(&thread),
+            "signal": thread_json(&thread, &self.attachments_dir),
             "note": "This task is now waiting on the operator on this thread: nothing is applied until they accept the change, and this turn is your last one until they answer. Raise nothing more in your report; the wait is already recorded.",
         }))
     }
@@ -549,8 +546,23 @@ fn argument<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, AgentToolEr
         .ok_or_else(|| AgentToolError::new(format!("this tool needs a {name}")))
 }
 
-fn thread_json(thread: &TaskOperatorSignalThread) -> Value {
+fn thread_json(thread: &TaskOperatorSignalThread, attachments: &Path) -> Value {
+    // What a picture is called and what it weighs, never what it is: an agent reasons
+    // about a picture's role, and the bytes belong to the interface.
+    let pictures: Vec<Value> = thread
+        .messages
+        .iter()
+        .flat_map(|message| picture::take(&message.body).1)
+        .map(|stored| {
+            json!({
+                "id": stored.id,
+                "alt": stored.alt,
+                "bytes": picture::bytes(attachments, &stored.id),
+            })
+        })
+        .collect();
     json!({
+        "pictures": pictures,
         "id": thread.id,
         "kind": thread.kind,
         "title": thread.title,

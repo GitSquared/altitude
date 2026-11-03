@@ -24,6 +24,7 @@ use uuid::Uuid;
 
 mod agent;
 mod mirror;
+pub mod picture;
 mod run;
 mod state;
 
@@ -74,10 +75,6 @@ pub struct TaskService<E> {
     signal_changes: broadcast::Sender<String>,
     refused_status_syncs: Arc<Mutex<HashMap<String, usize>>>,
 }
-
-// A picture in a signal body is named by the digest of its content, so the same body
-// means the same picture on every machine that holds it.
-pub const PICTURE: &str = "altitude-image:";
 
 pub(crate) fn copy_tree(source: &Path, destination: &Path) -> io::Result<()> {
     fs::create_dir_all(destination)?;

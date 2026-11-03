@@ -1,7 +1,7 @@
 mod kitty;
 mod mermaid;
 
-use std::{collections::HashMap, fs, path::PathBuf, time::Duration};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use ratatui::{
     Frame,
@@ -16,7 +16,7 @@ use self::{
     kitty::{Cells, Placement},
     mermaid::Raster,
 };
-use crate::task::PICTURE;
+use crate::task::picture;
 
 // A diagram taller than this is a document, not a picture in a conversation.
 const LONGEST: u16 = 40;
@@ -196,11 +196,11 @@ impl Pictures {
 
     fn build(&self, source: &str) -> Option<Warm> {
         let font = self.picker.font_size();
-        let raster = match source.strip_prefix(PICTURE) {
+        let raster = match source.strip_prefix(picture::PREFIX) {
             // A picture the host has already read out of a sandbox: its digest names
             // the bytes, and nothing about it needs drawing.
-            Some(digest) => Raster {
-                picture: image::load_from_memory(&fs::read(self.attachments.join(digest)).ok()?)
+            Some(id) => Raster {
+                picture: image::load_from_memory(&picture::read(&self.attachments, id).ok()?)
                     .ok()?,
             },
             None => mermaid::raster(source, self.is_dark, font.height)?,
