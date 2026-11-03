@@ -133,6 +133,13 @@ machine). `task` is `store`, `agent`, `run` and `mirror`.
 - **A folder is created when it has three or more files that belong together**, and
   it is named for the job, never for the layer (`utils`, `helpers`, `common`,
   `misc`, `models`, `services` are not jobs). Two files stay where they are.
+- **One contract and the things that answer it are a `providers/` folder.**
+  `agent`, `tracker`, `vcs` and `isolation` each state a trait and the vocabulary
+  it is written in; `providers/` beside them holds the concrete answers, one file
+  each, and a folder of its own when one provider is several jobs
+  (`tracker/providers/linear/` is the provider, its grant, its webhooks, its app
+  sign-in and its setup guide). Anything only one implementation knows lives in
+  its folder, not in the folder above.
 - **A file that reaches seven hundred lines is telling you it has more than one
   job.** Split it into `name/` with a `mod.rs` and the jobs beside it — before it
   reaches a thousand, while the seams are still visible.
