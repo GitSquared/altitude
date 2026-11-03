@@ -1,5 +1,7 @@
 use std::{
-    fs, io, mem,
+    fs,
+    io::{self, Write},
+    mem,
     time::{Duration, Instant},
 };
 
@@ -85,12 +87,25 @@ fn draw_when(
     redraw: &mut bool,
     terminal: &mut DefaultTerminal,
     render: impl FnOnce(&mut Frame),
-) -> io::Result<()> {
-    if *redraw {
-        terminal.draw(render)?;
-        *redraw = false;
+) -> io::Result<bool> {
+    if !*redraw {
+        return Ok(false);
     }
-    Ok(())
+    terminal.draw(render)?;
+    *redraw = false;
+    Ok(true)
+}
+
+// Pictures are positioned by the cursor, so they are written to the terminal once the
+// frame that decided where they go has been drawn.
+fn place_pictures(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
+    let placements = app.pictures.settle();
+    if placements.is_empty() {
+        return Ok(());
+    }
+    let backend = terminal.backend_mut();
+    backend.write_all(placements.as_bytes())?;
+    backend.flush()
 }
 
 fn draw_backdrop(
@@ -413,7 +428,7 @@ where
         // A copied message flashes for a moment and then stops on its own, so the
         // frame is where it ends rather than anything remembering to end it.
         app.expire_message_flash();
-        draw_when(&mut redraw, terminal, |frame| {
+        let painted = draw_when(&mut redraw, terminal, |frame| {
             let hints = app.hints();
             let content = widgets::chrome::draw(frame, &hints, app.keyboard_hints());
             // A screen replaces the grid rather than lying over it, so the grid is
@@ -612,6 +627,11 @@ where
                 effects = EffectManager::default();
             }
         })?;
+        // A frame that was not painted decided nothing about where pictures go, so
+        // its placements are left exactly as they were.
+        if painted {
+            place_pictures(terminal, &mut app)?;
+        }
         // A modal has finished leaving once nothing is drawing it out.
         if leaving.is_some() && !effects.is_running() {
             leaving = None;
