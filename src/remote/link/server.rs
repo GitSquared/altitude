@@ -11,7 +11,10 @@ use std::{
 
 use crate::remote::TransferPart;
 use cap_std::fs::{Dir, OpenOptions, OpenOptionsExt, Permissions, PermissionsExt};
-use tokio::sync::{Mutex as AsyncMutex, mpsc::UnboundedReceiver, watch};
+use tokio::{
+    fs as async_fs,
+    sync::{Mutex as AsyncMutex, mpsc::UnboundedReceiver, watch},
+};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 
@@ -21,7 +24,8 @@ use iroh::{
     endpoint::{Builder, Connection, RecvStream, SendStream},
 };
 
-use crate::config::Settings;
+use crate::config::{Settings, attachments_dir};
+use crate::task::picture;
 
 use crate::remote::host::clients::{ClientLog, ClientRecord};
 use crate::task::TaskOperatorSignalThread;
@@ -470,6 +474,36 @@ async fn answer(
                 write_frame(&mut send, &response).await?;
             }
             return Ok(());
+        }
+        LinkRequest::ReadPicture { id } => {
+            let store = attachments_dir(&handler.data_dir);
+            let response = if !picture::is_id(&id) {
+                LinkResponse::Rejected {
+                    reason: "that is not a picture id".into(),
+                }
+            } else {
+                match async_fs::read(picture::path(&store, &id)).await {
+                    Ok(bytes) if bytes.len() as u64 <= picture::LARGEST => {
+                        write_frame(
+                            &mut send,
+                            &LinkResponse::Picture {
+                                id: id.clone(),
+                                len: bytes.len() as u64,
+                            },
+                        )
+                        .await?;
+                        send.write_all(&bytes).await?;
+                        return Ok(());
+                    }
+                    Ok(_) => LinkResponse::Rejected {
+                        reason: "that picture is larger than a picture may be".into(),
+                    },
+                    Err(_) => LinkResponse::Rejected {
+                        reason: "this machine does not have that picture".into(),
+                    },
+                }
+            };
+            write_frame(&mut send, &response).await?;
         }
         LinkRequest::ListSignals { task_id } => {
             let response = match handler.tasks.signal_threads(peer, task_id).await {

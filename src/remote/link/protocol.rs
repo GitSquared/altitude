@@ -67,6 +67,11 @@ pub enum LinkRequest {
     ListSignals {
         task_id: String,
     },
+    // A picture is named by the digest of its bytes everywhere, so a machine that
+    // reads one in a signal can ask whoever raised it for the bytes.
+    ReadPicture {
+        id: String,
+    },
     Signal {
         command: SignalCommand,
     },
@@ -162,6 +167,10 @@ pub enum LinkResponse {
     Ready,
     Signals {
         signals: Vec<TaskOperatorSignalThread>,
+    },
+    Picture {
+        id: String,
+        len: u64,
     },
     HeldProfiles {
         profiles: Vec<ProfileDigest>,

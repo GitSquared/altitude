@@ -52,10 +52,6 @@ where
     }
 }
 
-// A picture is read whole into memory, so there is a ceiling: a signal is not a way
-// to move a video.
-const READ_MOST: u64 = 8 * 1024 * 1024;
-
 // The paths of the pictures a message names, as byte ranges of the path itself so the
 // message can be rewritten where it stands.
 fn image_paths(body: &str) -> Vec<(usize, usize, String)> {
@@ -380,10 +376,11 @@ impl TaskAgentTools {
         let bytes = attachments
             .collect(sandbox.to_owned(), path.to_owned(), staged.clone())
             .await?;
-        if bytes > READ_MOST {
+        if bytes > picture::LARGEST {
             let _ = fs::remove_file(&staged).await;
             return Err(AgentToolError::new(format!(
-                "that picture is {bytes} bytes; pictures are read up to {READ_MOST}"
+                "that picture is {bytes} bytes; pictures are read up to {} ",
+                picture::LARGEST
             )));
         }
         let contents = fs::read(&staged).await.map_err(|error| {

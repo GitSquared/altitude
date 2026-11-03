@@ -9,6 +9,16 @@ use std::{
 // fetches them, and a tracker uploads them — all through these five calls.
 pub const PREFIX: &str = "altitude-image:";
 
+// A picture is read whole into memory, so there is a ceiling: a signal is not a way to
+// move a video.
+pub const LARGEST: u64 = 8 * 1024 * 1024;
+
+// A digest is the whole name, so nothing else may appear in one: this is also what
+// keeps a request from naming a file outside the store.
+pub fn is_id(id: &str) -> bool {
+    id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 pub struct Picture {
     pub id: String,
     pub alt: String,

@@ -55,8 +55,11 @@ use crate::{
 };
 
 use super::Pictures;
+use std::path::Path;
+
 use super::background::terrain::Terrain;
 use super::widgets::{alert::Alert, list, progress};
+use crate::task::picture;
 use popups::confirm::PendingConfirm;
 use popups::identity::{
     GitIdentityDecision, GitIdentitySetup, IdentityChoice, IdentitySetup, RenameIdentity,
@@ -5796,9 +5799,17 @@ impl App {
         let client = self.link.clone();
         let keys = self.remote_keys.clone();
         let replies = replies.clone();
+        let pictures = self.config.attachments_dir();
         tokio::spawn(async move {
             let signals =
                 Self::read_remote_signals(&remote.address, &remote.task_id, &keys, &client).await;
+            if let Ok(threads) = &signals {
+                // The pictures a remote raised are named by digest; the ones this
+                // machine does not hold are fetched before the conversation is shown,
+                // so a screen never draws a placeholder it could have had.
+                Self::collect_remote_pictures(&remote.address, threads, &keys, &client, &pictures)
+                    .await;
+            }
             let _ = replies
                 .send(RemoteSignalsReply::Opened { remote, signals })
                 .await;
@@ -5839,6 +5850,35 @@ impl App {
             ));
         }
         Ok(sighting.ticket.into())
+    }
+
+    async fn collect_remote_pictures(
+        address: &str,
+        threads: &[TaskOperatorSignalThread],
+        keys: &RemoteKeys,
+        client: &LinkClient,
+        store: &Path,
+    ) {
+        let ids: Vec<String> = threads
+            .iter()
+            .flat_map(|thread| thread.messages.iter())
+            .flat_map(|message| picture::take(&message.body).1)
+            .map(|stored| stored.id)
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let Ok(peer) = Self::remote_peer(address, keys).await else {
+            return;
+        };
+        for id in ids {
+            if picture::bytes(store, &id).is_some() {
+                continue;
+            }
+            if let Ok(bytes) = client.picture(peer.clone(), &id).await {
+                let _ = picture::store(store, &bytes);
+            }
+        }
     }
 
     async fn read_remote_signals(

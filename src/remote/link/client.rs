@@ -7,6 +7,7 @@ use iroh::{Endpoint, EndpointAddr, EndpointId, endpoint::Connection};
 use tokio::sync::mpsc;
 
 use crate::task::TaskOperatorSignalThread;
+use crate::task::picture;
 
 use crate::remote::protocol::SignalCommand;
 use crate::remote::protocol::{
@@ -423,6 +424,21 @@ impl LinkClient {
         };
         match self.say_with_body(peer, &request, &bytes).await? {
             LinkResponse::Accepted => Ok(()),
+            LinkResponse::Rejected { reason } => Err(reason.into()),
+            other => Err(format!("unexpected answer: {other:?}").into()),
+        }
+    }
+
+    // The bytes a digest names, read from the machine that holds them.
+    pub async fn picture(&self, peer: impl Into<EndpointAddr>, id: &str) -> LinkResult<Vec<u8>> {
+        let dial = self.dial(peer).await?;
+        let (mut send, mut recv) = dial.0.open_bi().await?;
+        write_frame(&mut send, &LinkRequest::ReadPicture { id: id.to_owned() }).await?;
+        send.finish()?;
+        match read_frame::<_, LinkResponse>(&mut recv).await? {
+            LinkResponse::Picture { id: answer, len } if answer == id => {
+                read_body(&mut recv, len, picture::LARGEST).await
+            }
             LinkResponse::Rejected { reason } => Err(reason.into()),
             other => Err(format!("unexpected answer: {other:?}").into()),
         }
