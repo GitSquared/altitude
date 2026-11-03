@@ -4,10 +4,10 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::Line,
-    widgets::{Block, BorderType, Padding, Paragraph, Widget, Wrap},
+    widgets::{Block, BorderType, Padding, Paragraph, Widget},
 };
 
-use crate::tui::widgets::palette;
+use crate::tui::widgets::{markdown, palette};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tick {
@@ -51,9 +51,7 @@ pub struct Nested<'a> {
 pub fn height(width: u16, body: &str, nested: Option<&Nested<'_>>) -> u16 {
     // The border takes two columns and the padding takes two more.
     let text_width = width.saturating_sub(4).max(1);
-    let rows = Paragraph::new(body)
-        .wrap(Wrap { trim: true })
-        .line_count(text_width);
+    let rows = markdown::lines(body, text_width).len();
     let nested = nested.map_or(0, |nested| {
         u16::try_from(nested.lines.len())
             .unwrap_or(u16::MAX)
@@ -105,16 +103,9 @@ pub fn draw_clipped(
     if let Some(tick) = message.tick.filter(|_| message.from_operator) {
         stamp_tick(&mut buffer, tick);
     }
-    let body = Paragraph::new(message.body)
-        .style(palette::primary())
-        .wrap(Wrap { trim: true });
-    let rows = u16::try_from(
-        Paragraph::new(message.body)
-            .wrap(Wrap { trim: true })
-            .line_count(inner.width.max(1)),
-    )
-    .unwrap_or(u16::MAX);
-    body.render(inner, &mut buffer);
+    let body = markdown::lines(message.body, inner.width.max(1));
+    let rows = u16::try_from(body.len()).unwrap_or(u16::MAX);
+    Paragraph::new(body).render(inner, &mut buffer);
     if let Some(nested) = &message.nested {
         let block = Block::bordered()
             .border_type(BorderType::Rounded)

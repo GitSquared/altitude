@@ -22,7 +22,7 @@ use crate::{
             columns::Columns,
             empty, header,
             list::{self, Row},
-            palette, signal,
+            markdown, palette, signal,
             surface::{self, Surface},
             tabs::{self, Tab},
             text::TextBox,
@@ -1240,11 +1240,7 @@ fn draw_empty(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn one_line(body: &str) -> String {
-    body.lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or_default()
-        .trim()
-        .to_owned()
+    markdown::preview(body)
 }
 
 fn who(resolved_by: Option<TaskOperatorSignalAuthor>, agent: &str) -> &str {

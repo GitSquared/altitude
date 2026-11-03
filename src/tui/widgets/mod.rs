@@ -9,6 +9,7 @@ pub mod header;
 pub mod layers;
 pub mod list;
 pub mod loading;
+pub mod markdown;
 pub mod palette;
 pub mod pointer;
 pub mod progress;
