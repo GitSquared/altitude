@@ -255,14 +255,6 @@ pub struct DeferredReview {
     pub agent_run_id: String,
 }
 
-// A pause that ends by itself carries the clock that ends it, so the task comes back
-// without anyone being asked.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct LimitHold {
-    pub window: AgentWindow,
-    pub clears_at_ms: i64,
-}
-
 #[derive(Clone, Debug)]
 pub struct Task {
     pub id: String,
@@ -294,10 +286,12 @@ pub struct TaskFacts {
     pub sandbox_available: bool,
     pub snapshot_path: Option<String>,
     pub snapshot_available: bool,
-    // When the account's limit clears. Read as a time and not a switch: a task is
-    // held only while a pause says it is waiting on one, because a value left behind
-    // by a later pause would otherwise hold work nobody is waiting on.
+    // When the account's limit clears, and which of its windows ran out. Read as a
+    // time and not a switch: a task is held only while a pause says it is waiting on
+    // one, because a value left behind by a later pause would otherwise hold work
+    // nobody is waiting on.
     pub resumes_at_ms: Option<i64>,
+    pub limit_window: Option<AgentWindow>,
     pub last_error: Option<String>,
     #[sqlx(json(nullable))]
     pub latest_operator_message: Option<TaskOperatorSignalMessage>,
@@ -417,8 +411,12 @@ pub enum TaskHistoryEvent {
         snapshot_available: bool,
         execution_pause_reason: TaskExecutionPauseReason,
         snapshot_path: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        limit: Option<LimitHold>,
+    },
+    // The account's limit holding the task, recorded with the pause it explains: what
+    // holds it and when it lets go, which is the one wait nobody has to clear.
+    LimitHeld {
+        window: AgentWindow,
+        clears_at_ms: i64,
     },
     ExecutionRecovered {
         execution_status: TaskExecutionStatus,

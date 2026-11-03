@@ -25,7 +25,7 @@ use crate::{
         wake_reason,
     },
     task::{
-        DeferredReview, LimitHold, Task, TaskAgentRequestedAction, TaskAgentRun, TaskExecutionMode,
+        DeferredReview, Task, TaskAgentRequestedAction, TaskAgentRun, TaskExecutionMode,
         TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent, TaskOperatorSignal,
         TaskOperatorSignalAuthor, TaskService, TaskServiceError,
     },
@@ -592,7 +592,6 @@ where
                     snapshot_available: task.facts.snapshot_available,
                     execution_pause_reason: reason,
                     snapshot_path: task.facts.snapshot_path.clone().unwrap_or_default(),
-                    limit: None,
                 }],
             )
             .await?;
@@ -1409,7 +1408,6 @@ where
                 snapshot_available: task.facts.snapshot_available,
                 execution_pause_reason: TaskExecutionPauseReason::AwaitingOperator,
                 snapshot_path: task.facts.snapshot_path.clone().unwrap_or_default(),
-                limit: None,
             },
         ];
         let result = self.service.record(&task.id, &events).await;
@@ -1508,15 +1506,7 @@ where
                 };
                 let result = self
                     .service
-                    .hold_for_limit(
-                        &task,
-                        run,
-                        LimitHold {
-                            window: window.clone(),
-                            clears_at_ms: *clears_at_ms,
-                        },
-                        exit_code,
-                    )
+                    .hold_for_limit(&task, run, window.clone(), *clears_at_ms, exit_code)
                     .await;
                 let _ = self
                     .events

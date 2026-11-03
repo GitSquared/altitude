@@ -26,7 +26,7 @@ use crate::{
             surface::{self, Surface},
             tabs::{self, Tab},
             text::TextBox,
-            utils::{ago, shimmer, since, truncate},
+            utils::{ago, clock, shimmer, since, truncate},
         },
     },
 };
@@ -715,7 +715,7 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
         None if app.remote_signals_loading => "Asking the machine that owns this task".to_owned(),
         None => String::new(),
     };
-    let [title, meta, _, rest] = Layout::vertical([
+    let [title, meta, standing, rest] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -733,6 +733,23 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
         )),
         title,
     );
+    // What the account the task runs on is doing, in the one line this pane has to
+    // spare: it says nothing at all unless a limit is actually holding the task.
+    if let Some((window, clears_at_ms)) = app.signal_task_limit() {
+        let line = format!(
+            "{} · {} limit · resumes {}",
+            app.signal_agent_label(),
+            window.word(),
+            clock(clears_at_ms)
+        );
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                truncate(&line, usize::from(standing.width)),
+                palette::muted(),
+            )),
+            standing,
+        );
+    }
     let Some(thread) = app.signal_thread().cloned() else {
         draw_empty(frame, rest, app);
         return;

@@ -13,7 +13,7 @@ use ratatui::{DefaultTerminal, text::Line};
 use tokio::{process::Command as HostCommand, sync::mpsc, task::JoinHandle};
 
 use crate::{
-    agent::{AGENTS, Activity, AgentKind},
+    agent::{AGENTS, Activity, AgentKind, AgentWindow},
     config::{Config, DEFAULT_PORT, SettingsError, SettingsFile},
     credentials::{
         Credential, CredentialAnswer, CredentialShell, CredentialShellCancel, CredentialShellEvent,
@@ -3818,6 +3818,32 @@ impl App {
         self.remote_tasks
             .iter()
             .find(|held| held.address == remote.address && held.summary.id == remote.task_id)
+    }
+
+    // The account's limit, when one is holding this task: which of its windows ran
+    // out and when it lets go. The reason is read with the time, never the time
+    // alone, so a task that came back does not keep saying it is waiting.
+    pub(in crate::tui) fn signal_task_limit(&self) -> Option<(AgentWindow, i64)> {
+        if let Some(task) = self.signal_task() {
+            if task.facts.execution_pause_reason != Some(TaskExecutionPauseReason::AwaitingLimit) {
+                return None;
+            }
+            return Some((
+                task.facts
+                    .limit_window
+                    .clone()
+                    .unwrap_or(AgentWindow::Other),
+                task.facts.resumes_at_ms?,
+            ));
+        }
+        let held = self.signal_held()?.summary.clone();
+        if held.pause_reason != Some(TaskExecutionPauseReason::AwaitingLimit) {
+            return None;
+        }
+        Some((
+            held.limit_window.unwrap_or(AgentWindow::Other),
+            held.resumes_at_ms?,
+        ))
     }
 
     pub(in crate::tui) fn signal_agent_label(&self) -> String {

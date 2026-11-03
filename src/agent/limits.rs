@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
+use sqlx::Type;
 
 // The windows a provider meters a subscription by. Altitude names the ones it knows
 // so the interface can say "5h" without learning a new word for each harness; what
 // it cannot classify keeps the word "usage" rather than being dropped, because a
 // refusal nobody can name is still a refusal.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "TEXT", rename_all = "snake_case")]
 pub enum AgentWindow {
     Session,
     Weekly,
@@ -56,10 +58,16 @@ pub enum AgentRefusal {
 }
 
 impl AgentRefusal {
+    // A window reopens on its own clock, and a task that arrives on the very second
+    // it rolls can be refused by a window it has only just left: a minute of grace is
+    // cheaper than a provision spent learning nothing. Every harness gets it here,
+    // because a window is always made in this one place.
+    const GRACE_MS: i64 = 60_000;
+
     pub fn window(window: AgentWindow, clears_at_ms: i64) -> Self {
         Self::Window {
             window,
-            clears_at_ms,
+            clears_at_ms: clears_at_ms.saturating_add(Self::GRACE_MS),
         }
     }
 

@@ -84,11 +84,16 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      WHERE task_id = tasks.id
        AND json_type(payload, '$.data.snapshot_available') IS NOT NULL
      ORDER BY sequence DESC LIMIT 1) AS snapshot_available,
-    (SELECT payload ->> '$.data.limit.clears_at_ms'
+    (SELECT payload ->> '$.data.clears_at_ms'
      FROM task_event_logs
      WHERE task_id = tasks.id
-       AND json_type(payload, '$.data.limit.clears_at_ms') IS NOT NULL
+       AND event_type = 'limit_held'
      ORDER BY sequence DESC LIMIT 1) AS resumes_at_ms,
+    (SELECT payload ->> '$.data.window'
+     FROM task_event_logs
+     WHERE task_id = tasks.id
+       AND event_type = 'limit_held'
+     ORDER BY sequence DESC LIMIT 1) AS limit_window,
     (SELECT payload ->> '$.data.error'
      FROM task_event_logs
      WHERE task_id = tasks.id

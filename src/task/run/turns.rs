@@ -11,12 +11,15 @@ use uuid::Uuid;
 // backstop for an agent out of things to do, not a step limit.
 const TURNS_BEFORE_THE_OPERATOR: usize = 12;
 
-use crate::task::{
-    IsolationError, LimitHold, Task, TaskAgentRequestedAction, TaskAgentRun, TaskAgentRunOutcome,
-    TaskAgentTurnReport, TaskError, TaskExecutionMode, TaskExecutionPauseReason,
-    TaskExecutionStatus, TaskHistoryEvent, TaskOperatorAttentionLevel, TaskOperatorSignalAuthor,
-    TaskOperatorSignalKind, TaskService, TaskServiceError, run_ended, snapshot_name,
-    store::ReviewRequest,
+use crate::{
+    agent::AgentWindow,
+    task::{
+        IsolationError, Task, TaskAgentRequestedAction, TaskAgentRun, TaskAgentRunOutcome,
+        TaskAgentTurnReport, TaskError, TaskExecutionMode, TaskExecutionPauseReason,
+        TaskExecutionStatus, TaskHistoryEvent, TaskOperatorAttentionLevel,
+        TaskOperatorSignalAuthor, TaskOperatorSignalKind, TaskService, TaskServiceError, run_ended,
+        snapshot_name, store::ReviewRequest,
+    },
 };
 
 impl<E> TaskService<E>
@@ -396,7 +399,6 @@ where
                         snapshot_available: true,
                         execution_pause_reason: reason,
                         snapshot_path,
-                        limit: None,
                     },
                 ],
             )
@@ -410,7 +412,8 @@ where
         &self,
         task: &Task,
         agent_run: &TaskAgentRun,
-        hold: LimitHold,
+        window: AgentWindow,
+        clears_at_ms: i64,
         exit_code: Option<i32>,
     ) -> Result<Task, TaskServiceError> {
         let snapshot_path = self.suspend_capsule(task).await?;
@@ -425,7 +428,10 @@ where
                         snapshot_available: true,
                         execution_pause_reason: TaskExecutionPauseReason::AwaitingLimit,
                         snapshot_path,
-                        limit: Some(hold),
+                    },
+                    TaskHistoryEvent::LimitHeld {
+                        window,
+                        clears_at_ms,
                     },
                 ],
             )
@@ -453,7 +459,6 @@ where
             snapshot_available: true,
             execution_pause_reason: TaskExecutionPauseReason::AwaitingReviewChecks,
             snapshot_path,
-            limit: None,
         });
         let task = self.record_snapshot(task, &events).await?;
         Ok(task)

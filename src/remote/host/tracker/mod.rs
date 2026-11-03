@@ -45,7 +45,7 @@ use tokio::{
 
 use crate::{
     task::{
-        LimitHold, TaskExecutionPauseReason, TaskHistoryEvent, TaskOperatorSignalAuthor,
+        TaskExecutionPauseReason, TaskHistoryEvent, TaskOperatorSignalAuthor,
         TaskOperatorSignalKind, TaskOperatorSignalThread,
     },
     tracker::{
@@ -137,8 +137,8 @@ fn published_comment_id(task_id: &str, signal_id: &str) -> String {
     stable_id("comment", &format!("signal:{task_id}:{signal_id}"))
 }
 
-fn pause_notice(reason: &TaskExecutionPauseReason, limit: Option<&LimitHold>) -> String {
-    let notice = match reason {
+fn pause_notice(reason: &TaskExecutionPauseReason) -> &'static str {
+    match reason {
         TaskExecutionPauseReason::AwaitingOperator => "Waiting for your reply on this task.",
         TaskExecutionPauseReason::AwaitingReviewChecks => {
             "Waiting for the pull request checks to settle."
@@ -150,14 +150,11 @@ fn pause_notice(reason: &TaskExecutionPauseReason, limit: Option<&LimitHold>) ->
         TaskExecutionPauseReason::ApplicationShutdown => {
             "The machine running this task restarted. The task resumes when it is back."
         }
-        // The one pause that is nobody's to clear. Saying when rather than which
-        // clock, because the operator may be reading this from another timezone.
+        // The one pause nobody has to clear. It names the clock's owner and not the
+        // hour, because a time is right for one machine's timezone and not another's.
         TaskExecutionPauseReason::AwaitingLimit => {
-            let window = limit.map_or("usage", |hold| hold.window.word());
-            return format!(
-                "The account's {window} limit is used up. This task resumes on its own when \
-                 the limit clears; nothing here is waiting on you."
-            );
+            "The account's usage limit is used up. This task resumes on its own when the \
+             limit clears; nothing here is waiting on you."
         }
         TaskExecutionPauseReason::Transfer => {
             "The operator is taking this task over on their own machine; it keeps running there."
@@ -171,8 +168,7 @@ fn pause_notice(reason: &TaskExecutionPauseReason, limit: Option<&LimitHold>) ->
         TaskExecutionPauseReason::DelegationWithdrawn => {
             "This issue is no longer delegated to Altitude, so the task stopped."
         }
-    };
-    notice.to_owned()
+    }
 }
 
 fn worth_retrying(refusal: &str) -> bool {
@@ -1795,7 +1791,6 @@ impl RemoteTracker {
             // "working" forever.
             TaskHistoryEvent::ExecutionPaused {
                 execution_pause_reason,
-                limit,
                 ..
             } => {
                 self.config
@@ -1807,7 +1802,7 @@ impl RemoteTracker {
                         // still thinking.
                         &stable_id(&format!("{}-{index}", report.task_id), "paused"),
                         AgentActivityContent::Response {
-                            body: pause_notice(execution_pause_reason, limit.as_ref()),
+                            body: pause_notice(execution_pause_reason).to_owned(),
                         },
                     )
                     .await
