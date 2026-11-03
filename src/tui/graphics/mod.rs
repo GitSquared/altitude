@@ -40,7 +40,9 @@ pub struct Pictures {
     // Where the pictures a signal carries are kept, by the digest that names them.
     attachments: PathBuf,
     rasters: HashMap<u64, Option<Warm>>,
-    protocols: HashMap<Key, Option<Picture>>,
+    // Only the protocols the crate lays out itself use this: a kitty picture is placed
+    // by cells, so nothing about it needs a protocol object.
+    sliced: HashMap<SlicedKey, Option<Sliced>>,
     cells: Cells,
 }
 
@@ -52,14 +54,13 @@ struct Warm {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct Key {
+struct SlicedKey {
     source: u64,
     columns: u16,
     scale: u16,
 }
 
-// The crate's own picture, for the protocols that are not kitty.
-struct Picture {
+struct Sliced {
     protocol: SlicedProtocol,
     size: Size,
 }
@@ -95,7 +96,7 @@ impl Pictures {
             cell,
             attachments,
             rasters: HashMap::new(),
-            protocols: HashMap::new(),
+            sliced: HashMap::new(),
             cells: Cells::default(),
         }
     }
@@ -136,8 +137,7 @@ impl Pictures {
         if self.is_placing_by_cells() {
             return Some(box_size);
         }
-        self.protocol(source, columns, scale)
-            .map(|picture| picture.size)
+        self.slice(source, columns, scale).map(|sliced| sliced.size)
     }
 
     pub fn draw(
@@ -173,9 +173,9 @@ impl Pictures {
         }
         // Every other protocol is laid out by the crate, which knows how to slice a
         // sixel and how much of an iTerm2 image a terminal will take.
-        if let Some(picture) = self.protocol(source, columns, scale) {
+        if let Some(sliced) = self.slice(source, columns, scale) {
             let at = SignedPosition::from(at);
-            frame.render_widget(SlicedImage::new(&picture.protocol, at), viewport);
+            frame.render_widget(SlicedImage::new(&sliced.protocol, at), viewport);
         }
     }
 
@@ -194,7 +194,7 @@ impl Pictures {
         if !self.rasters.contains_key(&digest) {
             if self.rasters.len() >= WARM_RASTERS {
                 self.rasters.clear();
-                self.protocols.clear();
+                self.sliced.clear();
             }
             let warm = self.build(source);
             self.rasters.insert(digest, warm);
@@ -229,26 +229,26 @@ impl Pictures {
         Some(Warm { raster, natural })
     }
 
-    fn protocol(&mut self, source: &str, columns: u16, scale: f32) -> Option<&Picture> {
-        let key = Key {
+    fn slice(&mut self, source: &str, columns: u16, scale: f32) -> Option<&Sliced> {
+        let key = SlicedKey {
             source: digest(source),
             columns,
             scale: (scale * 1000.0).round() as u16,
         };
-        if !self.protocols.contains_key(&key) {
-            let picture = self.build_protocol(source, columns, scale);
-            self.protocols.insert(key, picture);
+        if !self.sliced.contains_key(&key) {
+            let sliced = self.build_sliced(source, columns, scale);
+            self.sliced.insert(key, sliced);
         }
-        self.protocols.get(&key)?.as_ref()
+        self.sliced.get(&key)?.as_ref()
     }
 
-    fn build_protocol(&self, source: &str, columns: u16, scale: f32) -> Option<Picture> {
+    fn build_sliced(&self, source: &str, columns: u16, scale: f32) -> Option<Sliced> {
         let warm = self.rasters.get(&digest(source))?.as_ref()?;
         let box_size = fit(warm.natural, columns, scale);
         let protocol =
             SlicedProtocol::new(&self.picker, warm.raster.picture.clone(), Some(box_size)).ok()?;
         let size = protocol.size();
-        Some(Picture { protocol, size })
+        Some(Sliced { protocol, size })
     }
 }
 

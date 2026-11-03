@@ -1,12 +1,15 @@
-use std::{iter, mem};
+use std::mem;
 
-use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
 use unicode_width::UnicodeWidthStr;
 
+mod table;
+
+use self::table::Table;
 use super::palette;
 use crate::task::picture;
 
@@ -93,12 +96,6 @@ pub fn preview(body: &str) -> String {
                 .to_owned()
         })
         .unwrap_or_default()
-}
-
-struct Table {
-    alignments: Vec<Alignment>,
-    head: Vec<String>,
-    body: Vec<Vec<String>>,
 }
 
 struct Block {
@@ -359,113 +356,8 @@ impl Block {
         }
     }
 
-    // A table is laid out as a grid with its own borders: cells are padded to the
-    // column widths, so the separators line up instead of drifting with the text.
     fn draw_table(&mut self, table: Table) {
-        let columns = table
-            .head
-            .len()
-            .max(table.body.iter().map(Vec::len).max().unwrap_or(0));
-        if columns == 0 {
-            return;
-        }
-        let mut widths = vec![0usize; columns];
-        for row in iter::once(&table.head).chain(table.body.iter()) {
-            for (index, cell) in row.iter().enumerate() {
-                widths[index] = widths[index].max(cell.width());
-            }
-        }
-        // One cell of padding on each side and a border between neighbours.
-        const LEAST: usize = 1;
-        let total = |widths: &[usize]| widths.iter().map(|w| w + 3).sum::<usize>() + 1;
-        while total(&widths) > self.width {
-            // Take from the widest column that can spare a cell, so a narrow one is
-            // not squeezed to nothing for the sake of a wide neighbour.
-            let Some((widest, _)) = widths
-                .iter()
-                .enumerate()
-                .filter(|(_, width)| **width > LEAST)
-                .max_by_key(|(_, width)| **width)
-            else {
-                break;
-            };
-            widths[widest] -= 1;
-        }
-        if total(&widths) > self.width {
-            // Too many columns for the room it has: the plain form is a better lie
-            // than a grid that does not fit.
-            self.flat_table(&table);
-            return;
-        }
-
-        let rule = |left: char, middle: char, right: char| {
-            let mut line = String::from(left);
-            for (index, width) in widths.iter().enumerate() {
-                line.push_str(&"─".repeat(width + 2));
-                line.push(if index + 1 == widths.len() {
-                    right
-                } else {
-                    middle
-                });
-            }
-            line
-        };
-        self.lines
-            .push(Line::styled(rule('┌', '┬', '┐'), palette::muted()));
-        if !table.head.is_empty() {
-            self.table_row(&table.head, &widths, &table.alignments, palette::heading());
-            self.lines
-                .push(Line::styled(rule('├', '┼', '┤'), palette::muted()));
-        }
-        for row in &table.body {
-            self.table_row(row, &widths, &table.alignments, palette::primary());
-        }
-        self.lines
-            .push(Line::styled(rule('└', '┴', '┘'), palette::muted()));
-    }
-
-    fn table_row(
-        &mut self,
-        cells: &[String],
-        widths: &[usize],
-        alignments: &[Alignment],
-        tone: Style,
-    ) {
-        // A cell taller than one line makes the whole row that tall, so a wrapped
-        // cell does not push the rest of the row out of line.
-        let wrapped: Vec<Vec<String>> = widths
-            .iter()
-            .enumerate()
-            .map(|(index, width)| {
-                cells
-                    .get(index)
-                    .map(|cell| wrap_to(cell.trim(), *width))
-                    .unwrap_or_default()
-            })
-            .collect();
-        let height = wrapped.iter().map(Vec::len).max().unwrap_or(1).max(1);
-        for line in 0..height {
-            // The separators are borders: they are drawn in the border's tone, not
-            // the tone of the words between them, or they read as emphasis.
-            let mut spans = vec![Span::styled("│", palette::muted())];
-            for (index, width) in widths.iter().enumerate() {
-                let content = wrapped[index].get(line).map_or("", String::as_str);
-                let padded = format!(" {} ", aligned(content, *width, alignments.get(index)));
-                spans.push(Span::styled(padded, tone));
-                spans.push(Span::styled("│", palette::muted()));
-            }
-            self.lines.push(Line::from(spans));
-        }
-    }
-
-    fn flat_table(&mut self, table: &Table) {
-        for row in iter::once(&table.head).chain(table.body.iter()) {
-            if row.is_empty() {
-                continue;
-            }
-            self.lines
-                .push(Line::styled(row.join(" │ "), palette::primary()));
-        }
+        self.lines.extend(table::lines(&table, self.width));
     }
 
     fn code_line(&mut self, text: &str) {
@@ -559,61 +451,6 @@ impl Block {
             self.wrap();
             rest = tail;
         }
-    }
-}
-
-// A table cell wraps inside its column rather than at the end of the line.
-fn wrap_to(text: &str, width: usize) -> Vec<String> {
-    let width = width.max(1);
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    for word in text.split_whitespace() {
-        let mut word = word;
-        loop {
-            let taken = current.width() + usize::from(!current.is_empty());
-            let room = width.saturating_sub(taken);
-            if word.width() <= room {
-                if !current.is_empty() {
-                    current.push(' ');
-                }
-                current.push_str(word);
-                break;
-            }
-            if current.is_empty() {
-                // A word wider than the column is cut at its own edge.
-                let cut = word
-                    .char_indices()
-                    .take_while(|(index, _)| word[..*index].width() < width)
-                    .last()
-                    .map_or(word.len(), |(index, character)| {
-                        index + character.len_utf8()
-                    });
-                let (head, tail) = word.split_at(cut);
-                lines.push(head.to_owned());
-                word = tail;
-            } else {
-                lines.push(mem::take(&mut current));
-            }
-            if word.is_empty() {
-                break;
-            }
-        }
-    }
-    if !current.is_empty() || lines.is_empty() {
-        lines.push(current);
-    }
-    lines
-}
-
-fn aligned(text: &str, width: usize, alignment: Option<&Alignment>) -> String {
-    let room = width.saturating_sub(text.width());
-    match alignment {
-        Some(Alignment::Right) => format!("{}{text}", " ".repeat(room)),
-        Some(Alignment::Center) => {
-            let left = room / 2;
-            format!("{}{text}{}", " ".repeat(left), " ".repeat(room - left))
-        }
-        _ => format!("{text}{}", " ".repeat(room)),
     }
 }
 
