@@ -14,6 +14,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 const ANTHROPIC_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 const ANTHROPIC_BETA = "claude-code-20250219,oauth-2025-04-20";
+const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const REQUEST_TIMEOUT_MS = 5_000;
 
 // The custom type this extension's entries carry, so the reader can pick them out of
@@ -21,7 +22,7 @@ const REQUEST_TIMEOUT_MS = 5_000;
 const ENTRY_TYPE = "altitude.usage";
 
 interface WindowReading {
-	window: "session" | "weekly";
+	window: "session" | "weekly" | "usage";
 	used_percent?: number;
 	clears_at_ms?: number;
 }
@@ -85,15 +86,69 @@ async function anthropicWindows(ctx: ExtensionContext): Promise<WindowReading[]>
 	].filter((reading): reading is WindowReading => reading !== undefined);
 }
 
-async function standing(ctx: ExtensionContext): Promise<Entry | undefined> {
-	const model = ctx.model;
-	if (!model) return undefined;
-	// Only a subscription has a window to report, and pi is the one who knows which
-	// kind of credential this is: an API key is metered by money and has no plan.
-	if (model.provider !== "anthropic" || !ctx.modelRegistry.isUsingOAuth(model)) {
+// A ChatGPT plan's windows, from the same endpoint its own client reads. The window
+// length is what names it: a plan can report only the weekly one, in the slot the
+// five-hour one usually fills, so the position means nothing.
+function codexWindow(report: unknown, now: number): WindowReading | undefined {
+	if (typeof report !== "object" || report === null) return undefined;
+	const record = report as Record<string, unknown>;
+	const percent = usedPercent(record.used_percent);
+	if (percent === undefined) return undefined;
+	const minutes = Number(record.limit_window_seconds) / 60;
+	const resetAt = toEpochMs(record.reset_at);
+	const resetAfter = Number(record.reset_after_seconds);
+	const clears_at_ms =
+		resetAt ?? (Number.isFinite(resetAfter) && resetAfter > 0 ? now + resetAfter * 1_000 : undefined);
+	return {
+		window: minutes >= 10_000 ? "weekly" : minutes >= 200 ? "session" : "usage",
+		used_percent: percent,
+		clears_at_ms,
+	};
+}
+
+// The account id is a claim inside the token itself, which is how pi's own Codex
+// client knows which account it is talking to.
+function chatgptAccountId(token: string): string | undefined {
+	const payload = token.split(".")[1];
+	if (!payload) return undefined;
+	try {
+		const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+		return claims?.["https://api.openai.com/auth"]?.chatgpt_account_id;
+	} catch {
 		return undefined;
 	}
-	const windows = await anthropicWindows(ctx);
+}
+
+async function codexWindows(ctx: ExtensionContext): Promise<WindowReading[]> {
+	const resolved = await ctx.modelRegistry.getProviderAuth("openai-codex");
+	const token = resolved?.auth?.apiKey?.trim();
+	if (!token) return [];
+	const accountId = chatgptAccountId(token);
+	if (!accountId) return [];
+
+	const response = await fetch(CODEX_USAGE_URL, {
+		headers: { Authorization: `Bearer ${token}`, "ChatGPT-Account-Id": accountId },
+		signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+	});
+	if (!response.ok) return [];
+
+	const body = (await response.json()) as Record<string, unknown>;
+	const rateLimit = body.rate_limit as Record<string, unknown> | undefined;
+	const now = Date.now();
+	return [rateLimit?.primary_window, rateLimit?.secondary_window]
+		.map((window) => codexWindow(window, now))
+		.filter((reading): reading is WindowReading => reading !== undefined);
+}
+
+async function standing(ctx: ExtensionContext): Promise<Entry | undefined> {
+	const model = ctx.model;
+	// Only a subscription has a window to report, and pi is the one who knows which
+	// kind of credential this is: an API key is metered by money and has no plan.
+	if (!model || !ctx.modelRegistry.isUsingOAuth(model)) return undefined;
+
+	let windows: WindowReading[] = [];
+	if (model.provider === "anthropic") windows = await anthropicWindows(ctx);
+	else if (model.provider === "openai-codex") windows = await codexWindows(ctx);
 	if (windows.length === 0) return undefined;
 	return { provider: model.provider, on_plan: true, observed_at_ms: Date.now(), windows };
 }
