@@ -42,7 +42,6 @@ pub struct Placement<'a> {
 struct Emission {
     id: u32,
     columns: u16,
-    rows: u16,
     crop: Option<(u32, u32)>,
     at: (u16, u16),
     // The pixels, when the terminal does not have them yet.
@@ -116,7 +115,6 @@ impl Cells {
         self.pending.push(Emission {
             id,
             columns,
-            rows: shown,
             crop: crop_of(raster, rows, hidden, shown),
             at: (
                 u16::try_from(left).unwrap_or(0),
@@ -146,12 +144,7 @@ impl Cells {
                 emission.at.1.saturating_add(1),
                 emission.at.0.saturating_add(1)
             ));
-            out.push_str(&place(
-                emission.id,
-                emission.columns,
-                emission.rows,
-                emission.crop,
-            ));
+            out.push_str(&place(emission.id, emission.columns, emission.crop));
         }
         self.placed = wanted;
         out
@@ -197,7 +190,12 @@ fn transmit(id: u32, picture: &image::DynamicImage) -> String {
     out
 }
 
-fn place(id: u32, columns: u16, rows: u16, crop: Option<(u32, u32)>) -> String {
+// The columns are named and the rows are not: a terminal that is told both scales the
+// picture to fill the box, and a box rounded to whole cells stretches a picture by a
+// few percent. Told only the columns, it works the rows out from the image and the
+// cell size it actually has, so the picture keeps its proportions and we are not
+// guessing at its font.
+fn place(id: u32, columns: u16, crop: Option<(u32, u32)>) -> String {
     let crop = crop.map_or_else(String::new, |(y, h)| format!(",y={y},h={h}"));
-    format!("\u{1b}_Ga=p,q=2,i={id},c={columns},r={rows}{crop};\u{1b}\\")
+    format!("\u{1b}_Ga=p,q=2,i={id},c={columns}{crop};\u{1b}\\")
 }

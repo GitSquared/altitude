@@ -1,3 +1,4 @@
+mod cells;
 mod kitty;
 mod mermaid;
 
@@ -34,6 +35,8 @@ const WARM_RASTERS: usize = 12;
 pub struct Pictures {
     picker: Picker,
     is_dark: bool,
+    // One cell in pixels, measured rather than taken from the type size.
+    cell: Size,
     // Where the pictures a signal carries are kept, by the digest that names them.
     attachments: PathBuf,
     rasters: HashMap<u64, Option<Warm>>,
@@ -82,9 +85,14 @@ impl Pictures {
                 _ => None,
             })
             .unwrap_or(true);
+        let font = picker.font_size();
+        let cell = cells::pixels()
+            .map(|(width, height)| Size::new(width, height))
+            .unwrap_or_else(|| Size::new(font.width, font.height));
         Self {
             picker,
             is_dark,
+            cell,
             attachments,
             rasters: HashMap::new(),
             protocols: HashMap::new(),
@@ -205,21 +213,17 @@ impl Pictures {
             },
             None => mermaid::raster(source, self.is_dark, font.height)?,
         };
-        // The raster is oversampled, so the cells it covers are counted in the
-        // pixels the terminal will actually show, not the ones that were drawn.
+        // The raster is twice a cell in each direction, so its cell count is its pixels
+        // over two measured cells. The height follows from the width on one scale, so
+        // the box has the picture's own proportions instead of two rounded guesses.
+        let wide = raster.picture.width() as f32 / (f32::from(self.cell.width.max(1)) * 2.0);
         let natural = Size::new(
+            u16::try_from((wide.round().max(1.0)) as u32).ok()?,
             u16::try_from(
-                raster
-                    .picture
-                    .width()
-                    .div_ceil(u32::from(font.width).max(1) * 2),
-            )
-            .ok()?,
-            u16::try_from(
-                raster
-                    .picture
-                    .height()
-                    .div_ceil(u32::from(font.height).max(1) * 2),
+                (wide.max(1.0) * raster.picture.height() as f32
+                    / raster.picture.width().max(1) as f32)
+                    .round()
+                    .max(1.0) as u32,
             )
             .ok()?,
         );
@@ -266,11 +270,11 @@ fn fit(natural: Size, columns: u16, scale: f32) -> Size {
     // the other axis is what keeps the proportions rather than shaving one side.
     if height > LONGEST {
         height = LONGEST;
-        width = (f32::from(height) * wide / tall).round().max(1.0) as u16;
+        width = (f32::from(height) * wide / tall).ceil().max(1.0) as u16;
     }
     if width > columns.max(1) {
         width = columns.max(1);
-        height = (f32::from(width) * tall / wide).round().max(1.0) as u16;
+        height = (f32::from(width) * tall / wide).ceil().max(1.0) as u16;
     }
     Size::new(width.max(1), height.clamp(1, LONGEST))
 }
