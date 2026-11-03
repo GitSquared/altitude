@@ -6,7 +6,7 @@ use crate::{
     project::{Project, ProjectCommits},
     remote::{DiscoveredRemote, RemoteKey, TrackerConnection, TrackerReadiness},
     tui::{
-        app::{CredentialStatus, RemoteStatus, TrackerState},
+        app::{CredentialStatus, RemoteStatus, Sync, TrackerState},
         widgets::{chrome, palette, utils::Dot},
     },
 };
@@ -43,7 +43,7 @@ pub enum RowKind {
         address: String,
         remembered: Option<RemoteKey>,
         status: RemoteStatus,
-        needs_config: bool,
+        sync: Sync,
         trackers: Option<Vec<TrackerConnection>>,
         binding: Option<TrackerBinding>,
     },
@@ -65,12 +65,7 @@ pub(super) fn switch_row(setting: Setting, on: bool) -> Row {
 impl Row {
     pub(super) fn dot(&self) -> Option<Dot> {
         match &self.kind {
-            RowKind::Remote {
-                status: RemoteStatus::Reached,
-                needs_config: true,
-                ..
-            } => Some(mark(false, true)),
-            RowKind::Remote { status, .. } => Some(remote_mark(status)),
+            RowKind::Remote { status, sync, .. } => Some(remote_mark(status, *sync)),
             // The same question mark the first screen gives a machine found on
             // the network: it is an offer, not something this client holds.
             RowKind::Discovered(_) => Some(Dot::still('?', palette::muted())),
@@ -295,7 +290,16 @@ pub(super) fn mark(filled: bool, asking: bool) -> Dot {
     }
 }
 
-fn remote_mark(status: &RemoteStatus) -> Dot {
+fn remote_mark(status: &RemoteStatus, sync: Sync) -> Dot {
+    // What a remote is owed is the row's word, since a machine this one has
+    // nothing to send is as still as it looks.
+    match (status, sync) {
+        (RemoteStatus::Reached, Sync::Configuration) => return mark(false, true),
+        (RemoteStatus::Reached, Sync::NoProjects | Sync::UntilItsTaskEnds) => {
+            return mark(false, false);
+        }
+        _ => {}
+    }
     match status {
         RemoteStatus::Asking | RemoteStatus::Preparing(_) | RemoteStatus::Syncing => {
             mark(false, true)

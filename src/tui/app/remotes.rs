@@ -20,7 +20,7 @@ use crate::{
 };
 
 use super::{
-    App, Foreground, HeldTask, PendingTask, RemoteStatus, RemoveTaskReply, SendTaskReply,
+    App, Foreground, HeldTask, PendingTask, RemoteStatus, RemoveTaskReply, SendTaskReply, Sync,
     TaskDelegationReply, TransferView, WATCH_RETRY, WATCH_RETRY_MAX, WATCH_SETTLED, WatchEnd,
     WatchedTasks, is_listed_summary, mem, open_panel, origin_label,
     popups::confirm::PendingConfirm, popups::new_task::Host,
@@ -47,10 +47,12 @@ impl App {
             // build the environment a task names, so it is not a machine that can
             // be given work yet. Saying why points at the settings that fix it.
             let (label, ready) = match self.remote_status.get(&address) {
-                Some(RemoteStatus::Reached) if self.remote_needs_config(&address) => {
-                    (format!("{name} (needs config)"), false)
-                }
-                Some(RemoteStatus::Reached) => (name, true),
+                Some(RemoteStatus::Reached) => match self.sync_for(&address) {
+                    Sync::Nothing => (name, true),
+                    Sync::Configuration => (format!("{name} (needs config)"), false),
+                    Sync::NoProjects => (format!("{name} (no projects)"), false),
+                    Sync::UntilItsTaskEnds => (format!("{name} (waiting for its task)"), false),
+                },
                 Some(RemoteStatus::Preparing(Some(Phase::Project { .. }))) => {
                     (format!("{name} (installing tools)"), false)
                 }

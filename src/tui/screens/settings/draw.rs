@@ -262,13 +262,12 @@ fn detail(panel: &Panel, view: &View, tick: Option<usize>) -> Paragraph<'static>
             address,
             remembered,
             status,
-            needs_config,
+            sync,
             trackers,
             binding,
         } => {
-            let mut lines =
-                remote_connector(label, address, remembered.as_ref(), status, *needs_config)
-                    .lines(heading, tick);
+            let mut lines = remote_connector(label, address, remembered.as_ref(), status, *sync)
+                .lines(heading, tick);
             lines.push(Line::from(""));
             lines.push(section_heading("Task tracker"));
             lines.push(tracker_summary(trackers.as_deref(), tick));

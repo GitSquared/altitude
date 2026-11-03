@@ -284,7 +284,7 @@ impl App {
                 },
                 detail: Some(address.clone()),
                 kind: RowKind::Remote {
-                    needs_config: self.remote_needs_config(&address),
+                    sync: self.sync_for(&address),
                     address,
                     remembered,
                     status,

@@ -178,6 +178,22 @@ impl RemoteStatus {
     }
 }
 
+/// What this client still owes a remote. The panel and the pusher read the same
+/// answer, so what the panel says is being sent is what being sent means: a
+/// machine owed nothing was saying "sending setup…" forever, with nothing in
+/// flight and nothing to send.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::tui) enum Sync {
+    /// It holds what this machine would send.
+    Nothing,
+    /// A configuration, or the revocation of one, is what it is owed.
+    Configuration,
+    /// It runs none of this machine's projects, so there is nothing to send it.
+    NoProjects,
+    /// What it holds keeps until the task it is running there is gone.
+    UntilItsTaskEnds,
+}
+
 fn task_shell_title(task: &Task) -> String {
     let agent = task
         .agent_kind
@@ -1600,7 +1616,7 @@ impl App {
                 Some(RemoteStatus::Asking | RemoteStatus::Preparing(_) | RemoteStatus::Syncing) => {
                     true
                 }
-                Some(RemoteStatus::Reached) => self.remote_needs_config(address),
+                Some(RemoteStatus::Reached) => self.sync_for(address) == Sync::Configuration,
                 _ => false,
             })
             .collect()
@@ -1637,6 +1653,25 @@ impl App {
                 }
             }
         });
+    }
+
+    /// What this machine still owes a remote, if anything.
+    pub(in crate::tui) fn sync_for(&self, address: &str) -> Sync {
+        if !self.remote_needs_config(address) {
+            return Sync::Nothing;
+        }
+        if self.remote_runs_projects(address) {
+            return Sync::Configuration;
+        }
+        // Nothing of this machine's runs there. What it was given is taken back
+        // once the task it is running is gone, so that is a configuration too.
+        if self.remote_tasks.iter().any(|held| held.address == address) {
+            return Sync::UntilItsTaskEnds;
+        }
+        if self.remote_was_given_config(address) {
+            return Sync::Configuration;
+        }
+        Sync::NoProjects
     }
 
     pub(in crate::tui) fn remote_needs_config(&self, address: &str) -> bool {

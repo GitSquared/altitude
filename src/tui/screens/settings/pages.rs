@@ -13,7 +13,7 @@ use crate::{
     remote::{Phase, RemoteKey, TrackerConnection, TrackerReadiness},
     tracker::{TrackerKind, setup::Item},
     tui::{
-        app::{CredentialStatus, RemoteStatus, TrackerState},
+        app::{CredentialStatus, RemoteStatus, Sync, TrackerState},
         widgets::{
             palette, progress,
             utils::{Dot, plain, shimmer},
@@ -561,10 +561,33 @@ pub(super) fn remote_connector(
     address: &str,
     remembered: Option<&RemoteKey>,
     status: &RemoteStatus,
-    needs_config: bool,
+    sync: Sync,
 ) -> Connector {
     let (reach, word, note, action) = match status {
-        RemoteStatus::Reached if needs_config => (
+        // Nothing of this machine's runs there, so nothing will ever be sent: a
+        // word saying it is on its way is a wait that never ends.
+        RemoteStatus::Reached if sync == Sync::NoProjects => (
+            Reach::Off,
+            "no projects yet",
+            Some(
+                "This machine runs none of your projects, so there is nothing to send it. \
+                 Choose it as a project's host in Settings → Projects."
+                    .to_owned(),
+            ),
+            None,
+        ),
+        // What it holds keeps until the task it is running there is gone.
+        RemoteStatus::Reached if sync == Sync::UntilItsTaskEnds => (
+            Reach::Off,
+            "waiting for its task",
+            Some(
+                "One of your tasks is still running there, so what it needs to run stays \
+                 until the task is gone."
+                    .to_owned(),
+            ),
+            None,
+        ),
+        RemoteStatus::Reached if sync == Sync::Configuration => (
             Reach::Asking,
             "sending setup…",
             // What is actually sent: the projects that run on it, and the logins
