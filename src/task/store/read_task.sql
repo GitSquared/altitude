@@ -94,6 +94,11 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      WHERE task_id = tasks.id
        AND event_type = 'limit_held'
      ORDER BY sequence DESC LIMIT 1) AS limit_window,
+    (SELECT payload -> '$.data.standing'
+     FROM task_event_logs
+     WHERE task_id = tasks.id
+       AND event_type = 'agent_standing_reported'
+     ORDER BY sequence DESC LIMIT 1) AS standing,
     (SELECT json_object(
          'cost_usd_micros', coalesce(SUM(json_extract(payload, '$.data.cost_usd_micros')), 0),
          'total_tokens', coalesce(SUM(json_extract(payload, '$.data.total_tokens')), 0),

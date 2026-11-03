@@ -13,7 +13,7 @@ use ratatui::{DefaultTerminal, text::Line};
 use tokio::{process::Command as HostCommand, sync::mpsc, task::JoinHandle};
 
 use crate::{
-    agent::{AGENTS, Activity, AgentKind, AgentWindow},
+    agent::{AGENTS, Activity, AgentKind, AgentStanding, AgentWindow},
     config::{Config, DEFAULT_PORT, SettingsError, SettingsFile},
     credentials::{
         Credential, CredentialAnswer, CredentialShell, CredentialShellCancel, CredentialShellEvent,
@@ -3822,6 +3822,16 @@ impl App {
         self.remote_tasks
             .iter()
             .find(|held| held.address == remote.address && held.summary.id == remote.task_id)
+    }
+
+    // The account the task's credential runs on: how much of each window is gone, and
+    // how long ago that was true. A reading, not a state, so the age travels with it.
+    pub(in crate::tui) fn signal_task_standing(&self) -> Option<&AgentStanding> {
+        let standing = match self.signal_task() {
+            Some(task) => task.facts.standing.as_ref(),
+            None => self.signal_held()?.summary.standing.as_ref(),
+        }?;
+        (!standing.windows.is_empty()).then_some(standing)
     }
 
     // The account's limit, when one is holding this task: which of its windows ran

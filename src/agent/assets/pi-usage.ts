@@ -28,6 +28,9 @@ interface WindowReading {
 
 interface Entry {
 	provider: string;
+	// Only a credential that is signed in rather than keyed is a plan, and this
+	// extension only asks one: the fact is stated here rather than inferred later.
+	on_plan: boolean;
 	observed_at_ms: number;
 	windows: WindowReading[];
 }
@@ -92,7 +95,7 @@ async function standing(ctx: ExtensionContext): Promise<Entry | undefined> {
 	}
 	const windows = await anthropicWindows(ctx);
 	if (windows.length === 0) return undefined;
-	return { provider: model.provider, observed_at_ms: Date.now(), windows };
+	return { provider: model.provider, on_plan: true, observed_at_ms: Date.now(), windows };
 }
 
 export default function (pi: ExtensionAPI) {

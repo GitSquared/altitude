@@ -1,5 +1,5 @@
 use super::{
-    AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, AgentRefusal, AgentUsage, AgentWindowReading,
+    AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, AgentRefusal, AgentStanding, AgentUsage,
     REPORT_SCHEMA, REPORT_SYSTEM_PROMPT, TaskProgressDecoder, TaskReportDecoder, TaskUsage,
     activity,
 };
@@ -84,7 +84,7 @@ pub struct PiStream {
     spent: AgentUsage,
     // The account's standing, as the extension left it in the session: which windows
     // are open, how much of each is gone, and when each comes back.
-    standing: Vec<AgentWindowReading>,
+    standing: AgentStanding,
     // Whether the provider refused the turn. That much pi states plainly; everything
     // else about the refusal is in prose, which is not something to read a fact out of.
     refused: bool,
@@ -103,7 +103,12 @@ impl PiStream {
                 is_charged: true,
                 ..AgentUsage::default()
             },
-            standing: Vec::new(),
+            standing: AgentStanding {
+                provider: None,
+                on_plan: None,
+                observed_at_ms: 0,
+                windows: Vec::new(),
+            },
             refused: false,
         }
     }
@@ -115,13 +120,10 @@ impl PiStream {
         if entry.get("customType").and_then(Value::as_str) != Some(USAGE_ENTRY_TYPE) {
             return;
         }
-        let Some(readings) = entry.pointer("/data/windows").and_then(Value::as_array) else {
+        let Ok(standing) = serde_json::from_value::<AgentStanding>(entry["data"].clone()) else {
             return;
         };
-        self.standing = readings
-            .iter()
-            .filter_map(|reading| serde_json::from_value(reading.clone()).ok())
-            .collect();
+        self.standing = standing;
     }
 
     fn process_line(&mut self, line: &str) {
@@ -207,6 +209,10 @@ impl PiStream {
 }
 
 impl TaskReportDecoder for PiStream {
+    fn take_standing(&mut self) -> Option<AgentStanding> {
+        (!self.standing.is_empty()).then(|| self.standing.clone())
+    }
+
     // A refusal is read from two facts the harness states outright: the provider
     // refused, and a window the extension reported is spent. Which window and when it
     // comes back are on that window, so nothing here depends on how the refusal was
@@ -215,17 +221,22 @@ impl TaskReportDecoder for PiStream {
         if !self.refused {
             return None;
         }
-        let spent = self
-            .standing
-            .iter()
-            .filter(|reading| reading.is_spent())
-            .min_by_key(|reading| reading.clears_at_ms.unwrap_or(i64::MAX))?;
+        let spent = self.standing.first_to_clear()?;
         let clears_at_ms = spent.clears_at_ms?;
         Some(AgentRefusal::window(spent.window.clone(), clears_at_ms))
     }
 
+    // The extension is the one who knows whether this credential is a plan, and it
+    // only asks a subscription at all: a plan's prices are not money.
     fn take_usage(&mut self) -> Option<AgentUsage> {
-        (!self.spent.is_empty()).then(|| self.spent.clone())
+        if self.spent.is_empty() {
+            return None;
+        }
+        let mut spent = self.spent.clone();
+        if self.standing.on_plan == Some(true) {
+            spent.is_charged = false;
+        }
+        Some(spent)
     }
 
     fn failure_message(&mut self) -> Option<&str> {

@@ -15,7 +15,7 @@ mod pi;
 pub mod tools;
 mod usage;
 use claude::ClaudeCode;
-pub use limits::{AgentRefusal, AgentWindow, AgentWindowReading};
+pub use limits::{AgentRefusal, AgentStanding, AgentWindow, AgentWindowReading, AgentWindowState};
 use pi::PiCode;
 pub use usage::{AgentUsage, TaskUsage};
 
@@ -210,6 +210,12 @@ pub trait TaskReportDecoder: Send {
     // What the run cost, in the harness's own accounting, as a delta: what the task
     // has spent is the sum of these, whatever the harness counts internally.
     fn take_usage(&mut self) -> Option<AgentUsage> {
+        None
+    }
+    // The account the run spent, as the harness described it. Both harnesses answer in
+    // their own way — one inside its own stream, one through an extension of ours —
+    // and this is the one shape either of them lands in.
+    fn take_standing(&mut self) -> Option<AgentStanding> {
         None
     }
 }

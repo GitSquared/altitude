@@ -10,6 +10,7 @@ use ratatui::{
 };
 
 use crate::{
+    agent::AgentWindowState,
     project::Project,
     task::{
         ProjectProposal, SignalTransition, TaskOperatorSignalAuthor, TaskOperatorSignalKind,
@@ -739,6 +740,23 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
     let mut standing_parts = vec![app.signal_agent_label()];
     if let Some(spend) = app.signal_task_spend() {
         standing_parts.push(spend);
+    }
+    if let Some(account) = app.signal_task_standing() {
+        let windows: Vec<String> = account
+            .windows
+            .iter()
+            .map(|reading| match reading.used_percent {
+                // Claude says which of its windows is running out; the rest only
+                // count, so only the one that said it is marked.
+                Some(used) if reading.state == Some(AgentWindowState::Warning) => {
+                    format!("{} {used:.0}% running out", reading.window.word())
+                }
+                Some(used) => format!("{} {used:.0}%", reading.window.word()),
+                None => reading.window.word().to_owned(),
+            })
+            .collect();
+        standing_parts.push(windows.join(" · "));
+        standing_parts.push(ago(account.observed_at_ms, Utc::now().timestamp_millis()));
     }
     if let Some((window, clears_at_ms)) = app.signal_task_limit() {
         standing_parts.push(format!("{} limit", window.word()));

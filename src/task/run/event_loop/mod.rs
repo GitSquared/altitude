@@ -1461,6 +1461,28 @@ where
         mut report_stream: Option<Box<dyn TaskReportDecoder>>,
         event: CommandEvent,
     ) -> Result<(), TaskServiceError> {
+        // What the account looks like is recorded before the run is judged, because
+        // the judgement reads it: a refusal is a spent window, not a sentence.
+        let task = match report_stream
+            .as_mut()
+            .and_then(|decoder| decoder.take_standing())
+        {
+            Some(standing) => match self
+                .service
+                .record(
+                    &task.id,
+                    &[TaskHistoryEvent::AgentStandingReported { standing }],
+                )
+                .await
+            {
+                Ok(task) => task,
+                Err(error) => {
+                    tracing::warn!(task_id = %task.id, %error, "could not record an account's standing");
+                    task
+                }
+            },
+            None => task,
+        };
         // What the run spent is recorded before anything is decided about it: a run
         // that ends in a pause or a refusal has still cost what it cost.
         let task = match report_stream

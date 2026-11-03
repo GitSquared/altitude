@@ -2,7 +2,7 @@ use chrono::{Local, SecondsFormat};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use crate::agent::{AgentKind, AgentUsage, AgentWindow, TaskUsage};
+use crate::agent::{AgentKind, AgentStanding, AgentUsage, AgentWindow, TaskUsage};
 use crate::id;
 use crate::project::Project;
 use crate::tracker::{IssueReference, IssueSnapshot, TrackerKind, TrackerStatus};
@@ -296,6 +296,10 @@ pub struct TaskFacts {
     // report, because a run is what a harness knows the cost of.
     #[sqlx(json)]
     pub usage: TaskUsage,
+    // The account this task's credential runs on, as its harness last said. A reading
+    // and not a state: it is as old as the run that took it, and the interface says so.
+    #[sqlx(json(nullable))]
+    pub standing: Option<AgentStanding>,
     pub last_error: Option<String>,
     #[sqlx(json(nullable))]
     pub latest_operator_message: Option<TaskOperatorSignalMessage>,
@@ -427,6 +431,9 @@ pub enum TaskHistoryEvent {
         total_tokens: i64,
         cost_from_provider: bool,
         is_charged: bool,
+    },
+    AgentStandingReported {
+        standing: AgentStanding,
     },
     ExecutionRecovered {
         execution_status: TaskExecutionStatus,
