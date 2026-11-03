@@ -234,6 +234,7 @@ impl Block {
             Tag::BlockQuote(_) => {
                 self.close();
                 self.quote_depth = self.quote_depth.saturating_add(1);
+                self.push_style(palette::primary().add_modifier(Modifier::ITALIC));
             }
             Tag::CodeBlock(kind) => {
                 self.begin_block();
@@ -300,6 +301,7 @@ impl Block {
                 self.close();
             }
             TagEnd::BlockQuote(_) => {
+                self.pop_style();
                 self.close();
                 self.quote_depth = self.quote_depth.saturating_sub(1);
             }
@@ -463,15 +465,16 @@ impl Block {
             .collect();
         let height = wrapped.iter().map(Vec::len).max().unwrap_or(1).max(1);
         for line in 0..height {
-            let mut text = String::from("│");
+            // The separators are borders: they are drawn in the border's tone, not
+            // the tone of the words between them, or they read as emphasis.
+            let mut spans = vec![Span::styled("│", palette::muted())];
             for (index, width) in widths.iter().enumerate() {
                 let content = wrapped[index].get(line).map_or("", String::as_str);
-                text.push(' ');
-                text.push_str(&aligned(content, *width, alignments.get(index)));
-                text.push(' ');
-                text.push('│');
+                let padded = format!(" {} ", aligned(content, *width, alignments.get(index)));
+                spans.push(Span::styled(padded, tone));
+                spans.push(Span::styled("│", palette::muted()));
             }
-            self.lines.push(Line::styled(text, tone));
+            self.lines.push(Line::from(spans));
         }
     }
 

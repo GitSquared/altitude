@@ -22,8 +22,8 @@ use crate::task::PICTURE;
 const LONGEST: u16 = 40;
 // A diagram at its own scale has labels exactly one cell tall, which is how mermaid
 // would draw it at 14px next to 14px body text. A conversation is read, not studied,
-// so a picture is kept a notch under that: still legible, and a few rows shorter.
-const COMPACT: f32 = 0.85;
+// so a picture is drawn well under that: legible, and far fewer rows.
+const COMPACT: f32 = 0.6;
 // Long enough for a terminal across an ssh link to answer, short enough that one
 // that never answers does not hold the interface up.
 const ANSWER_TIMEOUT: Duration = Duration::from_millis(800);
