@@ -112,8 +112,12 @@ impl Pictures {
             u16::try_from(picture.width().div_ceil(u32::from(font.width).max(1))).ok()?,
             u16::try_from(picture.height().div_ceil(u32::from(font.height).max(1))).ok()?,
         );
-        let size = fit(natural, columns, LONGEST);
-        let protocol = SlicedProtocol::new(&self.picker, picture, Some(size)).ok()?;
+        // The crate fits the image inside the size it is given, so the size it
+        // reports back is the one to reserve: asking for a taller box than the
+        // picture needs would leave the difference as blank rows under it.
+        let protocol =
+            SlicedProtocol::new(&self.picker, picture, Some(fit(natural, columns))).ok()?;
+        let size = protocol.size();
         Some(Picture { protocol, size })
     }
 }
@@ -121,10 +125,10 @@ impl Pictures {
 // Only ever down: a diagram smaller than the column it has been given keeps its
 // own size rather than being blown up into a blur. Both limits scale it, so a tall
 // diagram gets narrower instead of being squashed into its row budget.
-fn fit(natural: Size, columns: u16, rows: u16) -> Size {
+fn fit(natural: Size, columns: u16) -> Size {
     let allowance = |limit: u16, value: u16| f32::from(limit.max(1)) / f32::from(value.max(1));
     let scale = allowance(columns, natural.width)
-        .min(allowance(rows, natural.height))
+        .min(allowance(LONGEST, natural.height))
         .min(LARGEST_SCALE);
     let scaled = |value: u16| {
         u16::try_from((f32::from(value) * scale).ceil().max(1.0) as u32)
@@ -133,7 +137,7 @@ fn fit(natural: Size, columns: u16, rows: u16) -> Size {
     };
     Size::new(
         scaled(natural.width).min(columns.max(1)),
-        scaled(natural.height).min(rows.max(1)),
+        scaled(natural.height).min(LONGEST),
     )
 }
 

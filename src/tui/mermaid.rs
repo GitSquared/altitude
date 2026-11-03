@@ -1,6 +1,6 @@
 use std::sync::{Arc, OnceLock};
 
-use image::DynamicImage;
+use image::{DynamicImage, imageops::crop_imm};
 use mermaid_rs_renderer::{LayoutConfig, Theme, compute_layout, parse_mermaid, render_svg};
 use resvg::{
     tiny_skia,
@@ -37,7 +37,32 @@ pub fn picture(source: &str, is_dark: bool) -> Option<DynamicImage> {
     );
     // A round trip through PNG is what un-premultiplies tiny-skia's alpha, and it
     // is paid once per diagram rather than once per frame.
-    image::load_from_memory(&pixmap.encode_png().ok()?).ok()
+    let picture = image::load_from_memory(&pixmap.encode_png().ok()?).ok()?;
+    Some(tightened(&picture))
+}
+
+// The canvas a diagram is drawn on is not its content: cropping to the ink is what
+// keeps a card from carrying the difference as blank space.
+fn tightened(picture: &DynamicImage) -> DynamicImage {
+    let pixels = picture.to_rgba8();
+    let mut bounds: Option<(u32, u32, u32, u32)> = None;
+    for (x, y, pixel) in pixels.enumerate_pixels() {
+        if pixel[3] <= 8 {
+            continue;
+        }
+        bounds = Some(match bounds {
+            None => (x, y, x, y),
+            Some((left, top, right, bottom)) => {
+                (left.min(x), top.min(y), right.max(x), bottom.max(y))
+            }
+        });
+    }
+    let Some((left, top, right, bottom)) = bounds else {
+        return picture.clone();
+    };
+    crop_imm(&pixels, left, top, right - left + 1, bottom - top + 1)
+        .to_image()
+        .into()
 }
 
 fn themed(is_dark: bool) -> Theme {
