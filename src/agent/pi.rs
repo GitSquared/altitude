@@ -1,11 +1,12 @@
 use super::{
-    AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, REPORT_SCHEMA, REPORT_SYSTEM_PROMPT,
-    TaskProgressDecoder, TaskReportDecoder, activity,
+    AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, AgentRefusal, AgentWindow, REPORT_SCHEMA,
+    REPORT_SYSTEM_PROMPT, TaskProgressDecoder, TaskReportDecoder, activity,
 };
 use crate::isolation::{
     DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand, shell_quote,
 };
 use crate::task::{TaskAgentTurnContext, TaskAgentTurnReport};
+use crate::vcs::now_ms;
 use serde_json::Value;
 use std::mem;
 use uuid::Uuid;
@@ -73,6 +74,9 @@ pub struct PiStream {
     settled: bool,
     model: Option<String>,
     error: Option<String>,
+    // What the provider said when it refused, in its own words: pi passes the
+    // sentence through, and it is where the only thing a refusal can tell us lives.
+    said: Option<String>,
 }
 
 impl PiStream {
@@ -83,6 +87,7 @@ impl PiStream {
             settled: false,
             model: None,
             error: None,
+            said: None,
         }
     }
 
@@ -131,6 +136,7 @@ impl PiStream {
                         .and_then(|message| message.get("errorMessage"))
                         .and_then(Value::as_str)
                         .unwrap_or("Pi ended the report turn without a reason");
+                    self.said = Some(detail.to_owned());
                     self.error = Some(format!("Pi failed the report turn: {detail}"));
                 }
             }
@@ -141,6 +147,7 @@ impl PiStream {
                     .get("finalError")
                     .and_then(Value::as_str)
                     .unwrap_or("Pi gave up retrying the report turn");
+                self.said = Some(detail.to_owned());
                 self.error = Some(format!("Pi failed the report turn: {detail}"));
             }
             Some("agent_settled") => self.settled = true,
@@ -149,7 +156,53 @@ impl PiStream {
     }
 }
 
+// The words pi itself will not retry: an account that is spent rather than busy.
+// Altitude takes the same list instead of inventing one, so a refusal pi has already
+// decided is final is not read as a busy line to wait out.
+const SPENT_WORDS: [&str; 10] = [
+    "GoUsageLimitError",
+    "FreeUsageLimitError",
+    "Monthly usage limit reached",
+    "available balance",
+    "insufficient_quota",
+    "out of budget",
+    "quota exceeded",
+    "billing",
+    "subscription_sharing_usage_limit_exceeded",
+    "subscription_sharing_workplace_individual_usage_limit_exceeded",
+];
+
+fn refusal_of(said: &str) -> Option<AgentRefusal> {
+    // A subscription plan's own wording, which is the one refusal that says when it
+    // ends: "You have hit your ChatGPT usage limit (plus plan). Try again in ~37 min."
+    if let Some(minutes) = retry_minutes(said) {
+        return Some(AgentRefusal::window(
+            AgentWindow::Other,
+            now_ms().saturating_add(minutes.saturating_mul(60_000)),
+        ));
+    }
+    let lowered = said.to_ascii_lowercase();
+    SPENT_WORDS
+        .iter()
+        .any(|word| lowered.contains(&word.to_ascii_lowercase()))
+        .then(|| AgentRefusal::stopped(said.to_owned()))
+}
+
+fn retry_minutes(said: &str) -> Option<i64> {
+    let rest = said.split("Try again in ~").nth(1)?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
 impl TaskReportDecoder for PiStream {
+    fn refusal(&mut self) -> Option<AgentRefusal> {
+        if !self.pending.is_empty() {
+            let line = mem::take(&mut self.pending);
+            self.process_line(&line);
+        }
+        refusal_of(self.said.as_deref()?)
+    }
+
     fn failure_message(&mut self) -> Option<&str> {
         if !self.pending.is_empty() {
             let line = mem::take(&mut self.pending);
