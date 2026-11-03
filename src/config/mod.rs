@@ -30,6 +30,14 @@ struct RecordedLabel {
     label: String,
 }
 
+// Pictures a signal carries, by content: the digest in the signal is the whole
+// reference, so the same picture sent twice is one file, and a machine that holds the
+// digest needs nothing else to name it. The layout is named once here for the parts
+// of the system that hold a data directory but no config.
+pub fn attachments_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("attachments")
+}
+
 #[derive(Clone)]
 pub struct Config {
     config_dir: PathBuf,
@@ -233,11 +241,8 @@ impl Config {
         self.data_dir.join("snapshots")
     }
 
-    // Pictures a signal carries, by content: the digest in the signal is the whole
-    // reference, so the same picture sent twice is one file and a machine that has
-    // the digest needs nothing else to name it.
     pub fn attachments_dir(&self) -> PathBuf {
-        self.data_dir.join("attachments")
+        attachments_dir(&self.data_dir)
     }
 
     pub fn agent_channel_dir(&self) -> PathBuf {
