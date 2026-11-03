@@ -77,7 +77,7 @@ fn arriving_accounts(decoded: &[(PathBuf, Vec<u8>)]) -> Vec<(TrackerKind, Option
         .map(|provider| {
             let account = logins
                 .iter()
-                .find(|(login, _)| provider.owns(login))
+                .find(|(login, _)| Service::from_id(login) == Some(Service::Tracker(*provider)))
                 .and_then(|(_, bytes)| serde_json::from_slice::<TrackerAccount>(bytes).ok())
                 .filter(|account| account.provider == *provider);
             (*provider, account)

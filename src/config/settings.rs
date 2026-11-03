@@ -2,6 +2,8 @@ use crate::{
     agent::AgentKind,
     credentials::{Credential, Service, Slot, agent_of},
     project::{Project, ProjectCommits},
+    tracker::TrackerKind,
+    vcs::VcsProviderKind,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -189,7 +191,7 @@ impl Settings {
             self.defaults.agent_credential = self
                 .defaults
                 .agent
-                .map(|agent| format!("agents/{}", agent_slug(agent)))
+                .map(|agent| agent.profile().to_owned())
                 .filter(|id| known(id));
         }
         if self
@@ -198,7 +200,8 @@ impl Settings {
             .as_deref()
             .is_none_or(|id| !known(id))
         {
-            self.defaults.vcs_credential = Some("vcs/github".to_owned()).filter(|id| known(id));
+            self.defaults.vcs_credential =
+                Some(VcsProviderKind::sole().profile().to_owned()).filter(|id| known(id));
         }
         if self
             .defaults
@@ -207,7 +210,7 @@ impl Settings {
             .is_none_or(|id| !known(id))
         {
             self.defaults.tracker_credential =
-                Some("trackers/linear".to_owned()).filter(|id| known(id));
+                Some(TrackerKind::sole().profile().to_owned()).filter(|id| known(id));
         }
         for project in &mut self.projects {
             if project
@@ -217,7 +220,7 @@ impl Settings {
             {
                 project.agent_credential = project
                     .agent
-                    .map(|agent| format!("agents/{}", agent_slug(agent)))
+                    .map(|agent| agent.profile().to_owned())
                     .filter(|id| known(id))
                     .or_else(|| self.defaults.agent_credential.clone());
             }
@@ -721,13 +724,6 @@ impl Settings {
             }
         }
         Ok(())
-    }
-}
-
-fn agent_slug(agent: AgentKind) -> &'static str {
-    match agent {
-        AgentKind::Claude => "claude",
-        AgentKind::Pi => "pi",
     }
 }
 

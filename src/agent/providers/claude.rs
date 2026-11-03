@@ -1,7 +1,7 @@
 use crate::agent::{
-    AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, AgentRefusal, AgentStanding, AgentUsage,
-    AgentWindow, AgentWindowReading, REPORT_SCHEMA, REPORT_SYSTEM_PROMPT, TaskProgressDecoder,
-    TaskReportDecoder, TaskUsage, activity, system_prompt,
+    AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, AgentKind, AgentRefusal, AgentStanding,
+    AgentUsage, AgentWindow, AgentWindowReading, REPORT_SCHEMA, REPORT_SYSTEM_PROMPT,
+    TaskProgressDecoder, TaskReportDecoder, TaskUsage, activity, system_prompt,
 };
 use crate::isolation::{
     DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand, shell_quote,
@@ -454,7 +454,7 @@ impl AgentEngine for ClaudeCode {
 
     fn profile_recipe(&self) -> ProfileRecipe {
         ProfileRecipe {
-            profile: "agents/claude".to_owned(),
+            profile: AgentKind::Claude.profile().to_owned(),
             display: "Claude Code",
             sign_in: "Follow Claude Code's sign-in instructions.",
             // The sign-in is a command inside Claude Code's own interface, so there

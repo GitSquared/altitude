@@ -1,5 +1,5 @@
 use crate::agent::{
-    AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, AgentUsage, REPORT_SCHEMA,
+    AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, AgentKind, AgentUsage, REPORT_SCHEMA,
     REPORT_SYSTEM_PROMPT, TaskProgressDecoder, TaskReportDecoder, TaskUsage, activity,
     system_prompt,
 };
@@ -363,7 +363,7 @@ impl AgentEngine for PiCode {
 
     fn profile_recipe(&self) -> ProfileRecipe {
         ProfileRecipe {
-            profile: "agents/pi".to_owned(),
+            profile: AgentKind::Pi.profile().to_owned(),
             display: "Pi",
             sign_in: "Use /login in Pi to connect your provider.",
             // Pi has no sign-in command: the provider is chosen in its own interface.

@@ -207,8 +207,8 @@ impl Config {
         // what the operator chooses.
         let existing = Service::ALL
             .iter()
-            .filter(|service| self.profile_dir(service.default_id()).is_dir())
-            .map(|service| Credential::new(service.default_id(), service.label()))
+            .filter(|service| self.profile_dir(service.id()).is_dir())
+            .map(|service| Credential::new(service.id(), service.label()))
             .collect::<Vec<_>>();
         SettingsFile::load_or_create(self.settings_path(), &existing)
     }

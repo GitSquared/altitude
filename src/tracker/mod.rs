@@ -41,12 +41,6 @@ impl TrackerKind {
             Self::Linear => "trackers/linear",
         }
     }
-
-    pub fn owns(self, login: &str) -> bool {
-        login
-            .strip_prefix(self.profile())
-            .is_some_and(|rest| rest.starts_with('/'))
-    }
 }
 
 pub const ACCOUNT_FILE: &str = "identity.json";

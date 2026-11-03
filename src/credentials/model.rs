@@ -24,13 +24,23 @@ impl Service {
     ];
 
     pub fn from_id(id: &str) -> Option<Self> {
-        let mut parts = id.split('/');
-        match (parts.next()?, parts.next()?) {
-            ("agents", "claude") => Some(Self::Agent(AgentKind::Claude)),
-            ("agents", "pi") => Some(Self::Agent(AgentKind::Pi)),
-            ("vcs", "github") => Some(Self::VersionControl(VcsProviderKind::GitHub)),
-            ("trackers", "linear") => Some(Self::Tracker(TrackerKind::Linear)),
-            _ => None,
+        Self::ALL.into_iter().find(|service| service.owns(id))
+    }
+
+    // A credential id is the service's profile with the operator's own name under
+    // it, so the prefix is what says whose the identity is.
+    pub fn owns(self, id: &str) -> bool {
+        id.strip_prefix(self.id())
+            .is_some_and(|rest| rest.starts_with('/'))
+    }
+
+    // The profile a credential of this service is kept in, which is the id a
+    // default credential of it takes and the whole of what tells two apart.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Agent(kind) => kind.profile(),
+            Self::VersionControl(kind) => kind.profile(),
+            Self::Tracker(kind) => kind.profile(),
         }
     }
 
@@ -44,10 +54,9 @@ impl Service {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Agent(AgentKind::Claude) => "Claude Code",
-            Self::Agent(AgentKind::Pi) => "Pi",
-            Self::VersionControl(VcsProviderKind::GitHub) => "GitHub",
-            Self::Tracker(TrackerKind::Linear) => "Linear",
+            Self::Agent(kind) => kind.label(),
+            Self::VersionControl(kind) => kind.label(),
+            Self::Tracker(kind) => kind.label(),
         }
     }
 
@@ -55,23 +64,15 @@ impl Service {
         !matches!(self, Self::Tracker(_))
     }
 
-    pub fn default_id(self) -> &'static str {
-        match self {
-            Self::Agent(AgentKind::Claude) => "agents/claude",
-            Self::Agent(AgentKind::Pi) => "agents/pi",
-            Self::VersionControl(VcsProviderKind::GitHub) => "vcs/github",
-            Self::Tracker(TrackerKind::Linear) => "trackers/linear",
-        }
+    // What the service is called once a label has to name one of its credentials:
+    // the shortest word its id already ends in.
+    pub fn slug(self) -> &'static str {
+        self.id().rsplit('/').next().unwrap_or_default()
     }
 }
 
 pub fn describe(service: Service, group: Option<&str>, identity: &str) -> String {
-    let name = match service {
-        Service::Agent(AgentKind::Claude) => "claude",
-        Service::Agent(AgentKind::Pi) => "pi",
-        Service::VersionControl(VcsProviderKind::GitHub) => "github",
-        Service::Tracker(TrackerKind::Linear) => "linear",
-    };
+    let name = service.slug();
     let identity = identity.trim();
     let identity = if identity.eq_ignore_ascii_case(name) {
         ""
@@ -152,12 +153,7 @@ pub fn new_id(service: Service, label: &str, taken: impl Fn(&str) -> bool) -> St
         .collect::<Vec<_>>()
         .join("-");
     let slug = if slug.is_empty() { "identity" } else { &slug };
-    let base = match service {
-        Service::Agent(AgentKind::Claude) => "agents/claude",
-        Service::Agent(AgentKind::Pi) => "agents/pi",
-        Service::VersionControl(VcsProviderKind::GitHub) => "vcs/github",
-        Service::Tracker(TrackerKind::Linear) => "trackers/linear",
-    };
+    let base = service.id();
     let candidate = format!("{base}/{slug}");
     if !taken(&candidate) {
         return candidate;

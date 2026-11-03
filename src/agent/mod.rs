@@ -35,14 +35,18 @@ impl AgentKind {
             Self::Pi => "agents/pi",
         }
     }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude",
+            Self::Pi => "Pi",
+        }
+    }
 }
 
 impl fmt::Display for AgentKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Claude => "Claude",
-            Self::Pi => "Pi",
-        })
+        formatter.write_str(self.label())
     }
 }
 
