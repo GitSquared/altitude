@@ -58,35 +58,51 @@ pub fn take(body: &str) -> (String, Vec<Picture>) {
 // whole reference, so nothing else has to be recorded about it.
 pub fn store(directory: &Path, bytes: &[u8]) -> io::Result<String> {
     let id = blake3::hash(bytes).to_hex().to_string();
-    let path = directory.join(&id);
-    if path.is_file() {
+    if directory.join(&id).is_file() {
         return Ok(id);
     }
     fs::create_dir_all(directory)?;
     let staging = directory.join(format!(".{id}.staged"));
     fs::write(&staging, bytes)?;
-    fs::rename(&staging, &path)?;
+    fs::rename(&staging, id_path(directory, &id))?;
     Ok(id)
 }
 
-// What a picture is, from the bytes themselves: ingest has already refused anything
-// that is not one of these, so this only names what is there.
-pub fn mime(bytes: &[u8]) -> &'static str {
-    if bytes.starts_with(b"\x89PNG") {
-        "image/png"
-    } else if bytes.starts_with(&[0xFF, 0xD8]) {
-        "image/jpeg"
-    } else if bytes.starts_with(b"GIF8") {
-        "image/gif"
-    } else if bytes.get(8..12) == Some(b"WEBP") {
-        "image/webp"
-    } else {
-        "image/bmp"
+// The same, for a picture that is already a file on this machine: it is hashed where
+// it lies and moved into place, so a screenshot out of a sandbox is written once.
+pub fn adopt(directory: &Path, staged: &Path) -> io::Result<String> {
+    let id = blake3::hash(&fs::read(staged)?).to_hex().to_string();
+    if directory.join(&id).is_file() {
+        return Ok(id);
     }
+    fs::create_dir_all(directory)?;
+    fs::rename(staged, id_path(directory, &id))?;
+    Ok(id)
+}
+
+fn id_path(directory: &Path, id: &str) -> PathBuf {
+    directory.join(id)
+}
+
+// What a picture is, from the bytes themselves. The answer doubles as the test for
+// whether something is a picture at all, so the set of formats is written once.
+pub fn mime(bytes: &[u8]) -> Option<&'static str> {
+    const TYPES: [(&[u8], &str); 3] = [
+        (b"\x89PNG", "image/png"),
+        (&[0xFF, 0xD8], "image/jpeg"),
+        (b"GIF8", "image/gif"),
+    ];
+    if let Some((_, kind)) = TYPES.iter().find(|(magic, _)| bytes.starts_with(magic)) {
+        return Some(kind);
+    }
+    if bytes.get(8..12) == Some(b"WEBP") {
+        return Some("image/webp");
+    }
+    bytes.starts_with(b"BM").then_some("image/bmp")
 }
 
 pub fn path(directory: &Path, id: &str) -> PathBuf {
-    directory.join(id)
+    id_path(directory, id)
 }
 
 pub fn read(directory: &Path, id: &str) -> io::Result<Vec<u8>> {

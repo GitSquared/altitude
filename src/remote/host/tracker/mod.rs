@@ -2008,15 +2008,12 @@ impl RemoteTracker {
                 hosted.push_str(&format!("\n\n_(the picture {alt} is not on this machine)_"));
                 continue;
             };
-            let name = format!(
-                "{}.{}",
-                stored.id,
-                picture::mime(&bytes).rsplit('/').next().unwrap_or("png")
-            );
+            let mime = picture::mime(&bytes).unwrap_or("image/png");
+            let name = format!("{}.{}", stored.id, mime.rsplit('/').next().unwrap_or("png"));
             match self
                 .config
                 .automation
-                .upload_picture(&bytes, picture::mime(&bytes), &name)
+                .upload_picture(&bytes, mime, &name)
                 .await
             {
                 // Anywhere the text went, the picture is not: Linear keeps uploads to

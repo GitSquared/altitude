@@ -79,14 +79,6 @@ fn image_paths(body: &str) -> Vec<(usize, usize, String)> {
     found
 }
 
-fn is_picture(bytes: &[u8]) -> bool {
-    bytes.starts_with(b"\x89PNG")
-        || bytes.starts_with(&[0xFF, 0xD8])
-        || bytes.starts_with(b"GIF8")
-        || bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP")
-        || bytes.starts_with(b"BM")
-}
-
 pub struct TaskAgentTools {
     store: TaskStore,
     task_id: String,
@@ -383,20 +375,19 @@ impl TaskAgentTools {
                 picture::LARGEST
             )));
         }
-        let contents = fs::read(&staged).await.map_err(|error| {
+        let head = fs::read(&staged).await.map_err(|error| {
             AgentToolError::new(format!("could not read that picture: {error}"))
         })?;
-        if !is_picture(&contents) {
+        // The first bytes are enough to know what it is; the file itself is moved into
+        // the store rather than copied through memory.
+        if picture::mime(&head).is_none() {
             let _ = fs::remove_file(&staged).await;
             return Err(AgentToolError::new(
                 "that file is not a picture; png, jpeg, gif, webp and bmp are read",
             ));
         }
-        let digest = picture::store(&self.attachments_dir, &contents).map_err(|error| {
-            AgentToolError::new(format!("could not store that picture: {error}"))
-        })?;
-        let _ = fs::remove_file(&staged).await;
-        Ok(digest)
+        picture::adopt(&self.attachments_dir, &staged)
+            .map_err(|error| AgentToolError::new(format!("could not store that picture: {error}")))
     }
 
     async fn resolve_signal(&self, arguments: &Value) -> Result<Value, AgentToolError> {
