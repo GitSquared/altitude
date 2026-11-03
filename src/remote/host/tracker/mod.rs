@@ -2016,8 +2016,10 @@ impl RemoteTracker {
                 .upload_picture(&bytes, mime, &name)
                 .await
             {
-                // Anywhere the text went, the picture is not: Linear keeps uploads to
-                // itself, so a comment mirrored from here carries the image only here.
+                // Linear keeps an upload to itself: the URL is readable by whoever can
+                // read the issue, and by nobody else. It matters less than it sounds,
+                // because a synced issue mirror carries no comments at all — the
+                // picture lives where the comment lives, and nowhere else.
                 Ok(url) => hosted.push_str(&format!("\n\n![{alt}]({url})")),
                 Err(error) => {
                     tracing::warn!(%error, "could not give the tracker a picture");
