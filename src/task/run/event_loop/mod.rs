@@ -13,7 +13,7 @@ use crate::task::{
 use tokio::{sync::mpsc, time};
 
 use crate::{
-    agent::{Activity, AgentKind, TaskReportDecoder},
+    agent::{Activity, AgentKind, AgentRefusal, TaskReportDecoder},
     config::InstallationIdentity,
     isolation::{
         Command, CommandEvent, CommandSession, FileTransferSink, IsolationEngine, OutputStream,
@@ -1461,6 +1461,47 @@ where
         mut report_stream: Option<Box<dyn TaskReportDecoder>>,
         event: CommandEvent,
     ) -> Result<(), TaskServiceError> {
+        // What the account looks like is recorded before the run is judged, because
+        // the judgement reads it: a refusal is a spent window, not a sentence.
+        let task = match report_stream
+            .as_mut()
+            .and_then(|decoder| decoder.take_standing())
+        {
+            Some(standing) => match self
+                .service
+                .record(
+                    &task.id,
+                    &[TaskHistoryEvent::AgentStandingReported { standing }],
+                )
+                .await
+            {
+                Ok(task) => task,
+                Err(error) => {
+                    tracing::warn!(task_id = %task.id, %error, "could not record an account's standing");
+                    task
+                }
+            },
+            None => task,
+        };
+        // What the run spent is recorded before anything is decided about it: a run
+        // that ends in a pause or a refusal has still cost what it cost.
+        let task = match report_stream
+            .as_mut()
+            .and_then(|decoder| decoder.take_usage())
+        {
+            Some(usage) => match self
+                .service
+                .record(&task.id, &[TaskHistoryEvent::from(&usage)])
+                .await
+            {
+                Ok(task) => task,
+                Err(error) => {
+                    tracing::warn!(task_id = %task.id, %error, "could not record what a run cost");
+                    task
+                }
+            },
+            None => task,
+        };
         if let Some(target) = control {
             self.service.continue_turn(run).await?;
             // Handing control back ends the take over: the terminal closes before the
@@ -1491,9 +1532,39 @@ where
             return Ok(());
         }
         if !matches!(event, CommandEvent::Exited(0)) {
-            let diagnostic = report_stream
-                .as_mut()
-                .and_then(|decoder| decoder.failure_message());
+            let refusal = report_stream.as_mut().and_then(|decoder| decoder.refusal());
+            // A window that reopens on its own is the one ending that is not a
+            // failure: the task keeps its place, and comes back when the clock runs
+            // out rather than when the operator reads about it.
+            if let Some(AgentRefusal::Window {
+                window,
+                clears_at_ms,
+            }) = &refusal
+            {
+                let exit_code = match event {
+                    CommandEvent::Exited(code) => Some(code),
+                    _ => None,
+                };
+                let result = self
+                    .service
+                    .hold_for_limit(&task, run, window.clone(), *clears_at_ms, exit_code)
+                    .await;
+                let _ = self
+                    .events
+                    .send(TaskExecutionUpdate::Finished(task.id, result));
+                return Ok(());
+            }
+            // What the account said is a better account of the ending than the exit
+            // code is, and it is the only sentence a stopped task has to offer.
+            let said = match &refusal {
+                Some(AgentRefusal::Stopped { said }) => Some(said.as_str()),
+                _ => None,
+            };
+            let diagnostic = said.or_else(|| {
+                report_stream
+                    .as_mut()
+                    .and_then(|decoder| decoder.failure_message())
+            });
             let result = self.service.finish(&task, run, event, diagnostic).await;
             let _ = self
                 .events

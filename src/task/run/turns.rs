@@ -11,12 +11,15 @@ use uuid::Uuid;
 // backstop for an agent out of things to do, not a step limit.
 const TURNS_BEFORE_THE_OPERATOR: usize = 12;
 
-use crate::task::{
-    IsolationError, Task, TaskAgentRequestedAction, TaskAgentRun, TaskAgentRunOutcome,
-    TaskAgentTurnReport, TaskError, TaskExecutionMode, TaskExecutionPauseReason,
-    TaskExecutionStatus, TaskHistoryEvent, TaskOperatorAttentionLevel, TaskOperatorSignalAuthor,
-    TaskOperatorSignalKind, TaskService, TaskServiceError, run_ended, snapshot_name,
-    store::ReviewRequest,
+use crate::{
+    agent::AgentWindow,
+    task::{
+        IsolationError, Task, TaskAgentRequestedAction, TaskAgentRun, TaskAgentRunOutcome,
+        TaskAgentTurnReport, TaskError, TaskExecutionMode, TaskExecutionPauseReason,
+        TaskExecutionStatus, TaskHistoryEvent, TaskOperatorAttentionLevel,
+        TaskOperatorSignalAuthor, TaskOperatorSignalKind, TaskService, TaskServiceError, run_ended,
+        snapshot_name, store::ReviewRequest,
+    },
 };
 
 impl<E> TaskService<E>
@@ -367,6 +370,7 @@ where
                 TaskHistoryEvent::AgentRunStarted { .. }
                 | TaskHistoryEvent::AgentRunEnded { .. }
                 | TaskHistoryEvent::AgentModelObserved { .. }
+                | TaskHistoryEvent::AgentUsageReported { .. }
                 | TaskHistoryEvent::TrackerSynced { .. }
                 | TaskHistoryEvent::ExecutionRecovered { .. } => continue,
                 _ => break,
@@ -396,6 +400,39 @@ where
                         snapshot_available: true,
                         execution_pause_reason: reason,
                         snapshot_path,
+                    },
+                ],
+            )
+            .await?;
+        Ok(task)
+    }
+
+    // The account's limit is a wait, not a loss: the capsule is given back so the
+    // wait costs no room, and the task comes back on its own once the clock runs out.
+    pub async fn hold_for_limit(
+        &self,
+        task: &Task,
+        agent_run: &TaskAgentRun,
+        window: AgentWindow,
+        clears_at_ms: i64,
+        exit_code: Option<i32>,
+    ) -> Result<Task, TaskServiceError> {
+        let snapshot_path = self.suspend_capsule(task).await?;
+        let task = self
+            .record_snapshot(
+                task,
+                &[
+                    run_ended(agent_run, TaskAgentRunOutcome::Limited, exit_code),
+                    TaskHistoryEvent::ExecutionPaused {
+                        execution_status: TaskExecutionStatus::Paused,
+                        sandbox_available: false,
+                        snapshot_available: true,
+                        execution_pause_reason: TaskExecutionPauseReason::AwaitingLimit,
+                        snapshot_path,
+                    },
+                    TaskHistoryEvent::LimitHeld {
+                        window,
+                        clears_at_ms,
                     },
                 ],
             )

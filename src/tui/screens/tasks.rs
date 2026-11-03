@@ -429,6 +429,7 @@ fn card_status(
             Some(TaskExecutionPauseReason::AwaitingReviewChecks) => "paused · watching PRs",
             Some(TaskExecutionPauseReason::ApplicationShutdown) => "paused · machine restarted",
             Some(TaskExecutionPauseReason::AgentWentQuiet) => "paused · the agent went quiet",
+            Some(TaskExecutionPauseReason::AwaitingLimit) => "paused · waiting on a usage limit",
             Some(TaskExecutionPauseReason::Transfer) => "paused · transferring",
             Some(TaskExecutionPauseReason::TrackerEnded) => "paused · the issue ended",
             Some(TaskExecutionPauseReason::StoppedInTracker) => "paused · stopped in the tracker",

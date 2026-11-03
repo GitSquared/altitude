@@ -2,7 +2,7 @@ use chrono::{Local, SecondsFormat};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use crate::agent::AgentKind;
+use crate::agent::{AgentKind, AgentStanding, AgentUsage, AgentWindow, TaskUsage};
 use crate::id;
 use crate::project::Project;
 use crate::tracker::{IssueReference, IssueSnapshot, TrackerKind, TrackerStatus};
@@ -128,6 +128,9 @@ pub enum TaskExecutionPauseReason {
     // A turn that ends by asking for another one and leaves nothing behind would say the
     // same thing again from the same state.
     AgentWentQuiet,
+    // The only pause nobody is waiting on: the account's limit clears by itself, so
+    // the task comes back without the operator doing anything.
+    AwaitingLimit,
     Transfer,
     // The endings a tracker hands down keep the task: what happened elsewhere is something
     // the operator can read here, rather than work that quietly disappears.
@@ -283,6 +286,20 @@ pub struct TaskFacts {
     pub sandbox_available: bool,
     pub snapshot_path: Option<String>,
     pub snapshot_available: bool,
+    // When the account's limit clears, and which of its windows ran out. Read as a
+    // time and not a switch: a task is held only while a pause says it is waiting on
+    // one, because a value left behind by a later pause would otherwise hold work
+    // nobody is waiting on.
+    pub resumes_at_ms: Option<i64>,
+    pub limit_window: Option<AgentWindow>,
+    // What this task has spent, as its harnesses counted it. A sum of every run's
+    // report, because a run is what a harness knows the cost of.
+    #[sqlx(json)]
+    pub usage: TaskUsage,
+    // The account this task's credential runs on, as its harness last said. A reading
+    // and not a state: it is as old as the run that took it, and the interface says so.
+    #[sqlx(json(nullable))]
+    pub standing: Option<AgentStanding>,
     pub last_error: Option<String>,
     #[sqlx(json(nullable))]
     pub latest_operator_message: Option<TaskOperatorSignalMessage>,
@@ -403,6 +420,20 @@ pub enum TaskHistoryEvent {
         execution_pause_reason: TaskExecutionPauseReason,
         snapshot_path: String,
     },
+    // The account's limit holding the task, recorded with the pause it explains: what
+    // holds it and when it lets go, which is the one wait nobody has to clear.
+    LimitHeld {
+        window: AgentWindow,
+        clears_at_ms: i64,
+    },
+    AgentUsageReported {
+        cost_usd_micros: i64,
+        cost_from_provider: bool,
+        is_charged: bool,
+    },
+    AgentStandingReported {
+        standing: AgentStanding,
+    },
     ExecutionRecovered {
         execution_status: TaskExecutionStatus,
         sandbox_available: bool,
@@ -472,11 +503,24 @@ pub enum TaskHistoryEvent {
     },
 }
 
+impl From<&AgentUsage> for TaskHistoryEvent {
+    fn from(usage: &AgentUsage) -> Self {
+        Self::AgentUsageReported {
+            cost_usd_micros: usage.cost_usd_micros,
+            cost_from_provider: usage.cost_from_provider,
+            is_charged: usage.is_charged,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskAgentRunOutcome {
     Continued,
     AwaitingOperator,
+    // The account refused the turn and said when it clears: nothing about the work
+    // went wrong.
+    Limited,
     Failed,
 }
 

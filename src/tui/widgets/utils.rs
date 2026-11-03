@@ -134,3 +134,22 @@ pub fn ago(at_ms: i64, now_ms: i64) -> String {
         format!("{} ago", since(at_ms, now_ms))
     }
 }
+
+// The hour and minute on the operator's own clock, because a time is something to
+// read whereas a countdown is a number that goes stale in front of them.
+pub fn clock(at_ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(at_ms)
+        .map(|at| at.with_timezone(&chrono::Local).format("%H:%M").to_string())
+        .unwrap_or_default()
+}
+
+// A run's cost can be a fraction of a cent, and two decimal places would round it to
+// nothing: the precision follows the size of the number instead.
+pub fn money(cost_usd_micros: i64) -> String {
+    let dollars = cost_usd_micros as f64 / 1_000_000.0;
+    if dollars >= 0.01 {
+        format!("${dollars:.2}")
+    } else {
+        format!("${dollars:.4}")
+    }
+}

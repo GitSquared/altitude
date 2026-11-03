@@ -84,6 +84,35 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      WHERE task_id = tasks.id
        AND json_type(payload, '$.data.snapshot_available') IS NOT NULL
      ORDER BY sequence DESC LIMIT 1) AS snapshot_available,
+    (SELECT payload ->> '$.data.clears_at_ms'
+     FROM task_event_logs
+     WHERE task_id = tasks.id
+       AND event_type = 'limit_held'
+     ORDER BY sequence DESC LIMIT 1) AS resumes_at_ms,
+    (SELECT payload ->> '$.data.window'
+     FROM task_event_logs
+     WHERE task_id = tasks.id
+       AND event_type = 'limit_held'
+     ORDER BY sequence DESC LIMIT 1) AS limit_window,
+    (SELECT payload -> '$.data.standing'
+     FROM task_event_logs
+     WHERE task_id = tasks.id
+       AND event_type = 'agent_standing_reported'
+     ORDER BY sequence DESC LIMIT 1) AS standing,
+    (SELECT json_object(
+         'cost_usd_micros', coalesce(SUM(json_extract(payload, '$.data.cost_usd_micros')), 0),
+         -- The total is the provider's figure only if every part of it was: one run
+         -- priced by the harness's own table makes the sum an estimate.
+         -- A flag has to leave here as JSON true or false: a number reads as a number
+         -- on the way back in, and the facts would not decode at all.
+         'cost_from_provider', CASE WHEN coalesce(MIN(json_extract(payload, '$.data.cost_from_provider')), 0) = 1
+                                    THEN json('true') ELSE json('false') END,
+         -- And it is charged for only if every part of it was, for the same reason.
+         'is_charged', CASE WHEN coalesce(MIN(json_extract(payload, '$.data.is_charged')), 0) = 1
+                            THEN json('true') ELSE json('false') END)
+     FROM task_event_logs
+     WHERE task_id = tasks.id
+       AND event_type = 'agent_usage_reported') AS usage,
     (SELECT payload ->> '$.data.error'
      FROM task_event_logs
      WHERE task_id = tasks.id

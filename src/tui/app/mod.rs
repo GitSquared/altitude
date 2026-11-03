@@ -13,7 +13,7 @@ use ratatui::{DefaultTerminal, text::Line};
 use tokio::{process::Command as HostCommand, sync::mpsc, task::JoinHandle};
 
 use crate::{
-    agent::{AGENTS, Activity, AgentKind},
+    agent::{AGENTS, Activity, AgentKind, AgentStanding, AgentWindow},
     config::{Config, DEFAULT_PORT, SettingsError, SettingsFile},
     credentials::{
         Credential, CredentialAnswer, CredentialShell, CredentialShellCancel, CredentialShellEvent,
@@ -46,7 +46,11 @@ use crate::{
         pointer::Targets,
         select::{Offer, Select},
     },
-    tui::widgets::{palette, text::Field, utils::plain},
+    tui::widgets::{
+        palette,
+        text::Field,
+        utils::{money, plain},
+    },
     vcs::{Repository, VcsProviderKind},
 };
 
@@ -3818,6 +3822,61 @@ impl App {
         self.remote_tasks
             .iter()
             .find(|held| held.address == remote.address && held.summary.id == remote.task_id)
+    }
+
+    // The account the task's credential runs on: how much of each window is gone, and
+    // how long ago that was true. A reading, not a state, so the age travels with it.
+    pub(in crate::tui) fn signal_task_standing(&self) -> Option<&AgentStanding> {
+        let standing = match self.signal_task() {
+            Some(task) => task.facts.standing.as_ref(),
+            None => self.signal_held()?.summary.standing.as_ref(),
+        }?;
+        (!standing.windows.is_empty()).then_some(standing)
+    }
+
+    // The account's limit, when one is holding this task: which of its windows ran
+    // out and when it lets go. The reason is read with the time, never the time
+    // alone, so a task that came back does not keep saying it is waiting.
+    pub(in crate::tui) fn signal_task_limit(&self) -> Option<(AgentWindow, i64)> {
+        if let Some(task) = self.signal_task() {
+            if task.facts.execution_pause_reason != Some(TaskExecutionPauseReason::AwaitingLimit) {
+                return None;
+            }
+            return Some((
+                task.facts
+                    .limit_window
+                    .clone()
+                    .unwrap_or(AgentWindow::Other),
+                task.facts.resumes_at_ms?,
+            ));
+        }
+        let held = self.signal_held()?.summary.clone();
+        if held.pause_reason != Some(TaskExecutionPauseReason::AwaitingLimit) {
+            return None;
+        }
+        Some((
+            held.limit_window.unwrap_or(AgentWindow::Other),
+            held.resumes_at_ms?,
+        ))
+    }
+
+    // What the task has spent, in the harness's own accounting: the money, marked as
+    // an estimate when the provider did not price it. A subscription's money is not
+    // shown, because a harness prices those at list rates whether or not anyone is
+    // paying.
+    pub(in crate::tui) fn signal_task_spend(&self) -> Option<String> {
+        let usage = match self.signal_task() {
+            Some(task) => &task.facts.usage,
+            None => &self.signal_held()?.summary.usage,
+        };
+        if usage.is_unpriced() || !usage.is_charged {
+            return None;
+        }
+        Some(if usage.cost_from_provider {
+            money(usage.cost_usd_micros)
+        } else {
+            format!("~{}", money(usage.cost_usd_micros))
+        })
     }
 
     pub(in crate::tui) fn signal_agent_label(&self) -> String {

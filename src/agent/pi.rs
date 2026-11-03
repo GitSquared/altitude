@@ -1,6 +1,6 @@
 use super::{
-    AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, REPORT_SCHEMA, REPORT_SYSTEM_PROMPT,
-    TaskProgressDecoder, TaskReportDecoder, activity,
+    AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, AgentUsage, REPORT_SCHEMA,
+    REPORT_SYSTEM_PROMPT, TaskProgressDecoder, TaskReportDecoder, TaskUsage, activity,
 };
 use crate::isolation::{
     DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand, shell_quote,
@@ -10,9 +10,11 @@ use serde_json::Value;
 use std::mem;
 use uuid::Uuid;
 
+// A major is a decision, not a schedule: the 72-hour environment refresh takes the
+// newest 1.x on its own, and moving to 2.x is an edit someone makes here.
 const INSTALL_COMMAND: &str = concat!(
     "npm install -g --ignore-scripts --no-fund --no-audit --no-progress --color=false ",
-    "@earendil-works/pi-coding-agent@0.99.1",
+    "@earendil-works/pi-coding-agent@1",
     " && command -v pi >/dev/null"
 );
 
@@ -71,6 +73,10 @@ pub struct PiStream {
     settled: bool,
     model: Option<String>,
     error: Option<String>,
+    // Pi prices every assistant message as it arrives, so the run's spend is their
+    // sum. It says whether the price came from the provider or from its own table,
+    // and one table-priced message makes the total an estimate.
+    spent: AgentUsage,
 }
 
 impl PiStream {
@@ -81,6 +87,11 @@ impl PiStream {
             settled: false,
             model: None,
             error: None,
+            spent: AgentUsage {
+                cost_from_provider: true,
+                is_charged: true,
+                ..AgentUsage::default()
+            },
         }
     }
 
@@ -121,6 +132,17 @@ impl PiStream {
                     .and_then(|message| message.get("model"))
                     .and_then(Value::as_str)
                     .map(str::to_owned);
+                if let Some(usage) = message.and_then(|message| message.get("usage")) {
+                    self.spent.cost_usd_micros += usage
+                        .pointer("/cost/total")
+                        .and_then(Value::as_f64)
+                        .map(|dollars| (dollars * 1_000_000.0).round() as i64)
+                        .unwrap_or_default();
+                    self.spent.cost_from_provider &= usage
+                        .pointer("/cost/totalFromProvider")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                }
                 let stop_reason = message
                     .and_then(|message| message.get("stopReason"))
                     .and_then(Value::as_str);
@@ -129,7 +151,7 @@ impl PiStream {
                         .and_then(|message| message.get("errorMessage"))
                         .and_then(Value::as_str)
                         .unwrap_or("Pi ended the report turn without a reason");
-                    self.error = Some(format!("Pi failed the report turn: {detail}"));
+                    self.error = Some(format!("Pi failed the turn: {detail}"));
                 }
             }
             Some("auto_retry_end")
@@ -139,7 +161,7 @@ impl PiStream {
                     .get("finalError")
                     .and_then(Value::as_str)
                     .unwrap_or("Pi gave up retrying the report turn");
-                self.error = Some(format!("Pi failed the report turn: {detail}"));
+                self.error = Some(format!("Pi failed the turn: {detail}"));
             }
             Some("agent_settled") => self.settled = true,
             _ => {}
@@ -148,6 +170,10 @@ impl PiStream {
 }
 
 impl TaskReportDecoder for PiStream {
+    fn take_usage(&mut self) -> Option<AgentUsage> {
+        (!self.spent.is_unpriced()).then(|| self.spent.clone())
+    }
+
     fn failure_message(&mut self) -> Option<&str> {
         if !self.pending.is_empty() {
             let line = mem::take(&mut self.pending);
@@ -322,7 +348,7 @@ impl AgentEngine for PiCode {
         )
     }
 
-    fn report_decoder(&self) -> Box<dyn TaskReportDecoder> {
+    fn report_decoder(&self, _recorded: &TaskUsage) -> Box<dyn TaskReportDecoder> {
         Box::new(PiStream::new())
     }
 

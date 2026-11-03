@@ -9,11 +9,15 @@ mod channel;
 
 pub use activity::Activity;
 mod claude;
+mod limits;
 pub mod mcp;
 mod pi;
 pub mod tools;
+mod usage;
 use claude::ClaudeCode;
+pub use limits::{AgentRefusal, AgentStanding, AgentWindow, AgentWindowReading};
 use pi::PiCode;
+pub use usage::{AgentUsage, TaskUsage};
 
 pub const AGENTS: [AgentKind; 2] = [AgentKind::Pi, AgentKind::Claude];
 
@@ -183,7 +187,9 @@ pub trait AgentEngine: Send + Sync {
     fn report_command(&self, conversation_id: &str, context: &TaskAgentTurnContext) -> String;
     fn operator_command(&self, conversation_id: &str, opening: &str) -> String;
     fn operator_requires_conversation(&self) -> bool;
-    fn report_decoder(&self) -> Box<dyn TaskReportDecoder>;
+    // The totals already recorded, for a harness whose own numbers are cumulative and
+    // have to be turned into a delta before anyone can add them up.
+    fn report_decoder(&self, recorded: &TaskUsage) -> Box<dyn TaskReportDecoder>;
     // Engines that speak while they work say so in the same stream the report is
     // read from. One that does not need only return None.
     fn progress_decoder(&self) -> Option<Box<dyn TaskProgressDecoder>> {
@@ -195,6 +201,22 @@ pub trait TaskReportDecoder: Send {
     fn process(&mut self, bytes: &[u8]);
     fn report(self: Box<Self>) -> Result<TaskAgentTurnReport, String>;
     fn failure_message(&mut self) -> Option<&str>;
+    // What the account said when it refused the harness, which only matters when a
+    // run ends short: a harness that was told nothing, or that was told in words it
+    // cannot read, leaves a run that failed and no more than that.
+    fn refusal(&mut self) -> Option<AgentRefusal> {
+        None
+    }
+    // What the run cost, in the harness's own accounting, as a delta: what the task
+    // has spent is the sum of these, whatever the harness counts internally.
+    fn take_usage(&mut self) -> Option<AgentUsage> {
+        None
+    }
+    // The account the run spent, as the harness described it. One shape, whatever a
+    // harness has to do to fill it.
+    fn take_standing(&mut self) -> Option<AgentStanding> {
+        None
+    }
 }
 
 // What the agent is doing, as it works, for someone who wants to look without

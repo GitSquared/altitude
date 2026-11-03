@@ -1,11 +1,13 @@
 use super::{
-    AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, REPORT_SCHEMA, REPORT_SYSTEM_PROMPT,
-    TaskProgressDecoder, TaskReportDecoder, activity,
+    AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, AgentRefusal, AgentStanding, AgentUsage,
+    AgentWindow, AgentWindowReading, REPORT_SCHEMA, REPORT_SYSTEM_PROMPT, TaskProgressDecoder,
+    TaskReportDecoder, TaskUsage, activity,
 };
 use crate::isolation::{
     DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand, shell_quote,
 };
 use crate::task::{TaskAgentTurnContext, TaskAgentTurnReport};
+use crate::vcs::now_ms;
 use serde_json::Value;
 use std::mem;
 use uuid::Uuid;
@@ -19,6 +21,14 @@ pub struct ClaudeStream {
     received_result: bool,
     model: Option<String>,
     error: Option<String>,
+    // The newest thing Claude said about the account's limits. A run reports them
+    // while it works and again when it is refused, so the last word is the one that
+    // says whether the refusal is the end.
+    limit: Option<Value>,
+    cost_usd_micros: i64,
+    // Claude Code counts the conversation, not the run, so what this run spent is
+    // what the conversation has reached less what it had reached before.
+    recorded: TaskUsage,
 }
 
 const DEFAULT_SETTINGS: &str = r#"{
@@ -43,23 +53,54 @@ const DEFAULT_MCP: &str = r#"{
 "#;
 
 impl ClaudeCode {
+    // Claude Code publishes no major-version channel of its own, so the major is
+    // checked here rather than assumed: the vendor's stable pointer names a
+    // release, the refresh takes the newest 2.x it names, and the day it names a
+    // 3.x this build stops instead of taking the major for us.
     fn install_command() -> &'static str {
-        "export HOME=/root && \\
-         curl -fsSL https://claude.ai/install.sh -o /tmp/install-claude && \\
-         bash /tmp/install-claude && \\
-         test -x /root/.local/bin/claude && \\
+        "export HOME=/root\n\
+         version=$(curl -fsSL https://downloads.claude.ai/claude-code-releases/stable)\n\
+         case \"$version\" in\n\
+           2.*) ;;\n\
+           *) echo \"Claude Code's stable release is $version, not 2.x; decide the major here\" >&2\n\
+              exit 1 ;;\n\
+         esac\n\
+         curl -fsSL https://claude.ai/install.sh -o /tmp/install-claude\n\
+         bash /tmp/install-claude \"$version\"\n\
+         test -x /root/.local/bin/claude\n\
          rm /tmp/install-claude"
     }
 }
 
 impl ClaudeStream {
-    pub fn new() -> Self {
+    // A plan's prices are list prices: nothing is being paid unless the account is
+    // spending usage credits on top of it. A session that reported no windows at all
+    // is an API key or a cloud provider, whose number is what it is.
+    fn is_charged(&self) -> bool {
+        let Some(limit) = self.limit.as_ref() else {
+            return true;
+        };
+        let on_plan = limit
+            .get("unifiedWindows")
+            .and_then(Value::as_object)
+            .is_some_and(|windows| !windows.is_empty());
+        let using_overage = limit
+            .get("isUsingOverage")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        !on_plan || using_overage
+    }
+
+    pub fn new(recorded: &TaskUsage) -> Self {
         Self {
             pending: String::new(),
             report: None,
             received_result: false,
             model: None,
             error: None,
+            limit: None,
+            cost_usd_micros: 0,
+            recorded: recorded.clone(),
         }
     }
 
@@ -67,8 +108,18 @@ impl ClaudeStream {
         let Ok(message) = serde_json::from_str::<Value>(line.trim()) else {
             return;
         };
+        if message.get("type").and_then(Value::as_str) == Some("rate_limit_event")
+            && let Some(info) = message.get("rate_limit_info")
+        {
+            self.limit = Some(info.clone());
+        }
         if message.get("type").and_then(Value::as_str) == Some("result") {
             self.received_result = true;
+            self.cost_usd_micros = message
+                .get("total_cost_usd")
+                .and_then(Value::as_f64)
+                .map(|dollars| (dollars * 1_000_000.0).round() as i64)
+                .unwrap_or_default();
             self.model = message
                 .get("model")
                 .and_then(Value::as_str)
@@ -80,17 +131,24 @@ impl ClaudeStream {
                 })
                 .map(str::to_owned);
             if message.get("is_error").and_then(Value::as_bool) == Some(true) {
-                self.error = Some(
-                    if message
-                        .get("result")
-                        .and_then(Value::as_str)
-                        .is_some_and(|result| result.contains("Not logged in"))
-                    {
-                        "Claude is not logged in in its sandbox profile; open an attached Claude shell and run /login"
-                    } else {
-                        "Claude rejected the command"
-                    }.to_owned(),
-                );
+                // What Claude said is the best account of why the turn ended, so the
+                // operator gets it rather than a sentence about an exit code. A login
+                // that has lapsed is the one case worth naming, because the fix is a
+                // command.
+                let said = message
+                    .get("result")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or_default();
+                self.error = Some(if said.contains("Not logged in") {
+                    "Claude is not logged in in its sandbox profile; open an attached \
+                     Claude shell and run /login"
+                        .to_owned()
+                } else if said.is_empty() {
+                    "Claude rejected the turn".to_owned()
+                } else {
+                    format!("Claude rejected the turn: {said}")
+                });
             }
             if let Some(output) = message.get("structured_output") {
                 match serde_json::from_value(output.clone()) {
@@ -103,6 +161,92 @@ impl ClaudeStream {
 }
 
 impl TaskReportDecoder for ClaudeStream {
+    // Every window Claude tracks, on every observation, not only the one that is
+    // limiting: `unifiedWindows` is the account's standing and the top-level fields
+    // are only whichever window is currently the tightest.
+    fn take_standing(&mut self) -> Option<AgentStanding> {
+        if !self.pending.is_empty() {
+            let line = mem::take(&mut self.pending);
+            self.process_line(&line);
+        }
+        let limit = self.limit.as_ref()?;
+        let windows: Vec<AgentWindowReading> = limit
+            .get("unifiedWindows")
+            .and_then(Value::as_object)
+            .map(|windows| {
+                windows
+                    .iter()
+                    .filter_map(|(name, window)| {
+                        let used = window.get("utilization").and_then(Value::as_f64);
+                        used.map(|used| AgentWindowReading {
+                            window: AgentWindow::of(Some(name)),
+                            // The header's utilization is a fraction; the record keeps
+                            // the percentage a person reads.
+                            used_percent: Some(used * 100.0),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(AgentStanding {
+            observed_at_ms: now_ms(),
+            windows,
+        })
+    }
+
+    fn take_usage(&mut self) -> Option<AgentUsage> {
+        if !self.received_result {
+            return None;
+        }
+        // Claude Code prices a conversation at list rates whether or not anything is
+        // being paid, so this is always its figure and never the provider's.
+        let usage = AgentUsage {
+            cost_usd_micros: self.cost_usd_micros,
+            cost_from_provider: false,
+            is_charged: self.is_charged(),
+        }
+        .since(&self.recorded);
+        (!usage.is_unpriced()).then_some(usage)
+    }
+
+    fn refusal(&mut self) -> Option<AgentRefusal> {
+        if !self.pending.is_empty() {
+            let line = mem::take(&mut self.pending);
+            self.process_line(&line);
+        }
+        let limit = self.limit.as_ref()?;
+        // A window inside `unifiedWindows` carries its own status, and a rejected
+        // window there does not mean the request was refused: only the top-level
+        // status says that. Anything else is a limit the account warned about and
+        // then let through.
+        if limit.get("status").and_then(Value::as_str) != Some("rejected") {
+            return None;
+        }
+        let window = AgentWindow::of(limit.get("rateLimitType").and_then(Value::as_str));
+        // Epoch seconds, which is what the header carries; the record keeps
+        // milliseconds, like every other time it holds.
+        let clears_at_ms = ["resetsAt", "overageResetsAt"]
+            .iter()
+            .find_map(|key| limit.get(key).and_then(Value::as_i64))
+            .map(|seconds| seconds.saturating_mul(1000));
+        Some(match clears_at_ms {
+            // A reset that has already passed is not a clock. Holding until then
+            // would put the task back into the same refusal on the first tick, so it
+            // stops here and the operator hears about it once.
+            Some(clears_at_ms) if clears_at_ms > now_ms() => {
+                AgentRefusal::window(window, clears_at_ms)
+            }
+            Some(_) => AgentRefusal::stopped(format!(
+                "Claude's {} limit is used up and the reset it named has already passed",
+                window.word()
+            )),
+            None => AgentRefusal::stopped(format!(
+                "Claude's {} limit is used up and it did not say when it clears",
+                window.word()
+            )),
+        })
+    }
+
     fn failure_message(&mut self) -> Option<&str> {
         if !self.pending.is_empty() {
             let line = mem::take(&mut self.pending);
@@ -296,8 +440,8 @@ impl AgentEngine for ClaudeCode {
         )
     }
 
-    fn report_decoder(&self) -> Box<dyn TaskReportDecoder> {
-        Box::new(ClaudeStream::new())
+    fn report_decoder(&self, recorded: &TaskUsage) -> Box<dyn TaskReportDecoder> {
+        Box::new(ClaudeStream::new(recorded))
     }
 
     fn progress_decoder(&self) -> Option<Box<dyn TaskProgressDecoder>> {

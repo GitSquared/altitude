@@ -14,7 +14,10 @@ use crate::task::{
 };
 use crate::tracker::{IssueReference, IssueSnapshot, TrackerKind, TrackerStatus};
 use crate::vcs::ContributionState;
-use crate::{agent::AgentKind, project::Project};
+use crate::{
+    agent::{AgentKind, AgentStanding, AgentWindow, TaskUsage},
+    project::Project,
+};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::remote::{
@@ -234,6 +237,19 @@ pub struct TaskSummary {
     pub mode: TaskExecutionMode,
     #[serde(default)]
     pub pause_reason: Option<TaskExecutionPauseReason>,
+    // When a limit on the account clears, and which of its windows ran out: the one
+    // pause that ends without anyone being asked.
+    #[serde(default)]
+    pub resumes_at_ms: Option<i64>,
+    #[serde(default)]
+    pub limit_window: Option<AgentWindow>,
+    // What the task has spent, carried so a machine holding someone else's task can
+    // say the same thing about it as the machine that ran it.
+    #[serde(default)]
+    pub usage: TaskUsage,
+    // The account the task's credential runs on, as of the last run that looked.
+    #[serde(default)]
+    pub standing: Option<AgentStanding>,
     // What the agent is doing right now. Live only: it is replaced by the next
     // line, and a summary that has none describes a task that is not working.
     #[serde(default)]
@@ -287,6 +303,10 @@ impl TaskSummary {
             status: task.facts.execution_status.clone(),
             mode: task.facts.execution_mode,
             pause_reason: task.facts.execution_pause_reason.clone(),
+            resumes_at_ms: task.facts.resumes_at_ms,
+            limit_window: task.facts.limit_window.clone(),
+            usage: task.facts.usage.clone(),
+            standing: task.facts.standing.clone(),
             activity: None,
             attention: task.facts.operator_attention_level.clone(),
             blocking_signal_kind: task.facts.blocking_signal_kind,

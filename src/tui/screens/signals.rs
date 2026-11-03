@@ -26,7 +26,7 @@ use crate::{
             surface::{self, Surface},
             tabs::{self, Tab},
             text::TextBox,
-            utils::{ago, shimmer, since, truncate},
+            utils::{ago, clock, shimmer, since, truncate},
         },
     },
 };
@@ -715,7 +715,7 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
         None if app.remote_signals_loading => "Asking the machine that owns this task".to_owned(),
         None => String::new(),
     };
-    let [title, meta, _, rest] = Layout::vertical([
+    let [title, meta, standing, rest] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -733,6 +733,39 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
         )),
         title,
     );
+    // What the account the task runs on is costing and, when one is holding it, which
+    // of its windows ran out and the hour it lets go: the one line this pane has to
+    // spare, and it says nothing at all about a plain task.
+    let mut standing_parts = vec![app.signal_agent_label()];
+    if let Some(spend) = app.signal_task_spend() {
+        standing_parts.push(spend);
+    }
+    if let Some(account) = app.signal_task_standing() {
+        let windows: Vec<String> = account
+            .windows
+            .iter()
+            .map(|reading| match reading.used_percent {
+                Some(used) => format!("{} {used:.0}%", reading.window.word()),
+                None => reading.window.word().to_owned(),
+            })
+            .collect();
+        standing_parts.push(windows.join(" · "));
+        standing_parts.push(ago(account.observed_at_ms, Utc::now().timestamp_millis()));
+    }
+    if let Some((window, clears_at_ms)) = app.signal_task_limit() {
+        standing_parts.push(format!("{} limit", window.word()));
+        standing_parts.push(format!("resumes {}", clock(clears_at_ms)));
+    }
+    if standing_parts.len() > 1 {
+        let line = standing_parts.join(" · ");
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                truncate(&line, usize::from(standing.width)),
+                palette::muted(),
+            )),
+            standing,
+        );
+    }
     let Some(thread) = app.signal_thread().cloned() else {
         draw_empty(frame, rest, app);
         return;

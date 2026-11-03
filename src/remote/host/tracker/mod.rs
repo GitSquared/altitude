@@ -150,6 +150,12 @@ fn pause_notice(reason: &TaskExecutionPauseReason) -> &'static str {
         TaskExecutionPauseReason::ApplicationShutdown => {
             "The machine running this task restarted. The task resumes when it is back."
         }
+        // The one pause nobody has to clear. It names the clock's owner and not the
+        // hour, because a time is right for one machine's timezone and not another's.
+        TaskExecutionPauseReason::AwaitingLimit => {
+            "The account's usage limit is used up. This task resumes on its own when the \
+             limit clears; nothing here is waiting on you."
+        }
         TaskExecutionPauseReason::Transfer => {
             "The operator is taking this task over on their own machine; it keeps running there."
         }
