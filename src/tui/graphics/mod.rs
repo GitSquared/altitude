@@ -19,7 +19,11 @@ use self::{
 use crate::task::PICTURE;
 
 // A diagram taller than this is a document, not a picture in a conversation.
-const LONGEST: u16 = 60;
+const LONGEST: u16 = 40;
+// A diagram at its own scale has labels exactly one cell tall, which is how mermaid
+// would draw it at 14px next to 14px body text. A conversation is read, not studied,
+// so a picture is kept a notch under that: still legible, and a few rows shorter.
+const COMPACT: f32 = 0.85;
 // Long enough for a terminal across an ssh link to answer, short enough that one
 // that never answers does not hold the interface up.
 const ANSWER_TIMEOUT: Duration = Duration::from_millis(800);
@@ -255,7 +259,7 @@ fn fit(natural: Size, columns: u16, scale: f32) -> Size {
     // picture fitted by width and then cut by a row budget would be squashed, and
     // the terminal stretches whatever box it is given to fit.
     let room = (f32::from(columns.max(1)) / wide).min(f32::from(LONGEST) / tall);
-    let scale = scale.min(room).max(f32::MIN_POSITIVE);
+    let scale = (scale * COMPACT).min(room).max(f32::MIN_POSITIVE);
     let mut width = (wide * scale).round().max(1.0) as u16;
     let mut height = (f32::from(width) * tall / wide).round().max(1.0) as u16;
     // Rounding can push a side one cell past its budget; giving back that cell on
