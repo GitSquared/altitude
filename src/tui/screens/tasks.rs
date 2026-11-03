@@ -26,7 +26,7 @@ use crate::{
         TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
         TaskOperatorAttentionLevel,
     },
-    tui::widgets::utils::{shimmer, truncate},
+    tui::widgets::{format::truncate, shimmer::shimmer},
     vcs::{ContributionReadiness, now_ms},
 };
 

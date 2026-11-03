@@ -44,7 +44,7 @@ use super::popups;
 use super::popups::confirm::handle_confirm_key;
 use super::screens;
 use super::widgets;
-use super::widgets::utils::shimmer_clock;
+use super::widgets::shimmer::shimmer_clock;
 use crate::credentials::CredentialShellEvent;
 
 struct Leaving {

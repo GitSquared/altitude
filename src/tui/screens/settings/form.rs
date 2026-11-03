@@ -19,10 +19,10 @@ use crate::{
         widgets::{
             button, chrome,
             focus::FocusRing,
+            format::truncate,
             palette,
             select::{self, Offer, Select},
             text::{Field, FieldStyle, TextBox},
-            utils::truncate,
         },
     },
     vcs::Repository,

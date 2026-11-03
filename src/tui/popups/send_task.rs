@@ -11,7 +11,7 @@ use crate::{
     tui::{
         keys,
         popups::new_task::Host,
-        widgets::{chrome, palette, utils::truncate},
+        widgets::{chrome, format::truncate, palette},
     },
 };
 

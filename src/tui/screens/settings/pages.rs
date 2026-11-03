@@ -15,8 +15,9 @@ use crate::{
     tui::{
         app::{CredentialStatus, RemoteStatus, Sync, TrackerState},
         widgets::{
+            format::plain,
             palette, progress,
-            utils::{Dot, plain, shimmer},
+            shimmer::{Dot, shimmer},
         },
     },
 };

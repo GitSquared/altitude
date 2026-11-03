@@ -14,11 +14,13 @@ use ratatui::{
 
 use crate::tui::keys;
 use crate::tui::widgets::{
-    button, chrome, empty, palette,
+    button, chrome, empty,
+    format::truncate,
+    palette,
     pointer::Targets,
     select::{Offer, Select},
+    shimmer::shimmer,
     text::TextBox,
-    utils::{shimmer, truncate},
 };
 use crate::{
     agent::AgentKind,

@@ -8,7 +8,7 @@ use ratatui::{
     widgets::{Block, Clear, List, ListItem},
 };
 
-use crate::tui::widgets::{palette, utils::truncate};
+use crate::tui::widgets::{format::truncate, palette};
 
 pub struct Heading {
     pub title: String,

@@ -47,9 +47,9 @@ use crate::{
         select::{Offer, Select},
     },
     tui::widgets::{
+        format::{money, plain},
         palette,
         text::Field,
-        utils::{money, plain},
     },
     vcs::{Repository, VcsProviderKind},
 };

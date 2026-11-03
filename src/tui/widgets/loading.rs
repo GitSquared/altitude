@@ -5,7 +5,7 @@ use ratatui::{
     widgets::{Block, BorderType, Clear, Paragraph},
 };
 
-use crate::tui::widgets::{palette, utils::shimmer};
+use crate::tui::widgets::{palette, shimmer::shimmer};
 
 pub fn draw(frame: &mut Frame, area: Rect, message: &str, tick: Option<usize>) -> Rect {
     // Wide enough for the line it is waiting on and a space either side, and no

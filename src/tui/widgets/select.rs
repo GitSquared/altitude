@@ -8,7 +8,7 @@ use ratatui::{
     widgets::{Block, BorderType, Clear, Padding, Paragraph, Widget},
 };
 
-use crate::tui::widgets::{chrome, palette, utils::truncate};
+use crate::tui::widgets::{chrome, format::truncate, palette};
 
 pub fn shown_pill(buffer: &mut Buffer, area: Rect, value: &str, focused: bool) {
     let room = usize::from(area.width).saturating_sub(3);

@@ -7,7 +7,7 @@ use crate::{
     remote::{DiscoveredRemote, RemoteKey, TrackerConnection, TrackerReadiness},
     tui::{
         app::{CredentialStatus, RemoteStatus, Sync, TrackerState},
-        widgets::{chrome, palette, utils::Dot},
+        widgets::{chrome, palette, shimmer::Dot},
     },
 };
 

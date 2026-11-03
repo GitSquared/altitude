@@ -5,7 +5,7 @@ use ratatui::{
     widgets::{Clear, Paragraph},
 };
 
-use crate::tui::widgets::{palette, utils::truncate};
+use crate::tui::widgets::{format::truncate, palette};
 
 pub fn draw(frame: &mut Frame, area: Rect, name: &str, detail: Option<&str>, note: Option<&str>) {
     frame.render_widget(Clear, area);

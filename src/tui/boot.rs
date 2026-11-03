@@ -17,7 +17,7 @@ use crate::tui::{
 };
 use crate::{
     isolation::{ImagePull, IsolationStatus},
-    tui::widgets::utils::{shimmer, shimmer_clock},
+    tui::widgets::shimmer::{shimmer, shimmer_clock},
 };
 
 const TITLE: &str = "⛰  altitude";

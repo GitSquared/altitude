@@ -13,7 +13,7 @@ use crate::{
         widgets::{
             palette,
             select::{Offer, Select},
-            utils::shimmer,
+            shimmer::shimmer,
         },
     },
 };

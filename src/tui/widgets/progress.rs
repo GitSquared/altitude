@@ -5,7 +5,7 @@ use ratatui::{
     widgets::{Block, BorderType, Clear, Padding, Paragraph},
 };
 
-use crate::tui::widgets::{palette, utils::shimmer};
+use crate::tui::widgets::{palette, shimmer::shimmer};
 
 const WIDTH: u16 = 62;
 

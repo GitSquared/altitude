@@ -12,8 +12,8 @@ use crate::tui::widgets::{
     list::{self, Row},
     palette,
     pointer::Targets,
+    shimmer::shimmer,
     surface::Surface,
-    utils::shimmer,
 };
 
 use crate::remote::LOCAL_VERSION;
