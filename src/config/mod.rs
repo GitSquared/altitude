@@ -233,6 +233,13 @@ impl Config {
         self.data_dir.join("snapshots")
     }
 
+    // Pictures a signal carries, by content: the digest in the signal is the whole
+    // reference, so the same picture sent twice is one file and a machine that has
+    // the digest needs nothing else to name it.
+    pub fn attachments_dir(&self) -> PathBuf {
+        self.data_dir.join("attachments")
+    }
+
     pub fn agent_channel_dir(&self) -> PathBuf {
         self.cache_dir.join("control")
     }

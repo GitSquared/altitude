@@ -1,21 +1,104 @@
 use serde_json::{Value, json};
 use std::fmt;
+use std::future::Future;
+use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
+use tokio::fs;
 use tokio::sync::broadcast;
+
+use crate::isolation::IsolationEngine;
 
 use crate::agent::tools::{AgentTool, AgentToolError, AgentToolFuture, AgentToolProvider};
 use crate::project::validate_cache;
 use crate::task::{
-    ProjectProposal, Task, TaskHistoryEvent, TaskOperatorSignalAuthor, TaskOperatorSignalKind,
-    TaskOperatorSignalThread, TaskPlanStatus, TaskPlanStep, TaskStore, normalize_title,
+    PICTURE, ProjectProposal, Task, TaskHistoryEvent, TaskOperatorSignalAuthor,
+    TaskOperatorSignalKind, TaskOperatorSignalThread, TaskPlanStatus, TaskPlanStep, TaskStore,
+    normalize_title,
 };
 use crate::tracker::IssueReader;
+
+// A picture an agent writes into a signal is a path in its own sandbox: the host is
+// the only side that can read one, so collecting it is the tool layer's job.
+pub trait Attachments: Send + Sync {
+    fn collect<'a>(
+        &'a self,
+        sandbox_id: String,
+        guest_path: String,
+        destination: PathBuf,
+    ) -> CollectFuture<'a>;
+}
+
+type CollectFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, AgentToolError>> + Send + 'a>>;
+
+impl<E> Attachments for E
+where
+    E: IsolationEngine + Clone + 'static,
+{
+    fn collect<'a>(
+        &'a self,
+        sandbox_id: String,
+        guest_path: String,
+        destination: PathBuf,
+    ) -> CollectFuture<'a> {
+        let isolation = self.clone();
+        Box::pin(async move {
+            isolation
+                .collect_file(sandbox_id, guest_path, destination)
+                .await
+                .map_err(|error| {
+                    AgentToolError::new(format!("could not read that picture: {error}"))
+                })
+        })
+    }
+}
+
+// A picture is read whole into memory, so there is a ceiling: a signal is not a way
+// to move a video.
+const READ_MOST: u64 = 8 * 1024 * 1024;
+
+// The paths of the pictures a message names, as byte ranges of the path itself so the
+// message can be rewritten where it stands.
+fn image_paths(body: &str) -> Vec<(usize, usize, String)> {
+    let mut found = Vec::new();
+    let mut rest = body;
+    let mut offset = 0;
+    while let Some(start) = rest.find("![") {
+        let after = &rest[start..];
+        let Some(close) = after.find("](") else {
+            break;
+        };
+        let Some(end) = after[close..].find(')').map(|at| close + at) else {
+            break;
+        };
+        let path = after[close + 2..end].trim();
+        let from = offset + start + close + 2;
+        // A picture from somewhere else on the network is already a picture: only a
+        // path in this sandbox has to be read out of it.
+        if !path.is_empty() && !path.starts_with("http") && !path.starts_with("data:") {
+            found.push((from, offset + start + end, path.to_owned()));
+        }
+        offset += start + end + 1;
+        rest = &rest[start + end + 1..];
+    }
+    found
+}
+
+fn is_picture(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\x89PNG")
+        || bytes.starts_with(&[0xFF, 0xD8])
+        || bytes.starts_with(b"GIF8")
+        || bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP")
+        || bytes.starts_with(b"BM")
+}
 
 pub struct TaskAgentTools {
     store: TaskStore,
     task_id: String,
     tracker: Option<Arc<dyn IssueReader>>,
     changes: broadcast::Sender<String>,
+    attachments: Option<Arc<dyn Attachments>>,
+    attachments_dir: PathBuf,
 }
 
 impl TaskAgentTools {
@@ -24,12 +107,16 @@ impl TaskAgentTools {
         task_id: String,
         tracker: Option<Arc<dyn IssueReader>>,
         changes: broadcast::Sender<String>,
+        attachments: Option<Arc<dyn Attachments>>,
+        attachments_dir: PathBuf,
     ) -> Self {
         Self {
             store,
             task_id,
             tracker,
             changes,
+            attachments,
+            attachments_dir,
         }
     }
 
@@ -195,13 +282,14 @@ impl TaskAgentTools {
         self.ensure_active().await?;
         let signal_id = argument(arguments, "signal_id")?;
         let body = argument(arguments, "body")?;
+        let (body, pictures) = self.settle_pictures(body).await;
         self.store
-            .message_signal(&self.task_id, signal_id, body)
+            .message_signal(&self.task_id, signal_id, &body)
             .await
             .map_err(tool_failure)?;
         self.announce();
         let thread = self.thread(signal_id).await?;
-        Ok(json!({ "signal": thread_json(&thread) }))
+        Ok(json!({ "signal": thread_json(&thread), "pictures": pictures }))
     }
 
     async fn open_signal(&self, arguments: &Value) -> Result<Value, AgentToolError> {
@@ -222,14 +310,99 @@ impl TaskAgentTools {
                 ));
             }
         };
+        let (body, pictures) = self.settle_pictures(body).await;
         let (_, signal_id) = self
             .store
-            .open_signal(&self.task_id, kind, title, body, None)
+            .open_signal(&self.task_id, kind, title, &body, None)
             .await
             .map_err(tool_failure)?;
         self.announce();
         let thread = self.thread(&signal_id).await?;
-        Ok(json!({ "signal": thread_json(&thread) }))
+        Ok(json!({ "signal": thread_json(&thread), "pictures": pictures }))
+    }
+
+    // A picture in a message is written the way markdown writes one, with a path in
+    // the agent's own sandbox. The host reads the file once, stores it by content, and
+    // leaves a digest where the path was: the message then means the same thing on
+    // this machine, on a remote, and in the task's issue.
+    async fn settle_pictures(&self, body: &str) -> (String, Value) {
+        let references = image_paths(body);
+        if references.is_empty() {
+            return (body.to_owned(), Value::Null);
+        }
+        let Some(attachments) = self.attachments.clone() else {
+            return (
+                body.to_owned(),
+                json!([{ "error": "pictures are not available here" }]),
+            );
+        };
+        let sandbox = match self.task().await {
+            Ok(task) => task.facts.sandbox_id.clone(),
+            Err(error) => return (body.to_owned(), json!([{ "error": error.to_string() }])),
+        };
+        let mut settled = body.to_owned();
+        let mut report = Vec::new();
+        // Back to front, so an earlier rewrite does not move a later reference.
+        for (start, end, path) in references.into_iter().rev() {
+            let Some(sandbox) = sandbox.clone() else {
+                report.push(
+                    json!({ "path": path, "error": "this task has no sandbox to read it from" }),
+                );
+                continue;
+            };
+            match self.settle_picture(&attachments, &sandbox, &path).await {
+                Ok(digest) => {
+                    settled.replace_range(start..end, &format!("{}{digest}", PICTURE));
+                    report.push(json!({ "path": path, "id": digest }));
+                }
+                Err(error) => report.push(json!({ "path": path, "error": error.to_string() })),
+            }
+        }
+        (settled, Value::Array(report))
+    }
+
+    async fn settle_picture(
+        &self,
+        attachments: &Arc<dyn Attachments>,
+        sandbox: &str,
+        path: &str,
+    ) -> Result<String, AgentToolError> {
+        let staged = self
+            .attachments_dir
+            .join(format!(".{}.staged", uuid::Uuid::new_v4()));
+        if let Some(parent) = staged.parent() {
+            fs::create_dir_all(parent).await.map_err(|error| {
+                AgentToolError::new(format!("could not store that picture: {error}"))
+            })?;
+        }
+        let bytes = attachments
+            .collect(sandbox.to_owned(), path.to_owned(), staged.clone())
+            .await?;
+        if bytes > READ_MOST {
+            let _ = fs::remove_file(&staged).await;
+            return Err(AgentToolError::new(format!(
+                "that picture is {bytes} bytes; pictures are read up to {READ_MOST}"
+            )));
+        }
+        let contents = fs::read(&staged).await.map_err(|error| {
+            AgentToolError::new(format!("could not read that picture: {error}"))
+        })?;
+        if !is_picture(&contents) {
+            let _ = fs::remove_file(&staged).await;
+            return Err(AgentToolError::new(
+                "that file is not a picture; png, jpeg, gif, webp and bmp are read",
+            ));
+        }
+        let digest = blake3::hash(&contents).to_hex().to_string();
+        let stored = self.attachments_dir.join(&digest);
+        if stored.exists() {
+            let _ = fs::remove_file(&staged).await;
+        } else {
+            fs::rename(&staged, &stored).await.map_err(|error| {
+                AgentToolError::new(format!("could not store that picture: {error}"))
+            })?;
+        }
+        Ok(digest)
     }
 
     async fn resolve_signal(&self, arguments: &Value) -> Result<Value, AgentToolError> {
@@ -412,7 +585,7 @@ impl AgentToolProvider for TaskAgentTools {
             ),
             AgentTool::new(
                 "tasks_signal",
-                "Read and change this task's conversations with the operator. A thread has a kind, messages, and one state: unresolved or resolved. action=list returns every thread; action=read needs signal_id; action=open needs kind, title and body and records an update or a decision; action=reply needs signal_id and body; action=resolve needs signal_id, defaults resolved=true, and accepts an optional reason. A reply is a message, not a new question, and reopens a resolved thread. Messages carry ids m1, m2, ... inside their thread. A blocking question or a review request belongs in the turn report, not here.\n\nResolving a thread means it needs nothing more from the operator. It does not mean you have said your part, and it does not mean your last reply was answered: it means the reason the thread exists is over and this task is not waiting on anything in it. Resolve a blocked thread only once the operator has given you what you were blocked on and your next step does not depend on them; if their message asks you something, or you still need a decision from them, it stays unresolved. Only the operator accepts a review.",
+                "Read and change this task's conversations with the operator. A body is markdown the operator's interface draws, and may carry diagrams and pictures. A thread has a kind, messages, and one state: unresolved or resolved. action=list returns every thread; action=read needs signal_id; action=open needs kind, title and body and records an update or a decision; action=reply needs signal_id and body; action=resolve needs signal_id, defaults resolved=true, and accepts an optional reason. A reply is a message, not a new question, and reopens a resolved thread. Messages carry ids m1, m2, ... inside their thread. A blocking question or a review request belongs in the turn report, not here.\n\nResolving a thread means it needs nothing more from the operator. It does not mean you have said your part, and it does not mean your last reply was answered: it means the reason the thread exists is over and this task is not waiting on anything in it. Resolve a blocked thread only once the operator has given you what you were blocked on and your next step does not depend on them; if their message asks you something, or you still need a decision from them, it stays unresolved. Only the operator accepts a review.",
                 json!({
                     "type": "object",
                     "additionalProperties": false,
@@ -421,7 +594,7 @@ impl AgentToolProvider for TaskAgentTools {
                         "signal_id": { "type": "string", "description": "The thread for read, reply, or resolve." },
                         "kind": { "enum": ["update", "decision"], "description": "For open: update is the log; decision is an assumption worth review." },
                         "title": { "type": "string", "description": "For open: one line the operator reads in the list." },
-                        "body": { "type": "string", "description": "For open or reply: the message itself, as the operator reads it. Markdown: headings, lists, tables, `code`, quotes and links are drawn as such. A fenced ```mermaid block is drawn as a diagram in the operator's interface and in the task's issue, so use one when the shape of something says it better than a paragraph. Do not prefix the body with status or a summary heading." },
+                        "body": { "type": "string", "description": "For open or reply: the message itself, as the operator reads it. Markdown: headings, lists, tables, `code`, quotes and links are drawn as such. A fenced ```mermaid block is drawn as a diagram in the operator's interface and in the task's issue. A picture from your workspace goes in as ordinary markdown, `![what it shows](/absolute/path/in/your/workspace.png)`, and the operator sees the picture where you put it: use one for what only pixels can show, such as the screen you changed or the failure you are explaining. Do not prefix the body with status or a summary heading." },
                         "resolved": { "type": "boolean", "description": "For resolve: true to resolve, false to reopen. Defaults to true." },
                         "reason": { "type": "string", "description": "For resolve: optional final message in the thread." }
                     },

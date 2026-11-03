@@ -1035,7 +1035,7 @@ fn draw_messages(
         .iter()
         .map(|message| {
             if pictures.has_pictures() {
-                markdown::take_diagrams(&message.body)
+                markdown::take_pictures(&message.body)
             } else {
                 (message.body.clone(), Vec::new())
             }

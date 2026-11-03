@@ -24,7 +24,7 @@ use crate::{
 
 impl<E> TaskService<E>
 where
-    E: IsolationEngine + Clone,
+    E: IsolationEngine + Clone + 'static,
 {
     pub async fn request_control(
         &self,

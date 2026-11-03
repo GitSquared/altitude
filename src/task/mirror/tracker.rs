@@ -85,7 +85,7 @@ impl TrackerHost for OwnTrackers {
 
 impl<E> TaskService<E>
 where
-    E: IsolationEngine + Clone,
+    E: IsolationEngine + Clone + 'static,
 {
     pub async fn create_from_issue(
         &self,

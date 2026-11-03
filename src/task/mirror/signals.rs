@@ -8,7 +8,7 @@ use crate::task::{
 
 impl<E> TaskService<E>
 where
-    E: IsolationEngine + Clone,
+    E: IsolationEngine + Clone + 'static,
 {
     pub async fn task_for_signal(
         &self,

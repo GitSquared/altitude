@@ -22,7 +22,7 @@ use crate::task::{
 
 impl<E> TaskService<E>
 where
-    E: IsolationEngine + Clone,
+    E: IsolationEngine + Clone + 'static,
 {
     pub(crate) fn draft(
         &self,

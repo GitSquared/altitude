@@ -44,7 +44,7 @@ struct Owner {
 
 impl<E> Watchers<E>
 where
-    E: IsolationEngine + Clone,
+    E: IsolationEngine + Clone + 'static,
 {
     pub(crate) fn new(service: TaskService<E>) -> Self {
         Self {

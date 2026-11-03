@@ -1,7 +1,7 @@
 mod kitty;
 mod mermaid;
 
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, fs, path::PathBuf, time::Duration};
 
 use ratatui::{
     Frame,
@@ -16,6 +16,7 @@ use self::{
     kitty::{Cells, Placement},
     mermaid::Raster,
 };
+use crate::task::PICTURE;
 
 // A diagram taller than this is a document, not a picture in a conversation.
 const LONGEST: u16 = 60;
@@ -29,6 +30,8 @@ const WARM_RASTERS: usize = 12;
 pub struct Pictures {
     picker: Picker,
     is_dark: bool,
+    // Where the pictures a signal carries are kept, by the digest that names them.
+    attachments: PathBuf,
     rasters: HashMap<u64, Option<Warm>>,
     protocols: HashMap<Key, Option<Picture>>,
     cells: Cells,
@@ -55,7 +58,7 @@ struct Picture {
 }
 
 impl Pictures {
-    pub fn detect() -> Self {
+    pub fn detect(attachments: PathBuf) -> Self {
         let options = QueryStdioOptions {
             timeout: ANSWER_TIMEOUT,
             terminal_background_color_osc: true,
@@ -78,6 +81,7 @@ impl Pictures {
         Self {
             picker,
             is_dark,
+            attachments,
             rasters: HashMap::new(),
             protocols: HashMap::new(),
             cells: Cells::default(),
@@ -188,7 +192,15 @@ impl Pictures {
 
     fn build(&self, source: &str) -> Option<Warm> {
         let font = self.picker.font_size();
-        let raster = mermaid::raster(source, self.is_dark, font.height)?;
+        let raster = match source.strip_prefix(PICTURE) {
+            // A picture the host has already read out of a sandbox: its digest names
+            // the bytes, and nothing about it needs drawing.
+            Some(digest) => Raster {
+                picture: image::load_from_memory(&fs::read(self.attachments.join(digest)).ok()?)
+                    .ok()?,
+            },
+            None => mermaid::raster(source, self.is_dark, font.height)?,
+        };
         // The raster is oversampled, so the cells it covers are counted in the
         // pixels the terminal will actually show, not the ones that were drawn.
         let natural = Size::new(

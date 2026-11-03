@@ -8,6 +8,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use super::palette;
+use crate::task::PICTURE;
 
 pub fn lines(body: &str, width: u16) -> Vec<Line<'static>> {
     let mut options = Options::empty();
@@ -21,9 +22,10 @@ pub fn lines(body: &str, width: u16) -> Vec<Line<'static>> {
     block.finish()
 }
 
-// The diagrams a body carries, and the body without them. A surface that can draw
-// them shows the picture; every other surface keeps the fence in the text.
-pub fn take_diagrams(body: &str) -> (String, Vec<String>) {
+// The pictures a body carries, and the body without them: a mermaid fence, or a
+// reference to a picture the host has already stored. A surface that can draw them
+// shows the picture; every other surface keeps the fence in the text.
+pub fn take_pictures(body: &str) -> (String, Vec<String>) {
     let mut text = String::new();
     let mut diagrams = Vec::new();
     let mut source: Option<String> = None;
@@ -53,7 +55,40 @@ pub fn take_diagrams(body: &str) -> (String, Vec<String>) {
         text.push_str(&diagram);
         text.push('\n');
     }
+    let (text, stored) = take_stored(text);
+    diagrams.extend(stored);
     (text, diagrams)
+}
+
+// A stored picture is written as markdown would write it, so the words stay readable
+// in any surface that cannot draw it.
+fn take_stored(body: String) -> (String, Vec<String>) {
+    let mut text = String::with_capacity(body.len());
+    let mut sources = Vec::new();
+    let mut rest = body.as_str();
+    loop {
+        let Some(start) = rest.find("![") else {
+            text.push_str(rest);
+            break;
+        };
+        let after = &rest[start..];
+        let Some(close) = after.find("](") else {
+            text.push_str(rest);
+            break;
+        };
+        let Some(end) = after[close..].find(')').map(|at| close + at) else {
+            text.push_str(rest);
+            break;
+        };
+        let target = &after[close + 2..end];
+        text.push_str(&rest[..start]);
+        match target.strip_prefix(PICTURE) {
+            Some(digest) => sources.push(format!("{}{digest}", PICTURE)),
+            None => text.push_str(&after[..=end]),
+        }
+        rest = &after[end + 1..];
+    }
+    (text, sources)
 }
 
 fn is_mermaid_fence(line: &str) -> bool {

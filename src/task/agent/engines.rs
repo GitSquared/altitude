@@ -7,7 +7,7 @@ use crate::task::{AgentError, Task, TaskError, TaskService, TaskServiceError};
 
 impl<E> TaskService<E>
 where
-    E: IsolationEngine + Clone,
+    E: IsolationEngine + Clone + 'static,
 {
     pub(crate) async fn agent_conversation(
         &self,

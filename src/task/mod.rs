@@ -62,6 +62,7 @@ pub struct TaskService<E> {
     store: TaskStore,
     isolation: E,
     snapshots_dir: PathBuf,
+    attachments_dir: PathBuf,
     agents: AgentEngines,
     identity: InstallationIdentity,
     environment_progress: EnvironmentProgressRegistry,
@@ -73,6 +74,10 @@ pub struct TaskService<E> {
     signal_changes: broadcast::Sender<String>,
     refused_status_syncs: Arc<Mutex<HashMap<String, usize>>>,
 }
+
+// A picture in a signal body is named by the digest of its content, so the same body
+// means the same picture on every machine that holds it.
+pub const PICTURE: &str = "altitude-image:";
 
 pub(crate) fn copy_tree(source: &Path, destination: &Path) -> io::Result<()> {
     fs::create_dir_all(destination)?;
@@ -211,7 +216,7 @@ fn should_suspend(task: &Task) -> bool {
 
 impl<E> TaskService<E>
 where
-    E: IsolationEngine + Clone,
+    E: IsolationEngine + Clone + 'static,
 {
     pub fn new(
         store: TaskStore,
@@ -224,6 +229,7 @@ where
         Self {
             store,
             snapshots_dir: config.task_snapshots_dir(),
+            attachments_dir: config.attachments_dir(),
             agent_channels: AgentChannels::new(config.agent_channel_dir()),
             port_relays: port_relays.clone(),
             credentials: Credentials::new(isolation.clone(), config, agents.clone(), port_relays),
@@ -290,6 +296,8 @@ where
             task_id.to_owned(),
             self.issue_reader.clone(),
             self.signal_changes.clone(),
+            Some(Arc::new(self.isolation.clone())),
+            self.attachments_dir.clone(),
         ));
         tools.register(VcsAgentTools::new(self.store.clone(), task_id.to_owned()));
         tools
