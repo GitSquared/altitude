@@ -68,6 +68,22 @@ pub fn store(directory: &Path, bytes: &[u8]) -> io::Result<String> {
     Ok(id)
 }
 
+// What a picture is, from the bytes themselves: ingest has already refused anything
+// that is not one of these, so this only names what is there.
+pub fn mime(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(b"\x89PNG") {
+        "image/png"
+    } else if bytes.starts_with(&[0xFF, 0xD8]) {
+        "image/jpeg"
+    } else if bytes.starts_with(b"GIF8") {
+        "image/gif"
+    } else if bytes.get(8..12) == Some(b"WEBP") {
+        "image/webp"
+    } else {
+        "image/bmp"
+    }
+}
+
 pub fn path(directory: &Path, id: &str) -> PathBuf {
     directory.join(id)
 }

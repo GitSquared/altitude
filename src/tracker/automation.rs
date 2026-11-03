@@ -57,6 +57,10 @@ const CREATE_ACTIVITY_MUTATION: &str = "mutation CreateAgentActivity($input: Age
 // The input type is named for the mutation, not for the input: Linear has no
 // `AgentSessionCreateOnIssueInput`, and asking for one is a validation error
 // rather than a refusal, which is why the session was never created.
+const FILE_UPLOAD_MUTATION: &str = "mutation Upload($filename: String!, $size: Int!, $contentType: String!) { \
+    fileUpload(filename: $filename, size: $size, contentType: $contentType) { \
+    uploadFile { uploadUrl assetUrl headers { key value } } } }";
+
 const CREATE_SESSION_ON_ISSUE_MUTATION: &str = "mutation CreateAgentSessionOnIssue($input: AgentSessionCreateOnIssue!) { \
     agentSessionCreateOnIssue(input: $input) { success agentSession { id } } }";
 
@@ -773,6 +777,57 @@ impl LinearAutomation {
     }
 
     // HTTP success alone does not establish that a GraphQL operation succeeded.
+    // A picture goes into Linear's own storage, which is what an issue comment can
+    // show. The bytes were vetted when they entered Altitude, so nothing is checked
+    // again here: this is a courier.
+    pub async fn upload_picture(
+        &self,
+        bytes: &[u8],
+        mime: &str,
+        name: &str,
+    ) -> Result<String, TrackerError> {
+        let reservation = self
+            .graphql(
+                FILE_UPLOAD_MUTATION,
+                json!({ "filename": name, "size": bytes.len(), "contentType": mime }),
+            )
+            .await?;
+        let upload = reservation
+            .get("fileUpload")
+            .and_then(|upload| upload.get("uploadFile"))
+            .ok_or_else(|| TrackerError::new("Linear did not describe where to put the picture"))?;
+        let url = upload
+            .get("uploadUrl")
+            .and_then(Value::as_str)
+            .ok_or_else(|| TrackerError::new("Linear gave no place to put the picture"))?;
+        let asset = upload
+            .get("assetUrl")
+            .and_then(Value::as_str)
+            .ok_or_else(|| TrackerError::new("Linear gave no address for the picture"))?;
+        let mut request = self.client.put(url).body(bytes.to_vec());
+        if let Some(headers) = upload.get("headers").and_then(Value::as_array) {
+            for header in headers {
+                if let (Some(key), Some(value)) = (
+                    header.get("key").and_then(Value::as_str),
+                    header.get("value").and_then(Value::as_str),
+                ) {
+                    request = request.header(key, value);
+                }
+            }
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|_| TrackerError::new("the picture could not be sent to Linear"))?;
+        if !response.status().is_success() {
+            return Err(TrackerError::new(format!(
+                "Linear refused the picture with HTTP {}",
+                response.status()
+            )));
+        }
+        Ok(asset.to_owned())
+    }
+
     async fn graphql(&self, query: &str, variables: Value) -> Result<Value, TrackerError> {
         let token = self
             .token

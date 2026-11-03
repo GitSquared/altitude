@@ -46,7 +46,7 @@ use tokio::{
 use crate::{
     task::{
         TaskExecutionPauseReason, TaskHistoryEvent, TaskOperatorSignalAuthor,
-        TaskOperatorSignalKind, TaskOperatorSignalThread,
+        TaskOperatorSignalKind, TaskOperatorSignalThread, picture,
     },
     tracker::{
         IssueReference, IssueSnapshot, TrackerKind, TrackerStatus,
@@ -95,6 +95,7 @@ pub struct RemoteTrackerConfig {
     pub webhook_secret: Vec<u8>,
     pub oauth_client_id: String,
     pub storage_path: PathBuf,
+    pub attachments_dir: PathBuf,
     pub operators_dir: PathBuf,
     pub host_label: String,
 }
@@ -1991,6 +1992,45 @@ impl RemoteTracker {
         self.finish_report(report)
     }
 
+    // A picture in a signal becomes a picture in Linear's storage, which is the only
+    // form an issue comment can show. The bytes were vetted when they entered
+    // Altitude, so nothing is checked again here.
+    async fn hosted_body(&self, body: &str) -> String {
+        let (text, pictures) = picture::take(body);
+        if pictures.is_empty() {
+            return body.to_owned();
+        }
+        let mut hosted = text;
+        for stored in pictures {
+            let alt = stored.alt;
+            let bytes = picture::read(&self.config.attachments_dir, &stored.id);
+            let Ok(bytes) = bytes else {
+                hosted.push_str(&format!("\n\n_(the picture {alt} is not on this machine)_"));
+                continue;
+            };
+            let name = format!(
+                "{}.{}",
+                stored.id,
+                picture::mime(&bytes).rsplit('/').next().unwrap_or("png")
+            );
+            match self
+                .config
+                .automation
+                .upload_picture(&bytes, picture::mime(&bytes), &name)
+                .await
+            {
+                // Anywhere the text went, the picture is not: Linear keeps uploads to
+                // itself, so a comment mirrored from here carries the image only here.
+                Ok(url) => hosted.push_str(&format!("\n\n![{alt}]({url})")),
+                Err(error) => {
+                    tracing::warn!(%error, "could not give the tracker a picture");
+                    hosted.push_str(&format!("\n\n_(the picture {alt} could not be sent)_"));
+                }
+            }
+        }
+        hosted
+    }
+
     async fn publish_signal(
         &self,
         report: &Cursor,
@@ -2001,6 +2041,7 @@ impl RemoteTracker {
         contributions: &[String],
     ) -> Result<Option<TrackerStatus>, String> {
         let comment_id = published_comment_id(&report.task_id, signal_id);
+        let body = &self.hosted_body(body).await;
         match kind {
             // Updates are the session's transcript, not an issue comment.
             TaskOperatorSignalKind::Update => {

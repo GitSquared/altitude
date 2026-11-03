@@ -1730,6 +1730,7 @@ async fn connect_tracker(
         webhook_secret: settings.webhook_secret()?.into_bytes(),
         oauth_client_id: settings.client_id.clone(),
         storage_path: config.data_dir().join("trackers/linear/deliveries.json"),
+        attachments_dir: config.attachments_dir(),
         operators_dir: config.data_dir().join("operators"),
         host_label: whoami::hostname().unwrap_or_else(|_| "remote".to_owned()),
     })?;
