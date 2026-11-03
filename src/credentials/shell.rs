@@ -6,7 +6,7 @@ use std::sync::{
 use tokio::sync::mpsc;
 
 use crate::{
-    agent::tools::AgentToolRegistry,
+    agent::tool::AgentToolRegistry,
     credentials::{Credentials, CredentialsError},
     isolation::{
         CREDENTIAL_PREFIX, Command, CommandEvent, CredentialSandbox, EnvironmentProgress,

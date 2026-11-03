@@ -8,7 +8,7 @@ use std::{
 use tokio::{net::UnixListener, task::JoinHandle};
 
 use crate::{
-    agent::{mcp, tools::AgentToolRegistry},
+    agent::{mcp, tool::AgentToolRegistry},
     isolation::private_directory,
 };
 

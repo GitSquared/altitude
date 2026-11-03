@@ -11,7 +11,7 @@ pub use activity::Activity;
 mod limits;
 pub mod mcp;
 mod providers;
-pub mod tools;
+pub mod tool;
 mod usage;
 pub use limits::{AgentRefusal, AgentStanding, AgentWindow, AgentWindowReading};
 use providers::{ClaudeCode, PiCode};

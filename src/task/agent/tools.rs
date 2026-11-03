@@ -9,7 +9,7 @@ use tokio::sync::broadcast;
 
 use crate::isolation::IsolationEngine;
 
-use crate::agent::tools::{AgentTool, AgentToolError, AgentToolFuture, AgentToolProvider};
+use crate::agent::tool::{AgentTool, AgentToolError, AgentToolFuture, AgentToolProvider};
 use crate::project::validate_cache;
 use crate::task::{
     ProjectProposal, Task, TaskHistoryEvent, TaskOperatorSignalAuthor, TaskOperatorSignalKind,

@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 use std::io;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
-use super::tools::AgentToolRegistry;
+use super::tool::AgentToolRegistry;
 
 pub const AGENT_CHANNEL_PORT: u32 = 5000;
 

@@ -1,5 +1,5 @@
 use crate::{
-    agent::{AgentChannels, AgentEngines, AgentError, AgentKind, tools::AgentToolRegistry},
+    agent::{AgentChannels, AgentEngines, AgentError, AgentKind, tool::AgentToolRegistry},
     config::{Config, InstallationIdentity},
     credentials::{Credentials, CredentialsError},
     isolation::{

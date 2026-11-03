@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 use std::fmt;
 
 use super::contribution_from_url;
-use crate::agent::tools::{AgentTool, AgentToolError, AgentToolFuture, AgentToolProvider};
+use crate::agent::tool::{AgentTool, AgentToolError, AgentToolFuture, AgentToolProvider};
 use crate::task::TaskStore;
 
 pub struct VcsAgentTools {
