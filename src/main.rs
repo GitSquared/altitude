@@ -68,6 +68,9 @@ async fn client() -> Result<(), Box<dyn Error>> {
     let _log_guard = logging::init(&config)?;
     tracing::info!("starting altitude");
     let mut terminal = ratatui::init();
+    // Asked before anything else reads the terminal: the answer comes back on the
+    // input stream the interface is about to own.
+    let pictures = tui::Pictures::detect();
     // Said after the terminal is given back, which is the only place a person can
     // read it.
     let mut farewell: Option<String> = None;
@@ -228,6 +231,7 @@ async fn client() -> Result<(), Box<dyn Error>> {
                 remote_keys,
                 link.clone(),
                 watched,
+                pictures,
             ),
             tui::Feeds {
                 task_execution: task_execution_updates,

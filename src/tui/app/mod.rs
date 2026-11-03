@@ -54,6 +54,7 @@ use crate::{
     vcs::{Repository, VcsProviderKind},
 };
 
+use super::Pictures;
 use super::background::terrain::Terrain;
 use super::widgets::{alert::Alert, list, progress};
 use popups::confirm::PendingConfirm;
@@ -483,6 +484,9 @@ pub struct App {
     // nothing here outlives the run it describes, and the task screen is the only
     // reader. Capped, because an agent that works for an hour says a lot.
     pub(in crate::tui) activities: HashMap<String, Vec<Activity>>,
+    // What this terminal can draw, and the diagrams it has been asked for. Owned
+    // here so a picture outlives the frame that first wanted it.
+    pub(in crate::tui) pictures: Pictures,
     pub(in crate::tui) signal_activity_scroll: u16,
     pub(in crate::tui) signal_activity_scroll_max: u16,
     pub(in crate::tui) signal_activity_rows: u16,
@@ -629,6 +633,7 @@ impl App {
         remote_keys: RemoteKeys,
         link: LinkClient,
         watch_events: mpsc::UnboundedSender<WatchedTasks>,
+        pictures: Pictures,
     ) -> Self {
         let (settings_file, settings_error) = match settings {
             Ok(file) => (Some(file), None),
@@ -655,6 +660,7 @@ impl App {
             git_identity: GitIdentity::default(),
             commit_edit: None,
             git_identity_over_card: false,
+            pictures,
             signal_task_id: None,
             signal_all_threads: Vec::new(),
             signal_threads: Vec::new(),

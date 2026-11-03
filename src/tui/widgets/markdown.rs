@@ -21,6 +21,49 @@ pub fn lines(body: &str, width: u16) -> Vec<Line<'static>> {
     block.finish()
 }
 
+// The diagrams a body carries, and the body without them. A surface that can draw
+// them shows the picture; every other surface keeps the fence in the text.
+pub fn take_diagrams(body: &str) -> (String, Vec<String>) {
+    let mut text = String::new();
+    let mut diagrams = Vec::new();
+    let mut source: Option<String> = None;
+    for line in body.lines() {
+        match &mut source {
+            Some(diagram) => {
+                if line.trim_start().starts_with("```") {
+                    diagrams.push(mem::take(diagram));
+                    source = None;
+                } else {
+                    if !diagram.is_empty() {
+                        diagram.push('\n');
+                    }
+                    diagram.push_str(line);
+                }
+            }
+            None if is_mermaid_fence(line) => source = Some(String::new()),
+            None => {
+                text.push_str(line);
+                text.push('\n');
+            }
+        }
+    }
+    // An unterminated fence is not a diagram: it goes back into the text as written.
+    if let Some(diagram) = source {
+        text.push_str("```mermaid\n");
+        text.push_str(&diagram);
+        text.push('\n');
+    }
+    (text, diagrams)
+}
+
+fn is_mermaid_fence(line: &str) -> bool {
+    let line = line.trim();
+    let Some(language) = line.strip_prefix("```") else {
+        return false;
+    };
+    language.trim().eq_ignore_ascii_case("mermaid")
+}
+
 // A one-line stand-in for a body the operator only glances at, in a list.
 pub fn preview(body: &str) -> String {
     lines(body, 400)
