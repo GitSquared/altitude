@@ -2,7 +2,7 @@ use chrono::{Local, SecondsFormat};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use crate::agent::AgentKind;
+use crate::agent::{AgentKind, AgentWindow};
 use crate::id;
 use crate::project::Project;
 use crate::tracker::{IssueReference, IssueSnapshot, TrackerKind, TrackerStatus};
@@ -128,6 +128,9 @@ pub enum TaskExecutionPauseReason {
     // A turn that ends by asking for another one and leaves nothing behind would say the
     // same thing again from the same state.
     AgentWentQuiet,
+    // The only pause nobody is waiting on: the account's limit clears by itself, so
+    // the task comes back without the operator doing anything.
+    AwaitingLimit,
     Transfer,
     // The endings a tracker hands down keep the task: what happened elsewhere is something
     // the operator can read here, rather than work that quietly disappears.
@@ -252,6 +255,14 @@ pub struct DeferredReview {
     pub agent_run_id: String,
 }
 
+// A pause that ends by itself carries the clock that ends it, so the task comes back
+// without anyone being asked.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LimitHold {
+    pub window: AgentWindow,
+    pub clears_at_ms: i64,
+}
+
 #[derive(Clone, Debug)]
 pub struct Task {
     pub id: String,
@@ -283,6 +294,10 @@ pub struct TaskFacts {
     pub sandbox_available: bool,
     pub snapshot_path: Option<String>,
     pub snapshot_available: bool,
+    // When the account's limit clears. Read as a time and not a switch: a task is
+    // held only while a pause says it is waiting on one, because a value left behind
+    // by a later pause would otherwise hold work nobody is waiting on.
+    pub resumes_at_ms: Option<i64>,
     pub last_error: Option<String>,
     #[sqlx(json(nullable))]
     pub latest_operator_message: Option<TaskOperatorSignalMessage>,
@@ -402,6 +417,8 @@ pub enum TaskHistoryEvent {
         snapshot_available: bool,
         execution_pause_reason: TaskExecutionPauseReason,
         snapshot_path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<LimitHold>,
     },
     ExecutionRecovered {
         execution_status: TaskExecutionStatus,
@@ -477,6 +494,9 @@ pub enum TaskHistoryEvent {
 pub enum TaskAgentRunOutcome {
     Continued,
     AwaitingOperator,
+    // The account refused the turn and said when it clears: nothing about the work
+    // went wrong.
+    Limited,
     Failed,
 }
 

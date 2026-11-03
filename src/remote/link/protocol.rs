@@ -234,6 +234,10 @@ pub struct TaskSummary {
     pub mode: TaskExecutionMode,
     #[serde(default)]
     pub pause_reason: Option<TaskExecutionPauseReason>,
+    // When a limit on the account clears: the one pause that ends without anyone
+    // being asked.
+    #[serde(default)]
+    pub resumes_at_ms: Option<i64>,
     // What the agent is doing right now. Live only: it is replaced by the next
     // line, and a summary that has none describes a task that is not working.
     #[serde(default)]
@@ -287,6 +291,7 @@ impl TaskSummary {
             status: task.facts.execution_status.clone(),
             mode: task.facts.execution_mode,
             pause_reason: task.facts.execution_pause_reason.clone(),
+            resumes_at_ms: task.facts.resumes_at_ms,
             activity: None,
             attention: task.facts.operator_attention_level.clone(),
             blocking_signal_kind: task.facts.blocking_signal_kind,

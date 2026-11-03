@@ -6,7 +6,7 @@ use crate::{
         SandboxPurpose, VsockRoute, guest_absolute, mounts,
     },
     project::Project,
-    vcs::VcsProviderKind,
+    vcs::{VcsProviderKind, now_ms},
 };
 use futures_util::future::join_all;
 
@@ -438,6 +438,29 @@ where
         }
         Ok(task)
     }
+    // A limit that clears puts a task back without anyone being committed to it: the
+    // same shape as a restart resuming what it was running, on a shorter clock. The
+    // task is Pending again, which is what the queue already knows how to start.
+    pub async fn resume_limits_due(&self, tasks: &[Task]) -> Vec<Result<Task, TaskServiceError>> {
+        let due = tasks.iter().filter(|task| {
+            task.facts.execution_status == TaskExecutionStatus::Paused
+                && task.facts.execution_pause_reason
+                    == Some(TaskExecutionPauseReason::AwaitingLimit)
+                && task
+                    .facts
+                    .resumes_at_ms
+                    .is_some_and(|clears_at_ms| clears_at_ms <= now_ms())
+        });
+        join_all(due.map(|task| {
+            let service = self.clone();
+            async move {
+                let event = resumed(task, task.facts.snapshot_path.clone().unwrap_or_default());
+                service.record(&task.id, &[event]).await
+            }
+        }))
+        .await
+    }
+
     pub async fn recover_all(&self) -> Vec<Result<Task, TaskServiceError>> {
         let tasks = match self.list().await {
             Ok(tasks) => tasks,
@@ -510,6 +533,7 @@ where
                                 execution_pause_reason:
                                     TaskExecutionPauseReason::AwaitingReviewChecks,
                                 snapshot_path: task.facts.snapshot_path.clone().unwrap_or_default(),
+                                limit: None,
                             }],
                         )
                         .await?;
@@ -567,6 +591,7 @@ where
                                 snapshot_available: true,
                                 execution_pause_reason: reason,
                                 snapshot_path,
+                                limit: None,
                             }
                         };
                         service.record_snapshot(&task, &[event]).await?;
@@ -590,6 +615,7 @@ where
                                         .snapshot_path
                                         .clone()
                                         .unwrap_or_default(),
+                                    limit: None,
                                 }],
                             )
                             .await?;
@@ -652,6 +678,7 @@ fn resumed(task: &Task, snapshot_path: String) -> TaskHistoryEvent {
             snapshot_available: true,
             execution_pause_reason: TaskExecutionPauseReason::AwaitingReviewChecks,
             snapshot_path,
+            limit: None,
         }
     } else if task.facts.blocking_signal_kind.is_some() {
         TaskHistoryEvent::ExecutionPaused {
@@ -660,6 +687,7 @@ fn resumed(task: &Task, snapshot_path: String) -> TaskHistoryEvent {
             snapshot_available: true,
             execution_pause_reason: TaskExecutionPauseReason::AwaitingOperator,
             snapshot_path,
+            limit: None,
         }
     } else {
         TaskHistoryEvent::ExecutionRecovered {

@@ -1,11 +1,12 @@
 use super::{
-    AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, REPORT_SCHEMA, REPORT_SYSTEM_PROMPT,
-    TaskProgressDecoder, TaskReportDecoder, activity,
+    AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, AgentRefusal, AgentWindow, REPORT_SCHEMA,
+    REPORT_SYSTEM_PROMPT, TaskProgressDecoder, TaskReportDecoder, activity,
 };
 use crate::isolation::{
     DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand, shell_quote,
 };
 use crate::task::{TaskAgentTurnContext, TaskAgentTurnReport};
+use crate::vcs::now_ms;
 use serde_json::Value;
 use std::mem;
 use uuid::Uuid;
@@ -19,6 +20,10 @@ pub struct ClaudeStream {
     received_result: bool,
     model: Option<String>,
     error: Option<String>,
+    // The newest thing Claude said about the account's limits. A run reports them
+    // while it works and again when it is refused, so the last word is the one that
+    // says whether the refusal is the end.
+    limit: Option<Value>,
 }
 
 const DEFAULT_SETTINGS: &str = r#"{
@@ -70,6 +75,7 @@ impl ClaudeStream {
             received_result: false,
             model: None,
             error: None,
+            limit: None,
         }
     }
 
@@ -77,6 +83,11 @@ impl ClaudeStream {
         let Ok(message) = serde_json::from_str::<Value>(line.trim()) else {
             return;
         };
+        if message.get("type").and_then(Value::as_str) == Some("rate_limit_event")
+            && let Some(info) = message.get("rate_limit_info")
+        {
+            self.limit = Some(info.clone());
+        }
         if message.get("type").and_then(Value::as_str) == Some("result") {
             self.received_result = true;
             self.model = message
@@ -113,6 +124,44 @@ impl ClaudeStream {
 }
 
 impl TaskReportDecoder for ClaudeStream {
+    fn refusal(&mut self) -> Option<AgentRefusal> {
+        if !self.pending.is_empty() {
+            let line = mem::take(&mut self.pending);
+            self.process_line(&line);
+        }
+        let limit = self.limit.as_ref()?;
+        // A window inside `unifiedWindows` carries its own status, and a rejected
+        // window there does not mean the request was refused: only the top-level
+        // status says that. Anything else is a limit the account warned about and
+        // then let through.
+        if limit.get("status").and_then(Value::as_str) != Some("rejected") {
+            return None;
+        }
+        let window = AgentWindow::of(limit.get("rateLimitType").and_then(Value::as_str));
+        // Epoch seconds, which is what the header carries; the record keeps
+        // milliseconds, like every other time it holds.
+        let clears_at_ms = ["resetsAt", "overageResetsAt"]
+            .iter()
+            .find_map(|key| limit.get(key).and_then(Value::as_i64))
+            .map(|seconds| seconds.saturating_mul(1000));
+        Some(match clears_at_ms {
+            // A reset that has already passed is not a clock. Holding until then
+            // would put the task back into the same refusal on the first tick, so it
+            // stops here and the operator hears about it once.
+            Some(clears_at_ms) if clears_at_ms > now_ms() => {
+                AgentRefusal::window(window, clears_at_ms)
+            }
+            Some(_) => AgentRefusal::stopped(format!(
+                "Claude's {} limit is used up and the reset it named has already passed",
+                window.word()
+            )),
+            None => AgentRefusal::stopped(format!(
+                "Claude's {} limit is used up and it did not say when it clears",
+                window.word()
+            )),
+        })
+    }
+
     fn failure_message(&mut self) -> Option<&str> {
         if !self.pending.is_empty() {
             let line = mem::take(&mut self.pending);

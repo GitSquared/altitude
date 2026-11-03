@@ -26,7 +26,7 @@ use crate::{
         TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
         TaskOperatorAttentionLevel,
     },
-    tui::widgets::utils::{shimmer, truncate},
+    tui::widgets::utils::{clock, shimmer, truncate},
     vcs::{ContributionReadiness, now_ms},
 };
 
@@ -429,6 +429,7 @@ fn card_status(
             Some(TaskExecutionPauseReason::AwaitingReviewChecks) => "paused · watching PRs",
             Some(TaskExecutionPauseReason::ApplicationShutdown) => "paused · machine restarted",
             Some(TaskExecutionPauseReason::AgentWentQuiet) => "paused · the agent went quiet",
+            Some(TaskExecutionPauseReason::AwaitingLimit) => "paused · waiting on a usage limit",
             Some(TaskExecutionPauseReason::Transfer) => "paused · transferring",
             Some(TaskExecutionPauseReason::TrackerEnded) => "paused · the issue ended",
             Some(TaskExecutionPauseReason::StoppedInTracker) => "paused · stopped in the tracker",
@@ -487,6 +488,14 @@ fn card_extras(summary: &TaskSummary, now_ms: i64) -> Vec<Line<'static>> {
         && let Some(error) = &summary.last_error
     {
         extras.push(Line::styled(error.clone(), palette::bad()));
+    }
+    if summary.pause_reason == Some(TaskExecutionPauseReason::AwaitingLimit)
+        && let Some(clears_at_ms) = summary.resumes_at_ms
+    {
+        extras.push(Line::styled(
+            format!("resumes {}", clock(clears_at_ms)),
+            palette::muted(),
+        ));
     }
     // Whose work this is, when it is not the machine holding the capsule. A task
     // delegated here from another operator names them.

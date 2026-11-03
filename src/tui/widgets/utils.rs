@@ -134,3 +134,11 @@ pub fn ago(at_ms: i64, now_ms: i64) -> String {
         format!("{} ago", since(at_ms, now_ms))
     }
 }
+
+// The hour and minute on the operator's own clock, because a time is something to
+// read whereas a countdown is a number that goes stale in front of them.
+pub fn clock(at_ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(at_ms)
+        .map(|at| at.with_timezone(&chrono::Local).format("%H:%M").to_string())
+        .unwrap_or_default()
+}

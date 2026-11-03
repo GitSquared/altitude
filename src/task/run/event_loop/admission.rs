@@ -66,13 +66,29 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
         if !self.admission_enabled.load(Ordering::Acquire) {
             return;
         }
-        let tasks = match self.service.list().await {
+        let mut tasks = match self.service.list().await {
             Ok(tasks) => tasks,
             Err(error) => {
                 tracing::warn!(%error, "could not read tasks to admit work");
                 return;
             }
         };
+        // A limit that has cleared is a task that starts again by itself. It is put
+        // back before the queue is read, so the same pass that measures room is the
+        // one that starts it, and no clock of its own has to be kept for it.
+        for result in self.service.resume_limits_due(&tasks).await {
+            match result {
+                Ok(task) => {
+                    if let Some(known) = tasks.iter_mut().find(|known| known.id == task.id) {
+                        tracing::info!(task_id = %task.id, "a usage limit cleared");
+                        *known = task;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "could not put back a task whose usage limit cleared");
+                }
+            }
+        }
         // A capsule that exists is a slot in use. A task being started has no
         // capsule yet but is about to want one, so it counts too.
         let occupied = tasks

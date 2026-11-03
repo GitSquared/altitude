@@ -9,10 +9,12 @@ mod channel;
 
 pub use activity::Activity;
 mod claude;
+mod limits;
 pub mod mcp;
 mod pi;
 pub mod tools;
 use claude::ClaudeCode;
+pub use limits::{AgentRefusal, AgentWindow};
 use pi::PiCode;
 
 pub const AGENTS: [AgentKind; 2] = [AgentKind::Pi, AgentKind::Claude];
@@ -195,6 +197,12 @@ pub trait TaskReportDecoder: Send {
     fn process(&mut self, bytes: &[u8]);
     fn report(self: Box<Self>) -> Result<TaskAgentTurnReport, String>;
     fn failure_message(&mut self) -> Option<&str>;
+    // What the account said when it refused the harness, which only matters when a
+    // run ends short: a harness that was told nothing, or that was told in words it
+    // cannot read, leaves a run that failed and no more than that.
+    fn refusal(&mut self) -> Option<AgentRefusal> {
+        None
+    }
 }
 
 // What the agent is doing, as it works, for someone who wants to look without

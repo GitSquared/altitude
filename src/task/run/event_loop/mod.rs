@@ -13,7 +13,7 @@ use crate::task::{
 use tokio::{sync::mpsc, time};
 
 use crate::{
-    agent::{Activity, AgentKind, TaskReportDecoder},
+    agent::{Activity, AgentKind, AgentRefusal, TaskReportDecoder},
     config::InstallationIdentity,
     isolation::{
         Command, CommandEvent, CommandSession, FileTransferSink, IsolationEngine, OutputStream,
@@ -25,7 +25,7 @@ use crate::{
         wake_reason,
     },
     task::{
-        DeferredReview, Task, TaskAgentRequestedAction, TaskAgentRun, TaskExecutionMode,
+        DeferredReview, LimitHold, Task, TaskAgentRequestedAction, TaskAgentRun, TaskExecutionMode,
         TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent, TaskOperatorSignal,
         TaskOperatorSignalAuthor, TaskService, TaskServiceError,
     },
@@ -592,6 +592,7 @@ where
                     snapshot_available: task.facts.snapshot_available,
                     execution_pause_reason: reason,
                     snapshot_path: task.facts.snapshot_path.clone().unwrap_or_default(),
+                    limit: None,
                 }],
             )
             .await?;
@@ -1408,6 +1409,7 @@ where
                 snapshot_available: task.facts.snapshot_available,
                 execution_pause_reason: TaskExecutionPauseReason::AwaitingOperator,
                 snapshot_path: task.facts.snapshot_path.clone().unwrap_or_default(),
+                limit: None,
             },
         ];
         let result = self.service.record(&task.id, &events).await;
@@ -1491,9 +1493,47 @@ where
             return Ok(());
         }
         if !matches!(event, CommandEvent::Exited(0)) {
-            let diagnostic = report_stream
-                .as_mut()
-                .and_then(|decoder| decoder.failure_message());
+            let refusal = report_stream.as_mut().and_then(|decoder| decoder.refusal());
+            // A window that reopens on its own is the one ending that is not a
+            // failure: the task keeps its place, and comes back when the clock runs
+            // out rather than when the operator reads about it.
+            if let Some(AgentRefusal::Window {
+                window,
+                clears_at_ms,
+            }) = &refusal
+            {
+                let exit_code = match event {
+                    CommandEvent::Exited(code) => Some(code),
+                    _ => None,
+                };
+                let result = self
+                    .service
+                    .hold_for_limit(
+                        &task,
+                        run,
+                        LimitHold {
+                            window: window.clone(),
+                            clears_at_ms: *clears_at_ms,
+                        },
+                        exit_code,
+                    )
+                    .await;
+                let _ = self
+                    .events
+                    .send(TaskExecutionUpdate::Finished(task.id, result));
+                return Ok(());
+            }
+            // What the account said is a better account of the ending than the exit
+            // code is, and it is the only sentence a stopped task has to offer.
+            let said = match &refusal {
+                Some(AgentRefusal::Stopped { said }) => Some(said.as_str()),
+                _ => None,
+            };
+            let diagnostic = said.or_else(|| {
+                report_stream
+                    .as_mut()
+                    .and_then(|decoder| decoder.failure_message())
+            });
             let result = self.service.finish(&task, run, event, diagnostic).await;
             let _ = self
                 .events
