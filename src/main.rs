@@ -147,6 +147,13 @@ async fn client() -> Result<(), Box<dyn Error>> {
         )
         .with_trackers(trackers)
         .with_issue_reader(issue_reader);
+        // Every body is known before any turn runs, which is the only moment a picture
+        // nothing names can be told apart from one a signal is about to name.
+        match tasks.sweep_pictures().await {
+            Ok(0) => {}
+            Ok(swept) => tracing::info!(swept, "swept pictures nothing names"),
+            Err(error) => tracing::warn!(%error, "pictures could not be swept"),
+        }
         let Some(recovered) = tui::boot_task_resume(
             &mut terminal,
             &mut terminate,

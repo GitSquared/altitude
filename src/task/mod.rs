@@ -13,6 +13,7 @@ use crate::{
 use futures_util::future::BoxFuture;
 use std::{
     collections::HashMap,
+    collections::HashSet,
     error::Error,
     fmt, fs, io,
     os::unix::fs::symlink,
@@ -298,6 +299,33 @@ where
         ));
         tools.register(VcsAgentTools::new(self.store.clone(), task_id.to_owned()));
         tools
+    }
+
+    // Pictures are named by the signals that carry them, so what nothing names is
+    // nothing. Run when the application starts: it is the only moment every body is
+    // known and none is being written.
+    pub async fn sweep_pictures(&self) -> Result<usize, TaskServiceError> {
+        let mut keep = HashSet::new();
+        for task in self.list().await? {
+            let threads = self
+                .store
+                .signal_threads(&task.id)
+                .await
+                .map_err(TaskServiceError::Task)?;
+            for thread in threads {
+                for message in thread.messages {
+                    keep.extend(
+                        picture::take(&message.body)
+                            .1
+                            .into_iter()
+                            .map(|held| held.id),
+                    );
+                }
+            }
+        }
+        picture::sweep(&self.attachments_dir, &keep).map_err(|_| {
+            TaskServiceError::Task(TaskError::OperationRejected("could not sweep pictures"))
+        })
     }
 
     pub(crate) fn bind_agent_channel(&self, task_id: &str) -> Result<PathBuf, TaskServiceError> {

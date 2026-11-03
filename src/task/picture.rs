@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs, io,
     path::{Path, PathBuf},
 };
@@ -90,6 +91,30 @@ pub fn path(directory: &Path, id: &str) -> PathBuf {
 
 pub fn read(directory: &Path, id: &str) -> io::Result<Vec<u8>> {
     fs::read(path(directory, id))
+}
+
+// Every picture nothing names any more. A store that only grows is a leak with a
+// friendly name, and content addressing makes the question cheap to ask: what is here
+// minus what is named.
+pub fn sweep(directory: &Path, keep: &HashSet<String>) -> io::Result<usize> {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Ok(0);
+    };
+    let mut swept = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        // A staging file is a picture on its way in, not one on its way out.
+        if !is_id(name) || keep.contains(name) {
+            continue;
+        }
+        if fs::remove_file(entry.path()).is_ok() {
+            swept += 1;
+        }
+    }
+    Ok(swept)
 }
 
 // What a picture weighs, which is all a reader needs to know about one it cannot see.
