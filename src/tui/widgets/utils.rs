@@ -143,12 +143,13 @@ pub fn clock(at_ms: i64) -> String {
         .unwrap_or_default()
 }
 
-// A count of tokens is read for its size, not its digits: what matters is whether a
-// task spent thousands or millions.
-pub fn tokens(count: i64) -> String {
-    match count {
-        ..=999 => count.to_string(),
-        1_000..=999_999 => format!("{:.1}k", count as f64 / 1_000.0),
-        _ => format!("{:.1}M", count as f64 / 1_000_000.0),
+// A run's cost can be a fraction of a cent, and two decimal places would round it to
+// nothing: the precision follows the size of the number instead.
+pub fn money(cost_usd_micros: i64) -> String {
+    let dollars = cost_usd_micros as f64 / 1_000_000.0;
+    if dollars >= 0.01 {
+        format!("${dollars:.2}")
+    } else {
+        format!("${dollars:.4}")
     }
 }
