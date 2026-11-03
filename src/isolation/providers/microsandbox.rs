@@ -35,7 +35,7 @@ use crate::agent::mcp::AGENT_CHANNEL_PORT;
 use crate::config::Config;
 use crate::project::Project;
 
-use super::{
+use crate::isolation::{
     BaseSandboxRecipe, BaseSandboxSnapshot, CREDENTIAL_PREFIX, Command, CommandEvent,
     CommandSession, CredentialCheck, CredentialReport, CredentialSandbox, EnvironmentDescription,
     EnvironmentProgress, EnvironmentProgressSink, FileTally, FileTransferSink, ImagePull,

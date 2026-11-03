@@ -20,7 +20,7 @@ use tokio::{
     net::TcpListener,
 };
 
-use super::TrackerError;
+use crate::tracker::TrackerError;
 
 pub(super) const MCP_URL: &str = "https://mcp.linear.app/mcp";
 pub(super) const GRANT_FILE: &str = "grant.json";

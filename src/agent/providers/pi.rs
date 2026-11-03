@@ -1,6 +1,7 @@
-use super::{
+use crate::agent::{
     AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, AgentUsage, REPORT_SCHEMA,
     REPORT_SYSTEM_PROMPT, TaskProgressDecoder, TaskReportDecoder, TaskUsage, activity,
+    system_prompt,
 };
 use crate::isolation::{
     DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand, shell_quote,
@@ -309,7 +310,7 @@ impl AgentEngine for PiCode {
             "exec pi --print --mode json --session {} \
              --append-system-prompt {} {}",
             shell_quote(&self.conversation_transcript_path(conversation_id)),
-            shell_quote(&super::system_prompt(AUTOPILOT_SYSTEM_PROMPT, context)),
+            shell_quote(&system_prompt(AUTOPILOT_SYSTEM_PROMPT, context)),
             shell_quote(&format!(
                 "{prompt}\n\nAltitude task context at the start of this turn: {context}"
             )),
@@ -331,7 +332,7 @@ impl AgentEngine for PiCode {
             schema = shell_quote(REPORT_SCHEMA),
             session = shell_quote(&self.conversation_transcript_path(conversation_id)),
             tool = REPORT_TOOL_NAME,
-            prompt = shell_quote(&super::system_prompt(REPORT_SYSTEM_PROMPT, context)),
+            prompt = shell_quote(&system_prompt(REPORT_SYSTEM_PROMPT, context)),
             message = shell_quote(&format!(
                 "Return the required task report.\n\nAltitude task context at the start of this turn: {context}"
             )),

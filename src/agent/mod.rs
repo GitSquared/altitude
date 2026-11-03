@@ -8,15 +8,13 @@ mod activity;
 mod channel;
 
 pub use activity::Activity;
-mod claude;
 mod limits;
 pub mod mcp;
-mod pi;
+mod providers;
 pub mod tools;
 mod usage;
-use claude::ClaudeCode;
 pub use limits::{AgentRefusal, AgentStanding, AgentWindow, AgentWindowReading};
-use pi::PiCode;
+use providers::{ClaudeCode, PiCode};
 pub use usage::{AgentUsage, TaskUsage};
 
 pub const AGENTS: [AgentKind; 2] = [AgentKind::Pi, AgentKind::Claude];

@@ -1,8 +1,8 @@
-mod github;
 pub(crate) mod listing;
+mod providers;
 pub mod tools;
 
-pub use github::GitHub;
+pub use providers::GitHub;
 
 use crate::isolation::ProfileRecipe;
 use serde::{Deserialize, Serialize};

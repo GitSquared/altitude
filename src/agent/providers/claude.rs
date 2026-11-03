@@ -1,7 +1,7 @@
-use super::{
+use crate::agent::{
     AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, AgentRefusal, AgentStanding, AgentUsage,
     AgentWindow, AgentWindowReading, REPORT_SCHEMA, REPORT_SYSTEM_PROMPT, TaskProgressDecoder,
-    TaskReportDecoder, TaskUsage, activity,
+    TaskReportDecoder, TaskUsage, activity, system_prompt,
 };
 use crate::isolation::{
     DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand, shell_quote,
@@ -408,7 +408,7 @@ impl AgentEngine for ClaudeCode {
              --allowedTools {} \
              --append-system-prompt {} {session} {}",
             shell_quote(MCP_TOOLS),
-            shell_quote(&super::system_prompt(AUTOPILOT_SYSTEM_PROMPT, context)),
+            shell_quote(&system_prompt(AUTOPILOT_SYSTEM_PROMPT, context)),
             shell_quote(&format!(
                 "{prompt}\n\nAltitude task context at the start of this turn: {context}"
             )),
@@ -423,7 +423,7 @@ impl AgentEngine for ClaudeCode {
              --allowedTools {} \
              --append-system-prompt {} --json-schema {} --resume {} {}",
             shell_quote(MCP_TOOLS),
-            shell_quote(&super::system_prompt(REPORT_SYSTEM_PROMPT, context)),
+            shell_quote(&system_prompt(REPORT_SYSTEM_PROMPT, context)),
             shell_quote(REPORT_SCHEMA),
             shell_quote(conversation_id),
             shell_quote(&format!(

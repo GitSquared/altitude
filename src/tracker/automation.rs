@@ -12,7 +12,7 @@ use sha2::Sha256;
 
 use super::{
     IssueComment, IssueReader, IssueReference, IssueSnapshot, IssueSummary, TrackerError,
-    TrackerKind, TrackerStatus, linear,
+    TrackerKind, TrackerStatus, providers::scope_of,
 };
 use crate::task::{TaskPlanStatus, TaskPlanStep};
 
@@ -1100,7 +1100,7 @@ fn summary_of(issue: &Value) -> Result<IssueSummary, TrackerError> {
             .pointer("/project/name")
             .and_then(Value::as_str)
             .map(str::to_owned),
-        scope: linear::scope_of(issue)?,
+        scope: scope_of(issue)?,
     })
 }
 

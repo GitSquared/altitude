@@ -18,12 +18,12 @@ pub(crate) mod capacity;
 
 pub use capacity::SandboxCapacity;
 mod git_cache;
-mod microsandbox;
 pub(crate) mod mounts;
+mod providers;
 mod relay;
 mod sandbox;
 
-pub use microsandbox::MicrosandboxIsolation;
+pub use providers::MicrosandboxIsolation;
 pub(crate) use relay::{PORT_RELAY_GUEST_PORT, install_script, with_port_relay};
 pub use relay::{PortNotice, PortRelays};
 pub(crate) use sandbox::guest_absolute;

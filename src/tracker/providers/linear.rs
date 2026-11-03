@@ -19,10 +19,11 @@ use tokio::{
     time::{sleep, timeout},
 };
 
-use super::{
+use super::linear_auth;
+use crate::tracker::{
     ACCOUNT_FILE, IssueComment, IssueReader, IssueReference, IssueScope, IssueSnapshot,
     IssueSummary, ScopeSummary, TrackerAccount, TrackerError, TrackerFuture, TrackerKind,
-    TrackerProvider, TrackerStatus, linear_auth,
+    TrackerProvider, TrackerStatus,
 };
 
 const LIST_ISSUES: &str = "list_issues";
@@ -901,7 +902,7 @@ fn is_not_found(error: &TrackerError) -> bool {
         || message.contains("does not exist")
 }
 
-pub(super) fn scope_of(issue: &Value) -> Result<Option<IssueScope>, TrackerError> {
+pub(crate) fn scope_of(issue: &Value) -> Result<Option<IssueScope>, TrackerError> {
     let Some(team) = issue.get("team").filter(|team| !team.is_null()) else {
         return Ok(None);
     };

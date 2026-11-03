@@ -1,10 +1,9 @@
 pub(crate) mod automation;
-mod linear;
-mod linear_auth;
 pub(crate) mod oauth;
+mod providers;
 pub(crate) mod setup;
 
-pub use linear::Linear;
+pub use providers::Linear;
 
 use std::{error::Error, fmt, future::Future, pin::Pin};
 
