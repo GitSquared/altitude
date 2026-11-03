@@ -7,11 +7,17 @@ use resvg::{
     usvg::{self, fontdb::Database},
 };
 
-// Diagrams are drawn at twice their nominal size so a card's worth of columns
-// still has pixels to spare when the picture is scaled down to cells.
-const SCALE: f32 = 2.0;
+// Mermaid lays its labels out at 14px, which is what makes a diagram's text a
+// fixed size on screen no matter which terminal is asking: the raster is built so
+// that 14px lands on one cell row, and the picture then reads at the same size as
+// the words around it.
+const LABEL_PX: f32 = 14.0;
+// Twice the pixels the terminal will show, so a picture stays sharp on a display
+// that is finer than the cells the font reports.
+const OVERSAMPLE: f32 = 2.0;
 
-pub fn picture(source: &str, is_dark: bool) -> Option<DynamicImage> {
+pub fn picture(source: &str, is_dark: bool, cell_height: u16) -> Option<DynamicImage> {
+    let scale = OVERSAMPLE * f32::from(cell_height.max(1)) / LABEL_PX;
     let parsed = parse_mermaid(source).ok()?;
     let theme = themed(is_dark);
     let config = LayoutConfig::default();
@@ -27,12 +33,12 @@ pub fn picture(source: &str, is_dark: bool) -> Option<DynamicImage> {
     let tree = usvg::Tree::from_str(&svg, &options).ok()?;
     let size = tree.size();
     let mut pixmap = tiny_skia::Pixmap::new(
-        (size.width() * SCALE) as u32,
-        (size.height() * SCALE) as u32,
+        (size.width() * scale) as u32,
+        (size.height() * scale) as u32,
     )?;
     resvg::render(
         &tree,
-        tiny_skia::Transform::from_scale(SCALE, SCALE),
+        tiny_skia::Transform::from_scale(scale, scale),
         &mut pixmap.as_mut(),
     );
     // A round trip through PNG is what un-premultiplies tiny-skia's alpha, and it

@@ -1029,10 +1029,32 @@ fn draw_messages(
     // A diagram this terminal can draw leaves the text and becomes a picture
     // inside the card that carried it. A message whose diagrams will not all draw
     // keeps its fences, so the source is never lost to a render that failed.
-    let bodies: Vec<Body> = thread
+    let text_width = width.saturating_sub(4).max(1);
+    let stripped: Vec<(String, Vec<String>)> = thread
         .messages
         .iter()
-        .map(|message| Body::of(&message.body, pictures, width.saturating_sub(4).max(1)))
+        .map(|message| {
+            if pictures.has_pictures() {
+                markdown::take_diagrams(&message.body)
+            } else {
+                (message.body.clone(), Vec::new())
+            }
+        })
+        .collect();
+    // One scale for the whole conversation. A diagram at its own scale reads at the
+    // size of the words around it, so the only diagram that sets the scale is the
+    // widest one: two pictures in a thread never disagree about the size of text.
+    let scale = stripped
+        .iter()
+        .flat_map(|(_, sources)| sources.iter())
+        .map(|source| pictures.allowance(source, text_width))
+        .fold(1.0_f32, f32::min);
+    let bodies: Vec<Body> = stripped
+        .into_iter()
+        .zip(&thread.messages)
+        .map(|((text, sources), message)| {
+            Body::of(text, sources, &message.body, pictures, text_width, scale)
+        })
         .collect();
     // A close or a reopen is part of the conversation, not a message: it sits
     // between the cards at the point it happened, as a quiet line.
@@ -1136,8 +1158,11 @@ fn draw_messages(
                 area,
                 &body.sources[slot.index],
                 slot.width,
-                i16::try_from(i32::from(slot.x) - i32::from(area.x)).unwrap_or(0),
-                i16::try_from(slot.top - viewport_top).unwrap_or(0),
+                body.scale,
+                (
+                    i16::try_from(i32::from(slot.x) - i32::from(area.x)).unwrap_or(0),
+                    i16::try_from(slot.top - viewport_top).unwrap_or(0),
+                ),
             );
         }
         hitboxes.push((visible, index));
@@ -1176,26 +1201,31 @@ struct Body {
     text: String,
     sources: Vec<String>,
     sizes: Vec<Size>,
+    scale: f32,
 }
 
 impl Body {
-    fn of(body: &str, pictures: &mut Pictures, width: u16) -> Self {
-        if !pictures.has_pictures() {
-            return Self::fenced(body);
-        }
-        let (text, sources) = markdown::take_diagrams(body);
-        if sources.is_empty() {
+    fn of(
+        text: String,
+        sources: Vec<String>,
+        body: &str,
+        pictures: &mut Pictures,
+        width: u16,
+        scale: f32,
+    ) -> Self {
+        if sources.is_empty() || !pictures.has_pictures() {
             return Self::fenced(body);
         }
         let sizes: Option<Vec<Size>> = sources
             .iter()
-            .map(|source| pictures.size(source, width))
+            .map(|source| pictures.size(source, width, scale))
             .collect();
         match sizes {
             Some(sizes) => Self {
                 text,
                 sources,
                 sizes,
+                scale,
             },
             None => Self::fenced(body),
         }
@@ -1206,6 +1236,7 @@ impl Body {
             text: body.to_owned(),
             sources: Vec::new(),
             sizes: Vec::new(),
+            scale: 1.0,
         }
     }
 }

@@ -71,6 +71,7 @@ async fn client() -> Result<(), Box<dyn Error>> {
     // Asked before anything else reads the terminal: the answer comes back on the
     // input stream the interface is about to own.
     let pictures = tui::Pictures::detect();
+    tracing::info!("terminal draws pictures: {}", pictures.describe());
     // Said after the terminal is given back, which is the only place a person can
     // read it.
     let mut farewell: Option<String> = None;
