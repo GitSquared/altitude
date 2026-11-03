@@ -20,8 +20,8 @@ pub enum AgentWindow {
 impl AgentWindow {
     pub fn of(name: Option<&str>) -> Self {
         match name {
-            Some("five_hour") => Self::Session,
-            Some("seven_day") => Self::Weekly,
+            Some("five_hour" | "session") => Self::Session,
+            Some("seven_day" | "weekly") => Self::Weekly,
             Some("seven_day_opus") => Self::WeeklyOpus,
             Some("seven_day_sonnet") => Self::WeeklySonnet,
             Some("overage" | "seven_day_overage_included") => Self::Overage,
@@ -38,6 +38,23 @@ impl AgentWindow {
             Self::Overage => "usage credits",
             Self::Other => "usage",
         }
+    }
+}
+
+// One window of an account's standing, as a harness reported it: how much of the
+// allowance is gone and when it comes back. Nothing here is inferred from prose.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentWindowReading {
+    pub window: AgentWindow,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_percent: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clears_at_ms: Option<i64>,
+}
+
+impl AgentWindowReading {
+    pub fn is_spent(&self) -> bool {
+        self.used_percent.is_some_and(|used| used >= 100.0)
     }
 }
 
