@@ -155,7 +155,7 @@ impl PiStream {
                         .and_then(|message| message.get("errorMessage"))
                         .and_then(Value::as_str)
                         .unwrap_or("Pi ended the report turn without a reason");
-                    self.error = Some(format!("Pi failed the report turn: {detail}"));
+                    self.error = Some(format!("Pi failed the turn: {detail}"));
                 }
             }
             Some("auto_retry_end")
@@ -165,7 +165,7 @@ impl PiStream {
                     .get("finalError")
                     .and_then(Value::as_str)
                     .unwrap_or("Pi gave up retrying the report turn");
-                self.error = Some(format!("Pi failed the report turn: {detail}"));
+                self.error = Some(format!("Pi failed the turn: {detail}"));
             }
             Some("agent_settled") => self.settled = true,
             _ => {}

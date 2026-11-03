@@ -147,17 +147,24 @@ impl ClaudeStream {
                 })
                 .map(str::to_owned);
             if message.get("is_error").and_then(Value::as_bool) == Some(true) {
-                self.error = Some(
-                    if message
-                        .get("result")
-                        .and_then(Value::as_str)
-                        .is_some_and(|result| result.contains("Not logged in"))
-                    {
-                        "Claude is not logged in in its sandbox profile; open an attached Claude shell and run /login"
-                    } else {
-                        "Claude rejected the command"
-                    }.to_owned(),
-                );
+                // What Claude said is the best account of why the turn ended, so the
+                // operator gets it rather than a sentence about an exit code. A login
+                // that has lapsed is the one case worth naming, because the fix is a
+                // command.
+                let said = message
+                    .get("result")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or_default();
+                self.error = Some(if said.contains("Not logged in") {
+                    "Claude is not logged in in its sandbox profile; open an attached \
+                     Claude shell and run /login"
+                        .to_owned()
+                } else if said.is_empty() {
+                    "Claude rejected the turn".to_owned()
+                } else {
+                    format!("Claude rejected the turn: {said}")
+                });
             }
             if let Some(output) = message.get("structured_output") {
                 match serde_json::from_value(output.clone()) {
