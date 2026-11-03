@@ -1,6 +1,6 @@
-use std::mem;
+use std::{iter, mem};
 
-use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
@@ -80,6 +80,12 @@ pub fn preview(body: &str) -> String {
         .unwrap_or_default()
 }
 
+struct Table {
+    alignments: Vec<Alignment>,
+    head: Vec<String>,
+    body: Vec<Vec<String>>,
+}
+
 struct Block {
     width: usize,
     lines: Vec<Line<'static>>,
@@ -98,6 +104,7 @@ struct Block {
     is_code: bool,
     cell: Option<String>,
     cells: Vec<String>,
+    table: Option<Table>,
     is_table_head: bool,
     link: Option<String>,
     image: Option<String>,
@@ -121,6 +128,7 @@ impl Block {
             is_code: false,
             cell: None,
             cells: Vec::new(),
+            table: None,
             is_table_head: false,
             link: None,
             image: None,
@@ -224,12 +232,16 @@ impl Block {
                 self.hang = format!("{}{}", "  ".repeat(depth), " ".repeat(marker.width()));
                 self.at_block_start = true;
             }
-            Tag::Table(_) => self.begin_block(),
-            Tag::TableRow => self.close(),
-            Tag::TableHead => {
-                self.close();
-                self.is_table_head = true;
+            Tag::Table(alignments) => {
+                self.begin_block();
+                self.table = Some(Table {
+                    alignments,
+                    head: Vec::new(),
+                    body: Vec::new(),
+                });
             }
+            Tag::TableRow => self.close(),
+            Tag::TableHead => self.is_table_head = true,
             Tag::TableCell => self.cell = Some(String::new()),
             Tag::Emphasis => self.push_style(palette::primary().add_modifier(Modifier::ITALIC)),
             Tag::Strong => self.push_style(palette::primary().add_modifier(Modifier::BOLD)),
@@ -278,8 +290,24 @@ impl Block {
                     self.cells.push(cell);
                 }
             }
-            TagEnd::TableHead | TagEnd::TableRow => self.row(),
-            TagEnd::Table => self.close(),
+            TagEnd::TableHead | TagEnd::TableRow => {
+                let cells = mem::take(&mut self.cells);
+                let is_head = mem::take(&mut self.is_table_head);
+                if let Some(table) = self.table.as_mut()
+                    && !cells.is_empty()
+                {
+                    if is_head {
+                        table.head = cells;
+                    } else {
+                        table.body.push(cells);
+                    }
+                }
+            }
+            TagEnd::Table => {
+                if let Some(table) = self.table.take() {
+                    self.draw_table(table);
+                }
+            }
             TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => self.pop_style(),
             TagEnd::Link => {
                 self.pop_style();
@@ -314,25 +342,112 @@ impl Block {
         }
     }
 
-    fn row(&mut self) {
-        let cells = mem::take(&mut self.cells);
-        let is_head = mem::take(&mut self.is_table_head);
-        if cells.is_empty() {
+    // A table is laid out as a grid with its own borders: cells are padded to the
+    // column widths, so the separators line up instead of drifting with the text.
+    fn draw_table(&mut self, table: Table) {
+        let columns = table
+            .head
+            .len()
+            .max(table.body.iter().map(Vec::len).max().unwrap_or(0));
+        if columns == 0 {
             return;
         }
-        self.close();
-        let tone = if is_head {
-            palette::heading()
-        } else {
-            palette::primary()
-        };
-        for (index, cell) in cells.iter().enumerate() {
-            if index > 0 {
-                self.emit(" │ ", palette::muted());
+        let mut widths = vec![0usize; columns];
+        for row in iter::once(&table.head).chain(table.body.iter()) {
+            for (index, cell) in row.iter().enumerate() {
+                widths[index] = widths[index].max(cell.width());
             }
-            self.emit(cell, tone);
         }
-        self.close();
+        // One cell of padding on each side and a border between neighbours.
+        const LEAST: usize = 1;
+        let total = |widths: &[usize]| widths.iter().map(|w| w + 3).sum::<usize>() + 1;
+        while total(&widths) > self.width {
+            // Take from the widest column that can spare a cell, so a narrow one is
+            // not squeezed to nothing for the sake of a wide neighbour.
+            let Some((widest, _)) = widths
+                .iter()
+                .enumerate()
+                .filter(|(_, width)| **width > LEAST)
+                .max_by_key(|(_, width)| **width)
+            else {
+                break;
+            };
+            widths[widest] -= 1;
+        }
+        if total(&widths) > self.width {
+            // Too many columns for the room it has: the plain form is a better lie
+            // than a grid that does not fit.
+            self.flat_table(&table);
+            return;
+        }
+
+        let rule = |left: char, middle: char, right: char| {
+            let mut line = String::from(left);
+            for (index, width) in widths.iter().enumerate() {
+                line.push_str(&"─".repeat(width + 2));
+                line.push(if index + 1 == widths.len() {
+                    right
+                } else {
+                    middle
+                });
+            }
+            line
+        };
+        self.lines
+            .push(Line::styled(rule('┌', '┬', '┐'), palette::muted()));
+        if !table.head.is_empty() {
+            self.table_row(&table.head, &widths, &table.alignments, palette::heading());
+            self.lines
+                .push(Line::styled(rule('├', '┼', '┤'), palette::muted()));
+        }
+        for row in &table.body {
+            self.table_row(row, &widths, &table.alignments, palette::primary());
+        }
+        self.lines
+            .push(Line::styled(rule('└', '┴', '┘'), palette::muted()));
+    }
+
+    fn table_row(
+        &mut self,
+        cells: &[String],
+        widths: &[usize],
+        alignments: &[Alignment],
+        tone: Style,
+    ) {
+        // A cell taller than one line makes the whole row that tall, so a wrapped
+        // cell does not push the rest of the row out of line.
+        let wrapped: Vec<Vec<String>> = widths
+            .iter()
+            .enumerate()
+            .map(|(index, width)| {
+                cells
+                    .get(index)
+                    .map(|cell| wrap_to(cell.trim(), *width))
+                    .unwrap_or_default()
+            })
+            .collect();
+        let height = wrapped.iter().map(Vec::len).max().unwrap_or(1).max(1);
+        for line in 0..height {
+            let mut text = String::from("│");
+            for (index, width) in widths.iter().enumerate() {
+                let content = wrapped[index].get(line).map_or("", String::as_str);
+                text.push(' ');
+                text.push_str(&aligned(content, *width, alignments.get(index)));
+                text.push(' ');
+                text.push('│');
+            }
+            self.lines.push(Line::styled(text, tone));
+        }
+    }
+
+    fn flat_table(&mut self, table: &Table) {
+        for row in iter::once(&table.head).chain(table.body.iter()) {
+            if row.is_empty() {
+                continue;
+            }
+            self.lines
+                .push(Line::styled(row.join(" │ "), palette::primary()));
+        }
     }
 
     fn code_line(&mut self, text: &str) {
@@ -426,6 +541,61 @@ impl Block {
             self.wrap();
             rest = tail;
         }
+    }
+}
+
+// A table cell wraps inside its column rather than at the end of the line.
+fn wrap_to(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let mut word = word;
+        loop {
+            let taken = current.width() + usize::from(!current.is_empty());
+            let room = width.saturating_sub(taken);
+            if word.width() <= room {
+                if !current.is_empty() {
+                    current.push(' ');
+                }
+                current.push_str(word);
+                break;
+            }
+            if current.is_empty() {
+                // A word wider than the column is cut at its own edge.
+                let cut = word
+                    .char_indices()
+                    .take_while(|(index, _)| word[..*index].width() < width)
+                    .last()
+                    .map_or(word.len(), |(index, character)| {
+                        index + character.len_utf8()
+                    });
+                let (head, tail) = word.split_at(cut);
+                lines.push(head.to_owned());
+                word = tail;
+            } else {
+                lines.push(mem::take(&mut current));
+            }
+            if word.is_empty() {
+                break;
+            }
+        }
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+fn aligned(text: &str, width: usize, alignment: Option<&Alignment>) -> String {
+    let room = width.saturating_sub(text.width());
+    match alignment {
+        Some(Alignment::Right) => format!("{}{text}", " ".repeat(room)),
+        Some(Alignment::Center) => {
+            let left = room / 2;
+            format!("{}{text}{}", " ".repeat(left), " ".repeat(room - left))
+        }
+        _ => format!("{text}{}", " ".repeat(room)),
     }
 }
 
