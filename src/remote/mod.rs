@@ -18,7 +18,7 @@ use std::error::Error;
 pub use {
     acting::keys::{RemoteKey, RemoteKeys},
     acting::takeover::bring_home,
-    announce::{Announcement, RemoteState, TrackerConnection, TrackerReadiness},
+    announce::{Announcement, Phase, RemoteState, TrackerConnection, TrackerReadiness},
     bundle::ConfigBundle,
     client::LinkClient,
     compat::{Compatibility, LOCAL_VERSION},

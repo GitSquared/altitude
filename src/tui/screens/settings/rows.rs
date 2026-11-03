@@ -297,7 +297,9 @@ pub(super) fn mark(filled: bool, asking: bool) -> Dot {
 
 fn remote_mark(status: &RemoteStatus) -> Dot {
     match status {
-        RemoteStatus::Asking | RemoteStatus::Preparing | RemoteStatus::Syncing => mark(false, true),
+        RemoteStatus::Asking | RemoteStatus::Preparing(_) | RemoteStatus::Syncing => {
+            mark(false, true)
+        }
         RemoteStatus::Reached => mark(true, false),
         RemoteStatus::Unknown
         | RemoteStatus::Changed

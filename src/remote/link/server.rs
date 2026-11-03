@@ -32,7 +32,7 @@ use crate::task::TaskOperatorSignalThread;
 
 use crate::remote::{
     LinkResult,
-    announce::{Announcement, Broadcast, RemoteState, TrackerConnection},
+    announce::{Announcement, Broadcast, Phase, TrackerConnection},
     bundle::{ConfigBundle, HeldConfig, ProfileDigest},
     discovery,
     identity::InstallationKey,
@@ -321,7 +321,9 @@ pub struct ServerParts {
     pub listen: SocketAddr,
     pub label: String,
     pub data_dir: PathBuf,
-    pub state: watch::Receiver<RemoteState>,
+    /// What this machine is doing, from which the announced word is derived: one
+    /// fact, so the coarse word and the phase can never say different things.
+    pub phase: watch::Receiver<Phase>,
     pub trackers: Vec<TrackerConnection>,
     pub tasks: Arc<dyn TaskHost>,
 }
@@ -716,7 +718,7 @@ impl LinkServer {
             listen,
             label,
             data_dir,
-            state,
+            phase,
             trackers,
             tasks,
         } = parts;
@@ -749,10 +751,11 @@ impl LinkServer {
                 id: identity.id().to_string(),
                 label: label.clone(),
                 version: env!("CARGO_PKG_VERSION").to_owned(),
-                state: RemoteState::Preparing,
+                state: Phase::Runtime.state(),
+                phase: Some(Phase::Runtime),
                 trackers,
             },
-            state,
+            phase,
         )
         .await?;
         // Discovery is a convenience; a network that refuses mDNS does not stop

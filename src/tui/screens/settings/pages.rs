@@ -10,12 +10,12 @@ use crate::{
     agent::AgentKind,
     credentials::Service,
     project::Project,
-    remote::{RemoteKey, TrackerConnection, TrackerReadiness},
+    remote::{Phase, RemoteKey, TrackerConnection, TrackerReadiness},
     tracker::{TrackerKind, setup::Item},
     tui::{
         app::{CredentialStatus, RemoteStatus, TrackerState},
         widgets::{
-            palette,
+            palette, progress,
             utils::{Dot, plain, shimmer},
         },
     },
@@ -517,6 +517,45 @@ pub(super) fn tracker_connector(state: TrackerState, profile_dir: &Path) -> Conn
     }
 }
 
+/// What a machine says it is doing while it starts itself up, in the words a
+/// client can act on: a download it can watch, a build it should not interrupt,
+/// or the one thing it should do next.
+fn starting_up(phase: Option<&Phase>) -> String {
+    match phase {
+        Some(Phase::BaseImage {
+            downloaded_bytes,
+            total_bytes,
+        }) if *total_bytes > 0 => {
+            let percent = (downloaded_bytes.saturating_mul(100) / total_bytes).min(100);
+            format!(
+                "Downloading the base image · {percent}% of {}. A first start does this once, \
+                 and every task after it starts quicker.",
+                progress::amount(*total_bytes)
+            )
+        }
+        Some(Phase::BaseImage { .. }) => "Downloading the base image. A first start does this \
+             once, and every task after it starts quicker."
+            .to_owned(),
+        Some(Phase::BaseTools) => {
+            "Installing the base tools. A first start installs them once.".to_owned()
+        }
+        Some(Phase::Project { .. }) => {
+            "Building a project's environment. A first build installs its tools, so it takes \
+             a while and is only done once."
+                .to_owned()
+        }
+        Some(Phase::Runtime) => {
+            "Installing what runs sandboxes here. A first start installs it once.".to_owned()
+        }
+        // An older remote does not say which part it is on.
+        Some(Phase::Ready) | None => {
+            "It is building what it needs to run a task. A first build installs the project's \
+             tools, so it takes a while and is only done once."
+                .to_owned()
+        }
+    }
+}
+
 pub(super) fn remote_connector(
     title: String,
     address: &str,
@@ -533,17 +572,25 @@ pub(super) fn remote_connector(
             Some("Sending the projects that run there, and the logins they use.".to_owned()),
             None,
         ),
+        // One project's environment, which a first push builds from nothing. It is
+        // this machine's own work being done over there, which is the wait the
+        // words before it were too coarse to tell apart.
+        RemoteStatus::Preparing(Some(Phase::Project { name })) => (
+            Reach::Asking,
+            "installing tools…",
+            Some(format!(
+                "Building {name}'s environment. A first build installs the project's tools, \
+                 so it takes a while and is only done once."
+            )),
+            None,
+        ),
         // It is starting itself up: installing what it needs and building a base image
         // before it can run anything. Nothing here is being sent anywhere, which is
         // the difference this word exists for.
-        RemoteStatus::Preparing => (
+        RemoteStatus::Preparing(phase) => (
             Reach::Asking,
             "starting up…",
-            Some(
-                "It is building what it needs to run a task. A first build installs the \
-                 project's tools, so it takes a while and is only done once."
-                    .to_owned(),
-            ),
+            Some(starting_up(phase.as_ref())),
             None,
         ),
         RemoteStatus::Reached => (Reach::On, "synced", None, None),

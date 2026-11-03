@@ -23,7 +23,12 @@ pub struct Announcement {
     pub id: String,
     pub label: String,
     pub version: String,
+    /// Whether this machine can be given work, in the one word every version of
+    /// a client reads. It is `phase` said coarsely, for the clients that cannot
+    /// read `phase` at all; a client that can says what the machine is doing.
     pub state: RemoteState,
+    #[serde(default)]
+    pub phase: Option<Phase>,
     pub trackers: Vec<TrackerConnection>,
 }
 
@@ -65,6 +70,44 @@ pub enum RemoteState {
     Ready,
 }
 
+/// What a machine is doing while it cannot be given work yet. A first start
+/// installs a runtime, pulls the base image every environment sits on, and a
+/// configuration it was sent builds one environment per project, all of it
+/// minutes of work that no link frame would otherwise show.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    /// Installing what runs sandboxes at all.
+    Runtime,
+    /// The base image, with how far it has come: the bytes are unknown until the
+    /// manifest is read, so both halves may be zero.
+    BaseImage {
+        downloaded_bytes: u64,
+        total_bytes: u64,
+    },
+    /// The tools the base image's own recipes install.
+    BaseTools,
+    /// One project's environment, which a first push builds from nothing.
+    Project {
+        name: String,
+    },
+    Ready,
+}
+
+impl Phase {
+    pub fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready)
+    }
+
+    pub fn state(&self) -> RemoteState {
+        if self.is_ready() {
+            RemoteState::Ready
+        } else {
+            RemoteState::Preparing
+        }
+    }
+}
+
 pub(super) struct Broadcast {
     tasks: Vec<JoinHandle<()>>,
 }
@@ -73,7 +116,7 @@ impl Broadcast {
     pub(super) async fn start(
         bound: &[SocketAddr],
         announcement: Announcement,
-        state: watch::Receiver<RemoteState>,
+        phase: watch::Receiver<Phase>,
     ) -> LinkResult<Self> {
         // Every listener is bound before any is served: a bind that fails half
         // way through must not leave a task running on a port nobody owns.
@@ -86,7 +129,7 @@ impl Broadcast {
             tasks.push(tokio::spawn(answer_everyone(
                 listener,
                 announcement.clone(),
-                state.clone(),
+                phase.clone(),
             )));
         }
         Ok(Self { tasks })
@@ -130,17 +173,21 @@ fn bind_listener(address: SocketAddr) -> Result<TcpListener, String> {
 async fn answer_everyone(
     listener: TcpListener,
     announcement: Announcement,
-    state: watch::Receiver<RemoteState>,
+    phase: watch::Receiver<Phase>,
 ) {
     loop {
         match listener.accept().await {
             Ok((mut stream, peer)) => {
                 let mut announcement = announcement.clone();
-                let state = state.clone();
+                let phase = phase.clone();
                 tokio::spawn(async move {
                     // Read per request, not once: a remote that has just been sent a
-                    // configuration is building, and says so until it is done.
-                    announcement.state = *state.borrow();
+                    // configuration is building, and says so until it is done. Both
+                    // halves come from one borrow, so the coarse word and the phase
+                    // can never say different things.
+                    let said = phase.borrow().clone();
+                    announcement.state = said.state();
+                    announcement.phase = Some(said);
                     if let Err(error) = answer(&mut stream, &announcement).await {
                         tracing::debug!(%peer, %error, "an announcement went unanswered");
                     }

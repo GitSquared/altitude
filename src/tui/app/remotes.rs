@@ -12,7 +12,7 @@ use crate::{
     config::DEFAULT_PORT,
     isolation::IsolationEngine,
     remote::{
-        Compatibility, LOCAL_VERSION, LinkClient, RemoteKeyStatus, RemoteKeys, RemoteState,
+        Compatibility, LOCAL_VERSION, LinkClient, Phase, RemoteKeyStatus, RemoteKeys, RemoteState,
         TaskOrigin, TaskRequest, TaskSummary, WatchEvent, bring_home, meet, send::send_to_remote,
     },
     task::{TaskEventLoop, TaskService},
@@ -51,7 +51,10 @@ impl App {
                     (format!("{name} (needs config)"), false)
                 }
                 Some(RemoteStatus::Reached) => (name, true),
-                Some(RemoteStatus::Preparing) => (format!("{name} (starting up)"), false),
+                Some(RemoteStatus::Preparing(Some(Phase::Project { .. }))) => {
+                    (format!("{name} (installing tools)"), false)
+                }
+                Some(RemoteStatus::Preparing(_)) => (format!("{name} (starting up)"), false),
                 Some(RemoteStatus::Syncing) => (format!("{name} (syncing)"), false),
                 Some(RemoteStatus::Asking) => (format!("{name} (asking)"), false),
                 Some(RemoteStatus::Changed) => (format!("{name} (identity changed)"), false),
@@ -174,7 +177,10 @@ impl App {
                         WatchEvent::Snapshot(summaries) => WatchedTasks::Snapshot { address, summaries },
                         WatchEvent::Changed(summary) => WatchedTasks::Changed { address, summary },
                         WatchEvent::Removed(id) => WatchedTasks::Removed { address, id },
-                        WatchEvent::Ready => WatchedTasks::Ready { address },
+                        WatchEvent::Ready => WatchedTasks::Phase {
+                            address,
+                            phase: Phase::Ready,
+                        },
                     };
                     if events.send(event).is_err() {
                         return WatchEnd::Closed;
@@ -188,7 +194,7 @@ impl App {
         let address = match &event {
             WatchedTasks::Dialling { address }
             | WatchedTasks::Reached { address, .. }
-            | WatchedTasks::Ready { address }
+            | WatchedTasks::Phase { address, .. }
             | WatchedTasks::Snapshot { address, .. }
             | WatchedTasks::Changed { address, .. }
             | WatchedTasks::Removed { address, .. }
@@ -225,9 +231,15 @@ impl App {
                         );
                     } else {
                         self.note_remote_trackers(&address, &announcement);
-                        let status = match announcement.state {
-                            RemoteState::Preparing => RemoteStatus::Preparing,
-                            RemoteState::Ready => RemoteStatus::Reached,
+                        // A remote that says what it is doing is believed; one too
+                        // old to say is read for the one word it does have.
+                        let status = match announcement.phase.clone() {
+                            Some(phase) if phase.is_ready() => RemoteStatus::Reached,
+                            Some(phase) => RemoteStatus::Preparing(Some(phase)),
+                            None => match announcement.state {
+                                RemoteState::Preparing => RemoteStatus::Preparing(None),
+                                RemoteState::Ready => RemoteStatus::Reached,
+                            },
                         };
                         self.remote_status.insert(address, status);
                     }
@@ -243,8 +255,13 @@ impl App {
                     self.remote_status.insert(address, RemoteStatus::Changed);
                 }
             },
-            WatchedTasks::Ready { address } => {
-                self.remote_status.insert(address, RemoteStatus::Reached);
+            WatchedTasks::Phase { address, phase } => {
+                let status = if phase.is_ready() {
+                    RemoteStatus::Reached
+                } else {
+                    RemoteStatus::Preparing(Some(phase))
+                };
+                self.remote_status.insert(address, status);
             }
             WatchedTasks::Snapshot { address, summaries } => self.holding(address, summaries),
             WatchedTasks::Changed { address, summary } => {

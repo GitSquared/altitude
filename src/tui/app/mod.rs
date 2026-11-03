@@ -24,8 +24,8 @@ use crate::{
     project::{Project, ProjectCommits, TrackerBinding, normalize_repository},
     remote::{
         Announcement, Compatibility, ConfigBundle, ConfigPush, DiscoveredRemote, DiscoveryEvent,
-        LinkClient, RemoteKey, RemoteKeyStatus, RemoteKeys, TaskOrigin, TaskSummary,
-        TrackerConnection, meet, transfer, transfer::TransferUpdate,
+        LinkClient, Phase, RemoteKey, RemoteKeyStatus, RemoteKeys, RemoteState, TaskOrigin,
+        TaskSummary, TrackerConnection, meet, transfer, transfer::TransferUpdate,
     },
     task::{
         SignalTransition, Task, TaskEventLoop, TaskExecutionMode, TaskExecutionPauseReason,
@@ -162,8 +162,9 @@ pub(in crate::tui) enum RemoteStatus {
     Asking,
     Reached,
     // It is building what it needs to run a task here. Nothing of this machine's is
-    // in flight, which is what "syncing" used to say as well.
-    Preparing,
+    // in flight, which is what "syncing" used to say as well. What it is building
+    // is the remote's own to say, and an older one says nothing.
+    Preparing(Option<Phase>),
     // This machine is sending it the projects that run there, and their logins.
     Syncing,
     Changed,
@@ -173,7 +174,7 @@ pub(in crate::tui) enum RemoteStatus {
 
 impl RemoteStatus {
     pub(in crate::tui) fn is_in_progress(&self) -> bool {
-        matches!(self, Self::Asking | Self::Preparing | Self::Syncing)
+        matches!(self, Self::Asking | Self::Preparing(_) | Self::Syncing)
     }
 }
 
@@ -279,6 +280,10 @@ const CHECK_FRESH_FOR: Duration = Duration::from_secs(10 * 60);
 const WATCH_RETRY: Duration = Duration::from_secs(1);
 const WATCH_RETRY_MAX: Duration = Duration::from_secs(30);
 const WATCH_SETTLED: Duration = Duration::from_secs(5);
+// How often a client that is waiting on a remote reads its announcement again. A
+// first start is minutes of installing and downloading, and the announcement is
+// where the machine says which part it is on.
+pub(in crate::tui) const ANNOUNCE_REFRESH: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(in crate::tui) enum ShellId {
@@ -378,8 +383,10 @@ pub enum WatchedTasks {
         key_status: RemoteKeyStatus,
         compatibility: Compatibility,
     },
-    Ready {
+    /// What the remote is doing now: ready, or building what it needs first.
+    Phase {
         address: String,
+        phase: Phase,
     },
     Snapshot {
         address: String,
@@ -1581,6 +1588,55 @@ impl App {
                 .unwrap_or(0);
             self.panel.select_row(index);
         }
+    }
+
+    /// The machines this client is waiting on: one that cannot be given work yet,
+    /// or one it still owes something. A machine that is ready and owed nothing is
+    /// not asked.
+    fn remotes_to_refresh(&self) -> Vec<String> {
+        self.configured_remotes()
+            .into_iter()
+            .filter(|address| match self.remote_status.get(address) {
+                Some(RemoteStatus::Asking | RemoteStatus::Preparing(_) | RemoteStatus::Syncing) => {
+                    true
+                }
+                Some(RemoteStatus::Reached) => self.remote_needs_config(address),
+                _ => false,
+            })
+            .collect()
+    }
+
+    /// Ask those machines what they are doing now. A first start is minutes of
+    /// installing and downloading, and the announcement is where a machine says
+    /// which part it is on. A watch says "ready" once, to whoever is listening at
+    /// that moment, so a client waiting on a machine reads the announcement again
+    /// rather than sitting on the word it got before the machine moved on.
+    pub(in crate::tui) fn refresh_remotes(&self) {
+        let addresses = self.remotes_to_refresh();
+        if addresses.is_empty() {
+            return;
+        }
+        let events = self.watch_events.clone();
+        let keys = self.remote_keys.clone();
+        tokio::spawn(async move {
+            for address in addresses {
+                let remembered = keys.remembered(&address).await.ok().flatten();
+                let Ok(sighting) = meet(&address, DEFAULT_PORT, remembered.as_deref()).await else {
+                    continue;
+                };
+                let phase = match sighting.announcement.phase {
+                    Some(phase) => phase,
+                    // Too old to say which part it is on: the watch is already
+                    // carrying the one word it does have.
+                    None if sighting.announcement.state == RemoteState::Ready => Phase::Ready,
+                    None => continue,
+                };
+                let event = WatchedTasks::Phase { address, phase };
+                if events.send(event).is_err() {
+                    return;
+                }
+            }
+        });
     }
 
     pub(in crate::tui) fn remote_needs_config(&self, address: &str) -> bool {

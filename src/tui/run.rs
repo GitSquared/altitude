@@ -34,9 +34,9 @@ use crate::{
 
 use super::App;
 use super::app::{
-    ConfigPushReply, Foreground, IssueReadReply, IssueSearchReply, NO_TRACKER, RemoteSignalsReply,
-    RemoveTaskReply, RepositoryListReply, SendTaskReply, TaskDelegationReply, TrackerConnectReply,
-    TrackerScopesReply, WatchedTasks,
+    ANNOUNCE_REFRESH, ConfigPushReply, Foreground, IssueReadReply, IssueSearchReply, NO_TRACKER,
+    RemoteSignalsReply, RemoveTaskReply, RepositoryListReply, SendTaskReply, TaskDelegationReply,
+    TrackerConnectReply, TrackerScopesReply, WatchedTasks,
 };
 use super::background::terrain;
 use super::keys::{is_dismiss, is_help};
@@ -233,6 +233,10 @@ where
     let mut progress_clock = time::interval(Duration::from_millis(100));
     progress_clock.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     let mut configuration_clock = time::interval(Duration::from_secs(3));
+    // What a remote is doing, while this client is waiting on it. Nothing is asked
+    // of a machine that is ready and owed nothing.
+    let mut remote_clock = time::interval(ANNOUNCE_REFRESH);
+    remote_clock.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     let mut reading_configuration = false;
     let (configuration_reads, mut configuration_read) = mpsc::unbounded_channel();
     let mut scan = None;
@@ -666,6 +670,7 @@ where
                 discovery_failed = scan.is_none();
                 redraw = true;
             }
+            _ = remote_clock.tick() => app.refresh_remotes(),
             _ = configuration_clock.tick(), if !reading_configuration => {
                 reading_configuration = true;
                 let config = app.config.clone();

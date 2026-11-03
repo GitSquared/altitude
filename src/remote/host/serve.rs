@@ -40,16 +40,17 @@ use tokio::{
 };
 
 use crate::{
-    agent::AgentEngines,
+    agent::{AgentEngines, AgentKind},
     cli::{ServeArgs, ServeCommand, Tracker},
     config::{Config, DEFAULT_PORT, InstallationIdentity, LinearSettings, ServeSettings},
     db::Database,
     isolation::{self, IsolationEngine, IsolationStatus, MicrosandboxIsolation},
     logging,
+    project::Project,
     remote::protocol::{TaskRequest, TaskSummary},
     remote::{
         ClientRecord, InstallationKey, LinkServer, TrackerConnection,
-        announce::{RemoteState, TrackerReadiness},
+        announce::{Phase, TrackerReadiness},
         server::{BoxFuture, ServerParts, TaskHost},
     },
     task::{Task, TaskEventLoop, TaskExecutionUpdate, TaskService, TaskStore},
@@ -106,7 +107,7 @@ struct OwnTasks {
     collecting: Arc<Mutex<HashMap<String, super::super::transfer::TransferUpdate>>>,
     watchers: Arc<Watchers>,
     read_slots: Arc<Semaphore>,
-    readiness: watch::Sender<RemoteState>,
+    readiness: watch::Sender<Phase>,
     runtime: watch::Receiver<IsolationStatus>,
     tracker: Option<Arc<tracker::RemoteTracker>>,
     delegation_paused: bool,
@@ -638,6 +639,7 @@ impl TaskHost for OwnTasks {
     fn configure(&self, peer: EndpointId, forget_logins: bool) -> BoxFuture<Result<(), String>> {
         let config = Arc::clone(&self.config);
         let tasks = Arc::clone(&self.tasks);
+        let phase = self.readiness.clone();
         let mut runtime = self.runtime.clone();
         Box::pin(async move {
             wait_until_ready(&mut runtime).await?;
@@ -648,12 +650,19 @@ impl TaskHost for OwnTasks {
                 .load_or_create_settings()
                 .map_err(|e| e.to_string())?;
             let agent = settings.settings().agent().unwrap_or_default();
-            for project in settings.settings().projects() {
-                tasks
-                    .prepare_project_as_operator(&owner, project, agent)
-                    .await
-                    .map_err(|e| e.to_string())?;
-            }
+            let built = prepare_projects(
+                &tasks,
+                &owner,
+                settings.settings().projects(),
+                agent,
+                &phase,
+            )
+            .await;
+            // Whatever a build did, this machine can be given work again once it
+            // is over: a phase left naming a project that already failed would be
+            // a word that never moves again.
+            phase.send_replace(Phase::Ready);
+            built?;
             // What was pushed is the complete set of projects this machine runs
             // for the operator, so anything else under its store is work that
             // moved away. A project with a task in play keeps its builds until the
@@ -1157,6 +1166,28 @@ async fn wait_until_ready(runtime: &mut watch::Receiver<IsolationStatus>) -> Res
     }
 }
 
+/// Build the environment each project of a pushed configuration runs in. A first
+/// push builds them from nothing, so each one is what the machine says it is doing
+/// while it lasts.
+async fn prepare_projects(
+    tasks: &TaskEventLoop<MicrosandboxIsolation>,
+    owner: &str,
+    projects: &[Project],
+    agent: AgentKind,
+    phase: &watch::Sender<Phase>,
+) -> Result<(), String> {
+    for project in projects {
+        phase.send_replace(Phase::Project {
+            name: project.name.clone(),
+        });
+        tasks
+            .prepare_project_as_operator(owner, project, agent)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 async fn transfer_committed(
     tasks: &TaskEventLoop<MicrosandboxIsolation>,
     prepared: &PreparedTransfer,
@@ -1402,7 +1433,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     // question as "is the runtime up": it is ready once its runtime can make
     // sandboxes. Environments are built per operator, after a push or before a
     // run, rather than from a shared configuration at startup.
-    let (state, observed) = watch::channel(RemoteState::Preparing);
+    let (phase, phases) = watch::channel(Phase::Runtime);
     let database = Database::open(&config).await.map_err(io::Error::other)?;
     let tasks = TaskService::new(
         TaskStore::new(&database),
@@ -1429,11 +1460,14 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     {
         // A machine that finishes preparing says so, rather than leaving the
         // clients that asked before it was ready believing it never got there.
+        // What it was doing until then is in its announcement, which a client that
+        // is waiting on it reads again; the coarse word is the one that has to
+        // reach every watcher, because it is the one that lets them work.
         let watchers = Arc::clone(&watchers);
-        let mut state = state.subscribe();
+        let mut phase = phases.clone();
         tokio::spawn(async move {
-            while state.changed().await.is_ok() {
-                if *state.borrow_and_update() == RemoteState::Ready {
+            while phase.changed().await.is_ok() {
+                if phase.borrow_and_update().is_ready() {
                     watchers.ready();
                 }
             }
@@ -1508,7 +1542,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         collecting: Arc::new(Mutex::new(HashMap::new())),
         watchers,
         read_slots: Arc::new(Semaphore::new(4)),
-        readiness: state,
+        readiness: phase.clone(),
         runtime: prepared,
         tracker: linear_runtime
             .as_ref()
@@ -1533,7 +1567,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         listen,
         label,
         data_dir: config.data_dir().to_owned(),
-        state: observed,
+        phase: phases,
         trackers,
         tasks: host.clone(),
     })
@@ -1566,20 +1600,27 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     let preparation = async {
         loop {
             let status = runtime.borrow_and_update().clone();
-            match status {
-                IsolationStatus::Starting => tracing::info!("Starting sandbox runtime"),
+            let said = match status {
+                IsolationStatus::Starting => Phase::Runtime,
                 IsolationStatus::InstallingRuntime => {
-                    tracing::info!("Installing sandbox runtime · first startup may take a moment")
+                    tracing::info!("Installing sandbox runtime · first startup may take a moment");
+                    Phase::Runtime
                 }
-                IsolationStatus::PreparingBaseImage(_) => {
-                    tracing::info!("Preparing base sandbox image")
+                IsolationStatus::PreparingBaseImage(pull) => {
+                    tracing::info!("Preparing base sandbox image");
+                    Phase::BaseImage {
+                        downloaded_bytes: pull.downloaded_bytes,
+                        total_bytes: pull.total_bytes,
+                    }
                 }
                 IsolationStatus::PreparingBasePackages => {
-                    tracing::info!("Installing base tools")
+                    tracing::info!("Installing base tools");
+                    Phase::BaseTools
                 }
                 IsolationStatus::Failed(error) => return Err(io::Error::other(error)),
                 IsolationStatus::Ready => break,
-            }
+            };
+            phase.send_replace(said);
             runtime.changed().await.map_err(io::Error::other)?;
         }
         tracing::info!("Sandbox ready · recovering saved tasks");
@@ -1589,7 +1630,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
             }
         }
         resumed.enable_admission();
-        readiness.send_replace(RemoteState::Ready);
+        readiness.send_replace(Phase::Ready);
         tracing::info!("Remote ready · open Altitude → Settings → Remotes");
         if !listen.ip().is_loopback() {
             tracing::info!("Clients on the same network can discover this remote automatically");
