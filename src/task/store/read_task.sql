@@ -103,9 +103,13 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
          'cost_usd_micros', coalesce(SUM(json_extract(payload, '$.data.cost_usd_micros')), 0),
          -- The total is the provider's figure only if every part of it was: one run
          -- priced by the harness's own table makes the sum an estimate.
-         'cost_from_provider', coalesce(MIN(json_extract(payload, '$.data.cost_from_provider')), 0),
+         -- A flag has to leave here as JSON true or false: a number reads as a number
+         -- on the way back in, and the facts would not decode at all.
+         'cost_from_provider', CASE WHEN coalesce(MIN(json_extract(payload, '$.data.cost_from_provider')), 0) = 1
+                                    THEN json('true') ELSE json('false') END,
          -- And it is charged for only if every part of it was, for the same reason.
-         'is_charged', coalesce(MIN(json_extract(payload, '$.data.is_charged')), 0))
+         'is_charged', CASE WHEN coalesce(MIN(json_extract(payload, '$.data.is_charged')), 0) = 1
+                            THEN json('true') ELSE json('false') END)
      FROM task_event_logs
      WHERE task_id = tasks.id
        AND event_type = 'agent_usage_reported') AS usage,
