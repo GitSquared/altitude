@@ -1,7 +1,6 @@
 use super::{
-    AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, AgentRefusal, AgentStanding, AgentUsage,
-    REPORT_SCHEMA, REPORT_SYSTEM_PROMPT, TaskProgressDecoder, TaskReportDecoder, TaskUsage,
-    activity,
+    AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, AgentUsage, REPORT_SCHEMA,
+    REPORT_SYSTEM_PROMPT, TaskProgressDecoder, TaskReportDecoder, TaskUsage, activity,
 };
 use crate::isolation::{
     DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand, shell_quote,
@@ -38,10 +37,6 @@ const DEFAULT_MCP: &str = r#"{
 "#;
 
 const REPORT_EXTENSION_PATH: &str = "/tmp/altitude-report.ts";
-// What our own extension writes into the session. A session entry is data in a shape
-// this side chose, which is the only kind of thing a refusal is read from.
-const USAGE_ENTRY_TYPE: &str = "altitude.usage";
-const USAGE_EXTENSION_PATH: &str = "/altitude/pi/altitude-usage.ts";
 const REPORT_SCHEMA_ENV: &str = "ALTITUDE_REPORT_SCHEMA";
 const REPORT_TOOL_NAME: &str = "altitude_task_report";
 const REPORT_EXTENSION: &str = r#"import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -82,12 +77,6 @@ pub struct PiStream {
     // sum. It says whether the price came from the provider or from its own table,
     // and one table-priced message makes the total an estimate.
     spent: AgentUsage,
-    // The account's standing, as the extension left it in the session: which windows
-    // are open, how much of each is gone, and when each comes back.
-    standing: AgentStanding,
-    // Whether the provider refused the turn. That much pi states plainly; everything
-    // else about the refusal is in prose, which is not something to read a fact out of.
-    refused: bool,
 }
 
 impl PiStream {
@@ -103,27 +92,7 @@ impl PiStream {
                 is_charged: true,
                 ..AgentUsage::default()
             },
-            standing: AgentStanding {
-                provider: None,
-                on_plan: None,
-                observed_at_ms: 0,
-                windows: Vec::new(),
-            },
-            refused: false,
         }
-    }
-
-    fn read_standing(&mut self, event: &Value) {
-        let Some(entry) = event.get("entry") else {
-            return;
-        };
-        if entry.get("customType").and_then(Value::as_str) != Some(USAGE_ENTRY_TYPE) {
-            return;
-        }
-        let Ok(standing) = serde_json::from_value::<AgentStanding>(entry["data"].clone()) else {
-            return;
-        };
-        self.standing = standing;
     }
 
     fn process_line(&mut self, line: &str) {
@@ -181,9 +150,6 @@ impl PiStream {
                 let stop_reason = message
                     .and_then(|message| message.get("stopReason"))
                     .and_then(Value::as_str);
-                if stop_reason == Some("error") {
-                    self.refused = true;
-                }
                 if matches!(stop_reason, Some("error") | Some("aborted")) {
                     let detail = message
                         .and_then(|message| message.get("errorMessage"))
@@ -201,7 +167,6 @@ impl PiStream {
                     .unwrap_or("Pi gave up retrying the report turn");
                 self.error = Some(format!("Pi failed the report turn: {detail}"));
             }
-            Some("entry_appended") => self.read_standing(&event),
             Some("agent_settled") => self.settled = true,
             _ => {}
         }
@@ -209,34 +174,8 @@ impl PiStream {
 }
 
 impl TaskReportDecoder for PiStream {
-    fn take_standing(&mut self) -> Option<AgentStanding> {
-        (!self.standing.is_empty()).then(|| self.standing.clone())
-    }
-
-    // A refusal is read from two facts the harness states outright: the provider
-    // refused, and a window the extension reported is spent. Which window and when it
-    // comes back are on that window, so nothing here depends on how the refusal was
-    // worded or what language it was worded in.
-    fn refusal(&mut self) -> Option<AgentRefusal> {
-        if !self.refused {
-            return None;
-        }
-        let spent = self.standing.first_to_clear()?;
-        let clears_at_ms = spent.clears_at_ms?;
-        Some(AgentRefusal::window(spent.window.clone(), clears_at_ms))
-    }
-
-    // The extension is the one who knows whether this credential is a plan, and it
-    // only asks a subscription at all: a plan's prices are not money.
     fn take_usage(&mut self) -> Option<AgentUsage> {
-        if self.spent.is_empty() {
-            return None;
-        }
-        let mut spent = self.spent.clone();
-        if self.standing.on_plan == Some(true) {
-            spent.is_charged = false;
-        }
-        Some(spent)
+        (!self.spent.is_empty()).then(|| self.spent.clone())
     }
 
     fn failure_message(&mut self) -> Option<&str> {
@@ -371,10 +310,9 @@ impl AgentEngine for PiCode {
         // Pi creates the session file when it is absent and continues it when it
         // exists, so a work turn does not distinguish the two.
         format!(
-            "exec pi --print --mode json --session {} --extension {} \
+            "exec pi --print --mode json --session {} \
              --append-system-prompt {} {}",
             shell_quote(&self.conversation_transcript_path(conversation_id)),
-            USAGE_EXTENSION_PATH,
             shell_quote(&super::system_prompt(AUTOPILOT_SYSTEM_PROMPT, context)),
             shell_quote(&format!(
                 "{prompt}\n\nAltitude task context at the start of this turn: {context}"
@@ -389,10 +327,9 @@ impl AgentEngine for PiCode {
             "cat > {extension_path} <<'ALTITUDE_REPORT_EXTENSION'\n{extension}ALTITUDE_REPORT_EXTENSION\n\
              export {schema_env}={schema}\n\
              exec pi --print --mode json --session {session} --no-extensions \
-             --extension {extension_path} --extension {usage_extension} --tools {tool} \
+             --extension {extension_path} --tools {tool} \
              --append-system-prompt {prompt} {message}",
             extension_path = REPORT_EXTENSION_PATH,
-            usage_extension = USAGE_EXTENSION_PATH,
             extension = REPORT_EXTENSION,
             schema_env = REPORT_SCHEMA_ENV,
             schema = shell_quote(REPORT_SCHEMA),
@@ -456,7 +393,6 @@ impl AgentEngine for PiCode {
                     ],
                 )
                 .with_managed_file("altitude-bridge.py", include_str!("assets/bridge.py"))
-                .with_managed_file("altitude-usage.ts", include_str!("assets/pi-usage.ts"))
                 // Conversations live on the task's disk and travel with its
                 // snapshot; the rest of the profile is shared across tasks.
                 .with_task_local_subdirectories(&["sessions"]),

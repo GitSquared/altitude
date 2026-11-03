@@ -52,19 +52,10 @@ pub struct AgentWindowReading {
     pub clears_at_ms: Option<i64>,
 }
 
-impl AgentWindowReading {
-    // A window is spent when it says so, and the percentage is the only thing every
-    // harness reports. How close a window is to that is the operator's business at a
-    // desk, not something an unattended task can act on.
-    pub fn is_spent(&self) -> bool {
-        self.used_percent.is_some_and(|used| used >= 100.0)
-    }
-}
-
 // The account an agent runs on, as its harness last described it: which windows are
 // open, how much of each is gone, and whether the harness itself says this credential
-// is a plan. Both harnesses answer in their own way and the shape is the same, so
-// everything downstream reads one thing.
+// is a plan. Claude reports this on its own stream; pi reports nothing of the kind
+// without an extension of ours, and a harness that says nothing says nothing here.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AgentStanding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -76,21 +67,6 @@ pub struct AgentStanding {
     pub observed_at_ms: i64,
     #[serde(default)]
     pub windows: Vec<AgentWindowReading>,
-}
-
-impl AgentStanding {
-    pub fn is_empty(&self) -> bool {
-        self.windows.is_empty() && self.on_plan.is_none()
-    }
-
-    // The window to wait out when the account refuses: the spent one that comes back
-    // soonest, since that is the first moment there is anything to run again.
-    pub fn first_to_clear(&self) -> Option<&AgentWindowReading> {
-        self.windows
-            .iter()
-            .filter(|reading| reading.is_spent())
-            .min_by_key(|reading| reading.clears_at_ms.unwrap_or(i64::MAX))
-    }
 }
 
 // What the account said when it refused the harness. A window is a clock, and a

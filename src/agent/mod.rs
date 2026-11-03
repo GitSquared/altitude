@@ -212,9 +212,8 @@ pub trait TaskReportDecoder: Send {
     fn take_usage(&mut self) -> Option<AgentUsage> {
         None
     }
-    // The account the run spent, as the harness described it. Both harnesses answer in
-    // their own way — one inside its own stream, one through an extension of ours —
-    // and this is the one shape either of them lands in.
+    // The account the run spent, as the harness described it. One shape, whatever a
+    // harness has to do to fill it.
     fn take_standing(&mut self) -> Option<AgentStanding> {
         None
     }
