@@ -748,7 +748,16 @@ async fn deliver_config(
     client
         .put_config(peer, &bytes, take_tracker)
         .await
-        .map_err(|error| error.to_string())
+        // A machine that answered with a reason is saying something about the
+        // build it is running, and that is the first thing an operator needs to
+        // know when the two disagree about a login.
+        .map_err(|error| {
+            format!(
+                "{} (v{}) refused the configuration: {error}",
+                sighting.announcement.label_or_address(address),
+                sighting.announcement.version
+            )
+        })
 }
 
 fn show_task_error(app: &mut App, id: &str, error: TaskServiceError) {

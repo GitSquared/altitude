@@ -317,7 +317,10 @@ pub(crate) fn remote_connector(
         RemoteStatus::Silent(reason) => (
             Reach::Off,
             "disconnected",
-            Some(format!("It did not answer — {reason}.")),
+            // The reason is a sentence of its own: a machine that refused the
+            // configuration did answer, so the line says what happened rather
+            // than guessing that nothing came back.
+            Some(format!("{reason}.")),
             Some("Press enter to try again."),
         ),
         RemoteStatus::Unknown => (

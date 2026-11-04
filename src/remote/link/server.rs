@@ -157,7 +157,12 @@ impl LinkHandler {
         let mut decoded = Vec::new();
         for profile in &bundle.profiles {
             if !is_allowed_profile(&profile.profile) {
-                return Err(io::Error::other("unknown credential profile"));
+                // Named, because an operator on a newer build is looking at the
+                // other end of this: the profile is what they have to act on.
+                return Err(io::Error::other(format!(
+                    "this machine knows no credential {:?}",
+                    profile.profile
+                )));
             }
             for file in &profile.files {
                 if file.path.is_empty()
