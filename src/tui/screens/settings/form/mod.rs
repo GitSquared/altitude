@@ -1,11 +1,7 @@
 use std::mem;
 
 use crossterm::event::{KeyEvent, MouseEvent};
-use ratatui::{
-    Frame,
-    buffer::Buffer,
-    layout::Rect,
-};
+use ratatui::{Frame, buffer::Buffer, layout::Rect};
 
 use crate::{
     agent::AgentKind,

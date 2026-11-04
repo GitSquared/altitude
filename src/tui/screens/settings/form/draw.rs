@@ -1,6 +1,5 @@
 use super::*;
 
-
 use ratatui::{
     Frame,
     buffer::Buffer,
@@ -12,12 +11,12 @@ use ratatui::{
 use crate::{
     project::{self},
     tui::widgets::{
-            button, chrome,
-            format::truncate,
-            palette,
-            select::{self},
-            text::FieldStyle,
-        },
+        button, chrome,
+        format::truncate,
+        palette,
+        select::{self},
+        text::FieldStyle,
+    },
 };
 
 pub fn draw_form(frame: &mut Frame, area: Rect, form: &mut Form, tick: Option<usize>) {

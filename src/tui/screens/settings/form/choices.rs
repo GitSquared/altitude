@@ -1,6 +1,3 @@
-
-
-
 use crate::{
     credentials::{Credential, Slot},
     project::ProjectCommits,
