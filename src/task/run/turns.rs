@@ -5,6 +5,7 @@ use crate::{
     project::Project,
     vcs::{ContributionObservation, ProviderBatch},
 };
+use std::time::Instant;
 use uuid::Uuid;
 
 // Generous on purpose: silent turns are a normal way to work, and this is the
@@ -341,8 +342,18 @@ where
             answering_signal_id: agent_run.answering_signal_id.clone(),
         }];
         let task = self.record(&task.id, &events).await?;
+        let launching = Instant::now();
         match self.isolation.run_command(sandbox_id, command).await {
-            Ok(session) => Ok((task, agent_run, session)),
+            Ok(session) => {
+                tracing::info!(
+                    task = %task.id,
+                    run = %agent_run.id,
+                    elapsed_ms = launching.elapsed().as_millis() as u64,
+                    mode = ?mode,
+                    "the agent is running"
+                );
+                Ok((task, agent_run, session))
+            }
             Err(error) => {
                 self.finish(
                     &task,

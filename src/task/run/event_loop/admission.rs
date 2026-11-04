@@ -21,6 +21,10 @@ use crate::task::TaskEventLoop;
 // takes the next one.
 const START_BUDGET: Duration = Duration::from_secs(10 * 60);
 
+// A start is minutes of silence in a log. At debug, saying so every half minute is
+// what tells a slow start from a stopped one, which otherwise read the same.
+const START_HEARTBEAT: Duration = Duration::from_secs(30);
+
 impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
     pub fn sandbox_capacity(&self) -> SandboxCapacity {
         self.service.isolation.sandbox_capacity()
@@ -55,6 +59,67 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
                 event_loop.admit();
             }
         });
+    }
+
+    // A start in flight has nothing to say until it ends, which is why a wedged one
+    // used to look exactly like a working one from the outside.
+    pub(crate) fn watch_starting(&self) {
+        let event_loop = self.clone();
+        tokio::spawn(async move {
+            let mut tick = time::interval(START_HEARTBEAT);
+            tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                let starting: Vec<String> = event_loop
+                    .starting
+                    .lock()
+                    .expect("starting lock poisoned")
+                    .iter()
+                    .cloned()
+                    .collect();
+                for task_id in starting {
+                    let task = match event_loop.task(&task_id).await {
+                        Ok(task) => task,
+                        Err(error) => {
+                            tracing::debug!(task = %task_id, %error, "could not read a task that is starting");
+                            continue;
+                        }
+                    };
+                    tracing::debug!(
+                        task = %task_id,
+                        stage = %event_loop.starting_stage(&task_id, task.as_ref()),
+                        "a start is still going"
+                    );
+                }
+            }
+        });
+    }
+
+    // Where a start has got to, read from what is recorded about the task rather than
+    // from the future doing it: the whole point is to say something at a moment when
+    // that future is not saying anything.
+    fn starting_stage(&self, task_id: &str, task: Option<&Task>) -> String {
+        if self
+            .runs
+            .lock()
+            .expect("task run lock poisoned")
+            .contains_key(task_id)
+        {
+            return "the agent is running".to_owned();
+        }
+        if let Some(step) = self.service.environment_step(task_id) {
+            return format!(
+                "building the environment · {} · step {} of {}",
+                step.label,
+                step.completed + 1,
+                step.total
+            );
+        }
+        match task {
+            Some(task) if task.facts.sandbox_available => "launching the agent".to_owned(),
+            Some(_) => "making the sandbox".to_owned(),
+            None => "a task that is no longer recorded".to_owned(),
+        }
     }
 
     // Whether another task would be admitted now. A caller asks this rather than
@@ -141,6 +206,18 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
             .into_iter()
             .filter(|task| !starting.contains(&task.id))
             .collect();
+        // Why nothing started is the question a quiet machine raises, and this is the
+        // pass that answers it.
+        tracing::debug!(
+            room,
+            occupied = tasks
+                .iter()
+                .filter(|task| task.facts.sandbox_available)
+                .count(),
+            starting = starting.len(),
+            waiting = waiting.len(),
+            "an admission pass is deciding"
+        );
         let mut fresh = 0;
         for task in waiting {
             if waits_for_room(task) {
@@ -180,14 +257,7 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
                         );
                         event_loop.watch_agent_run(started);
                     }
-                    Err(_) => {
-                        tracing::error!(
-                            task = %task_id,
-                            budget_s = START_BUDGET.as_secs(),
-                            "a start outlived its budget"
-                        );
-                        event_loop.give_up_starting(task).await;
-                    }
+                    Err(_) => event_loop.give_up_starting(task).await,
                 }
                 event_loop
                     .starting
@@ -218,9 +288,16 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
         let Some(held) = held else {
             return;
         };
+        let stage = self.starting_stage(&held.id, Some(&held));
+        tracing::error!(
+            task = %held.id,
+            budget_s = START_BUDGET.as_secs(),
+            stage = %stage,
+            "a start outlived its budget"
+        );
         let message = format!(
             "Starting this task took longer than {} minutes without finishing, so the machine \
-             stopped trying.",
+             stopped trying. It was still {stage}.",
             START_BUDGET.as_secs() / 60
         );
         let held = match self.service.fail(&held, message).await {

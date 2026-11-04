@@ -11,7 +11,7 @@ use crate::{
 use futures_util::future::join_all;
 
 use crate::isolation::Unwatched;
-use std::{fs, path::PathBuf};
+use std::{fs, path::PathBuf, time::Instant};
 use uuid::Uuid;
 
 use crate::task::{
@@ -128,7 +128,14 @@ where
         let command = match task.agent_kind {
             Some(kind) => {
                 let engine = self.agents.engine(kind);
+                let asking = Instant::now();
                 let conversation_id = self.agent_conversation(&task, resume).await?;
+                tracing::info!(
+                    task = %task.id,
+                    elapsed_ms = asking.elapsed().as_millis() as u64,
+                    resumed = resume,
+                    "the agent's conversation is ready"
+                );
                 // A task the host woke because a linked pull request needed
                 // attention carries why. Anything else is a paused capsule coming
                 // back, whose last turn may be days old by now, so the agent is
@@ -226,6 +233,15 @@ where
             .project()
             .cloned()
             .ok_or(TaskServiceError::Task(TaskError::MissingProject))?;
+        // The longest wait in a start, and the one a wedged machine never gets past,
+        // so it is bracketed: what a log shows between these two lines is the answer.
+        let preparing = Instant::now();
+        tracing::info!(
+            task = %task.id,
+            resumed = snapshot_path.is_some(),
+            agent = task.agent_kind.is_some(),
+            "preparing a task's sandbox"
+        );
         let create = match task.agent_kind {
             Some(kind) => {
                 let agent_id = project
@@ -267,6 +283,12 @@ where
             }
         };
         self.environment_progress.clear(&task.id);
+        tracing::info!(
+            task = %task.id,
+            elapsed_ms = preparing.elapsed().as_millis() as u64,
+            ready = create.is_ok(),
+            "a task's sandbox is ready"
+        );
         if let Err(error) = create {
             self.release_agent_channel(&task.id);
             self.fail(&task, error.to_string()).await?;
