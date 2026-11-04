@@ -151,7 +151,7 @@ A task ends only when the operator accepts a review request, so work that is fin
 
 One request is one thread. If you already opened a thread that stops the task this turn — asking for a project change, for example — that thread is the request: report no signal. Do not raise a blocked signal to announce that you are waiting, and do not repeat what an open thread already says.
 
-The body of an operator signal is the message itself."#;
+The body of an operator signal is the message itself: markdown, drawn as such, where a fenced mermaid block becomes a diagram. A small diagram earns its place when the shape of the work is the point — a flow that changed, before and after, how the parts fit — and it says at a glance what a paragraph would spell out. Do not draw one around a single fact."#;
 const REPORT_SCHEMA: &str = r#"{
   "type": "object",
   "additionalProperties": false,
