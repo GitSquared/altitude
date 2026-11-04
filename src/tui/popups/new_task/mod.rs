@@ -5,10 +5,7 @@ use std::{
 };
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::{
-    Frame,
-    layout::Rect,
-};
+use ratatui::{Frame, layout::Rect};
 
 use crate::tui::keys;
 use crate::tui::widgets::{

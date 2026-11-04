@@ -1,6 +1,5 @@
 use super::*;
 
-
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Flex, Layout, Rect},
@@ -8,14 +7,10 @@ use ratatui::{
     widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-use crate::tui::widgets::{
-    button, chrome, empty,
-    format::truncate,
-    palette,
-    pointer::Targets,
-    shimmer::shimmer,
-};
 use crate::tracker::IssueSummary;
+use crate::tui::widgets::{
+    button, chrome, empty, format::truncate, palette, pointer::Targets, shimmer::shimmer,
+};
 
 pub fn draw(
     frame: &mut Frame,
