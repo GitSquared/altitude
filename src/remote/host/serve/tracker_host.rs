@@ -7,7 +7,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use crate::task::tasks_ahead_in_queue;
+use crate::task::tasks_waiting_for_room;
 use crate::task::{TaskExecutionPauseReason, TaskExecutionStatus};
 use iroh::EndpointId;
 
@@ -355,32 +355,39 @@ impl tracker::Host for OwnTasks {
         Box::pin(async move { Ok(self.tasks.current_activity(&task_id).map(|line| line.text)) })
     }
 
-    fn queue_standing(
-        &self,
-        task_id: String,
-    ) -> tracker::HostFuture<'_, Option<tracker::QueueStanding>> {
+    // One read of the queue for every task on it, rather than one read per task: the
+    // queue, the machine and the start are the same three facts for all of them.
+    fn queue_standings(&self) -> tracker::HostFuture<'_, HashMap<String, tracker::QueueStanding>> {
         Box::pin(async move {
             let tasks = self.tasks.list().await.map_err(|error| error.to_string())?;
-            let start = self.tasks.is_starting(&task_id).then(|| {
-                match self.tasks.service().environment_step(&task_id) {
-                    Some(progress) => tracker::Start::Building(progress),
-                    None => tracker::Start::Provisioning,
-                }
-            });
-            let Some(ahead) = tasks_ahead_in_queue(&tasks, &task_id) else {
-                return Ok(None);
-            };
-            Ok(Some(tracker::QueueStanding {
-                ahead,
-                // A task waiting for room has no capsule, so every capsule counted
-                // here belongs to work that is ahead of it.
-                on_machine: tasks
-                    .iter()
-                    .filter(|task| task.facts.sandbox_available)
-                    .count(),
-                has_room: self.tasks.has_room_for_another(&tasks),
-                start,
-            }))
+            // A task waiting for room has no capsule, so every capsule counted here
+            // belongs to work that is ahead of it.
+            let on_machine = tasks
+                .iter()
+                .filter(|task| task.facts.sandbox_available)
+                .count();
+            let holding = self.tasks.pressure();
+            Ok(tasks_waiting_for_room(&tasks)
+                .into_iter()
+                .enumerate()
+                .map(|(ahead, task)| {
+                    let start = self.tasks.is_starting(&task.id).then(|| {
+                        match self.tasks.service().environment_step(&task.id) {
+                            Some(progress) => tracker::Start::Building(progress),
+                            None => tracker::Start::Provisioning,
+                        }
+                    });
+                    (
+                        task.id.clone(),
+                        tracker::QueueStanding {
+                            ahead,
+                            on_machine,
+                            holding,
+                            start,
+                        },
+                    )
+                })
+                .collect())
         })
     }
 

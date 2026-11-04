@@ -10,7 +10,7 @@ use std::{
 };
 
 use super::admission::{self};
-use crate::isolation::EnvironmentProgress;
+use crate::isolation::{EnvironmentProgress, Pressure};
 use crate::remote::identity::write_private;
 use crate::{
     task::{
@@ -102,7 +102,7 @@ pub struct BoundTask {
 pub struct QueueStanding {
     pub ahead: usize,
     pub on_machine: usize,
-    pub has_room: bool,
+    pub holding: Option<Pressure>,
     pub start: Option<Start>,
 }
 
@@ -155,7 +155,7 @@ pub trait Host: Send + Sync + 'static {
     ) -> HostFuture<'_, Option<BoundTask>>;
     fn session_agent(&self, task_id: String) -> HostFuture<'_, Option<String>>;
 
-    fn queue_standing(&self, task_id: String) -> HostFuture<'_, Option<QueueStanding>>;
+    fn queue_standings(&self) -> HostFuture<'_, HashMap<String, QueueStanding>>;
     fn current_activity(&self, task_id: String) -> HostFuture<'_, Option<String>>;
 }
 

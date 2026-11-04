@@ -574,7 +574,7 @@ where
                 if let Ok(tasks) = event_loop.list().await {
                     app.list_tasks(tasks);
                 }
-                app.capacity = Some(event_loop.sandbox_capacity());
+                app.pressure = event_loop.pressure();
                 redraw = true;
             }
             event = async { scan.as_mut().expect("discovery active").recv().await }, if scan.is_some() => {

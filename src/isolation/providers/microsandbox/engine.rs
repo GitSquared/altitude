@@ -16,9 +16,8 @@ use crate::isolation::{
     BaseSandboxRecipe, BaseSandboxSnapshot, CREDENTIAL_PREFIX, Command, CommandEvent,
     CommandSession, CredentialCheck, CredentialReport, CredentialSandbox, EnvironmentDescription,
     EnvironmentProgressSink, FileTally, FileTransferSink, ImagePull, IsolationEngine,
-    IsolationError, IsolationStatus, OutputStream, PackageInstall, PackageInstallSink,
-    ProfileRecipe, SandboxCapacity, SandboxCeiling, SandboxOptions, SandboxPurpose, VsockRoute,
-    WATCHER_PREFIX,
+    IsolationError, IsolationStatus, OutputStream, PackageInstall, PackageInstallSink, Pressure,
+    ProfileRecipe, SandboxCeiling, SandboxOptions, SandboxPurpose, VsockRoute, WATCHER_PREFIX,
     sandbox::{self, REFRESH_AFTER, private_directory},
 };
 
@@ -45,17 +44,25 @@ impl PackageInstallSink for BasePackages<'_> {
 // One impl block: a trait whose methods return `impl Future` cannot be implemented
 // in two, so the engine's surface stays in this file and the work stays beside it.
 impl IsolationEngine for MicrosandboxIsolation {
-    fn sandbox_capacity(&self) -> SandboxCapacity {
-        self.host_capacity
+    fn pressure(&self) -> Option<Pressure> {
+        self.host_pressure
             .lock()
-            .expect("capacity lock poisoned")
-            .sandbox_capacity()
+            .expect("pressure lock poisoned")
+            .pressure()
     }
 
-    fn observe_demand(&self, queued_tasks: usize) -> SandboxCapacity {
-        let mut capacity = self.host_capacity.lock().expect("capacity lock poisoned");
-        capacity.observe(queued_tasks);
-        capacity.sandbox_capacity()
+    fn observe_pressure(&self) -> Option<Pressure> {
+        self.host_pressure
+            .lock()
+            .expect("pressure lock poisoned")
+            .observe()
+    }
+
+    fn sandbox_ceiling(&self) -> SandboxCeiling {
+        self.host_pressure
+            .lock()
+            .expect("pressure lock poisoned")
+            .ceiling()
     }
 
     fn for_operator(&self, owner: &str) -> Result<Self, IsolationError> {
@@ -75,7 +82,7 @@ impl IsolationEngine for MicrosandboxIsolation {
             cache_home: self.cache_home.clone(),
             socket_safe_home: self.socket_safe_home.clone(),
             build_lock: self.build_lock.clone(),
-            host_capacity: Arc::clone(&self.host_capacity),
+            host_pressure: Arc::clone(&self.host_pressure),
         })
     }
 

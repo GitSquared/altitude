@@ -15,7 +15,7 @@ use crate::{
         CredentialAnswer, CredentialShell, CredentialShellCancel, CredentialShellEvent,
         credential_shell_id,
     },
-    isolation::SandboxCapacity,
+    isolation::Pressure,
     isolation::{EnvironmentDescription, EnvironmentProgress, ProfileSummary},
     project::ProjectCommits,
     remote::{
@@ -514,7 +514,7 @@ pub struct App {
     pub(in crate::tui) shimmer: usize,
     pub(in crate::tui) terrain: Terrain,
     pub(in crate::tui) help_scroll: u16,
-    pub(in crate::tui) capacity: Option<SandboxCapacity>,
+    pub(in crate::tui) pressure: Option<Pressure>,
     pub(in crate::tui) alert: Option<Alert>,
     pub(in crate::tui) removing: HashSet<String>,
     pub(in crate::tui) shells: HashMap<ShellId, Shell>,

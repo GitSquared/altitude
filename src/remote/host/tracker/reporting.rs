@@ -111,6 +111,13 @@ impl RemoteTracker {
     }
 
     pub(super) async fn report_queue_standing(&self, host: &dyn Host) {
+        let standings = match host.queue_standings().await {
+            Ok(standings) => standings,
+            Err(error) => {
+                tracing::debug!(%error, "could not read the queue to report where tasks stand");
+                return;
+            }
+        };
         let bound = match host.bound_tasks().await {
             Ok(bound) => bound,
             Err(error) => {
@@ -119,25 +126,18 @@ impl RemoteTracker {
             }
         };
         for task in bound {
-            let standing = match host.queue_standing(task.task_id.clone()).await {
-                Ok(standing) => standing,
-                Err(error) => {
-                    tracing::debug!(task = %task.task_id, %error, "could not read a task's queue standing");
-                    continue;
-                }
-            };
             let Some(report) = self.report_for_task(&task.task_id) else {
                 continue;
             };
-            let Some(standing) = standing else {
+            let Some(standing) = standings.get(&task.task_id) else {
                 self.queue_notices
                     .lock()
                     .expect("queue notices lock poisoned")
                     .remove(&task.task_id);
                 continue;
             };
-            let since = self.queue_state_since(&task.task_id, &standing);
-            let state = queue_notice_state(&standing);
+            let since = self.queue_state_since(&task.task_id, standing);
+            let state = queue_notice_state(standing);
             let body = queue_notice_line(&state, since);
             if !self.queue_notice_is_due(&task.task_id, standing.ahead, &state) {
                 continue;
@@ -601,17 +601,24 @@ fn queue_notice_state(standing: &QueueStanding) -> String {
         1 => "Queued on the remote · 1 task ahead".to_owned(),
         ahead => format!("Queued on the remote · {ahead} tasks ahead"),
     };
-    // The verb travels with the count so one clause reads both ways: what is on the
-    // machine, and what about it leaves no room.
-    let work = match standing.on_machine {
-        0 => None,
-        1 => Some("1 task is".to_owned()),
-        on_machine => Some(format!("{on_machine} tasks are")),
-    };
-    match (work, standing.has_room) {
-        (None, _) => place,
-        (Some(work), true) => format!("{place} · {work} on the machine"),
-        (Some(work), false) => format!("{place} · no room while {work} on the machine"),
+    // What is in the way, when something is: the machine's own reason if it has one,
+    // and otherwise the work it is already carrying.
+    match standing.holding {
+        Some(pressure) => format!("{place} · {}", pressure_words(pressure)),
+        None => match standing.on_machine {
+            0 => place,
+            1 => format!("{place} · 1 task is on the machine"),
+            on_machine => format!("{place} · {on_machine} tasks are on the machine"),
+        },
+    }
+}
+
+// The machine says what it is busy with; the operator reads why their task is waiting.
+fn pressure_words(pressure: Pressure) -> &'static str {
+    match pressure {
+        Pressure::Cpu => "the machine is using as much cpu as it will take",
+        Pressure::Memory => "the machine is using as much memory as it will take",
+        Pressure::Disk => "the machine is low on disk",
     }
 }
 

@@ -114,7 +114,7 @@ where
             review_waits: Arc::new(ReviewWaits::default()),
             sends_home: Arc::new(Mutex::new(None)),
         };
-        event_loop.watch_host_capacity();
+        event_loop.watch_pressure();
         event_loop.watch_starting();
         event_loop.watch_held_reviews();
         (event_loop, receiver)

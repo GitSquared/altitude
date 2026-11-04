@@ -13,7 +13,7 @@ use crate::{
     remote::TaskSummary,
     task::{
         SIGNAL_ORDER, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
-        TaskOperatorSignalKind, tasks_ahead_in_queue,
+        TaskOperatorSignalKind, place_in_queue,
     },
     tui::{
         App,
@@ -413,14 +413,7 @@ struct Held {
 }
 
 fn rows(app: &App) -> Built {
-    let occupied = app
-        .tasks
-        .iter()
-        .filter(|task| task.facts.sandbox_available)
-        .count();
-    let has_room = app
-        .capacity
-        .is_none_or(|capacity| capacity.free_slots_after(occupied) > 0);
+    let taking_work = app.pressure.is_none();
     let filter = app
         .task_filter
         .chosen_value()
@@ -446,8 +439,8 @@ fn rows(app: &App) -> Built {
             detail_of(
                 app,
                 &summary,
-                tasks_ahead_in_queue(&app.tasks, &task.id),
-                has_room,
+                place_in_queue(&app.tasks, &task.id),
+                taking_work,
             ),
         );
         entries.push(Held {
@@ -475,7 +468,7 @@ fn rows(app: &App) -> Built {
             summary,
             standing,
             false,
-            detail_of(app, summary, None, has_room),
+            detail_of(app, summary, None, taking_work),
         );
         // A machine is a name only when the task is not on this one.
         if summary.tracker_issue.is_none() {
@@ -582,7 +575,7 @@ fn row_of(summary: &TaskSummary, standing: Standing, live: bool, detail: String)
     row
 }
 
-fn detail_of(app: &App, summary: &TaskSummary, ahead: Option<usize>, has_room: bool) -> String {
+fn detail_of(app: &App, summary: &TaskSummary, ahead: Option<usize>, taking_work: bool) -> String {
     // What the agent is doing right now is the fact that changes what this row
     // means, so it is the row's own line before anything else it might say.
     if summary.status == TaskExecutionStatus::Running
@@ -646,9 +639,9 @@ fn detail_of(app: &App, summary: &TaskSummary, ahead: Option<usize>, has_room: b
             .clone()
             .unwrap_or_else(|| "the run ended in an error".to_owned()),
         TaskExecutionStatus::Pending => match ahead {
-            Some(0) if !has_room => "next up".to_owned(),
+            Some(0) if !taking_work => "next up".to_owned(),
             Some(ahead) => format!("{ahead} ahead"),
-            None => "waiting for room".to_owned(),
+            None => "waiting".to_owned(),
         },
         TaskExecutionStatus::Running => match summary.mode {
             TaskExecutionMode::Autopilot => "working".to_owned(),

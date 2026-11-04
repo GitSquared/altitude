@@ -182,15 +182,7 @@ impl Error for TaskServiceError {}
 
 // Execution policy consumes recorded values; the store does not infer these decisions.
 
-pub(crate) use queue::tasks_ahead_in_queue;
-
-pub(crate) fn wants_a_slot(task: &Task) -> bool {
-    !task.facts.is_borrowed()
-        && matches!(
-            task.facts.execution_status,
-            TaskExecutionStatus::Pending | TaskExecutionStatus::Running
-        )
-}
+pub(crate) use queue::{place_in_queue, tasks_waiting_for_room};
 
 fn should_resume(task: &Task) -> bool {
     matches!(

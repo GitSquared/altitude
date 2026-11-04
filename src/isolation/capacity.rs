@@ -1,11 +1,11 @@
 use std::{
-    cmp::Ordering,
     collections::VecDeque,
+    path::{Path, PathBuf},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use sysinfo::{MINIMUM_CPU_UPDATE_INTERVAL, System};
+use sysinfo::{Disks, MINIMUM_CPU_UPDATE_INTERVAL, System};
 
 use super::SandboxCeiling;
 
@@ -13,17 +13,53 @@ pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
 
 pub const WINDOW: Duration = Duration::from_secs(10 * 60);
 
-pub const CPU_TARGET_PERCENT: f64 = 75.0;
+// Where the valve shuts and where it opens again. Two thresholds because one flaps: a
+// machine sitting on the line would take a task, become too busy, refuse the next, and
+// spend the afternoon taking every other one.
+pub const BUSY_CPU_PERCENT: f64 = 75.0;
+pub const CALM_CPU_PERCENT: f64 = 60.0;
+pub const BUSY_MEMORY_PERCENT: f64 = 80.0;
+pub const CALM_MEMORY_PERCENT: f64 = 70.0;
 
-pub const MEMORY_TARGET_PERCENT: f64 = 80.0;
+// A disk that fills stops a machine rather than slowing it, and it is the one resource
+// a ceiling can take past the point of no return. Five gigabytes is a machine in
+// trouble, whatever its disk's size.
+pub const DISK_FLOOR_MIB: u64 = 5 * 1_024;
 
 pub const MIN_READINGS: usize = 4;
+
+pub const SANDBOX_DISK_CEILING_MIB: u32 = 15 * 1_024;
+
+pub const MEMORY_SHARE_OF_HOST: u64 = 80;
+pub const MINIMUM_CEILING_MIB: u64 = 2 * 1_024;
+pub const MAXIMUM_CEILING_MIB: u64 = 8 * 1_024;
+pub const MAXIMUM_CEILING_CPUS: u8 = 4;
+
+// What a machine is too busy with. A ceiling is a bound and not a reservation, so
+// there is no count of what fits anywhere in this module: the only question a queue
+// can ask a host is whether it is coping, and this is the answer when it is not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pressure {
+    Cpu,
+    Memory,
+    Disk,
+}
+
+// How many starts may be landing at once. A start is minutes of boot before it shows
+// up in the machine's own load, so this counts transitions and not capacity: two at a
+// time on a machine with the cores to absorb them, one otherwise.
+pub fn landings() -> usize {
+    thread::available_parallelism()
+        .map_or(1, |cores| cores.get())
+        .min(2)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ResourceSample {
     pub at_ms: i64,
     pub cpu_percent: f64,
     pub memory_percent: f64,
+    pub available_mib: u64,
 }
 
 #[derive(Debug, Default)]
@@ -47,6 +83,10 @@ impl SampleWindow {
 
     pub fn is_warming_up(&self) -> bool {
         self.samples.len() < MIN_READINGS
+    }
+
+    pub fn latest(&self) -> Option<&ResourceSample> {
+        self.samples.back()
     }
 
     pub fn cpu_p75(&self) -> Option<f64> {
@@ -78,27 +118,6 @@ fn total_memory_mib(system: &System) -> u64 {
     system.total_memory() / (1024 * 1024)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SandboxCapacity {
-    pub slots: usize,
-    pub ceiling: SandboxCeiling,
-}
-
-impl SandboxCapacity {
-    pub fn free_slots_after(&self, in_use: usize) -> usize {
-        self.slots.saturating_sub(in_use)
-    }
-}
-
-impl Default for SandboxCapacity {
-    fn default() -> Self {
-        Self {
-            slots: 1,
-            ceiling: smallest_ceiling(),
-        }
-    }
-}
-
 fn smallest_ceiling() -> SandboxCeiling {
     SandboxCeiling {
         cpus: 1,
@@ -107,51 +126,20 @@ fn smallest_ceiling() -> SandboxCeiling {
     }
 }
 
-pub const SANDBOX_DISK_CEILING_MIB: u32 = 15 * 1_024;
-
-pub const MEMORY_SHARE_OF_HOST: u64 = 80;
-pub const MINIMUM_CEILING_MIB: u64 = 2 * 1_024;
-pub const MAXIMUM_CEILING_MIB: u64 = 8 * 1_024;
-pub const MAXIMUM_CEILING_CPUS: u8 = 4;
-
-pub fn optimistic_start() -> usize {
-    thread::available_parallelism().map_or(1, |cores| cores.get())
-}
-
-pub fn next_slot_limit(current: usize, window: &SampleWindow, demand: usize) -> usize {
-    let (Some(cpu), Some(memory)) = (window.cpu_p75(), window.memory_p75()) else {
-        return current;
-    };
-    if window.is_warming_up() {
-        return current;
-    }
-    if cpu > CPU_TARGET_PERCENT || memory > MEMORY_TARGET_PERCENT {
-        return current.saturating_sub(1).max(1);
-    }
-    match demand.cmp(&current) {
-        Ordering::Greater => current + 1,
-        Ordering::Less => current.saturating_sub(1).max(1),
-        Ordering::Equal => current,
-    }
-}
-
-fn percentile_75(values: impl Iterator<Item = f64>) -> Option<f64> {
-    let mut sorted: Vec<f64> = values.collect();
-    sorted.sort_by(f64::total_cmp);
-    let rank = (0.75 * sorted.len() as f64).ceil() as usize;
-    sorted.get(rank.checked_sub(1)?).copied()
-}
-
+// The valve, and the sizes that go with it. It holds no count of how many sandboxes
+// the machine may carry, because nothing here reserves anything: it reads what the
+// machine is doing and answers whether it is coping.
 #[derive(Debug)]
-pub struct HostCapacity {
+pub struct HostPressure {
     sampler: Option<HostSampler>,
     totals: HostTotals,
     window: SampleWindow,
-    slots: usize,
+    data_dir: PathBuf,
+    held: Option<Pressure>,
 }
 
-impl HostCapacity {
-    pub fn new() -> Self {
+impl HostPressure {
+    pub fn new(data_dir: &Path) -> Self {
         let mut sampler = HostSampler::new();
         let totals = sampler
             .as_mut()
@@ -164,49 +152,87 @@ impl HostCapacity {
             sampler,
             totals,
             window: SampleWindow::new(),
-            slots: optimistic_start(),
+            data_dir: data_dir.to_owned(),
+            held: None,
         }
     }
 
-    fn ceiling(&self) -> SandboxCeiling {
+    // A reading and the valve's answer with it: they move together, and a caller that
+    // sampled and then asked would be reading an answer one sample old.
+    pub fn observe(&mut self) -> Option<Pressure> {
+        let low_disk = self.disk_available_mib() < DISK_FLOOR_MIB;
+        if let Some(sample) = self.sampler.as_mut().and_then(HostSampler::sample) {
+            self.window.push(sample);
+        }
+        let (Some(cpu), Some(memory)) = (self.window.cpu_p75(), self.window.memory_p75()) else {
+            // Too few readings to judge the machine. A valve that shut on no readings
+            // would refuse the first task after every restart, so only the disk — which
+            // is a fact rather than a sample — can close it this early.
+            self.held = low_disk.then_some(Pressure::Disk);
+            return self.held;
+        };
+        if self.window.is_warming_up() {
+            self.held = low_disk.then_some(Pressure::Disk);
+            return self.held;
+        }
+        self.held = match self.held {
+            // A held valve opens on calm rather than on the line it shut at, which is
+            // the whole of the hysteresis.
+            Some(_) if cpu < CALM_CPU_PERCENT && memory < CALM_MEMORY_PERCENT && !low_disk => None,
+            Some(held) => Some(held),
+            None if cpu > BUSY_CPU_PERCENT => Some(Pressure::Cpu),
+            None if memory > BUSY_MEMORY_PERCENT => Some(Pressure::Memory),
+            None if low_disk => Some(Pressure::Disk),
+            None => None,
+        };
+        self.held
+    }
+
+    pub fn pressure(&self) -> Option<Pressure> {
+        self.held
+    }
+
+    // Sized from what the machine has left rather than from a count of how many it is
+    // keeping: a ceiling is an upper bound, so the only honest input is memory it can
+    // actually give away now. A box filling up hands out smaller sandboxes by itself.
+    pub fn ceiling(&self) -> SandboxCeiling {
         if self.totals.memory_mib == 0 {
             return smallest_ceiling();
         }
-        let share = u64::try_from(self.slots.max(1)).unwrap_or(u64::MAX);
-        // The floor wins over the share, deliberately: a sandbox too small to run
-        // a package manager fails in a way that looks like a broken agent, while
-        // one that grows past its share is caught by the sampler, which pulls the
-        // count down rather than shrinking work already in progress. The ceiling
-        // is a bound, not a reservation, so the overshoot costs nothing until a
-        // guest actually touches that memory.
-        let memory_mib = (self.totals.memory_mib * MEMORY_SHARE_OF_HOST / 100 / share)
+        let available_mib = self
+            .window
+            .latest()
+            .map_or(self.totals.memory_mib, |sample| sample.available_mib);
+        let memory_mib = (available_mib * MEMORY_SHARE_OF_HOST / 100)
             .clamp(MINIMUM_CEILING_MIB, MAXIMUM_CEILING_MIB);
-        let cpus = u64::try_from(self.totals.cpus).unwrap_or(1) / share;
         SandboxCeiling {
-            cpus: u8::try_from(cpus.clamp(1, u64::from(MAXIMUM_CEILING_CPUS))).unwrap_or(1),
+            // Every guest may be told the machine's cores: vcpus are time-shared, and
+            // what keeps the number of guests down is the valve, not the ceiling.
+            cpus: u8::try_from(self.totals.cpus.clamp(1, usize::from(MAXIMUM_CEILING_CPUS)))
+                .unwrap_or(1),
             memory_mib: u32::try_from(memory_mib.min(u64::from(u32::MAX))).unwrap_or(u32::MAX),
             disk_mib: SANDBOX_DISK_CEILING_MIB,
         }
     }
 
-    pub fn sandbox_capacity(&self) -> SandboxCapacity {
-        SandboxCapacity {
-            slots: self.slots,
-            ceiling: self.ceiling(),
-        }
-    }
-
-    pub fn observe(&mut self, demand: usize) -> Option<usize> {
-        let sample = self.sampler.as_mut()?.sample()?;
-        self.window.push(sample);
-        self.slots = next_slot_limit(self.slots, &self.window, demand);
-        Some(self.slots)
+    fn disk_available_mib(&self) -> u64 {
+        // The filesystem holding the sandboxes, which is the one that fills when they
+        // do. Anything unreadable is treated as having room rather than as pressure:
+        // a machine that cannot answer is not a machine to stop taking work for.
+        let Ok(disks) = Disks::new_with_refreshed_list() else {
+            return u64::MAX;
+        };
+        disks
+            .iter()
+            .filter(|disk| self.data_dir.starts_with(disk.mount_point()))
+            .max_by_key(|disk| disk.mount_point().as_os_str().len())
+            .map_or(u64::MAX, |disk| disk.available_space() / (1024 * 1024))
     }
 }
 
-impl Default for HostCapacity {
+impl Default for HostPressure {
     fn default() -> Self {
-        Self::new()
+        Self::new(Path::new("."))
     }
 }
 
@@ -246,18 +272,27 @@ impl HostSampler {
             return None;
         }
         // Both or neither: a reading that cannot see memory is not a reading this
-        // rule should act on.
+        // valve should act on.
         let total = self.system.total_memory();
         if total == 0 {
             return None;
         }
-        let used = total.saturating_sub(self.system.available_memory());
+        let available = self.system.available_memory();
+        let used = total.saturating_sub(available);
         Some(ResourceSample {
             at_ms: now_ms(),
             cpu_percent: f64::from(self.system.global_cpu_usage()).clamp(0.0, 100.0),
             memory_percent: (100.0 * used as f64 / total as f64).clamp(0.0, 100.0),
+            available_mib: available / (1024 * 1024),
         })
     }
+}
+
+fn percentile_75(values: impl Iterator<Item = f64>) -> Option<f64> {
+    let mut sorted: Vec<f64> = values.collect();
+    sorted.sort_by(f64::total_cmp);
+    let rank = (0.75 * sorted.len() as f64).ceil() as usize;
+    sorted.get(rank.checked_sub(1)?).copied()
 }
 
 fn now_ms() -> i64 {

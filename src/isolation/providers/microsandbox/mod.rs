@@ -18,9 +18,7 @@ use tokio::{process::Command as TokioCommand, task::spawn_blocking};
 use crate::agent::mcp::AGENT_CHANNEL_PORT;
 use crate::config::Config;
 
-use crate::isolation::{
-    CREDENTIAL_PREFIX, IsolationError, SandboxCeiling, VsockRoute, capacity::HostCapacity,
-};
+use crate::isolation::{CREDENTIAL_PREFIX, IsolationError, VsockRoute, capacity::HostPressure};
 
 mod base;
 mod engine;
@@ -47,7 +45,7 @@ pub struct MicrosandboxIsolation {
     build_lock: BuildLock,
     // Shared rather than per view: how much this machine can take is the same
     // answer for every operator on it.
-    host_capacity: Arc<Mutex<HostCapacity>>,
+    host_pressure: Arc<Mutex<HostPressure>>,
 }
 
 #[derive(Clone)]
@@ -141,16 +139,8 @@ impl MicrosandboxIsolation {
             cache_home: config.isolation_cache_dir(),
             socket_safe_home: config.microsandbox_socket_dir(),
             build_lock: BuildLock::new(config),
-            host_capacity: Arc::new(Mutex::new(HostCapacity::new())),
+            host_pressure: Arc::new(Mutex::new(HostPressure::new(&config.isolation_data_dir()))),
         }
-    }
-
-    pub(super) fn sandbox_ceiling(&self) -> SandboxCeiling {
-        self.host_capacity
-            .lock()
-            .expect("capacity lock poisoned")
-            .sandbox_capacity()
-            .ceiling
     }
 
     pub(super) fn credential_shell_channel(&self, id: &str) -> Option<VsockRoute> {

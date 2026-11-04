@@ -3,15 +3,14 @@ use std::time::{Duration, Instant};
 
 use tokio::time;
 
-use crate::isolation::{IsolationEngine, SandboxCapacity};
+use crate::isolation::capacity::SAMPLE_INTERVAL;
+use crate::isolation::{IsolationEngine, Pressure, landings};
 
 use crate::task::{
     Task, TaskExecutionUpdate, TaskService,
     queue::{tasks_waiting_to_start, waits_for_room},
-    wants_a_slot,
 };
 
-use crate::isolation::capacity::SAMPLE_INTERVAL;
 use crate::task::TaskEventLoop;
 
 // A start that is still going after ten minutes is one nothing is going to finish:
@@ -26,35 +25,25 @@ const START_BUDGET: Duration = Duration::from_secs(10 * 60);
 const START_HEARTBEAT: Duration = Duration::from_secs(30);
 
 impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
-    pub fn sandbox_capacity(&self) -> SandboxCapacity {
-        self.service.isolation.sandbox_capacity()
+    pub fn pressure(&self) -> Option<Pressure> {
+        self.service.isolation.pressure()
     }
 
-    pub(crate) fn watch_host_capacity(&self) {
+    // The machine's own answer, taken on a clock: this is the whole of what a queue
+    // knows about a host it does not measure itself.
+    pub(crate) fn watch_pressure(&self) {
         let event_loop = self.clone();
         tokio::spawn(async move {
             let mut tick = time::interval(SAMPLE_INTERVAL);
             loop {
                 tick.tick().await;
-                // Demand is the queue's business; how much room that leaves is
-                // the host's, and only the second half is asked for here.
-                let demand = match event_loop.service.list().await {
-                    Ok(tasks) => tasks
-                        .iter()
-                        .filter(|task| wants_a_slot(task) && task.facts.deferred_review.is_none())
-                        .count(),
-                    Err(error) => {
-                        tracing::warn!(%error, "could not read tasks to measure demand");
-                        continue;
-                    }
-                };
-                let capacity = event_loop.service.isolation.observe_demand(demand);
+                let pressure = event_loop.service.isolation.observe_pressure();
+                let ceiling = event_loop.service.isolation.sandbox_ceiling();
                 tracing::debug!(
-                    slots = capacity.slots,
-                    ceiling_cpus = capacity.ceiling.cpus,
-                    ceiling_mib = capacity.ceiling.memory_mib,
-                    demand,
-                    "observed host capacity"
+                    ?pressure,
+                    ceiling_cpus = ceiling.cpus,
+                    ceiling_mib = ceiling.memory_mib,
+                    "measured the machine"
                 );
                 event_loop.admit();
             }
@@ -122,13 +111,6 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
         }
     }
 
-    // Whether another task would be admitted now. A caller asks this rather than
-    // reading a slot count and comparing it: how many sandboxes the machine keeps
-    // is its own moving answer, and what that means for the next task is this rule.
-    pub(crate) fn has_room_for_another(&self, tasks: &[Task]) -> bool {
-        self.free_slots(tasks) > 0
-    }
-
     // A task being started has no capsule yet, so the queue still counts it as
     // waiting for room. What separates it from the tasks behind it is that this
     // machine is already working on it.
@@ -137,21 +119,6 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
             .lock()
             .expect("starting lock poisoned")
             .contains(task_id)
-    }
-
-    // A capsule that exists is a slot in use. A task being started has no capsule
-    // yet but is about to want one, so it counts too. One count, because a second
-    // copy of this arithmetic is one that can disagree with admission.
-    fn free_slots(&self, tasks: &[Task]) -> usize {
-        let occupied = tasks
-            .iter()
-            .filter(|task| task.facts.sandbox_available)
-            .count();
-        let taken = occupied + self.starting.lock().expect("starting lock poisoned").len();
-        self.service
-            .isolation
-            .sandbox_capacity()
-            .free_slots_after(taken)
     }
 
     pub fn enable_admission(&self) {
@@ -194,7 +161,6 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
                 }
             }
         }
-        let room = self.free_slots(&tasks);
         // The queue is the one the screens show: same order, same rule about who
         // is waiting for room. Only the tasks already being started drop out.
         let starting = self
@@ -202,6 +168,14 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
             .lock()
             .expect("starting lock poisoned")
             .clone();
+        // A machine busy with something that is not ours must not starve the queue, so
+        // the valve only holds work back while the machine is carrying some of it.
+        let carrying =
+            tasks.iter().any(|task| task.facts.sandbox_available) || !starting.is_empty();
+        let stalled = self.service.isolation.pressure().filter(|_| carrying);
+        // A start that has not booted yet is invisible in the load that would have said
+        // no to it, so landings are counted rather than measured.
+        let mut landing = starting.len();
         let waiting: Vec<&Task> = tasks_waiting_to_start(&tasks)
             .into_iter()
             .filter(|task| !starting.contains(&task.id))
@@ -209,22 +183,17 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
         // Why nothing started is the question a quiet machine raises, and this is the
         // pass that answers it.
         tracing::debug!(
-            room,
-            occupied = tasks
-                .iter()
-                .filter(|task| task.facts.sandbox_available)
-                .count(),
-            starting = starting.len(),
+            ?stalled,
+            landing,
             waiting = waiting.len(),
             "an admission pass is deciding"
         );
-        let mut fresh = 0;
         for task in waiting {
             if waits_for_room(task) {
-                if fresh >= room {
+                if stalled.is_some() || landing >= landings() {
                     continue;
                 }
-                fresh += 1;
+                landing += 1;
             }
             if !self.admission_enabled.load(Ordering::Acquire) {
                 break;

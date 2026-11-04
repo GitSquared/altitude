@@ -19,11 +19,18 @@ pub fn waits_for_room(task: &Task) -> bool {
     !task.facts.sandbox_available
 }
 
-pub fn tasks_ahead_in_queue(tasks: &[Task], task_id: &str) -> Option<usize> {
+// The order the machine would take these in, and the one the screens show. It is one
+// list because a queue numbered in one place and served from another is two answers
+// to the same question.
+pub fn tasks_waiting_for_room(tasks: &[Task]) -> Vec<&Task> {
     tasks_waiting_to_start(tasks)
         .into_iter()
         .filter(|task| waits_for_room(task))
-        .enumerate()
-        .find(|(_, task)| task.id == task_id)
-        .map(|(ahead, _)| ahead)
+        .collect()
+}
+
+pub fn place_in_queue(tasks: &[Task], task_id: &str) -> Option<usize> {
+    tasks_waiting_for_room(tasks)
+        .iter()
+        .position(|task| task.id == task_id)
 }

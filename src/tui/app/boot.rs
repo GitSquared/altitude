@@ -191,7 +191,7 @@ impl App {
             shimmer: 0,
             terrain: Terrain::default(),
             help_scroll: 0,
-            capacity: None,
+            pressure: None,
         }
     }
 }

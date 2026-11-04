@@ -16,7 +16,7 @@ use crate::project::Project;
 // machine, not about the work.
 pub(crate) mod capacity;
 
-pub use capacity::SandboxCapacity;
+pub use capacity::{Pressure, landings};
 mod git_cache;
 pub(crate) mod mounts;
 mod providers;
@@ -390,9 +390,13 @@ impl fmt::Display for IsolationError {
 impl StdError for IsolationError {}
 
 pub trait IsolationEngine: Send + Sync {
-    fn sandbox_capacity(&self) -> SandboxCapacity;
+    // Whether the machine is coping, and whether asking it is a question that a
+    // sample has to be taken for.
+    fn pressure(&self) -> Option<Pressure>;
 
-    fn observe_demand(&self, queued_tasks: usize) -> SandboxCapacity;
+    fn observe_pressure(&self) -> Option<Pressure>;
+
+    fn sandbox_ceiling(&self) -> SandboxCeiling;
 
     fn provision(
         &self,
