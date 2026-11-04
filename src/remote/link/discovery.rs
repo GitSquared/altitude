@@ -7,11 +7,7 @@ use std::{
     net::SocketAddr,
     time::Duration,
 };
-use tokio::{
-    sync::mpsc,
-    task::JoinSet,
-    time::{Instant, timeout_at},
-};
+use tokio::{sync::mpsc, task::JoinSet, time::timeout};
 
 use crate::{
     config::DEFAULT_PORT,
@@ -44,11 +40,15 @@ struct SourceEvent {
     event: DiscoveryEvent,
 }
 
+// How long the local network is listened to. Browsing is a subscription that never
+// ends by itself, so it is the one source that needs a window; a tailnet scan
+// bounds itself by the peers it has to probe.
+const LOCAL_WINDOW: Duration = Duration::from_secs(3);
+
 pub struct Scan {
     events: mpsc::Receiver<SourceEvent>,
     sightings: BTreeMap<Source, HashMap<EndpointId, DiscoveredRemote>>,
     tasks: JoinSet<()>,
-    deadline: Instant,
 }
 
 pub(crate) async fn scan(endpoint: &Endpoint) -> LinkResult<Scan> {
@@ -58,30 +58,36 @@ pub(crate) async fn scan(endpoint: &Endpoint) -> LinkResult<Scan> {
         Ok(mut browser) => {
             let send = send.clone();
             tasks.spawn(async move {
-                while let Some(event) = browser.recv().await {
-                    let event = SourceEvent {
-                        source: Source::Local,
-                        event,
-                    };
-                    if send.send(event).await.is_err() {
-                        break;
+                let browsing = async move {
+                    while let Some(event) = browser.recv().await {
+                        let event = SourceEvent {
+                            source: Source::Local,
+                            event,
+                        };
+                        if send.send(event).await.is_err() {
+                            break;
+                        }
                     }
-                }
+                };
+                let _ = timeout(LOCAL_WINDOW, browsing).await;
             });
         }
         Err(error) => tracing::warn!(%error, "Local network discovery unavailable"),
     }
-    if let Some(executable) = tailscale::executable() {
-        tasks.spawn(tailscale::scan(executable, endpoint.id(), send.clone()));
+    match tailscale::executable() {
+        Some(executable) => {
+            tasks.spawn(tailscale::scan(executable, endpoint.id(), send.clone()));
+        }
+        None => tracing::debug!("the tailscale CLI was not found; the tailnet was not scanned"),
     }
     if tasks.is_empty() {
         return Err("No network discovery source is available; add remotes by hostname".into());
     }
+    tracing::debug!("a scan is looking for remotes");
     Ok(Scan {
         events,
         sightings: BTreeMap::new(),
         tasks,
-        deadline: Instant::now() + Duration::from_secs(5),
     })
 }
 
@@ -92,14 +98,16 @@ pub(crate) fn advertise(endpoint: &Endpoint, label: &str) -> LinkResult<()> {
 impl Scan {
     pub async fn recv(&mut self) -> Option<DiscoveryEvent> {
         loop {
-            let SourceEvent { source, event } =
-                match timeout_at(self.deadline, self.events.recv()).await {
-                    Ok(Some(event)) => event,
-                    _ => {
-                        self.tasks.abort_all();
-                        return None;
-                    }
-                };
+            // A scan ends when its sources do: each one bounds itself, so nothing
+            // can be cut off mid-probe the way a window over the whole scan did.
+            let SourceEvent { source, event } = match self.events.recv().await {
+                Some(event) => event,
+                None => {
+                    self.tasks.abort_all();
+                    tracing::debug!("the scan ended");
+                    return None;
+                }
+            };
             let id = match &event {
                 DiscoveryEvent::Found(remote) => remote.id,
                 DiscoveryEvent::Removed(id) => *id,
@@ -107,9 +115,17 @@ impl Scan {
             let previous = self.preferred_remote(id).cloned();
             match event {
                 DiscoveryEvent::Found(remote) => {
+                    tracing::debug!(
+                        ?source,
+                        id = %remote.id,
+                        address = %remote.address,
+                        label = %remote.label,
+                        "a remote answered"
+                    );
                     self.sightings.entry(source).or_default().insert(id, remote);
                 }
                 DiscoveryEvent::Removed(id) => {
+                    tracing::debug!(?source, id = %id, "a remote went away");
                     if let Some(remotes) = self.sightings.get_mut(&source) {
                         remotes.remove(&id);
                     }

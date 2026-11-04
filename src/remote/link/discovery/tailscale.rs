@@ -21,7 +21,10 @@ use crate::{
 
 const STATUS_LIMIT: Duration = Duration::from_secs(5);
 const PROBE_LIMIT: Duration = Duration::from_secs(3);
-const MAX_CONCURRENT_PROBES: usize = 4;
+// A probe is one small request, so this is set to finish an ordinary tailnet in a
+// single round: the scan has no window of its own any more, and a peer that waits
+// its turn behind a queue of unresponsive ones is a peer that may not be reported.
+const MAX_CONCURRENT_PROBES: usize = 16;
 
 #[cfg(target_os = "macos")]
 const MACOS_CLI: &str = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
@@ -78,15 +81,19 @@ pub(super) async fn scan(
     own_id: EndpointId,
     events: mpsc::Sender<SourceEvent>,
 ) {
-    let Some(addresses) = peer_addresses(&executable).await else {
+    let Some(candidates) = peer_addresses(&executable).await else {
         return;
     };
-    let remotes = stream::iter(addresses)
+    let online = candidates.len();
+    let mut answered = 0;
+    tracing::debug!(online, "the tailnet scan is probing peers");
+    let remotes = stream::iter(candidates)
         .map(|candidate| discover_remote(candidate, own_id))
         .buffer_unordered(MAX_CONCURRENT_PROBES)
         .filter_map(future::ready);
     tokio::pin!(remotes);
     while let Some(remote) = remotes.next().await {
+        answered += 1;
         let event = SourceEvent {
             source: Source::Tailscale,
             event: DiscoveryEvent::Found(remote),
@@ -95,6 +102,7 @@ pub(super) async fn scan(
             return;
         }
     }
+    tracing::debug!(online, answered, "the tailnet scan ended");
 }
 
 async fn peer_addresses(executable: &Path) -> Option<Vec<Candidate>> {
@@ -179,17 +187,37 @@ async fn discover_remote(candidate: Candidate, own_id: EndpointId) -> Option<Dis
     let host = address.ip().to_string();
     // The announce exchange has its own limit; this one caps the whole probe,
     // including the connect, so a stalled address cannot hold a slot.
-    let announcement = time::timeout(PROBE_LIMIT, announce::ask(&host, address.port()))
-        .await
-        .ok()?
-        .ok()?;
+    let announcement = match time::timeout(PROBE_LIMIT, announce::ask(&host, address.port())).await
+    {
+        Ok(Ok(announcement)) => announcement,
+        Ok(Err(error)) => {
+            tracing::debug!(%host, %error, "a tailnet peer did not answer");
+            return None;
+        }
+        Err(_) => {
+            tracing::debug!(%host, "a tailnet peer did not answer in time");
+            return None;
+        }
+    };
     if announcement.protocol != String::from_utf8_lossy(LINK_ALPN) {
+        tracing::debug!(
+            %host,
+            protocol = %announcement.protocol,
+            "a tailnet peer answers another protocol"
+        );
         return None;
     }
-    let id: EndpointId = announcement.id.parse().ok()?;
+    let id: EndpointId = match announcement.id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            tracing::debug!(%host, id = %announcement.id, "a tailnet peer has no id");
+            return None;
+        }
+    };
     if id == own_id {
         return None;
     }
+    tracing::debug!(%host, label = %announcement.label, "a tailnet peer is a remote");
     Some(DiscoveredRemote {
         id,
         label: clean(&announcement.label, 64),
