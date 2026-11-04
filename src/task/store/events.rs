@@ -1,12 +1,9 @@
 use super::*;
 
-
 use sqlx::{Sqlite, Transaction};
 use uuid::Uuid;
 
-use crate::task::{
-    Task, TaskError, TaskHistoryEvent,
-};
+use crate::task::{Task, TaskError, TaskHistoryEvent};
 
 impl TaskStore {
     pub async fn append_events(

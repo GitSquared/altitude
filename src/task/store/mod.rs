@@ -1,11 +1,10 @@
-
 use sqlx::{FromRow, Sqlite, SqlitePool, Transaction, types::Json};
 
 use crate::id;
 use crate::project::Project;
 use crate::task::{
-    Task, TaskError,
-    TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus, TaskFacts, TaskHistoryEvent, TaskOperatorAttentionLevel, TaskOperatorSignalDraft,
+    Task, TaskError, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus, TaskFacts,
+    TaskHistoryEvent, TaskOperatorAttentionLevel, TaskOperatorSignalDraft,
 };
 use crate::{
     agent::AgentKind,

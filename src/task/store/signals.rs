@@ -8,9 +8,8 @@ use uuid::Uuid;
 use crate::id;
 use crate::task::{
     ProjectProposal, SignalTransition, Task, TaskError, TaskExecutionStatus, TaskHistoryEvent,
-    TaskInput, TaskInputAuthor, TaskInputSource, TaskOperatorSignal,
-    TaskOperatorSignalAuthor, TaskOperatorSignalKind,
-    TaskOperatorSignalMessage, TaskOperatorSignalThread, TaskPlanStep,
+    TaskInput, TaskInputAuthor, TaskInputSource, TaskOperatorSignal, TaskOperatorSignalAuthor,
+    TaskOperatorSignalKind, TaskOperatorSignalMessage, TaskOperatorSignalThread, TaskPlanStep,
 };
 
 impl TaskStore {

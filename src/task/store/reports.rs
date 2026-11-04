@@ -1,11 +1,11 @@
 use super::*;
 
-
 use sqlx::types::Json;
 
 use crate::task::{
-    Task, TaskAgentRun, TaskAgentTurnReport, TaskError, TaskHistoryEvent, TaskOperatorAttentionLevel, TaskOperatorSignal,
-    TaskOperatorSignalAuthor, TaskOperatorSignalDraft, TaskOperatorSignalKind,
+    Task, TaskAgentRun, TaskAgentTurnReport, TaskError, TaskHistoryEvent,
+    TaskOperatorAttentionLevel, TaskOperatorSignal, TaskOperatorSignalAuthor,
+    TaskOperatorSignalDraft, TaskOperatorSignalKind,
 };
 use crate::vcs::{CodeContribution, ContributionObservation};
 
