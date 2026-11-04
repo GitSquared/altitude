@@ -32,7 +32,7 @@ pub(super) const NARRATION_LIMIT: usize = 160;
 
 pub(super) fn narration(text: &str) -> Option<Activity> {
     speaking(text).map(|said| Activity {
-        text: format!("\"{said}\""),
+        text: said,
         kind: ActivityKind::Speech,
     })
 }
