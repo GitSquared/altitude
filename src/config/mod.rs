@@ -207,10 +207,38 @@ impl Config {
         // what the operator chooses.
         let existing = Service::ALL
             .iter()
-            .filter(|service| self.profile_dir(service.id()).is_dir())
-            .map(|service| Credential::new(service.id(), service.label()))
+            .flat_map(|service| self.logins_on_disk(*service))
             .collect::<Vec<_>>();
         SettingsFile::load_or_create(self.settings_path(), &existing)
+    }
+
+    // Every login this installation could have on disk for one service: the
+    // service's own profile, and each identity named under it. Both nest the same
+    // way, so a directory that holds a profile is a login and nothing else is.
+    fn logins_on_disk(&self, service: Service) -> Vec<Credential> {
+        let mut found = Vec::new();
+        if self.profile_dir(service.id()).is_dir() {
+            found.push(Credential::new(service.id(), service.label()));
+        }
+        let Ok(entries) = fs::read_dir(self.scoped_data_dir().join(service.id())) else {
+            return found;
+        };
+        for entry in entries.flatten() {
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let id = format!("{}/{name}", service.id());
+            // A name the settings file could not read back is not a login this
+            // build should offer: the directory is left where it is.
+            if !self.profile_dir(&id).is_dir()
+                || !Credential::new(id.clone(), name.clone()).is_valid()
+            {
+                continue;
+            }
+            found.push(Credential::new(id, name));
+        }
+        found.sort_by(|left, right| left.id.cmp(&right.id));
+        found
     }
 
     pub fn database_path(&self) -> PathBuf {

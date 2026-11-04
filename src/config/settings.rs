@@ -188,11 +188,12 @@ impl Settings {
             .as_deref()
             .is_none_or(|id| !known(id))
         {
-            self.defaults.agent_credential = self
-                .defaults
-                .agent
-                .map(|agent| agent.profile().to_owned())
-                .filter(|id| known(id));
+            // The operator chose a harness, so the login is that harness's: the
+            // one it has, whether the operator named it or not. Two of them are
+            // two to choose between, and the settings screen asks.
+            self.defaults.agent_credential = self.defaults.agent.and_then(|agent| {
+                Self::sole_credential(&self.credentials, |id| agent_of(Some(id)) == Some(agent))
+            });
         }
         if self
             .defaults
@@ -220,8 +221,11 @@ impl Settings {
             {
                 project.agent_credential = project
                     .agent
-                    .map(|agent| agent.profile().to_owned())
-                    .filter(|id| known(id))
+                    .and_then(|agent| {
+                        Self::sole_credential(&self.credentials, |id| {
+                            agent_of(Some(id)) == Some(agent)
+                        })
+                    })
                     .or_else(|| self.defaults.agent_credential.clone());
             }
             if project
@@ -254,20 +258,24 @@ impl Settings {
             if self.default_credential(slot).is_some() {
                 continue;
             }
-            let only: Vec<String> = self
-                .credentials
-                .iter()
-                .filter(|credential| {
-                    credential
-                        .service()
-                        .is_some_and(|service| service.slot() == slot)
-                })
-                .map(|credential| credential.id.clone())
-                .collect();
-            if let [id] = only.as_slice() {
-                let _ = self.choose_default_credential(id);
+            let only = Self::sole_credential(&self.credentials, |id| {
+                Service::from_id(id).is_some_and(|service| service.slot() == slot)
+            });
+            if let Some(id) = only {
+                let _ = self.choose_default_credential(&id);
             }
         }
+    }
+
+    // The id of the one login that answers, when there is exactly one: a login a
+    // default can be worked out from, rather than one of several to choose.
+    fn sole_credential(credentials: &[Credential], keep: impl Fn(&str) -> bool) -> Option<String> {
+        let mut matching = credentials
+            .iter()
+            .map(|credential| credential.id.as_str())
+            .filter(|id| keep(id));
+        let only = matching.next()?;
+        matching.next().is_none().then(|| only.to_owned())
     }
 
     pub fn credentials(&self) -> &[Credential] {
