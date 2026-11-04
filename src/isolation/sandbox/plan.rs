@@ -72,12 +72,13 @@ pub(crate) async fn provision(
     .await
 }
 
-pub(crate) fn composed_recipe(
+// The layer a task runs on: what a sandbox would be shown, without building it.
+pub(crate) fn environment_top_layer(
     config: &Config,
     project: Project,
     recipes: Vec<ProfileRecipe>,
-) -> Result<BaseSandboxRecipe, IsolationError> {
-    SandboxPlan::compose(config, project, recipes).map(|plan| plan.recipe)
+) -> Result<Option<BaseSandboxRecipe>, IsolationError> {
+    Ok(SandboxPlan::compose(config, project, recipes)?.layers.pop())
 }
 
 pub(crate) fn cache_storage_path(cache: &str) -> PathBuf {

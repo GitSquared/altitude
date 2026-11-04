@@ -329,6 +329,16 @@ impl Config {
             .join("snapshots")
     }
 
+    // What the agent and provider profiles put in a machine is the same software
+    // whatever project asks for it, so it is kept once for the whole machine
+    // rather than rebuilt inside every project that happens to want it.
+    pub fn installs_snapshots_dir(&self) -> PathBuf {
+        self.data_dir
+            .join("environments")
+            .join("installs")
+            .join("snapshots")
+    }
+
     pub fn project_snapshots_dir(&self, project_id: &str) -> PathBuf {
         self.scoped_data_dir()
             .join("projects")

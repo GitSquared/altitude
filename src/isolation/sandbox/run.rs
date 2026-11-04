@@ -23,7 +23,7 @@ pub async fn ensure_project(
 ) -> Result<BaseSandboxSnapshot, IsolationError> {
     let mut plan = SandboxPlan::compose(config, project, recipes)?;
     plan.initialize(config)?;
-    engine.ensure_base(plan.recipe, progress).await
+    engine.ensure_base(plan.layers, progress).await
 }
 
 pub(crate) async fn credential_reports(
@@ -146,7 +146,7 @@ pub(crate) async fn create(
         Some(SnapshotSource::Capsule(path)) => path,
         Some(SnapshotSource::Environment(path)) => path,
         None => engine
-            .ensure_base(plan.recipe, progress)
+            .ensure_base(plan.layers, progress)
             .await?
             .path
             .to_string_lossy()

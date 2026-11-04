@@ -24,7 +24,9 @@ use guest::relative_path;
 use plan::{cache_storage_path, expand_guest_path};
 
 pub(crate) use guest::{guest_absolute, run_collecting, shell_quote};
-pub(crate) use plan::{ProvisionRequest, SandboxKind, SnapshotSource, composed_recipe, provision};
+pub(crate) use plan::{
+    ProvisionRequest, SandboxKind, SnapshotSource, environment_top_layer, provision,
+};
 pub use profile::{DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand};
 pub(crate) use run::{
     add_commits_env, create, credential_reports, credential_shell, ensure_project, watcher,
@@ -36,11 +38,25 @@ pub const REFRESH_AFTER: Duration = Duration::from_secs(72 * 60 * 60);
 
 pub(super) struct SandboxPlan {
     project: Project,
-    recipe: BaseSandboxRecipe,
+    // Bottom first: what the profiles install, then what the project adds on top
+    // of it. Each is one snapshot, and a layer is only a layer when it has
+    // something of its own to run.
+    layers: Vec<BaseSandboxRecipe>,
     options: SandboxOptions,
     defaults: Vec<(PathBuf, &'static str)>,
     managed_files: Vec<(PathBuf, String)>,
     local_mounts: Vec<(String, String)>,
+}
+
+// The commands are the build: two layers with the same ones are the same layer,
+// whichever project asked for it.
+fn tag_of(steps: &[SetupStep]) -> String {
+    let identity = steps
+        .iter()
+        .map(|step| step.command.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    blake3::hash(identity.as_bytes()).to_hex()[..12].to_owned()
 }
 
 impl SandboxPlan {
@@ -55,22 +71,42 @@ impl SandboxPlan {
         let project_name = project.name.clone();
         let project_id = project.id.clone();
         let project_setup = project.setup_command.clone();
-        // Each contributor to the build is its own step, so a task waiting on a cold
+        // Each contributor to a layer is its own step, so a task waiting on a cold
         // environment can say what it is waiting for. The commands are also what the
-        // build is, and so what names its snapshot.
-        let mut steps = vec![SetupStep::new(
+        // layer is, and so what names its snapshot.
+        let installs = recipes
+            .iter()
+            .map(|recipe| SetupStep::new(recipe.label, recipe.setup_command))
+            .collect::<Vec<_>>();
+        let mut layers = Vec::new();
+        if !installs.iter().all(|step| step.command.trim().is_empty()) {
+            layers.push(BaseSandboxRecipe::new(
+                "installs",
+                config.installs_snapshots_dir().join(tag_of(&installs)),
+                REFRESH_AFTER,
+                installs,
+            ));
+        }
+        let project_steps = vec![SetupStep::new(
             format!("preparing the {project_name} environment"),
             project_setup,
         )];
-        for recipe in &recipes {
-            steps.push(SetupStep::new(recipe.label, recipe.setup_command));
-        }
-        let identity = steps
+        if !project_steps
             .iter()
-            .map(|step| step.command.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        let tag = blake3::hash(identity.as_bytes()).to_hex()[..12].to_owned();
+            .all(|step| step.command.trim().is_empty())
+        {
+            layers.push(BaseSandboxRecipe::new(
+                format!("coding-{project_name}"),
+                // A project id is not a build: a sign-in's narrower composition and
+                // the one tasks run on are two builds, and a store shared between
+                // them would have each replace the other's snapshot.
+                config
+                    .project_snapshots_dir(&project_id)
+                    .join(tag_of(&project_steps)),
+                REFRESH_AFTER,
+                project_steps,
+            ));
+        }
         let commits = project.commits.clone();
         let mut environment = vec![
             ("HOME".into(), GUEST_HOME.into()),
@@ -84,15 +120,7 @@ impl SandboxPlan {
         }
         let mut plan = Self {
             project,
-            recipe: BaseSandboxRecipe::new(
-                format!("coding-{project_name}"),
-                // A project id is not a build: a sign-in's narrower composition and
-                // the one tasks run on are two builds, and a store shared between
-                // them would have each replace the other's snapshot.
-                config.project_snapshots_dir(&project_id).join(tag),
-                REFRESH_AFTER,
-                steps,
-            ),
+            layers,
             options: SandboxOptions {
                 snapshot_path: None,
                 network_enabled: true,

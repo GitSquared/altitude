@@ -446,9 +446,12 @@ pub trait IsolationEngine: Send + Sync {
         progress: &dyn EnvironmentProgressSink,
     ) -> impl Future<Output = Result<BaseSandboxSnapshot, IsolationError>> + Send;
 
+    // The layers are bottom first, and each is built on the one before it: the
+    // machine's own software does not have to be installed again because a project
+    // changed what it wants on top.
     fn ensure_base(
         &self,
-        recipe: BaseSandboxRecipe,
+        layers: Vec<BaseSandboxRecipe>,
         progress: &dyn EnvironmentProgressSink,
     ) -> impl Future<Output = Result<BaseSandboxSnapshot, IsolationError>> + Send;
 
