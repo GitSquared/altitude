@@ -3,11 +3,16 @@ use crate::{
     task::{TaskHistoryEvent, TaskOperatorSignalKind, picture},
     tracker::{IssueReference, TrackerStatus, providers::linear::automation::AgentActivityContent},
 };
-use std::{collections::HashSet, time::Instant};
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 
 use super::*;
 pub(super) struct QueueNotice {
-    ahead: usize,
+    starting: bool,
+    state: String,
+    since: Instant,
     at: Instant,
 }
 
@@ -114,8 +119,8 @@ impl RemoteTracker {
             }
         };
         for task in bound {
-            let ahead = match host.tasks_ahead_in_queue(task.task_id.clone()).await {
-                Ok(ahead) => ahead,
+            let standing = match host.queue_standing(task.task_id.clone()).await {
+                Ok(standing) => standing,
                 Err(error) => {
                     tracing::debug!(task = %task.task_id, %error, "could not read a task's queue standing");
                     continue;
@@ -124,29 +129,28 @@ impl RemoteTracker {
             let Some(report) = self.report_for_task(&task.task_id) else {
                 continue;
             };
-            let Some(ahead) = ahead else {
+            let Some(standing) = standing else {
                 self.queue_notices
                     .lock()
                     .expect("queue notices lock poisoned")
                     .remove(&task.task_id);
                 continue;
             };
-            if !self.queue_notice_is_due(&task.task_id, ahead) {
+            let since = self.queue_state_since(&task.task_id, &standing);
+            let state = queue_notice_state(&standing);
+            let body = queue_notice_line(&state, since);
+            if !self.queue_notice_is_due(&task.task_id, standing.ahead, &state) {
                 continue;
             }
-            let body = if ahead == 0 {
-                "Next up on the remote · waiting for a sandbox to free.".to_owned()
-            } else if ahead == 1 {
-                "Queued on the remote · 1 task ahead.".to_owned()
-            } else {
-                format!("Queued on the remote · {ahead} tasks ahead.")
-            };
             let stamp = now_ms();
-            let activity_id = stable_id(&report.session, &format!("queue-{stamp}-{ahead}"));
+            let activity_id = stable_id(
+                &report.session,
+                &format!("queue-{stamp}-{}", standing.ahead),
+            );
             if let Err(error) = self
                 .config
                 .automation
-                .create_ephemeral_thought(&report.session, &activity_id, body.clone())
+                .create_ephemeral_thought(&report.session, &activity_id, body)
                 .await
             {
                 tracing::debug!(task = %task.task_id, %error, "could not say where a task stands");
@@ -158,7 +162,9 @@ impl RemoteTracker {
                 .insert(
                     task.task_id.clone(),
                     QueueNotice {
-                        ahead,
+                        starting: standing.start.is_some(),
+                        state,
+                        since,
                         at: Instant::now(),
                     },
                 );
@@ -217,7 +223,21 @@ impl RemoteTracker {
         }
     }
 
-    pub(super) fn queue_notice_is_due(&self, task_id: &str, ahead: usize) -> bool {
+    // When the line started saying this, so the number on it is the operator's own
+    // clock. It resets when the task moves from waiting to starting and not when the
+    // machine's counts move under it: a second slot filling is not a new wait.
+    pub(super) fn queue_state_since(&self, task_id: &str, standing: &QueueStanding) -> Instant {
+        let notices = self
+            .queue_notices
+            .lock()
+            .expect("queue notices lock poisoned");
+        match notices.get(task_id) {
+            Some(notice) if notice.starting == standing.start.is_some() => notice.since,
+            _ => Instant::now(),
+        }
+    }
+
+    pub(super) fn queue_notice_is_due(&self, task_id: &str, ahead: usize, state: &str) -> bool {
         let notices = self
             .queue_notices
             .lock()
@@ -225,12 +245,19 @@ impl RemoteTracker {
         let Some(last) = notices.get(task_id) else {
             return true;
         };
+        // What the machine is doing changing is news even when the queue number
+        // did not move: it is what tells a wait apart from a machine that stopped.
+        if last.state != state {
+            return true;
+        }
+        // The age is the only thing the line says while nothing moves, and it is
+        // worth a refresh on its own for as long as a task is the next one up.
         let interval = if ahead == 0 {
             NEXT_UP_NOTICE_INTERVAL
         } else {
             QUEUE_NOTICE_INTERVAL
         };
-        last.ahead != ahead || last.at.elapsed() >= interval
+        last.at.elapsed() >= interval
     }
 
     pub(super) async fn publish_signal(
@@ -538,5 +565,61 @@ impl RemoteTracker {
             }
         }
         self.advance_cursor(&report.task_id, events.len())
+    }
+}
+
+// Where a queued task stands, in one line, with how long it has stood there: the
+// queue says what is in front of it, the machine says why it is not moving, and the
+// age is what tells a slow wait apart from one nothing is going to end.
+fn queue_notice_line(state: &str, since: Instant) -> String {
+    match waited_words(since.elapsed()) {
+        Some(waited) => format!("{state} · {waited}."),
+        None => format!("{state}."),
+    }
+}
+
+fn queue_notice_state(standing: &QueueStanding) -> String {
+    // A task the machine has picked up is not waiting on the queue any more. The
+    // minutes it spends starting are the ones an operator is most likely to be
+    // watching, so they say what is being done rather than what is being waited for.
+    match &standing.start {
+        Some(Start::Provisioning) => {
+            return "Starting on the remote · making its sandbox".to_owned();
+        }
+        Some(Start::Building(progress)) => {
+            return format!(
+                "Starting on the remote · {} · step {} of {}",
+                progress.label,
+                progress.completed + 1,
+                progress.total
+            );
+        }
+        None => {}
+    }
+    let place = match standing.ahead {
+        0 => "Next up on the remote".to_owned(),
+        1 => "Queued on the remote · 1 task ahead".to_owned(),
+        ahead => format!("Queued on the remote · {ahead} tasks ahead"),
+    };
+    // The verb travels with the count so one clause reads both ways: what is on the
+    // machine, and what about it leaves no room.
+    let work = match standing.on_machine {
+        0 => None,
+        1 => Some("1 task is".to_owned()),
+        on_machine => Some(format!("{on_machine} tasks are")),
+    };
+    match (work, standing.has_room) {
+        (None, _) => place,
+        (Some(work), true) => format!("{place} · {work} on the machine"),
+        (Some(work), false) => format!("{place} · no room while {work} on the machine"),
+    }
+}
+
+// Minutes, because that is the unit an operator waiting on work counts in, and the
+// first minute is left to the next line that has something to say.
+fn waited_words(elapsed: Duration) -> Option<String> {
+    match elapsed.as_secs() / 60 {
+        0 => None,
+        minutes => Some(format!("{minutes}m")),
     }
 }

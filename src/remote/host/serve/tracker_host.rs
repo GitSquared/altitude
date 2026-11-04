@@ -355,10 +355,32 @@ impl tracker::Host for OwnTasks {
         Box::pin(async move { Ok(self.tasks.current_activity(&task_id).map(|line| line.text)) })
     }
 
-    fn tasks_ahead_in_queue(&self, task_id: String) -> tracker::HostFuture<'_, Option<usize>> {
+    fn queue_standing(
+        &self,
+        task_id: String,
+    ) -> tracker::HostFuture<'_, Option<tracker::QueueStanding>> {
         Box::pin(async move {
             let tasks = self.tasks.list().await.map_err(|error| error.to_string())?;
-            Ok(tasks_ahead_in_queue(&tasks, &task_id))
+            let start = self.tasks.is_starting(&task_id).then(|| {
+                match self.tasks.service().environment_step(&task_id) {
+                    Some(progress) => tracker::Start::Building(progress),
+                    None => tracker::Start::Provisioning,
+                }
+            });
+            let Some(ahead) = tasks_ahead_in_queue(&tasks, &task_id) else {
+                return Ok(None);
+            };
+            Ok(Some(tracker::QueueStanding {
+                ahead,
+                // A task waiting for room has no capsule, so every capsule counted
+                // here belongs to work that is ahead of it.
+                on_machine: tasks
+                    .iter()
+                    .filter(|task| task.facts.sandbox_available)
+                    .count(),
+                has_room: self.tasks.has_room_for_another(&tasks),
+                start,
+            }))
         })
     }
 

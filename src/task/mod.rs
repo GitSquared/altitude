@@ -362,6 +362,9 @@ where
     pub fn environment_builds(&self) -> HashMap<String, EnvironmentProgress> {
         self.environment_progress.published()
     }
+    pub fn environment_step(&self, task_id: &str) -> Option<EnvironmentProgress> {
+        self.environment_progress.step(task_id)
+    }
     pub async fn list(&self) -> Result<Vec<Task>, TaskServiceError> {
         self.store.list().await.map_err(TaskServiceError::Task)
     }

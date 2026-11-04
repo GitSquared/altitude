@@ -49,6 +49,38 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
         });
     }
 
+    // Whether another task would be admitted now. A caller asks this rather than
+    // reading a slot count and comparing it: how many sandboxes the machine keeps
+    // is its own moving answer, and what that means for the next task is this rule.
+    pub(crate) fn has_room_for_another(&self, tasks: &[Task]) -> bool {
+        self.free_slots(tasks) > 0
+    }
+
+    // A task being started has no capsule yet, so the queue still counts it as
+    // waiting for room. What separates it from the tasks behind it is that this
+    // machine is already working on it.
+    pub(crate) fn is_starting(&self, task_id: &str) -> bool {
+        self.starting
+            .lock()
+            .expect("starting lock poisoned")
+            .contains(task_id)
+    }
+
+    // A capsule that exists is a slot in use. A task being started has no capsule
+    // yet but is about to want one, so it counts too. One count, because a second
+    // copy of this arithmetic is one that can disagree with admission.
+    fn free_slots(&self, tasks: &[Task]) -> usize {
+        let occupied = tasks
+            .iter()
+            .filter(|task| task.facts.sandbox_available)
+            .count();
+        let taken = occupied + self.starting.lock().expect("starting lock poisoned").len();
+        self.service
+            .isolation
+            .sandbox_capacity()
+            .free_slots_after(taken)
+    }
+
     pub fn enable_admission(&self) {
         self.admission_enabled.store(true, Ordering::Release);
         self.admit();
@@ -89,18 +121,7 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
                 }
             }
         }
-        // A capsule that exists is a slot in use. A task being started has no
-        // capsule yet but is about to want one, so it counts too.
-        let occupied = tasks
-            .iter()
-            .filter(|task| task.facts.sandbox_available)
-            .count();
-        let taken = occupied + self.starting.lock().expect("starting lock poisoned").len();
-        let room = self
-            .service
-            .isolation
-            .sandbox_capacity()
-            .free_slots_after(taken);
+        let room = self.free_slots(&tasks);
         // The queue is the one the screens show: same order, same rule about who
         // is waiting for room. Only the tasks already being started drop out.
         let starting = self

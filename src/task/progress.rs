@@ -19,6 +19,10 @@ impl EnvironmentProgressRegistry {
         self.lock().clone()
     }
 
+    pub fn step(&self, task_id: &str) -> Option<EnvironmentProgress> {
+        self.lock().get(task_id).cloned()
+    }
+
     pub fn clear(&self, task_id: &str) {
         self.lock().remove(task_id);
     }
