@@ -1,6 +1,6 @@
 use crate::remote::protocol::{self, SignalCommand};
 use crate::remote::server::Watching;
-use crate::remote::{HeldConfig, TransferPart};
+use crate::remote::{HISTORY_FILE, HeldConfig, TRANSCRIPT_FILE, TransferPart, WORK_FILE};
 
 use std::{
     collections::HashSet,
@@ -221,9 +221,9 @@ impl TaskHost for OwnTasks {
                 .expect("transfer activity lock poisoned")
                 .insert(transfer_id.clone(), now_ms());
             let filename = match part {
-                TransferPart::History => "history.json",
-                TransferPart::Work => "work.tar.zst",
-                TransferPart::Transcript => "transcript.jsonl",
+                TransferPart::History => HISTORY_FILE,
+                TransferPart::Work => WORK_FILE,
+                TransferPart::Transcript => TRANSCRIPT_FILE,
             };
             let path = directory.join(filename);
             spawn_blocking(move || {
@@ -301,7 +301,7 @@ impl TaskHost for OwnTasks {
                 .abandon_transfer(&task.id, &transfer_id)
                 .await
                 .map_err(|error| error.to_string())?;
-            for name in ["work.tar.zst", "transcript.jsonl", "history.json"] {
+            for name in [WORK_FILE, TRANSCRIPT_FILE, HISTORY_FILE] {
                 let _ = fs::remove_file(root.join(&transfer_id).join(name));
             }
             Ok(())
@@ -411,7 +411,7 @@ impl TaskHost for OwnTasks {
                 .relinquish(task, &transfer_id, &peer.to_string())
                 .await
                 .map_err(|e| e.to_string())?;
-            for name in ["work.tar.zst", "transcript.jsonl", "history.json"] {
+            for name in [WORK_FILE, TRANSCRIPT_FILE, HISTORY_FILE] {
                 let _ = fs::remove_file(directory.join(name));
             }
             Ok(())

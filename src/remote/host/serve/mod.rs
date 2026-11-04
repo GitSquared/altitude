@@ -9,9 +9,9 @@ use crate::{task::TaskExecutionPauseReason, vcs::now_ms};
 use iroh::EndpointId;
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
-use crate::remote::WatchEvent;
 use crate::remote::send::IncomingTransfers;
 use crate::remote::transfer::TransferUpdate;
+use crate::remote::{HISTORY_FILE, TRANSCRIPT_FILE, WORK_FILE, WatchEvent};
 
 use tokio::sync::{mpsc, watch};
 
@@ -153,7 +153,7 @@ impl OwnTasks {
                 .expect("transfer activity lock poisoned")
                 .remove(&transfer_id);
             if let Ok(directory) = self.transfer_directory(&transfer_id) {
-                for name in ["work.tar.zst", "transcript.jsonl", "history.json"] {
+                for name in [WORK_FILE, TRANSCRIPT_FILE, HISTORY_FILE] {
                     let _ = fs::remove_file(directory.join(name));
                 }
             }

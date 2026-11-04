@@ -25,12 +25,14 @@ base64 = "0.23.1"
 cap-std = "4.0.3"
 microsandbox-image = "=0.7.13"
 microsandbox-utils = "=0.7.13"
+tar = "0.4"
 tempfile = "3"
 blake3 = "1.8"
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 chrono = "0.4"
 clap = { version = "4", features = ["derive", "wrap_help"] }
 directories = "6"
+flate2 = "1"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 iroh = "1.3"
 iroh-mdns-address-lookup = "0.6"

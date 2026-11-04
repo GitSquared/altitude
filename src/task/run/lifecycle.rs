@@ -14,6 +14,7 @@ use crate::isolation::Unwatched;
 use std::{fs, path::PathBuf, time::Instant};
 use uuid::Uuid;
 
+use crate::remote::{TRANSCRIPT_FILE, WORK_PLAIN_FILE};
 use crate::task::{
     Task, TaskAgentRun, TaskAgentRunOutcome, TaskDraft, TaskError, TaskExecutionMode,
     TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent, TaskService, TaskServiceError,
@@ -342,9 +343,9 @@ where
             .project()
             .and_then(|project| project.checkout_path())
             .and_then(|path| guest_absolute(&path).ok());
-        let work = arrivals.join("work");
+        let work = arrivals.join(WORK_PLAIN_FILE);
         if let Some(checkout) = checkout
-            && work.is_dir()
+            && work.is_file()
         {
             let tally = isolation
                 .deliver_files(sandbox_id.to_owned(), work, checkout, progress)
@@ -353,10 +354,11 @@ where
             tracing::info!(
                 task = %task.id,
                 files = tally.files,
+                bytes = tally.bytes,
                 "put the files this task arrived with into its sandbox"
             );
         }
-        let transcript = arrivals.join("transcript.jsonl");
+        let transcript = arrivals.join(TRANSCRIPT_FILE);
         if let (true, Some(kind), Some(conversation)) = (
             transcript.is_file(),
             task.agent_kind,

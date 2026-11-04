@@ -1,10 +1,8 @@
-use std::{
-    collections::HashMap, fs, os::unix::fs::symlink, path::PathBuf, sync::Arc, time::Duration,
-};
+use std::{collections::HashMap, fs, path::PathBuf, sync::Arc, time::Duration, time::Instant};
 
 use microsandbox::{
     LocalBackend, Sandbox,
-    sandbox::{MAX_SANDBOX_LIST_LIMIT, PullPolicy, PullProgress, exec::ExecEvent, fs::FsSetAttrs},
+    sandbox::{MAX_SANDBOX_LIST_LIMIT, PullPolicy, PullProgress, exec::ExecEvent},
     set_default_backend,
     snapshot::Snapshot,
 };
@@ -26,7 +24,10 @@ use crate::isolation::{
 
 use super::base::BASE_IMAGE;
 use super::base::PREPARATION_SANDBOX;
-use super::files::{COPY_CONCURRENCY, host_tree, io_error, permissions};
+use super::files::{
+    ArchivedFile, COPY_CONCURRENCY, carry_in, carry_out, copy_archive_into_guest, io_error,
+    read_archive, write_archive,
+};
 use super::snapshot::BaseSandboxSnapshotStore;
 use super::{MicrosandboxIsolation, connect};
 
@@ -131,7 +132,7 @@ impl IsolationEngine for MicrosandboxIsolation {
     }
 
     fn project_snapshot(&self, project: Project, recipes: Vec<ProfileRecipe>) -> Option<String> {
-        let recipe = sandbox::composed_recipe(&self.config, project, recipes).ok()?;
+        let recipe = sandbox::environment_top_layer(&self.config, project, recipes).ok()??;
         let snapshot = BaseSandboxSnapshotStore::new(&recipe)
             .current()
             .ok()
@@ -304,15 +305,19 @@ impl IsolationEngine for MicrosandboxIsolation {
 
     async fn ensure_base(
         &self,
-        recipe: BaseSandboxRecipe,
+        layers: Vec<BaseSandboxRecipe>,
         progress: &dyn EnvironmentProgressSink,
     ) -> Result<BaseSandboxSnapshot, IsolationError> {
         let _build = self.build_lock.acquire().await?;
         // The workspace base is app startup's concern and reports on its own
         // screen; a task waits only on the environment built from it.
-        let workspace = self.ensure_workspace(None).await?;
-        self.ensure_snapshot(recipe, Some(workspace), Some(progress), None)
-            .await
+        let mut built = self.ensure_workspace(None).await?;
+        for layer in layers {
+            built = self
+                .ensure_snapshot(layer, Some(built), Some(progress), None)
+                .await?;
+        }
+        Ok(built)
     }
 
     async fn run_command(
@@ -401,68 +406,32 @@ impl IsolationEngine for MicrosandboxIsolation {
         destination: PathBuf,
         progress: &dyn FileTransferSink,
     ) -> Result<FileTally, IsolationError> {
+        let started = Instant::now();
         let sandbox = connect(&id).await?;
         let fs = sandbox.fs();
         let tree = self.walk_guest(&fs, &root, &excluded).await?;
         progress.counted(tree.whole);
-        let mut moved = FileTally::default();
-        for directory in &tree.directories {
-            fs::create_dir_all(destination.join(directory)).map_err(io_error)?;
-        }
-        for file in &tree.files {
-            if let Some(parent) = destination.join(&file.relative).parent() {
-                fs::create_dir_all(parent).map_err(io_error)?;
-            }
-        }
-        // One round trip per file, several in flight: a checkout is hundreds of small
-        // files and waiting for each in turn is what made a transfer look stuck.
-        let fs = &fs;
-        let planned: Vec<(String, PathBuf, u32, u64)> = tree
-            .files
-            .iter()
-            .map(|file| {
-                (
-                    file.guest.clone(),
-                    destination.join(&file.relative),
-                    file.mode,
-                    file.size,
-                )
-            })
-            .collect();
-        let copying = planned
-            .into_iter()
-            .map(|(guest, host, mode, size)| async move {
-                fs.copy_to_host(&guest, &host)
-                    .await
-                    .map_err(|error| IsolationError::new(error.to_string()))?;
-                // A copy is bytes; what a task left is a tree, so the mode comes too.
-                fs::set_permissions(&host, permissions(mode)).map_err(io_error)?;
-                progress.moved(FileTally {
-                    files: 1,
-                    bytes: size,
-                });
-                Ok::<u64, IsolationError>(size)
-            });
-        let mut copying = stream::iter(copying).buffer_unordered(COPY_CONCURRENCY);
-        while let Some(result) = copying.next().await {
-            moved.bytes += result?;
-            moved.files += 1;
-        }
-        for link in &tree.links {
-            let host = destination.join(&link.relative);
-            if let Some(parent) = host.parent() {
-                fs::create_dir_all(parent).map_err(io_error)?;
-            }
-            let _ = fs::remove_file(&host);
-            symlink(&link.target, &host).map_err(io_error)?;
-        }
+        tracing::debug!(
+            sandbox_id = %id,
+            root,
+            files = tree.whole.files,
+            bytes = tree.whole.bytes,
+            directories = tree.directories.len(),
+            links = tree.links.len(),
+            elapsed_ms = started.elapsed().as_millis(),
+            "walked a task's tree to carry it out"
+        );
+        write_archive(&fs, &tree, &destination, progress).await?;
         tracing::info!(
             sandbox_id = %id,
-            files = moved.files,
-            bytes = moved.bytes,
-            "carried a task's files out"
+            root,
+            files = tree.whole.files,
+            bytes = tree.whole.bytes,
+            archive = %destination.display(),
+            elapsed_ms = started.elapsed().as_millis(),
+            "carried a task's tree out into one archive"
         );
-        Ok(moved)
+        Ok(tree.whole)
     }
 
     async fn collect_file(
@@ -473,18 +442,12 @@ impl IsolationEngine for MicrosandboxIsolation {
     ) -> Result<u64, IsolationError> {
         let sandbox = connect(&id).await?;
         let fs = sandbox.fs();
-        let size = fs
-            .stat(&guest_path)
-            .await
-            .map_err(|error| IsolationError::new(error.to_string()))?
-            .size;
         if let Some(parent) = host_path.parent() {
             fs::create_dir_all(parent).map_err(io_error)?;
         }
-        fs.copy_to_host(&guest_path, &host_path)
+        carry_out(&fs, &guest_path, &host_path, 0o600)
             .await
-            .map_err(|error| IsolationError::new(error.to_string()))?;
-        Ok(size)
+            .map_err(|error| IsolationError::new(format!("carrying out {guest_path}: {error}")))
     }
 
     async fn deliver_file(
@@ -500,9 +463,10 @@ impl IsolationEngine for MicrosandboxIsolation {
         {
             let _ = fs.mkdir(parent).await;
         }
-        fs.copy_from_host(&host_path, &guest_path)
+        carry_in(&fs, &host_path, &guest_path, 0o600)
             .await
-            .map_err(|error| IsolationError::new(error.to_string()))
+            .map_err(|error| IsolationError::new(format!("putting in {guest_path}: {error}")))?;
+        Ok(())
     }
 
     async fn deliver_files(
@@ -512,53 +476,73 @@ impl IsolationEngine for MicrosandboxIsolation {
         root: String,
         progress: &dyn FileTransferSink,
     ) -> Result<FileTally, IsolationError> {
-        let tree = host_tree(&source)?;
+        let started = Instant::now();
+        let tree = read_archive(&source)?;
         progress.counted(tree.whole);
+        tracing::debug!(
+            sandbox_id = %id,
+            root,
+            source = %source.display(),
+            files = tree.whole.files,
+            bytes = tree.whole.bytes,
+            directories = tree.directories.len(),
+            links = tree.links.len(),
+            "read the archive a task arrived with"
+        );
         let sandbox = connect(&id).await?;
         let fs = sandbox.fs();
         let guest = |relative: &str| format!("{}/{relative}", root.trim_end_matches('/'));
         let _ = fs.mkdir(&root).await;
-        let mut moved = FileTally::default();
-        for directory in &tree.directories {
-            let _ = fs.mkdir(&guest(directory)).await;
-        }
-        for file in &tree.files {
-            fs.copy_from_host(source.join(&file.relative), &guest(&file.relative))
+        let fs = &fs;
+        let directories: Vec<String> = tree
+            .directories
+            .iter()
+            .map(|directory| guest(directory))
+            .collect();
+        let mut creating = stream::iter(directories)
+            .map(|directory| async move {
+                let _ = fs.mkdir(&directory).await;
+            })
+            .buffer_unordered(COPY_CONCURRENCY);
+        while creating.next().await.is_some() {}
+        let archive = fs::File::open(&source).map_err(io_error)?;
+        let planned: Vec<(String, ArchivedFile)> = tree
+            .files
+            .into_iter()
+            .map(|file| (guest(&file.relative), file))
+            .collect();
+        let archive = &archive;
+        let moving = planned.into_iter().map(|(guest, archived)| async move {
+            copy_archive_into_guest(fs, archive, &archived, &guest)
                 .await
-                .map_err(|error| IsolationError::new(error.to_string()))?;
-            if let Err(error) = fs
-                .set_stat(
-                    &guest(&file.relative),
-                    true,
-                    FsSetAttrs {
-                        mode: Some(file.mode),
-                        ..FsSetAttrs::default()
-                    },
-                )
-                .await
-            {
-                tracing::warn!(path = %file.relative, %error, "could not restore a file's mode");
-            }
-            moved.files += 1;
-            moved.bytes += file.size;
+                .map_err(|error| IsolationError::new(format!("putting in {guest}: {error}")))?;
             progress.moved(FileTally {
                 files: 1,
-                bytes: file.size,
+                bytes: archived.size,
             });
+            Ok::<(), IsolationError>(())
+        });
+        let mut moving = stream::iter(moving).buffer_unordered(COPY_CONCURRENCY);
+        while let Some(result) = moving.next().await {
+            result?;
         }
         for link in &tree.links {
-            let _ = fs.remove(&guest(&link.relative)).await;
-            fs.symlink(&link.target, &guest(&link.relative))
+            let path = guest(&link.relative);
+            let _ = fs.remove(&path).await;
+            fs.symlink(&link.target, &path)
                 .await
-                .map_err(|error| IsolationError::new(error.to_string()))?;
+                .map_err(|error| IsolationError::new(format!("putting in {path}: {error}")))?;
         }
         tracing::info!(
             sandbox_id = %id,
-            files = moved.files,
-            bytes = moved.bytes,
-            "put a task's files in"
+            root,
+            source = %source.display(),
+            files = tree.whole.files,
+            bytes = tree.whole.bytes,
+            elapsed_ms = started.elapsed().as_millis(),
+            "put a task's arrived tree into its sandbox"
         );
-        Ok(moved)
+        Ok(tree.whole)
     }
 
     async fn has_sandbox(&self, id: String) -> bool {

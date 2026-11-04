@@ -2,8 +2,8 @@ use std::{
     fmt, fs,
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    process,
     sync::Arc,
+    time::Instant,
 };
 
 use iroh::{EndpointAddr, EndpointId};
@@ -15,8 +15,9 @@ use crate::{
     config::{Config, DEFAULT_PORT},
     isolation::{IsolationEngine, MicrosandboxIsolation, UnwatchedFiles},
     remote::{
-        Compatibility, ConfigBundle, ConfigPush, Handover, HandoverRecord, LinkClient, Logins,
-        RemoteKeyStatus, RemoteKeys, Transfer, TransferArchive, TransferPart, meet,
+        Compatibility, ConfigBundle, ConfigPush, HISTORY_FILE, Handover, HandoverRecord,
+        LinkClient, Logins, RemoteKeyStatus, RemoteKeys, TRANSCRIPT_FILE, Transfer,
+        TransferArchive, TransferPart, WORK_FILE, WORK_PLAIN_FILE, archive, meet,
         protocol::{MAX_BLOB_BYTES, TRANSFER_PIECE_BYTES},
         serve, transfer,
     },
@@ -28,9 +29,6 @@ const INCOMING_DIRECTORY: &str = "incoming";
 const DESTINATION_FILE: &str = "outgoing.json";
 const TRANSFER_FILE: &str = "transfer.json";
 const COMMITTED_FILE: &str = "committed";
-const HISTORY_FILE: &str = "history.json";
-const WORK_FILE: &str = "work.tar.zst";
-const TRANSCRIPT_FILE: &str = "transcript.jsonl";
 
 fn message(error: impl fmt::Display) -> String {
     error.to_string()
@@ -357,6 +355,13 @@ impl IncomingTransfers {
         validate_archive(&handover.history, "history")?;
         validate_archive(&handover.work, "work")?;
         validate_archive(&handover.transcript, "transcript")?;
+        tracing::info!(
+            %transfer_id,
+            peer = %peer,
+            work_bytes = handover.work.len,
+            transcript_bytes = handover.transcript.len,
+            "a remote is handing over a task"
+        );
         let metadata = IncomingTransfer {
             peer: peer.to_string(),
             handover,
@@ -468,7 +473,7 @@ impl IncomingTransfers {
             .prepare_project_as_operator(&metadata.peer, &record.draft.project, record.draft.agent)
             .await
             .map_err(message)?;
-        let files = unpack_task_files(&directory, handover)?;
+        let files = unpack_task_files(&directory, handover).await?;
         let task = self
             .tasks
             .land(TaskArrival {
@@ -524,6 +529,9 @@ impl IncomingTransfers {
         for name in [HISTORY_FILE, WORK_FILE, TRANSCRIPT_FILE] {
             let _ = fs::remove_file(directory.join(name));
         }
+        // What was filed under the task's own id is the copy that matters now.
+        let _ = fs::remove_dir_all(directory.join("files"));
+        tracing::info!(%transfer_id, "a task's transfer is committed here");
         Ok(())
     }
 
@@ -561,7 +569,12 @@ impl IncomingTransfers {
     }
 }
 
-fn unpack_task_files(directory: &Path, handover: &Handover) -> Result<Option<PathBuf>, String> {
+// The work archive arrives compressed and is expanded here, because the sandbox it
+// is about to go into reads a tree by offset. Nothing is unpacked into this disk.
+async fn unpack_task_files(
+    directory: &Path,
+    handover: &Handover,
+) -> Result<Option<PathBuf>, String> {
     if handover.work.len == 0 && handover.transcript.len == 0 {
         return Ok(None);
     }
@@ -569,23 +582,27 @@ fn unpack_task_files(directory: &Path, handover: &Handover) -> Result<Option<Pat
     let _ = fs::remove_dir_all(&files);
     fs::create_dir_all(&files).map_err(message)?;
     if handover.work.len > 0 {
-        let status = process::Command::new("tar")
-            .arg("-xzf")
-            .arg(directory.join(WORK_FILE))
-            .arg("-C")
-            .arg(&files)
-            .status()
-            .map_err(|error| format!("could not run tar: {error}"))?;
-        if !status.success() {
-            return Err("the working files could not be unpacked".to_owned());
+        let packed = directory.join(WORK_FILE);
+        let plain = files.join(WORK_PLAIN_FILE);
+        // The compressed archive stays until the transfer is committed: taking the
+        // same task again after an interruption checks it, and does not need it
+        // expanded twice.
+        if !plain.is_file() {
+            let started = Instant::now();
+            let bytes = archive::expand(packed, plain)
+                .await
+                .map_err(|error| format!("the working files could not be expanded: {error}"))?;
+            tracing::info!(
+                bytes,
+                packed_bytes = handover.work.len,
+                elapsed_ms = started.elapsed().as_millis(),
+                "expanded a task's arriving working files"
+            );
         }
     }
     if handover.transcript.len > 0 {
-        fs::rename(
-            directory.join(TRANSCRIPT_FILE),
-            files.join("transcript.jsonl"),
-        )
-        .map_err(message)?;
+        fs::rename(directory.join(TRANSCRIPT_FILE), files.join(TRANSCRIPT_FILE))
+            .map_err(message)?;
     }
     Ok(Some(files))
 }

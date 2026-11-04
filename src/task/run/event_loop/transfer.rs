@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use crate::task::{TaskArrival, TaskError, TaskOperatorSignalKind, copy_tree};
+use crate::remote::{TRANSCRIPT_FILE, WORK_PLAIN_FILE};
+use crate::task::{TaskArrival, TaskError, TaskOperatorSignalKind, file_arrivals};
 
 use crate::{
     agent::AgentKind,
@@ -106,6 +107,9 @@ where
             .isolation
             .for_operator(owner)
             .map_err(TaskServiceError::Isolation)?;
+        // A task that is not holding a sandbox is given one here before anything can
+        // be read out of it, and on a cold machine that is a build, not a copy.
+        tracing::info!(task = %task.id, "resuming a task's sandbox to pack its files");
         let resumed = self.service.provision(task.clone()).await?;
         let sandbox_id = resumed
             .facts
@@ -167,7 +171,7 @@ where
                     sandbox_id.clone(),
                     checkout,
                     excluded,
-                    destination.join("work"),
+                    destination.join(WORK_PLAIN_FILE),
                     progress,
                 )
                 .await
@@ -191,7 +195,7 @@ where
                 .is_ok();
             if exists {
                 isolation
-                    .collect_file(sandbox_id, guest, destination.join("transcript.jsonl"))
+                    .collect_file(sandbox_id, guest, destination.join(TRANSCRIPT_FILE))
                     .await
                     .map_err(TaskServiceError::Isolation)?;
             }
@@ -277,8 +281,15 @@ where
         // it does.
         if let Some(files) = files {
             let arrivals = self.service.arrivals_dir(&task.id);
-            if let Err(error) = copy_tree(&files, &arrivals) {
-                tracing::warn!(task = %task.id, %error, "could not keep the files this task arrived with");
+            match file_arrivals(&files, &arrivals) {
+                Ok(()) => tracing::info!(
+                    task = %task.id,
+                    arrivals = %arrivals.display(),
+                    "filed what this task arrived with"
+                ),
+                Err(error) => {
+                    tracing::warn!(task = %task.id, %error, "could not keep the files this task arrived with")
+                }
             }
         }
         Ok(task)

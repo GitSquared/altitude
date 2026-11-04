@@ -403,6 +403,16 @@ pub struct HandoverDraft {
     pub agent_conversation_id: Option<String>,
 }
 
+// A capsule is a directory of plain files whose names both machines agree on. The
+// work archive travels compressed because it crosses a network, and is expanded on
+// arrival because the side that puts a tree into a sandbox reads it by offset.
+pub const HISTORY_FILE: &str = "history.json";
+pub const WORK_FILE: &str = "work.tar.gz";
+// The expanded archive: what the isolation layer writes and reads by offset, and
+// what is filed under a task's id until provisioning puts it in a sandbox.
+pub const WORK_PLAIN_FILE: &str = "work.tar";
+pub const TRANSCRIPT_FILE: &str = "transcript.jsonl";
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferArchive {
     pub len: u64,

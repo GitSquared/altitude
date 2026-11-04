@@ -1,4 +1,5 @@
 mod acting;
+pub(crate) mod archive;
 mod bundle;
 mod host;
 pub(crate) mod identity;
@@ -27,8 +28,9 @@ pub use {
     identity::InstallationKey,
     known::{RemoteKeyStatus, meet},
     protocol::{
-        ConfigPush, Handover, HandoverDraft, HandoverRecord, RecordedEvent, TaskOrigin,
-        TaskRequest, TaskSummary, TransferArchive, TransferPart, WatchEvent,
+        ConfigPush, HISTORY_FILE, Handover, HandoverDraft, HandoverRecord, RecordedEvent,
+        TRANSCRIPT_FILE, TaskOrigin, TaskRequest, TaskSummary, TransferArchive, TransferPart,
+        WORK_FILE, WORK_PLAIN_FILE, WatchEvent,
     },
     server::LinkServer,
     transfer::Transfer,

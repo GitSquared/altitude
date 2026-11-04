@@ -3,7 +3,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::time::sleep;
 
@@ -12,11 +12,12 @@ use crate::{
     isolation::IsolationEngine,
     remote::{
         Compatibility, Handover, HandoverRecord, LinkClient, RemoteKeyStatus, RemoteKeys,
-        TaskSummary, Transfer, TransferPart, meet, protocol,
+        TRANSCRIPT_FILE, TaskSummary, Transfer, TransferPart, WORK_FILE, WORK_PLAIN_FILE, archive,
+        meet, protocol,
     },
     task::{Task, TaskArrival, TaskEventLoop, TaskHistoryEvent},
 };
-use std::{fs, process};
+use std::fs;
 
 pub async fn bring_home<E>(
     address: &str,
@@ -43,6 +44,7 @@ where
         ));
     }
     let peer: iroh::EndpointAddr = sighting.ticket.into();
+    tracing::info!(task = %summary.id, address, "taking a task home from a remote");
     // While the other machine collects, the bar reports what it reports rather than
     // standing still: the files are being walked over there, not here.
     let polling = {
@@ -160,28 +162,29 @@ where
         transfer.counting(whole);
     }
     if handover.work.len > 0 {
-        let path = landing.path().join("work.tar.zst");
+        let packed = landing.path().join(WORK_FILE);
         client
             .fetch_part(
                 peer,
                 &handover.transfer_id,
                 TransferPart::Work,
                 &handover.work,
-                &path,
+                &packed,
                 transfer,
             )
             .await
             .map_err(|e| e.to_string())?;
-        let status = process::Command::new("tar")
-            .arg("-xzf")
-            .arg(&path)
-            .arg("-C")
-            .arg(&files)
-            .status()
-            .map_err(|e| format!("could not run tar: {e}"))?;
-        if !status.success() {
-            return Err("the working files could not be unpacked".to_owned());
-        }
+        let started = Instant::now();
+        let bytes = archive::expand(packed, files.join(WORK_PLAIN_FILE))
+            .await
+            .map_err(|error| format!("the working files could not be expanded: {error}"))?;
+        tracing::info!(
+            transfer_id = %handover.transfer_id,
+            bytes,
+            packed_bytes = handover.work.len,
+            elapsed_ms = started.elapsed().as_millis(),
+            "expanded a task's arriving working files"
+        );
     }
     if handover.transcript.len > 0 {
         client
@@ -190,7 +193,7 @@ where
                 &handover.transfer_id,
                 TransferPart::Transcript,
                 &handover.transcript,
-                &files.join("transcript.jsonl"),
+                &files.join(TRANSCRIPT_FILE),
                 transfer,
             )
             .await

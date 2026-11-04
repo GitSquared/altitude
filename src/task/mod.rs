@@ -16,11 +16,12 @@ use std::{
     collections::HashSet,
     error::Error,
     fmt, fs, io,
-    os::unix::fs::symlink,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 use tokio::sync::broadcast;
+
+use crate::remote::{TRANSCRIPT_FILE, WORK_PLAIN_FILE};
 use uuid::Uuid;
 
 mod agent;
@@ -77,21 +78,19 @@ pub struct TaskService<E> {
     refused_status_syncs: Arc<Mutex<HashMap<String, usize>>>,
 }
 
-pub(crate) fn copy_tree(source: &Path, destination: &Path) -> io::Result<()> {
-    fs::create_dir_all(destination)?;
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
-        let target = destination.join(entry.file_name());
-        let metadata = fs::symlink_metadata(entry.path())?;
-        if metadata.is_symlink() {
-            let _ = fs::remove_file(&target);
-            symlink(fs::read_link(entry.path())?, &target)?;
-        } else if metadata.is_dir() {
-            copy_tree(&entry.path(), &target)?;
-        } else {
-            fs::copy(entry.path(), &target)?;
-            fs::set_permissions(&target, metadata.permissions())?;
+// What a task arrives with, filed under its own id until provisioning puts it in a
+// sandbox. Moved rather than copied: this is the only copy of what came off the
+// other machine, and a capsule can be hundreds of megabytes.
+pub(crate) fn file_arrivals(source: &Path, arrivals: &Path) -> io::Result<()> {
+    fs::create_dir_all(arrivals)?;
+    for name in [WORK_PLAIN_FILE, TRANSCRIPT_FILE] {
+        let from = source.join(name);
+        if !from.is_file() {
+            continue;
         }
+        let to = arrivals.join(name);
+        let _ = fs::remove_file(&to);
+        fs::rename(&from, &to)?;
     }
     Ok(())
 }

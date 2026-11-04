@@ -1,14 +1,15 @@
-use crate::remote::HandoverRecord;
+use crate::remote::archive;
 use crate::remote::protocol::{self};
 use crate::remote::transfer as update;
+use crate::remote::{HandoverRecord, TRANSCRIPT_FILE, WORK_FILE, WORK_PLAIN_FILE};
 
 use std::{
     collections::HashMap,
     fs,
     io::Read,
     path::Path,
-    process,
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use crate::{
@@ -83,50 +84,40 @@ async fn bundle_task_files<E>(
 where
     E: IsolationEngine + Clone + 'static,
 {
-    let staging = directory.join("files");
-    let _ = fs::remove_dir_all(&staging);
-    fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
-    tasks
-        .pack_task_files(task, &staging, progress)
-        .await
-        .map_err(|error| error.to_string())?;
+    let plain = directory.join(WORK_PLAIN_FILE);
+    let packed = directory.join(WORK_FILE);
     let empty = || TransferArchive {
         len: 0,
         digest: blake3::hash(&[]).to_hex().to_string(),
     };
-    let work = if staging.join("work").is_dir() {
-        archive_directory(&staging.join("work"), &directory.join("work.tar.zst"))?;
-        archive_description(&directory.join("work.tar.zst"))?
+    tasks
+        .pack_task_files(task, directory, progress)
+        .await
+        .map_err(|error| error.to_string())?;
+    let work = if plain.is_file() {
+        let started = Instant::now();
+        let unpacked = archive::pack(plain.clone(), packed.clone())
+            .await
+            .map_err(|error| format!("the working files could not be compressed: {error}"))?;
+        let _ = fs::remove_file(&plain);
+        let described = archive_description(&packed)?;
+        tracing::info!(
+            task = %task.id,
+            files_bytes = unpacked,
+            packed_bytes = described.len,
+            elapsed_ms = started.elapsed().as_millis(),
+            "packed a task's working files into one archive"
+        );
+        described
     } else {
         empty()
     };
-    let transcript = if staging.join("transcript.jsonl").is_file() {
-        fs::copy(
-            staging.join("transcript.jsonl"),
-            directory.join("transcript.jsonl"),
-        )
-        .map_err(|e| e.to_string())?;
-        archive_description(&directory.join("transcript.jsonl"))?
+    let transcript = if directory.join(TRANSCRIPT_FILE).is_file() {
+        archive_description(&directory.join(TRANSCRIPT_FILE))?
     } else {
         empty()
     };
-    let _ = fs::remove_dir_all(&staging);
     Ok((work, transcript))
-}
-
-fn archive_directory(source: &Path, archive: &Path) -> Result<(), String> {
-    let status = process::Command::new("tar")
-        .arg("-czf")
-        .arg(archive)
-        .arg("-C")
-        .arg(source)
-        .arg(".")
-        .status()
-        .map_err(|error| format!("could not run tar: {error}"))?;
-    if !status.success() {
-        return Err("the working files could not be packed".to_owned());
-    }
-    Ok(())
 }
 
 fn archive_description(path: &Path) -> Result<TransferArchive, String> {
@@ -241,7 +232,13 @@ where
         };
     let directory = root.join(&transfer_id);
     fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
-    for name in ["work.tar.zst", "transcript.jsonl"] {
+    tracing::info!(
+        task = %task_id,
+        %transfer_id,
+        %recipient,
+        "packing a task to hand to another machine"
+    );
+    for name in [WORK_FILE, TRANSCRIPT_FILE] {
         let _ = fs::remove_file(directory.join(name));
     }
     let stopped = tasks
