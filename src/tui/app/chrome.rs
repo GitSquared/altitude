@@ -265,7 +265,7 @@ impl App {
                 let mut hints = vec![
                     Hint::new("c", "create"),
                     Hint::new("ctrl-l", "link issue"),
-                    Hint::new("s", "settings"),
+                    Hint::new(",", "settings"),
                 ];
                 // The tabs are always there; the key is worth showing only when
                 // there is more than one to move between.
