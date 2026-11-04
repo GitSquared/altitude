@@ -70,13 +70,13 @@ impl RemoteTracker {
             // The session the operator delegated into is where they are watching,
             // so answering in it is answering where they asked. One is opened only
             // when the tracker made none.
-            // A session this machine has already reported into belongs to the task
-            // that used it, and a finished task's session is not a thread to answer
-            // in: the delegation made a new one, or this machine makes it.
+            // A session a live task is reporting into belongs to that task, and a
+            // finished task's session is not a thread to answer in: the delegation
+            // made a new one, or this machine makes it.
             let adopted = delegated
                 .session
                 .clone()
-                .filter(|session| self.report_for_session(session).is_none());
+                .filter(|session| self.report_in_play_for_session(session).is_none());
             let session = match &adopted {
                 Some(session) => session.clone(),
                 None => match self
@@ -205,9 +205,18 @@ impl RemoteTracker {
         let Some(issue_id) = event.issue_id.as_deref() else {
             return Ok(());
         };
-        if self.is_terminated(&event.session_id)
-            || self.report_for_session(&event.session_id).is_some()
-        {
+        if self.is_terminated(&event.session_id) {
+            return Ok(());
+        }
+        // A delegation nobody acted on is the hardest thing to see from outside this
+        // machine, so the ones it declines to act on say so where an operator reads.
+        if let Some(report) = self.report_in_play_for_session(&event.session_id) {
+            tracing::info!(
+                issue = %issue_id,
+                session = %event.session_id,
+                task = %report.task_id,
+                "a delegation arrived for a session this machine is already working in"
+            );
             return Ok(());
         }
         // The session's creator is the delegation author. An automation- or
@@ -317,11 +326,16 @@ impl RemoteTracker {
         }
         // The same session delivered again is the work already running here; it
         // must not be stopped and restarted.
-        if host
+        if let Some(work) = host
             .work_for_issue(issue_id.to_owned(), vec![session_id.to_owned()])
             .await?
-            .is_some()
         {
+            tracing::info!(
+                issue = %issue_id,
+                session = %session_id,
+                task = %work.task_id,
+                "a delegation arrived for work already on this machine"
+            );
             return Ok(());
         }
 

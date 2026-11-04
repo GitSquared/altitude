@@ -56,6 +56,14 @@ impl RemoteTracker {
             .cloned()
     }
 
+    // A report that is over says nothing about what this machine is doing now: its
+    // task was deleted, or its work ended. A delegation that arrives afterwards is
+    // new work rather than a session this machine has already answered.
+    pub(super) fn report_in_play_for_session(&self, session_id: &str) -> Option<Cursor> {
+        self.report_for_session(session_id)
+            .filter(|report| !report.finished)
+    }
+
     pub(super) fn cursors(&self) -> Vec<Cursor> {
         self.lock()
             .map(|ledger| ledger.cursors.clone())
