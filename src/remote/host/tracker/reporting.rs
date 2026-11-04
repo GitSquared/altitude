@@ -111,17 +111,21 @@ impl RemoteTracker {
     }
 
     pub(super) async fn report_queue_standing(&self, host: &dyn Host) {
-        let standings = match host.queue_standings().await {
-            Ok(standings) => standings,
-            Err(error) => {
-                tracing::debug!(%error, "could not read the queue to report where tasks stand");
-                return;
-            }
-        };
         let bound = match host.bound_tasks().await {
             Ok(bound) => bound,
             Err(error) => {
                 tracing::debug!(%error, "could not read bound tasks to report queue standing");
+                return;
+            }
+        };
+        // A machine reporting on nothing reads the queue not at all.
+        if bound.is_empty() {
+            return;
+        }
+        let standings = match host.queue_standings().await {
+            Ok(standings) => standings,
+            Err(error) => {
+                tracing::debug!(%error, "could not read the queue to report where tasks stand");
                 return;
             }
         };

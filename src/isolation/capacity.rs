@@ -175,15 +175,25 @@ impl HostPressure {
             self.held = low_disk.then_some(Pressure::Disk);
             return self.held;
         }
-        self.held = match self.held {
-            // A held valve opens on calm rather than on the line it shut at, which is
-            // the whole of the hysteresis.
-            Some(_) if cpu < CALM_CPU_PERCENT && memory < CALM_MEMORY_PERCENT && !low_disk => None,
-            Some(held) => Some(held),
-            None if cpu > BUSY_CPU_PERCENT => Some(Pressure::Cpu),
-            None if memory > BUSY_MEMORY_PERCENT => Some(Pressure::Memory),
-            None if low_disk => Some(Pressure::Disk),
-            None => None,
+        let busy = if cpu > BUSY_CPU_PERCENT {
+            Some(Pressure::Cpu)
+        } else if memory > BUSY_MEMORY_PERCENT {
+            Some(Pressure::Memory)
+        } else if low_disk {
+            Some(Pressure::Disk)
+        } else {
+            None
+        };
+        let calm = cpu < CALM_CPU_PERCENT && memory < CALM_MEMORY_PERCENT && !low_disk;
+        self.held = match busy {
+            // The reason is the current reading, so a machine that shut for cpu and is
+            // now holding on memory says memory.
+            Some(busy) => Some(busy),
+            // A held valve opens on calm, not at the line it shut at: that is the whole
+            // of the hysteresis, and the dead band between the two numbers is where it
+            // stays as it was.
+            None if calm => None,
+            None => self.held,
         };
         self.held
     }
