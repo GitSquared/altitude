@@ -1,11 +1,11 @@
-use std::{error::Error, future::Future, io};
+use std::{error::Error, future::Future, io, time::Instant};
 
 use crossterm::event::{EventStream, KeyCode, KeyModifiers};
 use futures_util::StreamExt;
 use ratatui::{
     DefaultTerminal, Frame,
     layout::{Constraint, Layout},
-    text::Line,
+    text::{Line, Span},
     widgets::Paragraph,
 };
 use tokio::{signal::unix::Signal, sync::watch, time};
@@ -16,7 +16,7 @@ use crate::tui::{
     widgets::{palette, progress, question},
 };
 use crate::{
-    isolation::{ImagePull, IsolationStatus},
+    isolation::{ImagePull, IsolationStatus, PackageInstall},
     tui::widgets::shimmer::{shimmer, shimmer_clock},
 };
 
@@ -110,14 +110,18 @@ async fn wait_for<T>(
     let mut backdrop = time::interval(terrain::CLOCK);
     backdrop.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     let mut terrain = terrain::Terrain::default();
+    let mut pulled = Pull::default();
     let mut shimmer = 0;
     tokio::pin!(operation);
 
     loop {
+        let status = label();
+        let rate = pulled.rate(status);
         terminal.draw(|frame| {
             draw(
                 frame,
-                label(),
+                status,
+                rate,
                 animations.then_some(shimmer),
                 animations.then_some(&mut terrain),
             )
@@ -224,7 +228,10 @@ fn isolation_status(status: &IsolationStatus) -> BootStatus {
             label: "fetching the sandbox image…",
             pull: *pull,
         },
-        IsolationStatus::PreparingBasePackages => BootStatus::Working("installing base packages…"),
+        IsolationStatus::PreparingBasePackages(install) => BootStatus::Installing {
+            label: "installing base packages…",
+            install: *install,
+        },
         IsolationStatus::Ready | IsolationStatus::Failed(_) => BootStatus::Working("starting up…"),
     }
 }
@@ -236,29 +243,69 @@ enum BootStatus {
         label: &'static str,
         pull: ImagePull,
     },
+    Installing {
+        label: &'static str,
+        install: PackageInstall,
+    },
 }
 
 impl BootStatus {
     fn label(self) -> &'static str {
         match self {
-            Self::Working(label) => label,
-            Self::Downloading { label, .. } => label,
+            Self::Working(label)
+            | Self::Downloading { label, .. }
+            | Self::Installing { label, .. } => label,
         }
     }
 
-    fn download(self) -> Option<(u64, u64)> {
+    fn pull(self) -> Option<ImagePull> {
+        // The manifest says how large the image is before a byte of it moves, and
+        // an image that is already here moves none: neither is a download to
+        // report, so the line waits for the first byte.
         match self {
-            Self::Downloading { pull, .. } if pull.total_bytes > 0 => {
-                Some((pull.downloaded_bytes, pull.total_bytes))
-            }
+            Self::Downloading { pull, .. } if pull.downloaded_bytes > 0 => Some(pull),
             _ => None,
         }
+    }
+}
+
+// The pull's own speed, which the status only carries the bytes of: how fast the
+// image is coming down is what says whether the wait is worth watching.
+#[derive(Default)]
+struct Pull {
+    sampled: Option<(Instant, u64)>,
+    rate: Option<f64>,
+}
+
+impl Pull {
+    fn rate(&mut self, status: BootStatus) -> Option<f64> {
+        let Some(pull) = status.pull() else {
+            self.sampled = None;
+            return None;
+        };
+        let now = Instant::now();
+        match self.sampled {
+            Some((then, was)) => {
+                let elapsed = now.duration_since(then).as_secs_f64();
+                if elapsed >= 0.25 && pull.downloaded_bytes >= was {
+                    let sample = (pull.downloaded_bytes - was) as f64 / elapsed;
+                    self.rate = Some(match self.rate {
+                        Some(previous) => (previous + sample) / 2.0,
+                        None => sample,
+                    });
+                    self.sampled = Some((now, pull.downloaded_bytes));
+                }
+            }
+            None => self.sampled = Some((now, pull.downloaded_bytes)),
+        }
+        self.rate
     }
 }
 
 fn draw(
     frame: &mut Frame,
     status: BootStatus,
+    rate: Option<f64>,
     tick: Option<usize>,
     terrain: Option<&mut terrain::Terrain>,
 ) {
@@ -266,15 +313,20 @@ fn draw(
     if let Some(terrain) = terrain.as_ref() {
         terrain.mark(frame.buffer_mut(), area);
     }
-    let download = status.download();
+    // What is being measured, if anything: the numbers are one line, and the bar
+    // that used to sit above them says nothing the percentage does not.
+    let measured = match status {
+        BootStatus::Downloading { .. } => status.pull().map(|pull| downloaded(pull, rate)),
+        BootStatus::Installing { install, .. } if install.total > 0 => Some(installed(install)),
+        _ => None,
+    };
     let mut rows = vec![
         Constraint::Fill(1),
         Constraint::Length(1),
         Constraint::Length(3),
         Constraint::Length(1),
     ];
-    if download.is_some() {
-        rows.push(Constraint::Length(1));
+    if measured.is_some() {
         rows.push(Constraint::Length(1));
     }
     rows.push(Constraint::Fill(1));
@@ -290,25 +342,47 @@ fn draw(
         rows[3],
     );
 
-    if let Some((done, total)) = download {
-        // Wide enough to read as a measurement rather than a dialog, and the
-        // numbers below repeat what the bar cannot show exactly.
-        let width = 40.min(area.width);
+    if let Some(measured) = measured {
         frame.render_widget(
-            Paragraph::new(progress::bar_line(width, done, total)).centered(),
+            Paragraph::new(measured).centered().style(palette::muted()),
             rows[4],
-        );
-        frame.render_widget(
-            Paragraph::new(Line::styled(
-                format!("{} of {}", progress::amount(done), progress::amount(total)),
-                palette::muted(),
-            ))
-            .centered(),
-            rows[5],
         );
     }
 
     if let Some(terrain) = terrain {
         terrain.draw(frame.buffer_mut(), area);
     }
+}
+
+fn downloaded(pull: ImagePull, rate: Option<f64>) -> Line<'static> {
+    // A pull that outran its own manifest is still a pull that is nearly done.
+    let total = pull.total_bytes.max(pull.downloaded_bytes);
+    let percent = pull.downloaded_bytes * 100 / total;
+    let mut line = vec![
+        Span::styled(format!("{percent:>3}%"), palette::primary()),
+        Span::raw(" · "),
+        Span::raw(format!(
+            "{} of {}",
+            progress::amount(pull.downloaded_bytes),
+            progress::amount(total)
+        )),
+    ];
+    // A pull at the end is not moving any more: what is left of the wait is the
+    // sandbox unpacking, and a speed that keeps falling would say otherwise.
+    if let Some(rate) = rate.filter(|_| pull.downloaded_bytes < total) {
+        line.push(Span::raw(" · "));
+        line.push(Span::raw(format!("{}/s", progress::amount(rate as u64))));
+    }
+    Line::from(line)
+}
+
+fn installed(install: PackageInstall) -> Line<'static> {
+    Line::styled(
+        format!(
+            "{} of {}",
+            install.installed.min(install.total),
+            install.total
+        ),
+        palette::primary(),
+    )
 }

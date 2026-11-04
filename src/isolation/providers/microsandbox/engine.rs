@@ -18,8 +18,9 @@ use crate::isolation::{
     BaseSandboxRecipe, BaseSandboxSnapshot, CREDENTIAL_PREFIX, Command, CommandEvent,
     CommandSession, CredentialCheck, CredentialReport, CredentialSandbox, EnvironmentDescription,
     EnvironmentProgressSink, FileTally, FileTransferSink, ImagePull, IsolationEngine,
-    IsolationError, IsolationStatus, OutputStream, ProfileRecipe, SandboxCapacity, SandboxCeiling,
-    SandboxOptions, SandboxPurpose, VsockRoute, WATCHER_PREFIX,
+    IsolationError, IsolationStatus, OutputStream, PackageInstall, PackageInstallSink,
+    ProfileRecipe, SandboxCapacity, SandboxCeiling, SandboxOptions, SandboxPurpose, VsockRoute,
+    WATCHER_PREFIX,
     sandbox::{self, REFRESH_AFTER, private_directory},
 };
 
@@ -28,6 +29,17 @@ use super::base::PREPARATION_SANDBOX;
 use super::files::{COPY_CONCURRENCY, host_tree, io_error, permissions};
 use super::snapshot::BaseSandboxSnapshotStore;
 use super::{MicrosandboxIsolation, connect};
+
+// The boot screen's view of the base build's installs: the status it shows is the
+// only thing the sink has to say.
+struct BasePackages<'a>(&'a watch::Sender<IsolationStatus>);
+
+impl PackageInstallSink for BasePackages<'_> {
+    fn installing(&self, install: PackageInstall) {
+        self.0
+            .send_replace(IsolationStatus::PreparingBasePackages(install));
+    }
+}
 
 // One impl block: a trait whose methods return `impl Future` cannot be implemented
 // in two, so the engine's surface stays in this file and the work stays beside it.
@@ -246,9 +258,13 @@ impl IsolationEngine for MicrosandboxIsolation {
 
         tracing::debug!("base sandbox image ready");
 
-        status.send_replace(IsolationStatus::PreparingBasePackages);
+        status.send_replace(IsolationStatus::PreparingBasePackages(
+            PackageInstall::default(),
+        ));
         let _build = self.build_lock.acquire().await?;
-        self.ensure_workspace().await?;
+        // One sink for this screen only: a task waits on the environment it builds
+        // for itself, and the base is the startup's own concern.
+        self.ensure_workspace(Some(&BasePackages(status))).await?;
 
         Ok(())
     }
@@ -294,8 +310,8 @@ impl IsolationEngine for MicrosandboxIsolation {
         let _build = self.build_lock.acquire().await?;
         // The workspace base is app startup's concern and reports on its own
         // screen; a task waits only on the environment built from it.
-        let workspace = self.ensure_workspace().await?;
-        self.ensure_snapshot(recipe, Some(workspace), Some(progress))
+        let workspace = self.ensure_workspace(None).await?;
+        self.ensure_snapshot(recipe, Some(workspace), Some(progress), None)
             .await
     }
 

@@ -26,6 +26,7 @@ mod base;
 mod engine;
 mod files;
 mod lifecycle;
+mod packages;
 mod snapshot;
 
 pub(super) async fn connect(id: &str) -> Result<Sandbox, IsolationError> {

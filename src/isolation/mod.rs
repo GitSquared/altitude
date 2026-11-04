@@ -36,7 +36,7 @@ pub enum IsolationStatus {
     Starting,
     InstallingRuntime,
     PreparingBaseImage(ImagePull),
-    PreparingBasePackages,
+    PreparingBasePackages(PackageInstall),
     Ready,
     Failed(String),
 }
@@ -47,6 +47,15 @@ pub enum IsolationStatus {
 pub struct ImagePull {
     pub downloaded_bytes: u64,
     pub total_bytes: u64,
+}
+
+// How far an environment's installs have come. apt says up front how many
+// packages it is about to add and dpkg names each one as it sets it up, so both
+// halves are zero until an install announces itself.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PackageInstall {
+    pub installed: u64,
+    pub total: u64,
 }
 
 pub struct CommandSession {
@@ -118,6 +127,10 @@ pub struct EnvironmentProgress {
 
 pub trait EnvironmentProgressSink: Send + Sync {
     fn report(&self, progress: EnvironmentProgress);
+}
+
+pub trait PackageInstallSink: Send + Sync {
+    fn installing(&self, install: PackageInstall);
 }
 
 pub struct Unwatched;

@@ -350,8 +350,12 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
                         total_bytes: pull.total_bytes,
                     }
                 }
-                IsolationStatus::PreparingBasePackages => {
-                    tracing::info!("Installing base tools");
+                IsolationStatus::PreparingBasePackages(install) => {
+                    tracing::info!(
+                        installed = install.installed,
+                        total = install.total,
+                        "Installing base tools"
+                    );
                     Phase::BaseTools
                 }
                 IsolationStatus::Failed(error) => return Err(io::Error::other(error)),

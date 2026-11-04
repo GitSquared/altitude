@@ -4,9 +4,11 @@ use microsandbox::sandbox::PullPolicy;
 
 use crate::isolation::{
     BaseSandboxRecipe, BaseSandboxSnapshot, CommandEvent, EnvironmentProgress,
-    EnvironmentProgressSink, IsolationEngine, IsolationError, SandboxOptions, SetupStep,
+    EnvironmentProgressSink, IsolationEngine, IsolationError, PackageInstallSink, SandboxOptions,
+    SetupStep,
 };
 
+use super::packages::Packages;
 use super::snapshot::{BaseSandboxSnapshotStore, artifact_name, build_namespace, now_ms};
 use super::{MicrosandboxIsolation, output_tail};
 
@@ -65,7 +67,10 @@ fn description_command() -> String {
 }
 
 impl MicrosandboxIsolation {
-    pub(super) async fn ensure_workspace(&self) -> Result<BaseSandboxSnapshot, IsolationError> {
+    pub(super) async fn ensure_workspace(
+        &self,
+        installs: Option<&dyn PackageInstallSink>,
+    ) -> Result<BaseSandboxSnapshot, IsolationError> {
         self.ensure_snapshot(
             BaseSandboxRecipe::new(
                 "workspace",
@@ -75,6 +80,7 @@ impl MicrosandboxIsolation {
             ),
             None,
             None,
+            installs,
         )
         .await
     }
@@ -84,6 +90,7 @@ impl MicrosandboxIsolation {
         recipe: BaseSandboxRecipe,
         parent: Option<BaseSandboxSnapshot>,
         progress: Option<&dyn EnvironmentProgressSink>,
+        installs: Option<&dyn PackageInstallSink>,
     ) -> Result<BaseSandboxSnapshot, IsolationError> {
         let store = BaseSandboxSnapshotStore::new(&recipe);
         let current = store.current()?;
@@ -129,7 +136,7 @@ impl MicrosandboxIsolation {
                         total: steps.len(),
                     });
                 }
-                self.run_setup_step(&sandbox_id, step).await?;
+                self.run_setup_step(&sandbox_id, step, installs).await?;
             }
             // Asked while the sandbox is still running, and before the snapshot
             // is taken, because it can only be asked of a live machine.
@@ -171,9 +178,18 @@ impl MicrosandboxIsolation {
         &self,
         sandbox_id: &str,
         step: &SetupStep,
+        installs: Option<&dyn PackageInstallSink>,
     ) -> Result<(), IsolationError> {
-        let (status, output) = self
-            .run_to_end(sandbox_id, &step.command)
+        let mut output = String::new();
+        let mut packages = Packages::default();
+        let status = self
+            .stream_to_end(sandbox_id, &step.command, |chunk| {
+                output.push_str(chunk);
+                let Some(installs) = installs else { return };
+                if let Some(install) = packages.observe(chunk) {
+                    installs.installing(install);
+                }
+            })
             .await
             .map_err(|error| IsolationError::new(format!("{}: {error}", step.label)))?;
         match status {
@@ -191,10 +207,22 @@ impl MicrosandboxIsolation {
         sandbox_id: &str,
         command: &str,
     ) -> Result<(i32, String), IsolationError> {
+        let mut output = String::new();
+        let status = self
+            .stream_to_end(sandbox_id, command, |chunk| output.push_str(chunk))
+            .await?;
+        Ok((status, output))
+    }
+
+    async fn stream_to_end(
+        &self,
+        sandbox_id: &str,
+        command: &str,
+        mut on_output: impl FnMut(&str),
+    ) -> Result<i32, IsolationError> {
         let mut session = self
             .run_command(sandbox_id.to_owned(), format!("set -eu\n{command}"))
             .await?;
-        let mut output = String::new();
         loop {
             let Some(event) = session.events.recv().await else {
                 return Err(IsolationError::new(
@@ -202,10 +230,8 @@ impl MicrosandboxIsolation {
                 ));
             };
             match event {
-                CommandEvent::Output { bytes, .. } => {
-                    output.push_str(&String::from_utf8_lossy(&bytes))
-                }
-                CommandEvent::Exited(status) => return Ok((status, output)),
+                CommandEvent::Output { bytes, .. } => on_output(&String::from_utf8_lossy(&bytes)),
+                CommandEvent::Exited(status) => return Ok(status),
                 CommandEvent::Failed(error) => return Err(IsolationError::new(error)),
             }
         }

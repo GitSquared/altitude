@@ -126,8 +126,8 @@ fn draw_bar(frame: &mut Frame, area: Rect, progress: &Progress<'_>) {
 }
 
 // A bar on one line: filled cells, the eighth-of-a-cell remainder, then the
-// percentage. Shared with the boot screen, which has no room for the popup.
-pub fn bar_line(width: u16, done: u64, total: u64) -> Line<'static> {
+// percentage.
+fn bar_line(width: u16, done: u64, total: u64) -> Line<'static> {
     const PARTIAL: [&str; 8] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
     let percent = (done.min(total) * 100).checked_div(total).unwrap_or(0) as u16;
     let percent = format!("{percent:>4}%");
