@@ -22,21 +22,21 @@ use tokio::{
 
 use crate::tracker::TrackerError;
 
-pub(super) const MCP_URL: &str = "https://mcp.linear.app/mcp";
-pub(super) const GRANT_FILE: &str = "grant.json";
+const MCP_URL: &str = "https://mcp.linear.app/mcp";
+const GRANT_FILE: &str = "grant.json";
 
-pub(super) struct Grant(PathBuf);
+struct Grant(PathBuf);
 
 impl Grant {
-    pub(super) fn new(profile: &Path) -> Self {
+    fn new(profile: &Path) -> Self {
         Self(profile.join(GRANT_FILE))
     }
 
-    pub(super) fn is_present(&self) -> bool {
+    fn is_present(&self) -> bool {
         self.0.is_file()
     }
 
-    pub(super) fn changed_at(&self) -> Option<SystemTime> {
+    fn changed_at(&self) -> Option<SystemTime> {
         fs::metadata(&self.0)
             .ok()
             .and_then(|metadata| metadata.modified().ok())
