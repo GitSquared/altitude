@@ -1,6 +1,5 @@
 use super::*;
 
-
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -13,14 +12,9 @@ use crate::{
     tui::{
         app::{CredentialStatus, TrackerState},
         popups::repositories::Repositories,
-        widgets::{
-            button::Button,
-            palette,
-            shimmer::shimmer,
-        },
+        widgets::{button::Button, palette, shimmer::shimmer},
     },
 };
-
 
 pub fn draw(
     frame: &mut Frame,

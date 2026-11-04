@@ -1,6 +1,5 @@
 use std::slice;
 
-
 use crate::{
     agent::AgentKind,
     tracker::TrackerKind,

@@ -1,6 +1,5 @@
 use super::*;
 
-
 use ratatui::{
     layout::Rect,
     text::{Line, Span},
@@ -9,13 +8,12 @@ use ratatui::{
 
 use crate::{
     tui::widgets::{
-            format::truncate,
-            palette,
-            select::{Offer, Select},
-        },
+        format::truncate,
+        palette,
+        select::{Offer, Select},
+    },
     vcs::Repository,
 };
-
 
 pub(super) fn row_spans(
     marker: Marker,
