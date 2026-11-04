@@ -89,16 +89,6 @@ pub enum TrackerStatus {
     Done,
 }
 
-impl TrackerStatus {
-    pub fn word(&self) -> &'static str {
-        match self {
-            Self::InProgress => "in progress",
-            Self::InReview => "in review",
-            Self::Done => "done",
-        }
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IssueReference {
     pub provider: TrackerKind,

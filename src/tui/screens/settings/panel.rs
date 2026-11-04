@@ -109,7 +109,8 @@ pub enum Depth {
 
 pub struct Panel {
     pub section: Section,
-    pub cursor: list::Cursor,
+    pub rail: list::List,
+    pub list: list::List,
     pub depth: Depth,
     pub form: Option<Form>,
     pub detail_scroll: u16,
@@ -119,7 +120,8 @@ impl Panel {
     pub fn new() -> Self {
         Self {
             section: Section::ALL[0],
-            cursor: list::Cursor::default(),
+            rail: list::List::default(),
+            list: list::List::default(),
             // The rail, so the panel opens on its shape rather than on the
             // details of whatever row happens to be first.
             depth: Depth::Rail,
@@ -136,7 +138,7 @@ impl Default for Panel {
 }
 
 impl Panel {
-    pub fn move_selection(&mut self, forward: bool, rows: usize) {
+    pub fn move_selection(&mut self, forward: bool) {
         self.detail_scroll = 0;
         match self.depth {
             Depth::Rail => {
@@ -150,18 +152,20 @@ impl Panel {
                     (at + Section::ALL.len() - 1) % Section::ALL.len()
                 };
                 self.section = Section::ALL[next];
-                self.cursor.reset();
+                self.list.reset();
             }
-            Depth::List => self.cursor.move_by(forward, rows),
+            Depth::List => {
+                self.list.move_by(forward);
+            }
         }
     }
 
     pub fn selected(&self) -> usize {
-        self.cursor.selected()
+        self.list.selected()
     }
 
     pub fn select_row(&mut self, index: usize) {
-        self.cursor.select(index);
+        self.list.select(index);
     }
 
     pub fn selected_row<'a>(&self, view: &'a View) -> Option<&'a Row> {

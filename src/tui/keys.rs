@@ -29,8 +29,12 @@ pub fn help_sections() -> Vec<HelpSection> {
         HelpSection {
             title: "Navigation",
             bindings: &[
-                ("j / k · h / l", "Select the next or previous card"),
-                ("← / → · ↑ / ↓", "Move across the grid"),
+                ("j / k · ↓ / ↑", "Select the next or previous row"),
+                (
+                    "h / l · Space",
+                    "Close or open the group the cursor is in; a folded group's heading is a row \
+                     the cursor can sit on",
+                ),
                 (
                     "Tab / Shift-Tab",
                     "Switch screen tabs; in a form, move between fields",
@@ -59,9 +63,19 @@ pub fn help_sections() -> Vec<HelpSection> {
                 ("Ctrl-L", "Link a Linear issue and start work on it"),
                 (
                     "Tab / Shift-Tab · [ / ]",
-                    "Switch project tabs; the grid and a new task follow",
+                    "Switch project tabs; the list and a new task follow",
                 ),
-                ("s", "Open Settings"),
+                (",", "Open Settings"),
+                (
+                    "Home / End · PgUp / PgDn",
+                    "Go to either end of the list, or a screenful up or down",
+                ),
+                ("f", "Filter the list by what the task is doing"),
+                ("s", "Order the list: recent, newest, oldest"),
+                (
+                    "Typing (open menu)",
+                    "Narrow the choices; enter takes one, esc closes it",
+                ),
                 ("Enter / i", "Read and answer the selected task's signals"),
                 (
                     "Ctrl-Enter",
@@ -107,7 +121,7 @@ pub fn help_sections() -> Vec<HelpSection> {
                     "PgUp / PgDn · Home",
                     "Scroll details, or return to their beginning",
                 ),
-                ("Esc / q / s", "Close Settings"),
+                ("Esc / q / ,", "Close Settings"),
             ],
         },
         HelpSection {
@@ -154,6 +168,10 @@ pub fn help_sections() -> Vec<HelpSection> {
                     "Take the secondary action where the thread has one: reply to the agent. A reply reopens the thread it answers",
                 ),
                 ("f / s", "Filter or sort the thread list"),
+                (
+                    "Space",
+                    "Fold or unfold the group the cursor is in; Home / End go to either end",
+                ),
                 ("n", "Write a new message to the agent"),
                 (
                     "Tab / Shift-Tab · p",

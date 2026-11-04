@@ -9,8 +9,9 @@ use iroh::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::task::{
-    Task, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent,
-    TaskOperatorAttentionLevel, TaskOperatorSignalKind, TaskOperatorSignalThread, TaskPlanStep,
+    SignalCounts, Task, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
+    TaskHistoryEvent, TaskOperatorAttentionLevel, TaskOperatorSignalKind, TaskOperatorSignalThread,
+    TaskPlanStep,
 };
 use crate::tracker::{IssueReference, IssueSnapshot, TrackerKind, TrackerStatus};
 use crate::vcs::ContributionState;
@@ -234,6 +235,12 @@ pub struct TaskSummary {
     pub id: String,
     pub host: String,
     pub title: String,
+    #[serde(default)]
+    pub title_generated: bool,
+    #[serde(default)]
+    pub created_at_ms: i64,
+    #[serde(default)]
+    pub shown_updated_at_ms: i64,
     pub project: String,
     #[serde(default)]
     pub project_id: Option<String>,
@@ -267,7 +274,15 @@ pub struct TaskSummary {
     #[serde(default)]
     pub blocking_signal_kind: Option<TaskOperatorSignalKind>,
     #[serde(default)]
+    pub leading_signal_kind: Option<TaskOperatorSignalKind>,
+    // The question itself, when there is one: a row can say what the agent is
+    // asking rather than only that it is asking something.
+    #[serde(default)]
+    pub leading_signal_title: Option<String>,
+    #[serde(default)]
     pub unresolved_signal_count: u32,
+    #[serde(default)]
+    pub signal_counts: SignalCounts,
     #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default)]
@@ -284,6 +299,8 @@ pub struct TaskSummary {
 pub struct ContributionSummary {
     pub reference: String,
     #[serde(default)]
+    pub url: String,
+    #[serde(default)]
     pub summary: Option<String>,
     #[serde(default)]
     pub state: Option<ContributionState>,
@@ -295,6 +312,9 @@ impl TaskSummary {
             id: task.id.clone(),
             host: task.host.clone(),
             title: task.title().to_owned(),
+            title_generated: task.facts.title.is_none(),
+            created_at_ms: task.facts.created_at_ms,
+            shown_updated_at_ms: task.facts.shown_updated_at_ms,
             project: task
                 .facts
                 .project
@@ -319,7 +339,10 @@ impl TaskSummary {
             activity: None,
             attention: task.facts.operator_attention_level.clone(),
             blocking_signal_kind: task.facts.blocking_signal_kind,
+            leading_signal_kind: task.facts.leading_signal_kind,
+            leading_signal_title: task.facts.leading_signal_title.clone(),
             unresolved_signal_count: task.facts.unresolved_signal_count,
+            signal_counts: task.facts.signal_counts,
             last_error: task.facts.last_error.clone(),
             tracker_issue: task.facts.tracker_issue.clone(),
             tracker_state: task.facts.tracker_status,
@@ -334,6 +357,7 @@ impl TaskSummary {
                         .find(|observation| observation.contribution_id == contribution.id);
                     ContributionSummary {
                         reference: contribution.reference.clone(),
+                        url: contribution.url.clone(),
                         summary: observed.map(|observation| observation.summary.clone()),
                         state: observed.map(|observation| observation.state.clone()),
                     }

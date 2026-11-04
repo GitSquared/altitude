@@ -32,11 +32,26 @@ mod remote;
 mod task;
 mod tracker;
 mod tui;
+
+#[cfg(any(debug_assertions, feature = "preview"))]
+use std::env;
 mod vcs;
 mod version;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
+    // A debug build can draw the task list over a database of fabricated tasks.
+    // It is a way of looking at the interface without asking real agents to run.
+    #[cfg(any(debug_assertions, feature = "preview"))]
+    if env::var_os("ALTITUDE_PREVIEW").is_some() {
+        return match tui::preview().await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("Error: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let result = match Cli::parse().command {
         Some(Command::Serve(args)) => remote::serve::run(args).await,
         None => client().await,

@@ -173,7 +173,7 @@ impl App {
                     Ok(threads) => {
                         self.signal_all_threads = threads;
                         self.signal_threads.clear();
-                        self.signals_cursor = list::Cursor::default();
+                        self.signals_list = list::List::default();
                         self.apply_signal_view();
                         self.reset_signal_message();
                     }
@@ -219,7 +219,6 @@ impl App {
                                 !(held.address == remote.address
                                     && held.summary.id == remote.task_id)
                             });
-                            self.clamp_selection();
                             self.leave_signals();
                             self.say("Task completed");
                         }
@@ -250,7 +249,7 @@ impl App {
         self.signal_task_id = Some(remote.task_id.clone());
         self.signal_all_threads.clear();
         self.signal_threads.clear();
-        self.signals_cursor = list::Cursor::default();
+        self.signals_list = list::List::default();
         self.signal_arrivals.clear();
         self.signal_focus = SignalFocus::List;
         self.signal_message_cursor = 0;

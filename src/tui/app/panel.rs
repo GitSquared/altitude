@@ -29,7 +29,6 @@ impl App {
             return;
         }
         let previous_section = self.panel.section;
-        let rows = self.row_count();
         match key.code {
             KeyCode::PageDown => {
                 self.panel.detail_scroll = self.panel.detail_scroll.saturating_add(5)
@@ -60,8 +59,8 @@ impl App {
             }
             KeyCode::Right | KeyCode::Char('l') => self.panel.depth = Depth::List,
             KeyCode::Left | KeyCode::Char('h') => self.panel.depth = Depth::Rail,
-            KeyCode::Down | KeyCode::Char('j') => self.panel.move_selection(true, rows),
-            KeyCode::Up | KeyCode::Char('k') => self.panel.move_selection(false, rows),
+            KeyCode::Down | KeyCode::Char('j') => self.panel.move_selection(true),
+            KeyCode::Up | KeyCode::Char('k') => self.panel.move_selection(false),
             _ if is_remove(key)
                 && self.panel.section.slot().is_some()
                 && self
@@ -243,5 +242,5 @@ pub(in crate::tui) async fn open_panel_at<E>(
 {
     open_panel(app, task_service).await;
     app.panel.section = section;
-    app.panel.cursor.reset();
+    app.panel.list.reset();
 }

@@ -90,6 +90,22 @@ impl App {
             }
         }
 
+        // An open menu owns every key while it is open, escape included.
+        if self.task_filter.is_open() {
+            self.task_filter.handle_key(key);
+            self.apply_task_view();
+            return Ok(false);
+        }
+        if self.task_sort.is_open() {
+            self.task_sort.handle_key(key);
+            self.apply_task_view();
+            return Ok(false);
+        }
+        // Moving, paging and the ends of the list are the list's own.
+        if self.tasks_list.key(key).is_some() {
+            return Ok(false);
+        }
+
         match key.code {
             KeyCode::Char('q') => return Ok(true),
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
@@ -125,36 +141,12 @@ impl App {
                     self.foreground = Foreground::NewTask(Box::new(question.linking()));
                 }
             }
-            KeyCode::Char('s') => {
+            KeyCode::Char(',') => {
                 open_panel(self, task_service).await;
             }
+            KeyCode::Char('s') => self.task_sort.open(),
+            KeyCode::Char('f') => self.task_filter.open(),
             KeyCode::Char('i') => self.open_signals(task_service, remote_signals).await,
-            // j and k walk the cards, the way a list does; the arrows keep the
-            // grid's shape, where up and down are a row rather than a card.
-            KeyCode::Char('j') => {
-                let columns = self.grid_columns();
-                self.select_adjacent(1, columns);
-            }
-            KeyCode::Char('k') => {
-                let columns = self.grid_columns();
-                self.select_adjacent(-1, columns);
-            }
-            KeyCode::Down => {
-                let columns = self.grid_columns();
-                self.select_adjacent(columns as isize, columns);
-            }
-            KeyCode::Up => {
-                let columns = self.grid_columns();
-                self.select_adjacent(-(columns as isize), columns);
-            }
-            KeyCode::Right | KeyCode::Char('l') => {
-                let columns = self.grid_columns();
-                self.select_adjacent(1, columns);
-            }
-            KeyCode::Left | KeyCode::Char('h') => {
-                let columns = self.grid_columns();
-                self.select_adjacent(-1, columns);
-            }
             _ if is_remove(key) => {
                 // A remote's task is removed the same way. Which machine holds it
                 // is where the act happens, not what the act is.

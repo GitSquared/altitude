@@ -155,8 +155,41 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
        AND resolved = 0
        AND kind IN ('blocked', 'in_review')
      ORDER BY raised_at_ms DESC LIMIT 1) AS blocking_signal_kind,
+    -- The kind a list shows the task under: the most urgent unresolved thread,
+    -- which is not the same question as whether the task is blocked.
+    (SELECT kind
+     FROM task_operator_signals
+     WHERE task_id = tasks.id
+       AND resolved = 0
+     ORDER BY CASE kind
+         WHEN 'blocked' THEN 0
+         WHEN 'in_review' THEN 1
+         WHEN 'decision' THEN 2
+         ELSE 3
+     END, raised_at_ms DESC
+     LIMIT 1) AS leading_signal_kind,
+    -- And what that thread is about, because a row can say the question itself
+    -- rather than only that there is one.
+    (SELECT title
+     FROM task_operator_signals
+     WHERE task_id = tasks.id
+       AND resolved = 0
+     ORDER BY CASE kind
+         WHEN 'blocked' THEN 0
+         WHEN 'in_review' THEN 1
+         WHEN 'decision' THEN 2
+         ELSE 3
+     END, raised_at_ms DESC
+     LIMIT 1) AS leading_signal_title,
     (SELECT count(*) FROM task_operator_signals
      WHERE task_id = tasks.id AND resolved = 0) AS unresolved_signal_count,
+    -- How many of each kind. One number says a row is noisy; the numbers by kind
+    -- say whether it is asking something or only reporting.
+    COALESCE((SELECT json_group_object(kind, total) FROM (
+         SELECT kind, count(*) AS total
+         FROM task_operator_signals
+         WHERE task_id = tasks.id AND resolved = 0
+         GROUP BY kind)), '{}') AS signal_counts,
     (SELECT json_object(
          'signal', json(payload -> '$.data.signal'),
          'agent_run_id', payload -> '$.data.agent_run_id')
@@ -171,6 +204,25 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
          (SELECT MAX(sequence) FROM task_event_logs
           WHERE task_id = tasks.id AND event_type = 'agent_run_started'), 0)
      ORDER BY cleared.sequence DESC LIMIT 1) AS review_wake_reason,
+    tasks.created_at_ms AS created_at_ms,
+    -- The age a list shows: when one of the facts it prints last moved. The log
+    -- has plenty of events that change nothing on a row — a plan refreshed every
+    -- turn, a model observed, a tracker echoing a status back — and counting those
+    -- would make every age mean "recently" and nothing else.
+    COALESCE((SELECT MAX(recorded_at_ms) FROM task_event_logs
+              WHERE task_id = tasks.id
+                AND event_type IN (
+                    'intent_expressed', 'task_title_set', 'task_arrived_from',
+                    'agent_run_started', 'agent_run_ended', 'agent_turn_reported',
+                    'control_requested', 'execution_queued', 'execution_paused',
+                    'execution_recovered', 'execution_failed', 'task_completed',
+                    'task_handed_back', 'operator_signal_raised', 'operator_signal_resolved',
+                    'operator_signal_confirmed', 'review_deferred', 'review_deferral_cleared',
+                    'code_contribution_linked', 'code_contribution_observed',
+                    'tracker_issue_bound', 'transfer_staged', 'transfer_landed',
+                    'transfer_committed', 'transfer_abandoned',
+                    'limit_held', 'agent_usage_reported'
+                )), tasks.created_at_ms) AS shown_updated_at_ms,
     (SELECT json_group_array(json(contribution))
      FROM task_code_contributions WHERE task_id = tasks.id) AS contributions,
     (SELECT json_group_array(json(observation))

@@ -88,6 +88,38 @@ pub enum TaskOperatorSignalKind {
     Blocked,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignalCounts {
+    #[serde(default)]
+    pub blocked: u32,
+    #[serde(default)]
+    pub in_review: u32,
+    #[serde(default)]
+    pub decision: u32,
+    #[serde(default)]
+    pub update: u32,
+}
+
+impl SignalCounts {
+    pub fn count(self, kind: TaskOperatorSignalKind) -> u32 {
+        match kind {
+            TaskOperatorSignalKind::Blocked => self.blocked,
+            TaskOperatorSignalKind::InReview => self.in_review,
+            TaskOperatorSignalKind::Decision => self.decision,
+            TaskOperatorSignalKind::Update => self.update,
+        }
+    }
+}
+
+// The order a row says its counts in: what stopped it, what is waiting to be
+// read, what it is asking, and what it is only telling.
+pub const SIGNAL_ORDER: [TaskOperatorSignalKind; 4] = [
+    TaskOperatorSignalKind::Blocked,
+    TaskOperatorSignalKind::InReview,
+    TaskOperatorSignalKind::Decision,
+    TaskOperatorSignalKind::Update,
+];
+
 impl TaskOperatorSignalKind {
     pub fn tier(self) -> u8 {
         match self {
@@ -268,6 +300,8 @@ pub struct Task {
 #[derive(Clone, Debug, sqlx::FromRow)]
 pub struct TaskFacts {
     pub accepted: bool,
+    pub created_at_ms: i64,
+    pub shown_updated_at_ms: i64,
     pub intent: String,
     pub title: Option<String>,
     pub operator_id: Option<String>,
@@ -315,7 +349,11 @@ pub struct TaskFacts {
     #[sqlx(default)]
     pub tracker_status: Option<TrackerStatus>,
     pub blocking_signal_kind: Option<TaskOperatorSignalKind>,
+    pub leading_signal_kind: Option<TaskOperatorSignalKind>,
+    pub leading_signal_title: Option<String>,
     pub unresolved_signal_count: u32,
+    #[sqlx(json)]
+    pub signal_counts: SignalCounts,
     #[sqlx(json(nullable))]
     pub deferred_review: Option<DeferredReview>,
     pub review_wake_reason: Option<String>,

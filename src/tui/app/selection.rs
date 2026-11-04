@@ -3,22 +3,6 @@ use crate::project::Project;
 use super::*;
 
 impl App {
-    pub(super) fn clamp_selection(&mut self) {
-        let (local, remote) = self.visible_counts();
-        self.selected = self.selected.min((local + remote).saturating_sub(1));
-    }
-
-    pub(in crate::tui) fn select_adjacent(&mut self, step: isize, columns: usize) {
-        let (local, remote) = self.visible_counts();
-        let count = local + remote;
-        if count == 0 {
-            return;
-        }
-        let moved = self.selected as isize + step;
-        self.selected = moved.clamp(0, count as isize - 1) as usize;
-        let _ = columns;
-    }
-
     // A task this machine is holding for someone is not the operator's to schedule
     // and not theirs to move: it goes back where it came from when the desk stops,
     // which is not a key.
@@ -65,9 +49,5 @@ impl App {
                  remote. Add it in Settings → Remotes, or change the project's machine."
             )),
         }
-    }
-
-    pub(in crate::tui) fn grid_columns(&self) -> usize {
-        self.grid_columns.max(1)
     }
 }

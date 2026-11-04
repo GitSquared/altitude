@@ -11,10 +11,6 @@ pub fn inactive_selection() -> Style {
     Style::new().fg(Color::Reset).bg(Color::DarkGray)
 }
 
-pub fn focus_detail() -> Style {
-    Style::new().fg(Color::DarkGray).bg(Color::Cyan)
-}
-
 pub fn selection_detail() -> Style {
     Style::new().fg(Color::Gray)
 }

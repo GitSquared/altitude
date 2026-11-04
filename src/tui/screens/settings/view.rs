@@ -397,10 +397,6 @@ impl App {
             .collect()
     }
 
-    pub(in crate::tui) fn row_count(&self) -> usize {
-        self.settings_view().rows.len()
-    }
-
     pub(in crate::tui) fn selected_row(&self) -> Option<Row> {
         self.settings_view()
             .rows

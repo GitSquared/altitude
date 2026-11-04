@@ -10,6 +10,7 @@ use crate::{
 };
 
 use crate::tui::widgets::alert::Alert;
+use crate::tui::widgets::list::Event;
 use popups::message::{Decision as MessageDecision, MessagePrompt};
 use screens::signals::{SignalFocus, SignalHit, primary_action, secondary_action};
 
@@ -79,7 +80,7 @@ impl App {
                 match target {
                     SignalHit::List => self.signal_focus = SignalFocus::List,
                     SignalHit::Thread(index) => {
-                        self.signals_cursor.select(index);
+                        self.signals_list.select(index);
                         self.signal_focus = SignalFocus::List;
                         self.reset_signal_message();
                     }
@@ -190,6 +191,18 @@ impl App {
         // Tab switches the screen's tabs where it has them; the horizontal
         // arrows and h/l move between the parts of the screen. j/k and the
         // vertical arrows move inside the part that has the keys.
+        // In the thread list, moving and folding are the list's own; a list
+        // already at its top hands the focus back to the filters above it.
+        if self.signal_focus == SignalFocus::List
+            && let Some(event) = self.signals_list.key(key)
+        {
+            match event {
+                Event::AtStart => self.signal_focus = SignalFocus::Filter,
+                Event::Moved => self.reset_signal_message(),
+                Event::AtEnd | Event::Folded { .. } => {}
+            }
+            return;
+        }
         if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
             if self.signal_plan_tabs {
                 self.signal_plan_open = !self.signal_plan_open;
@@ -241,7 +254,7 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => match self.signal_focus {
                 SignalFocus::List => {
                     let len = self.signal_threads.len();
-                    if self.signals_cursor.selected() + 1 < len {
+                    if self.signals_list.selected() + 1 < len {
                         self.move_signal_cursor(true);
                     }
                 }
@@ -255,7 +268,7 @@ impl App {
             },
             KeyCode::Up | KeyCode::Char('k') => match self.signal_focus {
                 SignalFocus::List => {
-                    if self.signals_cursor.selected() == 0 {
+                    if self.signals_list.selected() == 0 {
                         self.signal_focus = SignalFocus::Filter;
                     } else {
                         self.move_signal_cursor(false);

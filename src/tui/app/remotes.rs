@@ -16,7 +16,7 @@ use crate::{
         TaskOrigin, TaskRequest, TaskSummary, WatchEvent, bring_home, meet, send::send_to_remote,
     },
     task::{TaskEventLoop, TaskService},
-    tui::widgets::progress,
+    tui::{screens::tasks::TaskRef, widgets::progress},
 };
 
 use super::{
@@ -296,7 +296,6 @@ impl App {
             WatchedTasks::Removed { address, id } => {
                 self.remote_tasks
                     .retain(|held| !(held.address == address && held.summary.id == id));
-                self.settle_selection();
             }
             // Its tasks are its own, and there is no copy here to fall back on.
             // They stay on screen anyway: a machine that restarts still holds the
@@ -307,7 +306,6 @@ impl App {
                 self.remote_synced.remove(&address);
                 self.remote_status
                     .insert(address, RemoteStatus::Silent(reason));
-                self.settle_selection();
             }
         }
         // A creation question may be open over the list, and a machine that just
@@ -337,7 +335,6 @@ impl App {
             .collect();
         self.remote_tasks.splice(at..at, arrived);
         self.reveal_pending();
-        self.settle_selection();
     }
 
     pub(in crate::tui) fn reveal_pending(&mut self) {
@@ -352,18 +349,9 @@ impl App {
         if let Some(project_id) = project_id {
             self.focus_project(&project_id);
         }
-        let (local, _) = self.visible_counts();
-        let index = self
-            .visible_remote_tasks()
-            .position(|held| held.address == address && held.summary.id == id);
-        if let Some(index) = index {
-            self.selected = local + index;
-        }
-    }
-
-    pub(in crate::tui) fn settle_selection(&mut self) {
-        let (local, remote) = self.visible_counts();
-        self.selected = self.selected.min((local + remote).saturating_sub(1));
+        // The list places the cursor once it has ranked its rows, which is after
+        // this: all this can say is which task to look for.
+        self.pending_reveal = Some(TaskRef::Remote { address, id });
     }
 
     pub(in crate::tui) fn ask_to_take_over(
@@ -643,8 +631,6 @@ impl App {
                 self.remote_tasks.retain(|held| {
                     !(held.address == reply.address && held.summary.id == reply.task_id)
                 });
-                let (local, remote) = self.visible_counts();
-                self.selected = self.selected.min((local + remote).saturating_sub(1));
             }
             Err(error) => self.problem(format!("Could not drop the task: {error}")),
         }

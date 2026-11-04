@@ -332,11 +332,15 @@ impl App {
     }
 
     pub(in crate::tui) fn is_gliding(&self) -> bool {
-        self.signals_cursor.is_gliding() || self.panel.cursor.is_gliding()
+        self.tasks_list.is_gliding()
+            || self.signals_list.is_gliding()
+            || self.panel.list.is_gliding()
     }
 
     pub(in crate::tui) fn glide_lists(&mut self, elapsed: Duration) -> bool {
-        self.signals_cursor.glide(elapsed) | self.panel.cursor.glide(elapsed)
+        self.tasks_list.glide(elapsed)
+            | self.signals_list.glide(elapsed)
+            | self.panel.list.glide(elapsed)
     }
 
     pub(in crate::tui) fn has_modal(&self) -> bool {

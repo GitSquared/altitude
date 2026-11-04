@@ -23,10 +23,7 @@ use crate::{
         RemoteKey, RemoteKeyStatus, RemoteKeys, TaskOrigin, TaskSummary, TrackerConnection, meet,
         transfer, transfer::TransferUpdate,
     },
-    task::{
-        Task, TaskExecutionPauseReason, TaskExecutionStatus, TaskOperatorSignalThread,
-        TaskServiceError,
-    },
+    task::{Task, TaskExecutionPauseReason, TaskOperatorSignalThread, TaskServiceError},
     tracker::{IssueSnapshot, IssueSummary, ScopeSummary, TrackerKind},
     tui::keys::{is_dismiss, is_remove},
     tui::popups,
@@ -53,6 +50,7 @@ use screens::get_started::GetStarted;
 use screens::settings::{GitIdentity, Panel, SettingsHit};
 use screens::shell::{GuestRequest, Shell};
 use screens::signals::{Composer, SignalFilter, SignalFocus, SignalHit, SignalSort};
+use screens::tasks::{Menu, TaskControl, TaskFilter, TaskRef, TaskSort};
 
 #[derive(Default)]
 pub(in crate::tui) enum Foreground {
@@ -493,7 +491,12 @@ mod tracker;
 pub struct App {
     pub(in crate::tui) tasks: Vec<Task>,
     active_project: Option<String>,
-    pub(in crate::tui) grid_columns: usize,
+    pub(in crate::tui) tasks_list: list::List,
+    pub(in crate::tui) task_filter: Select<TaskFilter>,
+    pub(in crate::tui) task_sort: Select<TaskSort>,
+    pub(in crate::tui) task_control_targets: Targets<TaskControl>,
+    pub(in crate::tui) task_order: Vec<TaskRef>,
+    pub(in crate::tui) pending_reveal: Option<TaskRef>,
     pub(in crate::tui) environment_builds: HashMap<String, EnvironmentProgress>,
     // What each running agent is doing, straight from its own stream. Live only:
     // nothing here outlives the run it describes, and the task screen is the only
@@ -514,8 +517,6 @@ pub struct App {
     pub(in crate::tui) capacity: Option<SandboxCapacity>,
     pub(in crate::tui) alert: Option<Alert>,
     pub(in crate::tui) removing: HashSet<String>,
-    pub(in crate::tui) selected: usize,
-    pub(in crate::tui) first_visible_task: usize,
     pub(in crate::tui) shells: HashMap<ShellId, Shell>,
     pub(in crate::tui) new_task_targets: Targets<NewTaskHit>,
     pub(in crate::tui) credential_shell: CredentialShellState,
@@ -527,8 +528,7 @@ pub struct App {
     pub(in crate::tui) signal_threads: Vec<TaskOperatorSignalThread>,
     pub(in crate::tui) signal_filter: Select<SignalFilter>,
     pub(in crate::tui) signal_sort: Select<SignalSort>,
-    pub(in crate::tui) signals_cursor: list::Cursor,
-    pub(in crate::tui) signals_layout: list::Layout,
+    pub(in crate::tui) signals_list: list::List,
     pub(in crate::tui) signal_scroll: u16,
     pub(in crate::tui) signal_message_rows: Vec<(u16, u16)>,
     pub(in crate::tui) signal_scroll_max: u16,
@@ -544,7 +544,7 @@ pub struct App {
     // Rebuilt by every draw of the task screen, so it cannot describe a screen
     // that is no longer on it.
     pub(in crate::tui) signal_focus_ring: FocusRing<SignalFocus>,
-    pub(in crate::tui) task_targets: Targets<usize>,
+    pub(in crate::tui) task_targets: Targets<list::Hit>,
     pub(in crate::tui) project_targets: Targets<usize>,
     pub(in crate::tui) settings_targets: Targets<SettingsHit>,
     pub(in crate::tui) signal_arrivals: HashMap<String, Instant>,
@@ -619,13 +619,15 @@ impl Drop for App {
 // What the list is for: work that is still the operator's. An issue that ended elsewhere,
 // or a delegation that was withdrawn, is a record rather than a task to act on, and it is
 // read where it happened.
+// Work that ended somewhere else — the issue was closed, the delegation withdrawn —
+// is a record rather than a task to act on, and it is read where it happened. A
+// finished task is not that: it stays, so the list can show it when asked.
 fn is_listed(task: &Task) -> bool {
-    task.facts.execution_status != TaskExecutionStatus::Completed
-        && !task
-            .facts
-            .execution_pause_reason
-            .as_ref()
-            .is_some_and(TaskExecutionPauseReason::is_out_of_play)
+    !task
+        .facts
+        .execution_pause_reason
+        .as_ref()
+        .is_some_and(TaskExecutionPauseReason::is_out_of_play)
 }
 
 fn listed(tasks: Vec<Task>) -> Vec<Task> {
@@ -633,11 +635,10 @@ fn listed(tasks: Vec<Task>) -> Vec<Task> {
 }
 
 fn is_listed_summary(summary: &TaskSummary) -> bool {
-    summary.status != TaskExecutionStatus::Completed
-        && !summary
-            .pause_reason
-            .as_ref()
-            .is_some_and(TaskExecutionPauseReason::is_out_of_play)
+    !summary
+        .pause_reason
+        .as_ref()
+        .is_some_and(TaskExecutionPauseReason::is_out_of_play)
 }
 
 fn github_login(output: &str) -> Option<String> {

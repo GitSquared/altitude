@@ -231,7 +231,7 @@ impl App {
     }
 
     pub(in crate::tui) fn signal_thread(&self) -> Option<&TaskOperatorSignalThread> {
-        self.signal_threads.get(self.signals_cursor.selected())
+        self.signal_threads.get(self.signals_list.selected())
     }
 
     pub(in crate::tui) fn signal_task(&self) -> Option<&Task> {

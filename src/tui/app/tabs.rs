@@ -88,14 +88,20 @@ impl App {
         local + remote
     }
 
+    pub(super) fn selected_ref(&self) -> Option<&TaskRef> {
+        self.task_order.get(self.tasks_list.selected())
+    }
+
     pub(super) fn selected_held(&self) -> Option<&HeldTask> {
-        let (local, _) = self.visible_counts();
-        self.visible_remote_tasks()
-            .nth(self.selected.checked_sub(local)?)
+        let TaskRef::Remote { address, id } = self.selected_ref()? else {
+            return None;
+        };
+        self.remote_tasks
+            .iter()
+            .find(|held| &held.address == address && &held.summary.id == id)
     }
 
     pub(super) fn selected_is_remote(&self) -> bool {
-        let (local, remote) = self.visible_counts();
-        self.selected >= local && self.selected < local + remote
+        matches!(self.selected_ref(), Some(TaskRef::Remote { .. }))
     }
 }

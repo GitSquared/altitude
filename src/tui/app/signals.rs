@@ -368,20 +368,19 @@ impl App {
                 .iter()
                 .position(|thread| &thread.id == id)
         }) {
-            Some(index) => self.signals_cursor.select(index),
-            None => self.signals_cursor.select(0),
+            Some(index) => self.signals_list.select(index),
+            None => self.signals_list.select(0),
         }
         self.normalise_signal_focus();
     }
 
     pub(in crate::tui) fn move_signal_cursor(&mut self, forward: bool) {
-        self.signals_cursor
-            .move_by(forward, self.signal_threads.len());
+        self.signals_list.move_by(forward);
         self.reset_signal_message();
     }
 
     pub(in crate::tui) fn page_signal_cursor(&mut self, forward: bool) {
-        self.signals_cursor.page_by(forward, &self.signals_layout);
+        self.signals_list.page_by(forward);
         self.reset_signal_message();
     }
 
@@ -411,11 +410,11 @@ impl App {
         if len == 0 {
             return;
         }
-        let start = self.signals_cursor.selected();
+        let start = self.signals_list.selected();
         for offset in 1..=len {
             let index = (start + offset) % len;
             if self.signal_threads[index].is_unresolved() {
-                self.signals_cursor.select(index);
+                self.signals_list.select(index);
                 self.reset_signal_message();
                 return;
             }
@@ -587,7 +586,7 @@ impl App {
         self.signal_task_id = Some(task_id);
         self.signal_all_threads = threads;
         self.signal_threads.clear();
-        self.signals_cursor = list::Cursor::default();
+        self.signals_list = list::List::default();
         self.apply_signal_view();
         self.signal_arrivals.clear();
         self.signal_focus = SignalFocus::List;
@@ -633,9 +632,7 @@ impl App {
                 self.pending_tasks.clear();
                 let id = task.id.clone();
                 self.replace_task(task);
-                if let Some(index) = self.tasks.iter().position(|task| task.id == id) {
-                    self.selected = index;
-                }
+                self.pending_reveal = Some(TaskRef::Local(id));
             }
             TaskExecutionUpdate::Created(Err(error)) => {
                 self.pending_tasks.clear();

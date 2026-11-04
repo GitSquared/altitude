@@ -11,6 +11,12 @@ publish = false
 [lints.clippy]
 absolute_paths = "warn"
 
+[features]
+# A screen of fabricated tasks to look at the interface with. Debug builds have
+# it anyway; a release build needs asking, because a debug build's arithmetic is
+# nowhere near fast enough to judge the interface by.
+preview = []
+
 [dependencies]
 axum = "0.8.9"
 arboard = { version = "3.6.1", default-features = false }

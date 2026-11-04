@@ -30,40 +30,87 @@ impl App {
             self.tasks.insert(0, task);
             return;
         };
-        // A task that has just been completed leaves the grid the moment the
-        // record says so, rather than waiting for the next refresh.
         let stays = is_listed(&task);
         *current = task;
         if !stays {
             self.tasks.retain(is_listed);
-            self.clamp_selection();
         }
+    }
+
+    // The rows are built afresh every frame in the order the pills ask for, so
+    // changing one of them only has to say which task the cursor was on.
+    pub(in crate::tui) fn apply_task_view(&mut self) {
+        self.pending_reveal = self.selected_ref().cloned();
+    }
+
+    pub(in crate::tui) fn choose_task_control(&mut self, control: TaskControl) {
+        match control {
+            TaskControl::Filter => self.task_filter.open(),
+            TaskControl::Sort => self.task_sort.open(),
+            TaskControl::Offer(menu, index) => match menu {
+                Menu::Filter => {
+                    self.task_filter.choose(index);
+                    self.task_filter.close();
+                }
+                Menu::Sort => {
+                    self.task_sort.choose(index);
+                    self.task_sort.close();
+                }
+            },
+        }
+        self.apply_task_view();
+    }
+
+    pub(in crate::tui) fn close_task_menus(&mut self) -> bool {
+        let mut closed = false;
+        for open in [self.task_filter.is_open(), self.task_sort.is_open()] {
+            closed |= open;
+        }
+        self.task_filter.close();
+        self.task_sort.close();
+        closed
     }
 
     pub(in crate::tui) fn list_tasks(&mut self, tasks: Vec<Task>) {
         self.tasks = listed(tasks);
-        self.clamp_selection();
     }
 
     pub(in crate::tui) fn task_mouse(&mut self, mouse: MouseEvent) {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                let control = self
+                    .task_control_targets
+                    .at(mouse.column, mouse.row)
+                    .copied();
+                if let Some(control) = control {
+                    self.choose_task_control(control);
+                    return;
+                }
+                if self.close_task_menus() {
+                    return;
+                }
                 if let Some(index) = self.project_targets.at(mouse.column, mouse.row).copied() {
                     let id = self.projects().get(index).map(|project| project.id.clone());
                     if let Some(id) = id {
                         self.focus_project(&id);
                     }
-                } else if let Some(index) = self.task_targets.at(mouse.column, mouse.row).copied() {
-                    self.selected = index;
+                } else if let Some(hit) = self.task_targets.at(mouse.column, mouse.row).cloned() {
+                    // A name in the row is a way into what it names: the click goes
+                    // there rather than only selecting the row it sits in.
+                    match hit.link {
+                        Some(url) => match open_in_browser(&url) {
+                            Ok(()) => tracing::info!(%url, "opened a task's link"),
+                            Err(error) => self.problem(format!("Could not open {url}: {error}")),
+                        },
+                        None => self.tasks_list.select(hit.row),
+                    }
                 }
             }
             MouseEventKind::ScrollUp => {
-                let columns = self.grid_columns();
-                self.select_adjacent(-(columns as isize), columns);
+                self.tasks_list.move_by(false);
             }
             MouseEventKind::ScrollDown => {
-                let columns = self.grid_columns();
-                self.select_adjacent(columns as isize, columns);
+                self.tasks_list.move_by(true);
             }
             _ => {}
         }
@@ -150,12 +197,12 @@ impl App {
                     SettingsHit::Section(index) => {
                         if let Some(section) = Section::ALL.get(index) {
                             self.panel.section = *section;
-                            self.panel.cursor.reset();
+                            self.panel.rail.reset();
                             self.panel.depth = Depth::Rail;
                         }
                     }
                     SettingsHit::Row(index) => {
-                        self.panel.cursor.select(index);
+                        self.panel.list.select(index);
                         self.panel.depth = Depth::List;
                     }
                 }
@@ -188,7 +235,7 @@ impl App {
     pub(in crate::tui) fn focus_project(&mut self, id: &str) {
         if self.active_project.as_deref() != Some(id) {
             self.active_project = Some(id.to_owned());
-            self.selected = 0;
+            self.tasks_list.reset();
         }
     }
 
@@ -255,15 +302,15 @@ impl App {
     }
 
     pub(in crate::tui) fn selected_task(&self) -> Option<Task> {
-        self.visible_tasks().nth(self.selected).cloned()
+        let TaskRef::Local(id) = self.selected_ref()? else {
+            return None;
+        };
+        self.tasks.iter().find(|task| &task.id == id).cloned()
     }
 
     pub(in crate::tui) fn remove_task(&mut self, id: &str) {
         self.removing.remove(id);
-        if let Some(index) = self.tasks.iter().position(|task| task.id == id) {
-            self.tasks.remove(index);
-            self.clamp_selection();
-        }
+        self.tasks.retain(|task| task.id != id);
     }
 
     pub(in crate::tui) fn begin_removing(&mut self, id: &str) {

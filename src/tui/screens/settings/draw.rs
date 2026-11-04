@@ -6,14 +6,8 @@ use ratatui::{
 };
 
 use crate::tui::widgets::{
-    chrome,
-    columns::Columns,
-    empty, header,
-    list::{self, Row},
-    palette,
-    pointer::Targets,
-    shimmer::shimmer,
-    surface::Surface,
+    chrome, columns::Columns, empty, header, list::Row, palette, pointer::Targets,
+    shimmer::shimmer, surface::Surface,
 };
 
 use crate::remote::LOCAL_VERSION;
@@ -101,16 +95,14 @@ fn draw_columns(
                 .tone(tone)
         })
         .collect::<Vec<_>>();
-    for (rect, index) in list::draw(
-        frame,
-        rail,
-        &rail_rows,
-        0,
-        Some(rail_selected),
-        rail_focused.then_some(rail_selected),
-        1,
-    ) {
-        targets.add(rect, SettingsHit::Section(index));
+    // The rail's own selection is the section, which the panel keeps; the list
+    // is told once per frame rather than in every place a section can change.
+    panel.rail.select(rail_selected);
+    for (rect, index) in panel
+        .rail
+        .draw(frame, rail, &rail_rows, tick, rail_focused, 1)
+    {
+        targets.add(rect, SettingsHit::Section(index.row));
     }
 
     let list_focused = panel.depth == Depth::List;
@@ -138,24 +130,16 @@ fn draw_columns(
             line
         })
         .collect::<Vec<_>>();
-    let visible = list::content_lines(&list_rows);
-    panel
-        .cursor
-        .follow(&list_rows, list_area.height, tick.is_some());
-    for (rect, index) in list::draw(
-        frame,
-        list_area,
-        &list_rows,
-        panel.cursor.offset(),
-        Some(panel.selected()),
-        list_focused.then(|| panel.selected()),
-        1,
-    ) {
-        targets.add(rect, SettingsHit::Row(index));
+    let visible = panel.list.content_lines();
+    for (rect, index) in panel
+        .list
+        .draw(frame, list_area, &list_rows, tick, list_focused, 1)
+    {
+        targets.add(rect, SettingsHit::Row(index.row));
     }
     if panel.section == Section::Remotes && is_discovering {
         // A scan has no row yet, so it is said under the rows rather than in one.
-        let below = visible.saturating_sub(panel.cursor.offset());
+        let below = visible.saturating_sub(panel.list.offset());
         let y = list_area
             .y
             .saturating_add(u16::try_from(below + 1).unwrap_or(u16::MAX))

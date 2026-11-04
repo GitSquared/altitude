@@ -2,17 +2,13 @@ use super::*;
 use std::{collections::HashMap, time::Duration};
 
 use chrono::Utc;
-use ratatui::{Frame, layout::Rect, text::Span};
+use ratatui::{Frame, layout::Rect};
 
 use crate::{
     task::TaskOperatorSignalAuthor,
     tui::{
         App,
-        widgets::{
-            format::since,
-            list::{self, Row},
-            palette, signal,
-        },
+        widgets::{format::since, list::Row, palette, signal},
     },
 };
 
@@ -105,13 +101,12 @@ pub(super) fn draw_threads(frame: &mut Frame, area: Rect, app: &mut App) {
             // can spend its width on the title and the age instead.
             let mut row = Row::new(thread.title.clone()).detail(detail);
             if starts {
-                let mark = vec![Span::styled(
-                    format!("{} ", group.symbol),
+                row = row.heading(
+                    group.title,
+                    counts[group.title].to_string(),
+                    group.symbol,
                     group.tone.bold(),
-                )];
-                row = row
-                    .heading(group.title, counts[group.title].to_string())
-                    .heading_kind(mark, group.tone.bold());
+                );
             }
             if arriving {
                 row = row.tone(palette::accent());
@@ -126,23 +121,15 @@ pub(super) fn draw_threads(frame: &mut Frame, area: Rect, app: &mut App) {
             row
         })
         .collect::<Vec<_>>();
-    app.signals_layout = list::Layout::of(&rows, area.height);
-    app.signals_cursor
-        .follow(&rows, area.height, app.animations());
-    let selected = (!rows.is_empty()).then(|| app.signals_cursor.selected());
-    let focused = (app.signal_focus == SignalFocus::List)
-        .then_some(selected)
-        .flatten();
-    let hitboxes = list::draw(
+    let hitboxes = app.signals_list.draw(
         frame,
         area,
         &rows,
-        app.signals_cursor.offset(),
-        selected,
-        focused,
+        app.animation_tick(),
+        app.signal_focus == SignalFocus::List,
         LIST_PADDING,
     );
     for (rect, index) in hitboxes {
-        app.signal_targets.add(rect, SignalHit::Thread(index));
+        app.signal_targets.add(rect, SignalHit::Thread(index.row));
     }
 }
