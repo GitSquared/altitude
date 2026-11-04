@@ -4,9 +4,7 @@ use super::*;
 
 use serde_json::{Map, Value, json};
 
-use crate::tracker::{
-    TrackerError, TrackerStatus,
-};
+use crate::tracker::{TrackerError, TrackerStatus};
 
 pub(super) async fn choose_state(
     session: &Session,

@@ -1,6 +1,3 @@
-
-
-
 use crate::tracker::IssueSummary;
 
 pub(super) fn rank(results: &mut [IssueSummary], term: &str) {

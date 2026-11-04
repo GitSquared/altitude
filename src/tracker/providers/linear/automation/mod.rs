@@ -12,8 +12,8 @@ mod queries;
 mod sessions;
 
 pub use agent_sessions::{
-    AgentActivityContent, AgentSessionEvent, CommentSite, WebhookError,
-    parse_agent_session_event, verify_signature,
+    AgentActivityContent, AgentSessionEvent, CommentSite, WebhookError, parse_agent_session_event,
+    verify_signature,
 };
 
 use self::issues::summary_of;

@@ -1,12 +1,10 @@
-
 use super::url::workspace_slug_from_url;
 use super::*;
 
 use serde_json::{Map, Value, json};
 
 use crate::tracker::{
-    IssueComment, IssueReference,
-    IssueSummary, TrackerAccount, TrackerError, TrackerKind,
+    IssueComment, IssueReference, IssueSummary, TrackerAccount, TrackerError, TrackerKind,
 };
 
 pub(super) async fn read_account(session: &Session) -> Result<TrackerAccount, TrackerError> {

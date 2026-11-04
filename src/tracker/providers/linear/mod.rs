@@ -19,9 +19,8 @@ use tokio::{
 };
 
 use crate::tracker::{
-    ACCOUNT_FILE, IssueReader, IssueReference, IssueScope, IssueSnapshot,
-    IssueSummary, ScopeSummary, TrackerError, TrackerFuture,
-    TrackerProvider, TrackerStatus,
+    ACCOUNT_FILE, IssueReader, IssueReference, IssueScope, IssueSnapshot, IssueSummary,
+    ScopeSummary, TrackerError, TrackerFuture, TrackerProvider, TrackerStatus,
 };
 
 mod issue;

@@ -1,7 +1,4 @@
-use std::{
-    collections::HashMap,
-    path::Path,
-};
+use std::{collections::HashMap, path::Path};
 
 use super::auth;
 use super::{CLEANUP_TIMEOUT, REQUIRED_TOOLS, TOOL_TIMEOUT, tool_result};
