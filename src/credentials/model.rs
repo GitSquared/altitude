@@ -27,11 +27,14 @@ impl Service {
         Self::ALL.into_iter().find(|service| service.owns(id))
     }
 
-    // A credential id is the service's profile with the operator's own name under
-    // it, so the prefix is what says whose the identity is.
+    // A credential id is the service's profile, either bare or with the operator's
+    // own name under it: a settings file from before identities were named keeps
+    // one login per service, and its id is the profile alone.
     pub fn owns(self, id: &str) -> bool {
-        id.strip_prefix(self.id())
-            .is_some_and(|rest| rest.starts_with('/'))
+        id == self.id()
+            || id
+                .strip_prefix(self.id())
+                .is_some_and(|rest| rest.starts_with('/'))
     }
 
     // The profile a credential of this service is kept in, which is the id a
