@@ -239,7 +239,7 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
               WHERE task_id = tasks.id
                 AND event_type IN (
                     'intent_expressed', 'task_title_set', 'task_arrived_from',
-                    'agent_run_started', 'agent_run_ended', 'agent_turn_reported',
+                    'agent_run_started', 'agent_run_ended',
                     'control_requested', 'execution_queued', 'execution_paused',
                     'execution_recovered', 'execution_failed', 'task_completed',
                     'task_handed_back', 'operator_signal_raised', 'operator_signal_resolved',
