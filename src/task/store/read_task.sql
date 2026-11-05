@@ -113,10 +113,16 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      FROM task_event_logs
      WHERE task_id = tasks.id
        AND event_type = 'agent_usage_reported') AS usage,
+    -- The error of the failure the task is in, if it is in one: a run that started
+    -- afterwards is the task going back to work, and the error it left behind is
+    -- history rather than a state.
     (SELECT payload ->> '$.data.error'
      FROM task_event_logs
      WHERE task_id = tasks.id
        AND json_type(payload, '$.data.error') IS NOT NULL
+       AND sequence > COALESCE(
+         (SELECT MAX(sequence) FROM task_event_logs
+          WHERE task_id = tasks.id AND event_type = 'agent_run_started'), 0)
      ORDER BY sequence DESC LIMIT 1) AS last_error,
     (SELECT json_object(
          'id', 'm' || e.sequence,

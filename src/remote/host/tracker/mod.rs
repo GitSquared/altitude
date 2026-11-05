@@ -164,9 +164,16 @@ fn published_comment_id(task_id: &str, signal_id: &str) -> String {
 }
 
 // An error activity ends the session's "working" state, so it says what stopped the
-// task rather than only that something did.
+// task rather than only that something did. A failure is a state and not a question,
+// which is why the way out of it is part of the same message.
 fn failure_notice(error: &str) -> String {
-    format!("**Altitude stopped this task.**\n\n{}", error.trim())
+    format!(
+        "**Altitude stopped this task.**\n\n{}\n\n\
+         Take it over with ctrl-enter in the Altitude terminal and unblock it there: leaving \
+         the terminal hands the work back to Altitude, which carries on from where you left \
+         it. A message here restarts it too, without a terminal.",
+        error.trim()
+    )
 }
 
 fn pause_notice(reason: &TaskExecutionPauseReason) -> &'static str {

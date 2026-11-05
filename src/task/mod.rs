@@ -95,28 +95,15 @@ pub(crate) fn file_arrivals(source: &Path, arrivals: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn failure_events(task: &Task, error: String, signal_id: String) -> [TaskHistoryEvent; 2] {
-    let signal = TaskOperatorSignal {
-        id: signal_id,
-        task_id: task.id.clone(),
-        kind: TaskOperatorSignalKind::Blocked,
-        title: "Execution stopped".into(),
-        body: format!(
-            "{error}\n\nAltitude cannot continue this task. If ignored, it stays stopped.\n\n\
-             Take it over with ctrl-enter in the Altitude terminal and unblock it there: \
-             leaving the terminal hands the work back to Altitude, which carries on from where \
-             you left it. Replying here restarts it too, without a terminal."
-        ),
-        raised_at_ms: chrono::Utc::now().timestamp_millis(),
-        proposal: None,
-    };
-    [
-        TaskHistoryEvent::ExecutionFailed {
-            execution_status: TaskExecutionStatus::Failed,
-            error,
-        },
-        TaskHistoryEvent::OperatorSignalRaised { signal },
-    ]
+// A task that stopped is stopped, not asking anything: the thread it used to open
+// made a state look like a question, so every resume had to remember to answer it.
+// What an operator needs to know is the error, and the place they read it — the
+// interface, or the session on the tracker — is the place that says it.
+fn failure_events(error: String) -> [TaskHistoryEvent; 1] {
+    [TaskHistoryEvent::ExecutionFailed {
+        execution_status: TaskExecutionStatus::Failed,
+        error,
+    }]
 }
 
 fn snapshot_name(task_id: &str) -> String {

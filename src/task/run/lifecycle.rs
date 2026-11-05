@@ -404,7 +404,7 @@ where
         };
         let error = diagnostic.map_or(error.clone(), |detail| format!("{error}: {detail}"));
         let mut events = vec![run_ended(agent_run, TaskAgentRunOutcome::Failed, exit_code)];
-        events.extend(self.stopped_events(task, error).await?);
+        events.extend(self.stopped_events(error));
         self.record(&task.id, &events).await
     }
     pub async fn remove(&self, task: Task) -> Result<(), TaskServiceError> {
@@ -676,10 +676,48 @@ where
                             .await?;
                         Ok(())
                     }
+                    // A machine on its way down is not a task that failed. Stopping the
+                    // capsule came before saving it, so the workspace is gone either
+                    // way: the task goes back in the queue to start again from the
+                    // project's repository, and is told what it lost. Failing it here
+                    // turns a host's restart into a dead task with an error nobody can
+                    // act on.
+                    Err(error)
+                        if reason == TaskExecutionPauseReason::ApplicationShutdown
+                            && task.facts.execution_status != TaskExecutionStatus::Failed =>
+                    {
+                        tracing::warn!(
+                            task_id = %task.id,
+                            %error,
+                            "a task's sandbox could not be saved before the machine stopped"
+                        );
+                        let mut events = vec![
+                            TaskHistoryEvent::SandboxRemoved {
+                                sandbox_available: false,
+                            },
+                            TaskHistoryEvent::ExecutionQueued {
+                                execution_status: TaskExecutionStatus::Pending,
+                            },
+                        ];
+                        events.extend(machine_events(
+                            &task,
+                            "Altitude could not save this task before the machine stopped",
+                            "Its sandbox did not survive the stop, so the workspace is gone and \
+                             the task starts again from the project's repository.",
+                            Some(
+                                "Altitude stopped while working on this task and could not save \
+                                 its sandbox, so the workspace from that turn is gone. The \
+                                 project's repository is checked out again for you; recreate \
+                                 what you had and carry on with the work.",
+                            ),
+                        ));
+                        service.record(&task.id, &events).await?;
+                        Ok(())
+                    }
+                    // Where it was writing is half of why it could not: a permission
+                    // denied on one machine is a directory owned by another, and the
+                    // operator is the only one who can look.
                     Err(error) => {
-                        // Where it was writing is half of why it could not: a
-                        // permission denied on one machine is a directory owned by
-                        // another, and the operator is the only one who can look.
                         service
                             .fail(
                                 &task,
@@ -716,21 +754,12 @@ where
     }
     pub(crate) async fn fail(&self, task: &Task, error: String) -> Result<Task, TaskServiceError> {
         tracing::error!(task_id = %task.id, %error, "task execution failed");
-        let events = self.stopped_events(task, error).await?;
+        let events = self.stopped_events(error);
         self.record(&task.id, &events).await
     }
 
-    async fn stopped_events(
-        &self,
-        task: &Task,
-        error: String,
-    ) -> Result<Vec<TaskHistoryEvent>, TaskServiceError> {
-        let signal_id = self
-            .store
-            .next_signal_id(&task.id)
-            .await
-            .map_err(TaskServiceError::Task)?;
-        Ok(failure_events(task, error, signal_id).into())
+    fn stopped_events(&self, error: String) -> Vec<TaskHistoryEvent> {
+        failure_events(error).to_vec()
     }
 }
 
@@ -740,12 +769,22 @@ where
 // The agent is told only when its workspace did not survive, where the next turn has
 // to explain what it is starting from.
 fn restart_events(task: &Task, said: &str, tells_agent: Option<&str>) -> Vec<TaskHistoryEvent> {
+    machine_events(task, "Altitude restarted", said, tells_agent)
+}
+
+// The same thread, for anything the machine did to the task rather than the agent.
+fn machine_events(
+    task: &Task,
+    title: &str,
+    said: &str,
+    tells_agent: Option<&str>,
+) -> Vec<TaskHistoryEvent> {
     let signal_id = uuid::Uuid::new_v4().to_string();
     let signal = TaskOperatorSignal {
         id: signal_id.clone(),
         task_id: task.id.clone(),
         kind: TaskOperatorSignalKind::Update,
-        title: "Altitude restarted".to_owned(),
+        title: title.to_owned(),
         body: format!(
             "Altitude on {} restarted and is picking this task back up. {said}",
             task.host
