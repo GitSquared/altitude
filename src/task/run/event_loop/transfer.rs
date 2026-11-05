@@ -5,7 +5,7 @@ use crate::task::{TaskArrival, TaskError, TaskOperatorSignalKind, file_arrivals}
 
 use crate::{
     agent::AgentKind,
-    isolation::{CommandEvent, FileTransferSink, IsolationEngine, guest_absolute, shell_quote},
+    isolation::{CommandEvent, FileTransferSink, IsolationEngine, guest_absolute},
     project::Project,
     task::{
         Task, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent,
@@ -188,11 +188,13 @@ where
             // A conversation that has not written a transcript yet has nothing to
             // carry, and a move must not fail over the file it was never given: a
             // task that failed before its first turn still has work worth taking.
-            let exists = self
-                .service
-                .run_captured(&sandbox_id, format!("test -f {}", shell_quote(&guest)))
+            // Asked of the filesystem rather than by running a program in there: the
+            // guest is the agent's to have broken, and a task is not better off for
+            // having its conversation left behind because `test` went missing.
+            let exists = isolation
+                .guest_regular_file_exists(sandbox_id.clone(), guest.clone())
                 .await
-                .is_ok();
+                .map_err(TaskServiceError::Isolation)?;
             if exists {
                 isolation
                     .collect_file(sandbox_id, guest, destination.join(TRANSCRIPT_FILE))

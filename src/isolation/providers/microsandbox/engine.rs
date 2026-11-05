@@ -1,14 +1,12 @@
-use std::{collections::HashMap, fs, path::PathBuf, sync::Arc, time::Duration, time::Instant};
+use std::{collections::HashMap, fs, path::PathBuf, sync::Arc, time::Duration};
 
 use microsandbox::{
     LocalBackend, Sandbox,
-    sandbox::{MAX_SANDBOX_LIST_LIMIT, PullPolicy, PullProgress, exec::ExecEvent},
+    sandbox::{MAX_SANDBOX_LIST_LIMIT, PullPolicy, PullProgress, exec::ExecEvent, fs::FsEntryKind},
     set_default_backend,
     snapshot::Snapshot,
 };
 use tokio::sync::{mpsc, watch};
-
-use futures_util::{StreamExt, stream};
 
 use crate::project::Project;
 
@@ -23,12 +21,9 @@ use crate::isolation::{
 
 use super::base::BASE_IMAGE;
 use super::base::PREPARATION_SANDBOX;
-use super::files::{
-    ArchivedFile, COPY_CONCURRENCY, carry_in, carry_out, copy_archive_into_guest, io_error,
-    read_archive, write_archive,
-};
+use super::files::{carry_in, carry_out, io_error};
 use super::snapshot::BaseSandboxSnapshotStore;
-use super::{MicrosandboxIsolation, connect};
+use super::{MicrosandboxIsolation, connect, transfer};
 
 // The boot screen's view of the base build's installs: the status it shows is the
 // only thing the sink has to say.
@@ -413,32 +408,7 @@ impl IsolationEngine for MicrosandboxIsolation {
         destination: PathBuf,
         progress: &dyn FileTransferSink,
     ) -> Result<FileTally, IsolationError> {
-        let started = Instant::now();
-        let sandbox = connect(&id).await?;
-        let fs = sandbox.fs();
-        let tree = self.walk_guest(&fs, &root, &excluded).await?;
-        progress.counted(tree.whole);
-        tracing::debug!(
-            sandbox_id = %id,
-            root,
-            files = tree.whole.files,
-            bytes = tree.whole.bytes,
-            directories = tree.directories.len(),
-            links = tree.links.len(),
-            elapsed_ms = started.elapsed().as_millis(),
-            "walked a task's tree to carry it out"
-        );
-        write_archive(&fs, &tree, &destination, progress).await?;
-        tracing::info!(
-            sandbox_id = %id,
-            root,
-            files = tree.whole.files,
-            bytes = tree.whole.bytes,
-            archive = %destination.display(),
-            elapsed_ms = started.elapsed().as_millis(),
-            "carried a task's tree out into one archive"
-        );
-        Ok(tree.whole)
+        transfer::carry_tree_out(&id, &root, &excluded, &destination, progress).await
     }
 
     async fn collect_file(
@@ -470,6 +440,10 @@ impl IsolationEngine for MicrosandboxIsolation {
         {
             let _ = fs.mkdir(parent).await;
         }
+        // A link where this file goes would have the write land on whatever it
+        // points at, so the name is cleared first: replacing the link costs nothing,
+        // and writing through it would edit a file this one has nothing to do with.
+        let _ = fs.remove(&guest_path).await;
         carry_in(&fs, &host_path, &guest_path, 0o600)
             .await
             .map_err(|error| IsolationError::new(format!("putting in {guest_path}: {error}")))?;
@@ -483,73 +457,7 @@ impl IsolationEngine for MicrosandboxIsolation {
         root: String,
         progress: &dyn FileTransferSink,
     ) -> Result<FileTally, IsolationError> {
-        let started = Instant::now();
-        let tree = read_archive(&source)?;
-        progress.counted(tree.whole);
-        tracing::debug!(
-            sandbox_id = %id,
-            root,
-            source = %source.display(),
-            files = tree.whole.files,
-            bytes = tree.whole.bytes,
-            directories = tree.directories.len(),
-            links = tree.links.len(),
-            "read the archive a task arrived with"
-        );
-        let sandbox = connect(&id).await?;
-        let fs = sandbox.fs();
-        let guest = |relative: &str| format!("{}/{relative}", root.trim_end_matches('/'));
-        let _ = fs.mkdir(&root).await;
-        let fs = &fs;
-        let directories: Vec<String> = tree
-            .directories
-            .iter()
-            .map(|directory| guest(directory))
-            .collect();
-        let mut creating = stream::iter(directories)
-            .map(|directory| async move {
-                let _ = fs.mkdir(&directory).await;
-            })
-            .buffer_unordered(COPY_CONCURRENCY);
-        while creating.next().await.is_some() {}
-        let archive = fs::File::open(&source).map_err(io_error)?;
-        let planned: Vec<(String, ArchivedFile)> = tree
-            .files
-            .into_iter()
-            .map(|file| (guest(&file.relative), file))
-            .collect();
-        let archive = &archive;
-        let moving = planned.into_iter().map(|(guest, archived)| async move {
-            copy_archive_into_guest(fs, archive, &archived, &guest)
-                .await
-                .map_err(|error| IsolationError::new(format!("putting in {guest}: {error}")))?;
-            progress.moved(FileTally {
-                files: 1,
-                bytes: archived.size,
-            });
-            Ok::<(), IsolationError>(())
-        });
-        let mut moving = stream::iter(moving).buffer_unordered(COPY_CONCURRENCY);
-        while let Some(result) = moving.next().await {
-            result?;
-        }
-        for link in &tree.links {
-            let path = guest(&link.relative);
-            let _ = fs.remove(&path).await;
-            fs.symlink(&link.target, &path)
-                .await
-                .map_err(|error| IsolationError::new(format!("putting in {path}: {error}")))?;
-        }
-        tracing::info!(
-            sandbox_id = %id,
-            root,
-            source = %source.display(),
-            files = tree.whole.files,
-            bytes = tree.whole.bytes,
-            elapsed_ms = started.elapsed().as_millis(),
-            "put a task's arrived tree into its sandbox"
-        );
-        Ok(tree.whole)
+        transfer::put_tree_in(&id, source, &root, progress).await
     }
 
     async fn has_sandbox(&self, id: String) -> bool {
@@ -633,22 +541,20 @@ impl IsolationEngine for MicrosandboxIsolation {
         id: String,
         path: String,
     ) -> Result<bool, IsolationError> {
-        let sandbox = Sandbox::get(&id)
-            .await
-            .map_err(|error| IsolationError::new(error.to_string()))?
-            .connect_or_start()
-            .await
-            .map_err(|error| IsolationError::new(error.to_string()))?;
-        let output = sandbox
-            .shell(format!("test -f {}", sandbox::shell_quote(&path)))
-            .await
-            .map_err(|error| IsolationError::new(error.to_string()))?;
-        match output.status().code {
-            0 => Ok(true),
-            1 => Ok(false),
-            code => Err(IsolationError::new(format!(
-                "guest file check exited with code {code}"
-            ))),
+        let sandbox = connect(&id).await?;
+        // Asked through the filesystem protocol rather than by running `test`: the
+        // image is the guest's to break, and a check that needs a working shell
+        // answers questions about the image instead of about the file.
+        match sandbox.fs().stat_with_follow(&path, true).await {
+            Ok(metadata) => Ok(metadata.kind == FsEntryKind::File),
+            // A missing path is a failed stat; anything else is a guest that cannot
+            // be asked at all, which is worth failing over rather than reporting as
+            // an absence.
+            Err(microsandbox::MicrosandboxError::SandboxFsOps(error)) => {
+                tracing::debug!(%path, %error, "the guest has nothing at that path");
+                Ok(false)
+            }
+            Err(error) => Err(IsolationError::new(error.to_string())),
         }
     }
 }

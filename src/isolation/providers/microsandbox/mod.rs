@@ -26,6 +26,7 @@ mod files;
 mod lifecycle;
 mod packages;
 mod snapshot;
+mod transfer;
 
 pub(super) async fn connect(id: &str) -> Result<Sandbox, IsolationError> {
     Sandbox::get(id)

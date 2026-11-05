@@ -68,15 +68,6 @@ impl Transfer {
         });
     }
 
-    pub fn counting_files(&self, total: u64) {
-        self.updates.send_modify(|update| {
-            update.stage.clear();
-            update.done = 0;
-            update.total = total;
-            update.unit = Unit::Files;
-        });
-    }
-
     pub fn waiting(&self, stage: impl Into<String>) {
         let stage = stage.into();
         self.updates.send_modify(|update| update.stage = stage);
@@ -110,13 +101,9 @@ impl Transfer {
 }
 
 impl FileTransferSink for Transfer {
-    fn counted(&self, whole: FileTally) {
-        self.counting_files(whole.files);
-    }
-
-    fn moved(&self, step: FileTally) {
-        let moved = step.files;
-        self.updates
-            .send_modify(|update| update.done = update.done.saturating_add(moved));
+    // A tree moves in one step, so there is no fraction of it to report. What the
+    // bar has counted so far is the capsule arriving, which is still true.
+    fn moving(&self, whole: FileTally) {
+        self.waiting(format!("putting {} files in…", whole.files));
     }
 }

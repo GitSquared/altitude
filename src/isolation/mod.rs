@@ -145,16 +145,16 @@ pub struct FileTally {
     pub bytes: u64,
 }
 
+// A tree moves in one step now, so a sink is told how big it is rather than how much
+// of it has happened.
 pub trait FileTransferSink: Send + Sync {
-    fn counted(&self, whole: FileTally);
-    fn moved(&self, step: FileTally);
+    fn moving(&self, whole: FileTally);
 }
 
 pub struct UnwatchedFiles;
 
 impl FileTransferSink for UnwatchedFiles {
-    fn counted(&self, _whole: FileTally) {}
-    fn moved(&self, _step: FileTally) {}
+    fn moving(&self, _whole: FileTally) {}
 }
 
 #[derive(Clone, Debug)]

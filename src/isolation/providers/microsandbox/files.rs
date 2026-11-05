@@ -1,64 +1,42 @@
 use std::{
-    collections::HashMap,
+    collections::BTreeMap,
     fs::{self, File},
-    io::{self, Read, Write},
+    io::{self, Write},
     os::unix::fs::{FileExt, OpenOptionsExt, PermissionsExt},
     path::Path,
 };
 
-use futures_util::{StreamExt, stream};
-use microsandbox::sandbox::fs::{FsEntryKind, FsHandle, FsOpenOptions, FsSetAttrs, SandboxFsOps};
-use tar::{Archive, Builder, EntryType, Header};
+use microsandbox::sandbox::fs::{
+    FsEntry, FsEntryKind, FsHandle, FsOpenOptions, FsSetAttrs, SandboxFsOps,
+};
+use tar::{Archive, EntryType};
 
-use crate::isolation::{FileTally, FileTransferSink, IsolationError};
+use crate::isolation::{FileTally, IsolationError};
 
-use super::MicrosandboxIsolation;
-
-pub(super) struct GuestTree {
+// What a tree is, whether it was read out of a sandbox or out of an archive. The two
+// are held against each other, so they are the same words: a tree is its directories,
+// its files with the size and permissions they have, and its links with where they go.
+pub(super) struct Tree {
     pub(super) directories: Vec<String>,
-    pub(super) files: Vec<GuestFile>,
-    pub(super) links: Vec<GuestLink>,
+    pub(super) files: Vec<TreeFile>,
+    pub(super) links: Vec<TreeLink>,
     pub(super) whole: FileTally,
 }
 
-pub(super) struct GuestFile {
-    pub(super) guest: String,
+pub(super) struct TreeFile {
     pub(super) relative: String,
     pub(super) size: u64,
     pub(super) mode: u32,
 }
 
-pub(super) struct GuestLink {
+pub(super) struct TreeLink {
     pub(super) relative: String,
     pub(super) target: String,
-}
-
-// What an archive holds, read as offsets rather than as a stream: a file's bytes
-// can then be written to or read from the archive directly, so a tree is neither
-// assembled nor unpacked on a host disk.
-pub(super) struct ArchivedTree {
-    pub(super) directories: Vec<String>,
-    pub(super) files: Vec<ArchivedFile>,
-    pub(super) links: Vec<GuestLink>,
-    pub(super) whole: FileTally,
-}
-
-pub(super) struct ArchivedFile {
-    pub(super) relative: String,
-    pub(super) offset: u64,
-    pub(super) size: u64,
-    pub(super) mode: u32,
 }
 
 pub(super) fn io_error(error: io::Error) -> IsolationError {
     IsolationError::new(error.to_string())
 }
-
-pub(super) fn permissions(mode: u32) -> fs::Permissions {
-    fs::Permissions::from_mode(mode)
-}
-
-pub(super) const COPY_CONCURRENCY: usize = 8;
 
 // A guest retires a read as soon as it finishes, and a window refill that arrives
 // after that cancels the whole read as an unknown session. A refill is only due
@@ -66,132 +44,89 @@ pub(super) const COPY_CONCURRENCY: usize = 8;
 // that at a time and never has one to send.
 pub(super) const COPY_SLICE_BYTES: u64 = 3 * 1024 * 1024;
 
-// A tree's headers are written first, which is what gives every file its offset,
-// and the bytes go into those offsets afterwards, several files at a time. The
-// space a header reserves for its data is left as a hole, so reserving it costs
-// nothing.
-struct Holes<'a> {
-    file: &'a File,
-    position: u64,
-}
-
-impl Write for Holes<'_> {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        if buffer.iter().any(|byte| *byte != 0) {
-            self.file.write_all_at(buffer, self.position)?;
-        }
-        self.position += buffer.len() as u64;
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-struct Zeroes(u64);
-
-impl Read for Zeroes {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let len = self.0.min(buffer.len() as u64) as usize;
-        self.0 -= len as u64;
-        buffer[..len].fill(0);
-        Ok(len)
-    }
-}
-
-pub(super) async fn write_archive(
+pub(super) async fn walk(
     fs: &SandboxFsOps<'_>,
-    tree: &GuestTree,
-    destination: &Path,
-    progress: &dyn FileTransferSink,
-) -> Result<(), IsolationError> {
-    let archive = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(destination)
-        .map_err(io_error)?;
-    let mut holes = Holes {
-        file: &archive,
-        position: 0,
+    root: &str,
+    excluded: &[String],
+) -> Result<Tree, IsolationError> {
+    let mut tree = Tree {
+        directories: Vec::new(),
+        files: Vec::new(),
+        links: Vec::new(),
+        whole: FileTally::default(),
     };
-    {
-        let mut builder = Builder::new(&mut holes);
-        // A tree is its modes and its links as much as its bytes, and an archive
-        // carries all three in one thing to move. Nothing here is dated: the same
-        // tree is the same archive, which is what a digest is worth reading.
-        for directory in &tree.directories {
-            let mut header = Header::new_gnu();
-            header.set_entry_type(EntryType::Directory);
-            header.set_mode(0o755);
-            header.set_size(0);
-            header.set_mtime(0);
-            builder
-                .append_data(&mut header, directory, io::empty())
-                .map_err(archive_error)?;
+    let mut pending = vec![(root.trim_end_matches('/').to_owned(), String::new())];
+    while let Some((directory, relative_directory)) = pending.pop() {
+        // Opened and read through handles on the one connection the sandbox gave us:
+        // a listing per directory by path would dial the agent again for each one.
+        let handle = fs
+            .open_dir(&directory)
+            .await
+            .map_err(|error| IsolationError::new(format!("opening {directory}: {error}")))?;
+        let mut listed = Ok(());
+        loop {
+            let entries = match fs.read_dir_handle(handle, None).await {
+                Ok(entries) => entries,
+                Err(error) => {
+                    listed = Err(IsolationError::new(format!("reading {directory}: {error}")));
+                    break;
+                }
+            };
+            if entries.is_empty() {
+                break;
+            }
+            for entry in entries {
+                let name = entry.path.rsplit('/').next().unwrap_or_default().to_owned();
+                if name.is_empty() || name == "." || name == ".." {
+                    continue;
+                }
+                let relative = if relative_directory.is_empty() {
+                    name
+                } else {
+                    format!("{relative_directory}/{name}")
+                };
+                if excluded
+                    .iter()
+                    .any(|left| entry.path == *left || entry.path.starts_with(&format!("{left}/")))
+                {
+                    continue;
+                }
+                match entry.kind {
+                    FsEntryKind::Directory => {
+                        tree.directories.push(relative.clone());
+                        pending.push((entry.path, relative));
+                    }
+                    FsEntryKind::File => {
+                        tree.whole.files += 1;
+                        tree.whole.bytes += entry.size;
+                        tree.files.push(TreeFile {
+                            relative,
+                            size: entry.size,
+                            mode: entry.mode,
+                        });
+                    }
+                    FsEntryKind::Symlink => {
+                        let target = fs
+                            .read_link(&entry.path)
+                            .await
+                            .map_err(|error| IsolationError::new(error.to_string()))?;
+                        tree.links.push(TreeLink { relative, target });
+                    }
+                    FsEntryKind::Other => {}
+                }
+            }
         }
-        for file in &tree.files {
-            let mut header = Header::new_gnu();
-            header.set_entry_type(EntryType::Regular);
-            header.set_mode(file.mode);
-            header.set_size(file.size);
-            header.set_mtime(0);
-            builder
-                .append_data(&mut header, &file.relative, Zeroes(file.size))
-                .map_err(archive_error)?;
+        if let Err(error) = fs.close_handle(handle).await {
+            tracing::warn!(%error, directory, "could not close a directory handle");
         }
-        for link in &tree.links {
-            let mut header = Header::new_gnu();
-            header.set_entry_type(EntryType::Symlink);
-            header.set_mode(0o777);
-            header.set_size(0);
-            header.set_mtime(0);
-            header.set_link_name(&link.target).map_err(archive_error)?;
-            builder
-                .append_data(&mut header, &link.relative, io::empty())
-                .map_err(archive_error)?;
-        }
-        builder.finish().map_err(archive_error)?;
+        listed?;
     }
-    archive.set_len(holes.position).map_err(io_error)?;
-    let layout = read_archive(destination)?;
-    // Read back from the archive rather than recomputed: one place decides where a
-    // file's bytes sit, so the side that fills them and the side that lifts them
-    // cannot disagree.
-    let guest_of: HashMap<&str, &str> = tree
-        .files
-        .iter()
-        .map(|file| (file.relative.as_str(), file.guest.as_str()))
-        .collect();
-    let copying = layout.files.into_iter().map(|archived| {
-        let guest = guest_of
-            .get(archived.relative.as_str())
-            .copied()
-            .unwrap_or_default();
-        let archive = &archive;
-        async move {
-            copy_guest_into_archive(fs, guest, &archived, archive)
-                .await
-                .map_err(|error| IsolationError::new(format!("carrying out {guest}: {error}")))?;
-            progress.moved(FileTally {
-                files: 1,
-                bytes: archived.size,
-            });
-            Ok::<(), IsolationError>(())
-        }
-    });
-    let mut copying = stream::iter(copying).buffer_unordered(COPY_CONCURRENCY);
-    while let Some(result) = copying.next().await {
-        result?;
-    }
-    Ok(())
+    Ok(tree)
 }
 
-pub(super) fn read_archive(source: &Path) -> Result<ArchivedTree, IsolationError> {
+pub(super) fn read_archive(source: &Path) -> Result<Tree, IsolationError> {
     let mut archive = Archive::new(File::open(source).map_err(io_error)?);
-    let mut tree = ArchivedTree {
+    let mut tree = Tree {
         directories: Vec::new(),
         files: Vec::new(),
         links: Vec::new(),
@@ -199,14 +134,24 @@ pub(super) fn read_archive(source: &Path) -> Result<ArchivedTree, IsolationError
     };
     for entry in archive.entries().map_err(archive_error)? {
         let entry = entry.map_err(archive_error)?;
-        let relative = entry
+        let named = entry
             .path()
             .map_err(archive_error)?
             .to_string_lossy()
             .into_owned();
-        let mode = entry.header().mode().map_err(archive_error)?;
-        // What is carried is a tree, so an entry that climbs out of it is not one.
-        // A link's own target may point anywhere; its name may not.
+        // A tar of `.` names everything under a leading `./`, names the root itself
+        // as `.`, and names a directory with a trailing slash; what is carried are
+        // the names below the root, which is what the walk says too.
+        let relative = named
+            .strip_prefix("./")
+            .unwrap_or(&named)
+            .trim_end_matches('/')
+            .to_owned();
+        if relative.is_empty() || relative == "." {
+            continue;
+        }
+        // What is carried is a tree, so an entry that climbs out of it is not one. A
+        // link's own target may point anywhere; its name may not.
         if relative.starts_with('/') || relative.split('/').any(|part| part == "..") {
             return Err(IsolationError::new(format!(
                 "archive entry escapes the tree: {relative}"
@@ -220,17 +165,16 @@ pub(super) fn read_archive(source: &Path) -> Result<ArchivedTree, IsolationError
                     .map_err(archive_error)?
                     .map(|target| target.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                tree.links.push(GuestLink { relative, target });
+                tree.links.push(TreeLink { relative, target });
             }
             EntryType::Regular | EntryType::Continuous => {
                 let size = entry.size();
                 tree.whole.files += 1;
                 tree.whole.bytes += size;
-                tree.files.push(ArchivedFile {
+                tree.files.push(TreeFile {
                     relative,
-                    offset: entry.raw_file_position(),
                     size,
-                    mode,
+                    mode: entry.header().mode().map_err(archive_error)?,
                 });
             }
             _ => {}
@@ -239,88 +183,168 @@ pub(super) fn read_archive(source: &Path) -> Result<ArchivedTree, IsolationError
     Ok(tree)
 }
 
-async fn copy_guest_into_archive(
+// The first way the two disagree, if they do. What the sandbox packed is two
+// descriptions of one tree, so either holding more than the other is a
+// disagreement. A transfer that quietly loses a file is the one failure it must
+// never have: it looks like a task that did less.
+pub(super) fn disagreement(carried: &Tree, held: &Tree) -> Result<(), IsolationError> {
+    let carried = describe(carried);
+    let held = describe(held);
+    for (name, description) in &carried {
+        match held.get(name) {
+            // A directory is the same directory wherever it is met.
+            Some(here) if name.ends_with('/') || here == description => {}
+            Some(here) => {
+                return Err(IsolationError::new(format!(
+                    "{name} is {here} here and {description} in the archive"
+                )));
+            }
+            None => {
+                return Err(IsolationError::new(format!(
+                    "{name} is {description} in the archive and not here"
+                )));
+            }
+        }
+    }
+    for (name, description) in &held {
+        if !carried.contains_key(name) {
+            return Err(IsolationError::new(format!(
+                "{name} is {description} here and not in the archive"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn describe(tree: &Tree) -> BTreeMap<String, String> {
+    let mut described = BTreeMap::new();
+    for directory in &tree.directories {
+        described.insert(format!("{directory}/"), "a directory".to_owned());
+    }
+    for file in &tree.files {
+        // A guest stat reports the file's type in the mode as well; a tar header
+        // records the permission bits. What is compared is the permissions.
+        described.insert(
+            file.relative.clone(),
+            format!("{} bytes, mode {:o}", file.size, file.mode & 0o7777),
+        );
+    }
+    for link in &tree.links {
+        described.insert(link.relative.clone(), format!("a link to {}", link.target));
+    }
+    described
+}
+
+// Everything the archive carries, looked for where it should be. A checkout may hold
+// more than the capsule — its clone brought files of its own — never less, and never
+// something else under a name the capsule names. One listing per directory the
+// capsule names, so a cache mounted inside the checkout is never descended into.
+pub(super) async fn confirm_arrival(
     fs: &SandboxFsOps<'_>,
-    guest: &str,
-    archived: &ArchivedFile,
-    archive: &File,
+    root: &str,
+    carried: &Tree,
 ) -> Result<(), IsolationError> {
-    let handle = open_guest_file(
-        fs,
-        guest,
-        FsOpenOptions {
-            read: true,
-            ..FsOpenOptions::default()
-        },
-    )
-    .await?;
-    let mut offset = 0u64;
-    let mut copied = Ok(());
-    while offset < archived.size {
-        let len = COPY_SLICE_BYTES.min(archived.size - offset);
-        let chunk = match fs.read_handle(handle, offset, Some(len)).await {
-            Ok(chunk) => chunk,
+    let root = root.trim_end_matches('/');
+    let carried = describe(carried);
+    // Shallowest first, so a tree that is not there at all is reported at the root
+    // rather than at whichever directory happened to be looked at first.
+    let mut by_directory: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
+    for name in carried.keys() {
+        let parent = name
+            .trim_end_matches('/')
+            .rsplit_once('/')
+            .map(|(parent, _)| parent)
+            .unwrap_or_default();
+        by_directory.entry(parent).or_default().push(name);
+    }
+    for (parent, names) in by_directory {
+        let directory = if parent.is_empty() {
+            root.to_owned()
+        } else {
+            format!("{root}/{parent}")
+        };
+        let present = match list(fs, &directory).await {
+            Ok(present) => present,
+            // Every other directory was seen in its parent's listing first, so the
+            // one whose absence is ours to explain is the root.
+            Err(error) if parent.is_empty() => {
+                return Err(IsolationError::new(format!(
+                    "{directory} is not there after unpacking: {error}"
+                )));
+            }
+            Err(error) => return Err(error),
+        };
+        for name in names {
+            let leaf = name
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or(name);
+            match present.get(leaf) {
+                Some(here) if here == &carried[name] => {}
+                Some(here) => {
+                    return Err(IsolationError::new(format!(
+                        "{directory}/{leaf} was unpacked as {here} and the archive carries {}",
+                        carried[name]
+                    )));
+                }
+                None => {
+                    return Err(IsolationError::new(format!(
+                        "{directory}/{leaf} was unpacked and is not there"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// What one directory holds now, described the way an archive describes it.
+async fn list(
+    fs: &SandboxFsOps<'_>,
+    directory: &str,
+) -> Result<BTreeMap<String, String>, IsolationError> {
+    let handle = fs
+        .open_dir(directory)
+        .await
+        .map_err(|error| IsolationError::new(format!("opening {directory}: {error}")))?;
+    let mut present = BTreeMap::new();
+    let mut listed = Ok(());
+    loop {
+        let entries = match fs.read_dir_handle(handle, None).await {
+            Ok(entries) => entries,
             Err(error) => {
-                copied = Err(IsolationError::new(error.to_string()));
+                listed = Err(IsolationError::new(format!("reading {directory}: {error}")));
                 break;
             }
         };
-        // The archive already says how long this file is, so a file that answers
-        // with less has changed underneath the transfer and is worth refusing.
-        if chunk.len() as u64 != len {
-            copied = Err(IsolationError::new(format!(
-                "the file changed while it was being carried out: asked for {len} bytes at {offset}, read {}",
-                chunk.len()
-            )));
+        if entries.is_empty() {
             break;
         }
-        if let Err(error) = archive.write_all_at(&chunk, archived.offset + offset) {
-            copied = Err(io_error(error));
-            break;
+        for entry in entries {
+            let name = entry.path.rsplit('/').next().unwrap_or_default().to_owned();
+            present.insert(name, describe_entry(fs, &entry).await?);
         }
-        offset += len;
     }
-    close_guest_handle(fs, handle, guest).await;
-    copied
+    if let Err(error) = fs.close_handle(handle).await {
+        tracing::warn!(%error, directory, "could not close a directory handle");
+    }
+    listed?;
+    Ok(present)
 }
 
-pub(super) async fn copy_archive_into_guest(
-    fs: &SandboxFsOps<'_>,
-    archive: &File,
-    archived: &ArchivedFile,
-    guest: &str,
-) -> Result<(), IsolationError> {
-    let handle = open_guest_file(
-        fs,
-        guest,
-        FsOpenOptions {
-            write: true,
-            create: true,
-            truncate: true,
-            ..FsOpenOptions::default()
-        },
-    )
-    .await?;
-    let mut offset = 0u64;
-    // Sized to this file rather than to the slice: a checkout of small files would
-    // otherwise allocate and clear a slice-sized buffer once per file.
-    let mut buffer = vec![0u8; COPY_SLICE_BYTES.min(archived.size) as usize];
-    let mut written = Ok(archived.size);
-    while offset < archived.size {
-        let len = COPY_SLICE_BYTES.min(archived.size - offset) as usize;
-        if let Err(error) = archive.read_exact_at(&mut buffer[..len], archived.offset + offset) {
-            written = Err(io_error(error));
-            break;
-        }
-        if let Err(error) = fs.write_handle(handle, offset, &buffer[..len]).await {
-            written = Err(IsolationError::new(error.to_string()));
-            break;
-        }
-        offset += len as u64;
-    }
-    settle_written_file(fs, handle, guest, archived.mode, written)
-        .await
-        .map(|_| ())
+async fn describe_entry(fs: &SandboxFsOps<'_>, entry: &FsEntry) -> Result<String, IsolationError> {
+    Ok(match entry.kind {
+        FsEntryKind::Directory => "a directory".to_owned(),
+        FsEntryKind::File => format!("{} bytes, mode {:o}", entry.size, entry.mode & 0o7777),
+        FsEntryKind::Symlink => format!(
+            "a link to {}",
+            fs.read_link(&entry.path)
+                .await
+                .map_err(|error| IsolationError::new(error.to_string()))?
+        ),
+        FsEntryKind::Other => "something else".to_owned(),
+    })
 }
 
 // One file that is not part of a tree, carried out on its own: a task's transcript.
@@ -369,7 +393,7 @@ pub(super) async fn carry_out(
     close_guest_handle(fs, handle, guest).await;
     let written = copied?;
     drop(file);
-    fs::set_permissions(host, permissions(mode)).map_err(io_error)?;
+    fs::set_permissions(host, fs::Permissions::from_mode(mode)).map_err(io_error)?;
     Ok(written)
 }
 
@@ -382,6 +406,9 @@ pub(super) async fn carry_in(
 ) -> Result<u64, IsolationError> {
     let file = File::open(source).map_err(io_error)?;
     let size = file.metadata().map_err(io_error)?.len();
+    // Putting a file in replaces what is at that name: going through a link someone
+    // left there would edit a file this one has nothing to do with.
+    let _ = fs.remove(guest).await;
     let handle = open_guest_file(
         fs,
         guest,
@@ -394,6 +421,8 @@ pub(super) async fn carry_in(
     )
     .await?;
     let mut offset = 0u64;
+    // Sized to this file rather than to the slice: a checkout of small files would
+    // otherwise allocate and clear a slice-sized buffer once per file.
     let mut buffer = vec![0u8; COPY_SLICE_BYTES.min(size) as usize];
     let mut written = Ok(0);
     while offset < size {
@@ -457,88 +486,4 @@ async fn close_guest_handle(fs: &SandboxFsOps<'_>, handle: FsHandle, guest: &str
 
 fn archive_error(error: io::Error) -> IsolationError {
     IsolationError::new(format!("archive: {error}"))
-}
-
-impl MicrosandboxIsolation {
-    pub(super) async fn walk_guest(
-        &self,
-        fs: &SandboxFsOps<'_>,
-        root: &str,
-        excluded: &[String],
-    ) -> Result<GuestTree, IsolationError> {
-        let mut tree = GuestTree {
-            directories: Vec::new(),
-            files: Vec::new(),
-            links: Vec::new(),
-            whole: FileTally::default(),
-        };
-        let mut pending = vec![(root.trim_end_matches('/').to_owned(), String::new())];
-        while let Some((directory, relative_directory)) = pending.pop() {
-            // Opened and read through handles on the one connection the sandbox
-            // gave us: a listing per directory by path would dial the agent again
-            // for each one, which is most of what made a large checkout slow.
-            let handle = fs
-                .open_dir(&directory)
-                .await
-                .map_err(|error| IsolationError::new(format!("opening {directory}: {error}")))?;
-            let mut listed = Ok(());
-            loop {
-                let entries = match fs.read_dir_handle(handle, None).await {
-                    Ok(entries) => entries,
-                    Err(error) => {
-                        listed = Err(IsolationError::new(format!("reading {directory}: {error}")));
-                        break;
-                    }
-                };
-                if entries.is_empty() {
-                    break;
-                }
-                for entry in entries {
-                    let name = entry.path.rsplit('/').next().unwrap_or_default().to_owned();
-                    if name.is_empty() || name == "." || name == ".." {
-                        continue;
-                    }
-                    let relative = if relative_directory.is_empty() {
-                        name
-                    } else {
-                        format!("{relative_directory}/{name}")
-                    };
-                    if excluded.iter().any(|left| {
-                        entry.path == *left || entry.path.starts_with(&format!("{left}/"))
-                    }) {
-                        continue;
-                    }
-                    match entry.kind {
-                        FsEntryKind::Directory => {
-                            tree.directories.push(relative.clone());
-                            pending.push((entry.path, relative));
-                        }
-                        FsEntryKind::File => {
-                            tree.whole.files += 1;
-                            tree.whole.bytes += entry.size;
-                            tree.files.push(GuestFile {
-                                guest: entry.path,
-                                relative,
-                                size: entry.size,
-                                mode: entry.mode,
-                            });
-                        }
-                        FsEntryKind::Symlink => {
-                            let target = fs
-                                .read_link(&entry.path)
-                                .await
-                                .map_err(|error| IsolationError::new(error.to_string()))?;
-                            tree.links.push(GuestLink { relative, target });
-                        }
-                        FsEntryKind::Other => {}
-                    }
-                }
-            }
-            if let Err(error) = fs.close_handle(handle).await {
-                tracing::warn!(%error, directory, "could not close a directory handle");
-            }
-            listed?;
-        }
-        Ok(tree)
-    }
 }

@@ -142,17 +142,12 @@ fn file_digest(path: &Path) -> Result<String, String> {
 }
 
 impl FileTransferSink for WatchedCollect {
-    fn counted(&self, whole: FileTally) {
+    // The sandbox packs in one step, so what the other machine is told is what is
+    // being collected, not a fraction of it.
+    fn moving(&self, whole: FileTally) {
         self.record(|update| {
-            update.total = whole.files;
-            update.done = 0;
-            update.unit = update::Unit::Files;
-            update.stage = "collecting the working files…".to_owned();
+            update.stage = format!("collecting {} files…", whole.files);
         });
-    }
-
-    fn moved(&self, step: FileTally) {
-        self.record(|update| update.done = update.done.saturating_add(step.files));
     }
 }
 
