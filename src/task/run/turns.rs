@@ -360,6 +360,17 @@ where
                     outcome: TaskAgentRunOutcome::Continued,
                     ..
                 } => turns += 1,
+                // An update or a decision is the agent talking, not the task moving,
+                // and it stops nothing: an agent that raises one every turn is
+                // circling exactly like one that says nothing at all.
+                TaskHistoryEvent::OperatorSignalRaised { signal }
+                    if !matches!(
+                        signal.kind,
+                        TaskOperatorSignalKind::Blocked | TaskOperatorSignalKind::InReview
+                    ) =>
+                {
+                    continue;
+                }
                 // The bookkeeping a turn leaves whether or not it did anything is
                 // skipped; anything else is the task changing, which is what makes
                 // the next turn a step rather than a repeat.
