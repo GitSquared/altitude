@@ -119,8 +119,9 @@ impl RemoteTracker {
 
     // The machine is going down under this work, and a session that simply stops
     // reads as a hang to whoever is watching the issue. This says what is happening
-    // before the process goes: the task is parked, not finished. Bounded, because
-    // the guest is being shut down and saving the tasks matters more than this.
+    // before the process goes, and claims nothing about what survives: the stop is
+    // best effort, and what happens to each task is decided by the boot after it.
+    // Bounded, because the guest is shutting down and the tasks matter more.
     pub async fn announce_shutdown(&self, host: &dyn Host) {
         let bound = match host.bound_tasks().await {
             Ok(bound) => bound,
@@ -146,8 +147,8 @@ impl RemoteTracker {
                         &activity,
                         AgentActivityContent::Response {
                             body: "Altitude is shutting down, so this run stops here. The task \
-                                   is parked, not finished: it carries on when the machine is \
-                                   back."
+                                   is not finished: Altitude picks it back up when the machine \
+                                   is back."
                                 .to_owned(),
                         },
                     )
