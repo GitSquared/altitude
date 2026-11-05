@@ -11,7 +11,10 @@ use super::SandboxCeiling;
 
 pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
 
-pub const WINDOW: Duration = Duration::from_secs(10 * 60);
+// Short on purpose: a sample every ten seconds, read at p75, means a spike of a few
+// samples is not a machine out of room, while a machine that recovered is asked again
+// in a minute rather than after the operator has given up on it.
+pub const WINDOW: Duration = Duration::from_secs(90);
 
 // Where the valve shuts and where it opens again. Two thresholds because one flaps: a
 // machine sitting on the line would take a task, become too busy, refuse the next, and
