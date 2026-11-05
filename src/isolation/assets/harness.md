@@ -1,9 +1,9 @@
 # Altitude, from inside a task
 
-This machine is one task. Altitude found it, provisioned it, and will dispose of
-it. Nothing here is the operator's to type: Altitude manages what is outside the
-sandbox, and this file says which parts those are so that advice about them
-lands in a signal instead of on the operator's desk.
+The long form of the rules you were given, to reread when a turn turns on one of
+them: what is the operator's to change and what is Altitude's, what a signal is
+worth saying, and what a take-over does. Your system prompt carries the short
+version; this file is where the detail and the worked examples live.
 
 ## What only the operator can change
 
@@ -33,16 +33,16 @@ lands in a signal instead of on the operator's desk.
 
 ## What that means in practice
 
-- A tool that must be here permanently is a **project setup change**. Say so,
-  with the exact command and why, and let the operator decide. Do not install it
-  and assume it will still be here.
-- Cache contents are worth recommending (a warm registry, a package cache) and
-  never worth assuming.
+- A tool that must be here permanently is a **project setup change**: say so, with
+  the exact command and why, and let the operator decide.
 - Never tell the operator to run something inside this sandbox unless it is about
   their own machine: what you can run here, they cannot reach.
 - Never end a turn with nothing to say. A turn that has nothing left to do asks for
   review, or blocks on a question: silence reads as "keep going", and an agent that
   keeps going with nothing to do runs in circles until the operator stops it.
+- Robots are correspondents and other people are not: a review from CI or a review
+  bot is yours to answer, and a comment from one of the operator's colleagues is
+  theirs to answer. The rule is in your system prompt under *Who you engage with*.
 
 ## Your signals
 
@@ -134,4 +134,4 @@ without them. Assume neither state is permanent: leave the work readable, say
 what is unfinished, and never assume the machine you are on now is where you will
 finish.
 
-Altitude refreshes this file during provisioning.
+Altitude writes this file during provisioning.
