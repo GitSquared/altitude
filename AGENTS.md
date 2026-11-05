@@ -181,6 +181,10 @@ machine). `task` is `store`, `agent`, `run` and `mirror`.
   and `tag.forceSignAnnotated` means every tag needs `-m`.
 - Write the release notes by hand. The generated notes are a commit dump; a release is
   read by someone deciding whether to upgrade.
+- Keep the notes short. One paragraph per area, not a fix per bullet: name what got
+  better and what an operator will notice doing what they already do. Be vague about
+  the mechanism and skip the individual bug fixes — the log and the session say those,
+  and a note that lists them reads as a diff being read out.
 - Group the notes by the part of the system the change belongs to, named the way the
   source is: `Tracker`, `Remotes`, `Tasks and agents`, `Interface`, `Isolation`,
   `Settings and projects`. That is roughly the folders under `src/`, and a reader
@@ -188,8 +192,11 @@ machine). `task` is `store`, `agent`, `run` and `mirror`.
 - Say what the operator can now do, or what no longer goes wrong, in their words. Not
   "refactored the ledger"; "a delegation this machine already answered is not picked
   up again".
-- Lead with what someone upgrading will notice, and keep the mechanical work — layout,
-  dependencies, comment passes — in an `Internal` section at the end.
+- Lead with what someone upgrading will notice. Keep the mechanical work — layout,
+  dependencies, comment passes — out of the notes unless it changes how someone builds
+  or configures Altitude, and then it is a line, not a section.
+- Number small steps as small steps: a few days of fixes and one visible improvement is
+  a patch, not a milestone.
 - Never claim verification that did not happen. If a fix is compiled and reasoned but
   not exercised, say so in the session rather than dressing it up in the notes.
 
