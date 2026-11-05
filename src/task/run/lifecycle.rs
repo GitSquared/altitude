@@ -535,25 +535,13 @@ where
                                 task_id = %task.id,
                                 "a task's sandbox did not survive the restart"
                             );
-                            let mut events = vec![
-                                TaskHistoryEvent::SandboxRemoved {
-                                    sandbox_available: false,
-                                },
-                                TaskHistoryEvent::ExecutionQueued {
-                                    execution_status: TaskExecutionStatus::Pending,
-                                },
-                            ];
+                            let mut events = vec![TaskHistoryEvent::ExecutionQueued {
+                                execution_status: TaskExecutionStatus::Pending,
+                            }];
                             events.extend(restart_events(
                                 &task,
-                                "This task's sandbox did not survive the restart, so the machine is \
-                                 rebuilding it from the project's repository and starting the work \
-                                 again.",
-                                Some(
-                                    "Altitude restarted under you and lost this task's sandbox. The \
-                                     workspace is being rebuilt from the project's repository and \
-                                     this conversation is where it was; recreate what you need and \
-                                     carry on with the work.",
-                                ),
+                                "This task's sandbox did not survive the restart, so it starts \
+                                 again from the project's repository.",
                             ));
                             task = service.record(&task.id, &events).await?;
                         }
@@ -583,7 +571,7 @@ where
                         &task,
                         task.facts.snapshot_path.clone().unwrap_or_default(),
                     )];
-                    events.extend(restart_events(&task, &woke_up_saying(&task), None));
+                    events.extend(restart_events(&task, &woke_up_saying(&task)));
                     task = service.record(&task.id, &events).await?;
                 } else if task.facts.deferred_review.is_some() && task.facts.snapshot_available {
                     // A shutdown can catch a review between the hold being
@@ -596,7 +584,7 @@ where
                         execution_pause_reason: TaskExecutionPauseReason::AwaitingReviewChecks,
                         snapshot_path: task.facts.snapshot_path.clone().unwrap_or_default(),
                     }];
-                    events.extend(restart_events(&task, &woke_up_saying(&task), None));
+                    events.extend(restart_events(&task, &woke_up_saying(&task)));
                     task = service.record(&task.id, &events).await?;
                 }
                 Ok(task)
@@ -680,40 +668,17 @@ where
                             .await?;
                         Ok(())
                     }
-                    // A machine on its way down is not a task that failed. Stopping the
-                    // capsule came before saving it, so the workspace is gone either
-                    // way: the task goes back in the queue to start again from the
-                    // project's repository, and is told what it lost. Failing it here
-                    // turns a host's restart into a dead task with an error nobody can
-                    // act on.
-                    Err(error)
-                        if reason == TaskExecutionPauseReason::ApplicationShutdown
-                            && task.facts.execution_status != TaskExecutionStatus::Failed =>
-                    {
+                    // A machine that is going down has nothing to do about it: the
+                    // task keeps the state it has, and the boot that follows works out
+                    // what survived. Recording a failure here would end a task because
+                    // its host restarted, and queuing it would hand work to a process
+                    // that is about to be gone.
+                    Err(error) if reason == TaskExecutionPauseReason::ApplicationShutdown => {
                         tracing::warn!(
                             task_id = %task.id,
                             %error,
-                            "a task's sandbox could not be saved before the machine stopped"
+                            "a task could not be saved before the machine stopped"
                         );
-                        // Failing to park it is not the same as losing it: the
-                        // capsule is only removed once its snapshot is written, so
-                        // what is on disk may still be there. The task goes back in
-                        // the queue and the next boot finds out which it was — it
-                        // tries to park the capsule again, and a capsule that is
-                        // really gone is answered where that is known, by telling
-                        // the agent its workspace went with it.
-                        let mut events = vec![TaskHistoryEvent::ExecutionQueued {
-                            execution_status: TaskExecutionStatus::Pending,
-                        }];
-                        events.extend(machine_events(
-                            &task,
-                            "Altitude could not park this task before the machine stopped",
-                            "The machine stopped before it could save this task's sandbox. It \
-                             picks the task back up where it was, or starts it again from the \
-                             project's repository if its sandbox did not survive.",
-                            None,
-                        ));
-                        service.record(&task.id, &events).await?;
                         Ok(())
                     }
                     // Where it was writing is half of why it could not: a permission
@@ -768,55 +733,32 @@ where
 // A restart is the machine's news, not the agent's. The operator watching this task
 // should see that it stopped with the machine and is moving again, so that is a
 // thread of its own; it is resolved in the same breath because it asks for nothing.
-// The agent is told only when its workspace did not survive, where the next turn has
-// to explain what it is starting from.
-fn restart_events(task: &Task, said: &str, tells_agent: Option<&str>) -> Vec<TaskHistoryEvent> {
-    machine_events(
-        task,
-        "Altitude restarted",
-        &format!(
-            "Altitude on {} restarted and is picking this task back up. {said}",
-            task.host
-        ),
-        tells_agent,
-    )
-}
-
-fn machine_events(
-    task: &Task,
-    title: &str,
-    body: &str,
-    tells_agent: Option<&str>,
-) -> Vec<TaskHistoryEvent> {
+fn restart_events(task: &Task, said: &str) -> Vec<TaskHistoryEvent> {
     let signal_id = uuid::Uuid::new_v4().to_string();
     let signal = TaskOperatorSignal {
         id: signal_id.clone(),
         task_id: task.id.clone(),
         kind: TaskOperatorSignalKind::Update,
-        title: title.to_owned(),
-        body: body.to_owned(),
+        title: "Altitude restarted".to_owned(),
+        body: format!(
+            "Altitude on {} restarted and is picking this task back up. {said}",
+            task.host
+        ),
         raised_at_ms: chrono::Utc::now().timestamp_millis(),
         proposal: None,
     };
-    let mut events = vec![
-        TaskHistoryEvent::OperatorSignalRaised {
-            signal: signal.clone(),
-        },
+    vec![
+        TaskHistoryEvent::OperatorSignalRaised { signal },
         TaskHistoryEvent::OperatorSignalResolved {
             signal_id,
             resolved: true,
             by: TaskOperatorSignalAuthor::Agent,
         },
-    ];
-    if let Some(body) = tells_agent {
-        events.extend(notice_event(task, body));
-    }
-    events
+    ]
 }
 
-// The machine telling the agent something it has to know at its next turn. The
-// source says it is the machine and not the operator, which is the difference
-// between news about the work and an instruction about it.
+// The machine telling the agent something it has to know at its next turn: what it is
+// starting from, when the workspace it had is gone.
 fn notice_event(task: &Task, body: &str) -> Vec<TaskHistoryEvent> {
     vec![TaskHistoryEvent::TaskInputExpressed {
         input: TaskInput {
