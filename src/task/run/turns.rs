@@ -315,6 +315,29 @@ where
                 )
                 .await?;
         }
+        // The machine's remaining questions were addressed to a person, and a person
+        // is now at the terminal: a failure thread or a review thread left open would
+        // stop the very next report as though nothing had been answered. An agent
+        // that is still stuck asks again, with what it has learned from them.
+        let mut answered = Vec::new();
+        for thread in self.signal_threads(&task.id).await? {
+            if !thread.is_unresolved()
+                || !matches!(
+                    thread.kind,
+                    TaskOperatorSignalKind::Blocked | TaskOperatorSignalKind::InReview
+                )
+            {
+                continue;
+            }
+            answered.push(TaskHistoryEvent::OperatorSignalResolved {
+                signal_id: thread.id,
+                resolved: true,
+                by: TaskOperatorSignalAuthor::Operator,
+            });
+        }
+        if !answered.is_empty() {
+            task = self.record(&task.id, &answered).await?;
+        }
         if !task.facts.sandbox_available {
             task = self.provision(task).await?;
         }
@@ -538,7 +561,14 @@ where
         {
             Ok(path) => Ok(path.to_string_lossy().into_owned()),
             Err(error) => {
-                self.fail(task, error.to_string()).await?;
+                self.fail(
+                    task,
+                    format!(
+                        "could not save the task sandbox to {}: {error}",
+                        self.snapshots_dir.display()
+                    ),
+                )
+                .await?;
                 Err(TaskServiceError::Isolation(error))
             }
         }

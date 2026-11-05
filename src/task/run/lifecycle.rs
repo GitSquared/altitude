@@ -557,7 +557,10 @@ where
                             service
                                 .fail(
                                     &task,
-                                    format!("could not recover the task sandbox: {error}"),
+                                    format!(
+                                        "could not recover the task sandbox from {}: {error}",
+                                        service.snapshots_dir.display()
+                                    ),
                                 )
                                 .await?;
                             return Err(TaskServiceError::Isolation(error));
@@ -674,8 +677,17 @@ where
                         Ok(())
                     }
                     Err(error) => {
+                        // Where it was writing is half of why it could not: a
+                        // permission denied on one machine is a directory owned by
+                        // another, and the operator is the only one who can look.
                         service
-                            .fail(&task, format!("could not save the task sandbox: {error}"))
+                            .fail(
+                                &task,
+                                format!(
+                                    "could not save the task sandbox to {}: {error}",
+                                    service.snapshots_dir.display()
+                                ),
+                            )
                             .await?;
                         Err(TaskServiceError::Isolation(error))
                     }

@@ -236,6 +236,23 @@ impl RemoteTracker {
                     .await
                     .map_err(|error| error.to_string())?;
             }
+            // A task that stopped is not a task that is working. The thread the
+            // failure raised carries the detail; this is what stops the session
+            // claiming the agent is still busy, which is what it looked like while
+            // the machine had already given up.
+            TaskHistoryEvent::ExecutionFailed { error, .. } => {
+                self.config
+                    .automation
+                    .create_activity(
+                        &report.session,
+                        &stable_id(&format!("{}-{index}", report.task_id), "failed"),
+                        AgentActivityContent::Error {
+                            body: failure_notice(error),
+                        },
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
             TaskHistoryEvent::PlanUpdated { steps } => {
                 self.config
                     .automation

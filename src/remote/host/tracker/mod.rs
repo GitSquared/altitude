@@ -163,6 +163,12 @@ fn published_comment_id(task_id: &str, signal_id: &str) -> String {
     stable_id("comment", &format!("signal:{task_id}:{signal_id}"))
 }
 
+// An error activity ends the session's "working" state, so it says what stopped the
+// task rather than only that something did.
+fn failure_notice(error: &str) -> String {
+    format!("**Altitude stopped this task.**\n\n{}", error.trim())
+}
+
 fn pause_notice(reason: &TaskExecutionPauseReason) -> &'static str {
     match reason {
         TaskExecutionPauseReason::AwaitingOperator => "Waiting for your reply on this task.",
