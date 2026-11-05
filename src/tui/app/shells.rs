@@ -63,6 +63,23 @@ impl App {
         self.foreground = Foreground::Tasks;
     }
 
+    // The shell ended on its own. It comes off the stack, and if it was the one in
+    // front the agent's terminal is what is under it — never a jump out of wherever
+    // the operator has since gone.
+    pub(in crate::tui) fn pop_sandbox_shell(&mut self, task_id: &str) {
+        let id = ShellId::TaskShell(task_id.to_owned());
+        self.shells.remove(&id);
+        if self.open_shell() != Some(&id) {
+            return;
+        }
+        let under = ShellId::Task(task_id.to_owned());
+        self.foreground = if self.shells.contains_key(&under) {
+            Foreground::Shell(under)
+        } else {
+            Foreground::Tasks
+        };
+    }
+
     // Both of a task's terminals go together: the shell was opened to look at the
     // take-over that is ending, and a take-over that has ended has nothing to look at.
     pub(in crate::tui) fn remove_shell<E>(&mut self, task_id: &str, event_loop: &TaskEventLoop<E>)

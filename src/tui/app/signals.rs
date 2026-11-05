@@ -674,6 +674,7 @@ impl App {
                 let excess = lines.len().saturating_sub(Self::ACTIVITY_LINES);
                 lines.drain(..excess);
             }
+            TaskExecutionUpdate::ShellEnded { task_id } => self.pop_sandbox_shell(&task_id),
             TaskExecutionUpdate::ShellOutput { task_id, bytes } => {
                 let id = ShellId::TaskShell(task_id);
                 for reply in self.forward_shell_output(&id, bytes) {

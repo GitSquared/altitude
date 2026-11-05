@@ -145,7 +145,13 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
                     }
                 }
             }
+            // Ending here is the shell's own end, which the interface answers by
+            // going back to the terminal underneath rather than by standing on a
+            // shell that is not there any more.
             event_loop.shells.close(&task_id);
+            let _ = event_loop
+                .events
+                .send(TaskExecutionUpdate::ShellEnded { task_id });
         });
         ShellOpening::Opened
     }

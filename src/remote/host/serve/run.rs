@@ -218,7 +218,8 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
                 match update {
                     // A remote host has no operator in front of it, so a shell opened
                     // in one of its sandboxes is not its to show.
-                    TaskExecutionUpdate::ShellOutput { .. } => continue,
+                    TaskExecutionUpdate::ShellOutput { .. }
+                    | TaskExecutionUpdate::ShellEnded { .. } => continue,
                     // Bytes for a terminal are not a card: what a watcher reads is
                     // the task, and only the events that carry one change it.
                     TaskExecutionUpdate::Output { .. } => {}

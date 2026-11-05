@@ -60,6 +60,11 @@ pub enum TaskExecutionUpdate {
         task_id: String,
         bytes: Vec<u8>,
     },
+    // The shell ended by itself — the operator typed `exit`, or bash died. It is not
+    // the take-over ending, so the terminal under it is what comes back.
+    ShellEnded {
+        task_id: String,
+    },
 }
 
 #[derive(Clone)]
