@@ -63,7 +63,7 @@ where
             responding_to: None,
             external_id: None,
         };
-        let mut task = self
+        let task = self
             .record(&task.id, &[TaskHistoryEvent::TaskInputExpressed { input }])
             .await?;
         if matches!(
@@ -71,9 +71,6 @@ where
             TaskExecutionStatus::Running | TaskExecutionStatus::Pending
         ) {
             return Ok(None);
-        }
-        if !task.facts.sandbox_available {
-            task = self.provision(task).await?;
         }
         let intends = self.inputs(&task.id).await?;
         let prompt = format!(
@@ -129,7 +126,7 @@ where
     ) -> Result<Option<(Task, TaskAgentRun, CommandSession)>, TaskServiceError> {
         // Re-read rather than trusting a caller-held task: the operator may have
         // opened the signal list some time before replying.
-        let mut task = self
+        let task = self
             .store
             .message_operator_signal(task_id, signal_id, &reply)
             .await
@@ -142,9 +139,6 @@ where
             || task.facts.execution_pause_reason == Some(TaskExecutionPauseReason::Transfer)
         {
             return Ok(None);
-        }
-        if !task.facts.sandbox_available {
-            task = self.provision(task).await?;
         }
         // The turn reads the whole task and the thread; it does not receive a
         // pre-digested command. Keeping the answering id lets a report that has

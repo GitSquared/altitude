@@ -251,6 +251,11 @@ where
         // replying to one.
         answering: Option<String>,
     ) -> Result<(Task, TaskAgentRun, CommandSession), TaskServiceError> {
+        // The record is not the runtime: a task whose capsule went away — a host
+        // that restarted, a sandbox that could not be saved — is built again before
+        // a turn reaches for its transcript or its files. Provisioning a task that
+        // still has its capsule is one check and no work.
+        let task = self.provision(task).await?;
         // Refresh what the contributions look like before the agent runs, so a
         // turn is planned against current external state rather than the state
         // as of the previous turn.
@@ -273,6 +278,7 @@ where
         // to it, so the request turn carries it across.
         answering: Option<String>,
     ) -> Result<(Task, TaskAgentRun, CommandSession), TaskServiceError> {
+        let task = self.provision(task).await?;
         let engine = self.engine(&task)?;
         let conversation_id = self.agent_conversation(&task, true).await?;
         let command = engine.report_command(
@@ -338,9 +344,7 @@ where
         if !answered.is_empty() {
             task = self.record(&task.id, &answered).await?;
         }
-        if !task.facts.sandbox_available {
-            task = self.provision(task).await?;
-        }
+        let task = self.provision(task).await?;
         let engine = self.engine(&task)?;
         let conversation_id = self
             .agent_conversation(&task, engine.operator_requires_conversation())
