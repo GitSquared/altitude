@@ -261,7 +261,7 @@ impl App {
             ],
             Foreground::Shell(ShellId::TaskShell(_)) => vec![
                 Hint::new("alt-s", "agent"),
-                Hint::new("ctrl-q", "close shell"),
+                Hint::new("ctrl-q", "back on autopilot"),
             ],
             // Nothing to hand back to: the sandbox goes with the shell.
             Foreground::Shell(ShellId::Credentials(_)) => vec![Hint::new("ctrl-q", "close")],

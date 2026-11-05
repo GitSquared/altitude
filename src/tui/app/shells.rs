@@ -63,6 +63,32 @@ impl App {
         self.foreground = Foreground::Tasks;
     }
 
+    // What ctrl-q does from either half of a take-over: give the task back and take
+    // both terminals with it.
+    fn end_take_over<E>(&mut self, task_id: &str, event_loop: &TaskEventLoop<E>)
+    where
+        E: IsolationEngine + Clone + 'static,
+    {
+        // A task that was carried here belongs to the machine it came from: leaving
+        // it hands it back rather than piloting it here.
+        let borrowed = self
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .filter(|task| task.facts.arrived_from.is_some())
+            .cloned();
+        match borrowed {
+            Some(task) => event_loop.hand_back(task),
+            None => {
+                if !event_loop.return_to_autopilot(task_id) {
+                    self.say("This task is no longer running; control stayed with autopilot");
+                }
+            }
+        }
+        self.remove_shell(task_id, event_loop);
+        self.hide_shell();
+    }
+
     // The shell ended on its own. It comes off the stack, and if it was the one in
     // front the agent's terminal is what is under it — never a jump out of wherever
     // the operator has since gone.
@@ -164,39 +190,11 @@ impl App {
         }
         if screens::shell::is_exit_key(key) {
             match &id {
-                ShellId::TaskShell(task_id) => {
-                    // Leaving the shell leaves the take-over alone: the agent is still
-                    // the thing being operated, with its terminal behind this one.
-                    event_loop.close_task_shell(task_id);
-                    self.shells.remove(&id);
-                    let back = ShellId::Task(task_id.clone());
-                    if self.shells.contains_key(&back) {
-                        self.foreground = Foreground::Shell(back);
-                    } else {
-                        self.foreground = Foreground::Tasks;
-                    }
-                }
-                ShellId::Task(task_id) => {
-                    // A task that was carried here belongs to the machine it came
-                    // from: leaving it hands it back rather than piloting it here.
-                    let borrowed = self
-                        .tasks
-                        .iter()
-                        .find(|task| task.id == *task_id)
-                        .filter(|task| task.facts.arrived_from.is_some())
-                        .cloned();
-                    match borrowed {
-                        Some(task) => event_loop.hand_back(task),
-                        None => {
-                            if !event_loop.return_to_autopilot(task_id) {
-                                self.say(
-                                    "This task is no longer running; control stayed with autopilot",
-                                );
-                            }
-                        }
-                    }
-                    self.remove_shell(task_id, event_loop);
-                    self.hide_shell();
+                // The shell is stacked on the take-over, so leaving from it is
+                // leaving the take-over: one key ends it from either half. Closing
+                // only the shell is what `exit` is for.
+                ShellId::Task(task_id) | ShellId::TaskShell(task_id) => {
+                    self.end_take_over(task_id, event_loop);
                 }
                 ShellId::Credentials(_) => self.close_credential_shell(task_service).await,
             }
