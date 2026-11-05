@@ -10,7 +10,7 @@ use crate::{
 };
 use futures_util::future::join_all;
 
-use crate::isolation::Unwatched;
+use crate::isolation::EnvironmentProgressSink;
 use std::{fs, path::PathBuf, time::Instant};
 use uuid::Uuid;
 
@@ -83,17 +83,16 @@ where
         })
     }
 
+    // Where the minutes of a cold environment go. A caller with something to say
+    // about them passes a sink; one with nothing to say passes `Unwatched`.
     pub async fn prepare_project(
         &self,
         project: &Project,
         agent: AgentKind,
+        progress: &dyn EnvironmentProgressSink,
     ) -> Result<PathBuf, TaskServiceError> {
         self.isolation
-            .ensure_project(
-                project.clone(),
-                mounts::task(&self.agents, agent),
-                &Unwatched,
-            )
+            .ensure_project(project.clone(), mounts::task(&self.agents, agent), progress)
             .await
             .map(|snapshot| snapshot.path)
             .map_err(TaskServiceError::Isolation)
@@ -104,9 +103,10 @@ where
         owner: &str,
         project: &Project,
         agent: AgentKind,
+        progress: &dyn EnvironmentProgressSink,
     ) -> Result<PathBuf, TaskServiceError> {
         self.as_operator(owner)?
-            .prepare_project(project, agent)
+            .prepare_project(project, agent, progress)
             .await
     }
 

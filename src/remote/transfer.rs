@@ -1,4 +1,4 @@
-use crate::isolation::{FileTally, FileTransferSink};
+use crate::isolation::{EnvironmentProgress, EnvironmentProgressSink, FileTally, FileTransferSink};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -97,6 +97,19 @@ impl Transfer {
 
     pub fn is_stopped(&self) -> bool {
         self.stopped.load(Ordering::Relaxed)
+    }
+}
+
+impl EnvironmentProgressSink for Transfer {
+    // A cold take spends its minutes here, so the bar says which step rather than
+    // standing still through all of them.
+    fn report(&self, progress: EnvironmentProgress) {
+        self.waiting(format!(
+            "{} · step {} of {}",
+            progress.label,
+            progress.completed + 1,
+            progress.total
+        ));
     }
 }
 

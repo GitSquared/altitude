@@ -5,7 +5,9 @@ use crate::task::{TaskArrival, TaskError, TaskOperatorSignalKind, file_arrivals}
 
 use crate::{
     agent::AgentKind,
-    isolation::{CommandEvent, FileTransferSink, IsolationEngine, guest_absolute},
+    isolation::{
+        CommandEvent, EnvironmentProgressSink, FileTransferSink, IsolationEngine, guest_absolute,
+    },
     project::Project,
     task::{
         Task, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent,
@@ -129,7 +131,18 @@ where
         // The sandbox was made to be read, so it goes once it has been, and the
         // task's record says so: a task left believing it has a sandbox that no
         // longer exists is one that fails the next time anything looks at it.
-        let outcome = packed;
+        //
+        // When the pack failed it stays, because it holds the work the capsule never
+        // got: what the agent has in that tree is the only copy of it, and a transfer
+        // that ends without a capsule is not a reason to destroy it.
+        if packed.is_err() {
+            tracing::warn!(
+                task = %task.id,
+                sandbox_id = %sandbox_id,
+                "a task's files could not be packed; its sandbox stays where the work is"
+            );
+            return packed;
+        }
         if let Err(error) = isolation.remove(sandbox_id).await {
             tracing::warn!(%error, "could not remove the sandbox a task was packed from");
         }
@@ -146,7 +159,7 @@ where
             tracing::warn!(task = %task.id, %error, "could not record that a packed sandbox is gone");
         }
         self.service.release_agent_channel(&task.id);
-        outcome
+        packed
     }
 
     pub(super) async fn pack_into(
@@ -234,8 +247,9 @@ where
         &self,
         project: &Project,
         agent: AgentKind,
+        progress: &dyn EnvironmentProgressSink,
     ) -> Result<PathBuf, TaskServiceError> {
-        self.service.prepare_project(project, agent).await
+        self.service.prepare_project(project, agent, progress).await
     }
 
     pub async fn prepare_project_as_operator(
@@ -243,9 +257,10 @@ where
         owner: &str,
         project: &Project,
         agent: AgentKind,
+        progress: &dyn EnvironmentProgressSink,
     ) -> Result<PathBuf, TaskServiceError> {
         self.service
-            .prepare_project_as_operator(owner, project, agent)
+            .prepare_project_as_operator(owner, project, agent, progress)
             .await
     }
 

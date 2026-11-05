@@ -22,7 +22,7 @@ use tokio::{
 };
 
 use crate::{
-    isolation::IsolationEngine,
+    isolation::{IsolationEngine, Unwatched},
     remote::{ConfigBundle, Logins, Scan, transfer},
     task::{TaskEventLoop, TaskExecutionUpdate, TaskService},
 };
@@ -259,7 +259,7 @@ where
     {
         let service = task_service.clone();
         tokio::spawn(async move {
-            if let Err(error) = service.prepare_project(&project, agent).await {
+            if let Err(error) = service.prepare_project(&project, agent, &Unwatched).await {
                 tracing::debug!(%error, "could not prepare the first project");
             }
         });

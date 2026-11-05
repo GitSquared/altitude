@@ -105,7 +105,15 @@ where
         return Ok(task.id);
     }
     let outcome = receive(&peer, &handover, client, event_loop, transfer, address).await;
-    if outcome.is_err() {
+    if let Err(error) = &outcome {
+        // The task stays where it was, so the log is where the reason outlives the
+        // line the interface showed for a moment.
+        tracing::error!(
+            task = %summary.id,
+            transfer_id = %handover.transfer_id,
+            %error,
+            "a task could not be taken home; it stays where it was"
+        );
         give_back(&peer, &handover.transfer_id, client).await;
     }
     outcome
@@ -149,7 +157,7 @@ where
     // way to the words until there are bytes again.
     transfer.waiting("building the environment here…");
     event_loop
-        .prepare_project(&project, record.draft.agent)
+        .prepare_project(&project, record.draft.agent, transfer)
         .await
         .map_err(|e| e.to_string())?;
     // What travels is the task: its record, the files the work is made of, and the

@@ -240,57 +240,71 @@ where
         .stage_transfer(task_id, &transfer_id, recipient)
         .await
         .map_err(|e| e.to_string())?;
-    let events = tasks
-        .events(&stopped.id)
-        .await
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .filter(|(_, event)| !is_machine_local_event(event))
-        .map(|(recorded_at_ms, event)| RecordedEvent {
-            recorded_at_ms,
-            event,
-        })
-        .collect();
-    let record = HandoverRecord {
-        draft: HandoverDraft {
-            intent: stopped.facts.intent.clone(),
-            project: stopped
-                .project()
-                .cloned()
-                .ok_or("the task has no recorded project")?,
-            agent: stopped.agent_kind.unwrap_or_default(),
-            agent_conversation_id: stopped.facts.agent_conversation_id.clone(),
-        },
-        events,
-    };
-    let history_path = directory.join("history.json");
-    let file = fs::File::create(&history_path).map_err(|e| e.to_string())?;
-    serde_json::to_writer(&file, &record).map_err(|e| e.to_string())?;
-    file.sync_all().map_err(|e| e.to_string())?;
-    let history = archive_description(&history_path)?;
-    if history.len > protocol::MAX_BLOB_BYTES {
-        return Err("task history exceeds the transfer limit".into());
+    // From here the task is staged, which is a state someone has to clear: a pack
+    // that fails after being staged leaves the task paused for a hand-over that will
+    // never happen, so the work is put back as it was found.
+    let prepared = async {
+        let events = tasks
+            .events(&stopped.id)
+            .await
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|(_, event)| !is_machine_local_event(event))
+            .map(|(recorded_at_ms, event)| RecordedEvent {
+                recorded_at_ms,
+                event,
+            })
+            .collect();
+        let record = HandoverRecord {
+            draft: HandoverDraft {
+                intent: stopped.facts.intent.clone(),
+                project: stopped
+                    .project()
+                    .cloned()
+                    .ok_or("the task has no recorded project")?,
+                agent: stopped.agent_kind.unwrap_or_default(),
+                agent_conversation_id: stopped.facts.agent_conversation_id.clone(),
+            },
+            events,
+        };
+        let history_path = directory.join("history.json");
+        let file = fs::File::create(&history_path).map_err(|e| e.to_string())?;
+        serde_json::to_writer(&file, &record).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        let history = archive_description(&history_path)?;
+        if history.len > protocol::MAX_BLOB_BYTES {
+            return Err("task history exceeds the transfer limit".to_owned());
+        }
+        let (work, transcript) = bundle_task_files(tasks, &stopped, &directory, progress).await?;
+        let handover = Handover {
+            task_id: task_id.to_owned(),
+            transfer_id: transfer_id.clone(),
+            history,
+            work,
+            transcript,
+        };
+        let prepared = PreparedTransfer {
+            recipient: recipient.to_owned(),
+            handover: handover.clone(),
+        };
+        let file = fs::File::create(directory.join("transfer.json.incoming"))
+            .map_err(|e| e.to_string())?;
+        serde_json::to_writer(&file, &prepared).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        fs::rename(
+            directory.join("transfer.json.incoming"),
+            directory.join("transfer.json"),
+        )
+        .map_err(|e| e.to_string())?;
+        Ok::<Handover, String>(handover)
     }
-    let (work, transcript) = bundle_task_files(tasks, &stopped, &directory, progress).await?;
-    let handover = Handover {
-        task_id: task_id.to_owned(),
-        transfer_id,
-        history,
-        work,
-        transcript,
-    };
-    let prepared = PreparedTransfer {
-        recipient: recipient.to_owned(),
-        handover: handover.clone(),
-    };
-    let file =
-        fs::File::create(directory.join("transfer.json.incoming")).map_err(|e| e.to_string())?;
-    serde_json::to_writer(&file, &prepared).map_err(|e| e.to_string())?;
-    file.sync_all().map_err(|e| e.to_string())?;
-    fs::rename(
-        directory.join("transfer.json.incoming"),
-        directory.join("transfer.json"),
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(handover)
+    .await;
+    if let Err(error) = &prepared {
+        tracing::warn!(task = %task_id, %error, "a staged hand-over could not be prepared; the task stays where it is");
+        if let Err(problem) = tasks.abandon_transfer(task_id, &transfer_id).await {
+            tracing::warn!(task = %task_id, %problem, "could not unstage a hand-over that was never prepared");
+        }
+        let _ = fs::remove_dir_all(&directory);
+    }
+    prepared
 }

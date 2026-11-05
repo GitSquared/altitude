@@ -23,7 +23,7 @@ use crate::{
     cli::{ServeArgs, ServeCommand, Tracker},
     config::{Config, DEFAULT_PORT, ServeSettings},
     db::Database,
-    isolation::{self, IsolationStatus, MicrosandboxIsolation},
+    isolation::{self, IsolationStatus, MicrosandboxIsolation, Unwatched},
     logging,
     project::Project,
     remote::protocol::TaskSummary,
@@ -448,7 +448,7 @@ pub(super) async fn prepare_projects(
             name: project.name.clone(),
         });
         tasks
-            .prepare_project_as_operator(owner, project, agent)
+            .prepare_project_as_operator(owner, project, agent, &Unwatched)
             .await
             .map_err(|e| e.to_string())?;
     }

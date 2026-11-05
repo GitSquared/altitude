@@ -1,3 +1,4 @@
+use crate::isolation::Unwatched;
 use crate::remote::protocol::{self, SignalCommand};
 use crate::remote::server::Watching;
 use crate::remote::{HISTORY_FILE, HeldConfig, TRANSCRIPT_FILE, TransferPart, WORK_FILE};
@@ -521,7 +522,7 @@ impl TaskHost for OwnTasks {
                 .cloned()
                 .ok_or_else(|| format!("this machine has no project {}", request.project_id))?;
             tasks
-                .prepare_project_as_operator(&owner, &project, request.agent)
+                .prepare_project_as_operator(&owner, &project, request.agent, &Unwatched)
                 .await
                 .map_err(|e| e.to_string())?;
             let operator = InstallationIdentity {

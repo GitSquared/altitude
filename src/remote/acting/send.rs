@@ -9,7 +9,7 @@ use std::{
 use iroh::{EndpointAddr, EndpointId};
 use tokio::sync::Mutex;
 
-use crate::isolation::private_directory;
+use crate::isolation::{Unwatched, private_directory};
 
 use crate::{
     config::{Config, DEFAULT_PORT},
@@ -470,7 +470,12 @@ impl IncomingTransfers {
             .collect::<Vec<_>>();
         refuse_foreign_founder(&history, &metadata.peer)?;
         self.tasks
-            .prepare_project_as_operator(&metadata.peer, &record.draft.project, record.draft.agent)
+            .prepare_project_as_operator(
+                &metadata.peer,
+                &record.draft.project,
+                record.draft.agent,
+                &Unwatched,
+            )
             .await
             .map_err(message)?;
         let files = unpack_task_files(&directory, handover).await?;
