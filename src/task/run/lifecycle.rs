@@ -399,9 +399,13 @@ where
         diagnostic: Option<&str>,
     ) -> Result<Task, TaskServiceError> {
         let (exit_code, error) = match event {
-            // A clean exit is not an ending: a run that stops without a report has
-            // failed to report, and only the operator closes a task out.
-            CommandEvent::Exited(0) => (Some(0), "the run ended without a task report".to_owned()),
+            // A clean exit reached here is not an ending the task has words for: a
+            // turn that exits without raising anything is resumed by the loop, so this
+            // is only the command that ended before the loop could read it.
+            CommandEvent::Exited(0) => (
+                Some(0),
+                "the run ended without saying what happened".to_owned(),
+            ),
             CommandEvent::Exited(code) => (Some(code), format!("command exited with code {code}")),
             CommandEvent::Failed(error) => (None, error),
             CommandEvent::Output { .. } => unreachable!("output is handled by the event_loop"),
