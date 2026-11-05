@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use crate::{
-    agent::{AgentRefusal, TaskReportDecoder},
+    agent::{AgentRefusal, TaskStreamDecoder},
     isolation::{CommandEvent, CommandSession, IsolationEngine},
     task::mirror::review::Look,
     task::{
-        Task, TaskAgentRequestedAction, TaskAgentRun, TaskExecutionMode, TaskExecutionPauseReason,
-        TaskHistoryEvent, TaskServiceError,
+        Task, TaskAgentRun, TaskExecutionMode, TaskExecutionPauseReason, TaskHistoryEvent,
+        TaskServiceError,
     },
     vcs::{CodeContribution, ContributionObservation},
 };
@@ -51,10 +51,8 @@ where
         let current_activity = Arc::clone(&self.current_activity);
         let event_loop = self.clone();
         tokio::spawn(async move {
-            let mut report_stream = match mode {
-                TaskExecutionMode::Autopilot | TaskExecutionMode::AutopilotReport => {
-                    service.report_decoder(&task)
-                }
+            let mut stream = match mode {
+                TaskExecutionMode::Autopilot => service.stream_decoder(&task),
                 _ => None,
             };
             let mut progress = match mode {
@@ -68,8 +66,11 @@ where
                     )
                 });
                 match event {
-                    CommandEvent::Output { stream, bytes } => {
-                        if let Some(decoder) = &mut report_stream {
+                    CommandEvent::Output {
+                        stream: output,
+                        bytes,
+                    } => {
+                        if let Some(decoder) = &mut stream {
                             decoder.process(&bytes);
                         }
                         if let Some(decoder) = &mut progress
@@ -90,7 +91,7 @@ where
                         event_loop.cache_terminal_output(&task.id, &bytes);
                         let _ = events.send(TaskExecutionUpdate::Output {
                             task_id: task.id.clone(),
-                            stream,
+                            stream: output,
                             bytes,
                         });
                     }
@@ -108,14 +109,7 @@ where
                             return;
                         }
                         if let Err(error) = event_loop
-                            .settle_finished_run(
-                                task.clone(),
-                                &run,
-                                mode,
-                                control,
-                                report_stream,
-                                event,
-                            )
+                            .settle_finished_run(task.clone(), &run, mode, control, stream, event)
                             .await
                         {
                             let result = service
@@ -211,15 +205,12 @@ where
         run: &TaskAgentRun,
         mode: TaskExecutionMode,
         control: Option<TaskExecutionMode>,
-        mut report_stream: Option<Box<dyn TaskReportDecoder>>,
+        mut stream: Option<Box<dyn TaskStreamDecoder>>,
         event: CommandEvent,
     ) -> Result<(), TaskServiceError> {
         // What the account looks like is recorded before the run is judged, because
         // the judgement reads it: a refusal is a spent window, not a sentence.
-        let task = match report_stream
-            .as_mut()
-            .and_then(|decoder| decoder.take_standing())
-        {
+        let task = match stream.as_mut().and_then(|decoder| decoder.take_standing()) {
             Some(standing) => match self
                 .service
                 .record(
@@ -238,10 +229,7 @@ where
         };
         // What the run spent is recorded before anything is decided about it: a run
         // that ends in a pause or a refusal has still cost what it cost.
-        let task = match report_stream
-            .as_mut()
-            .and_then(|decoder| decoder.take_usage())
-        {
+        let task = match stream.as_mut().and_then(|decoder| decoder.take_usage()) {
             Some(usage) => match self
                 .service
                 .record(&task.id, &[TaskHistoryEvent::from(&usage)])
@@ -250,6 +238,22 @@ where
                 Ok(task) => task,
                 Err(error) => {
                     tracing::warn!(task_id = %task.id, %error, "could not record what a run cost");
+                    task
+                }
+            },
+            None => task,
+        };
+        // Which model a run used is decoded from its own stream now that no report
+        // turn names it, and it is a reading of the run like what it cost.
+        let task = match stream.as_mut().and_then(|decoder| decoder.take_model()) {
+            Some(model) => match self
+                .service
+                .record(&task.id, &[TaskHistoryEvent::AgentModelObserved { model }])
+                .await
+            {
+                Ok(task) => task,
+                Err(error) => {
+                    tracing::warn!(task_id = %task.id, %error, "could not record a run's model");
                     task
                 }
             },
@@ -269,9 +273,6 @@ where
                     self.service.resume_autopilot_after_operator(task).await
                 }
                 TaskExecutionMode::Operator => self.service.start_operator(task).await,
-                TaskExecutionMode::AutopilotReport => {
-                    unreachable!("a report turn cannot be a control target")
-                }
             };
             let operator_task = result
                 .as_ref()
@@ -285,7 +286,7 @@ where
             return Ok(());
         }
         if !matches!(event, CommandEvent::Exited(0)) {
-            let refusal = report_stream.as_mut().and_then(|decoder| decoder.refusal());
+            let refusal = stream.as_mut().and_then(|decoder| decoder.refusal());
             // A window that reopens on its own is the one ending that is not a
             // failure: the task keeps its place, and comes back when the clock runs
             // out rather than when the operator reads about it.
@@ -314,7 +315,7 @@ where
                 _ => None,
             };
             let diagnostic = said.or_else(|| {
-                report_stream
+                stream
                     .as_mut()
                     .and_then(|decoder| decoder.failure_message())
             });
@@ -326,95 +327,56 @@ where
         }
         match mode {
             TaskExecutionMode::Autopilot => {
-                self.service.continue_turn(run).await?;
-                // Something arrived while this turn was working. The turn that
-                // reads it has to be a work turn: asking for the report first would
-                // answer a message the agent has not seen, and the report is the one
-                // thing that cannot do anything about it.
-                let with_message = match self.service.store.get(&task.id).await {
-                    Ok(Some(moving)) if !moving.facts.pending_inputs.is_empty() => Some(moving),
-                    _ => None,
+                // What a turn decided is what it said. A turn that left something
+                // for the operator waits for them; one that left nothing is resumed,
+                // because Altitude keeps a task going until the agent can say why it
+                // should stop. Nothing is asked again: the signals are the answer,
+                // and the ending each of these paths records is the run's own.
+                let task = match self.service.store.get(&task.id).await {
+                    Ok(Some(moved)) => moved,
+                    _ => task,
                 };
-                self.watch_agent_run(match with_message {
-                    Some(moving) => {
-                        tracing::info!(
-                            task_id = %moving.id,
-                            messages = moving.facts.pending_inputs.len(),
-                            "a message arrived mid-turn; the next turn reads it"
-                        );
-                        self.service.continue_autopilot(moving).await
-                    }
-                    None => {
-                        self.service
-                            .request_autopilot_report(task, run.answering_signal_id.clone())
-                            .await
-                    }
-                });
-            }
-            TaskExecutionMode::AutopilotReport => {
-                let report = report_stream
-                    .ok_or_else(|| {
-                        TaskServiceError::InvalidReport("the report turn has no decoder".into())
-                    })?
-                    .report()
-                    .map_err(TaskServiceError::InvalidReport)?;
-                let (task, action) = self.service.apply_report(&task, run, &report).await?;
-                let _ = self
-                    .events
-                    .send(TaskExecutionUpdate::Report { task: task.clone() });
-                // A message that arrived while the report was being written has not
-                // been read by anybody. Whatever the report asked for, it waits: the
-                // news gets its turn, or the task parks with the message unread.
+                if task.facts.deferred_review.is_some() {
+                    // A review with pull requests to wait for: give the capsule back
+                    // now, and let the host watch them.
+                    let result = self.service.hold_review_checks(&task, Some(run)).await;
+                    let _ = self
+                        .events
+                        .send(TaskExecutionUpdate::Finished(task.id, result));
+                    return Ok(());
+                }
+                if task.facts.blocking_signal_kind.is_some() {
+                    let result = self
+                        .service
+                        .await_operator(&task, run, TaskExecutionPauseReason::AwaitingOperator)
+                        .await;
+                    let _ = self
+                        .events
+                        .send(TaskExecutionUpdate::Finished(task.id, result));
+                    return Ok(());
+                }
+                // A run of turns that each take one and say nothing between them
+                // starts the next from the same state, so the operator is asked
+                // instead of being left with an agent going in circles.
+                if self.service.went_quiet(&task).await? {
+                    let result = self
+                        .service
+                        .await_operator(&task, run, TaskExecutionPauseReason::AgentWentQuiet)
+                        .await;
+                    let _ = self
+                        .events
+                        .send(TaskExecutionUpdate::Finished(task.id, result));
+                    return Ok(());
+                }
                 if !task.facts.pending_inputs.is_empty() {
                     tracing::info!(
                         task_id = %task.id,
                         messages = task.facts.pending_inputs.len(),
-                        "a message arrived during the report; the next turn reads it"
+                        "a message arrived mid-turn; the next turn reads it"
                     );
-                    self.service.continue_turn(run).await?;
-                    self.watch_agent_run(self.service.continue_autopilot(task).await);
-                    return Ok(());
                 }
-                match action {
-                    // Another turn is a step only while the work is moving. A run of
-                    // turns that each ask for one and say nothing between them starts
-                    // the next from the same state, so the operator is asked instead.
-                    TaskAgentRequestedAction::Continue
-                        if self.service.went_quiet(&task).await? =>
-                    {
-                        let result = self
-                            .service
-                            .await_operator(&task, run, TaskExecutionPauseReason::AgentWentQuiet)
-                            .await;
-                        let _ = self
-                            .events
-                            .send(TaskExecutionUpdate::Finished(task.id, result));
-                    }
-                    TaskAgentRequestedAction::Continue => {
-                        self.service.continue_turn(run).await?;
-                        self.watch_agent_run(self.service.continue_autopilot(task).await);
-                    }
-                    TaskAgentRequestedAction::AwaitOperator
-                        if task.facts.deferred_review.is_some() =>
-                    {
-                        // The request is held in history and the host watches the
-                        // linked pull requests. Give the capsule back now: watching
-                        // needs no agent, and the wait should cost no capacity.
-                        let result = self.service.hold_review_checks(&task, Some(run)).await;
-                        let _ = self
-                            .events
-                            .send(TaskExecutionUpdate::Finished(task.id, result));
-                    }
-                    TaskAgentRequestedAction::AwaitOperator => {
-                        let result = self
-                            .service
-                            .await_operator(&task, run, TaskExecutionPauseReason::AwaitingOperator)
-                            .await;
-                        let _ = self
-                            .events
-                            .send(TaskExecutionUpdate::Finished(task.id, result));
-                    }
-                }
+                self.service.continue_turn(run).await?;
+                self.watch_agent_run(self.service.continue_autopilot(task).await);
             }
             // An operator's terminal ending is dropping the task off their desk,
             // which is the same thing as handing it back deliberately: the work

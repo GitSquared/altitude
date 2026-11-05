@@ -59,11 +59,12 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      WHERE task_id = tasks.id
        AND json_type(payload, '$.data.execution_mode') IS NOT NULL
      ORDER BY sequence DESC LIMIT 1) AS execution_mode,
-    (SELECT payload ->> '$.data.operator_attention_level'
-     FROM task_event_logs
-     WHERE task_id = tasks.id
-       AND json_type(payload, '$.data.operator_attention_level') IS NOT NULL
-     ORDER BY sequence DESC LIMIT 1) AS operator_attention_level,
+    -- Whether this task is waiting on the operator, read from the threads that are
+    -- open rather than stored beside them: one fact, one place.
+    CASE WHEN EXISTS (
+        SELECT 1 FROM task_operator_signals
+        WHERE task_id = tasks.id AND resolved = 0 AND kind IN ('blocked', 'in_review')
+    ) THEN 'requested' ELSE 'nominal' END AS operator_attention_level,
     (SELECT payload ->> '$.data.sandbox_id'
      FROM task_event_logs
      WHERE task_id = tasks.id
@@ -196,9 +197,7 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
          FROM task_operator_signals
          WHERE task_id = tasks.id AND resolved = 0
          GROUP BY kind)), '{}') AS signal_counts,
-    (SELECT json_object(
-         'signal', json(payload -> '$.data.signal'),
-         'agent_run_id', payload -> '$.data.agent_run_id')
+    (SELECT json_object('signal', json(payload -> '$.data.signal'))
      FROM task_deferred_reviews
      WHERE task_id = tasks.id
      ORDER BY sequence DESC LIMIT 1) AS deferred_review,

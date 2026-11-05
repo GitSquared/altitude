@@ -352,22 +352,6 @@ impl TaskStore {
         body: &str,
         proposal: Option<ProjectProposal>,
     ) -> Result<(Task, String), TaskError> {
-        // A blocked thread raised mid-turn is a request the operator can act on
-        // here, rather than a question only the report can ask: the proposal is
-        // what they would apply.
-        let actionable = kind == TaskOperatorSignalKind::Blocked
-            && proposal
-                .as_ref()
-                .is_some_and(|proposal| !proposal.is_empty());
-        if !matches!(
-            kind,
-            TaskOperatorSignalKind::Update | TaskOperatorSignalKind::Decision
-        ) && !actionable
-        {
-            return Err(TaskError::OperationRejected(
-                "only updates and decisions can be opened mid-turn",
-            ));
-        }
         let task = self
             .get(task_id)
             .await?
@@ -377,6 +361,20 @@ impl TaskStore {
         if task.facts.accepted {
             return Err(TaskError::OperationRejected(
                 "this task has already been accepted",
+            ));
+        }
+        // One request is one thread. A second question while the first is open is
+        // the machine being asked to hold two waits at once, and it costs the
+        // operator a second thread to read instead of an answer to the first.
+        if matches!(
+            kind,
+            TaskOperatorSignalKind::Blocked | TaskOperatorSignalKind::InReview
+        ) && (task.facts.deferred_review.is_some()
+            || self.has_unanswered_question(task_id).await?)
+        {
+            return Err(TaskError::OperationRejected(
+                "this task is already waiting on the operator; reply in that thread or \
+                 resolve it instead of opening another",
             ));
         }
         let signal = TaskOperatorSignal {
@@ -389,12 +387,17 @@ impl TaskStore {
             proposal,
         };
         let id = signal.id.clone();
-        let task = self
-            .append_events(
-                task_id,
-                &[TaskHistoryEvent::OperatorSignalRaised { signal }],
-            )
-            .await?;
+        // A review with pull requests to wait for is held rather than raised: the
+        // host watches them and delivers it when they can answer, so the operator
+        // is asked to look at work that is actually reviewable. One with nothing to
+        // watch goes out at once.
+        let event =
+            if kind == TaskOperatorSignalKind::InReview && !task.code_contributions.is_empty() {
+                TaskHistoryEvent::ReviewDeferred { signal }
+            } else {
+                TaskHistoryEvent::OperatorSignalRaised { signal }
+            };
+        let task = self.append_events(task_id, &[event]).await?;
         Ok((task, id))
     }
 
@@ -408,22 +411,6 @@ impl TaskStore {
             .ok_or(TaskError::OperationRejected(
                 "no such signal thread on this task",
             ))
-    }
-
-    pub async fn is_signal_unresolved(
-        &self,
-        task_id: &str,
-        signal_id: &str,
-    ) -> Result<bool, TaskError> {
-        let unresolved: Option<i64> = sqlx::query_scalar(
-            "SELECT 1 FROM task_operator_signals WHERE task_id = ?1 AND id = ?2 AND resolved = 0",
-        )
-        .bind(task_id)
-        .bind(signal_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(TaskError::Database)?;
-        Ok(unresolved.is_some())
     }
 
     pub async fn confirm_operator_signal(

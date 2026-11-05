@@ -16,11 +16,9 @@ const TURNS_BEFORE_THE_OPERATOR: usize = 12;
 use crate::{
     agent::AgentWindow,
     task::{
-        IsolationError, Task, TaskAgentRequestedAction, TaskAgentRun, TaskAgentRunOutcome,
-        TaskAgentTurnReport, TaskError, TaskExecutionMode, TaskExecutionPauseReason,
-        TaskExecutionStatus, TaskHistoryEvent, TaskOperatorAttentionLevel,
-        TaskOperatorSignalAuthor, TaskOperatorSignalKind, TaskService, TaskServiceError, run_ended,
-        snapshot_name, store::ReviewRequest,
+        IsolationError, Task, TaskAgentRun, TaskAgentRunOutcome, TaskError, TaskExecutionMode,
+        TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent, TaskOperatorSignalAuthor,
+        TaskOperatorSignalKind, TaskService, TaskServiceError, run_ended, snapshot_name,
     },
 };
 
@@ -38,68 +36,6 @@ where
             .request_control(task_id, requested_mode, agent_run_id)
             .await
             .map_err(TaskServiceError::Task)
-    }
-    pub async fn apply_report(
-        &self,
-        task: &Task,
-        agent_run: &TaskAgentRun,
-        report: &TaskAgentTurnReport,
-    ) -> Result<(Task, TaskAgentRequestedAction), TaskServiceError> {
-        // A report that asks for nothing still waits when the task already has a
-        // question with the operator they have not answered: the thread the agent
-        // opened is the wait, so the report does not have to raise another one to
-        // keep the task stopped.
-        let action = match report.requested_action() {
-            TaskAgentRequestedAction::Continue
-                if self
-                    .store
-                    .has_unanswered_question(&task.id)
-                    .await
-                    .map_err(TaskServiceError::Task)? =>
-            {
-                TaskAgentRequestedAction::AwaitOperator
-            }
-            action => action,
-        };
-        // Whatever stopped the task, the operator is the one who looks at it: the
-        // wait may be this report's question or a thread it already opened.
-        let attention = match action {
-            TaskAgentRequestedAction::AwaitOperator => TaskOperatorAttentionLevel::Requested,
-            TaskAgentRequestedAction::Continue => TaskOperatorAttentionLevel::Nominal,
-        };
-        // Links are recorded by the vcs_link_pull_request tool during the work
-        // turn, so the task this run started from may predate them. Read the
-        // current links before deciding whether a wrap-up request can be held.
-        let current = self
-            .store
-            .get(&task.id)
-            .await
-            .map_err(TaskServiceError::Task)?;
-        let task = current.as_ref().unwrap_or(task);
-        // A wrap-up request with linked pull requests is held, not delivered: the
-        // host watches those contributions and decides whether the operator or the
-        // agent is next. The links are already in the store, so a restart resumes
-        // watching every pull request the task linked.
-        //
-        // One with no pull request linked goes out at once. The review is the
-        // agent's account of the work; what Altitude could not watch is Altitude's
-        // business, not the operator's.
-        let review = match report.operator_signal.as_ref() {
-            Some(signal) if signal.kind == TaskOperatorSignalKind::InReview => {
-                if task.code_contributions.is_empty() {
-                    ReviewRequest::Raise
-                } else {
-                    ReviewRequest::Hold(signal)
-                }
-            }
-            _ => ReviewRequest::Raise,
-        };
-        let task = self
-            .store
-            .record_report(&task.id, agent_run, report, attention, review)
-            .await
-            .map_err(TaskServiceError::Task)?;
-        Ok((task, action))
     }
     pub async fn continue_autopilot(
         &self,
@@ -271,23 +207,6 @@ where
         self.launch(task, command, TaskExecutionMode::Autopilot, answering)
             .await
     }
-    pub async fn request_autopilot_report(
-        &self,
-        task: Task,
-        // The thread the run being reported on was answering. The report belongs
-        // to it, so the request turn carries it across.
-        answering: Option<String>,
-    ) -> Result<(Task, TaskAgentRun, CommandSession), TaskServiceError> {
-        let task = self.provision(task).await?;
-        let engine = self.engine(&task)?;
-        let conversation_id = self.agent_conversation(&task, true).await?;
-        let command = engine.report_command(
-            &conversation_id,
-            &self.turn_context(&task, TaskExecutionMode::AutopilotReport),
-        );
-        self.launch(task, command, TaskExecutionMode::AutopilotReport, answering)
-            .await
-    }
     pub async fn start_operator(
         &self,
         mut task: Task,
@@ -437,8 +356,8 @@ where
         let mut turns = 0;
         for (_, event) in events.iter().rev() {
             match event {
-                TaskHistoryEvent::AgentTurnReported {
-                    requested_action: TaskAgentRequestedAction::Continue,
+                TaskHistoryEvent::AgentRunEnded {
+                    outcome: TaskAgentRunOutcome::Continued,
                     ..
                 } => turns += 1,
                 // The bookkeeping a turn leaves whether or not it did anything is

@@ -737,9 +737,6 @@ impl App {
                     .insert(shell_id.clone(), Shell::new(rows, cols, history, title));
                 self.foreground = Foreground::Shell(shell_id);
             }
-            TaskExecutionUpdate::Report { task } => {
-                self.replace_task(task);
-            }
             _ => {}
         }
         // Any news about a task can be news about its threads: the agent may

@@ -4,7 +4,7 @@ use crate::id;
 use crate::project::Project;
 use crate::task::{
     Task, TaskError, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus, TaskFacts,
-    TaskHistoryEvent, TaskOperatorAttentionLevel, TaskOperatorSignalDraft,
+    TaskHistoryEvent, TaskOperatorAttentionLevel,
 };
 use crate::{
     agent::AgentKind,
@@ -56,11 +56,6 @@ pub struct TaskDraft {
 #[derive(Clone)]
 pub struct TaskStore {
     pool: SqlitePool,
-}
-
-pub(crate) enum ReviewRequest<'a> {
-    Raise,
-    Hold(&'a TaskOperatorSignalDraft),
 }
 
 impl TaskStore {

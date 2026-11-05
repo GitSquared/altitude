@@ -47,11 +47,16 @@ where
                 return;
             }
         };
-        // A task that failed is not watched, so it keeps no sandbox and its wait
-        // is forgotten.
+        // Only a task that has actually stopped for its review is watched: the hold is
+        // recorded the moment the agent asks, and the turn that asked it may still be
+        // running when the next look comes round.
         let watching: Vec<&Task> = tasks
             .iter()
-            .filter(|task| task.facts.execution_status != TaskExecutionStatus::Failed)
+            .filter(|task| {
+                task.facts.execution_status == TaskExecutionStatus::Paused
+                    && task.facts.execution_pause_reason
+                        == Some(TaskExecutionPauseReason::AwaitingReviewChecks)
+            })
             .collect();
         let owners: HashSet<String> = watching
             .iter()

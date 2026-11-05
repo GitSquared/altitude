@@ -1,12 +1,12 @@
 use crate::agent::{
     AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, AgentKind, AgentRefusal, AgentStanding,
-    AgentUsage, AgentWindow, AgentWindowReading, REPORT_SCHEMA, REPORT_SYSTEM_PROMPT,
-    TaskProgressDecoder, TaskReportDecoder, TaskUsage, activity, system_prompt,
+    AgentUsage, AgentWindow, AgentWindowReading, TaskProgressDecoder, TaskStreamDecoder, TaskUsage,
+    activity, system_prompt,
 };
 use crate::isolation::{
     DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand, shell_quote,
 };
-use crate::task::{TaskAgentTurnContext, TaskAgentTurnReport};
+use crate::task::TaskAgentTurnContext;
 use crate::vcs::now_ms;
 use serde_json::Value;
 use std::mem;
@@ -17,7 +17,6 @@ pub struct ClaudeCode;
 
 pub struct ClaudeStream {
     pending: String,
-    report: Option<TaskAgentTurnReport>,
     received_result: bool,
     model: Option<String>,
     error: Option<String>,
@@ -94,7 +93,6 @@ impl ClaudeStream {
     pub fn new(recorded: &TaskUsage) -> Self {
         Self {
             pending: String::new(),
-            report: None,
             received_result: false,
             model: None,
             error: None,
@@ -150,17 +148,11 @@ impl ClaudeStream {
                     format!("Claude rejected the turn: {said}")
                 });
             }
-            if let Some(output) = message.get("structured_output") {
-                match serde_json::from_value(output.clone()) {
-                    Ok(report) => self.report = Some(report),
-                    Err(error) => self.error = Some(format!("Invalid Claude task report: {error}")),
-                }
-            }
         }
     }
 }
 
-impl TaskReportDecoder for ClaudeStream {
+impl TaskStreamDecoder for ClaudeStream {
     // Every window Claude tracks, on every observation, not only the one that is
     // limiting: `unifiedWindows` is the account's standing and the top-level fields
     // are only whichever window is currently the tightest.
@@ -263,26 +255,12 @@ impl TaskReportDecoder for ClaudeStream {
         }
     }
 
-    fn report(mut self: Box<Self>) -> Result<TaskAgentTurnReport, String> {
+    fn take_model(&mut self) -> Option<String> {
         if !self.pending.is_empty() {
             let line = mem::take(&mut self.pending);
             self.process_line(&line);
         }
-        let mut report = self.report.take();
-        if let Some(report) = &mut report {
-            report.model = self.model.take();
-        }
-        let error = self.error.take();
-        report.ok_or_else(|| {
-            error.unwrap_or_else(|| {
-                if self.received_result {
-                    "Claude's report result did not contain structured output"
-                } else {
-                    "Claude's report command ended without a result response"
-                }
-                .to_owned()
-            })
-        })
+        self.model.take()
     }
 }
 
@@ -415,23 +393,6 @@ impl AgentEngine for ClaudeCode {
         )
     }
 
-    fn report_command(&self, conversation_id: &str, context: &TaskAgentTurnContext) -> String {
-        format!(
-            "exec claude -p --permission-mode auto --output-format json \\
-             --system-prompt-snapshot off \\
-             --mcp-config /altitude/claude/mcp.json \
-             --allowedTools {} \
-             --append-system-prompt {} --json-schema {} --resume {} {}",
-            shell_quote(MCP_TOOLS),
-            shell_quote(&system_prompt(REPORT_SYSTEM_PROMPT, context)),
-            shell_quote(REPORT_SCHEMA),
-            shell_quote(conversation_id),
-            shell_quote(&format!(
-                "Return the required task report.\n\nAltitude task context at the start of this turn: {context}"
-            )),
-        )
-    }
-
     fn operator_command(&self, conversation_id: &str, opening: &str) -> String {
         format!(
             "exec claude --permission-mode auto --resume {} {}",
@@ -440,7 +401,7 @@ impl AgentEngine for ClaudeCode {
         )
     }
 
-    fn report_decoder(&self, recorded: &TaskUsage) -> Box<dyn TaskReportDecoder> {
+    fn stream_decoder(&self, recorded: &TaskUsage) -> Box<dyn TaskStreamDecoder> {
         Box::new(ClaudeStream::new(recorded))
     }
 

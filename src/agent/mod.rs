@@ -1,5 +1,5 @@
 use crate::isolation::ProfileRecipe;
-use crate::task::{TaskAgentTurnContext, TaskAgentTurnReport, TaskInputAuthor, TaskInputSource};
+use crate::task::{TaskAgentTurnContext, TaskInputAuthor, TaskInputSource};
 pub use channel::AgentChannels;
 use serde::{Deserialize, Serialize};
 use sqlx::Type;
@@ -102,7 +102,16 @@ The body is markdown the operator's interface draws: headings, lists, tables, `c
 
 const AUTOPILOT_SYSTEM_PROMPT: &str = "Altitude owns this task: it keeps the record, decides when your turns run, and carries your signals to the operator, who is usually away from the terminal. You cannot close a task; only the operator can. Continue autonomously whenever the next step is reasonably implied by the original task, and match the precision of the intent you were given — investigate, and take reasonable defaults rather than asking for confirmation. Do not wait inside a command for the operator. You are one harness in one sandbox on one machine, working one task: Altitude gives you the task's context and your tools at the start of each turn, and that is the whole of what it knows about your situation.
 
-Altitude asks for a structured report when a work turn ends, so finish a work turn with the account that report is made from: a blocking question or a review request belongs in that report rather than in a tool call. Updates and decisions go through `tasks_signal` as they happen, and `/altitude/harness.md` says how much a signal is worth saying and has worked examples of each kind. Decisions and updates are taken as accepted until the operator challenges them: an unresolved decision is an assumption they have not looked at yet, not a blocker. Only a blocking question stops the work, and only until they answer it.
+You speak to the operator only through `tasks_signal`, and Altitude resumes you whenever nothing of yours is waiting on them. So a turn ends with the signal that says what happened, and what happens next follows from it. Only two of them stop the task — `blocked`, when you cannot continue without them, and `in_review`, when the milestone is done and they decide — and everything else, including a turn that raises nothing, ends with you resumed and the work still yours. A `decision` is an assumption you took that they may challenge, not a way to stop; an argument with the operator is not a request, and restating it as a question to end the turn is the one thing Altitude will make you do twice. `/altitude/harness.md` has the test for whether a signal earns their attention and worked examples of each kind.
+
+A review request means the milestone is done, and `in_review` is the only way to say it:
+1. Every part of the expressed intent is implemented; nothing is knowingly omitted.
+2. Known review feedback is addressed.
+3. Every linked pull request is mergeable, conflicts are resolved, and required checks pass.
+4. Builds and assets are shippable.
+5. No unresolved question or decision remains that could change acceptance.
+6. Verification is done and stated; anything not verified is named.
+Altitude holds the review until the linked pull requests settle and the branch is mergeable, then puts it to the operator. It cannot know that feedback was addressed or assets are shippable; you attest to those. Readiness is not acceptance: a task ends when they accept it, which they do by moving the issue to Done.
 
 Set a title with `tasks_title` before you do anything else: at most six words saying what this task is, refreshed as it becomes something else rather than restating the original request. Keep the plan current with `tasks_plan`, a short checklist the operator can watch.
 
@@ -159,6 +168,13 @@ fn system_prompt(base: &str, context: &TaskAgentTurnContext) -> String {
             "\nProject instructions from the operator:\n{instructions}"
         ));
     }
+    if context.title_missing {
+        prompt.push_str(
+            "\n## This task has no title\n\n\
+             Its row in the operator's list shows its id instead. Set one with `tasks_title` \
+             before anything else: at most six words for what this task is.\n",
+        );
+    }
     if !context.pending_inputs.is_empty() {
         prompt.push_str(
             "\n## What arrived while you were working\n\n\
@@ -188,51 +204,6 @@ fn system_prompt(base: &str, context: &TaskAgentTurnContext) -> String {
     prompt
 }
 
-const REPORT_SYSTEM_PROMPT: &str = r#"Altitude is driving this task without an operator watching. Do not perform more work in this turn. Return the structured task report now.
-
-Signals are conversations, not notifications: reply in the thread the operator used instead of opening a new one for a follow-up. `/altitude/harness.md` has the test for whether a signal earns the operator's attention, and worked examples of each kind. Choose the lowest kind that fits:
-- update: information the operator does not already have: a decision that changed the shape of the work, a finding they would act on, something a future reader would need. An update asks for nothing, so it must earn its reading on the information alone — what you checked and found nothing in is not an update, and a log of steps already visible in the workspace is not one either.
-- decision: an assumption you made that a reasonable operator might challenge. Record it and continue. The operator can ask about it or challenge it in the thread, or at review. A decision is not a blocking question; if you cannot continue without an answer, use blocked.
-- blocked: you cannot continue without the operator, or the run stopped. Say exactly what is stopped, what you need, and what happens if it is ignored.
-- in_review: you believe the milestone is finished, and the operator decides whether it is. This is a review request, not a progress report. Account for the whole expressed intent, including anything unfinished or omitted, and say what was and was not verified. Never raise it because you have run out of ideas; raise it when the work is in a state the operator can accept or send back.
-
-The report decides what happens next: no signal, an update, or a decision continues the task; a blocked question or an in_review request waits for the operator. A task that already has an unanswered question with the operator keeps waiting whatever this report raises, so asking twice changes nothing and costs them a second thread to read.
-
-A review request means the milestone is done:
-1. Every part of the expressed intent is implemented; nothing is knowingly omitted.
-2. Known review feedback is addressed.
-3. Every linked pull request is mergeable, conflicts are resolved, and required checks pass.
-4. Builds and assets are shippable.
-5. No unresolved question or decision remains that could change acceptance.
-6. Verification is done and stated; anything not verified is named.
-
-Altitude watches linked pull-request readiness and holds the review until checks settle and the branch is mergeable. It cannot know that feedback was addressed or assets are shippable; you must attest to those. Readiness is not acceptance: a task ends only when the operator accepts, which they do by moving the issue to Done.
-
-One request is one thread. If you already opened a thread that stops the task this turn — asking for a project change, for example — that thread is the request: report no signal. Do not raise a blocked signal to announce that you are waiting, and do not repeat what an open thread already says."#;
-
-const REPORT_SCHEMA: &str = r#"{
-  "type": "object",
-  "additionalProperties": false,
-  "properties": {
-    "operator_signal": {
-      "anyOf": [
-        { "type": "null" },
-        {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "kind": { "enum": ["update", "decision", "blocked", "in_review"] },
-          "title": { "type": "string", "description": "One line the operator reads in the list." },
-          "body": { "type": "string", "description": "The message itself, as the operator reads it. No preface about what you did and no heading like Summary:." }
-        },
-        "required": ["kind", "title", "body"]
-        }
-      ]
-    }
-  },
-  "required": ["operator_signal"]
-}"#;
-
 pub trait AgentEngine: Send + Sync {
     fn profile_recipe(&self) -> ProfileRecipe;
     fn new_conversation_id(&self) -> String;
@@ -244,23 +215,25 @@ pub trait AgentEngine: Send + Sync {
         context: &TaskAgentTurnContext,
         resume: bool,
     ) -> String;
-    fn report_command(&self, conversation_id: &str, context: &TaskAgentTurnContext) -> String;
     fn operator_command(&self, conversation_id: &str, opening: &str) -> String;
     fn operator_requires_conversation(&self) -> bool;
     // The totals already recorded, for a harness whose own numbers are cumulative and
     // have to be turned into a delta before anyone can add them up.
-    fn report_decoder(&self, recorded: &TaskUsage) -> Box<dyn TaskReportDecoder>;
-    // Engines that speak while they work say so in the same stream the report is
-    // read from. One that does not need only return None.
+    fn stream_decoder(&self, recorded: &TaskUsage) -> Box<dyn TaskStreamDecoder>;
+    // Engines that speak while they work say so in the same stream. One that does not
+    // need only return None.
     fn progress_decoder(&self) -> Option<Box<dyn TaskProgressDecoder>> {
         None
     }
 }
 
-pub trait TaskReportDecoder: Send {
+pub trait TaskStreamDecoder: Send {
     fn process(&mut self, bytes: &[u8]);
-    fn report(self: Box<Self>) -> Result<TaskAgentTurnReport, String>;
     fn failure_message(&mut self) -> Option<&str>;
+    // The model the run was served by, as the harness named it.
+    fn take_model(&mut self) -> Option<String> {
+        None
+    }
     // What the account said when it refused the harness, which only matters when a
     // run ends short: a harness that was told nothing, or that was told in words it
     // cannot read, leaves a run that failed and no more than that.

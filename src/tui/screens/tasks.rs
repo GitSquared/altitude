@@ -645,7 +645,6 @@ fn detail_of(app: &App, summary: &TaskSummary, ahead: Option<usize>, taking_work
         },
         TaskExecutionStatus::Running => match summary.mode {
             TaskExecutionMode::Autopilot => "working".to_owned(),
-            TaskExecutionMode::AutopilotReport => "reporting".to_owned(),
             TaskExecutionMode::Operator => "at the terminal".to_owned(),
         },
         TaskExecutionStatus::Paused => match summary.pause_reason {

@@ -289,14 +289,16 @@ impl TaskAgentTools {
         let kind = match arguments.get("kind").and_then(Value::as_str) {
             Some("update") => TaskOperatorSignalKind::Update,
             Some("decision") => TaskOperatorSignalKind::Decision,
+            Some("blocked") => TaskOperatorSignalKind::Blocked,
+            Some("in_review") => TaskOperatorSignalKind::InReview,
             Some(other) => {
                 return Err(AgentToolError::new(format!(
-                    "unknown signal kind {other:?}; use update or decision"
+                    "unknown signal kind {other:?}; use update, decision, blocked or in_review"
                 )));
             }
             None => {
                 return Err(AgentToolError::new(
-                    "tasks_signal action=open needs kind: update or decision",
+                    "tasks_signal action=open needs kind: update, decision, blocked or in_review",
                 ));
             }
         };
@@ -585,14 +587,14 @@ impl AgentToolProvider for TaskAgentTools {
             ),
             AgentTool::new(
                 "tasks_signal",
-                "Read and change this task's conversations with the operator. A body is markdown the operator's interface draws, and may carry diagrams and pictures. A thread has a kind, messages, and one state: unresolved or resolved. action=list returns every thread; action=read needs signal_id; action=open needs kind, title and body and records an update or a decision; action=reply needs signal_id and body; action=resolve needs signal_id, defaults resolved=true, and accepts an optional reason. A reply is a message, not a new question, and reopens a resolved thread. Messages carry ids m1, m2, ... inside their thread. A blocking question or a review request belongs in the turn report, not here.\n\nResolving a thread means it needs nothing more from the operator. It does not mean you have said your part, and it does not mean your last reply was answered: it means the reason the thread exists is over and this task is not waiting on anything in it. Resolve a blocked thread only once the operator has given you what you were blocked on and your next step does not depend on them; if their message asks you something, or you still need a decision from them, it stays unresolved. Only the operator accepts a review.",
+                "Read and change this task's conversations with the operator, which is the only way you speak to them. A body is markdown their interface draws, and may carry diagrams and pictures. A thread has a kind, messages, and one state: unresolved or resolved. action=list returns every thread; action=read needs signal_id; action=open needs kind, title and body; action=reply needs signal_id and body; action=resolve needs signal_id, defaults resolved=true, and accepts an optional reason. A reply is a message, not a new question, and reopens a resolved thread. Messages carry ids m1, m2, ... inside their thread.\n\nThe kind you open is what tells Altitude what to do next. `update` is news they cannot see for themselves, and `decision` is an assumption they may challenge: both leave the task running. `blocked` stops it until they answer. `in_review` finishes the milestone and puts it to them, which is the only way to ask for acceptance, and Altitude holds it until the linked pull requests settle. Only one of those two may be open at a time: reply in the thread you have instead of opening another.\n\nResolving a thread means it needs nothing more from the operator. It does not mean you have said your part, and it does not mean your last reply was answered: it means the reason the thread exists is over and this task is not waiting on anything in it. Resolve a blocked thread only once the operator has given you what you were blocked on and your next step does not depend on them; if their message asks you something, or you still need a decision from them, it stays unresolved. Only the operator accepts a review.",
                 json!({
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
                         "action": { "enum": ["list", "read", "open", "reply", "resolve"], "description": "list all threads; read one; open an update or decision; reply in one; resolve or reopen one." },
                         "signal_id": { "type": "string", "description": "The thread for read, reply, or resolve." },
-                        "kind": { "enum": ["update", "decision"], "description": "For open: update is the log; decision is an assumption worth review." },
+                        "kind": { "enum": ["update", "decision", "blocked", "in_review"], "description": "For open: update is news; decision is an assumption worth review; blocked stops the task until they answer; in_review asks for acceptance." },
                         "title": { "type": "string", "description": "For open: one line the operator reads in the list." },
                         "body": { "type": "string", "description": "For open or reply: the message itself, as the operator reads it. Markdown: headings, lists, tables, `code`, quotes and links are drawn as such. A fenced ```mermaid block is drawn as a diagram in the operator's interface and in the task's issue. A picture from your workspace goes in as ordinary markdown, `![what it shows](/absolute/path/in/your/workspace.png)`, and the operator sees the picture where you put it: use one for what only pixels can show, such as the screen you changed or the failure you are explaining. Do not prefix the body with status or a summary heading." },
                         "resolved": { "type": "boolean", "description": "For resolve: true to resolve, false to reopen. Defaults to true." },

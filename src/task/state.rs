@@ -9,41 +9,6 @@ use crate::tracker::{IssueReference, IssueSnapshot, TrackerKind, TrackerStatus};
 use crate::vcs::{CodeContribution, ContributionObservation};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TaskAgentTurnReport {
-    #[serde(default)]
-    pub operator_signal: Option<TaskOperatorSignalDraft>,
-    #[serde(default)]
-    pub model: Option<String>,
-}
-
-impl TaskAgentTurnReport {
-    pub fn requested_action(&self) -> TaskAgentRequestedAction {
-        match self.operator_signal.as_ref().map(|signal| signal.kind) {
-            Some(TaskOperatorSignalKind::Blocked | TaskOperatorSignalKind::InReview) => {
-                TaskAgentRequestedAction::AwaitOperator
-            }
-            _ => TaskAgentRequestedAction::Continue,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-// A harness may ask for the operator, but only the operator closes a task out, so
-// there is deliberately no way to finish here.
-pub enum TaskAgentRequestedAction {
-    Continue,
-    AwaitOperator,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TaskOperatorSignalDraft {
-    pub kind: TaskOperatorSignalKind,
-    pub title: String,
-    pub body: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskInput {
     pub id: String,
     pub at_ms: i64,
@@ -139,7 +104,6 @@ impl TaskOperatorSignalKind {
 pub enum TaskOperatorAttentionLevel {
     Nominal,
     Requested,
-    Alarm,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
@@ -188,7 +152,6 @@ impl TaskExecutionPauseReason {
 #[sqlx(rename_all = "snake_case")]
 pub enum TaskExecutionMode {
     Autopilot,
-    AutopilotReport,
     Operator,
 }
 
@@ -287,7 +250,6 @@ impl TaskOperatorSignalThread {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeferredReview {
     pub signal: TaskOperatorSignal,
-    pub agent_run_id: String,
 }
 
 #[derive(Clone, Debug)]
@@ -416,11 +378,6 @@ pub enum TaskHistoryEvent {
         outcome: TaskAgentRunOutcome,
         exit_code: Option<i32>,
     },
-    AgentTurnReported {
-        agent_run_id: String,
-        requested_action: TaskAgentRequestedAction,
-        operator_attention_level: TaskOperatorAttentionLevel,
-    },
     AgentModelObserved {
         model: String,
     },
@@ -454,7 +411,6 @@ pub enum TaskHistoryEvent {
     },
     ReviewDeferred {
         signal: TaskOperatorSignal,
-        agent_run_id: String,
     },
     ReviewDeferralCleared {
         signal_id: String,
@@ -608,6 +564,9 @@ pub struct TaskAgentTurnContext {
     // The login this project's work is contributed as, which is the one person
     // whose review the agent may answer.
     pub vcs_identity: Option<String>,
+    // A rule the task itself shows is unmet, so the turn says so rather than a
+    // second model call being spent finding out.
+    pub title_missing: bool,
 }
 
 impl fmt::Display for TaskAgentTurnContext {
@@ -750,6 +709,7 @@ impl Task {
             code_contribution_observations: self.code_contribution_observations.clone(),
             pending_inputs: self.facts.pending_inputs.clone(),
             vcs_identity: None,
+            title_missing: self.facts.title.is_none(),
         }
     }
 

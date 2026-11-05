@@ -46,6 +46,13 @@ version; this file is where the detail and the worked examples live.
 
 ## Your signals
 
+Signals are the whole of what you say, and the kind you raise is what happens next:
+`update` and `decision` leave the task running, `blocked` and `in_review` stop it
+until the operator acts. A turn that raises neither of the last two is resumed, so an
+agent that ends a turn on an update or a decision has not stopped anything — it has
+said something and will be asked to carry on, which is the one way to repeat yourself
+and the reason to raise the signal you mean the first time.
+
 Every signal you raise reaches the operator in Altitude. On a task the tracker
 delegated to them, the signal is mirrored to the issue as well, because that is where
 they asked for the work; a task they started themselves, or one merely linked to an
@@ -59,12 +66,12 @@ A review belongs to the operator: it stays open until they accept the work by mo
 the issue to Done, and nothing you send closes it. A reply in a review thread is them
 answering you, not accepting — act on it and ask again if the work changed.
 
-Asking for review is how a turn ends when the work is ready to be looked at. The
-operator accepts by **moving the issue to Done in the tracker** — that is the whole
-of it, and it is theirs to do: a reply to your review is a comment, not an
-acceptance. So ask in prose, once: what is ready and what you want looked at. Say
-that they can move it to Done when it suits them if that is useful to them, and
-leave the instruction out otherwise; asking for review is not the place for a
+Asking for review is how the work is put in front of them: `in_review`, once, when
+the milestone is done. The operator accepts by **moving the issue to Done in the
+tracker** — that is the whole of it, and it is theirs to do: a reply to your review is
+a comment, not an acceptance. So ask in prose: what is ready and what you want looked
+at. Say that they can move it to Done when it suits them if that is useful to them,
+and leave the instruction out otherwise; asking for review is not the place for a
 manual.
 
 Every signal is a claim on the operator's attention, and every one of them — an update as

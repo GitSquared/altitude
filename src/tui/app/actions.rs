@@ -354,10 +354,7 @@ impl App {
             self.say("This task is not running");
             return;
         }
-        if matches!(
-            task.facts.execution_mode,
-            TaskExecutionMode::Autopilot | TaskExecutionMode::AutopilotReport
-        ) {
+        if matches!(task.facts.execution_mode, TaskExecutionMode::Autopilot) {
             if !event_loop.take_control(&task.id) {
                 self.say("This task is not running, so there is nothing to take over");
             }

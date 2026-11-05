@@ -51,9 +51,6 @@ pub enum TaskExecutionUpdate {
         task_id: String,
         activity: Activity,
     },
-    Report {
-        task: Task,
-    },
     // What the shell the operator opened in a sandbox has to say, which is not the
     // task saying anything.
     ShellOutput {

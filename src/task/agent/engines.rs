@@ -1,5 +1,5 @@
 use crate::{
-    agent::{AgentEngine, AgentKind, TaskProgressDecoder, TaskReportDecoder},
+    agent::{AgentEngine, AgentKind, TaskProgressDecoder, TaskStreamDecoder},
     isolation::IsolationEngine,
 };
 
@@ -74,9 +74,9 @@ where
             .and_then(|kind| self.agents.engine(kind).progress_decoder())
     }
 
-    pub fn report_decoder(&self, task: &Task) -> Option<Box<dyn TaskReportDecoder>> {
+    pub fn stream_decoder(&self, task: &Task) -> Option<Box<dyn TaskStreamDecoder>> {
         task.agent_kind
-            .map(|kind| self.agents.engine(kind).report_decoder(&task.facts.usage))
+            .map(|kind| self.agents.engine(kind).stream_decoder(&task.facts.usage))
     }
     pub(crate) async fn conversation_failure<T>(
         &self,
