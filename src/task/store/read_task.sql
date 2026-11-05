@@ -203,7 +203,28 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
        AND cleared.sequence > COALESCE(
          (SELECT MAX(sequence) FROM task_event_logs
           WHERE task_id = tasks.id AND event_type = 'agent_run_started'), 0)
-     ORDER BY cleared.sequence DESC LIMIT 1) AS review_wake_reason,
+     ORDER BY cleared.sequence DESC LIMIT 1) AS review_wake_news,
+    -- Everything the machine has said to the agent about its pull requests, most
+    -- recently last. Saying it again when nothing has moved is what a wake loop is
+    -- made of, so the last one is what this pass compares itself against.
+    (SELECT json_extract(cleared.payload, '$.data.reason')
+     FROM task_event_logs AS cleared
+     WHERE cleared.task_id = tasks.id
+       AND cleared.event_type = 'review_deferral_cleared'
+     ORDER BY cleared.sequence DESC LIMIT 1) AS last_wake_news,
+    -- What the operator said while the agent was working. Read by the next turn, so a
+    -- message that arrives mid-run is answered rather than lost.
+    COALESCE((SELECT json_group_array(json(input))
+     FROM (
+         SELECT json_extract(expressed.payload, '$.data.input') AS input
+         FROM task_event_logs AS expressed
+         WHERE expressed.task_id = tasks.id
+           AND expressed.event_type = 'task_input_expressed'
+           AND expressed.sequence > COALESCE(
+             (SELECT MAX(sequence) FROM task_event_logs
+              WHERE task_id = tasks.id AND event_type = 'agent_run_started'), 0)
+         ORDER BY expressed.sequence
+     )), '[]') AS pending_inputs,
     tasks.created_at_ms AS created_at_ms,
     -- The age a list shows: when one of the facts it prints last moved. The log
     -- has plenty of events that change nothing on a row — a plan refreshed every

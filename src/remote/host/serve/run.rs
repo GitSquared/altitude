@@ -8,6 +8,11 @@ use std::{
 };
 
 use crate::version::VERSION;
+
+// A machine stopped for host maintenance gives its guest a minute to shut down.
+// Announcing the stop, parking every task and closing the links have to fit inside
+// that, so the parking half gets the smaller share of it.
+const STOP_BUDGET: Duration = Duration::from_secs(45);
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
 use crate::remote::send::IncomingTransfers;
@@ -15,7 +20,7 @@ use crate::remote::send::IncomingTransfers;
 use tokio::{
     signal::unix::{SignalKind, signal},
     sync::watch,
-    time::{MissedTickBehavior, interval},
+    time::{MissedTickBehavior, interval, timeout},
 };
 
 use crate::{
@@ -412,10 +417,27 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     };
 
     tracing::info!("Stopping remote · suspending active tasks");
+    // Whoever is watching a delegated task sees the session stop, so it is told why
+    // before the process goes: a session that just ends reads as a hang. It goes
+    // first and it is bounded, because the tasks are what the minute is for.
+    if let Some(tracker) = host.tracker.as_ref() {
+        tracker.announce_shutdown(host.as_ref()).await;
+    }
     // Suspension comes before the links close: every task's disk is flushed to
     // this host first, so a link that refuses to shut down cleanly is a smaller
-    // loss than work that never reached a snapshot.
-    let suspended = host.tasks.suspend_all().await;
+    // loss than work that never reached a snapshot. The budget is what keeps the
+    // wind-down ours: a host that is going away gives a guest a minute, and being
+    // cut off inside a snapshot is worse than a task that starts again afterwards.
+    let suspended = match timeout(STOP_BUDGET, host.tasks.suspend_all()).await {
+        Ok(suspended) => suspended,
+        Err(_) => {
+            tracing::warn!(
+                budget_s = STOP_BUDGET.as_secs(),
+                "stopping took longer than the wind-down has; tasks that were not parked are picked up after the restart"
+            );
+            Ok(())
+        }
+    };
     let stopped = server.shutdown().await.map_err(io::Error::other);
     result?;
     suspended?;

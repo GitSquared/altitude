@@ -201,6 +201,12 @@ impl Config {
         }
     }
 
+    // The settings as they are written, for a reader that must not create or
+    // rewrite them: a turn looking up a login is not an edit.
+    pub fn settings_if_written(&self) -> Option<Settings> {
+        toml::from_str(&fs::read_to_string(self.settings_path()).ok()?).ok()
+    }
+
     pub fn load_or_create_settings(&self) -> Result<SettingsFile, SettingsError> {
         // Profiles already on disk are the identities a pre-credential settings
         // file did not name. A fresh installation has none, and onboarding creates

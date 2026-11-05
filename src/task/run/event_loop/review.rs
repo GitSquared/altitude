@@ -4,10 +4,10 @@ use tokio::time;
 
 use crate::{
     isolation::IsolationEngine,
-    task::mirror::review::{OBSERVATION_ATTEMPTS, REVIEW_POLL_INTERVAL, unreadable, wake_reason},
+    task::mirror::review::{OBSERVATION_ATTEMPTS, REVIEW_POLL_INTERVAL, news, unreadable},
     task::{
         DeferredReview, Task, TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent,
-        TaskOperatorSignal, TaskOperatorSignalAuthor,
+        TaskInput, TaskInputAuthor, TaskInputSource, TaskOperatorSignal, TaskOperatorSignalAuthor,
     },
     vcs::{ContributionObservation, ContributionOutlook, ContributionReadiness, now_ms},
 };
@@ -135,10 +135,20 @@ where
         let outlook = ContributionOutlook::of(observations, now_ms());
         match outlook.readiness {
             ContributionReadiness::NeedsAction => {
-                if self
-                    .wake_review(task, deferred, wake_reason(&outlook.needing_action))
-                    .await
-                {
+                let news = news(&outlook.needing_action);
+                // A wake says something. If it would say what the machine already
+                // said, and nothing on the pull requests has moved since, there is
+                // nothing to say: the hold stands, the poll keeps looking, and the
+                // next thing anybody hears is the change itself. Saying it again
+                // would spend a turn to get the same answer.
+                if task.facts.last_wake_news.as_deref() == Some(news.as_str()) {
+                    tracing::debug!(
+                        task.id = %task.id,
+                        "a linked pull request still needs attention, and the machine has already said so"
+                    );
+                    return;
+                }
+                if self.wake_review(task, deferred, news).await {
                     // The task is queued; admission decides whether the host has
                     // room, so a review that needs work does not jump the queue.
                     self.admit();
@@ -198,24 +208,52 @@ where
         deferred: &DeferredReview,
         reason: String,
     ) -> bool {
-        let events = [
+        // A turn that is already running does not need waking, and stopping it would
+        // lose the work in flight to say what it is about to be told anyway: the news
+        // is left where the next turn reads it, the way an operator's message is.
+        let is_running = task.facts.execution_status == TaskExecutionStatus::Running;
+        let mut events = vec![
             TaskHistoryEvent::ReviewDeferralCleared {
                 signal_id: deferred.signal.id.clone(),
-                reason,
+                reason: reason.clone(),
             },
-            // The review never reached the operator, and the agent is being woken
-            // to do the work it was asking about. Whatever thread the hold was
-            // continuing ends here; the next request opens a new one.
+            // The review never reached the operator, and the agent is being given
+            // the work it was asking about. Whatever thread the hold was continuing
+            // ends here; the next request opens a new one.
             TaskHistoryEvent::OperatorSignalResolved {
                 signal_id: deferred.signal.id.clone(),
                 resolved: true,
                 by: TaskOperatorSignalAuthor::Agent,
             },
-            TaskHistoryEvent::ExecutionQueued {
-                execution_status: TaskExecutionStatus::Pending,
-            },
         ];
+        if is_running {
+            events.push(TaskHistoryEvent::TaskInputExpressed {
+                input: TaskInput {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    at_ms: now_ms(),
+                    author: TaskInputAuthor::Operator {
+                        id: task.facts.operator_id.clone().unwrap_or_default(),
+                        label: task.facts.operator_label.clone().unwrap_or_default(),
+                    },
+                    source: TaskInputSource::Notice,
+                    body: reason,
+                    responding_to: None,
+                    external_id: None,
+                },
+            });
+        } else {
+            events.push(TaskHistoryEvent::ExecutionQueued {
+                execution_status: TaskExecutionStatus::Pending,
+            });
+        }
         match self.service.record(&task.id, &events).await {
+            Ok(_) if is_running => {
+                tracing::info!(
+                    task_id = %task.id,
+                    "a linked pull request needs attention while the agent is working; its next turn reads it"
+                );
+                false
+            }
             Ok(_) => {
                 tracing::info!(task_id = %task.id, "woke a task because a linked pull request needs attention");
                 true

@@ -3,10 +3,17 @@ use crate::{
     task::{TaskHistoryEvent, TaskOperatorSignalKind, picture},
     tracker::{IssueReference, TrackerStatus, providers::linear::automation::AgentActivityContent},
 };
+use futures_util::future::join_all;
 use std::{
     collections::HashSet,
     time::{Duration, Instant},
 };
+
+use tokio::time::timeout;
+
+// Long enough for one request per bound task over a network that is about to go
+// away, short enough to leave the guest's own shutdown most of its minute.
+const SHUTDOWN_NOTICE_BUDGET: Duration = Duration::from_secs(10);
 
 use super::*;
 pub(super) struct QueueNotice {
@@ -107,6 +114,59 @@ impl RemoteTracker {
         }
         if let Err(error) = self.finish_report(&report) {
             tracing::warn!(task = %task_id, %error, "could not close a deleted task's report");
+        }
+    }
+
+    // The machine is going down under this work, and a session that simply stops
+    // reads as a hang to whoever is watching the issue. This says what is happening
+    // before the process goes: the task is parked, not finished. Bounded, because
+    // the guest is being shut down and saving the tasks matters more than this.
+    pub async fn announce_shutdown(&self, host: &dyn Host) {
+        let bound = match host.bound_tasks().await {
+            Ok(bound) => bound,
+            Err(error) => {
+                tracing::debug!(%error, "could not read bound tasks to say the machine is stopping");
+                return;
+            }
+        };
+        let shutdown = now_ms() / 1000;
+        let automation = Arc::clone(&self.config.automation);
+        let mut notices = Vec::new();
+        for task in bound {
+            let Some(report) = self.report_for_task(&task.task_id) else {
+                continue;
+            };
+            let session = report.session;
+            let activity = stable_id(&report.task_id, &format!("shutdown:{shutdown}"));
+            let automation = Arc::clone(&automation);
+            notices.push(async move {
+                automation
+                    .create_activity(
+                        &session,
+                        &activity,
+                        AgentActivityContent::Response {
+                            body: "Altitude is shutting down, so this run stops here. The task \
+                                   is parked, not finished: it carries on when the machine is \
+                                   back."
+                                .to_owned(),
+                        },
+                    )
+                    .await
+            });
+        }
+        if notices.is_empty() {
+            return;
+        }
+        match timeout(SHUTDOWN_NOTICE_BUDGET, join_all(notices)).await {
+            Ok(results) => {
+                for result in results.into_iter().filter_map(Result::err) {
+                    tracing::debug!(%result, "could not say the machine is stopping");
+                }
+            }
+            Err(_) => tracing::warn!(
+                budget_s = SHUTDOWN_NOTICE_BUDGET.as_secs(),
+                "saying the machine is stopping took too long"
+            ),
         }
     }
 

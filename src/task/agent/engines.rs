@@ -3,7 +3,10 @@ use crate::{
     isolation::IsolationEngine,
 };
 
-use crate::task::{AgentError, Task, TaskError, TaskService, TaskServiceError};
+use crate::task::{
+    AgentError, Task, TaskAgentTurnContext, TaskError, TaskExecutionMode, TaskService,
+    TaskServiceError,
+};
 
 impl<E> TaskService<E>
 where
@@ -38,6 +41,26 @@ where
             Err(error) => self.conversation_failure(task, format!("could not read {kind} conversation transcript: {error}")).await,
         }
     }
+    // What a turn is told about this task. The login belongs to the project's
+    // credential rather than to the task, so it is read here, where the credential
+    // store is, and not from the record.
+    pub(crate) fn turn_context(
+        &self,
+        task: &Task,
+        mode: TaskExecutionMode,
+    ) -> TaskAgentTurnContext {
+        let mut context = task.turn_context(mode);
+        context.vcs_identity = self.vcs_identity(task);
+        context
+    }
+
+    fn vcs_identity(&self, task: &Task) -> Option<String> {
+        let credential = task.facts.project.as_ref()?.vcs_credential.as_deref()?;
+        let settings = self.credentials.config().settings_if_written()?;
+        let label = settings.credential(credential)?.label.trim().to_owned();
+        (!label.is_empty()).then_some(label)
+    }
+
     pub(crate) fn engine(&self, task: &Task) -> Result<&dyn AgentEngine, TaskServiceError> {
         Ok(self.agents.engine(self.agent_kind(task)?))
     }

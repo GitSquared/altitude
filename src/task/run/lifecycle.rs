@@ -17,8 +17,10 @@ use uuid::Uuid;
 use crate::remote::{TRANSCRIPT_FILE, WORK_PLAIN_FILE};
 use crate::task::{
     Task, TaskAgentRun, TaskAgentRunOutcome, TaskDraft, TaskError, TaskExecutionMode,
-    TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent, TaskService, TaskServiceError,
-    failure_events, run_ended, should_resume, should_suspend, snapshot_name,
+    TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent, TaskInput, TaskInputAuthor,
+    TaskInputSource, TaskOperatorSignal, TaskOperatorSignalAuthor, TaskOperatorSignalKind,
+    TaskService, TaskServiceError, failure_events, run_ended, should_resume, should_suspend,
+    snapshot_name,
 };
 
 impl<E> TaskService<E>
@@ -138,10 +140,16 @@ where
                     "the agent's conversation is ready"
                 );
                 // A task the host woke because a linked pull request needed
-                // attention carries why. Anything else is a paused capsule coming
-                // back, whose last turn may be days old by now, so the agent is
-                // told what happened to it rather than simply asked to resume.
-                let prompt = task.facts.review_wake_reason.clone().unwrap_or_else(|| {
+                // attention carries the news itself. Anything else is a paused
+                // capsule coming back, whose last turn may be days old by now, so
+                // the agent is told what happened to it rather than simply asked to
+                // resume.
+                let prompt = task
+                    .facts
+                    .review_wake_news
+                    .as_ref()
+                    .map(|news| format!("Altitude checked the pull requests linked to this task:\n\n{news}"))
+                    .unwrap_or_else(|| {
                     if resume {
                         "Altitude paused this task and restored its sandbox from a snapshot. You \
                          are continuing the same conversation, and the current time is in the \
@@ -155,7 +163,7 @@ where
                 engine.autopilot_command(
                     &conversation_id,
                     &prompt,
-                    &task.turn_context(TaskExecutionMode::Autopilot),
+                    &self.turn_context(&task, TaskExecutionMode::Autopilot),
                     resume,
                 )
             }
@@ -514,14 +522,36 @@ where
                             task = service.record_snapshot(&task, &[event]).await?;
                         }
                         Err(error) if error.is_missing_sandbox() => {
-                            task = service
-                                .record(
-                                    &task.id,
-                                    &[TaskHistoryEvent::SandboxRemoved {
-                                        sandbox_available: false,
-                                    }],
-                                )
-                                .await?;
+                            // The machine went away under this task and its capsule
+                            // with it: there is nothing to snapshot and nothing to
+                            // resume from. Leaving it Running is how a task ends up
+                            // claiming to work with nothing running behind it, so it
+                            // is queued instead, and told what happened to it.
+                            tracing::info!(
+                                task_id = %task.id,
+                                "a task's sandbox did not survive the restart"
+                            );
+                            let mut events = vec![
+                                TaskHistoryEvent::SandboxRemoved {
+                                    sandbox_available: false,
+                                },
+                                TaskHistoryEvent::ExecutionQueued {
+                                    execution_status: TaskExecutionStatus::Pending,
+                                },
+                            ];
+                            events.extend(restart_events(
+                                &task,
+                                "This task's sandbox did not survive the restart, so the machine is \
+                                 rebuilding it from the project's repository and starting the work \
+                                 again.",
+                                Some(
+                                    "Altitude restarted under you and lost this task's sandbox. The \
+                                     workspace is being rebuilt from the project's repository and \
+                                     this conversation is where it was; recreate what you need and \
+                                     carry on with the work.",
+                                ),
+                            ));
+                            task = service.record(&task.id, &events).await?;
                         }
                         Err(error) => {
                             service
@@ -542,26 +572,25 @@ where
                     // left holding a snapshot and nothing picked it up again. This
                     // is the shape a restart leaves behind for every task it was
                     // running, and it resumes exactly as a live pause does.
-                    let event =
-                        resumed(&task, task.facts.snapshot_path.clone().unwrap_or_default());
-                    task = service.record(&task.id, &[event]).await?;
+                    let mut events = vec![resumed(
+                        &task,
+                        task.facts.snapshot_path.clone().unwrap_or_default(),
+                    )];
+                    events.extend(restart_events(&task, &woke_up_saying(&task), None));
+                    task = service.record(&task.id, &events).await?;
                 } else if task.facts.deferred_review.is_some() && task.facts.snapshot_available {
                     // A shutdown can catch a review between the hold being
                     // recorded and its capsule being suspended, which leaves it
                     // paused for the shutdown — a pause recovery resumes.
-                    task = service
-                        .record(
-                            &task.id,
-                            &[TaskHistoryEvent::ExecutionPaused {
-                                execution_status: TaskExecutionStatus::Paused,
-                                sandbox_available: false,
-                                snapshot_available: true,
-                                execution_pause_reason:
-                                    TaskExecutionPauseReason::AwaitingReviewChecks,
-                                snapshot_path: task.facts.snapshot_path.clone().unwrap_or_default(),
-                            }],
-                        )
-                        .await?;
+                    let mut events = vec![TaskHistoryEvent::ExecutionPaused {
+                        execution_status: TaskExecutionStatus::Paused,
+                        sandbox_available: false,
+                        snapshot_available: true,
+                        execution_pause_reason: TaskExecutionPauseReason::AwaitingReviewChecks,
+                        snapshot_path: task.facts.snapshot_path.clone().unwrap_or_default(),
+                    }];
+                    events.extend(restart_events(&task, &woke_up_saying(&task), None));
+                    task = service.record(&task.id, &events).await?;
                 }
                 Ok(task)
             }
@@ -691,6 +720,68 @@ where
             .map_err(TaskServiceError::Task)?;
         Ok(failure_events(task, error, signal_id).into())
     }
+}
+
+// A restart is the machine's news, not the agent's. The operator watching this task
+// should see that it stopped with the machine and is moving again, so that is a
+// thread of its own; it is resolved in the same breath because it asks for nothing.
+// The agent is told only when its workspace did not survive, where the next turn has
+// to explain what it is starting from.
+fn restart_events(task: &Task, said: &str, tells_agent: Option<&str>) -> Vec<TaskHistoryEvent> {
+    let signal_id = uuid::Uuid::new_v4().to_string();
+    let signal = TaskOperatorSignal {
+        id: signal_id.clone(),
+        task_id: task.id.clone(),
+        kind: TaskOperatorSignalKind::Update,
+        title: "Altitude restarted".to_owned(),
+        body: format!(
+            "Altitude on {} restarted and is picking this task back up. {said}",
+            task.host
+        ),
+        raised_at_ms: chrono::Utc::now().timestamp_millis(),
+        proposal: None,
+    };
+    let mut events = vec![
+        TaskHistoryEvent::OperatorSignalRaised {
+            signal: signal.clone(),
+        },
+        TaskHistoryEvent::OperatorSignalResolved {
+            signal_id,
+            resolved: true,
+            by: TaskOperatorSignalAuthor::Agent,
+        },
+    ];
+    if let Some(body) = tells_agent {
+        events.push(TaskHistoryEvent::TaskInputExpressed {
+            input: TaskInput {
+                id: uuid::Uuid::new_v4().to_string(),
+                at_ms: chrono::Utc::now().timestamp_millis(),
+                author: TaskInputAuthor::Operator {
+                    id: task.facts.operator_id.clone().unwrap_or_default(),
+                    label: task.facts.operator_label.clone().unwrap_or_default(),
+                },
+                source: TaskInputSource::Notice,
+                body: body.to_owned(),
+                responding_to: None,
+                external_id: None,
+            },
+        });
+    }
+    events
+}
+
+// What a restart left this task doing, in the words the operator reads: a task that
+// was waiting on a person or on a pull request is not "resuming" anything.
+fn woke_up_saying(task: &Task) -> String {
+    if task.facts.deferred_review.is_some() {
+        return "It was waiting on its pull requests, and the machine is watching them again."
+            .to_owned();
+    }
+    if task.facts.blocking_signal_kind.is_some() {
+        return "It was waiting on the operator, and still is.".to_owned();
+    }
+    "Its sandbox was saved when the machine went down, so the work resumes where it left off."
+        .to_owned()
 }
 
 fn resumed(task: &Task, snapshot_path: String) -> TaskHistoryEvent {

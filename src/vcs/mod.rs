@@ -113,6 +113,55 @@ pub struct ContributionState {
     pub checks_pending: u32,
     pub standing: MergeStanding,
     pub checks_settle_by_ms: i64,
+    // The jobs that are not passing, by name: a count tells the agent something is
+    // wrong, a name tells it where to look.
+    #[serde(default)]
+    pub failing_checks: Vec<String>,
+    #[serde(default)]
+    pub pending_checks: Vec<String>,
+    // A review or a comment is news even when it changes no verdict: the agent
+    // cannot answer feedback it was never told about. What was said is readable
+    // where it was said, so only which one landed and who wrote it is kept.
+    #[serde(default)]
+    pub latest_review: Option<LatestReview>,
+    #[serde(default)]
+    pub comment_count: u32,
+    #[serde(default)]
+    pub latest_comment: Option<LatestComment>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LatestComment {
+    pub id: String,
+    pub author: Option<String>,
+    pub is_bot: bool,
+    pub at: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LatestReview {
+    pub verdict: String,
+    pub author: Option<String>,
+    // Whether a robot wrote it. A robot's review is addressed to the agent; a
+    // person's is the operator's to read and answer, so the two are not the same
+    // kind of news and only one of them is work.
+    pub is_bot: bool,
+}
+
+impl LatestReview {
+    pub fn needs_a_reply(&self) -> bool {
+        self.is_bot && matches!(self.verdict.as_str(), "commented" | "changes requested")
+    }
+
+    pub fn label(&self) -> String {
+        let who = match (&self.author, self.is_bot) {
+            (Some(author), true) => format!(" by {author}, a bot"),
+            (Some(author), false) => format!(" by {author}"),
+            (None, true) => " by a bot".to_owned(),
+            (None, false) => String::new(),
+        };
+        format!("{}{who}", self.verdict)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,6 +193,19 @@ impl ContributionState {
             _ if self.checks_pending > 0 || now_ms < self.checks_settle_by_ms => {
                 ContributionReadiness::Pending
             }
+            // A robot's review or comment is feedback the agent is supposed to act
+            // on, and it asks for nothing from the operator.
+            _ if self
+                .latest_review
+                .as_ref()
+                .is_some_and(LatestReview::needs_a_reply)
+                || self
+                    .latest_comment
+                    .as_ref()
+                    .is_some_and(|comment| comment.is_bot) =>
+            {
+                ContributionReadiness::NeedsAction
+            }
             // Nothing is outstanding but a review, so the operator is the next step.
             MergeStanding::Approved | MergeStanding::Clear | MergeStanding::AwaitingReview => {
                 ContributionReadiness::Ready
@@ -158,7 +220,8 @@ impl ContributionState {
 
 pub struct ContributionOutlook {
     pub readiness: ContributionReadiness,
-    pub needing_action: Vec<String>,
+    // The ones the agent is told about, in the order they were linked.
+    pub needing_action: Vec<ContributionObservation>,
 }
 
 impl ContributionOutlook {
@@ -174,7 +237,7 @@ impl ContributionOutlook {
                 }
                 ContributionReadiness::NeedsAction => {
                     readiness = ContributionReadiness::NeedsAction;
-                    needing_action.push(observation.summary.clone());
+                    needing_action.push(observation.clone());
                 }
                 ContributionReadiness::Ready => {}
             }

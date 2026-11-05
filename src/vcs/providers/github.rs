@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use crate::{
     isolation::{GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand, shell_quote},
     vcs::{
-        CodeContribution, ContributionObservation, ContributionState, MergeStanding, Repository,
-        VcsProvider, VcsProviderKind,
+        CodeContribution, ContributionObservation, ContributionState, LatestComment, LatestReview,
+        MergeStanding, Repository, VcsProvider, VcsProviderKind,
     },
 };
 
@@ -225,13 +225,28 @@ const CONTRIBUTION_FIELDS: &str = r#"    ... on PullRequest {
         contexts(first: 100) {
           pageInfo { hasNextPage }
           nodes {
-            ... on CheckRun { conclusion }
-            ... on StatusContext { state }
+            ... on CheckRun { name conclusion }
+            ... on StatusContext { context state }
           }
+        }
+      }
+      comments(last: 10) {
+        totalCount
+        nodes {
+          id
+          createdAt
+          author { login __typename }
         }
       }
       commits(last: 1) {
         nodes { commit { committedDate } }
+      }
+      reviews(last: 10) {
+        nodes {
+          state
+          submittedAt
+          author { login __typename }
+        }
       }
     }"#;
 
@@ -251,6 +266,8 @@ fn observation_of(
     let mut checks_passing = 0;
     let mut checks_failing = 0;
     let mut checks_pending = 0;
+    let mut failing_checks = Vec::new();
+    let mut pending_checks = Vec::new();
     let rollup = view.status_check_rollup.as_ref();
     for check in rollup
         .and_then(|rollup| rollup.contexts.as_ref())
@@ -259,10 +276,22 @@ fn observation_of(
     {
         match check.outcome() {
             CheckOutcome::Passing => checks_passing += 1,
-            CheckOutcome::Failing => checks_failing += 1,
-            CheckOutcome::Pending => checks_pending += 1,
+            CheckOutcome::Failing => {
+                checks_failing += 1;
+                push_name(&mut failing_checks, check.name());
+            }
+            CheckOutcome::Pending => {
+                checks_pending += 1;
+                push_name(&mut pending_checks, check.name());
+            }
         }
     }
+    // The list is a pointer, not a report, so it is sorted and cut where a reader
+    // stops reading; the counts beside it are still the whole truth.
+    failing_checks.sort();
+    pending_checks.sort();
+    failing_checks.truncate(CHECK_NAMES_KEPT);
+    pending_checks.truncate(CHECK_NAMES_KEPT);
     // A rollup that has more than the queried page cannot be called settled:
     // the check that would fail may be on the next page.
     if rollup
@@ -273,13 +302,18 @@ fn observation_of(
         checks_pending += 1;
     }
     let standing = merge_standing(view);
+    let latest_review = view.latest_review();
+    let mut summary = format!(
+        "{} · {}",
+        check_summary(checks_failing, checks_pending, checks_passing),
+        standing.label(),
+    );
+    if let Some(review) = &latest_review {
+        summary.push_str(&format!(" · {}", review.label()));
+    }
     ContributionObservation {
         contribution_id: contribution.id.clone(),
-        summary: format!(
-            "{} · {}",
-            check_summary(checks_failing, checks_pending, checks_passing),
-            standing.label(),
-        ),
+        summary,
         state: ContributionState {
             head_sha: view.head_ref_oid.clone(),
             checks_passing,
@@ -291,8 +325,79 @@ fn observation_of(
                 .or_else(|| view.created_at.as_deref().and_then(created_at_ms))
                 .map(|committed| committed + CHECKS_APPEAR_WITHIN_MS)
                 .unwrap_or_default(),
+            failing_checks,
+            pending_checks,
+            latest_review,
+            comment_count: view
+                .comments
+                .as_ref()
+                .map(|comments| comments.total_count)
+                .unwrap_or_default(),
+            latest_comment: view.latest_comment(),
         },
     }
+}
+
+impl PullRequestView {
+    // Only a submitted review is one: a review still being written has no verdict
+    // and no date, and counting it would make the newest review the one nobody made.
+    fn latest_review(&self) -> Option<LatestReview> {
+        let newest = self
+            .reviews
+            .as_ref()?
+            .nodes
+            .iter()
+            .filter_map(|review| {
+                let submitted = review.submitted_at.as_deref()?;
+                Some((submitted, review))
+            })
+            // ISO-8601 timestamps order as text, and the provider's pages by
+            // date, so the last one asked for is the newest.
+            .max_by_key(|(submitted, _)| *submitted)?
+            .1;
+        let verdict = match newest.state.as_deref()? {
+            "APPROVED" => "approved",
+            "CHANGES_REQUESTED" => "changes requested",
+            "COMMENTED" => "commented",
+            "DISMISSED" => "dismissed",
+            other => other,
+        };
+        Some(LatestReview {
+            verdict: verdict.to_owned(),
+            author: newest
+                .author
+                .as_ref()
+                .and_then(|author| author.login.clone()),
+            is_bot: is_bot(newest.author.as_ref()),
+        })
+    }
+
+    // A comment on the pull request itself rather than on a line of it. Both kinds
+    // land here: what a reviewer wrote inline is a review, what anyone wrote in the
+    // conversation is a comment.
+    fn latest_comment(&self) -> Option<LatestComment> {
+        let newest = self
+            .comments
+            .as_ref()?
+            .nodes
+            .iter()
+            .filter_map(|comment| Some((comment.created_at.as_deref()?, comment)))
+            .max_by_key(|(created, _)| *created)?
+            .1;
+        Some(LatestComment {
+            id: newest.id.clone().unwrap_or_default(),
+            author: newest
+                .author
+                .as_ref()
+                .and_then(|author| author.login.clone()),
+            is_bot: is_bot(newest.author.as_ref()),
+            at: newest.created_at.clone(),
+        })
+    }
+}
+
+fn is_bot(author: Option<&Reviewer>) -> bool {
+    author.and_then(|author| author.kind.as_deref()) == Some("Bot")
 }
 
 #[derive(Deserialize)]
@@ -305,6 +410,10 @@ struct PullRequestView {
     review_decision: Option<String>,
     #[serde(rename = "statusCheckRollup", default)]
     status_check_rollup: Option<CheckRollup>,
+    #[serde(default)]
+    reviews: Option<Reviews>,
+    #[serde(default)]
+    comments: Option<Comments>,
     #[serde(default)]
     commits: Option<CommitConnection>,
     #[serde(default)]
@@ -335,6 +444,48 @@ struct CheckContexts {
 struct PageInfo {
     #[serde(rename = "hasNextPage", default)]
     has_next_page: bool,
+}
+
+#[derive(Deserialize)]
+struct Reviews {
+    #[serde(default)]
+    nodes: Vec<Review>,
+}
+
+#[derive(Deserialize)]
+struct Review {
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(rename = "submittedAt", default)]
+    submitted_at: Option<String>,
+    #[serde(default)]
+    author: Option<Reviewer>,
+}
+
+#[derive(Deserialize)]
+struct Reviewer {
+    #[serde(default)]
+    login: Option<String>,
+    #[serde(rename = "__typename", default)]
+    kind: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Comments {
+    #[serde(rename = "totalCount", default)]
+    total_count: u32,
+    #[serde(default)]
+    nodes: Vec<Comment>,
+}
+
+#[derive(Deserialize)]
+struct Comment {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(rename = "createdAt", default)]
+    created_at: Option<String>,
+    #[serde(default)]
+    author: Option<Reviewer>,
 }
 
 #[derive(Deserialize)]
@@ -413,12 +564,31 @@ fn merge_standing(view: &PullRequestView) -> MergeStanding {
     }
 }
 
+const CHECK_NAMES_KEPT: usize = 8;
+
+fn push_name(names: &mut Vec<String>, name: Option<&str>) {
+    if let Some(name) = name.map(str::trim).filter(|name| !name.is_empty()) {
+        names.push(name.to_owned());
+    }
+}
+
 #[derive(Deserialize)]
 struct CheckRollupEntry {
     #[serde(default)]
     conclusion: Option<String>,
     #[serde(default)]
     state: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    context: Option<String>,
+}
+
+impl CheckRollupEntry {
+    // A check run and a status context name the same thing differently.
+    fn name(&self) -> Option<&str> {
+        self.name.as_deref().or(self.context.as_deref())
+    }
 }
 
 enum CheckOutcome {

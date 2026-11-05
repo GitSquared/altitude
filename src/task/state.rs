@@ -68,6 +68,9 @@ pub enum TaskInputAuthor {
 pub enum TaskInputSource {
     TaskCreated,
     Altitude,
+    // Altitude's own news rather than something the operator said: a machine that
+    // restarted under the work, a pull request that needs attention.
+    Notice,
     TrackerComment {
         provider: TrackerKind,
         issue_id: String,
@@ -356,7 +359,13 @@ pub struct TaskFacts {
     pub signal_counts: SignalCounts,
     #[sqlx(json(nullable))]
     pub deferred_review: Option<DeferredReview>,
-    pub review_wake_reason: Option<String>,
+    // The news the run that is starting was woken with, and the last news any run
+    // was woken with. The first opens the turn; the second is what a wake compares
+    // itself against, because saying the same thing twice is what a wake loop is.
+    pub review_wake_news: Option<String>,
+    pub last_wake_news: Option<String>,
+    #[sqlx(json)]
+    pub pending_inputs: Vec<TaskInput>,
 }
 
 impl TaskFacts {
@@ -595,6 +604,10 @@ pub struct TaskAgentTurnContext {
     pub datetime: String,
     pub latest_operator_message: Option<TaskOperatorSignalMessage>,
     pub code_contribution_observations: Vec<ContributionObservation>,
+    pub pending_inputs: Vec<TaskInput>,
+    // The login this project's work is contributed as, which is the one person
+    // whose review the agent may answer.
+    pub vcs_identity: Option<String>,
 }
 
 impl fmt::Display for TaskAgentTurnContext {
@@ -735,6 +748,8 @@ impl Task {
             datetime: Local::now().to_rfc3339_opts(SecondsFormat::Secs, true),
             latest_operator_message: self.facts.latest_operator_message.clone(),
             code_contribution_observations: self.code_contribution_observations.clone(),
+            pending_inputs: self.facts.pending_inputs.clone(),
+            vcs_identity: None,
         }
     }
 

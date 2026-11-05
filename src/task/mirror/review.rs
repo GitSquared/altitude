@@ -6,6 +6,8 @@ use std::{
 
 use tokio::{sync::Mutex, time};
 
+use serde_json::{Value, json};
+
 use crate::{
     isolation::{IsolationEngine, WATCHER_PREFIX},
     vcs::{CodeContribution, ContributionObservation, ProviderBatch},
@@ -271,11 +273,47 @@ impl ReviewWait {
     }
 }
 
-pub(crate) fn wake_reason(needing_action: &[String]) -> String {
-    format!(
-        "A linked pull request needs attention before it can be reviewed: {}. Fix what is in scope and return the pull requests to a state a human can review.",
-        needing_action.join("; ")
-    )
+// What the agent is told when its pull requests are not ready: the state of each
+// one that needs something, as data. Prose would have to pick what matters and the
+// agent would have to parse it back; this says everything the provider said, in the
+// shape the provider said it, and the agent reads what it needs. It is also exactly
+// what the machine compares to know whether it is repeating itself, so two equal
+// messages mean two equal states.
+pub(crate) fn news(needing_action: &[ContributionObservation]) -> String {
+    let pull_requests: Vec<Value> = needing_action
+        .iter()
+        .map(|observation| {
+            let state = &observation.state;
+            json!({
+                "pull_request": observation.contribution_id,
+                "head": state.head_sha.chars().take(7).collect::<String>(),
+                "merge_state": state.standing.label(),
+                "checks": {
+                    "failing": state.failing_checks,
+                    "pending": state.pending_checks,
+                    "passing": state.checks_passing,
+                },
+                "last_review": state.latest_review.as_ref().map(|review| json!({
+                    "state": review.verdict,
+                    "author": review.author,
+                    "bot": review.is_bot,
+                })),
+                "comments": {
+                    "total": state.comment_count,
+                    "newest": state.latest_comment.as_ref().map(|comment| json!({
+                        "id": comment.id,
+                        "author": comment.author,
+                        "bot": comment.is_bot,
+                        "at": comment.at,
+                    })),
+                },
+            })
+        })
+        .collect();
+    // Pretty-printed because it is read by a model and by whoever opens the task's
+    // history afterwards, and neither is helped by one long line.
+    serde_json::to_string_pretty(&json!({ "pull_requests": pull_requests }))
+        .unwrap_or_else(|_| "{}".to_owned())
 }
 
 pub(crate) fn unreadable(signal: &TaskOperatorSignal, reason: &str) -> TaskOperatorSignal {

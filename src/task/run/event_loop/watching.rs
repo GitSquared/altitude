@@ -327,11 +327,29 @@ where
         match mode {
             TaskExecutionMode::Autopilot => {
                 self.service.continue_turn(run).await?;
-                self.watch_agent_run(
-                    self.service
-                        .request_autopilot_report(task, run.answering_signal_id.clone())
-                        .await,
-                );
+                // Something arrived while this turn was working. The turn that
+                // reads it has to be a work turn: asking for the report first would
+                // answer a message the agent has not seen, and the report is the one
+                // thing that cannot do anything about it.
+                let with_message = match self.service.store.get(&task.id).await {
+                    Ok(Some(moving)) if !moving.facts.pending_inputs.is_empty() => Some(moving),
+                    _ => None,
+                };
+                self.watch_agent_run(match with_message {
+                    Some(moving) => {
+                        tracing::info!(
+                            task_id = %moving.id,
+                            messages = moving.facts.pending_inputs.len(),
+                            "a message arrived mid-turn; the next turn reads it"
+                        );
+                        self.service.continue_autopilot(moving).await
+                    }
+                    None => {
+                        self.service
+                            .request_autopilot_report(task, run.answering_signal_id.clone())
+                            .await
+                    }
+                });
             }
             TaskExecutionMode::AutopilotReport => {
                 let report = report_stream
@@ -344,6 +362,19 @@ where
                 let _ = self
                     .events
                     .send(TaskExecutionUpdate::Report { task: task.clone() });
+                // A message that arrived while the report was being written has not
+                // been read by anybody. Whatever the report asked for, it waits: the
+                // news gets its turn, or the task parks with the message unread.
+                if !task.facts.pending_inputs.is_empty() {
+                    tracing::info!(
+                        task_id = %task.id,
+                        messages = task.facts.pending_inputs.len(),
+                        "a message arrived during the report; the next turn reads it"
+                    );
+                    self.service.continue_turn(run).await?;
+                    self.watch_agent_run(self.service.continue_autopilot(task).await);
+                    return Ok(());
+                }
                 match action {
                     // Another turn is a step only while the work is moving. A run of
                     // turns that each ask for one and say nothing between them starts

@@ -260,7 +260,7 @@ where
         let command = engine.autopilot_command(
             &conversation_id,
             prompt,
-            &task.turn_context(TaskExecutionMode::Autopilot),
+            &self.turn_context(&task, TaskExecutionMode::Autopilot),
             true,
         );
         self.launch(task, command, TaskExecutionMode::Autopilot, answering)
@@ -277,7 +277,7 @@ where
         let conversation_id = self.agent_conversation(&task, true).await?;
         let command = engine.report_command(
             &conversation_id,
-            &task.turn_context(TaskExecutionMode::AutopilotReport),
+            &self.turn_context(&task, TaskExecutionMode::AutopilotReport),
         );
         self.launch(task, command, TaskExecutionMode::AutopilotReport, answering)
             .await
