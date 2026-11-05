@@ -19,10 +19,13 @@ mod admission;
 mod control;
 mod lifecycle;
 mod review;
+mod shell;
 mod terminal;
 mod transfer;
 mod watching;
 
+pub use shell::ShellOpening;
+use shell::TaskShells;
 use terminal::CachedTerminalOutput;
 
 pub enum TaskExecutionUpdate {
@@ -51,6 +54,12 @@ pub enum TaskExecutionUpdate {
     Report {
         task: Task,
     },
+    // What the shell the operator opened in a sandbox has to say, which is not the
+    // task saying anything.
+    ShellOutput {
+        task_id: String,
+        bytes: Vec<u8>,
+    },
 }
 
 #[derive(Clone)]
@@ -61,6 +70,7 @@ pub struct TaskEventLoop<E> {
     runs: Arc<Mutex<HashMap<String, ActiveRun>>>,
     control_requests: Arc<Mutex<HashMap<String, RequestedControl>>>,
     terminal_output: Arc<Mutex<HashMap<String, CachedTerminalOutput>>>,
+    shells: TaskShells,
     // The newest line each running agent produced. Read by the interface and by a
     // tracker reporting on this machine, which is the same fact told twice.
     current_activity: Arc<Mutex<HashMap<String, Activity>>>,
@@ -108,6 +118,7 @@ where
             runs: Arc::new(Mutex::new(HashMap::new())),
             control_requests: Arc::new(Mutex::new(HashMap::new())),
             terminal_output: Arc::new(Mutex::new(HashMap::new())),
+            shells: TaskShells::default(),
             current_activity: Arc::new(Mutex::new(HashMap::new())),
             starting: Arc::new(Mutex::new(HashSet::new())),
             watchers,

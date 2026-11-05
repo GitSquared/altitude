@@ -1,6 +1,7 @@
 use crate::{
     isolation::{
-        CommandEvent, CommandSession, IsolationEngine, OutputStream, Unwatched, with_port_relay,
+        CommandEvent, CommandSession, IsolationEngine, OutputStream, Unwatched, guest_absolute,
+        shell_quote, with_port_relay,
     },
     project::Project,
     vcs::{ContributionObservation, ProviderBatch},
@@ -117,6 +118,44 @@ where
     ) -> Result<(Task, TaskAgentRun, CommandSession), TaskServiceError> {
         self.start_autopilot_turn(task, "The operator has returned control to Altitude. Review the preceding conversation and current workspace state, then continue the task autonomously wherever the original intent reasonably permits. Do not wait for routine confirmation.", None).await
     }
+    // A shell in the sandbox the operator is working in. It is not a run and it says
+    // nothing in the task's history: the agent is at its prompt while this is open,
+    // and what the operator types here is theirs to look at, not a task event.
+    pub(crate) async fn start_task_shell(
+        &self,
+        task: &Task,
+    ) -> Result<CommandSession, TaskServiceError> {
+        let sandbox_id = task
+            .facts
+            .sandbox_id
+            .clone()
+            .ok_or(TaskServiceError::Task(TaskError::MissingSandbox))?;
+        let owner =
+            task.operator_id()
+                .ok_or(TaskServiceError::Task(TaskError::OperationRejected(
+                    "the task records no operator to open a shell for",
+                )))?;
+        let isolation = self
+            .isolation
+            .for_operator(owner)
+            .map_err(TaskServiceError::Isolation)?;
+        // A debug shell belongs where the work is, and a login shell reads the
+        // profile that put the toolchains on the path.
+        let command = match task
+            .project()
+            .and_then(|project| project.checkout_path())
+            .map(|checkout| guest_absolute(&checkout))
+        {
+            Some(Ok(checkout)) => format!("cd {} && exec bash -l", shell_quote(&checkout)),
+            Some(Err(error)) => return Err(TaskServiceError::Isolation(error)),
+            None => "exec bash -l".to_owned(),
+        };
+        isolation
+            .run_command(sandbox_id, command)
+            .await
+            .map_err(TaskServiceError::Isolation)
+    }
+
     pub(crate) async fn run_captured(
         &self,
         sandbox_id: &str,

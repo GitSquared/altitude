@@ -252,12 +252,19 @@ impl App {
                 hints.push(dismiss());
                 hints
             }
-            // A shell takes every key there is, so it has no `?` to offer.
-            Foreground::Shell(ShellId::Task(_)) => {
-                vec![Hint::new("ctrl-a", "put task back on autopilot")]
-            }
+            // A shell takes every key there is, so it has no `?` to offer. The agent
+            // and the sandbox shell are two halves of one take-over, so each hint
+            // names the other.
+            Foreground::Shell(ShellId::Task(_)) => vec![
+                Hint::new("alt-s", "shell"),
+                Hint::new("ctrl-q", "back on autopilot"),
+            ],
+            Foreground::Shell(ShellId::TaskShell(_)) => vec![
+                Hint::new("alt-s", "agent"),
+                Hint::new("ctrl-q", "close shell"),
+            ],
             // Nothing to hand back to: the sandbox goes with the shell.
-            Foreground::Shell(ShellId::Credentials(_)) => vec![Hint::new("ctrl-a", "close")],
+            Foreground::Shell(ShellId::Credentials(_)) => vec![Hint::new("ctrl-q", "close")],
             Foreground::Tasks => {
                 // Only what there is something to do it to. A remote's tasks sit
                 // beside this machine's, so a list holding only theirs still has

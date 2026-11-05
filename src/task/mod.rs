@@ -31,7 +31,7 @@ mod run;
 mod state;
 
 use agent::tools::TaskAgentTools;
-pub use run::event_loop::{TaskEventLoop, TaskExecutionUpdate};
+pub use run::event_loop::{ShellOpening, TaskEventLoop, TaskExecutionUpdate};
 
 pub type HomeFuture = BoxFuture<'static, Result<(), String>>;
 

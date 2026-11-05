@@ -162,6 +162,10 @@ pub(in crate::tui) enum Sync {
     UntilItsTaskEnds,
 }
 
+fn sandbox_shell_title(task: &Task) -> String {
+    format!("bash - {}", task.title())
+}
+
 fn task_shell_title(task: &Task) -> String {
     let agent = task
         .agent_kind
@@ -272,6 +276,9 @@ pub(in crate::tui) const ANNOUNCE_REFRESH: Duration = Duration::from_secs(1);
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(in crate::tui) enum ShellId {
     Task(String),
+    // A bash shell in the same sandbox, beside the agent's terminal and alive for as
+    // long as the take-over is.
+    TaskShell(String),
     Credentials(String),
 }
 

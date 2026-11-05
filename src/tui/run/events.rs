@@ -240,7 +240,7 @@ where
             app.signals_key(key, task_service, remote_signals, event_loop)
                 .await
         }
-        Foreground::Shell(_) => app.shell_key(key, event_loop, task_service).await,
+        Foreground::Shell(_) => app.shell_key(key, terminal, event_loop, task_service).await,
         Foreground::Tasks => {
             if app.list_key(key, task_service, remote_signals).await? {
                 return Ok(true);

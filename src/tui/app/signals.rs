@@ -649,7 +649,7 @@ impl App {
                 {
                     self.moving = None;
                 }
-                self.remove_shell(&id);
+                self.remove_shell(&id, event_loop);
                 self.replace_task(task);
             }
             // A run's failure is the task's own news rather than the
@@ -673,6 +673,12 @@ impl App {
                 }
                 let excess = lines.len().saturating_sub(Self::ACTIVITY_LINES);
                 lines.drain(..excess);
+            }
+            TaskExecutionUpdate::ShellOutput { task_id, bytes } => {
+                let id = ShellId::TaskShell(task_id);
+                for reply in self.forward_shell_output(&id, bytes) {
+                    self.send_shell_input(&id, reply, event_loop);
+                }
             }
             TaskExecutionUpdate::Output {
                 task_id,

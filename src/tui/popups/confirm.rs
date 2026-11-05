@@ -256,7 +256,7 @@ pub(in crate::tui) async fn handle_confirm_key<E>(
                 if let Some(task) = app.tasks.iter().find(|task| task.id == id).cloned() {
                     tracing::info!(task_id = %id, "removing task from overview");
                     app.begin_removing(&id);
-                    app.remove_shell(&id);
+                    app.remove_shell(&id, event_loop);
                     event_loop.remove(task);
                 }
             }

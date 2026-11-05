@@ -7,12 +7,12 @@ use crate::task::TaskEventLoop;
 
 #[derive(Default)]
 pub(crate) struct CachedTerminalOutput {
-    chunks: VecDeque<Vec<u8>>,
+    pub(super) chunks: VecDeque<Vec<u8>>,
     byte_count: usize,
 }
 
 impl CachedTerminalOutput {
-    fn push(&mut self, bytes: &[u8]) {
+    pub(super) fn push(&mut self, bytes: &[u8]) {
         const LIMIT: usize = 2 * 1024 * 1024;
         let bytes = &bytes[bytes.len().saturating_sub(LIMIT)..];
         self.byte_count += bytes.len();

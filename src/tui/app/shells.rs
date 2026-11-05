@@ -2,13 +2,14 @@ use crossterm::event::KeyEvent;
 use ratatui::{DefaultTerminal, layout::Rect};
 
 use crate::isolation::IsolationEngine;
-use crate::task::{TaskEventLoop, TaskService};
+use crate::task::{ShellOpening, TaskEventLoop, TaskService};
 use crate::tui::screens;
+use crate::tui::screens::shell::Shell;
 use crate::tui::widgets::chrome;
 
 use super::{
     App, CredentialShellState, Foreground, GuestRequest, ShellId, copy_to_clipboard,
-    open_in_browser,
+    open_in_browser, sandbox_shell_title,
 };
 use crate::tui::links::Link;
 
@@ -23,6 +24,7 @@ impl App {
     {
         match id {
             ShellId::Task(task_id) => event_loop.send_terminal_input(task_id, bytes),
+            ShellId::TaskShell(task_id) => event_loop.send_task_shell_input(task_id, bytes),
             ShellId::Credentials(_) => {
                 if let CredentialShellState::Open(shell) = &self.credential_shell {
                     shell.input(bytes);
@@ -47,6 +49,7 @@ impl App {
         }
         match &id {
             ShellId::Task(task_id) => event_loop.resize_terminal(task_id, rows, cols),
+            ShellId::TaskShell(task_id) => event_loop.resize_task_shell(task_id, rows, cols),
             ShellId::Credentials(_) => {
                 if let CredentialShellState::Open(shell) = &self.credential_shell {
                     shell.resize(rows, cols);
@@ -60,17 +63,28 @@ impl App {
         self.foreground = Foreground::Tasks;
     }
 
-    pub(in crate::tui) fn remove_shell(&mut self, task_id: &str) {
-        let id = ShellId::Task(task_id.to_owned());
-        self.shells.remove(&id);
-        if self.open_shell() == Some(&id) {
-            self.foreground = Foreground::Tasks;
+    // Both of a task's terminals go together: the shell was opened to look at the
+    // take-over that is ending, and a take-over that has ended has nothing to look at.
+    pub(in crate::tui) fn remove_shell<E>(&mut self, task_id: &str, event_loop: &TaskEventLoop<E>)
+    where
+        E: IsolationEngine + Clone + 'static,
+    {
+        for id in [
+            ShellId::Task(task_id.to_owned()),
+            ShellId::TaskShell(task_id.to_owned()),
+        ] {
+            self.shells.remove(&id);
+            if self.open_shell() == Some(&id) {
+                self.foreground = Foreground::Tasks;
+            }
         }
+        event_loop.close_task_shell(task_id);
     }
 
     pub(in crate::tui) async fn shell_key<E>(
         &mut self,
         key: KeyEvent,
+        terminal: &DefaultTerminal,
         event_loop: &TaskEventLoop<E>,
         task_service: &TaskService<E>,
     ) where
@@ -79,8 +93,72 @@ impl App {
         let Some(id) = self.open_shell().cloned() else {
             return;
         };
+        // Stepping into the sandbox and stepping back out of it: one key, because
+        // what the operator is doing is switching between two halves of one take-over.
+        if screens::shell::is_shell_key(key) {
+            match &id {
+                ShellId::Task(task_id) => {
+                    let Some(task) = self.tasks.iter().find(|task| task.id == *task_id).cloned()
+                    else {
+                        return;
+                    };
+                    let title = sandbox_shell_title(&task);
+                    let Some((rows, cols)) = self.shell_size(terminal) else {
+                        return;
+                    };
+                    let id = ShellId::TaskShell(task_id.clone());
+                    match event_loop.open_task_shell(task, rows, cols) {
+                        // A shell that is already open keeps its screen: switching
+                        // back and forth must not cost what was scrolled past.
+                        ShellOpening::Attached => {
+                            if let Some(shell) = self.shells.get_mut(&id) {
+                                shell.resize(rows, cols);
+                            }
+                        }
+                        ShellOpening::Opened => {
+                            let history = event_loop.cached_task_shell_output(task_id);
+                            self.shells
+                                .insert(id.clone(), Shell::new(rows, cols, history, title));
+                        }
+                        ShellOpening::NoSandbox => {
+                            self.say("This task has no sandbox to open a shell in");
+                            return;
+                        }
+                    }
+                    self.foreground = Foreground::Shell(id);
+                }
+                ShellId::TaskShell(task_id) => {
+                    let id = ShellId::Task(task_id.clone());
+                    if self.shells.contains_key(&id) {
+                        if let Some((rows, cols)) = self.shell_size(terminal) {
+                            if let Some(shell) = self.shells.get_mut(&id) {
+                                shell.resize(rows, cols);
+                            }
+                            event_loop.resize_terminal(task_id, rows, cols);
+                        }
+                        self.foreground = Foreground::Shell(id);
+                    } else {
+                        self.foreground = Foreground::Tasks;
+                    }
+                }
+                ShellId::Credentials(_) => {}
+            }
+            return;
+        }
         if screens::shell::is_exit_key(key) {
             match &id {
+                ShellId::TaskShell(task_id) => {
+                    // Leaving the shell leaves the take-over alone: the agent is still
+                    // the thing being operated, with its terminal behind this one.
+                    event_loop.close_task_shell(task_id);
+                    self.shells.remove(&id);
+                    let back = ShellId::Task(task_id.clone());
+                    if self.shells.contains_key(&back) {
+                        self.foreground = Foreground::Shell(back);
+                    } else {
+                        self.foreground = Foreground::Tasks;
+                    }
+                }
                 ShellId::Task(task_id) => {
                     // A task that was carried here belongs to the machine it came
                     // from: leaving it hands it back rather than piloting it here.
@@ -100,6 +178,7 @@ impl App {
                             }
                         }
                     }
+                    self.remove_shell(task_id, event_loop);
                     self.hide_shell();
                 }
                 ShellId::Credentials(_) => self.close_credential_shell(task_service).await,

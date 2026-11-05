@@ -243,8 +243,12 @@ pub fn help_sections() -> Vec<HelpSection> {
             title: "Guest terminals",
             bindings: &[
                 (
-                    "Ctrl-A",
+                    "Ctrl-Q",
                     "Close a login shell, or hand a task back to autopilot",
+                ),
+                (
+                    "Alt-S",
+                    "Step into a bash shell in the task's sandbox, and back",
                 ),
                 (
                     "PgUp / PgDn",
