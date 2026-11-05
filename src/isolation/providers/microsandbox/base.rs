@@ -56,6 +56,10 @@ fn workspace_setup() -> String {
 
 pub(super) const PREPARATION_SANDBOX: &str = "altitude-base-image-setup";
 
+// A build sandbox is named for its composition and ends here, so a name with this
+// ending is a build that was in progress and cannot be one that is still going.
+pub(super) const SETUP_SUFFIX: &str = "-setup";
+
 fn description_command() -> String {
     // Asked package by package, because the list is the answer: scanning every
     // installed package would include the image's plumbing, and matching names
@@ -110,7 +114,7 @@ impl MicrosandboxIsolation {
             .filter(|step| !step.command.trim().is_empty())
             .collect();
         let sandbox_id = format!(
-            "altitude-{}-{}-setup",
+            "altitude-{}-{}{SETUP_SUFFIX}",
             build_namespace(&recipe.snapshots_dir),
             artifact_name(&recipe.name)
         );

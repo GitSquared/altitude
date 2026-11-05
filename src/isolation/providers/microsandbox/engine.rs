@@ -20,7 +20,7 @@ use crate::isolation::{
 };
 
 use super::base::BASE_IMAGE;
-use super::base::PREPARATION_SANDBOX;
+use super::base::{PREPARATION_SANDBOX, SETUP_SUFFIX};
 use super::files::{carry_in, carry_out, io_error};
 use super::snapshot::BaseSandboxSnapshotStore;
 use super::{MicrosandboxIsolation, connect, transfer};
@@ -176,6 +176,11 @@ impl IsolationEngine for MicrosandboxIsolation {
                     self.remove_leftover(name).await;
                 } else if name.starts_with(WATCHER_PREFIX) {
                     self.remove_leftover(name).await;
+                } else if name.ends_with(SETUP_SUFFIX) {
+                    // An environment build that was killed part-way leaves its sandbox
+                    // and the disk image inside it, and nothing else would ever look at
+                    // a name like that again.
+                    self.remove_leftover(name).await;
                 }
             }
             match page.next_cursor {
@@ -203,10 +208,14 @@ impl IsolationEngine for MicrosandboxIsolation {
         set_default_backend(backend);
 
         tracing::debug!("Microsandbox runtime ready");
-        // A credential shell lives as long as the terminal in front of it, and a
-        // watcher sandbox as long as the host that made it, so one that is still
-        // here belongs to a process that is gone.
-        self.remove_leftover_sandboxes().await;
+        // A credential shell lives as long as the terminal in front of it, a watcher
+        // sandbox as long as the host that made it, and a build sandbox only while its
+        // build holds the lock, so one that is still here belongs to a process that is
+        // gone. The lock is taken to say that of the builds too: a sweep must not take
+        // a build's sandbox out from under a build that is still running.
+        if let Ok(_building) = self.build_lock.acquire().await {
+            self.remove_leftover_sandboxes().await;
+        }
 
         status.send_replace(IsolationStatus::PreparingBaseImage(ImagePull::default()));
         let (mut pull, creating) = Sandbox::builder(PREPARATION_SANDBOX)
