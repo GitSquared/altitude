@@ -204,14 +204,18 @@ where
             && let Some(sandbox_id) = task.facts.sandbox_id.clone()
             && !isolation.has_sandbox(sandbox_id).await
         {
-            task = self
-                .record(
-                    &task.id,
-                    &[TaskHistoryEvent::SandboxRemoved {
-                        sandbox_available: false,
-                    }],
-                )
-                .await?;
+            // This is the one place that knows a capsule is gone rather than
+            // unparked, so it is where the agent is told its workspace went with it.
+            let mut events = vec![TaskHistoryEvent::SandboxRemoved {
+                sandbox_available: false,
+            }];
+            events.extend(notice_event(
+                &task,
+                "Altitude lost this task's sandbox, so the workspace from earlier turns is \
+                 gone. The project's repository is checked out fresh for you; recreate what \
+                 you need and carry on with the work.",
+            ));
+            task = self.record(&task.id, &events).await?;
         }
         if task.facts.sandbox_available {
             return Ok(task);
@@ -691,25 +695,23 @@ where
                             %error,
                             "a task's sandbox could not be saved before the machine stopped"
                         );
-                        let mut events = vec![
-                            TaskHistoryEvent::SandboxRemoved {
-                                sandbox_available: false,
-                            },
-                            TaskHistoryEvent::ExecutionQueued {
-                                execution_status: TaskExecutionStatus::Pending,
-                            },
-                        ];
+                        // Failing to park it is not the same as losing it: the
+                        // capsule is only removed once its snapshot is written, so
+                        // what is on disk may still be there. The task goes back in
+                        // the queue and the next boot finds out which it was — it
+                        // tries to park the capsule again, and a capsule that is
+                        // really gone is answered where that is known, by telling
+                        // the agent its workspace went with it.
+                        let mut events = vec![TaskHistoryEvent::ExecutionQueued {
+                            execution_status: TaskExecutionStatus::Pending,
+                        }];
                         events.extend(machine_events(
                             &task,
-                            "Altitude could not save this task before the machine stopped",
-                            "Its sandbox did not survive the stop, so the workspace is gone and \
-                             the task starts again from the project's repository.",
-                            Some(
-                                "Altitude stopped while working on this task and could not save \
-                                 its sandbox, so the workspace from that turn is gone. The \
-                                 project's repository is checked out again for you; recreate \
-                                 what you had and carry on with the work.",
-                            ),
+                            "Altitude could not park this task before the machine stopped",
+                            "The machine stopped before it could save this task's sandbox. It \
+                             picks the task back up where it was, or starts it again from the \
+                             project's repository if its sandbox did not survive.",
+                            None,
                         ));
                         service.record(&task.id, &events).await?;
                         Ok(())
@@ -769,14 +771,21 @@ where
 // The agent is told only when its workspace did not survive, where the next turn has
 // to explain what it is starting from.
 fn restart_events(task: &Task, said: &str, tells_agent: Option<&str>) -> Vec<TaskHistoryEvent> {
-    machine_events(task, "Altitude restarted", said, tells_agent)
+    machine_events(
+        task,
+        "Altitude restarted",
+        &format!(
+            "Altitude on {} restarted and is picking this task back up. {said}",
+            task.host
+        ),
+        tells_agent,
+    )
 }
 
-// The same thread, for anything the machine did to the task rather than the agent.
 fn machine_events(
     task: &Task,
     title: &str,
-    said: &str,
+    body: &str,
     tells_agent: Option<&str>,
 ) -> Vec<TaskHistoryEvent> {
     let signal_id = uuid::Uuid::new_v4().to_string();
@@ -785,10 +794,7 @@ fn machine_events(
         task_id: task.id.clone(),
         kind: TaskOperatorSignalKind::Update,
         title: title.to_owned(),
-        body: format!(
-            "Altitude on {} restarted and is picking this task back up. {said}",
-            task.host
-        ),
+        body: body.to_owned(),
         raised_at_ms: chrono::Utc::now().timestamp_millis(),
         proposal: None,
     };
@@ -803,22 +809,29 @@ fn machine_events(
         },
     ];
     if let Some(body) = tells_agent {
-        events.push(TaskHistoryEvent::TaskInputExpressed {
-            input: TaskInput {
-                id: uuid::Uuid::new_v4().to_string(),
-                at_ms: chrono::Utc::now().timestamp_millis(),
-                author: TaskInputAuthor::Operator {
-                    id: task.facts.operator_id.clone().unwrap_or_default(),
-                    label: task.facts.operator_label.clone().unwrap_or_default(),
-                },
-                source: TaskInputSource::Notice,
-                body: body.to_owned(),
-                responding_to: None,
-                external_id: None,
-            },
-        });
+        events.extend(notice_event(task, body));
     }
     events
+}
+
+// The machine telling the agent something it has to know at its next turn. The
+// source says it is the machine and not the operator, which is the difference
+// between news about the work and an instruction about it.
+fn notice_event(task: &Task, body: &str) -> Vec<TaskHistoryEvent> {
+    vec![TaskHistoryEvent::TaskInputExpressed {
+        input: TaskInput {
+            id: uuid::Uuid::new_v4().to_string(),
+            at_ms: chrono::Utc::now().timestamp_millis(),
+            author: TaskInputAuthor::Operator {
+                id: task.facts.operator_id.clone().unwrap_or_default(),
+                label: task.facts.operator_label.clone().unwrap_or_default(),
+            },
+            source: TaskInputSource::Notice,
+            body: body.to_owned(),
+            responding_to: None,
+            external_id: None,
+        },
+    }]
 }
 
 // What a restart left this task doing, in the words the operator reads: a task that
