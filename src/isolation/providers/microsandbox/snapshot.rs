@@ -163,3 +163,48 @@ impl BaseSandboxSnapshotStore {
         Ok(stale)
     }
 }
+
+// What a store holds is a layer, and a layer is a set of commands: change the commands
+// and the store's name changes with them, so the old one is never composed again and
+// never swept by anything that would know how to find it. A build this old would be
+// redone on its next use regardless, so removing it gives the disk back and costs
+// nothing but the rebuild it was going to pay for anyway.
+pub(super) async fn forget_abandoned_stores(roots: &[PathBuf], older_than: Duration) {
+    for root in roots {
+        let Ok(stores) = fs::read_dir(root) else {
+            continue;
+        };
+        for store in stores.flatten() {
+            let path = store.path();
+            if !store.file_type().is_ok_and(|kind| kind.is_dir())
+                || last_used(&path)
+                    .is_none_or(|used| used.elapsed().unwrap_or_default() < older_than)
+            {
+                continue;
+            }
+            tracing::debug!(store = %path.display(), "forgetting an environment nothing composes");
+            for snapshot in Snapshot::list_dir(&path).await.unwrap_or_default() {
+                let Ok(snapshot) = snapshot.path() else {
+                    continue;
+                };
+                if let Err(error) = Snapshot::remove(&snapshot.to_string_lossy(), true).await {
+                    tracing::warn!(snapshot = %snapshot.display(), %error, "could not remove an abandoned environment snapshot");
+                }
+            }
+            // Whatever the runtime left behind — the manifest, an empty directory — so
+            // that the next walk does not find this store again.
+            if let Err(error) = fs::remove_dir_all(&path) {
+                tracing::warn!(store = %path.display(), %error, "could not remove an abandoned environment store");
+            }
+        }
+    }
+}
+
+// Every build that publishes writes `current`, so that is when the store was last
+// built; a store that never finished one falls back to its own time.
+fn last_used(store: &Path) -> Option<SystemTime> {
+    fs::metadata(store.join("current"))
+        .and_then(|metadata| metadata.modified())
+        .or_else(|_| fs::metadata(store).and_then(|metadata| metadata.modified()))
+        .ok()
+}

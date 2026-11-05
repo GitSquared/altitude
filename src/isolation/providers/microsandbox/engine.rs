@@ -22,7 +22,7 @@ use crate::isolation::{
 use super::base::BASE_IMAGE;
 use super::base::{PREPARATION_SANDBOX, SETUP_SUFFIX};
 use super::files::{carry_in, carry_out, io_error};
-use super::snapshot::BaseSandboxSnapshotStore;
+use super::snapshot::{BaseSandboxSnapshotStore, forget_abandoned_stores};
 use super::{MicrosandboxIsolation, connect, transfer};
 
 // The boot screen's view of the base build's installs: the status it shows is the
@@ -215,6 +215,9 @@ impl IsolationEngine for MicrosandboxIsolation {
         // a build's sandbox out from under a build that is still running.
         if let Ok(_building) = self.build_lock.acquire().await {
             self.remove_leftover_sandboxes().await;
+            // Under the same lock: an environment store belongs to the build that is
+            // using it, and one nothing composes any more belongs to nobody.
+            forget_abandoned_stores(&self.config.environment_store_roots(), REFRESH_AFTER).await;
         }
 
         status.send_replace(IsolationStatus::PreparingBaseImage(ImagePull::default()));

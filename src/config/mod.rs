@@ -352,6 +352,20 @@ impl Config {
             .join("snapshots")
     }
 
+    // One store per set of commands, named after them. A project whose setup command
+    // changes never composes its previous tag again, so nothing that knows the store
+    // exists goes looking for it: only a walk of these roots finds it.
+    pub(crate) fn environment_store_roots(&self) -> Vec<PathBuf> {
+        let mut roots = vec![self.installs_snapshots_dir()];
+        let Ok(projects) = fs::read_dir(self.scoped_data_dir().join("projects")) else {
+            return roots;
+        };
+        for project in projects.flatten() {
+            roots.push(project.path().join("snapshots"));
+        }
+        roots
+    }
+
     pub fn forget_profiles(&self, profiles: &[String]) -> io::Result<()> {
         for profile in profiles {
             if Path::new(profile)
