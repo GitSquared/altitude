@@ -35,12 +35,18 @@ pub(super) async fn webhook(
     let signature = headers
         .get(SIGNATURE_HEADER)
         .and_then(|value| value.to_str().ok());
-    if !verify_signature(&tracker.config.webhook_secret, signature, &body) {
+    // A delivery with no signature is almost never Linear: anything that finds the
+    // public address can post here. Saying which of the two it was keeps a probe
+    // from reading as a secret that needs rotating.
+    let Some(signature) = signature else {
+        tracing::warn!("Linear delivery rejected · the request carried no signature header");
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !verify_signature(&tracker.config.webhook_secret, Some(signature), &body) {
         // Loud, and without the value: a secret that does not match the app's is
         // the one misconfiguration that otherwise looks like Linear sending
         // nothing at all.
         tracing::warn!(
-            header = signature.is_some(),
             "Linear delivery rejected · its signature does not match this machine's webhook secret"
         );
         return StatusCode::UNAUTHORIZED.into_response();
