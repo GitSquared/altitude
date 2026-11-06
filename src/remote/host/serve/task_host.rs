@@ -12,7 +12,7 @@ use std::{
 
 use crate::{task::TaskExecutionPauseReason, vcs::now_ms};
 use iroh::EndpointId;
-use tokio::task::spawn_blocking;
+use tokio::{sync::watch, task::spawn_blocking};
 
 use crate::remote::Handover;
 
@@ -30,6 +30,17 @@ use super::OwnTasks;
 use super::run::{prepare_projects, wait_until_ready};
 use super::transfer::{PreparedTransfer, WatchedCollect, export_task, transfer_committed};
 use crate::remote::transfer::TransferUpdate;
+
+// Says the machine can be given work again, however the build it was announcing
+// ended. A build is announced through a value that outlives it, so the reset has
+// to be something the announcement cannot outlive.
+struct PhaseWhileBuilding<'a>(&'a watch::Sender<Phase>);
+
+impl Drop for PhaseWhileBuilding<'_> {
+    fn drop(&mut self) {
+        self.0.send_replace(Phase::Ready);
+    }
+}
 
 impl TaskHost for OwnTasks {
     fn signal_threads(
@@ -433,18 +444,21 @@ impl TaskHost for OwnTasks {
                 .load_or_create_settings()
                 .map_err(|e| e.to_string())?;
             let agent = settings.settings().agent().unwrap_or_default();
-            let built = prepare_projects(
-                &tasks,
-                &owner,
-                settings.settings().projects(),
-                agent,
-                &phase,
-            )
-            .await;
-            // Whatever a build did, this machine can be given work again once it
-            // is over: a phase left naming a project that already failed would be
-            // a word that never moves again.
-            phase.send_replace(Phase::Ready);
+            // Scoped to the build: finished, failed, or dropped with the link that
+            // asked for it — a phase left naming a project that stopped building is
+            // a word that never moves again, and "installing tools" with no end
+            // reads as a hang as long as the machine stays up.
+            let built = {
+                let _building = PhaseWhileBuilding(&phase);
+                prepare_projects(
+                    &tasks,
+                    &owner,
+                    settings.settings().projects(),
+                    agent,
+                    &phase,
+                )
+                .await
+            };
             built?;
             // What was pushed is the complete set of projects this machine runs
             // for the operator, so anything else under its store is work that

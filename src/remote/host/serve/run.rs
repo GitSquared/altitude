@@ -101,7 +101,13 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     tracing::debug!("Checking sandbox host requirements");
     MicrosandboxIsolation::check_host()?;
     tracing::debug!("Sandbox host requirements passed");
-    tracing::debug!(settings = %settings_path.display(), data = %config.data_dir().display(), "Remote configuration");
+    // Where it read its settings from, because a secret that was rotated into a
+    // file this process is not reading looks exactly like a secret that is wrong.
+    tracing::info!(
+        settings = %settings_path.display(),
+        data = %config.data_dir().display(),
+        "Remote configuration"
+    );
 
     let listen: SocketAddr = args
         .listen
