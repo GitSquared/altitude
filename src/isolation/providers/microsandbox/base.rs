@@ -1,6 +1,7 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use microsandbox::sandbox::PullPolicy;
+use tokio::time;
 
 use crate::isolation::{
     BaseSandboxRecipe, BaseSandboxSnapshot, CommandEvent, EnvironmentProgress,
@@ -55,6 +56,12 @@ fn workspace_setup() -> String {
 }
 
 pub(super) const PREPARATION_SANDBOX: &str = "altitude-base-image-setup";
+
+// A build step installs toolchains — rustup, apt, a package manager — so this is
+// generous on purpose. It is not there to keep a slow build short; it is there so
+// a step that will never return is a failure with its output attached rather than
+// a machine that says it is installing tools forever.
+const BUILD_STEP_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 // A build sandbox is named for its composition and ends here, so a name with this
 // ending is a build that was in progress and cannot be one that is still going.
@@ -119,7 +126,8 @@ impl MicrosandboxIsolation {
             artifact_name(&recipe.name)
         );
         let created_at_ms = now_ms();
-        tracing::debug!(environment = %recipe.name, steps = steps.len(), "building environment base sandbox snapshot");
+        let began = Instant::now();
+        tracing::info!(environment = %recipe.name, steps = steps.len(), "building environment");
         self.remove_leftover(&sandbox_id).await;
         let mut options = SandboxOptions::isolated(
             parent.map(|snapshot| snapshot.path.to_string_lossy().into_owned()),
@@ -174,7 +182,12 @@ impl MicrosandboxIsolation {
             }
         }
         let snapshot = result?;
-        tracing::debug!(environment = %recipe.name, snapshot = %snapshot.path.display(), "environment base sandbox ready");
+        tracing::info!(
+            environment = %recipe.name,
+            elapsed_s = began.elapsed().as_secs(),
+            snapshot = %snapshot.path.display(),
+            "environment built"
+        );
         Ok(snapshot)
     }
 
@@ -186,8 +199,8 @@ impl MicrosandboxIsolation {
     ) -> Result<(), IsolationError> {
         let mut output = String::new();
         let mut packages = Packages::default();
-        let status = self
-            .stream_to_end(sandbox_id, &step.command, |chunk| {
+        let streamed = async {
+            self.stream_to_end(sandbox_id, &step.command, |chunk| {
                 output.push_str(chunk);
                 let Some(installs) = installs else { return };
                 if let Some(install) = packages.observe(chunk) {
@@ -195,7 +208,21 @@ impl MicrosandboxIsolation {
                 }
             })
             .await
-            .map_err(|error| IsolationError::new(format!("{}: {error}", step.label)))?;
+        };
+        let status = match time::timeout(BUILD_STEP_TIMEOUT, streamed).await {
+            Ok(Ok(status)) => status,
+            Ok(Err(error)) => {
+                return Err(IsolationError::new(format!("{}: {error}", step.label)));
+            }
+            Err(_) => {
+                return Err(IsolationError::new(format!(
+                    "{} did not finish within {} minutes: {}",
+                    step.label,
+                    BUILD_STEP_TIMEOUT.as_secs() / 60,
+                    output_tail(&output)
+                )));
+            }
+        };
         match status {
             0 => Ok(()),
             code => Err(IsolationError::new(format!(
@@ -224,8 +251,16 @@ impl MicrosandboxIsolation {
         command: &str,
         mut on_output: impl FnMut(&str),
     ) -> Result<i32, IsolationError> {
+        // Every command here is one-shot: nothing writes its stdin, so a step that
+        // asks a question waits on a pipe that will never be written — corepack's
+        // "about to download pnpm, continue?" is one keystroke away from a build
+        // that never ends. Closed stdin turns that prompt into the end of the file
+        // the command already has to handle.
         let mut session = self
-            .run_command(sandbox_id.to_owned(), format!("set -eu\n{command}"))
+            .run_command(
+                sandbox_id.to_owned(),
+                format!("set -eu\nexec < /dev/null\n{command}"),
+            )
             .await?;
         loop {
             let Some(event) = session.events.recv().await else {
