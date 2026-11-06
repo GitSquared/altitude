@@ -54,6 +54,7 @@ impl App {
             task_filter: Select::new(
                 "show",
                 vec![
+                    Offer::new(TaskFilter::All, "all"),
                     Offer::new(TaskFilter::Active, "active"),
                     Offer::new(TaskFilter::Failed, "✕ failed"),
                     Offer::new(TaskFilter::NeedsYou, "? needs you"),
@@ -66,7 +67,7 @@ impl App {
                     Offer::new(TaskFilter::Paused, "▮ paused"),
                     Offer::new(TaskFilter::Done, "✓ done"),
                 ],
-                0,
+                1,
             ),
             task_sort: Select::new(
                 "order",

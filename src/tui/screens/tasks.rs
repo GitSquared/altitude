@@ -146,9 +146,11 @@ impl Standing {
 }
 
 // What the list is allowed to show. `Active` is everything that is still
-// work, which is why done tasks are a filter rather than an absence.
+// work, which is why done tasks are a filter rather than an absence. `All` is
+// the whole of what the store holds, for reading a project's history.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TaskFilter {
+    All,
     Active,
     NeedsYou,
     ReadyToReview,
@@ -165,6 +167,7 @@ pub enum TaskFilter {
 impl TaskFilter {
     fn matches(self, standing: Standing) -> bool {
         match self {
+            Self::All => true,
             Self::Active => standing != Standing::Done,
             Self::NeedsYou => standing == Standing::NeedsYou,
             Self::ReadyToReview => standing == Standing::ReadyToReview,
@@ -177,6 +180,12 @@ impl TaskFilter {
             Self::Failed => standing == Standing::Failed,
             Self::Done => standing == Standing::Done,
         }
+    }
+
+    // On the lists that show all the work at once, a report from that work is not
+    // a section of its own.
+    fn files_reporting_with_work(self) -> bool {
+        matches!(self, Self::All | Self::Active)
     }
 }
 
@@ -446,7 +455,7 @@ fn rows(app: &App) -> Built {
         entries.push(Held {
             // Where the row is filed: work that is only reporting does not need a
             // section of its own, so on the unfiltered list it sits with the work.
-            standing: if filter == TaskFilter::Active {
+            standing: if filter.files_reporting_with_work() {
                 standing.filed()
             } else {
                 standing
@@ -477,7 +486,7 @@ fn rows(app: &App) -> Built {
         entries.push(Held {
             // Where the row is filed: work that is only reporting does not need a
             // section of its own, so on the unfiltered list it sits with the work.
-            standing: if filter == TaskFilter::Active {
+            standing: if filter.files_reporting_with_work() {
                 standing.filed()
             } else {
                 standing
