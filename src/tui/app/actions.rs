@@ -85,14 +85,15 @@ impl App {
         }
         // A project's machine is where its work is. Moving it while tasks are in
         // play would leave them running somewhere the project no longer points,
-        // and their builds on a machine that is about to forget them.
+        // and their builds on a machine that is about to forget them. Tasks that
+        // have ended are not in play: what they ran with is recorded on them.
         if let Some(id) = form.target.project_id() {
             let current = self
                 .settings_file
                 .as_ref()
                 .and_then(|file| file.settings().project(id))
                 .and_then(|project| project.host.clone());
-            if current != form.host_value() && self.project_has_tasks(id) {
+            if current != form.host_value() && self.project_has_tasks_in_play(id) {
                 self.say("That project has tasks in play; accept or delete them before moving it");
                 return false;
             }

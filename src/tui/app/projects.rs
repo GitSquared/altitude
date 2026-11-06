@@ -8,7 +8,7 @@ use crate::{
     credentials::CredentialShellEvent,
     isolation::IsolationEngine,
     project::Project,
-    task::TaskService,
+    task::{TaskExecutionStatus, TaskService},
     tui::keys::is_dismiss,
     tui::popups,
     tui::screens,
@@ -291,14 +291,27 @@ impl App {
             .filter(|agent| !self.signed_out(agent.profile()))
     }
 
-    pub(super) fn project_has_tasks(&self, id: &str) -> bool {
+    // A task that has ended is a record of work this machine finished, and its
+    // project is the one it was started with, so it does not follow the tab. Only
+    // a task that could still put a build on a machine holds a project where it is.
+    pub(super) fn project_has_tasks_in_play(&self, id: &str) -> bool {
+        let is_in_play = |status: &TaskExecutionStatus| {
+            matches!(
+                status,
+                TaskExecutionStatus::Pending
+                    | TaskExecutionStatus::Running
+                    | TaskExecutionStatus::Paused
+            )
+        };
         self.tasks
             .iter()
-            .any(|task| task.project().map(|project| project.id.as_str()) == Some(id))
+            .filter(|task| task.project().map(|project| project.id.as_str()) == Some(id))
+            .any(|task| is_in_play(&task.facts.execution_status))
             || self
                 .remote_tasks
                 .iter()
-                .any(|held| held.summary.project_id.as_deref() == Some(id))
+                .filter(|held| held.summary.project_id.as_deref() == Some(id))
+                .any(|held| is_in_play(&held.summary.status))
     }
 
     pub(in crate::tui) fn setup_incomplete(&self) -> bool {
