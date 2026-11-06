@@ -146,6 +146,19 @@ impl Config {
                         path.display()
                     ))
                 })?;
+                // The label follows the machine. Keeping the one written at first run
+                // meant a renamed machine announced a name that appears nowhere else —
+                // and nothing needs it kept, because every task's founding event
+                // records the label it was created under.
+                let current = installation_label();
+                if current != label {
+                    self.record_label(&path, &current)?;
+                    tracing::info!(from = %label, to = %current, "this installation is now named");
+                    return Ok(InstallationIdentity {
+                        id: self.key()?.id().to_string(),
+                        label: current,
+                    });
+                }
                 Ok(InstallationIdentity {
                     id: self.key()?.id().to_string(),
                     label,
@@ -154,6 +167,16 @@ impl Config {
             Err(error) if error.kind() == ErrorKind::NotFound => self.claim_identity(&path),
             Err(error) => Err(error),
         }
+    }
+
+    fn record_label(&self, path: &Path, label: &str) -> io::Result<()> {
+        let recorded = encoded_label(label)?;
+        fs::create_dir_all(&self.data_dir)?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true).mode(0o600);
+        let mut file = options.open(path)?;
+        file.write_all(recorded.as_bytes())?;
+        file.sync_all()
     }
 
     fn key(&self) -> io::Result<InstallationKey> {
@@ -170,10 +193,7 @@ impl Config {
 
     fn claim_identity(&self, path: &Path) -> io::Result<InstallationIdentity> {
         let label = installation_label();
-        let recorded = serde_json::to_string_pretty(&RecordedLabel {
-            label: label.clone(),
-        })
-        .map_err(|error| io::Error::other(format!("could not encode an identity: {error}")))?;
+        let recorded = encoded_label(&label)?;
         fs::create_dir_all(&self.data_dir)?;
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true).mode(0o600);
@@ -451,6 +471,13 @@ fn is_safe_operator_key(owner: &str) -> bool {
     owner
         .parse::<iroh::EndpointId>()
         .is_ok_and(|id| id.to_string() == owner)
+}
+
+fn encoded_label(label: &str) -> io::Result<String> {
+    serde_json::to_string_pretty(&RecordedLabel {
+        label: label.to_owned(),
+    })
+    .map_err(|error| io::Error::other(format!("could not encode an identity: {error}")))
 }
 
 fn installation_label() -> String {
