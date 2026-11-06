@@ -168,7 +168,8 @@ fn secret(inline: Option<&str>, environment: &str) -> Result<String, String> {
 fn secret_from_environment(name: &str) -> Result<String, String> {
     env::var(name)
         .ok()
-        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
         .ok_or_else(|| {
             format!(
                 "set {name} on the remote host, or write the value into this file's [linear] section"
