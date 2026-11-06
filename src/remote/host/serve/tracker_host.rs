@@ -10,6 +10,7 @@ use std::{
 use crate::task::tasks_waiting_for_room;
 use crate::task::{TaskExecutionPauseReason, TaskExecutionStatus};
 use iroh::EndpointId;
+use sha2::{Digest, Sha256};
 
 use tokio::{net::TcpListener, time::interval};
 
@@ -42,6 +43,12 @@ pub(super) struct LinearRuntime {
     pub(super) workspace_name: String,
 }
 
+// Six bytes of the digest: enough to tell two secrets apart, far too little to be
+// a secret itself.
+fn fingerprint(secret: &str) -> String {
+    hex::encode(&Sha256::digest(secret.as_bytes())[..6])
+}
+
 pub(super) async fn connect_tracker(
     config: &Config,
     settings: &LinearSettings,
@@ -61,9 +68,18 @@ pub(super) async fn connect_tracker(
     let listener = TcpListener::bind(&settings.listen)
         .await
         .map_err(|error| format!("could not listen for Linear webhooks: {error}"))?;
+    let webhook_secret = settings.webhook_secret()?;
+    // A fingerprint rather than the secret: when Linear rejects a delivery the
+    // question an operator has is which value this machine is holding, and twelve
+    // hex characters answer it against `printf '%s' '<the app secret>' | sha256sum`
+    // without a secret reaching a log.
+    tracing::info!(
+        fingerprint = %fingerprint(&webhook_secret),
+        "Linear webhook secret loaded"
+    );
     let tracker = tracker::RemoteTracker::new(tracker::RemoteTrackerConfig {
         automation: automation.clone(),
-        webhook_secret: settings.webhook_secret()?.into_bytes(),
+        webhook_secret: webhook_secret.into_bytes(),
         oauth_client_id: settings.client_id.clone(),
         storage_path: config.data_dir().join("trackers/linear/deliveries.json"),
         attachments_dir: config.attachments_dir(),
