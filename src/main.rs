@@ -133,8 +133,8 @@ async fn client() -> Result<(), Box<dyn Error>> {
             }
             return Ok(());
         }
-        // This installation's identity, named once and recorded on every task it
-        // delegates.
+        // This installation's identity, named after the machine it runs on and
+        // recorded on every task it delegates.
         let identity = config.identity()?;
         let isolation = MicrosandboxIsolation::new(&config);
         let isolation_status = isolation::prepare(isolation.clone());
