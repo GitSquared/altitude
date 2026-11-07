@@ -117,8 +117,11 @@ impl LinearAutomation {
             .get("status")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        // `complete` is where a session rests once its last prompt has been answered, and
+        // it takes the next activity like any other: what cannot be spoken in is a session
+        // the operator dismissed, and the states Linear gives one that stopped working.
         Ok(SessionStanding {
-            can_receive: !dismissed && matches!(status, "pending" | "active" | "awaitingInput"),
+            can_receive: !dismissed && !matches!(status, "stopping" | "error" | "stale"),
             never_answered: session.get("lastAgentReplyAt").is_none_or(Value::is_null),
         })
     }
