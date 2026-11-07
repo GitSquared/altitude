@@ -70,6 +70,31 @@ impl RemoteTracker {
     // conversation — the thread the operator reads — not a task's, so a task that
     // replaces another on the same issue carries that conversation on instead of
     // starting one the issue never shows.
+    // A session write failed: the session may have been dismissed or closed, and the
+    // next pass replaces it. What has already been said in it does not count as said in
+    // the one that replaces it, so the line is forgotten with it.
+    pub(super) fn break_session(&self, task_id: &str) {
+        if let Err(error) = self.mutate(|ledger| {
+            if let Some(report) = ledger.cursors.iter_mut().find(|r| r.task_id == task_id) {
+                report.session_broken = true;
+                report.activity_line = None;
+            }
+        }) {
+            tracing::warn!(%error, "could not record that a session has gone away");
+        }
+    }
+
+    pub(super) fn move_session(&self, task_id: &str, session: &str) -> Result<(), String> {
+        self.mutate(|ledger| {
+            if let Some(report) = ledger.cursors.iter_mut().find(|r| r.task_id == task_id) {
+                report.session = session.to_owned();
+                report.session_broken = false;
+                report.activity_line = None;
+                report.activities = 0;
+            }
+        })
+    }
+
     pub(super) fn session_for_issue(&self, issue_id: &str) -> Option<String> {
         let ledger = self.lock().ok()?;
         let reports: Vec<&Cursor> = ledger

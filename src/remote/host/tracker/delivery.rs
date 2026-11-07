@@ -231,42 +231,35 @@ impl RemoteTracker {
                 execution_pause_reason,
                 ..
             } => {
-                self.config
-                    .automation
-                    .create_activity(
-                        &report.session,
-                        // Per pause, not per task: a thread that says nothing the
-                        // second time it waits is a thread the operator thinks is
-                        // still thinking.
-                        &stable_id(&format!("{}-{index}", report.task_id), "paused"),
-                        AgentActivityContent::Response {
-                            body: pause_notice(execution_pause_reason).to_owned(),
-                        },
-                    )
-                    .await
-                    .map_err(|error| error.to_string())?;
+                self.say(
+                    report,
+                    // Per pause, not per task: a thread that says nothing the second
+                    // time it waits is a thread the operator thinks is still thinking.
+                    &stable_id(&format!("{}-{index}", report.task_id), "paused"),
+                    AgentActivityContent::Response {
+                        body: pause_notice(execution_pause_reason).to_owned(),
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string())?;
             }
             // A task that stopped is not a task that is working. The thread the
             // failure raised carries the detail; this is what stops the session
             // claiming the agent is still busy, which is what it looked like while
             // the machine had already given up.
             TaskHistoryEvent::ExecutionFailed { error, .. } => {
-                self.config
-                    .automation
-                    .create_activity(
-                        &report.session,
-                        &stable_id(&format!("{}-{index}", report.task_id), "failed"),
-                        AgentActivityContent::Error {
-                            body: failure_notice(error),
-                        },
-                    )
-                    .await
-                    .map_err(|error| error.to_string())?;
+                self.say(
+                    report,
+                    &stable_id(&format!("{}-{index}", report.task_id), "failed"),
+                    AgentActivityContent::Error {
+                        body: failure_notice(error),
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string())?;
             }
             TaskHistoryEvent::PlanUpdated { steps } => {
-                self.config
-                    .automation
-                    .update_session_plan(&report.session, steps)
+                self.set_plan(report, steps)
                     .await
                     .map_err(|error| error.to_string())?;
             }
@@ -290,17 +283,15 @@ impl RemoteTracker {
                             .user_name(&report.tracker_user_id)
                             .await
                             .ok();
-                        self.config
-                            .automation
-                            .create_activity(
-                                &report.session,
-                                &stable_id(&report.task_id, "picked-up"),
-                                AgentActivityContent::Thought {
-                                    body: picking_up(operator.as_deref(), agent.as_deref()),
-                                },
-                            )
-                            .await
-                            .map_err(|error| error.to_string())?;
+                        self.say(
+                            report,
+                            &stable_id(&report.task_id, "picked-up"),
+                            AgentActivityContent::Thought {
+                                body: picking_up(operator.as_deref(), agent.as_deref()),
+                            },
+                        )
+                        .await
+                        .map_err(|error| error.to_string())?;
                     }
                     // A run answers the reply that arrived after the last one. A message
                     // from before that has already been answered, and saying so again on
@@ -316,17 +307,15 @@ impl RemoteTracker {
                             )
                         }) =>
                     {
-                        self.config
-                            .automation
-                            .create_activity(
-                                &report.session,
-                                &stable_id(&report.task_id, agent_run_id),
-                                AgentActivityContent::Thought {
-                                    body: "Got your reply. Altitude is continuing the task.".into(),
-                                },
-                            )
-                            .await
-                            .map_err(|error| error.to_string())?;
+                        self.say(
+                            report,
+                            &stable_id(&report.task_id, agent_run_id),
+                            AgentActivityContent::Thought {
+                                body: "Got your reply. Altitude is continuing the task.".into(),
+                            },
+                        )
+                        .await
+                        .map_err(|error| error.to_string())?;
                     }
                     Some(_) => {}
                 }
@@ -496,10 +485,8 @@ impl RemoteTracker {
             return;
         }
         if let Err(error) = self
-            .config
-            .automation
-            .create_activity(
-                &report.session,
+            .say(
+                report,
                 &stable_id(&report.task_id, "unhooked"),
                 AgentActivityContent::Response {
                     body:

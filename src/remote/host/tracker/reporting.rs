@@ -16,6 +16,8 @@ use tokio::time::timeout;
 const SHUTDOWN_NOTICE_BUDGET: Duration = Duration::from_secs(10);
 
 use super::*;
+use crate::task::TaskPlanStep;
+use crate::tracker::TrackerError;
 pub(super) struct QueueNotice {
     starting: bool,
     state: String,
@@ -24,6 +26,60 @@ pub(super) struct QueueNotice {
 }
 
 impl RemoteTracker {
+    // Everything this machine says in a session goes through one of these, so a write
+    // that failed because the session has gone away is noticed where it happens: the
+    // report is marked, and the next pass opens a session on the issue rather than
+    // leaving the operator a thread that never says anything again.
+    pub(super) async fn say(
+        &self,
+        report: &Cursor,
+        activity_id: &str,
+        content: AgentActivityContent,
+    ) -> Result<(), TrackerError> {
+        let written = self
+            .config
+            .automation
+            .create_activity(&report.session, activity_id, content)
+            .await;
+        if written.is_err() {
+            self.break_session(&report.task_id);
+        }
+        written
+    }
+
+    pub(super) async fn say_ephemerally(
+        &self,
+        report: &Cursor,
+        activity_id: &str,
+        body: String,
+    ) -> Result<(), TrackerError> {
+        let written = self
+            .config
+            .automation
+            .create_ephemeral_thought(&report.session, activity_id, body)
+            .await;
+        if written.is_err() {
+            self.break_session(&report.task_id);
+        }
+        written
+    }
+
+    pub(super) async fn set_plan(
+        &self,
+        report: &Cursor,
+        steps: &[TaskPlanStep],
+    ) -> Result<(), TrackerError> {
+        let written = self
+            .config
+            .automation
+            .update_session_plan(&report.session, steps)
+            .await;
+        if written.is_err() {
+            self.break_session(&report.task_id);
+        }
+        written
+    }
+
     pub async fn start_reporting(
         &self,
         owner: &str,
@@ -71,6 +127,7 @@ impl RemoteTracker {
             failed_at: None,
             failed_attempts: 0,
             unhooked_at: None,
+            session_broken: false,
             activities: 0,
             activity_line: None,
         })?;
@@ -100,10 +157,8 @@ impl RemoteTracker {
             tracing::warn!(issue = %report.issue_id, %error, "could not release a deleted task's issue");
         }
         if let Err(error) = self
-            .config
-            .automation
-            .create_activity(
-                &report.session,
+            .say(
+                &report,
                 &stable_id(task_id, "deleted"),
                 AgentActivityContent::Response {
                     body: "This task was deleted, with its sandbox and its record.".to_owned(),
@@ -177,6 +232,55 @@ impl RemoteTracker {
         }
     }
 
+    // A session can go away under a report — dismissed in Linear, or closed once the
+    // work it carried ended — and a report writing into a thread nobody can read is the
+    // silence this whole mechanism exists to prevent. Opening one on the issue and
+    // moving there is cheap and rare, so it happens on the pass after the failure
+    // rather than being retried where the write failed.
+    pub(super) async fn repair_sessions(&self, host: &dyn Host) {
+        for report in self
+            .cursors()
+            .into_iter()
+            .filter(|report| report.session_broken && !report.finished)
+        {
+            let session = match self
+                .config
+                .automation
+                .create_session_on_issue(&report.issue_id)
+                .await
+            {
+                Ok(session) => session,
+                Err(error) => {
+                    // The flag stays, so the next pass asks again rather than the
+                    // report going quiet for good.
+                    tracing::warn!(task = %report.task_id, %error, "could not open a session for a report");
+                    continue;
+                }
+            };
+            if let Err(error) = self.move_session(&report.task_id, &session) {
+                tracing::warn!(task = %report.task_id, %error, "could not move a report to a new session");
+                continue;
+            }
+            let agent = host
+                .session_agent(report.task_id.clone())
+                .await
+                .ok()
+                .flatten();
+            if let Err(error) = self
+                .summarise_session(&session, &report.tracker_user_id, agent.as_deref())
+                .await
+            {
+                tracing::warn!(session = %session, %error, "could not name a new session");
+            }
+            tracing::info!(
+                task = %report.task_id,
+                issue = %report.issue_id,
+                session = %session,
+                "a session had gone away, so the report has a new one"
+            );
+        }
+    }
+
     // Answers when a line that says nothing new becomes worth saying again, which is
     // the only clock this pass keeps: a task waiting in a queue would otherwise say
     // nothing at all until it moved.
@@ -225,12 +329,7 @@ impl RemoteTracker {
                 &report.session,
                 &format!("queue-{stamp}-{}", standing.ahead),
             );
-            if let Err(error) = self
-                .config
-                .automation
-                .create_ephemeral_thought(&report.session, &activity_id, body)
-                .await
-            {
+            if let Err(error) = self.say_ephemerally(&report, &activity_id, body).await {
                 tracing::debug!(task = %task.task_id, %error, "could not say where a task stands");
                 continue;
             }
@@ -288,26 +387,18 @@ impl RemoteTracker {
             );
             let published_activity = match activity.kind {
                 ActivityKind::Thinking => {
-                    self.config
-                        .automation
-                        .create_ephemeral_thought(
-                            &report.session,
-                            &activity_id,
-                            activity.text.clone(),
-                        )
+                    self.say_ephemerally(&report, &activity_id, activity.text.clone())
                         .await
                 }
                 ActivityKind::Speech | ActivityKind::Remote => {
-                    self.config
-                        .automation
-                        .create_activity(
-                            &report.session,
-                            &activity_id,
-                            AgentActivityContent::Thought {
-                                body: activity.text.clone(),
-                            },
-                        )
-                        .await
+                    self.say(
+                        &report,
+                        &activity_id,
+                        AgentActivityContent::Thought {
+                            body: activity.text.clone(),
+                        },
+                    )
+                    .await
                 }
             };
             if let Err(error) = published_activity {
@@ -391,15 +482,13 @@ impl RemoteTracker {
                 // session's sidebar, and an update the operator never unfolds is an
                 // update that was never delivered.
                 let body = format!("**○ Info:** {}\n\n{}", title.trim(), body.trim());
-                self.config
-                    .automation
-                    .create_activity(
-                        &report.session,
-                        &stable_id(&report.task_id, signal_id),
-                        AgentActivityContent::Response { body },
-                    )
-                    .await
-                    .map_err(|error| error.to_string())?;
+                self.say(
+                    report,
+                    &stable_id(&report.task_id, signal_id),
+                    AgentActivityContent::Response { body },
+                )
+                .await
+                .map_err(|error| error.to_string())?;
                 Ok(None)
             }
             TaskOperatorSignalKind::Decision => {
@@ -610,10 +699,8 @@ impl RemoteTracker {
         // The activity is what the session shows, not the issue's state: a failure
         // to say it must not hold the cursor on an ending that has been written.
         if let Err(error) = self
-            .config
-            .automation
-            .create_activity(
-                &report.session,
+            .say(
+                report,
                 &stable_id(&report.task_id, "accepted"),
                 AgentActivityContent::Response {
                     body: accepted_body(&contribution_urls(events)),
@@ -665,19 +752,17 @@ impl RemoteTracker {
     }
 
     pub(super) async fn finish_transferred(&self, report: &Cursor) -> Result<(), String> {
-        self.config
-            .automation
-            .create_activity(
-                &report.session,
-                &stable_id(&report.task_id, "transferred"),
-                AgentActivityContent::Response {
-                    body: "The operator handed this task to another machine, and it keeps \
-                           running there."
-                        .to_owned(),
-                },
-            )
-            .await
-            .map_err(|error| error.to_string())?;
+        self.say(
+            report,
+            &stable_id(&report.task_id, "transferred"),
+            AgentActivityContent::Response {
+                body: "The operator handed this task to another machine, and it keeps \
+                       running there."
+                    .to_owned(),
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
         self.finish_report(report)
     }
 

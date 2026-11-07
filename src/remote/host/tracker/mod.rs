@@ -405,6 +405,7 @@ impl RemoteTracker {
     // Everything that is due, in the order it has to happen, and when it should be
     // asked again if that is a moment rather than an event.
     async fn pass(&self, host: &dyn Host) -> Option<Instant> {
+        self.repair_sessions(host).await;
         let retry = self.process_deliveries(host).await;
         self.adopt_bound_tasks(host).await;
         let notice = self.report_queue_standing(host).await;

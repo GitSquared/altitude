@@ -380,10 +380,8 @@ impl RemoteTracker {
                 let body = "A newer delegation replaced this one, so Altitude stopped this \
                             task.";
                 if let Err(error) = self
-                    .config
-                    .automation
-                    .create_activity(
-                        &report.session,
+                    .say(
+                        &report,
                         &stable_id(&task.task_id, "redelegated"),
                         AgentActivityContent::Response {
                             body: body.to_owned(),
@@ -458,6 +456,7 @@ impl RemoteTracker {
             failed_at: None,
             failed_attempts: 0,
             unhooked_at: None,
+            session_broken: false,
             activities: 0,
             activity_line: None,
         })?;
@@ -534,19 +533,17 @@ impl RemoteTracker {
         {
             tracing::warn!(issue = %report.issue_id, %error, "could not release a stopped task's issue");
         }
-        self.config
-            .automation
-            .create_activity(
-                &report.session,
-                &stable_id(&report.task_id, "stopped"),
-                AgentActivityContent::Response {
-                    body: "Stopped. Altitude stopped this task and handed the issue back; \
-                           the work it had done is still in Altitude, if you want it."
-                        .to_owned(),
-                },
-            )
-            .await
-            .map_err(|error| error.to_string())?;
+        self.say(
+            &report,
+            &stable_id(&report.task_id, "stopped"),
+            AgentActivityContent::Response {
+                body: "Stopped. Altitude stopped this task and handed the issue back; \
+                       the work it had done is still in Altitude, if you want it."
+                    .to_owned(),
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
         self.finish_report(&report)
     }
 
@@ -663,10 +660,8 @@ impl RemoteTracker {
             .await?;
         }
         if let Err(error) = self
-            .config
-            .automation
-            .create_activity(
-                &report.session,
+            .say(
+                report,
                 &stable_id(&report.task_id, "closed-by-operator"),
                 AgentActivityContent::Response {
                     body: notice.to_owned(),
