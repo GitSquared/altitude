@@ -44,6 +44,31 @@ fn pill_in(buffer: &mut Buffer, area: Rect, spans: &[Span<'static>], focused: bo
         .render(area, buffer);
 }
 
+// A list that opens over the thing it changes. It owns every key while it is open,
+// escape included, and that is one rule for every menu however it is drawn, so it is
+// stated here rather than in each screen that draws one.
+pub trait Menu {
+    fn is_open(&self) -> bool;
+    fn key(&mut self, key: KeyEvent);
+}
+
+impl<T> Menu for Select<T> {
+    fn is_open(&self) -> bool {
+        Select::is_open(self)
+    }
+
+    fn key(&mut self, key: KeyEvent) {
+        Select::handle_key(self, key);
+    }
+}
+
+// The menu that is open, if one is. A screen lists its menus in one place so that the
+// order they are asked in is the order they are drawn in, and the first one open is
+// the one in front.
+pub fn opened<'a>(menus: impl IntoIterator<Item = &'a mut dyn Menu>) -> Option<&'a mut dyn Menu> {
+    menus.into_iter().find(|menu| menu.is_open())
+}
+
 const SEARCH_FROM: usize = 5;
 
 const OPENS: char = '▼';

@@ -177,17 +177,6 @@ impl App {
             self.composer_key(key, event_loop, remote_signals);
             return;
         }
-        // A dropdown owns every key while it is open, escape included.
-        if self.signal_filter.is_open() {
-            self.signal_filter.handle_key(key);
-            self.apply_signal_view();
-            return;
-        }
-        if self.signal_sort.is_open() {
-            self.signal_sort.handle_key(key);
-            self.apply_signal_view();
-            return;
-        }
         // Tab switches the screen's tabs where it has them; the horizontal
         // arrows and h/l move between the parts of the screen. j/k and the
         // vertical arrows move inside the part that has the keys.

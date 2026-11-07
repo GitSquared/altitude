@@ -45,8 +45,14 @@ impl App {
 
     pub(in crate::tui) fn choose_task_control(&mut self, control: TaskControl) {
         match control {
-            TaskControl::Filter => self.task_filter.open(),
-            TaskControl::Sort => self.task_sort.open(),
+            TaskControl::Filter => {
+                self.task_sort.close();
+                self.task_filter.open();
+            }
+            TaskControl::Sort => {
+                self.task_filter.close();
+                self.task_sort.open();
+            }
             TaskControl::Offer(menu, index) => match menu {
                 Menu::Filter => {
                     self.task_filter.choose(index);

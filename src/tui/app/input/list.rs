@@ -90,17 +90,6 @@ impl App {
             }
         }
 
-        // An open menu owns every key while it is open, escape included.
-        if self.task_filter.is_open() {
-            self.task_filter.handle_key(key);
-            self.apply_task_view();
-            return Ok(false);
-        }
-        if self.task_sort.is_open() {
-            self.task_sort.handle_key(key);
-            self.apply_task_view();
-            return Ok(false);
-        }
         // Moving, paging and the ends of the list are the list's own.
         if self.tasks_list.key(key).is_some() {
             return Ok(false);

@@ -178,6 +178,11 @@ where
         app.foreground = Foreground::Keys(Box::new(mem::take(&mut app.foreground)));
         return Ok(false);
     }
+    // A menu lies over the screen it belongs to, so it is asked for the key before the
+    // screen is: a screen that reads a key first takes one aimed at the menu above it.
+    if app.menu_key(key) {
+        return Ok(false);
+    }
     // In the order the states are declared: whatever is in front takes the key,
     // and the line under it says which one that is.
     match &app.foreground {

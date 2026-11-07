@@ -119,16 +119,9 @@ fn draw_loop(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
 }
 
 fn leaves(app: &mut App, key: KeyEvent) -> bool {
-    // A menu owns the keyboard while it is open, as it does in the interface:
-    // escape closes it rather than leaving, and so does q.
-    if app.task_filter.is_open() {
-        app.task_filter.handle_key(key);
-        app.apply_task_view();
-        return false;
-    }
-    if app.task_sort.is_open() {
-        app.task_sort.handle_key(key);
-        app.apply_task_view();
+    // A menu owns the keyboard while it is open, as it does in the interface: escape
+    // closes it rather than leaving, and so does q.
+    if app.menu_key(key) {
         return false;
     }
     // Leaving is q, as it is on the list this draws.
