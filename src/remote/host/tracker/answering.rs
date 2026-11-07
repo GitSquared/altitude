@@ -7,6 +7,7 @@ use crate::{
 };
 
 use super::intake::Unprepared;
+use super::ledger::ReactionInput;
 use super::*;
 impl RemoteTracker {
     pub(super) async fn answer_prompt(
@@ -236,6 +237,64 @@ impl RemoteTracker {
                     .map_err(|error| error.to_string())
             }
         }
+    }
+
+    // A reaction is the operator answering with a symbol. What it means is theirs and
+    // the agent's to read: this says what happened in the thread the comment belongs
+    // to, and leaves every judgement about it to the one who has the tools to make it.
+    pub(super) async fn answer_reaction(
+        &self,
+        event: &ReactionInput,
+        host: &dyn Host,
+    ) -> Result<(), String> {
+        let site = self
+            .config
+            .automation
+            .comment_site(&event.comment_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        if site.is_artificial_session_root {
+            return Ok(());
+        }
+        let issue_id = site.issue_id.clone();
+        let Some(issue_id) = issue_id else {
+            return Ok(());
+        };
+        let Some(report) = host
+            .work_for_issue(issue_id, Vec::new())
+            .await?
+            .and_then(|task| self.report_for_task(&task.task_id))
+        else {
+            return Ok(());
+        };
+        // Only the operator directs this task. A teammate's symbol is not a decision,
+        // and this machine's own acknowledgements are not anybody speaking.
+        if event.actor_id != report.tracker_user_id {
+            return Ok(());
+        }
+        if !host.is_kept(report.task_id.clone()).await? {
+            return Ok(());
+        }
+        let root = site.root_comment_id.clone();
+        let thread = host
+            .signal_threads(report.task_id.clone())
+            .await?
+            .into_iter()
+            .find(|thread| published_comment_id(&report.task_id, &thread.id) == root);
+        let Some(thread) = thread else {
+            return Ok(());
+        };
+        let about = site
+            .body
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("a comment in this thread");
+        let said = format!(
+            "The operator reacted {} to this comment:\n\n{about}",
+            event.emoji
+        );
+        host.reply(report.task_id, thread.id, said).await
     }
 
     pub(super) async fn react_eyes(&self, comment_id: &str) {

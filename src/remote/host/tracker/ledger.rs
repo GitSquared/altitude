@@ -112,6 +112,7 @@ pub(super) enum StoredEvent {
     Session(Box<SessionEvent>),
     IssueStateChanged(IssueStateChanged),
     Comment(CommentInput),
+    Reaction(ReactionInput),
 }
 
 impl StoredEvent {
@@ -134,6 +135,9 @@ impl StoredEvent {
                     }
                 )
             }
+            StoredEvent::Reaction(reaction) => {
+                format!("reaction {} · {}", reaction.comment_id, reaction.emoji)
+            }
         }
     }
 
@@ -145,8 +149,17 @@ impl StoredEvent {
                 change.issue_id, change.state_id, change.actor_id, change.occurred_at_ms
             ),
             StoredEvent::Comment(comment) => format!("comment:{}", comment.comment_id),
+            StoredEvent::Reaction(reaction) => format!("reaction:{}", reaction.id),
         }
     }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(super) struct ReactionInput {
+    pub(super) id: String,
+    pub(super) comment_id: String,
+    pub(super) emoji: String,
+    pub(super) actor_id: String,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]

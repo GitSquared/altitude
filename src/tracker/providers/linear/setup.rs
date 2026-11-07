@@ -48,15 +48,23 @@ static LINEAR: Guide = Guide {
                 Item::Bullet("Webhook signing secret: copy it into webhook_secret in serve.toml."),
                 Item::Bullet("App events: select these three."),
                 Item::Detail("Agent session events (required)"),
-                Item::Detail("Inbox notifications (required for comments and mentions)"),
+                Item::Detail("Inbox notifications (required for mentions)"),
                 Item::Detail("Permission changes"),
                 Item::Bullet(
-                    "Data change events: select Issues if this remote should react to human \
-                     status changes.",
+                    "Data change events: select Issues, Comments and Emoji reactions if this \
+                     remote should hear what people do on the issue.",
                 ),
                 Item::Detail(
-                    "Without it Altitude still reports status out, but does not notice an \
-                     issue being completed or moved",
+                    "Issues: without it Altitude still reports status out, but does not notice \
+                     an issue being completed or moved",
+                ),
+                Item::Detail(
+                    "Comments: what the operator writes on the issue, which is the only way \
+                     they can talk to a task without opening the session",
+                ),
+                Item::Detail(
+                    "Emoji reactions: an answer given with a symbol, carried to the thread \
+                     as what happened and read by the agent in context",
                 ),
                 Item::Bullet("Authorization events: leave OAuth authorization events off."),
                 Item::Text(

@@ -1,5 +1,7 @@
 use super::ledger::{SessionEvent, StoredEvent};
-use super::webhook::{parse_app_notification, parse_issue_event};
+use super::webhook::{
+    parse_app_notification, parse_comment_event, parse_issue_event, parse_reaction_event,
+};
 use crate::tracker::providers::linear::automation::{
     AgentSessionEvent, WebhookError, parse_agent_session_event, verify_signature,
 };
@@ -129,6 +131,44 @@ fn classify_webhook(tracker: &RemoteTracker, body: &[u8]) -> WebhookOutcome {
                 match event.into_stored() {
                     Some(stored) => WebhookOutcome::Store(stored),
                     None => WebhookOutcome::Ignore("not a state change a person made"),
+                }
+            }
+        },
+        "Comment" => match parse_comment_event(body) {
+            Err(error) => {
+                WebhookOutcome::Reject(format!("the comment event could not be read: {error}"))
+            }
+            Ok(event) => {
+                if event.organization_id != tracker.config.automation.workspace_id() {
+                    return WebhookOutcome::Reject("another workspace".to_owned());
+                }
+                if !event.is_fresh() {
+                    return WebhookOutcome::Reject(
+                        "older than the freshness window · check this machine's clock".to_owned(),
+                    );
+                }
+                match event.into_stored() {
+                    Some(stored) => WebhookOutcome::Store(stored),
+                    None => WebhookOutcome::Ignore("not a comment someone wrote"),
+                }
+            }
+        },
+        "Reaction" => match parse_reaction_event(body) {
+            Err(error) => {
+                WebhookOutcome::Reject(format!("the reaction event could not be read: {error}"))
+            }
+            Ok(event) => {
+                if event.organization_id != tracker.config.automation.workspace_id() {
+                    return WebhookOutcome::Reject("another workspace".to_owned());
+                }
+                if !event.is_fresh() {
+                    return WebhookOutcome::Reject(
+                        "older than the freshness window · check this machine's clock".to_owned(),
+                    );
+                }
+                match event.into_stored() {
+                    Some(stored) => WebhookOutcome::Store(stored),
+                    None => WebhookOutcome::Ignore("not a reaction someone added"),
                 }
             }
         },

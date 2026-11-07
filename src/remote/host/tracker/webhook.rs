@@ -2,7 +2,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
-use super::{IssueStateChanged, StoredEvent, WEBHOOK_MAX_AGE, ledger::CommentInput};
+use super::{
+    IssueStateChanged, StoredEvent, WEBHOOK_MAX_AGE,
+    ledger::{CommentInput, ReactionInput},
+};
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -159,6 +162,135 @@ impl AppNotificationEvent {
             actor_id,
             is_mention,
             body: comment.body,
+        }))
+    }
+}
+
+// A comment written on an issue is a comment whether or not Linear also thought to
+// notify the app about it, so the comment data event is read as itself rather than
+// waiting for a mention or a reply to something this machine published.
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct CommentEvent {
+    pub(super) organization_id: String,
+    pub(super) webhook_timestamp: f64,
+    pub(super) action: String,
+    pub(super) actor: IssueActor,
+    pub(super) data: CommentData,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct CommentData {
+    pub(super) id: String,
+    #[serde(default)]
+    pub(super) body: String,
+    #[serde(default)]
+    pub(super) issue_id: Option<String>,
+    #[serde(default)]
+    pub(super) document_id: Option<String>,
+    #[serde(default)]
+    pub(super) user_id: Option<String>,
+}
+
+pub(super) fn parse_comment_event(body: &[u8]) -> Result<CommentEvent, serde_json::Error> {
+    serde_json::from_slice(body)
+}
+
+impl CommentEvent {
+    pub(super) fn is_fresh(&self) -> bool {
+        let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+            return false;
+        };
+        (now.as_millis() as f64 - self.webhook_timestamp).abs()
+            <= WEBHOOK_MAX_AGE.as_millis() as f64
+    }
+
+    // A mention arrives as a notification as well, and either delivery names the same
+    // comment, so which one comes first decides what is known about it: this one knows
+    // only that something was said, and saying it is enough to admit it.
+    pub(super) fn into_stored(self) -> Option<StoredEvent> {
+        if self.action != "create" || self.actor.actor_type != "user" {
+            return None;
+        }
+        let actor_id = self
+            .data
+            .user_id
+            .filter(|id| !id.is_empty())
+            .unwrap_or(self.actor.id);
+        Some(StoredEvent::Comment(CommentInput {
+            comment_id: self.data.id,
+            issue_id: self.data.issue_id,
+            document_id: self.data.document_id,
+            actor_id,
+            is_mention: false,
+            body: self.data.body,
+        }))
+    }
+}
+
+// A reaction is a person answering with a symbol instead of a sentence. What it means
+// is theirs to decide and the agent's to read in context, so it is carried to the
+// thread as what happened rather than translated into an act.
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ReactionEvent {
+    pub(super) organization_id: String,
+    pub(super) webhook_timestamp: f64,
+    pub(super) action: String,
+    pub(super) actor: IssueActor,
+    pub(super) data: ReactionData,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ReactionData {
+    #[serde(default)]
+    pub(super) id: Option<String>,
+    #[serde(default)]
+    pub(super) emoji: Option<String>,
+    #[serde(default, alias = "reaction")]
+    pub(super) reaction: Option<String>,
+    #[serde(default)]
+    pub(super) comment_id: Option<String>,
+    #[serde(default)]
+    pub(super) user_id: Option<String>,
+}
+
+pub(super) fn parse_reaction_event(body: &[u8]) -> Result<ReactionEvent, serde_json::Error> {
+    serde_json::from_slice(body)
+}
+
+impl ReactionEvent {
+    pub(super) fn is_fresh(&self) -> bool {
+        let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+            return false;
+        };
+        (now.as_millis() as f64 - self.webhook_timestamp).abs()
+            <= WEBHOOK_MAX_AGE.as_millis() as f64
+    }
+
+    // Taking a reaction away is not a thing to say to the agent: it already read the
+    // symbol, and a thread that says both is a thread arguing with itself.
+    pub(super) fn into_stored(self) -> Option<StoredEvent> {
+        if self.action != "create" || self.actor.actor_type != "user" {
+            return None;
+        }
+        let emoji = self.data.emoji.or(self.data.reaction)?.trim().to_owned();
+        let comment_id = self.data.comment_id?;
+        let actor_id = self
+            .data
+            .user_id
+            .filter(|id| !id.is_empty())
+            .unwrap_or(self.actor.id);
+        Some(StoredEvent::Reaction(ReactionInput {
+            id: self
+                .data
+                .id
+                .unwrap_or_else(|| format!("{comment_id}:{emoji}")),
+            comment_id,
+            emoji,
+            actor_id,
         }))
     }
 }

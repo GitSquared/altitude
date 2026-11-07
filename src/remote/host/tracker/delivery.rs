@@ -115,6 +115,7 @@ impl RemoteTracker {
                 .await
             }
             StoredEvent::Comment(comment) => self.answer_comment(comment, host).await,
+            StoredEvent::Reaction(reaction) => self.answer_reaction(reaction, host).await,
         }
     }
 
