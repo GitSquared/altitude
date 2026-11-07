@@ -9,7 +9,6 @@ use crate::task::{SendsTasksHome, TaskOperatorSignalThread};
 use tokio::sync::mpsc;
 
 use crate::{
-    agent::Activity,
     isolation::{Command, IsolationEngine, OutputStream},
     task::mirror::review::{ReviewWaits, Watchers},
     task::{Task, TaskExecutionMode, TaskHistoryEvent, TaskService, TaskServiceError},
@@ -49,7 +48,7 @@ pub enum TaskExecutionUpdate {
     // is replaced by the next one and means nothing once the run ends.
     Activity {
         task_id: String,
-        activity: Activity,
+        activity: String,
     },
     // What the shell the operator opened in a sandbox has to say, which is not the
     // task saying anything.
@@ -75,7 +74,7 @@ pub struct TaskEventLoop<E> {
     shells: TaskShells,
     // The newest line each running agent produced. Read by the interface and by a
     // tracker reporting on this machine, which is the same fact told twice.
-    current_activity: Arc<Mutex<HashMap<String, Activity>>>,
+    current_activity: Arc<Mutex<HashMap<String, String>>>,
     starting: Arc<Mutex<HashSet<String>>>,
     watchers: Arc<Watchers<E>>,
     review_waits: Arc<ReviewWaits>,
@@ -177,13 +176,13 @@ where
         Ok(())
     }
 
-    fn activity(&self) -> MutexGuard<'_, HashMap<String, Activity>> {
+    fn activity(&self) -> MutexGuard<'_, HashMap<String, String>> {
         self.current_activity
             .lock()
             .expect("activity lock poisoned")
     }
 
-    pub fn current_activity(&self, task_id: &str) -> Option<Activity> {
+    pub fn current_activity(&self, task_id: &str) -> Option<String> {
         self.activity().get(task_id).cloned()
     }
 

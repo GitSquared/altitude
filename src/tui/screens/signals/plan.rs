@@ -5,7 +5,6 @@ use std::mem;
 use ratatui::{Frame, layout::Rect, style::Style, text::Line, widgets::Paragraph};
 
 use crate::{
-    agent::ActivityKind,
     task::TaskPlanStatus,
     tui::{
         App,
@@ -127,8 +126,8 @@ pub(super) fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App) {
     let mut rows: Vec<(String, bool, Style)> = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         let newest = index + 1 == lines.len();
-        for (part, wrapped) in wrap_lines(&line.text, text_width).into_iter().enumerate() {
-            rows.push((wrapped, part == 0, activity_tone(line.kind, newest)));
+        for (part, wrapped) in wrap_lines(line, text_width).into_iter().enumerate() {
+            rows.push((wrapped, part == 0, activity_tone(newest)));
         }
     }
     app.signal_activity_scroll_max =
@@ -172,14 +171,11 @@ pub(super) fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App) {
 }
 
 // The newest line is the one being read, and everything above it is there to be
-// looked back through. What the agent says is the thing itself and a thought it is
-// having is context for it, so a thought sits a step back from where its age puts it.
-fn activity_tone(kind: ActivityKind, newest: bool) -> Style {
-    match (kind, newest) {
-        (ActivityKind::Thinking, true) => palette::muted(),
-        (ActivityKind::Thinking, false) => palette::backdrop(),
-        (ActivityKind::Speech | ActivityKind::Remote, true) => palette::primary(),
-        (ActivityKind::Speech | ActivityKind::Remote, false) => palette::muted(),
+// looked back through.
+fn activity_tone(newest: bool) -> Style {
+    match newest {
+        true => palette::primary(),
+        false => palette::muted(),
     }
 }
 

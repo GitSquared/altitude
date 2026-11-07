@@ -240,7 +240,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
                             && let Some(operator) = task.operator_id()
                         {
                             let mut summary = TaskSummary::of(task);
-                            summary.activity = Some(activity.text);
+                            summary.activity = Some(activity);
                             watchers.changed(operator, summary);
                         }
                     }

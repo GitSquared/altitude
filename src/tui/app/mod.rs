@@ -9,7 +9,6 @@ use iroh::{EndpointAddr, EndpointId};
 use tokio::{sync::mpsc, task::JoinHandle};
 
 use crate::{
-    agent::Activity,
     config::{Config, DEFAULT_PORT, SettingsFile},
     credentials::{
         CredentialAnswer, CredentialShell, CredentialShellCancel, CredentialShellEvent,
@@ -508,7 +507,7 @@ pub struct App {
     // What each running agent is doing, straight from its own stream. Live only:
     // nothing here outlives the run it describes, and the task screen is the only
     // reader. Capped, because an agent that works for an hour says a lot.
-    pub(in crate::tui) activities: HashMap<String, Vec<Activity>>,
+    pub(in crate::tui) activities: HashMap<String, Vec<String>>,
     // What this terminal can draw, and the diagrams it has been asked for. Owned
     // here so a picture outlives the frame that first wanted it.
     pub(in crate::tui) pictures: Pictures,

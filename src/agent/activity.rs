@@ -1,66 +1,9 @@
-use serde::{Deserialize, Serialize};
-
-// What kind of thing the line is: what the agent said, what it thought, or a line
-// another machine sent, which travels as text and keeps no kind with it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ActivityKind {
-    Speech,
-    Thinking,
-    Remote,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Activity {
-    pub text: String,
-    pub kind: ActivityKind,
-}
-
-impl Activity {
-    pub fn remote(text: String) -> Self {
-        Self {
-            text,
-            kind: ActivityKind::Remote,
-        }
-    }
-}
-
-// A message the agent sent and a thought it is thinking are the two things worth
-// reading; what it is holding in its hands is not, and the tool calls it makes are
-// the noisiest lines in the stream: a shell command is a pipeline of quoting, and
-// its name alone answers less than the sentence around it.
-pub(super) const NARRATION_LIMIT: usize = 160;
-
-pub(super) fn narration(text: &str) -> Option<Activity> {
-    speaking(text).map(|said| Activity {
-        text: said,
-        kind: ActivityKind::Speech,
-    })
-}
-
-// A thought is kept as its kind rather than as a word at the front of the line, so
-// the line stays the model's own words. Where a line travels as text alone — another
-// machine's summary, a tracker's session — it reads as something the agent said.
-pub(super) fn thinking(text: &str) -> Option<Activity> {
-    speaking(text).map(|thought| Activity {
-        text: thought,
-        kind: ActivityKind::Thinking,
-    })
-}
-
-fn speaking(text: &str) -> Option<String> {
-    let said = first_line(text, NARRATION_LIMIT);
-    (!said.is_empty()).then_some(said)
-}
-
-pub(super) fn first_line(text: &str, limit: usize) -> String {
-    let line = text
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("")
-        .trim();
-    let mut shortened: String = line.chars().take(limit).collect();
-    if shortened.len() < line.len() {
-        shortened.push('…');
-    }
-    shortened
+// The agent's own words are the only lines worth reporting. What it is holding in its
+// hands is not, and the tool calls it makes are the noisiest lines in the stream: a
+// shell command is a pipeline of quoting, and its name alone answers less than the
+// sentence around it. Reasoning is not reported either — it is a draft of the words,
+// it arrives several times a minute, and it turns a session into a scroll.
+pub(super) fn narration(text: &str) -> Option<String> {
+    let said = text.trim();
+    (!said.is_empty()).then(|| said.to_owned())
 }

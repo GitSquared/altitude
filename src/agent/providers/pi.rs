@@ -1,5 +1,5 @@
 use crate::agent::{
-    AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, AgentKind, AgentUsage, TaskProgressDecoder,
+    AUTOPILOT_SYSTEM_PROMPT, AgentEngine, AgentKind, AgentUsage, TaskProgressDecoder,
     TaskStreamDecoder, TaskUsage, activity, system_prompt,
 };
 use crate::isolation::{
@@ -153,9 +153,9 @@ impl TaskStreamDecoder for PiStream {
 // to be scraped out of a terminal.
 pub struct PiProgress {
     pending: String,
-    activity: Option<Activity>,
+    activity: Option<String>,
     // The assistant's text arrives a delta at a time; only the most recent block is
-    // of any interest, and only far enough to read the first line of it.
+    // of any interest.
     narration: String,
 }
 
@@ -185,7 +185,7 @@ impl PiProgress {
                     Some("text_start") => self.narration.clear(),
                     Some("text_delta") => {
                         if let Some(delta) = delta {
-                            push_preview(&mut self.narration, delta);
+                            self.narration.push_str(delta);
                         }
                     }
                     Some("text_end") => {
@@ -193,27 +193,10 @@ impl PiProgress {
                             self.activity = Some(said);
                         }
                     }
-                    Some("thinking_start") => self.narration.clear(),
-                    Some("thinking_delta") => {
-                        if let Some(delta) = delta {
-                            push_preview(&mut self.narration, delta);
-                        }
-                    }
-                    Some("thinking_end") => {
-                        if let Some(thought) = activity::thinking(&self.narration) {
-                            self.activity = Some(thought);
-                        }
-                    }
                     _ => {}
                 }
             }
         }
-    }
-}
-
-fn push_preview(preview: &mut String, delta: &str) {
-    if preview.chars().count() < activity::NARRATION_LIMIT {
-        preview.push_str(delta);
     }
 }
 
@@ -226,7 +209,7 @@ impl TaskProgressDecoder for PiProgress {
         }
     }
 
-    fn take_activity(&mut self) -> Option<Activity> {
+    fn take_activity(&mut self) -> Option<String> {
         self.activity.take()
     }
 }

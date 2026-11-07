@@ -368,7 +368,7 @@ impl tracker::Host for OwnTasks {
     }
 
     fn current_activity(&self, task_id: String) -> tracker::HostFuture<'_, Option<String>> {
-        Box::pin(async move { Ok(self.tasks.current_activity(&task_id).map(|line| line.text)) })
+        Box::pin(async move { Ok(self.tasks.current_activity(&task_id)) })
     }
 
     // One read of the queue for every task on it, rather than one read per task: the

@@ -7,7 +7,6 @@ use std::{error::Error as StdError, fmt, str::FromStr};
 mod activity;
 mod channel;
 
-pub use activity::{Activity, ActivityKind};
 mod limits;
 pub mod mcp;
 mod providers;
@@ -257,7 +256,7 @@ pub trait TaskStreamDecoder: Send {
 // task's own history is where anything worth keeping is written.
 pub trait TaskProgressDecoder: Send {
     fn process(&mut self, bytes: &[u8]);
-    fn take_activity(&mut self) -> Option<Activity>;
+    fn take_activity(&mut self) -> Option<String>;
 }
 
 #[derive(Clone)]
