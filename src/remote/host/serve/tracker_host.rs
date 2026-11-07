@@ -7,6 +7,7 @@ use std::{
     time::SystemTime,
 };
 
+use crate::agent::Activity;
 use crate::task::tasks_waiting_for_room;
 use crate::task::{TaskExecutionPauseReason, TaskExecutionStatus};
 use iroh::EndpointId;
@@ -358,6 +359,7 @@ impl tracker::Host for OwnTasks {
                     issue,
                     delegation: task.facts.tracker_delegation.clone(),
                     session_agent: task.session_agent(),
+                    status: task.facts.execution_status,
                 })
             }))
         })
@@ -376,7 +378,7 @@ impl tracker::Host for OwnTasks {
         })
     }
 
-    fn current_activity(&self, task_id: String) -> tracker::HostFuture<'_, Option<String>> {
+    fn current_activity(&self, task_id: String) -> tracker::HostFuture<'_, Option<Activity>> {
         Box::pin(async move { Ok(self.tasks.current_activity(&task_id)) })
     }
 
@@ -453,6 +455,7 @@ impl tracker::Host for OwnTasks {
                         issue,
                         delegation: task.facts.tracker_delegation.clone(),
                         session_agent: task.session_agent(),
+                        status: task.facts.execution_status,
                     })
                 })
                 .collect())

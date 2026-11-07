@@ -137,20 +137,25 @@ impl RemoteTracker {
             let Some(report) = self.report_for_task(&task.task_id) else {
                 continue;
             };
+            // Only a run that is happening stops. A task waiting on the operator or one
+            // still queued has nothing for the session to explain, and saying it does is
+            // what makes the session contradict itself the next time the task speaks.
+            if task.status != TaskExecutionStatus::Running {
+                continue;
+            }
             let session = report.session;
             let activity = stable_id(&report.task_id, &format!("shutdown:{shutdown}"));
             let automation = Arc::clone(&automation);
             notices.push(async move {
+                // A status rather than a message: it says why the session goes quiet, and
+                // the first thing this machine says when it is back replaces it.
                 automation
-                    .create_activity(
+                    .create_ephemeral_thought(
                         &session,
                         &activity,
-                        AgentActivityContent::Response {
-                            body: "Altitude is shutting down, so this run stops here. The task \
-                                   is not finished: Altitude picks it back up when the machine \
-                                   is back."
-                                .to_owned(),
-                        },
+                        "Altitude is shutting down, so this run stops here. The task is not \
+                         finished: Altitude picks it back up when the machine is back."
+                            .to_owned(),
                     )
                     .await
             });
@@ -244,10 +249,13 @@ impl RemoteTracker {
         next
     }
 
-    // What the agent is saying and thinking goes to the session as it happens: the
-    // operator watching the issue should not have to take the task over to find out
-    // whether it is still working. A thought rather than a reply, because nothing
-    // here is addressed to anybody and nothing here is news worth a notification.
+    // What the agent says and what it is thinking both go to the session as they happen:
+    // the operator watching the issue should not have to take the task over to find out
+    // whether it is still working. They are different things and they are published
+    // differently — what it says is part of the transcript, and what it is thinking is
+    // the state it is in, replaced by the next thing this machine says. Neither is a
+    // reply: nothing here is addressed to anybody and nothing here is news worth a
+    // notification.
     pub(super) async fn report_activity(&self, host: &dyn Host) {
         let bound = match host.bound_tasks().await {
             Ok(bound) => bound,
@@ -257,8 +265,8 @@ impl RemoteTracker {
             }
         };
         for task in bound {
-            let line = match host.current_activity(task.task_id.clone()).await {
-                Ok(Some(line)) if !line.trim().is_empty() => line,
+            let activity = match host.current_activity(task.task_id.clone()).await {
+                Ok(Some(activity)) if !activity.text.trim().is_empty() => activity,
                 _ => continue,
             };
             let Some(report) = self.report_for_task(&task.task_id) else {
@@ -270,29 +278,50 @@ impl RemoteTracker {
                     .lock()
                     .expect("activity notices lock poisoned");
                 match notices.get(&task.task_id) {
-                    Some(notice) if notice.line == line => continue,
+                    Some(notice) if notice.line == activity.text => continue,
                     Some(notice) => notice.published.saturating_add(1),
                     None => 1,
                 }
             };
             let activity_id = stable_id(&report.task_id, &format!("activity-{published}"));
-            if let Err(error) = self
-                .config
-                .automation
-                .create_activity(
-                    &report.session,
-                    &activity_id,
-                    AgentActivityContent::Thought { body: line.clone() },
-                )
-                .await
-            {
+            let published_activity = match activity.kind {
+                ActivityKind::Thinking => {
+                    self.config
+                        .automation
+                        .create_ephemeral_thought(
+                            &report.session,
+                            &activity_id,
+                            activity.text.clone(),
+                        )
+                        .await
+                }
+                ActivityKind::Speech | ActivityKind::Remote => {
+                    self.config
+                        .automation
+                        .create_activity(
+                            &report.session,
+                            &activity_id,
+                            AgentActivityContent::Thought {
+                                body: activity.text.clone(),
+                            },
+                        )
+                        .await
+                }
+            };
+            if let Err(error) = published_activity {
                 tracing::debug!(task = %task.task_id, %error, "could not say what an agent is doing");
                 continue;
             }
             self.activity_notices
                 .lock()
                 .expect("activity notices lock poisoned")
-                .insert(task.task_id.clone(), ActivityNotice { line, published });
+                .insert(
+                    task.task_id.clone(),
+                    ActivityNotice {
+                        line: activity.text,
+                        published,
+                    },
+                );
         }
     }
 
@@ -415,6 +444,36 @@ impl RemoteTracker {
                     .map_err(|error| error.to_string())?;
                 Ok(Some(TrackerStatus::InReview))
             }
+        }
+    }
+
+    // A reply is posted into the thread it answers, idempotently: a cursor can replay
+    // an event it never managed to finish, and a second copy of a sentence is the one
+    // thing a conversation cannot recover from.
+    pub(super) async fn post_signal_reply(&self, report: &Cursor, signal_id: &str, body: &str) {
+        let comment_id = published_comment_id(&report.task_id, signal_id);
+        match self.config.automation.comment(&comment_id).await {
+            Ok(Some(_)) => {}
+            // A thread this machine never published has nowhere to put a reply.
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(task = %report.task_id, signal = signal_id, %error, "could not read a signal's thread");
+                return;
+            }
+        }
+        let id = stable_id("reply", &format!("{}:{signal_id}:{body}", report.task_id));
+        if let Err(error) = self
+            .config
+            .automation
+            .comment_reply(Some(&report.issue_id), None, &comment_id, body, &id)
+            .await
+        {
+            tracing::warn!(
+                task = %report.task_id,
+                signal = signal_id,
+                %error,
+                "could not post the agent's reply to a thread"
+            );
         }
     }
 

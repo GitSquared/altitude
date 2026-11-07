@@ -333,6 +333,16 @@ impl RemoteTracker {
                 self.write_status(host, report, TrackerStatus::InProgress)
                     .await?;
             }
+            // What the agent says in a thread belongs to the thread. Until this, a reply
+            // lived only in the task's history: whoever read the issue saw the question
+            // and never the answer.
+            TaskHistoryEvent::OperatorSignalMessage {
+                signal_id,
+                author: TaskOperatorSignalAuthor::Agent,
+                body,
+            } => {
+                self.post_signal_reply(report, signal_id, body).await;
+            }
             TaskHistoryEvent::OperatorSignalRaised { signal } => {
                 if unresolved.contains(&signal.id) {
                     let contributions = contribution_details(&events[..=index]);

@@ -7,7 +7,7 @@ use ratatui::DefaultTerminal;
 use tokio::time::sleep;
 
 use crate::{
-    agent::AgentKind,
+    agent::{Activity, AgentKind},
     config::DEFAULT_PORT,
     isolation::IsolationEngine,
     remote::{
@@ -267,6 +267,7 @@ impl App {
             WatchedTasks::Snapshot { address, summaries } => self.holding(address, summaries),
             WatchedTasks::Changed { address, summary } => {
                 if let Some(activity) = summary.activity.clone() {
+                    let activity = Activity::remote(activity);
                     let lines = self.activities.entry(summary.id.clone()).or_default();
                     if lines.last() != Some(&activity) {
                         lines.push(activity);

@@ -10,11 +10,12 @@ use std::{
 };
 
 use super::admission::{self};
+use crate::agent::{Activity, ActivityKind};
 use crate::isolation::{EnvironmentProgress, Pressure};
 use crate::remote::identity::write_private;
 use crate::{
     task::{
-        TaskExecutionPauseReason, TaskHistoryEvent, TaskOperatorSignalKind,
+        TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent, TaskOperatorSignalKind,
         TaskOperatorSignalThread,
     },
     tracker::{
@@ -93,6 +94,7 @@ pub struct BoundTask {
     pub issue: IssueReference,
     pub delegation: Option<String>,
     pub session_agent: Option<String>,
+    pub status: TaskExecutionStatus,
 }
 
 // Where a task stands on the machine it was sent to: what is in front of it in the
@@ -156,7 +158,7 @@ pub trait Host: Send + Sync + 'static {
     fn session_agent(&self, task_id: String) -> HostFuture<'_, Option<String>>;
 
     fn queue_standings(&self) -> HostFuture<'_, HashMap<String, QueueStanding>>;
-    fn current_activity(&self, task_id: String) -> HostFuture<'_, Option<String>>;
+    fn current_activity(&self, task_id: String) -> HostFuture<'_, Option<Activity>>;
 }
 
 fn published_comment_id(task_id: &str, signal_id: &str) -> String {

@@ -1,5 +1,5 @@
 use crate::agent::{
-    AUTOPILOT_SYSTEM_PROMPT, AgentEngine, AgentKind, AgentUsage, TaskProgressDecoder,
+    AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, AgentKind, AgentUsage, TaskProgressDecoder,
     TaskStreamDecoder, TaskUsage, activity, system_prompt,
 };
 use crate::isolation::{
@@ -153,9 +153,9 @@ impl TaskStreamDecoder for PiStream {
 // to be scraped out of a terminal.
 pub struct PiProgress {
     pending: String,
-    activity: Option<String>,
-    // The assistant's text arrives a delta at a time; only the most recent block is
-    // of any interest.
+    activity: Option<Activity>,
+    // The assistant's text and its reasoning arrive a delta at a time and share this
+    // buffer; only the most recent block is of any interest.
     narration: String,
 }
 
@@ -193,6 +193,17 @@ impl PiProgress {
                             self.activity = Some(said);
                         }
                     }
+                    Some("thinking_start") => self.narration.clear(),
+                    Some("thinking_delta") => {
+                        if let Some(delta) = delta {
+                            self.narration.push_str(delta);
+                        }
+                    }
+                    Some("thinking_end") => {
+                        if let Some(thought) = activity::thinking(&self.narration) {
+                            self.activity = Some(thought);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -209,7 +220,7 @@ impl TaskProgressDecoder for PiProgress {
         }
     }
 
-    fn take_activity(&mut self) -> Option<String> {
+    fn take_activity(&mut self) -> Option<Activity> {
         self.activity.take()
     }
 }

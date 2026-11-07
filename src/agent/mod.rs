@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::Type;
 use std::{error::Error as StdError, fmt, str::FromStr};
 mod activity;
+
+pub use activity::{Activity, ActivityKind};
 mod channel;
 
 mod limits;
@@ -256,7 +258,7 @@ pub trait TaskStreamDecoder: Send {
 // task's own history is where anything worth keeping is written.
 pub trait TaskProgressDecoder: Send {
     fn process(&mut self, bytes: &[u8]);
-    fn take_activity(&mut self) -> Option<String>;
+    fn take_activity(&mut self) -> Option<Activity>;
 }
 
 #[derive(Clone)]

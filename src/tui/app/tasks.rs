@@ -3,6 +3,7 @@ use std::{collections::HashMap, time::Instant};
 use tokio::sync::mpsc;
 
 use crate::{
+    agent::Activity,
     isolation::IsolationEngine,
     remote::TaskOrigin,
     task::{Task, TaskEventLoop, TaskOperatorSignalAuthor, TaskOperatorSignalThread, TaskService},
@@ -255,7 +256,7 @@ impl App {
     // through, little enough that a task left running for hours stays cheap.
     pub(super) const ACTIVITY_LINES: usize = 200;
 
-    pub(in crate::tui) fn signal_activity(&self) -> Option<&Vec<String>> {
+    pub(in crate::tui) fn signal_activity(&self) -> Option<&Vec<Activity>> {
         let task_id = self.signal_task_id.as_deref()?;
         self.activities.get(task_id)
     }
