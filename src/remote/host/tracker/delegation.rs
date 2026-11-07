@@ -33,6 +33,20 @@ impl RemoteTracker {
             {
                 continue;
             }
+            // Work already in play on the issue means this delegation was delivered and
+            // answered: a prompt that arrived while the machine was up was steered into
+            // the task holding the issue, and nothing was left for a scan to find. Adopting
+            // it now would stop that task and replace a conversation the operator is
+            // having with a second one, which is what a boot did to a delegation that had
+            // been redirected minutes before.
+            match host.work_for_issue(reference.id.clone(), Vec::new()).await {
+                Ok(Some(_)) => continue,
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::debug!(issue = %reference.identifier, %error, "could not ask which task an issue has");
+                    continue;
+                }
+            }
             // A delegation is news while it is new. One nobody picked up when it was
             // made is not quietly started days later because a machine restarted.
             if delegated
