@@ -37,11 +37,12 @@ pub(super) fn narration(text: &str) -> Option<Activity> {
     })
 }
 
+// A thought is kept as its kind rather than as a word at the front of the line, so
+// the line stays the model's own words. Where a line travels as text alone — another
+// machine's summary, a tracker's session — it reads as something the agent said.
 pub(super) fn thinking(text: &str) -> Option<Activity> {
-    // The word is in the line, not only in the style: a line that leaves this
-    // machine as text has to read as thinking wherever it lands.
     speaking(text).map(|thought| Activity {
-        text: format!("thinking: {thought}"),
+        text: thought,
         kind: ActivityKind::Thinking,
     })
 }

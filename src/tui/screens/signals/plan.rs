@@ -5,6 +5,7 @@ use std::mem;
 use ratatui::{Frame, layout::Rect, style::Style, text::Line, widgets::Paragraph};
 
 use crate::{
+    agent::ActivityKind,
     task::TaskPlanStatus,
     tui::{
         App,
@@ -123,11 +124,11 @@ pub(super) fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App) {
     // newest one is at full strength across all of its rows rather than its tail.
     const MARK_WIDTH: u16 = 2;
     let text_width = body.width.saturating_sub(MARK_WIDTH).max(1);
-    let mut rows: Vec<(String, bool, bool)> = Vec::new();
+    let mut rows: Vec<(String, bool, Style)> = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         let newest = index + 1 == lines.len();
         for (part, wrapped) in wrap_lines(&line.text, text_width).into_iter().enumerate() {
-            rows.push((wrapped, part == 0, newest));
+            rows.push((wrapped, part == 0, activity_tone(line.kind, newest)));
         }
     }
     app.signal_activity_scroll_max =
@@ -139,25 +140,17 @@ pub(super) fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App) {
             .min(app.signal_activity_scroll_max)
     };
     let first = usize::from(scroll);
-    for (offset, (row, starts, newest)) in rows
+    for (offset, (row, starts, style)) in rows
         .iter()
         .skip(first)
         .take(usize::from(body.height))
         .enumerate()
     {
-        // The newest line is the one being read; everything above it is there to be
-        // looked back through.
-        // What the agent says is the thing being read; a thought it is having is
-        // context for it, so it leans back.
-        let style = match newest {
-            true => palette::primary(),
-            false => palette::muted(),
-        };
         let y = body.y.saturating_add(offset as u16);
         frame.render_widget(
             Paragraph::new(Line::styled(
                 if *starts { "› " } else { "  " }.to_owned(),
-                style,
+                *style,
             )),
             Rect {
                 x: body.x,
@@ -167,7 +160,7 @@ pub(super) fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App) {
             },
         );
         frame.render_widget(
-            Paragraph::new(row.clone()).style(style),
+            Paragraph::new(row.clone()).style(*style),
             Rect {
                 x: body.x.saturating_add(MARK_WIDTH),
                 y,
@@ -175,6 +168,18 @@ pub(super) fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App) {
                 height: 1,
             },
         );
+    }
+}
+
+// The newest line is the one being read, and everything above it is there to be
+// looked back through. What the agent says is the thing itself and a thought it is
+// having is context for it, so a thought sits a step back from where its age puts it.
+fn activity_tone(kind: ActivityKind, newest: bool) -> Style {
+    match (kind, newest) {
+        (ActivityKind::Thinking, true) => palette::muted(),
+        (ActivityKind::Thinking, false) => palette::backdrop(),
+        (ActivityKind::Speech | ActivityKind::Remote, true) => palette::primary(),
+        (ActivityKind::Speech | ActivityKind::Remote, false) => palette::muted(),
     }
 }
 
