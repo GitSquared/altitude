@@ -208,35 +208,25 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     // surface below is what the screen puts on top of it.
     let [header_area, body] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-    let task = app.signal_task_title();
-    let showing = app.signal_filter.chosen_value().copied();
-    let count = match showing {
-        Some(SignalFilter::Unresolved) => {
-            let unresolved = app
-                .signal_threads
-                .iter()
-                .filter(|thread| thread.is_unresolved())
-                .count();
-            match unresolved {
-                1 => "1 unresolved".to_owned(),
-                count => format!("{count} unresolved"),
-            }
-        }
-        Some(SignalFilter::Resolved) => match app.signal_threads.len() {
-            1 => "1 resolved".to_owned(),
-            count => format!("{count} resolved"),
-        },
-        _ => match app.signal_threads.len() {
-            1 => "1 thread".to_owned(),
-            count => format!("{count} threads"),
-        },
-    };
+    // The screen is the task, not only the thread: it says which task it is the way the
+    // list row does, and what the account running it costs, which the pane under this
+    // has no row to spare for.
+    let mut identification = vec![app.signal_task_title()];
+    identification.extend(app.signal_task_identification());
+    let detail = identification
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" \u{b7} ");
+    let mut standing = vec![app.signal_agent_label()];
+    standing.extend(app.signal_task_spend());
+    let note = standing.join(" \u{b7} ");
     header::draw(
         frame,
         header_area,
-        "SIGNAL THREAD",
-        Some(&task),
-        Some(&count),
+        "TASK DETAILS",
+        Some(&detail),
+        Some(&note),
     );
     // One frame, split by a single divider: the sections are two halves of the
     // same window rather than two windows that happen to touch.

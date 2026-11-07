@@ -220,6 +220,39 @@ impl App {
             .unwrap_or_default()
     }
 
+    // What identifies the task in the row it has in the list: its tracker issue and the
+    // pull requests it opened. The list draws them as columns; the screen that has one
+    // task in front of it says them in the same order.
+    pub(in crate::tui) fn signal_task_identification(&self) -> Vec<String> {
+        let (issue, pulls) = match self.signal_task() {
+            Some(task) => (
+                task.facts
+                    .tracker_issue
+                    .as_ref()
+                    .map(|issue| issue.identifier.clone()),
+                task.code_contributions
+                    .iter()
+                    .map(|pull| format!("#{}", pull.reference))
+                    .collect::<Vec<_>>(),
+            ),
+            None => match self.signal_held() {
+                Some(held) => (
+                    held.summary
+                        .tracker_issue
+                        .as_ref()
+                        .map(|issue| issue.identifier.clone()),
+                    held.summary
+                        .contributions
+                        .iter()
+                        .map(|pull| format!("#{}", pull.reference))
+                        .collect::<Vec<_>>(),
+                ),
+                None => (None, Vec::new()),
+            },
+        };
+        issue.into_iter().chain(pulls).collect()
+    }
+
     pub(in crate::tui) fn signal_task_title(&self) -> String {
         if let Some(task) = self.signal_task() {
             return task.title().to_owned();

@@ -1,3 +1,4 @@
+use super::frame::draw_pane_title;
 use super::*;
 
 use chrono::Utc;
@@ -16,7 +17,7 @@ use crate::{
         App, Pictures,
         widgets::{
             button, card, empty,
-            format::{ago, clock, truncate},
+            format::{ago, clock},
             markdown, palette,
             shimmer::shimmer,
             signal,
@@ -33,62 +34,26 @@ pub(super) fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
         width: area.width.saturating_sub(2),
         ..area
     };
-    let heading = match app.signal_thread() {
-        Some(thread) => truncate(&thread.title, usize::from(padded.width)),
-        None if app.remote_signals_loading => "Asking the machine that owns this task".to_owned(),
-        None => String::new(),
-    };
-    let [title, meta, standing, rest] = Layout::vertical([
+    // The pane is named like the plan and the activity beside it, and the line under
+    // that says which thread is being read: one blank row between the two and the first
+    // message, so the conversation starts after the frame rather than against it.
+    let [title, meta, _, rest] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(3),
     ])
     .areas(padded);
-    frame.render_widget(
-        Paragraph::new(Line::styled(
-            heading,
-            if app.signal_thread().is_some() {
-                palette::primary()
-            } else {
-                palette::muted()
-            },
-        )),
+    draw_pane_title(
+        frame,
         title,
+        "SIGNAL THREAD",
+        match app.signal_thread() {
+            Some(thread) => format!("  {}", thread.title),
+            None => String::new(),
+        },
+        app.signal_focus == SignalFocus::Detail,
     );
-    // What the account the task runs on is costing and, when one is holding it, which
-    // of its windows ran out and the hour it lets go: the one line this pane has to
-    // spare, and it says nothing at all about a plain task.
-    let mut standing_parts = vec![app.signal_agent_label()];
-    if let Some(spend) = app.signal_task_spend() {
-        standing_parts.push(spend);
-    }
-    if let Some(account) = app.signal_task_standing() {
-        let windows: Vec<String> = account
-            .windows
-            .iter()
-            .map(|reading| match reading.used_percent {
-                Some(used) => format!("{} {used:.0}%", reading.window.word()),
-                None => reading.window.word().to_owned(),
-            })
-            .collect();
-        standing_parts.push(windows.join(" · "));
-        standing_parts.push(ago(account.observed_at_ms, Utc::now().timestamp_millis()));
-    }
-    if let Some((window, clears_at_ms)) = app.signal_task_limit() {
-        standing_parts.push(format!("{} limit", window.word()));
-        standing_parts.push(format!("resumes {}", clock(clears_at_ms)));
-    }
-    if standing_parts.len() > 1 {
-        let line = standing_parts.join(" · ");
-        frame.render_widget(
-            Paragraph::new(Line::styled(
-                truncate(&line, usize::from(standing.width)),
-                palette::muted(),
-            )),
-            standing,
-        );
-    }
     let Some(thread) = app.signal_thread().cloned() else {
         draw_empty(frame, rest, app);
         return;
@@ -126,6 +91,37 @@ pub(super) fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
     } else {
         meta_line.push(Span::styled(
             format!(" · raised {}", ago(thread.last_raised_at_ms, now)),
+            palette::muted(),
+        ));
+    }
+    // What the account running this task has spent, and when one of its windows is
+    // holding the work, when that window lets go: one row, and it says nothing at all
+    // about a plain task.
+    if let Some(account) = app.signal_task_standing() {
+        let windows: Vec<String> = account
+            .windows
+            .iter()
+            .map(|reading| match reading.used_percent {
+                Some(used) => format!("{} {used:.0}%", reading.window.word()),
+                None => reading.window.word().to_owned(),
+            })
+            .collect();
+        meta_line.push(Span::styled(
+            format!(
+                " · {} · {}",
+                windows.join(" · "),
+                ago(account.observed_at_ms, Utc::now().timestamp_millis())
+            ),
+            palette::muted(),
+        ));
+    }
+    if let Some((window, clears_at_ms)) = app.signal_task_limit() {
+        meta_line.push(Span::styled(
+            format!(
+                " · {} limit · resumes {}",
+                window.word(),
+                clock(clears_at_ms)
+            ),
             palette::muted(),
         ));
     }
