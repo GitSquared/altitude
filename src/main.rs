@@ -12,7 +12,7 @@ use crate::{
     cli::{Cli, Command},
     config::Config,
     db::Database,
-    isolation::MicrosandboxIsolation,
+    isolation::{IsolationBackend, IsolationEngine, MicrosandboxIsolation, TestbedIsolation},
     remote::{InstallationKey, LinkClient, RemoteKeys},
     task::{TaskEventLoop, TaskService, TaskStore, TrackerHost},
 };
@@ -65,9 +65,21 @@ async fn main() -> ExitCode {
 }
 
 async fn client() -> Result<(), Box<dyn Error>> {
+    let config = Config::load()?;
+    match IsolationBackend::from_environment() {
+        IsolationBackend::Microsandbox => {
+            client_with(MicrosandboxIsolation::new(&config), config).await
+        }
+        IsolationBackend::Testbed => client_with(TestbedIsolation::new(&config), config).await,
+    }
+}
+
+async fn client_with<E>(isolation: E, config: Config) -> Result<(), Box<dyn Error>>
+where
+    E: IsolationEngine + Clone + 'static,
+{
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
-    let config = Config::load()?;
     // Before anything reads the task database: a second client would see the same
     // pending tasks and drive them, which is not a thing two processes can do.
     let _instance = instance::Instance::claim(&config.database_path())?;
@@ -135,7 +147,6 @@ async fn client() -> Result<(), Box<dyn Error>> {
         // This installation's identity, named after the machine it runs on and
         // recorded on every task it delegates.
         let identity = config.identity()?;
-        let isolation = MicrosandboxIsolation::new(&config);
         let isolation_status = isolation::prepare(isolation.clone());
         let Some(_isolation_status) = tui::boot_isolation(
             &mut terminal,
