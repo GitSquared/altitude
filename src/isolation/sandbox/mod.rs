@@ -282,6 +282,13 @@ impl SandboxPlan {
                 .replace("{{host_path}}", &host_path.to_string_lossy());
             plan.managed_files
                 .push((host_path.join("README.md"), readme));
+            // How to wield the indexer on this folder. Altitude refreshes both notes,
+            // so an edit to them is lost rather than kept: the memory is the agent's,
+            // the instructions are the machine's.
+            plan.managed_files.push((
+                host_path.join("QMD.md"),
+                include_str!("../assets/qmd.md").to_owned(),
+            ));
             plan.options.mounts.push(SandboxMount {
                 host_path,
                 guest_path: guest_path.to_string_lossy().into_owned(),
