@@ -648,6 +648,12 @@ fn is_listed_summary(summary: &TaskSummary) -> bool {
         .is_some_and(TaskExecutionPauseReason::is_out_of_play)
 }
 
+// Whether a task is on a project's tab. Work with no project has no other tab to be
+// in, so every one of them holds it.
+fn belongs_to(project: Option<&str>, tab: &str) -> bool {
+    project.is_none_or(|own| own == tab)
+}
+
 fn github_login(output: &str) -> Option<String> {
     const MARKERS: [&str; 2] = [
         "Logged in to github.com as ",

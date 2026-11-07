@@ -305,12 +305,12 @@ impl App {
         };
         self.tasks
             .iter()
-            .filter(|task| task.project().map(|project| project.id.as_str()) == Some(id))
+            .filter(|task| belongs_to(task.project().map(|own| own.id.as_str()), id))
             .any(|task| is_in_play(&task.facts.execution_status))
             || self
                 .remote_tasks
                 .iter()
-                .filter(|held| held.summary.project_id.as_deref() == Some(id))
+                .filter(|held| belongs_to(held.summary.project_id.as_deref(), id))
                 .any(|held| is_in_play(&held.summary.status))
     }
 

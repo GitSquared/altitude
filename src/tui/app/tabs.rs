@@ -1,20 +1,14 @@
-use crate::{task::Task, tracker::TrackerKind};
+use crate::{remote::TaskSummary, task::Task, tracker::TrackerKind, tui::screens::tasks::Standing};
 
 use super::*;
 
 impl App {
     pub(super) fn visible_counts(&self) -> (usize, usize) {
+        let project = self.active_project_id();
         (
-            self.visible_tasks().count(),
-            self.visible_remote_tasks().count(),
+            self.tasks_in(&project).count(),
+            self.remote_tasks_in(&project).count(),
         )
-    }
-
-    pub(super) fn in_active_tab(&self, project_id: Option<&str>) -> bool {
-        match project_id {
-            Some(id) => id == self.active_project_id(),
-            None => true,
-        }
     }
 
     pub(super) fn is_taken_over(&self, address: &str, id: &str) -> bool {
@@ -55,37 +49,37 @@ impl App {
             .collect()
     }
 
-    pub(in crate::tui) fn visible_tasks(&self) -> impl Iterator<Item = &Task> {
+    // What a tab holds: its project's work, and the work that has no project, which
+    // has no other tab to be in. One copy of a task that exists twice, too, because a
+    // task taken over here is not also listed under the machine that still holds it.
+    // The list, the counts and the number on the tab are all read from here, so none
+    // of them can name work the others do not.
+    pub(in crate::tui) fn tasks_in(&self, project: &str) -> impl Iterator<Item = &Task> {
         self.tasks
             .iter()
-            .filter(|task| self.in_active_tab(task.project().map(|project| project.id.as_str())))
+            .filter(move |task| belongs_to(task.project().map(|own| own.id.as_str()), project))
     }
 
-    pub(in crate::tui) fn visible_remote_tasks(&self) -> impl Iterator<Item = &HeldTask> {
+    pub(in crate::tui) fn remote_tasks_in(&self, project: &str) -> impl Iterator<Item = &HeldTask> {
         self.remote_tasks
             .iter()
             .filter(|held| !self.is_taken_over(&held.address, &held.summary.id))
-            .filter(|held| self.in_active_tab(held.summary.project_id.as_deref()))
+            .filter(move |held| belongs_to(held.summary.project_id.as_deref(), project))
     }
 
-    pub(in crate::tui) fn attention_in_project(&self, id: &str) -> usize {
+    // What a tab's number counts: the rows in it that are waiting on a person rather
+    // than on themselves, ranked the way the list ranks them.
+    pub(in crate::tui) fn attention_in_project(&self, project: &str) -> usize {
         let local = self
-            .tasks
-            .iter()
-            .filter(|task| {
-                task.project().map(|project| project.id.as_str()) == Some(id)
-                    && task.facts.blocking_signal_kind.is_some()
-            })
-            .count();
+            .tasks_in(project)
+            .map(|task| Standing::of(&TaskSummary::of(task)));
         let remote = self
-            .remote_tasks
-            .iter()
-            .filter(|held| {
-                held.summary.project_id.as_deref() == Some(id)
-                    && held.summary.blocking_signal_kind.is_some()
-            })
-            .count();
-        local + remote
+            .remote_tasks_in(project)
+            .map(|held| Standing::of(&held.summary));
+        local
+            .chain(remote)
+            .filter(|standing| standing.wants_a_person())
+            .count()
     }
 
     pub(super) fn selected_ref(&self) -> Option<&TaskRef> {

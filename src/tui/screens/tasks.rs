@@ -55,7 +55,7 @@ pub enum Standing {
 }
 
 impl Standing {
-    fn of(summary: &TaskSummary) -> Self {
+    pub(in crate::tui) fn of(summary: &TaskSummary) -> Self {
         match summary.status {
             TaskExecutionStatus::Failed => return Self::Failed,
             TaskExecutionStatus::Completed => return Self::Done,
@@ -81,6 +81,12 @@ impl Standing {
             TaskExecutionStatus::Pending => Self::Queued,
             _ => Self::Paused,
         }
+    }
+
+    // A row that is waiting on a person rather than on itself, which is what a
+    // project's tab is counting: what the tab leads to is what its number counts.
+    pub(in crate::tui) fn wants_a_person(self) -> bool {
+        matches!(self, Self::NeedsYou | Self::ReadyToReview)
     }
 
     // The section a row is filed under on the list that shows everything: an update
@@ -422,6 +428,7 @@ struct Held {
 }
 
 fn rows(app: &App) -> Built {
+    let project = app.active_project_id();
     let taking_work = app.pressure.is_none();
     let filter = app
         .task_filter
@@ -430,7 +437,7 @@ fn rows(app: &App) -> Built {
         .unwrap_or(TaskFilter::Active);
     let mut done_hidden = 0;
     let mut entries: Vec<Held> = Vec::new();
-    for task in app.visible_tasks() {
+    for task in app.tasks_in(&project) {
         let summary = TaskSummary::of(task);
         let standing = Standing::of(&summary);
         if !filter.matches(standing) {
@@ -466,7 +473,7 @@ fn rows(app: &App) -> Built {
             held: TaskRef::Local(task.id.clone()),
         });
     }
-    for held in app.visible_remote_tasks() {
+    for held in app.remote_tasks_in(&project) {
         let summary = &held.summary;
         let standing = Standing::of(summary);
         if !filter.matches(standing) {
