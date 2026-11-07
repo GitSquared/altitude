@@ -7,6 +7,7 @@ use std::{error::Error as StdError, fmt, str::FromStr};
 mod activity;
 
 pub use activity::{Activity, ActivityKind};
+mod carbon;
 mod channel;
 
 mod limits;
@@ -14,9 +15,10 @@ pub mod mcp;
 mod providers;
 pub mod tool;
 mod usage;
+pub use carbon::estimate_micrograms;
 pub use limits::{AgentRefusal, AgentStanding, AgentWindow, AgentWindowReading};
 use providers::{ClaudeCode, PiCode};
-pub use usage::{AgentUsage, TaskUsage};
+pub use usage::{AgentUsage, TaskTokens, TaskUsage};
 
 pub const AGENTS: [AgentKind; 2] = [AgentKind::Pi, AgentKind::Claude];
 

@@ -14,7 +14,7 @@ use crate::{
     },
     tui::popups,
     tui::screens,
-    tui::widgets::format::money,
+    tui::widgets::format::{carbon, money},
 };
 
 use crate::tui::widgets::list;
@@ -180,6 +180,16 @@ impl App {
         } else {
             format!("~{}", money(usage.cost_usd_micros))
         })
+    }
+
+    pub(in crate::tui) fn signal_task_carbon(&self) -> Option<String> {
+        let usage = match self.signal_task() {
+            Some(task) => &task.facts.usage,
+            None => &self.signal_held()?.summary.usage,
+        };
+        // Unlike cost, a footprint does not care who pays for the run, so it shows
+        // for a subscription too. Nothing shows when no factor covered the model.
+        (usage.co2e_micrograms > 0).then(|| carbon(usage.co2e_micrograms))
     }
 
     pub(in crate::tui) fn signal_agent_label(&self) -> String {

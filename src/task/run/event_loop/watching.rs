@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-    agent::{AgentRefusal, TaskStreamDecoder},
+    agent::{AgentRefusal, TaskStreamDecoder, estimate_micrograms},
     isolation::{CommandEvent, CommandSession, IsolationEngine},
     task::mirror::review::Look,
     task::{
@@ -227,25 +227,32 @@ where
             },
             None => task,
         };
+        // The model is taken before the usage, because the footprint recorded with
+        // the usage is derived from the two together, and the model is a reading of
+        // the run like what it cost.
+        let model = stream.as_mut().and_then(|decoder| decoder.take_model());
         // What the run spent is recorded before anything is decided about it: a run
-        // that ends in a pause or a refusal has still cost what it cost.
+        // that ends in a pause or a refusal has still cost what it cost. The
+        // footprint is Altitude's estimate from the run's tokens and model, not a
+        // number the harness gave.
         let task = match stream.as_mut().and_then(|decoder| decoder.take_usage()) {
-            Some(usage) => match self
-                .service
-                .record(&task.id, &[TaskHistoryEvent::from(&usage)])
-                .await
-            {
-                Ok(task) => task,
-                Err(error) => {
-                    tracing::warn!(task_id = %task.id, %error, "could not record what a run cost");
-                    task
+            Some(mut usage) => {
+                usage.co2e_micrograms = estimate_micrograms(model.as_deref(), &usage.tokens);
+                match self
+                    .service
+                    .record(&task.id, &[TaskHistoryEvent::from(&usage)])
+                    .await
+                {
+                    Ok(task) => task,
+                    Err(error) => {
+                        tracing::warn!(task_id = %task.id, %error, "could not record what a run cost");
+                        task
+                    }
                 }
-            },
+            }
             None => task,
         };
-        // Which model a run used is decoded from its own stream now that no report
-        // turn names it, and it is a reading of the run like what it cost.
-        let task = match stream.as_mut().and_then(|decoder| decoder.take_model()) {
+        let task = match model {
             Some(model) => match self
                 .service
                 .record(&task.id, &[TaskHistoryEvent::AgentModelObserved { model }])

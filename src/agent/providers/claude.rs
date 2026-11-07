@@ -1,7 +1,7 @@
 use crate::agent::{
     AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, AgentKind, AgentRefusal, AgentStanding,
-    AgentUsage, AgentWindow, AgentWindowReading, TaskProgressDecoder, TaskStreamDecoder, TaskUsage,
-    activity, system_prompt,
+    AgentUsage, AgentWindow, AgentWindowReading, TaskProgressDecoder, TaskStreamDecoder,
+    TaskTokens, TaskUsage, activity, system_prompt,
 };
 use crate::isolation::{
     DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand, shell_quote,
@@ -15,6 +15,10 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct ClaudeCode;
 
+fn token_count(usage: &Value, field: &str) -> i64 {
+    usage.get(field).and_then(Value::as_i64).unwrap_or_default()
+}
+
 pub struct ClaudeStream {
     pending: String,
     received_result: bool,
@@ -25,6 +29,7 @@ pub struct ClaudeStream {
     // says whether the refusal is the end.
     limit: Option<Value>,
     cost_usd_micros: i64,
+    tokens: TaskTokens,
     // Claude Code counts the conversation, not the run, so what this run spent is
     // what the conversation has reached less what it had reached before.
     recorded: TaskUsage,
@@ -98,6 +103,7 @@ impl ClaudeStream {
             error: None,
             limit: None,
             cost_usd_micros: 0,
+            tokens: TaskTokens::default(),
             recorded: recorded.clone(),
         }
     }
@@ -128,6 +134,16 @@ impl ClaudeStream {
                         .and_then(|usage| usage.keys().next().map(String::as_str))
                 })
                 .map(str::to_owned);
+            // The result counts the whole conversation, like its cost, so this is
+            // the running total a later run subtracts from.
+            if let Some(usage) = message.get("usage") {
+                self.tokens = TaskTokens {
+                    input: token_count(usage, "input_tokens"),
+                    cache_write: token_count(usage, "cache_creation_input_tokens"),
+                    cache_read: token_count(usage, "cache_read_input_tokens"),
+                    output: token_count(usage, "output_tokens"),
+                };
+            }
             if message.get("is_error").and_then(Value::as_bool) == Some(true) {
                 // What Claude said is the best account of why the turn ended, so the
                 // operator gets it rather than a sentence about an exit code. A login
@@ -196,9 +212,11 @@ impl TaskStreamDecoder for ClaudeStream {
             cost_usd_micros: self.cost_usd_micros,
             cost_from_provider: false,
             is_charged: self.is_charged(),
+            tokens: self.tokens,
+            co2e_micrograms: 0,
         }
         .since(&self.recorded);
-        (!usage.is_unpriced()).then_some(usage)
+        (!usage.is_unused()).then_some(usage)
     }
 
     fn refusal(&mut self) -> Option<AgentRefusal> {

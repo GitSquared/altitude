@@ -2,7 +2,7 @@ use chrono::{Local, SecondsFormat};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use crate::agent::{AgentKind, AgentStanding, AgentUsage, AgentWindow, TaskUsage};
+use crate::agent::{AgentKind, AgentStanding, AgentUsage, AgentWindow, TaskTokens, TaskUsage};
 use crate::id;
 use crate::project::Project;
 use crate::tracker::{IssueReference, IssueSnapshot, TrackerKind, TrackerStatus};
@@ -452,6 +452,10 @@ pub enum TaskHistoryEvent {
         cost_usd_micros: i64,
         cost_from_provider: bool,
         is_charged: bool,
+        #[serde(default)]
+        tokens: TaskTokens,
+        #[serde(default)]
+        co2e_micrograms: i64,
     },
     AgentStandingReported {
         standing: AgentStanding,
@@ -531,6 +535,8 @@ impl From<&AgentUsage> for TaskHistoryEvent {
             cost_usd_micros: usage.cost_usd_micros,
             cost_from_provider: usage.cost_from_provider,
             is_charged: usage.is_charged,
+            tokens: usage.tokens,
+            co2e_micrograms: usage.co2e_micrograms,
         }
     }
 }

@@ -209,8 +209,8 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     let [header_area, body] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
     // The screen is the task, not only the thread: it says which task it is the way the
-    // list row does, and what the account running it costs, which the pane under this
-    // has no row to spare for.
+    // list row does, and what the account running it costs and is estimated to emit,
+    // which the pane under this has no row to spare for.
     let mut identification = vec![app.signal_task_title()];
     identification.extend(app.signal_task_identification());
     let detail = identification
@@ -220,6 +220,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         .join(" \u{b7} ");
     let mut standing = vec![app.signal_agent_label()];
     standing.extend(app.signal_task_spend());
+    standing.extend(app.signal_task_carbon());
     let note = standing.join(" \u{b7} ");
     header::draw(
         frame,

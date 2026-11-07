@@ -110,7 +110,15 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
                                     THEN json('true') ELSE json('false') END,
          -- And it is charged for only if every part of it was, for the same reason.
          'is_charged', CASE WHEN coalesce(MIN(json_extract(payload, '$.data.is_charged')), 0) = 1
-                            THEN json('true') ELSE json('false') END)
+                            THEN json('true') ELSE json('false') END,
+         -- The tokens are the harness's counts, summed the way the cost is; the
+         -- footprint is Altitude's estimate, summed because every run recorded one.
+         'tokens', json_object(
+             'input', coalesce(SUM(json_extract(payload, '$.data.tokens.input')), 0),
+             'cache_write', coalesce(SUM(json_extract(payload, '$.data.tokens.cache_write')), 0),
+             'cache_read', coalesce(SUM(json_extract(payload, '$.data.tokens.cache_read')), 0),
+             'output', coalesce(SUM(json_extract(payload, '$.data.tokens.output')), 0)),
+         'co2e_micrograms', coalesce(SUM(json_extract(payload, '$.data.co2e_micrograms')), 0))
      FROM task_event_logs
      WHERE task_id = tasks.id
        AND event_type = 'agent_usage_reported') AS usage,

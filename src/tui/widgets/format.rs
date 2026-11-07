@@ -76,3 +76,17 @@ pub fn money(cost_usd_micros: i64) -> String {
         format!("${dollars:.4}")
     }
 }
+
+// A task's footprint runs from milligrams in one turn to kilograms over a long one,
+// so the unit follows the size the way the precision follows the dollars. Always an
+// estimate, and the tilde says so.
+pub fn carbon(co2e_micrograms: i64) -> String {
+    let grams = co2e_micrograms as f64 / 1_000_000.0;
+    if grams >= 1_000.0 {
+        format!("~{:.1} kgCO₂", grams / 1_000.0)
+    } else if grams >= 1.0 {
+        format!("~{grams:.1} gCO₂")
+    } else {
+        format!("~{:.0} mgCO₂", grams * 1_000.0)
+    }
+}

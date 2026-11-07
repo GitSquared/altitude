@@ -39,6 +39,10 @@ const DEFAULT_MCP: &str = r#"{
 #[derive(Clone)]
 pub struct PiCode;
 
+fn token_count(usage: &Value, field: &str) -> i64 {
+    usage.get(field).and_then(Value::as_i64).unwrap_or_default()
+}
+
 pub struct PiStream {
     pending: String,
     model: Option<String>,
@@ -93,6 +97,12 @@ impl PiStream {
                         .pointer("/cost/totalFromProvider")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
+                    // Pi names its token fields the way it names them in its own
+                    // accounting; the run's totals are their sum over its messages.
+                    self.spent.tokens.input += token_count(usage, "input");
+                    self.spent.tokens.cache_write += token_count(usage, "cacheWrite");
+                    self.spent.tokens.cache_read += token_count(usage, "cacheRead");
+                    self.spent.tokens.output += token_count(usage, "output");
                 }
                 let stop_reason = message
                     .and_then(|message| message.get("stopReason"))
@@ -121,7 +131,7 @@ impl PiStream {
 
 impl TaskStreamDecoder for PiStream {
     fn take_usage(&mut self) -> Option<AgentUsage> {
-        (!self.spent.is_unpriced()).then(|| self.spent.clone())
+        (!self.spent.is_unused()).then(|| self.spent.clone())
     }
 
     fn failure_message(&mut self) -> Option<&str> {
