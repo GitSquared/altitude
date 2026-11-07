@@ -363,6 +363,22 @@ impl TaskStore {
                 "this task has already been accepted",
             ));
         }
+        // A review is one question with one answer — this milestone, to you — so a second
+        // one while the first is still open asks it twice. Whether the operator has
+        // answered the first does not change that: an answered review is still the review
+        // they are looking at, and what has changed belongs in it.
+        if kind == TaskOperatorSignalKind::InReview
+            && self
+                .unresolved_signal_threads(task_id)
+                .await?
+                .iter()
+                .any(|thread| thread.kind == TaskOperatorSignalKind::InReview)
+        {
+            return Err(TaskError::OperationRejected(
+                "a review of this task is already open; reply in it with what changed instead \
+                 of asking for another",
+            ));
+        }
         // One request is one thread. A second question while the first is open is
         // the machine being asked to hold two waits at once, and it costs the
         // operator a second thread to read instead of an answer to the first.
