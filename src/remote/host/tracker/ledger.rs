@@ -99,6 +99,14 @@ pub(super) struct Cursor {
     pub(super) last_status: Option<TrackerStatus>,
     #[serde(default)]
     pub(super) unhooked_at: Option<i64>,
+    // What this machine has already said in the session, kept where the rest of the
+    // report's bookkeeping lives: the number names the next activity so a restart does
+    // not reuse an id Linear already has, and the line is what makes a restart not say
+    // the same thing twice.
+    #[serde(default)]
+    pub(super) activities: u32,
+    #[serde(default)]
+    pub(super) activity_line: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

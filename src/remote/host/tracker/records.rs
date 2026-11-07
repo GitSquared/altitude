@@ -117,6 +117,35 @@ impl RemoteTracker {
             .unwrap_or(false)
     }
 
+    // What has been said in this task's session so far: the count its activities are
+    // named by, and the last line, which is what a pass compares against.
+    pub(super) fn activity_state(&self, task_id: &str) -> (u32, Option<String>) {
+        self.lock()
+            .ok()
+            .and_then(|ledger| {
+                ledger
+                    .cursors
+                    .iter()
+                    .find(|report| report.task_id == task_id)
+                    .map(|report| (report.activities, report.activity_line.clone()))
+            })
+            .unwrap_or((0, None))
+    }
+
+    pub(super) fn record_activity(
+        &self,
+        task_id: &str,
+        published: u32,
+        line: String,
+    ) -> Result<(), String> {
+        self.mutate(|ledger| {
+            if let Some(report) = ledger.cursors.iter_mut().find(|r| r.task_id == task_id) {
+                report.activities = published;
+                report.activity_line = Some(line);
+            }
+        })
+    }
+
     pub(super) fn advance_cursor(&self, task_id: &str, cursor: usize) -> Result<(), String> {
         self.mutate(|ledger| {
             if let Some(report) = ledger.cursors.iter_mut().find(|r| r.task_id == task_id) {

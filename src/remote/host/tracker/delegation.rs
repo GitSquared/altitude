@@ -444,6 +444,8 @@ impl RemoteTracker {
             failed_at: None,
             failed_attempts: 0,
             unhooked_at: None,
+            activities: 0,
+            activity_line: None,
         })?;
         // New work on an issue is a new cycle: whatever ending was written for the
         // last task there is not this one's.

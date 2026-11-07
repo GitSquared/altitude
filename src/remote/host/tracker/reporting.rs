@@ -25,11 +25,6 @@ pub(super) struct QueueNotice {
 
 // The last line published for a task, and how many before it: the count is what
 // keeps two identical lines apart when the agent says the same thing twice.
-pub(super) struct ActivityNotice {
-    line: String,
-    published: usize,
-}
-
 impl RemoteTracker {
     pub async fn start_reporting(
         &self,
@@ -72,6 +67,8 @@ impl RemoteTracker {
             failed_at: None,
             failed_attempts: 0,
             unhooked_at: None,
+            activities: 0,
+            activity_line: None,
         })?;
         // Work started on an issue is a new cycle: whatever ending was written for
         // the last task there does not bind this one, and the operator asked for
@@ -272,18 +269,19 @@ impl RemoteTracker {
             let Some(report) = self.report_for_task(&task.task_id) else {
                 continue;
             };
-            let published = {
-                let notices = self
-                    .activity_notices
-                    .lock()
-                    .expect("activity notices lock poisoned");
-                match notices.get(&task.task_id) {
-                    Some(notice) if notice.line == activity.text => continue,
-                    Some(notice) => notice.published.saturating_add(1),
-                    None => 1,
-                }
-            };
-            let activity_id = stable_id(&report.task_id, &format!("activity-{published}"));
+            // The count and the last line are the report's own bookkeeping rather than
+            // this process's: naming an activity from a counter kept in memory meant a
+            // restart reused ids Linear already had, and every publish after it was
+            // accepted as a duplicate of something nobody could see.
+            let (said, last_line) = self.activity_state(&task.task_id);
+            if last_line.as_deref() == Some(activity.text.as_str()) {
+                continue;
+            }
+            let published = said.saturating_add(1);
+            let activity_id = stable_id(
+                &report.task_id,
+                &format!("activity-{}:{published}", self.started_at_ms),
+            );
             let published_activity = match activity.kind {
                 ActivityKind::Thinking => {
                     self.config
@@ -312,16 +310,9 @@ impl RemoteTracker {
                 tracing::debug!(task = %task.task_id, %error, "could not say what an agent is doing");
                 continue;
             }
-            self.activity_notices
-                .lock()
-                .expect("activity notices lock poisoned")
-                .insert(
-                    task.task_id.clone(),
-                    ActivityNotice {
-                        line: activity.text,
-                        published,
-                    },
-                );
+            if let Err(error) = self.record_activity(&task.task_id, published, activity.text) {
+                tracing::warn!(task = %task.task_id, %error, "could not record what was said in a session");
+            }
         }
     }
 

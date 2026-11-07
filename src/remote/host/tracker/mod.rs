@@ -117,14 +117,16 @@ pub enum Start {
 }
 
 use intake::webhook as intake_webhook;
-use reporting::{ActivityNotice, QueueNotice};
+use reporting::QueueNotice;
 
 pub struct RemoteTracker {
     config: RemoteTrackerConfig,
     queue_notices: Mutex<HashMap<String, QueueNotice>>,
-    activity_notices: Mutex<HashMap<String, ActivityNotice>>,
     ledger: Mutex<Ledger>,
     notify: Notify,
+    // When this process started. It names the activities it publishes, so a restart
+    // cannot reuse an id Linear already has and be folded into something nobody saw.
+    started_at_ms: i64,
     refusals: Mutex<HashMap<String, String>>,
     delivered: AtomicBool,
 }
@@ -350,10 +352,10 @@ impl RemoteTracker {
         Ok(Arc::new(Self {
             config,
             queue_notices: Mutex::new(HashMap::new()),
-            activity_notices: Mutex::new(HashMap::new()),
             ledger: Mutex::new(ledger),
             refusals: Mutex::new(HashMap::new()),
             notify: Notify::new(),
+            started_at_ms: now_ms(),
             delivered: AtomicBool::new(false),
         }))
     }
