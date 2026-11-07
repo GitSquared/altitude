@@ -193,6 +193,13 @@ impl TaskFilter {
     fn files_reporting_with_work(self) -> bool {
         matches!(self, Self::All | Self::Active)
     }
+
+    // A filter of one status has said which section the rows are in, so a heading
+    // would only repeat its pill. The filters that name no section always say which
+    // one each row is in, even when the list holds a single one.
+    fn wants_sections(self) -> bool {
+        matches!(self, Self::All | Self::Active)
+    }
 }
 
 // How rows are ordered inside their section. The sections themselves are the
@@ -524,15 +531,15 @@ fn rows(app: &App) -> Built {
     for held in &entries {
         *counts.entry(held.standing).or_default() += 1;
     }
-    // A heading says which group a row is in. When the filter has left one group
-    // there is nothing to say it apart from, so the rows stand on their own.
-    let grouped = counts.len() > 1;
+    // A heading says which section a row is in, which is the only thing saying it
+    // under a filter that names no section.
+    let sectioned = filter.wants_sections();
     let mut rows = Vec::with_capacity(entries.len());
     let mut order = Vec::with_capacity(entries.len());
     let mut previous: Option<Standing> = None;
     for held in entries {
         let mut row = held.row;
-        if grouped && previous != Some(held.standing) {
+        if sectioned && previous != Some(held.standing) {
             previous = Some(held.standing);
             let count = counts.get(&held.standing).copied().unwrap_or(0);
             row = row.heading(
