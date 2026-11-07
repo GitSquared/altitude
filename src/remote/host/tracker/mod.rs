@@ -378,10 +378,11 @@ impl RemoteTracker {
     // a queue notice that is worth repeating — are the only reasons to do anything,
     // and until one of them arrives this loop waits.
     pub async fn run(self: Arc<Self>, host: Arc<dyn Host>) {
-        // The one thing that is not an event: a delegation made while this machine was
-        // not listening left no webhook to find, so the ones the tracker still holds
-        // are looked for once, on the way up.
+        // The two things that are not events, both of them once: a delegation made
+        // while this machine was not listening left no webhook to find, and a session a
+        // previous run was talking into may have been finished with since.
         self.recover_delegations(host.as_ref()).await;
+        self.verify_sessions(host.as_ref()).await;
         loop {
             let due = self.pass(host.as_ref()).await;
             let done_at = Instant::now();

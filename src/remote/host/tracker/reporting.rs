@@ -102,17 +102,25 @@ impl RemoteTracker {
         // replaces another on the same issue carries it on. A delegation's own session
         // is where the operator clicked, so it is used the first time and only when the
         // issue has nothing to carry.
-        let session_id = match self.session_for_issue(&issue.id) {
-            Some(session) => session,
-            None => match delegation {
-                Some(delegation) => delegation,
-                None => self
-                    .config
-                    .automation
-                    .create_session_on_issue(&issue.id)
-                    .await
-                    .map_err(|error| error.to_string())?,
+        let candidate = match self.session_for_issue(&issue.id) {
+            Some(session) => Some(session),
+            None => delegation,
+        };
+        let session_id = match candidate {
+            // One the operator or Linear has finished with takes nothing more: asking
+            // first is the only way to know, because Linear accepts the activity and
+            // then shows it nowhere.
+            Some(candidate) => match self.config.automation.session_can_receive(&candidate).await {
+                Ok(true) => candidate,
+                Ok(false) => self.open_session(&issue.id).await?,
+                // A tracker that cannot be asked is not a reason to report nowhere, and
+                // the session is as likely to be usable as not.
+                Err(error) => {
+                    tracing::debug!(session = %candidate, %error, "could not ask whether a session can receive");
+                    candidate
+                }
             },
+            None => self.open_session(&issue.id).await?,
         };
         self.upsert_report(Cursor {
             issue_id: issue.id.clone(),
@@ -232,6 +240,67 @@ impl RemoteTracker {
         }
     }
 
+    async fn open_session(&self, issue_id: &str) -> Result<String, String> {
+        self.config
+            .automation
+            .create_session_on_issue(issue_id)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    // A report already in play when this machine starts is checked once, on the way up:
+    // Linear accepts activity for a session it has since finished with and shows it
+    // nowhere, so a report can look healthy and be talking into a thread nobody has.
+    // Checking on every pass would be asking Linear on a clock; asking once is enough
+    // for the session a previous run left behind.
+    pub(super) async fn verify_sessions(&self, host: &dyn Host) {
+        for report in self.cursors().into_iter().filter(|report| !report.finished) {
+            match self
+                .config
+                .automation
+                .session_can_receive(&report.session)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => self.replace_session(host, &report).await,
+                Err(error) => {
+                    tracing::debug!(session = %report.session, %error, "could not ask whether a session can receive");
+                }
+            }
+        }
+    }
+
+    async fn replace_session(&self, host: &dyn Host, report: &Cursor) {
+        let session = match self.open_session(&report.issue_id).await {
+            Ok(session) => session,
+            Err(error) => {
+                tracing::warn!(task = %report.task_id, %error, "could not open a session for a report");
+                return;
+            }
+        };
+        if let Err(error) = self.move_session(&report.task_id, &session) {
+            tracing::warn!(task = %report.task_id, %error, "could not move a report to a new session");
+            return;
+        }
+        let agent = host
+            .session_agent(report.task_id.clone())
+            .await
+            .ok()
+            .flatten();
+        if let Err(error) = self
+            .summarise_session(&session, &report.tracker_user_id, agent.as_deref())
+            .await
+        {
+            tracing::warn!(session = %session, %error, "could not name a new session");
+        }
+        tracing::info!(
+            task = %report.task_id,
+            issue = %report.issue_id,
+            session = %session,
+            "a session had gone away, so the report has a new one"
+        );
+    }
+
     // A session can go away under a report — dismissed in Linear, or closed once the
     // work it carried ended — and a report writing into a thread nobody can read is the
     // silence this whole mechanism exists to prevent. Opening one on the issue and
@@ -243,41 +312,9 @@ impl RemoteTracker {
             .into_iter()
             .filter(|report| report.session_broken && !report.finished)
         {
-            let session = match self
-                .config
-                .automation
-                .create_session_on_issue(&report.issue_id)
-                .await
-            {
-                Ok(session) => session,
-                Err(error) => {
-                    // The flag stays, so the next pass asks again rather than the
-                    // report going quiet for good.
-                    tracing::warn!(task = %report.task_id, %error, "could not open a session for a report");
-                    continue;
-                }
-            };
-            if let Err(error) = self.move_session(&report.task_id, &session) {
-                tracing::warn!(task = %report.task_id, %error, "could not move a report to a new session");
-                continue;
-            }
-            let agent = host
-                .session_agent(report.task_id.clone())
-                .await
-                .ok()
-                .flatten();
-            if let Err(error) = self
-                .summarise_session(&session, &report.tracker_user_id, agent.as_deref())
-                .await
-            {
-                tracing::warn!(session = %session, %error, "could not name a new session");
-            }
-            tracing::info!(
-                task = %report.task_id,
-                issue = %report.issue_id,
-                session = %session,
-                "a session had gone away, so the report has a new one"
-            );
+            // A move that fails leaves the flag, so the next pass asks again rather
+            // than the report going quiet for good.
+            self.replace_session(host, &report).await;
         }
     }
 

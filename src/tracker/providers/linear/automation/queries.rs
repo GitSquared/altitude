@@ -35,6 +35,9 @@ pub(super) const ISSUE_STATES_QUERY: &str = "query IssueStates($id: String!) { \
     issue(id: $id) { id team { id organization { id } \
     states(first: 250) { nodes { id name type position } } } } }";
 
+pub(super) const SESSION_STATE_QUERY: &str = "query SessionState($id: String!) { \
+    agentSession(id: $id) { status dismissedAt } }";
+
 pub(super) const CREATE_ACTIVITY_MUTATION: &str = "mutation CreateAgentActivity($input: AgentActivityCreateInput!) { \
     agentActivityCreate(input: $input) { success agentActivity { id } } }";
 

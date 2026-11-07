@@ -93,6 +93,25 @@ impl LinearAutomation {
             .ok_or_else(|| TrackerError::new("Linear created the agent session but returned no id"))
     }
 
+    // Whether this session can still be spoken in. Linear accepts an activity for one
+    // that is complete or dismissed and then shows it nowhere, so asking first is the
+    // only way to know: a report writing into a session nobody can read is the silence
+    // all of this exists to prevent.
+    pub async fn session_can_receive(&self, session_id: &str) -> Result<bool, TrackerError> {
+        let data = self
+            .graphql(SESSION_STATE_QUERY, json!({ "id": session_id }))
+            .await?;
+        let session = data
+            .get("agentSession")
+            .ok_or_else(|| TrackerError::new("Linear did not return that session"))?;
+        let dismissed = session.get("dismissedAt").is_some_and(|at| !at.is_null());
+        let status = session
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        Ok(!dismissed && matches!(status, "pending" | "active" | "awaitingInput"))
+    }
+
     pub async fn create_activity(
         &self,
         agent_session_id: &str,
