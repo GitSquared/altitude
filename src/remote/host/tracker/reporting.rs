@@ -171,23 +171,27 @@ impl RemoteTracker {
         }
     }
 
-    pub(super) async fn report_queue_standing(&self, host: &dyn Host) {
+    // Answers when a line that says nothing new becomes worth saying again, which is
+    // the only clock this pass keeps: a task waiting in a queue would otherwise say
+    // nothing at all until it moved.
+    pub(super) async fn report_queue_standing(&self, host: &dyn Host) -> Option<Instant> {
+        let mut next = None;
         let bound = match host.bound_tasks().await {
             Ok(bound) => bound,
             Err(error) => {
                 tracing::debug!(%error, "could not read bound tasks to report queue standing");
-                return;
+                return None;
             }
         };
         // A machine reporting on nothing reads the queue not at all.
         if bound.is_empty() {
-            return;
+            return None;
         }
         let standings = match host.queue_standings().await {
             Ok(standings) => standings,
             Err(error) => {
                 tracing::debug!(%error, "could not read the queue to report where tasks stand");
-                return;
+                return None;
             }
         };
         for task in bound {
@@ -205,6 +209,9 @@ impl RemoteTracker {
             let state = queue_notice_state(standing);
             let body = queue_notice_line(&state, since);
             if !self.queue_notice_is_due(&task.task_id, standing.ahead, &state) {
+                if let Some(at) = self.queue_notice_due_at(&task.task_id, standing.ahead, &state) {
+                    next = Some(next.map_or(at, |held: Instant| held.min(at)));
+                }
                 continue;
             }
             let stamp = now_ms();
@@ -234,6 +241,7 @@ impl RemoteTracker {
                     },
                 );
         }
+        next
     }
 
     // What the agent is saying and thinking goes to the session as it happens: the
@@ -302,6 +310,19 @@ impl RemoteTracker {
         }
     }
 
+    // When a line that says what the last one said becomes worth saying again.
+    fn queue_notice_due_at(&self, task_id: &str, ahead: usize, state: &str) -> Option<Instant> {
+        let notices = self
+            .queue_notices
+            .lock()
+            .expect("queue notices lock poisoned");
+        let last = notices.get(task_id)?;
+        if last.state != state {
+            return None;
+        }
+        Some(last.at + Self::queue_notice_interval(ahead))
+    }
+
     pub(super) fn queue_notice_is_due(&self, task_id: &str, ahead: usize, state: &str) -> bool {
         let notices = self
             .queue_notices
@@ -317,12 +338,15 @@ impl RemoteTracker {
         }
         // The age is the only thing the line says while nothing moves, and it is
         // worth a refresh on its own for as long as a task is the next one up.
-        let interval = if ahead == 0 {
+        last.at.elapsed() >= Self::queue_notice_interval(ahead)
+    }
+
+    fn queue_notice_interval(ahead: usize) -> Duration {
+        if ahead == 0 {
             NEXT_UP_NOTICE_INTERVAL
         } else {
             QUEUE_NOTICE_INTERVAL
-        };
-        last.at.elapsed() >= interval
+        }
     }
 
     pub(super) async fn publish_signal(

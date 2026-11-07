@@ -4,7 +4,7 @@ use std::{
     io,
     net::SocketAddr,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::version::VERSION;
@@ -19,8 +19,8 @@ use crate::remote::send::IncomingTransfers;
 
 use tokio::{
     signal::unix::{SignalKind, signal},
-    sync::watch,
-    time::{MissedTickBehavior, interval, timeout},
+    sync::{Notify, watch},
+    time::{self, timeout},
 };
 
 use crate::{
@@ -42,7 +42,7 @@ use crate::{
 };
 
 use super::tracker_host::{PushedTrackers, connect_tracker};
-use super::{OwnTasks, Watchers};
+use super::{OwnTasks, Transfers, Watchers};
 use crate::remote::host::tracker;
 use crate::remote::host::{admin, install, tracker_setup};
 
@@ -221,11 +221,24 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
             }
         });
     }
+    let logout_sync = Arc::new(Notify::new());
     {
         let watchers = Arc::clone(&watchers);
         let tasks = Arc::clone(&task_loop);
+        // A task's history moving is what the tracker has to look at, so it is told
+        // here rather than left to ask on a clock of its own.
+        let tracker = linear_runtime
+            .as_ref()
+            .map(|runtime| Arc::clone(&runtime.tracker));
+        // The path that reports through the operator's own login has no tracker to
+        // wake, so it gets told the same way.
+        let sync_signal = Arc::clone(&logout_sync);
         tokio::spawn(async move {
             while let Some(update) = updates.recv().await {
+                if let Some(tracker) = &tracker {
+                    tracker.wake();
+                }
+                sync_signal.notify_one();
                 match update {
                     // A remote host has no operator in front of it, so a shell opened
                     // in one of its sandboxes is not its to show.
@@ -273,10 +286,10 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     if reports_through_pushed_logins {
         let syncing = Arc::clone(&task_loop);
         tokio::spawn(async move {
-            let mut tick = interval(Duration::from_secs(10));
-            tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            // What a task's history added is what has to be reported, so the queue is
+            // drained when it moves rather than every ten seconds whether it did.
             loop {
-                tick.tick().await;
+                logout_sync.notified().await;
                 if let Err(error) = syncing.service().sync_tracker().await {
                     tracing::warn!(%error, "tracker updates remain queued");
                 }
@@ -289,7 +302,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         tasks: task_loop,
         incoming,
         preparation_lock: Arc::new(AsyncMutex::new(())),
-        activity: Arc::new(Mutex::new(HashMap::new())),
+        transfers: Arc::new(Transfers::new()),
         collecting: Arc::new(Mutex::new(HashMap::new())),
         watchers,
         read_slots: Arc::new(Semaphore::new(4)),
@@ -401,14 +414,18 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
 
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
-    // A transfer nobody is reading is a task nobody is running, and the only
-    // thing that can tell is the machine holding it.
-    let mut transfers = interval(Duration::from_secs(30));
-    transfers.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    // A transfer nobody is reading is a task nobody is running, and the only thing
+    // that can tell is the machine holding it. It knows the moment a transfer in
+    // flight would be stale, so that is what this waits for: no transfer, no wait.
+    let mut transfers = host.watch_transfers();
     let mut is_ready = false;
     let result = loop {
+        let stale_at = *transfers.borrow_and_update();
         tokio::select! {
-            _ = transfers.tick(), if is_ready => host.release_stalled_transfers().await,
+            _ = time::sleep_until(stale_at.unwrap_or_else(Instant::now).into()), if stale_at.is_some() => {
+                host.release_stalled_transfers().await;
+            }
+            _ = transfers.changed() => {}
             result = &mut preparation, if !is_ready => match result {
                 Ok(()) => is_ready = true,
                 Err(error) => {

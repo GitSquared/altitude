@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     path::Path,
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime},
+    time::SystemTime,
 };
 
 use crate::task::tasks_waiting_for_room;
@@ -12,7 +12,10 @@ use crate::task::{TaskExecutionPauseReason, TaskExecutionStatus};
 use iroh::EndpointId;
 use sha2::{Digest, Sha256};
 
-use tokio::{net::TcpListener, time::interval};
+use tokio::{
+    net::TcpListener,
+    time::{self, Duration as TokioDuration},
+};
 
 use crate::{
     config::{Config, InstallationIdentity, LinearSettings},
@@ -90,9 +93,10 @@ pub(super) async fn connect_tracker(
     let path = credentials_path.to_owned();
     let refreshed_automation = automation.clone();
     tokio::spawn(async move {
-        let mut tick = interval(Duration::from_secs(60));
+        // The token says when it expires, so renewing it is a moment to wait for
+        // rather than a question to ask every minute.
         loop {
-            tick.tick().await;
+            time::sleep(credentials.refresh_in()).await;
             match credentials.refresh_if_needed(&settings, &path).await {
                 Ok(true) => {
                     if let Err(error) =
@@ -102,7 +106,12 @@ pub(super) async fn connect_tracker(
                     }
                 }
                 Ok(false) => {}
-                Err(error) => tracing::warn!(%error, "Linear login refresh remains queued"),
+                Err(error) => {
+                    tracing::warn!(%error, "Linear login refresh remains queued");
+                    // A refresh that failed did not move the expiry, so the next wait
+                    // would be no wait at all.
+                    time::sleep(TokioDuration::from_secs(60)).await;
+                }
             }
         }
     });

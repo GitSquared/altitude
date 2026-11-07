@@ -10,6 +10,7 @@ use crate::{
     },
 };
 use std::collections::HashSet;
+use std::time::Instant;
 
 use super::*;
 
@@ -67,9 +68,15 @@ impl RemoteTracker {
         })
     }
 
-    pub(super) async fn process_deliveries(&self, host: &dyn Host) {
+    // Answers when the next delivery is due to be tried again, if one is waiting on a
+    // retry rather than on this machine doing something.
+    pub(super) async fn process_deliveries(&self, host: &dyn Host) -> Option<Instant> {
+        let mut retry = None;
         for delivery in self.pending() {
             if delivery.next_attempt_at_ms > now_ms() {
+                let at = Instant::now()
+                    + Duration::from_millis((delivery.next_attempt_at_ms - now_ms()) as u64);
+                retry = Some(retry.map_or(at, |held: Instant| held.min(at)));
                 continue;
             }
             match self.apply_delivery(&delivery.event, host).await {
@@ -83,9 +90,11 @@ impl RemoteTracker {
                     if let Err(persist_error) = self.defer_delivery(&delivery.key) {
                         tracing::error!(delivery = %delivery.key, %persist_error, "could not record a deferred Linear delivery");
                     }
+                    retry = Some(Instant::now() + RETRY);
                 }
             }
         }
+        retry
     }
 
     pub(super) async fn apply_delivery(

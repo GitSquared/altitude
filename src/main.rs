@@ -1,9 +1,8 @@
-use std::{error::Error, io, process::ExitCode, sync::Arc, time::Duration};
+use std::{error::Error, io, process::ExitCode, sync::Arc};
 
 use tokio::{
     signal::unix::{SignalKind, signal},
-    sync::mpsc,
-    time::{MissedTickBehavior, interval},
+    sync::{Notify, mpsc},
 };
 
 use clap::Parser;
@@ -229,17 +228,22 @@ async fn client() -> Result<(), Box<dyn Error>> {
                 tracing::warn!(%error, "an outgoing transfer is still waiting");
             }
         });
-        let syncing = tasks.clone();
-        let tracker_sync = tokio::spawn(async move {
-            let mut tick = interval(Duration::from_secs(10));
-            tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-            loop {
-                tick.tick().await;
-                if let Err(error) = syncing.sync_tracker().await {
-                    tracing::warn!(%error, "tracker updates remain queued");
+        // What a task's history holds is what the tracker has to be told, so the queue
+        // is drained when the history moves. Once on the way up first, for whatever
+        // was queued before this machine started.
+        let tracker_wake = Arc::new(Notify::new());
+        let tracker_sync = {
+            let syncing = tasks.clone();
+            let wake = Arc::clone(&tracker_wake);
+            tokio::spawn(async move {
+                loop {
+                    if let Err(error) = syncing.sync_tracker().await {
+                        tracing::warn!(%error, "tracker updates remain queued");
+                    }
+                    wake.notified().await;
                 }
-            }
-        });
+            })
+        };
         let (watched, watched_tasks) = mpsc::unbounded_channel();
         let result = tui::run(
             &mut terminal,
@@ -259,6 +263,7 @@ async fn client() -> Result<(), Box<dyn Error>> {
             tui::Feeds {
                 task_execution: task_execution_updates,
                 watched_tasks,
+                tracker_sync: Arc::clone(&tracker_wake),
             },
         )
         .await;

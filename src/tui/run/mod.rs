@@ -1,5 +1,6 @@
 use std::{
     fs, io,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -16,7 +17,7 @@ use ratatui::{DefaultTerminal, buffer::Buffer, layout::Rect, widgets::Clear};
 use tachyonfx::EffectManager;
 use tokio::{
     signal::unix::Signal,
-    sync::{broadcast, mpsc},
+    sync::{Notify, broadcast, mpsc},
     task::spawn_blocking,
     time,
 };
@@ -62,6 +63,10 @@ struct EventReplies<'a> {
 pub struct Feeds {
     pub task_execution: mpsc::UnboundedReceiver<TaskExecutionUpdate>,
     pub watched_tasks: mpsc::UnboundedReceiver<WatchedTasks>,
+    // A task's history moving is also what the tracker back here has to report, and
+    // this is where that is noticed: the queue is drained because something happened,
+    // not because a clock says so.
+    pub tracker_sync: Arc<Notify>,
 }
 
 pub async fn run<E>(
@@ -136,6 +141,7 @@ where
     let Feeds {
         task_execution: mut task_execution_updates,
         watched_tasks: mut watched,
+        tracker_sync,
     } = feeds;
     // Ports a sandbox makes reachable while its terminal is open are said on that
     // terminal's border, for a moment.
@@ -728,6 +734,7 @@ where
             }
             Some(update) = task_execution_updates.recv() => {
                 app.apply(update, terminal, &event_loop).await?;
+                tracker_sync.notify_one();
                 redraw = true;
             }
             notice = port_notices.recv() => {

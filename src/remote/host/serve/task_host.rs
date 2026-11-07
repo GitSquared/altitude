@@ -10,7 +10,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::{task::TaskExecutionPauseReason, vcs::now_ms};
+use crate::task::TaskExecutionPauseReason;
 use iroh::EndpointId;
 use tokio::{sync::watch, task::spawn_blocking};
 
@@ -167,7 +167,7 @@ impl TaskHost for OwnTasks {
         let tasks = self.tasks.clone();
         let config = self.config.clone();
         let lock = self.preparation_lock.clone();
-        let activity = Arc::clone(&self.activity);
+        let transfers = Arc::clone(&self.transfers);
         let collecting = Arc::clone(&self.collecting);
         Box::pin(async move {
             let _preparing = lock.lock().await;
@@ -193,10 +193,7 @@ impl TaskHost for OwnTasks {
             let handover = handover?;
             // Packaging is done, so the wait for the first piece starts now rather
             // than from when the task was staged.
-            activity
-                .lock()
-                .expect("transfer activity lock poisoned")
-                .insert(handover.transfer_id.clone(), now_ms());
+            transfers.moved(&handover.transfer_id);
             Ok(handover)
         })
     }
@@ -211,7 +208,7 @@ impl TaskHost for OwnTasks {
     ) -> BoxFuture<Result<Vec<u8>, String>> {
         let directory = self.transfer_directory(&transfer_id);
         let read_slots = Arc::clone(&self.read_slots);
-        let activity = Arc::clone(&self.activity);
+        let transfers = Arc::clone(&self.transfers);
         Box::pin(async move {
             if len == 0 || len > protocol::TRANSFER_PIECE_BYTES {
                 return Err("invalid transfer piece length".into());
@@ -228,10 +225,7 @@ impl TaskHost for OwnTasks {
             if prepared.recipient != peer.to_string() {
                 return Err("this transfer belongs to another recipient".into());
             }
-            activity
-                .lock()
-                .expect("transfer activity lock poisoned")
-                .insert(transfer_id.clone(), now_ms());
+            transfers.moved(&transfer_id);
             let filename = match part {
                 TransferPart::History => HISTORY_FILE,
                 TransferPart::Work => WORK_FILE,
@@ -378,6 +372,7 @@ impl TaskHost for OwnTasks {
         let directory = self.transfer_directory(&transfer_id);
         let tasks = Arc::clone(&self.tasks);
         let preparation_lock = Arc::clone(&self.preparation_lock);
+        let transfers = Arc::clone(&self.transfers);
         Box::pin(async move {
             let _preparing = preparation_lock.lock().await;
             let directory = directory?;
@@ -426,6 +421,8 @@ impl TaskHost for OwnTasks {
             for name in [WORK_FILE, TRANSCRIPT_FILE, HISTORY_FILE] {
                 let _ = fs::remove_file(directory.join(name));
             }
+            // It arrived, so there is no moment left at which it would be stale.
+            transfers.finished(&transfer_id);
             Ok(())
         })
     }

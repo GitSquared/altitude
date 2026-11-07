@@ -27,6 +27,10 @@ use crate::tracker::TrackerError;
 
 const TOKEN_URL: &str = "https://api.linear.app/oauth/token";
 
+// A token is renewed with time to spare, so a call that starts just before it expires
+// does not fail on the way out.
+const REFRESH_MARGIN_MS: i64 = 300_000;
+
 #[derive(Deserialize, Serialize)]
 pub struct AppCredentials {
     access_token: String,
@@ -78,12 +82,20 @@ impl AppCredentials {
         Ok(client)
     }
 
+    // How long until this login is due to be refreshed. A token says when it expires,
+    // so the moment it has to be renewed is known: nothing has to ask a clock every
+    // minute whether the moment has arrived.
+    pub fn refresh_in(&self) -> Duration {
+        let due_in = self.expires_at_ms - chrono::Utc::now().timestamp_millis() - REFRESH_MARGIN_MS;
+        Duration::from_millis(due_in.max(0) as u64)
+    }
+
     pub async fn refresh_if_needed(
         &mut self,
         settings: &LinearSettings,
         path: &Path,
     ) -> Result<bool, String> {
-        if self.expires_at_ms > chrono::Utc::now().timestamp_millis() + 300_000 {
+        if self.expires_at_ms > chrono::Utc::now().timestamp_millis() + REFRESH_MARGIN_MS {
             return Ok(false);
         }
         let secret = settings.client_secret()?;

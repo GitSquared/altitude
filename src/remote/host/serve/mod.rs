@@ -3,6 +3,7 @@ use std::{
     fs,
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use crate::{task::TaskExecutionPauseReason, vcs::now_ms};
@@ -40,7 +41,7 @@ struct OwnTasks {
     tasks: Arc<TaskEventLoop<MicrosandboxIsolation>>,
     incoming: IncomingTransfers,
     preparation_lock: Arc<AsyncMutex<()>>,
-    activity: Arc<Mutex<HashMap<String, i64>>>,
+    transfers: Arc<Transfers>,
     collecting: Arc<Mutex<HashMap<String, TransferUpdate>>>,
     watchers: Arc<Watchers>,
     read_slots: Arc<Semaphore>,
@@ -48,6 +49,67 @@ struct OwnTasks {
     runtime: watch::Receiver<IsolationStatus>,
     tracker: Option<Arc<tracker::RemoteTracker>>,
     delegation_paused: bool,
+}
+
+// When a transfer in flight would be stale if it said nothing more. A transfer that is
+// moving pushes that moment out, and the server sleeps until it: with nothing in
+// flight there is no moment to wake for, so nothing does.
+pub(super) struct Transfers {
+    moving: Mutex<HashMap<String, Instant>>,
+    deadline: watch::Sender<Option<Instant>>,
+}
+
+impl Transfers {
+    pub(super) fn new() -> Self {
+        let (deadline, _) = watch::channel(None);
+        Self {
+            moving: Mutex::new(HashMap::new()),
+            deadline,
+        }
+    }
+
+    // The furthest-out moment allows the whole set: a transfer that just moved must
+    // not be declared stale because a different one has been quiet for a while.
+    fn arm(&self) -> Option<Instant> {
+        let window = Duration::from_millis(TRANSFER_IDLE_MS as u64);
+        let next = self
+            .moving
+            .lock()
+            .expect("transfer activity lock poisoned")
+            .values()
+            .map(|moved| *moved + window)
+            .min();
+        self.deadline.send_replace(next);
+        next
+    }
+
+    fn moved(&self, transfer_id: &str) {
+        self.moving
+            .lock()
+            .expect("transfer activity lock poisoned")
+            .insert(transfer_id.to_owned(), Instant::now());
+        self.arm();
+    }
+
+    fn last(&self, transfer_id: &str) -> Option<Instant> {
+        self.moving
+            .lock()
+            .expect("transfer activity lock poisoned")
+            .get(transfer_id)
+            .copied()
+    }
+
+    fn finished(&self, transfer_id: &str) {
+        self.moving
+            .lock()
+            .expect("transfer activity lock poisoned")
+            .remove(transfer_id);
+        self.arm();
+    }
+
+    pub(super) fn watch(&self) -> watch::Receiver<Option<Instant>> {
+        self.deadline.subscribe()
+    }
 }
 
 #[derive(Default)]
@@ -114,6 +176,12 @@ impl Watchers {
 }
 
 impl OwnTasks {
+    // The moment a transfer in flight would be stale, so the server can sleep until it
+    // instead of asking every half minute whether there is one.
+    pub(super) fn watch_transfers(&self) -> watch::Receiver<Option<Instant>> {
+        self.transfers.watch()
+    }
+
     async fn release_stalled_transfers(&self) {
         // Packaging holds this lock, and a transfer being packaged is not stalled.
         let Ok(_packaging) = self.preparation_lock.try_lock() else {
@@ -133,14 +201,13 @@ impl OwnTasks {
             let Some((transfer_id, staged_at)) = self.staged_transfer(&task.id).await else {
                 continue;
             };
+            let staged = Duration::from_millis((now_ms() - staged_at) as u64);
             let last = self
-                .activity
-                .lock()
-                .expect("transfer activity lock poisoned")
-                .get(&transfer_id)
-                .copied()
-                .unwrap_or(staged_at);
-            if now_ms() - last < TRANSFER_IDLE_MS {
+                .transfers
+                .last(&transfer_id)
+                .map(|moved| moved.elapsed())
+                .unwrap_or(staged);
+            if last < Duration::from_millis(TRANSFER_IDLE_MS as u64) {
                 continue;
             }
             if let Err(error) = self.tasks.abandon_transfer(&task.id, &transfer_id).await {
@@ -148,10 +215,7 @@ impl OwnTasks {
                 continue;
             }
             tracing::info!(task = %task.id, %transfer_id, "a transfer stopped moving; the task stays here");
-            self.activity
-                .lock()
-                .expect("transfer activity lock poisoned")
-                .remove(&transfer_id);
+            self.transfers.finished(&transfer_id);
             if let Ok(directory) = self.transfer_directory(&transfer_id) {
                 for name in [WORK_FILE, TRANSCRIPT_FILE, HISTORY_FILE] {
                     let _ = fs::remove_file(directory.join(name));

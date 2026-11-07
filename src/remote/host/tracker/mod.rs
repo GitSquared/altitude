@@ -25,10 +25,8 @@ use crate::{
 use axum::{Router, extract::DefaultBodyLimit, routing::post};
 use iroh::EndpointId;
 use ledger::{IssueStateChanged, Ledger, StoredEvent};
-use tokio::{
-    sync::Notify,
-    time::{MissedTickBehavior, interval},
-};
+use std::time::Instant;
+use tokio::{sync::Notify, time};
 
 mod answering;
 mod delegation;
@@ -51,13 +49,15 @@ const MAX_WEBHOOK_BYTES: usize = 1024 * 1024;
 
 const SIGNATURE_HEADER: &str = "linear-signature";
 
-const TICK: Duration = Duration::from_secs(10);
+// A burst of task activity arrives faster than a pass is worth running: the passes
+// read whole task histories and talk to the tracker, so what a burst needs is one pass
+// after it, not one per line. At rest nothing waits on this, because nothing wakes the
+// loop then.
+const SETTLE: Duration = Duration::from_secs(1);
 
 const QUEUE_NOTICE_INTERVAL: Duration = Duration::from_secs(300);
 
 const NEXT_UP_NOTICE_INTERVAL: Duration = Duration::from_secs(30);
-
-const DELEGATION_SWEEP_TICKS: u32 = 6;
 
 const EVENT_ATTEMPTS: usize = 3;
 
@@ -363,28 +363,49 @@ impl RemoteTracker {
             .with_state(Arc::clone(self))
     }
 
+    // Anything that changed what the tracker owes: a delivery arrived, or a task's
+    // history moved.
+    pub fn wake(&self) {
+        self.notify.notify_one();
+    }
+
+    // Nothing here runs on a clock. A webhook, a task's history moving, or a moment
+    // something already knows it has to happen at — a delivery that is being retried,
+    // a queue notice that is worth repeating — are the only reasons to do anything,
+    // and until one of them arrives this loop waits.
     pub async fn run(self: Arc<Self>, host: Arc<dyn Host>) {
-        let mut tick = interval(TICK);
-        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        let mut passes = 0u32;
+        // The one thing that is not an event: a delegation made while this machine was
+        // not listening left no webhook to find, so the ones the tracker still holds
+        // are looked for once, on the way up.
+        self.recover_delegations(host.as_ref()).await;
         loop {
-            tokio::select! {
-                _ = tick.tick() => {}
-                _ = self.notify.notified() => {}
+            let due = self.pass(host.as_ref()).await;
+            let done_at = Instant::now();
+            match due {
+                Some(at) => {
+                    tokio::select! {
+                        _ = self.notify.notified() => {}
+                        _ = time::sleep_until(at.into()) => {}
+                    }
+                }
+                None => self.notify.notified().await,
             }
-            self.process_deliveries(host.as_ref()).await;
-            self.adopt_bound_tasks(host.as_ref()).await;
-            self.report_queue_standing(host.as_ref()).await;
-            self.report_activity(host.as_ref()).await;
-            self.poll_reports(host.as_ref()).await;
-            // A delegation is delivered by webhook, and a webhook that arrives
-            // while this machine is restarting is gone. Asking the tracker which
-            // issues are delegated is how the machine finds the work it was asked
-            // for while it was not listening.
-            passes += 1;
-            if passes.is_multiple_of(DELEGATION_SWEEP_TICKS) {
-                self.recover_delegations(host.as_ref()).await;
+            // A burst of lines from one run is one pass after it rather than one pass
+            // per line. Only a wake reaches this, so the wait costs nothing at rest.
+            if let Some(rest) = SETTLE.checked_sub(done_at.elapsed()) {
+                time::sleep(rest).await;
             }
         }
+    }
+
+    // Everything that is due, in the order it has to happen, and when it should be
+    // asked again if that is a moment rather than an event.
+    async fn pass(&self, host: &dyn Host) -> Option<Instant> {
+        let retry = self.process_deliveries(host).await;
+        self.adopt_bound_tasks(host).await;
+        let notice = self.report_queue_standing(host).await;
+        self.report_activity(host).await;
+        self.poll_reports(host).await;
+        [retry, notice].into_iter().flatten().min()
     }
 }
