@@ -278,31 +278,14 @@ impl SandboxPlan {
                 }
             }
             // The folder travels but its README does not: each machine writes its
-            // own from the project it holds, so the note says which project this is
-            // even when the sandbox and the host directory are named only by an id.
-            let mut context = String::new();
-            if let Some(repository) = plan.project.repository.as_deref() {
-                context.push_str(&format!("\nThe project's repository is `{repository}`.\n"));
-            }
-            if let Some(instructions) = plan
-                .project
-                .instructions
-                .as_deref()
-                .map(str::trim)
-                .filter(|text| !text.is_empty())
-            {
-                context.push_str(&format!("\n{instructions}\n"));
-            }
-            let context = if context.is_empty() {
-                String::new()
-            } else {
-                format!("\n## Project context\n{context}")
-            };
+            // own from the project it holds, so the note names the project even when
+            // the sandbox and the host directory are named only by an id. It points
+            // at the brief rather than repeating it, so the project's context has one
+            // source and the agent reads it once.
             let readme = include_str!("../assets/memory.md")
                 .replace("{{project}}", &plan.project.name)
                 .replace("{{guest_path}}", &guest_path.to_string_lossy())
-                .replace("{{host_path}}", &host_path.to_string_lossy())
-                .replace("{{context}}", &context);
+                .replace("{{host_path}}", &host_path.to_string_lossy());
             plan.managed_files
                 .push((host_path.join("README.md"), readme));
             // How to wield the indexer on this folder. Altitude refreshes both notes,
