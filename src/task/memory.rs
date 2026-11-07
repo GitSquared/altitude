@@ -7,9 +7,10 @@ use std::{
 
 use crate::task::{ProjectMemoryFile, TaskHistoryEvent};
 
-// The file Altitude keeps as a note to whoever opens the directory; it is not the
-// project's memory and no machine carries it.
-const README: &str = "README.md";
+// The notes Altitude keeps in the directory: what it is, and how to search it.
+// They are the machine's, refreshed at provisioning, so they are not the project's
+// memory and no machine carries them.
+const NOTES: [&str; 2] = ["README.md", "QMD.md"];
 
 // A memory path is one a machine is about to write from a file another machine
 // wrote, so it may never name anything but a place under the memory directory.
@@ -46,7 +47,8 @@ pub fn read(dir: &Path) -> io::Result<Vec<ProjectMemoryFile>> {
                 pending.push(child);
                 continue;
             }
-            if !metadata.is_file() || child == Path::new(README) {
+            let is_note = relative.as_os_str().is_empty() && NOTES.contains(&name.as_str());
+            if !metadata.is_file() || is_note {
                 continue;
             }
             let Ok(contents) = fs::read_to_string(entry.path()) else {
