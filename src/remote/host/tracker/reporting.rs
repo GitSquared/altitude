@@ -110,9 +110,9 @@ impl RemoteTracker {
             // One the operator or Linear has finished with takes nothing more: asking
             // first is the only way to know, because Linear accepts the activity and
             // then shows it nowhere.
-            Some(candidate) => match self.config.automation.session_can_receive(&candidate).await {
-                Ok(true) => candidate,
-                Ok(false) => self.open_session(&issue.id).await?,
+            Some(candidate) => match self.config.automation.session_standing(&candidate).await {
+                Ok(standing) if standing.can_receive => candidate,
+                Ok(_) => self.open_session(&issue.id).await?,
                 // A tracker that cannot be asked is not a reason to report nowhere, and
                 // the session is as likely to be usable as not.
                 Err(error) => {
@@ -258,15 +258,57 @@ impl RemoteTracker {
             match self
                 .config
                 .automation
-                .session_can_receive(&report.session)
+                .session_standing(&report.session)
                 .await
             {
-                Ok(true) => {}
-                Ok(false) => self.replace_session(host, &report).await,
+                Ok(standing) if !standing.can_receive => self.replace_session(host, &report).await,
+                Ok(standing) if standing.never_answered => {
+                    self.introduce(host, &report).await;
+                }
+                Ok(_) => {}
                 Err(error) => {
                     tracing::debug!(session = %report.session, %error, "could not ask whether a session can receive");
                 }
             }
+        }
+    }
+
+    // A session with a prompt this machine never answered sits in Linear as "thinking",
+    // which says work is happening when the task may have been paused for hours. One
+    // line says where it actually stands.
+    async fn introduce(&self, host: &dyn Host, report: &Cursor) {
+        let Ok(bound) = host.bound_tasks().await else {
+            return;
+        };
+        let Some(task) = bound.iter().find(|task| task.task_id == report.task_id) else {
+            return;
+        };
+        let body = match (&task.status, task.pause_reason.as_ref()) {
+            (TaskExecutionStatus::Running, _) => {
+                format!(
+                    "Altitude is working on this task on {}.",
+                    self.config.host_label
+                )
+            }
+            (TaskExecutionStatus::Paused, Some(reason)) => pause_notice(reason).to_owned(),
+            (TaskExecutionStatus::Pending, _) => format!(
+                "Altitude has this task queued on {}; it starts when the machine has room.",
+                self.config.host_label
+            ),
+            _ => format!(
+                "Altitude is reporting on this task from {}.",
+                self.config.host_label
+            ),
+        };
+        if let Err(error) = self
+            .say(
+                report,
+                &stable_id(&report.task_id, &format!("introduced:{}", report.session)),
+                AgentActivityContent::Response { body },
+            )
+            .await
+        {
+            tracing::debug!(task = %report.task_id, %error, "could not say where a task stands");
         }
     }
 
@@ -299,6 +341,9 @@ impl RemoteTracker {
             session = %session,
             "a session had gone away, so the report has a new one"
         );
+        // A new session arrives with a prompt nobody has answered, and Linear says it is
+        // thinking until something is said in it.
+        self.introduce(host, report).await;
     }
 
     // A session can go away under a report — dismissed in Linear, or closed once the

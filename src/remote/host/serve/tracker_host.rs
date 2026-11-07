@@ -360,6 +360,7 @@ impl tracker::Host for OwnTasks {
                     delegation: task.facts.tracker_delegation.clone(),
                     session_agent: task.session_agent(),
                     status: task.facts.execution_status,
+                    pause_reason: task.facts.execution_pause_reason.clone(),
                 })
             }))
         })
@@ -456,6 +457,7 @@ impl tracker::Host for OwnTasks {
                         delegation: task.facts.tracker_delegation.clone(),
                         session_agent: task.session_agent(),
                         status: task.facts.execution_status,
+                        pause_reason: task.facts.execution_pause_reason.clone(),
                     })
                 })
                 .collect())

@@ -8,6 +8,11 @@ use super::issues::mutation_succeeded;
 use super::queries::*;
 use super::*;
 
+pub struct SessionStanding {
+    pub can_receive: bool,
+    pub never_answered: bool,
+}
+
 impl LinearAutomation {
     pub async fn update_session_summary(
         &self,
@@ -93,11 +98,14 @@ impl LinearAutomation {
             .ok_or_else(|| TrackerError::new("Linear created the agent session but returned no id"))
     }
 
-    // Whether this session can still be spoken in. Linear accepts an activity for one
-    // that is complete or dismissed and then shows it nowhere, so asking first is the
-    // only way to know: a report writing into a session nobody can read is the silence
-    // all of this exists to prevent.
-    pub async fn session_can_receive(&self, session_id: &str) -> Result<bool, TrackerError> {
+    // What a session is like before anything is said in it. Linear accepts an activity
+    // for a session that is complete or dismissed and shows it nowhere, so asking is the
+    // only way to know; and one this machine has never answered sits in Linear as
+    // "thinking", which is a claim about work rather than a fact about it.
+    pub async fn session_standing(
+        &self,
+        session_id: &str,
+    ) -> Result<SessionStanding, TrackerError> {
         let data = self
             .graphql(SESSION_STATE_QUERY, json!({ "id": session_id }))
             .await?;
@@ -109,7 +117,10 @@ impl LinearAutomation {
             .get("status")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        Ok(!dismissed && matches!(status, "pending" | "active" | "awaitingInput"))
+        Ok(SessionStanding {
+            can_receive: !dismissed && matches!(status, "pending" | "active" | "awaitingInput"),
+            never_answered: session.get("lastAgentReplyAt").is_none_or(Value::is_null),
+        })
     }
 
     pub async fn create_activity(

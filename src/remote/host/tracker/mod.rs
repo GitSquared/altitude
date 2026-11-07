@@ -95,6 +95,7 @@ pub struct BoundTask {
     pub delegation: Option<String>,
     pub session_agent: Option<String>,
     pub status: TaskExecutionStatus,
+    pub pause_reason: Option<TaskExecutionPauseReason>,
 }
 
 // Where a task stands on the machine it was sent to: what is in front of it in the
