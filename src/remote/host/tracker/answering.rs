@@ -107,6 +107,13 @@ impl RemoteTracker {
         event: &CommentInput,
         host: &dyn Host,
     ) -> Result<(), String> {
+        // Everything this machine says on an issue comes back as a delivery too. There
+        // is nothing to read in it, and asking the tracker which thread it belongs to
+        // is the only cost of finding that out the slow way.
+        let app_user_id = self.config.automation.app_user_id();
+        if event.actor_id == app_user_id {
+            return Ok(());
+        }
         let site = self
             .config
             .automation
@@ -132,11 +139,8 @@ impl RemoteTracker {
         if !host.is_kept(report.task_id.clone()).await? {
             return Ok(());
         }
-        let app_user_id = self.config.automation.app_user_id();
         let actor = if event.actor_id == report.tracker_user_id {
             Actor::Operator
-        } else if event.actor_id == app_user_id {
-            Actor::Agent
         } else {
             Actor::OtherHuman
         };
@@ -247,6 +251,11 @@ impl RemoteTracker {
         event: &ReactionInput,
         host: &dyn Host,
     ) -> Result<(), String> {
+        // This machine's own reaction — the acknowledgement it adds to a comment it has
+        // read — is not the operator answering anything.
+        if event.actor_id == self.config.automation.app_user_id() {
+            return Ok(());
+        }
         let site = self
             .config
             .automation
