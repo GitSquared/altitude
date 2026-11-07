@@ -23,8 +23,6 @@ pub(super) struct QueueNotice {
     at: Instant,
 }
 
-// The last line published for a task, and how many before it: the count is what
-// keeps two identical lines apart when the agent says the same thing twice.
 impl RemoteTracker {
     pub async fn start_reporting(
         &self,
@@ -43,16 +41,22 @@ impl RemoteTracker {
         if self.report_for_task(&task_id).is_some() {
             return Ok(());
         }
-        // Work a delegation asked for is told to that delegation: opening a session
-        // beside it is how one issue ended up with two threads about one task.
-        let session_id = match delegation {
-            Some(delegation) => delegation,
-            None => self
-                .config
-                .automation
-                .create_session_on_issue(&issue.id)
-                .await
-                .map_err(|error| error.to_string())?,
+        // The session is the issue's, not the delegation's. An issue has one
+        // conversation, and what the operator reads is that thread: a task that
+        // replaces another on the same issue carries it on. A delegation's own session
+        // is where the operator clicked, so it is used the first time and only when the
+        // issue has nothing to carry.
+        let session_id = match self.session_for_issue(&issue.id) {
+            Some(session) => session,
+            None => match delegation {
+                Some(delegation) => delegation,
+                None => self
+                    .config
+                    .automation
+                    .create_session_on_issue(&issue.id)
+                    .await
+                    .map_err(|error| error.to_string())?,
+            },
         };
         self.upsert_report(Cursor {
             issue_id: issue.id.clone(),

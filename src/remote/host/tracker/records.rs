@@ -47,13 +47,41 @@ impl RemoteTracker {
             .cloned()
     }
 
+    // The report a session is talking to. A session outlives the task that opened it,
+    // so more than one report can name it: the one still in play is the task a message
+    // arriving in that thread is for, and a finished one is what is left when the work
+    // on the issue is over.
     pub(super) fn report_for_session(&self, session_id: &str) -> Option<Cursor> {
         let ledger = self.lock().ok()?;
-        ledger
+        let reports: Vec<&Cursor> = ledger
             .cursors
             .iter()
-            .find(|report| report.session == session_id)
-            .cloned()
+            .filter(|report| report.session == session_id)
+            .collect();
+        reports
+            .iter()
+            .find(|report| !report.finished)
+            .or_else(|| reports.first())
+            .map(|report| (*report).clone())
+    }
+
+    // The session this issue is reported in: the one a report still in play is using,
+    // and otherwise the one the issue's last report used. A session is the issue's
+    // conversation — the thread the operator reads — not a task's, so a task that
+    // replaces another on the same issue carries that conversation on instead of
+    // starting one the issue never shows.
+    pub(super) fn session_for_issue(&self, issue_id: &str) -> Option<String> {
+        let ledger = self.lock().ok()?;
+        let reports: Vec<&Cursor> = ledger
+            .cursors
+            .iter()
+            .filter(|report| report.issue_id == issue_id)
+            .collect();
+        reports
+            .iter()
+            .find(|report| !report.finished)
+            .or_else(|| reports.last())
+            .map(|report| report.session.clone())
     }
 
     // A report that is over says nothing about what this machine is doing now: its
