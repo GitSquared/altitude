@@ -48,6 +48,9 @@ fn workspace_setup() -> String {
          curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/nodesource.sh\n\
          bash /tmp/nodesource.sh\n\
          apt-get install -y --no-install-recommends {}\n\
+         npm install -g --no-fund --no-audit --no-progress @tobilu/qmd@2\n\
+         command -v qmd >/dev/null\n\
+         mkdir -p /altitude\n\
          cat > /root/README.md <<'ALTITUDE_WORKSPACE_README'\n\
          {}ALTITUDE_WORKSPACE_README\n",
         WORKSPACE_PACKAGES.join(" "),

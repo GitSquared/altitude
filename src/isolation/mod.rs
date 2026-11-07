@@ -398,6 +398,12 @@ pub trait IsolationEngine: Send + Sync {
 
     fn sandbox_ceiling(&self) -> SandboxCeiling;
 
+    // Where a project's memory lives on this machine. It comes from the engine rather
+    // than from the caller's config because the engine is the piece that knows
+    // whether this machine scopes storage per operator, and the sandbox mount and the
+    // sync have to agree on one directory.
+    fn project_memory_dir(&self, project_id: &str) -> PathBuf;
+
     fn provision(
         &self,
         id: String,

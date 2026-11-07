@@ -275,6 +275,7 @@ where
             transfer_id,
             peer,
         } = arrival;
+        let project_id = project.id.clone();
         let task = self
             .service
             .adopt(
@@ -293,6 +294,12 @@ where
                 }],
             )
             .await?;
+        // What the task brought with it: the memory events are in its history now, so
+        // writing the directory from them gives this machine the project's memory as
+        // the task that carried it found it.
+        self.service
+            .apply_project_memory(task.operator_id(), &project_id)
+            .await;
         // Filed under the task's own id, where provisioning looks for them: the
         // sandbox does not exist yet, and this is the only place to put them until
         // it does.

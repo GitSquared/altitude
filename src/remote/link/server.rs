@@ -25,6 +25,8 @@ use iroh::{
 };
 
 use crate::config::{Settings, attachments_dir};
+use crate::task::ProjectMemoryFile;
+use crate::task::memory;
 use crate::task::picture;
 
 use crate::remote::host::clients::{ClientLog, ClientRecord};
@@ -227,6 +229,29 @@ impl LinkHandler {
             &operator_dir.join("config.toml"),
             bundle.settings.as_bytes(),
         )?;
+        // A project's memory arrives before any of its tasks do, so a machine just
+        // given a project starts from what earlier tasks elsewhere knew.
+        for pushed in &bundle.memory {
+            if pushed.project_id.parse::<uuid::Uuid>().is_err() {
+                continue;
+            }
+            let directory = operator_dir
+                .join("projects")
+                .join(&pushed.project_id)
+                .join("memory");
+            let files: Vec<ProjectMemoryFile> = pushed
+                .files
+                .iter()
+                .map(|file| ProjectMemoryFile {
+                    path: file.path.clone(),
+                    contents: file.contents.clone(),
+                    at_ms: file.at_ms,
+                })
+                .collect();
+            if let Err(error) = memory::write(&directory, &files) {
+                tracing::warn!(%error, "could not write a project's memory from a configuration");
+            }
+        }
         let held_path = operator_dir.join("profiles.json");
         let mut held = HeldConfig::load(&held_path);
         for profile in &bundle.profiles {

@@ -354,6 +354,16 @@ pub enum TaskHistoryEvent {
     TaskTitleSet {
         title: String,
     },
+    // A project's memory is a directory of markdown files the agent edits directly;
+    // this records the directory's state as a task leaves a machine, so another
+    // machine can write the files it is missing. A path's latest event wins, and
+    // `None` is a file that was removed.
+    ProjectMemoryFileWritten {
+        project_id: String,
+        path: String,
+        contents: Option<String>,
+        written_at_ms: i64,
+    },
     IntentExpressed {
         execution_status: TaskExecutionStatus,
         execution_mode: TaskExecutionMode,
@@ -549,6 +559,16 @@ pub enum TaskPlanStatus {
     InProgress,
     Completed,
     Canceled,
+}
+
+// One file of a project's memory, as the newest event about it records it. It is a
+// materialized view the memory directory is written from, not a second copy kept in
+// step by hand.
+#[derive(Clone, Debug)]
+pub struct ProjectMemoryFile {
+    pub path: String,
+    pub contents: Option<String>,
+    pub at_ms: i64,
 }
 
 #[derive(Clone, Debug)]

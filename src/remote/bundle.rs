@@ -4,13 +4,33 @@ use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Settings;
+use crate::project::Project;
+use crate::task::memory;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConfigBundle {
     pub settings: String,
     pub profiles: Vec<ProfileBundle>,
+    // A project's memory, carried so a machine that has not been handed one of the
+    // project's tasks yet still starts from what earlier tasks elsewhere found.
+    #[serde(default)]
+    pub memory: Vec<MemoryBundle>,
     #[serde(default)]
     pub remove_logins: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MemoryBundle {
+    pub project_id: String,
+    #[serde(default)]
+    pub files: Vec<MemoryFile>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MemoryFile {
+    pub path: String,
+    pub contents: Option<String>,
+    pub at_ms: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -68,11 +88,13 @@ impl ConfigBundle {
             .iter()
             .map(|profile| (&profile.profile, &profile.digest))
             .collect::<Vec<_>>();
-        Ok(
-            blake3::hash(&serde_json::to_vec(&(&self.settings, profiles))?)
-                .to_hex()
-                .to_string(),
-        )
+        Ok(blake3::hash(&serde_json::to_vec(&(
+            &self.settings,
+            profiles,
+            &self.memory,
+        ))?)
+        .to_hex()
+        .to_string())
     }
 
     pub fn retain_changed_profiles(&mut self, held: &[ProfileDigest]) {
@@ -98,6 +120,11 @@ impl ConfigBundle {
             parsed.retain_projects_for(host);
         }
         let holds_work = !parsed.projects().is_empty();
+        let memory = if holds_work {
+            project_memory(data_dir, parsed.projects())
+        } else {
+            Vec::new()
+        };
         let settings = toml::to_string(&parsed.shared()).map_err(io::Error::other)?;
         let profiles = match logins {
             Logins::Always => true,
@@ -116,11 +143,36 @@ impl ConfigBundle {
         let mut bundle = Self {
             settings,
             profiles,
+            memory,
             remove_logins,
         };
         bundle.retain_changed_profiles(held);
         Ok(bundle)
     }
+}
+
+fn project_memory(data_dir: &Path, projects: &[Project]) -> Vec<MemoryBundle> {
+    projects
+        .iter()
+        .filter_map(|project| {
+            let directory = data_dir.join("projects").join(&project.id).join("memory");
+            let files = memory::read(&directory).ok()?;
+            if files.is_empty() {
+                return None;
+            }
+            Some(MemoryBundle {
+                project_id: project.id.clone(),
+                files: files
+                    .into_iter()
+                    .map(|file| MemoryFile {
+                        path: file.path,
+                        contents: file.contents,
+                        at_ms: file.at_ms,
+                    })
+                    .collect(),
+            })
+        })
+        .collect()
 }
 
 impl ProfileBundle {

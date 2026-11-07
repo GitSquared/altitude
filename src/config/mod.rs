@@ -456,6 +456,26 @@ impl Config {
             .join(project_id)
             .join("cache")
     }
+
+    // A project's memory is a directory of markdown files rather than an opaque
+    // store: the agent reads and edits it as ordinary files, and a machine syncs it
+    // by exchanging the files' contents. It sits beside the cache rather than in it,
+    // because a cache may be cleared at any time and memory may not.
+    pub fn project_memory_dir(&self, project_id: &str) -> PathBuf {
+        self.scoped_data_dir()
+            .join("projects")
+            .join(project_id)
+            .join("memory")
+    }
+
+    // The project's brief and Altitude's rules, kept on the machine so the sandbox
+    // mounts them read-only rather than writing them into a disk the agent owns.
+    pub fn project_brief_dir(&self, project_id: &str) -> PathBuf {
+        self.scoped_data_dir()
+            .join("projects")
+            .join(project_id)
+            .join("altitude")
+    }
 }
 
 fn is_safe_project_id(id: &str) -> bool {
