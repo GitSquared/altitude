@@ -245,6 +245,15 @@ impl TaskOperatorSignalThread {
             .rev()
             .find(|message| message.author == TaskOperatorSignalAuthor::Agent)
     }
+
+    // Whether the operator has said anything here at all. It is what makes a thread
+    // the agent's to close: until they have spoken, what was asked for has not arrived
+    // and there is nothing for the thread to be over.
+    pub fn is_answered(&self) -> bool {
+        self.messages
+            .iter()
+            .any(|message| message.author == TaskOperatorSignalAuthor::Operator)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

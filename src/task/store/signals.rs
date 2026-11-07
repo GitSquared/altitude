@@ -369,13 +369,25 @@ impl TaskStore {
         if matches!(
             kind,
             TaskOperatorSignalKind::Blocked | TaskOperatorSignalKind::InReview
-        ) && (task.facts.deferred_review.is_some()
-            || self.has_unanswered_question(task_id).await?)
-        {
-            return Err(TaskError::OperationRejected(
-                "this task is already waiting on the operator; reply in that thread or \
-                 resolve it instead of opening another",
-            ));
+        ) {
+            // Two blockers wear one coat here and they are not the same wait: a
+            // thread the operator has not answered is theirs to answer, and a review
+            // this machine is holding for its pull requests is nobody's — it becomes
+            // a thread by itself once they settle. Saying which one it is is the
+            // difference between an instruction and a puzzle.
+            if task.facts.deferred_review.is_some() {
+                return Err(TaskError::OperationRejected(
+                    "this task's review is already asked for and held until its pull requests \
+                     settle; it becomes a thread by itself then, and nothing about it waits on \
+                     the operator",
+                ));
+            }
+            if self.has_unanswered_question(task_id).await? {
+                return Err(TaskError::OperationRejected(
+                    "this task is already waiting on the operator in a thread they have not \
+                     answered; open a new one only once that has been answered",
+                ));
+            }
         }
         let signal = TaskOperatorSignal {
             id: self.next_signal_id(task_id).await?,

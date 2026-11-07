@@ -254,11 +254,23 @@ impl TaskAgentTools {
             .signal_threads(&self.task_id)
             .await
             .map_err(tool_failure)?;
+        // A review that was asked for and is being held for its pull requests is not
+        // a thread yet, so a list of threads is not the whole state of the task. It
+        // is said here rather than only when the next question is refused, because
+        // the agent reading its own signals is exactly who needs to know.
+        let held_review = self.task().await?.facts.deferred_review.map(|review| {
+            json!({
+                "kind": "in_review",
+                "title": review.signal.title,
+                "held_until": "its pull requests settle",
+            })
+        });
         Ok(json!({
             "signals": threads
                 .iter()
                 .map(|thread| thread_json(thread, &self.attachments_dir))
                 .collect::<Vec<_>>(),
+            "held_review": held_review,
         }))
     }
 
@@ -395,16 +407,30 @@ impl TaskAgentTools {
     async fn resolve_signal(&self, arguments: &Value) -> Result<Value, AgentToolError> {
         self.ensure_active().await?;
         let signal_id = argument(arguments, "signal_id")?;
-        let kind = self.thread(signal_id).await?.kind;
-        if kind == TaskOperatorSignalKind::InReview {
-            return Err(AgentToolError::new(
-                "a review request ends when the operator accepts it, not when the agent resolves it",
-            ));
-        }
+        let thread = self.thread(signal_id).await?;
         let resolved = arguments
             .get("resolved")
             .and_then(Value::as_bool)
             .unwrap_or(true);
+        // A thread ends when the reason it exists is over, and an unanswered thread has
+        // no such reason: what was asked for has not arrived. So one rule covers every
+        // kind — the operator's word in the thread is what makes it the agent's to
+        // close. A review is the exception, because acceptance is their act and the
+        // task ends on it.
+        if resolved {
+            if thread.kind == TaskOperatorSignalKind::InReview {
+                return Err(AgentToolError::new(
+                    "a review request ends when the operator accepts it, not when the agent \
+                     resolves it",
+                ));
+            }
+            if !thread.is_answered() {
+                return Err(AgentToolError::new(
+                    "nothing has been answered in this thread yet, so there is nothing it can be \
+                     over: the operator closes what only they have read",
+                ));
+            }
+        }
         if let Some(reason) = arguments.get("reason").and_then(Value::as_str)
             && !reason.trim().is_empty()
         {
@@ -587,7 +613,7 @@ impl AgentToolProvider for TaskAgentTools {
             ),
             AgentTool::new(
                 "tasks_signal",
-                "Read and change this task's conversations with the operator, which is the only way you speak to them. A body is markdown their interface draws, and may carry diagrams and pictures. A thread has a kind, messages, and one state: unresolved or resolved. action=list returns every thread; action=read needs signal_id; action=open needs kind, title and body; action=reply needs signal_id and body; action=resolve needs signal_id, defaults resolved=true, and accepts an optional reason. A reply is a message, not a new question, and reopens a resolved thread. Messages carry ids m1, m2, ... inside their thread.\n\nThe kind you open is what tells Altitude what to do next. `update` is news they cannot see for themselves, and `decision` is an assumption they may challenge: both leave the task running. `blocked` stops it until they answer. `in_review` finishes the milestone and puts it to them, which is the only way to ask for acceptance, and Altitude holds it until the linked pull requests settle. Only one of those two may be open at a time: reply in the thread you have instead of opening another.\n\nResolving a thread means it needs nothing more from the operator. It does not mean you have said your part, and it does not mean your last reply was answered: it means the reason the thread exists is over and this task is not waiting on anything in it. Resolve a blocked thread only once the operator has given you what you were blocked on and your next step does not depend on them; if their message asks you something, or you still need a decision from them, it stays unresolved. Only the operator accepts a review.",
+                "Read and change this task's conversations with the operator, which is the only way you speak to them. A body is markdown their interface draws, and may carry diagrams and pictures. A thread has a kind, messages, and one state: unresolved or resolved. action=list returns every thread; action=read needs signal_id; action=open needs kind, title and body; action=reply needs signal_id and body; action=resolve needs signal_id, defaults resolved=true, and accepts an optional reason. A reply is a message, not a new question, and reopens a resolved thread. Messages carry ids m1, m2, ... inside their thread.\n\nThe kind you open is what tells Altitude what to do next. `update` is news they cannot see for themselves, and `decision` is an assumption they may challenge: both leave the task running. `blocked` stops it until they answer. `in_review` finishes the milestone and puts it to them, which is the only way to ask for acceptance, and Altitude holds it until the linked pull requests settle. Only one of those two may be open at a time: reply in the thread you have instead of opening another.\n\nResolving a thread means it needs nothing more from the operator. It does not mean you have said your part, and it does not mean your last reply was answered: it means the reason the thread exists is over and this task is not waiting on anything in it. One rule decides whether a thread is yours to close: it ends once the operator has said something in it and the reason it exists is over. Until they have spoken there is nothing it can be over — a decision nobody has read, a block nobody has lifted — so those stay open for them to find, which is what makes a non-blocking kind cheap to leave alone. If their message asks you something, or you still need a direction from them, it stays unresolved. Only the operator accepts a review.",
                 json!({
                     "type": "object",
                     "additionalProperties": false,
