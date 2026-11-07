@@ -156,11 +156,20 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      FROM task_event_logs
      WHERE task_id = tasks.id AND event_type = 'task_arrived_from'
      ORDER BY sequence DESC LIMIT 1) AS arrived_from,
+    -- A thread whose last word is the operator's is not waiting on them: they have
+    -- spoken and the task is the one that owes an answer, so it is working rather
+    -- than asking. One nothing has been said in, or one the agent spoke in last, is.
     (SELECT kind
      FROM task_operator_signals
      WHERE task_id = tasks.id
        AND resolved = 0
        AND kind IN ('blocked', 'in_review')
+       AND (SELECT json_extract(spoken.payload, '$.data.author')
+            FROM task_event_logs AS spoken
+            WHERE spoken.task_id = tasks.id
+              AND spoken.event_type = 'operator_signal_message'
+              AND json_extract(spoken.payload, '$.data.signal_id') = task_operator_signals.id
+            ORDER BY spoken.sequence DESC LIMIT 1) IS NOT 'operator'
      ORDER BY raised_at_ms DESC LIMIT 1) AS blocking_signal_kind,
     -- The kind a list shows the task under: the most urgent unresolved thread,
     -- which is not the same question as whether the task is blocked.
@@ -168,6 +177,12 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      FROM task_operator_signals
      WHERE task_id = tasks.id
        AND resolved = 0
+       AND (SELECT json_extract(spoken.payload, '$.data.author')
+            FROM task_event_logs AS spoken
+            WHERE spoken.task_id = tasks.id
+              AND spoken.event_type = 'operator_signal_message'
+              AND json_extract(spoken.payload, '$.data.signal_id') = task_operator_signals.id
+            ORDER BY spoken.sequence DESC LIMIT 1) IS NOT 'operator'
      ORDER BY CASE kind
          WHEN 'blocked' THEN 0
          WHEN 'in_review' THEN 1
@@ -181,6 +196,12 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      FROM task_operator_signals
      WHERE task_id = tasks.id
        AND resolved = 0
+       AND (SELECT json_extract(spoken.payload, '$.data.author')
+            FROM task_event_logs AS spoken
+            WHERE spoken.task_id = tasks.id
+              AND spoken.event_type = 'operator_signal_message'
+              AND json_extract(spoken.payload, '$.data.signal_id') = task_operator_signals.id
+            ORDER BY spoken.sequence DESC LIMIT 1) IS NOT 'operator'
      ORDER BY CASE kind
          WHEN 'blocked' THEN 0
          WHEN 'in_review' THEN 1
