@@ -48,6 +48,11 @@ pub(super) struct SandboxPlan {
     options: SandboxOptions,
     defaults: Vec<(PathBuf, &'static str)>,
     managed_files: Vec<(PathBuf, String)>,
+    // Files Altitude owns, mounted read-only over their guest paths so the agent
+    // reads them and cannot rewrite them. They are separate from `options.mounts`
+    // because their guest paths sit inside a writable directory mount, and the
+    // provider has to apply the directory before the file on top of it.
+    read_only_files: Vec<SandboxMount>,
     local_mounts: Vec<(String, String)>,
 }
 
@@ -133,6 +138,7 @@ impl SandboxPlan {
             },
             defaults: Vec::new(),
             managed_files: Vec::new(),
+            read_only_files: Vec::new(),
             local_mounts: Vec::new(),
         };
         let mut profiles = HashSet::new();
@@ -302,17 +308,53 @@ impl SandboxPlan {
                 // Markdown to read and edit, never a program to run.
                 noexec: true,
             });
+            // The project's brief and Altitude's rules are files too. They live on
+            // the machine rather than in the guest so they can be mounted read-only
+            // like every other note Altitude owns, and the agent can reread them.
+            let checkout = plan
+                .project
+                .checkout_path()
+                .map(|path| expand_guest_path(&path))
+                .transpose()?
+                .map(|path| path.to_string_lossy().into_owned());
+            let brief_dir = config.project_brief_dir(&plan.project.id);
+            for (name, contents) in [
+                ("project.md", plan.project.brief(checkout.as_deref())),
+                (
+                    "harness.md",
+                    include_str!("../assets/harness.md").to_owned(),
+                ),
+            ] {
+                let host_path = brief_dir.join(name);
+                plan.managed_files.push((host_path.clone(), contents));
+                plan.read_only_files.push(SandboxMount {
+                    host_path,
+                    guest_path: format!("/altitude/{name}"),
+                    readonly: true,
+                    noexec: true,
+                });
+            }
         }
+        // Altitude's own files are read-only to the agent: each one is mounted over
+        // its guest path, after the directory that holds it, so the notes and
+        // guides cannot be rewritten from inside the sandbox.
+        let mut read_only = read_only_managed_files(&plan);
+        read_only.append(&mut plan.read_only_files);
+        plan.read_only_files = read_only;
         Ok(plan)
     }
 
     fn initialize(&mut self, config: &Config) -> Result<(), IsolationError> {
         private_directory(config.data_dir())?;
-        for mount in &mut self.options.mounts {
+        // The directories first: a managed file is written into one, and a file
+        // mount's source is written below before it is resolved.
+        for mount in &self.options.mounts {
             private_directory(&mount.host_path)?;
-            mount.host_path = fs::canonicalize(&mount.host_path).map_err(io_error)?;
         }
         for (path, contents) in &self.managed_files {
+            if let Some(parent) = path.parent() {
+                private_directory(parent)?;
+            }
             // Replace Altitude's own file without following a guest-created symlink.
             let temporary = path.with_file_name(format!(".managed-{}", uuid::Uuid::new_v4()));
             let mut file = OpenOptions::new()
@@ -347,8 +389,45 @@ impl SandboxPlan {
                 Err(error) => return Err(io_error(error)),
             }
         }
+        // The overmounts go last, now that the files they expose are written, and
+        // every host path is resolved once the whole set exists.
+        self.options.mounts.append(&mut self.read_only_files);
+        for mount in &mut self.options.mounts {
+            mount.host_path = fs::canonicalize(&mount.host_path).map_err(io_error)?;
+        }
         Ok(())
     }
+}
+
+// Each managed file is Altitude's own, written to the host and mounted into the
+// sandbox. Mounting it again over its guest path, read-only, is what keeps the
+// agent from editing it: the directory mount is writable, the file on top is not.
+fn read_only_managed_files(plan: &SandboxPlan) -> Vec<SandboxMount> {
+    let mut mounts = Vec::new();
+    for (path, _) in &plan.managed_files {
+        let Some(directory) = plan
+            .options
+            .mounts
+            .iter()
+            .filter(|mount| path.starts_with(&mount.host_path))
+            .max_by_key(|mount| mount.host_path.as_os_str().len())
+        else {
+            continue;
+        };
+        let Ok(relative) = path.strip_prefix(&directory.host_path) else {
+            continue;
+        };
+        mounts.push(SandboxMount {
+            host_path: path.clone(),
+            guest_path: Path::new(&directory.guest_path)
+                .join(relative)
+                .to_string_lossy()
+                .into_owned(),
+            readonly: true,
+            noexec: directory.noexec,
+        });
+    }
+    mounts
 }
 
 pub(crate) fn private_directory(path: &Path) -> Result<(), IsolationError> {

@@ -467,6 +467,15 @@ impl Config {
             .join(project_id)
             .join("memory")
     }
+
+    // The project's brief and Altitude's rules, kept on the machine so the sandbox
+    // mounts them read-only rather than writing them into a disk the agent owns.
+    pub fn project_brief_dir(&self, project_id: &str) -> PathBuf {
+        self.scoped_data_dir()
+            .join("projects")
+            .join(project_id)
+            .join("altitude")
+    }
 }
 
 fn is_safe_project_id(id: &str) -> bool {
