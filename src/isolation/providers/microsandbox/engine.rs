@@ -60,6 +60,10 @@ impl IsolationEngine for MicrosandboxIsolation {
             .ceiling()
     }
 
+    fn project_memory_dir(&self, project_id: &str) -> PathBuf {
+        self.config.project_memory_dir(project_id)
+    }
+
     fn for_operator(&self, owner: &str) -> Result<Self, IsolationError> {
         if !self.config.serves_operators() {
             return Ok(self.clone());

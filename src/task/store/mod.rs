@@ -14,6 +14,7 @@ use crate::{
 };
 
 mod events;
+mod memory;
 mod reports;
 mod signals;
 
