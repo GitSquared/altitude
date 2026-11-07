@@ -599,13 +599,9 @@ fn row_of(summary: &TaskSummary, standing: Standing, live: bool, detail: String)
 }
 
 fn detail_of(app: &App, summary: &TaskSummary, ahead: Option<usize>, taking_work: bool) -> String {
-    // What the agent is doing right now is the fact that changes what this row
-    // means, so it is the row's own line before anything else it might say.
-    if summary.status == TaskExecutionStatus::Running
-        && let Some(activity) = current_activity(app, summary)
-    {
-        return activity;
-    }
+    // A row says what the task is asking, and otherwise that it is working. What the
+    // model is saying this second changes faster than a list is read, so it is the
+    // activity pane's line rather than the row's.
     // A question is worth reading as itself rather than as a count of questions.
     if let Some(question) = &summary.leading_signal_title
         && summary.status != TaskExecutionStatus::Failed
@@ -667,7 +663,7 @@ fn detail_of(app: &App, summary: &TaskSummary, ahead: Option<usize>, taking_work
             None => "waiting".to_owned(),
         },
         TaskExecutionStatus::Running => match summary.mode {
-            TaskExecutionMode::Autopilot => "working".to_owned(),
+            TaskExecutionMode::Autopilot => "working…".to_owned(),
             TaskExecutionMode::Operator => "at the terminal".to_owned(),
         },
         TaskExecutionStatus::Paused => match summary.pause_reason {
@@ -698,15 +694,6 @@ fn limit_of(summary: &TaskSummary) -> String {
         Some(at) if at > now_ms() => format!("{window} limit · back at {}", clock(at)),
         _ => format!("{window} limit"),
     }
-}
-
-fn current_activity(app: &App, summary: &TaskSummary) -> Option<String> {
-    if let Some(lines) = app.activities.get(&summary.id)
-        && let Some(last) = lines.last()
-    {
-        return Some(last.text.clone());
-    }
-    summary.activity.clone()
 }
 
 // Every kind with something waiting, in the order the row reads them: what
