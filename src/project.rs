@@ -181,6 +181,16 @@ impl Project {
                 brief.push_str(&format!("- {cache}\n"));
             }
         }
+        brief.push_str(
+            "\n## Project memory\n\n\
+             Earlier tasks in this project keep notes in `~/.altitude/memory`, a \
+             directory of markdown files shared by every task in this project and \
+             mounted here. Read it before you start, and search it with `qmd` — the \
+             instructions are in `QMD.md` beside it. Write there what a later task \
+             should not have to rediscover — a convention, the command that works, the \
+             pitfall you hit — as markdown files of your own. Altitude keeps those \
+             files in step between the machines that run this project.\n",
+        );
         brief
     }
 

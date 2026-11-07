@@ -4,7 +4,7 @@ use crate::remote::transfer as update;
 use crate::remote::{HandoverRecord, TRANSCRIPT_FILE, WORK_FILE, WORK_PLAIN_FILE};
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::Read,
     path::Path,
@@ -192,6 +192,13 @@ where
         .iter()
         .find(|task| task.id == task_id)
         .ok_or_else(|| "this machine does not own that task".to_owned())?;
+    // What this machine's memory directory holds becomes the task's to carry, so a
+    // machine receiving it starts from what earlier tasks found rather than nothing.
+    if let Some(project) = task.project() {
+        tasks
+            .capture_project_memory(task.operator_id(), &task.id, &project.id)
+            .await;
+    }
     let held = tasks
         .events(task_id)
         .await
@@ -244,7 +251,7 @@ where
     // that fails after being staged leaves the task paused for a hand-over that will
     // never happen, so the work is put back as it was found.
     let prepared = async {
-        let events = tasks
+        let mut events: Vec<RecordedEvent> = tasks
             .events(&stopped.id)
             .await
             .map_err(|e| e.to_string())?
@@ -255,6 +262,43 @@ where
                 event,
             })
             .collect();
+        // The state of the project's memory, carried in full: the machine receiving
+        // the task writes its directory from these events, whoever on this machine
+        // wrote the files.
+        if let Some(project) = stopped.project() {
+            match tasks.project_memory_state(&project.id).await {
+                Ok(state) => {
+                    let held: HashSet<(String, Option<String>)> = events
+                        .iter()
+                        .filter_map(|recorded| match &recorded.event {
+                            TaskHistoryEvent::ProjectMemoryFileWritten {
+                                path, contents, ..
+                            } => Some((path.clone(), contents.clone())),
+                            _ => None,
+                        })
+                        .collect();
+                    for file in state {
+                        if held.contains(&(file.path.clone(), file.contents.clone())) {
+                            continue;
+                        }
+                        events.push(RecordedEvent {
+                            recorded_at_ms: file.at_ms,
+                            event: TaskHistoryEvent::ProjectMemoryFileWritten {
+                                project_id: project.id.clone(),
+                                path: file.path,
+                                contents: file.contents,
+                                written_at_ms: file.at_ms,
+                            },
+                        });
+                    }
+                }
+                Err(error) => tracing::warn!(
+                    task = %stopped.id,
+                    %error,
+                    "could not carry the project's memory with a task"
+                ),
+            }
+        }
         let record = HandoverRecord {
             draft: HandoverDraft {
                 intent: stopped.facts.intent.clone(),

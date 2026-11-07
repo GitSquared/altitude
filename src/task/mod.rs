@@ -25,6 +25,7 @@ use crate::remote::{TRANSCRIPT_FILE, WORK_PLAIN_FILE};
 use uuid::Uuid;
 
 mod agent;
+pub(crate) mod memory;
 mod mirror;
 pub mod picture;
 mod run;

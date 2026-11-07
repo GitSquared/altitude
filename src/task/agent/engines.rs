@@ -3,9 +3,12 @@ use crate::{
     isolation::IsolationEngine,
 };
 
+use std::path::PathBuf;
+
+use crate::task::memory;
 use crate::task::{
-    AgentError, Task, TaskAgentTurnContext, TaskError, TaskExecutionMode, TaskService,
-    TaskServiceError,
+    AgentError, ProjectMemoryFile, Task, TaskAgentTurnContext, TaskError, TaskExecutionMode,
+    TaskService, TaskServiceError,
 };
 
 impl<E> TaskService<E>
@@ -52,6 +55,74 @@ where
         let mut context = task.turn_context(mode);
         context.vcs_identity = self.vcs_identity(task);
         context
+    }
+
+    pub(crate) async fn project_memory_state(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<ProjectMemoryFile>, TaskServiceError> {
+        self.store
+            .project_memory_state(project_id)
+            .await
+            .map_err(TaskServiceError::Task)
+    }
+
+    // The directory the sandbox mounts for this project, for the operator whose work
+    // it is: the engine scopes it, so the sync writes where the agent reads.
+    fn memory_directory(&self, owner: Option<&str>, project_id: &str) -> PathBuf {
+        owner
+            .and_then(|owner| self.isolation.for_operator(owner).ok())
+            .map(|isolation| isolation.project_memory_dir(project_id))
+            .unwrap_or_else(|| self.isolation.project_memory_dir(project_id))
+    }
+
+    // Record what a project's memory directory now holds, as events on the task that
+    // is here to carry them, so the directory's changes have a log to travel by.
+    pub(crate) async fn capture_project_memory(
+        &self,
+        owner: Option<&str>,
+        task_id: &str,
+        project_id: &str,
+    ) {
+        let directory = self.memory_directory(owner, project_id);
+        let on_disk = match memory::read(&directory) {
+            Ok(files) => files,
+            Err(error) => {
+                tracing::warn!(%error, %project_id, "could not read a project's memory");
+                return;
+            }
+        };
+        let known = match self.project_memory_state(project_id).await {
+            Ok(known) => known,
+            Err(error) => {
+                tracing::warn!(%error, %project_id, "could not read a project's memory state");
+                return;
+            }
+        };
+        let events = memory::changes(project_id, &on_disk, &known);
+        if events.is_empty() {
+            return;
+        }
+        if let Err(error) = self.store.append_events(task_id, &events).await {
+            tracing::warn!(%error, %project_id, "could not record a project's memory");
+        }
+    }
+
+    // Bring a project's memory directory up to what its newest events say, so a task
+    // that just arrived finds what earlier tasks elsewhere wrote. A file newer on this
+    // machine is left alone, so applying never costs work this machine did later.
+    pub(crate) async fn apply_project_memory(&self, owner: Option<&str>, project_id: &str) {
+        match self.project_memory_state(project_id).await {
+            Ok(state) => {
+                let directory = self.memory_directory(owner, project_id);
+                if let Err(error) = memory::write(&directory, &state) {
+                    tracing::warn!(%error, %project_id, "could not write a project's memory");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, %project_id, "could not read a project's memory state");
+            }
+        }
     }
 
     fn vcs_identity(&self, task: &Task) -> Option<String> {

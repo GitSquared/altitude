@@ -33,6 +33,9 @@ pub(crate) use run::{
 };
 
 pub(super) const GUEST_HOME: &str = "/root";
+// Where a project's memory is mounted in every task that runs it. The same path is
+// named in the project brief, which is the only thing that tells the agent it exists.
+pub(crate) const MEMORY_GUEST_PATH: &str = "~/.altitude/memory";
 pub(super) const OPENER: &str = "/usr/local/bin/xdg-open";
 pub const REFRESH_AFTER: Duration = Duration::from_secs(72 * 60 * 60);
 
@@ -254,6 +257,44 @@ impl SandboxPlan {
                 // here stops the tool and protects nothing — the sandbox can copy a
                 // file out and run it, so the operator's cache is theirs to share.
                 noexec: false,
+            });
+        }
+        // Every project a task runs in has memory, whether it asked for it or not:
+        // what one task learns has to reach the next, and asking the operator to
+        // configure a place for it is asking them to remember to. It sits outside the
+        // cache tree, so clearing a cache never costs memory. A profile-only project
+        // is a build or a shell, not a place work runs, and gets none.
+        if plan.project.id.parse::<uuid::Uuid>().is_ok() {
+            let host_path = config.project_memory_dir(&plan.project.id);
+            let guest_path = expand_guest_path(MEMORY_GUEST_PATH)?;
+            for existing in &plan.options.mounts {
+                let existing_guest = Path::new(&existing.guest_path);
+                if guest_path.starts_with(existing_guest)
+                    || existing_guest.starts_with(&guest_path)
+                    || host_path.starts_with(&existing.host_path)
+                    || existing.host_path.starts_with(&host_path)
+                {
+                    return Err(IsolationError::new("project memory overlaps another mount"));
+                }
+            }
+            let readme = include_str!("../assets/memory.md")
+                .replace("{{guest_path}}", &guest_path.to_string_lossy())
+                .replace("{{host_path}}", &host_path.to_string_lossy());
+            plan.managed_files
+                .push((host_path.join("README.md"), readme));
+            // How to wield the indexer on this folder. Altitude refreshes both notes,
+            // so an edit to them is lost rather than kept: the memory is the agent's,
+            // the instructions are the machine's.
+            plan.managed_files.push((
+                host_path.join("QMD.md"),
+                include_str!("../assets/qmd.md").to_owned(),
+            ));
+            plan.options.mounts.push(SandboxMount {
+                host_path,
+                guest_path: guest_path.to_string_lossy().into_owned(),
+                readonly: false,
+                // Markdown to read and edit, never a program to run.
+                noexec: true,
             });
         }
         Ok(plan)
