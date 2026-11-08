@@ -3,7 +3,6 @@ use super::*;
 use std::cmp::Ordering;
 
 use sqlx::types::Json;
-use uuid::Uuid;
 
 use crate::id;
 use crate::task::{
@@ -226,32 +225,17 @@ impl TaskStore {
             .await
     }
 
+    // What the operator says in a thread is a message in it, and the turn that answers
+    // reads it from there. Recording it only as a task input put their words in front
+    // of the agent and nowhere the operator could see them: the thread still ended
+    // with the agent's question, so the task read as unanswered after being answered.
     pub async fn message_operator_signal(
         &self,
         task_id: &str,
         signal_id: &str,
         body: &str,
     ) -> Result<Task, TaskError> {
-        self.thread_of(task_id, signal_id).await?;
-        let task = self
-            .get(task_id)
-            .await?
-            .ok_or(TaskError::OperationRejected(
-                "this task is no longer in play",
-            ))?;
-        let input = TaskInput {
-            id: Uuid::new_v4().to_string(),
-            at_ms: now_ms(),
-            author: TaskInputAuthor::Operator {
-                id: task.facts.operator_id.unwrap_or_default(),
-                label: task.facts.operator_label.unwrap_or_default(),
-            },
-            source: TaskInputSource::Altitude,
-            body: body.to_owned(),
-            responding_to: Some(signal_id.to_owned()),
-            external_id: None,
-        };
-        self.append_events(task_id, &[TaskHistoryEvent::TaskInputExpressed { input }])
+        self.message_signal_as(task_id, signal_id, TaskAskAuthor::Operator, body)
             .await
     }
 
