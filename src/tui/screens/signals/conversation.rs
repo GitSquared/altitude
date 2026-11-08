@@ -47,7 +47,7 @@ pub(super) fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
     draw_pane_title(
         frame,
         title,
-        "SIGNAL THREAD",
+        "THREAD",
         match app.signal_thread() {
             Some(thread) => format!("  {}", thread.title),
             None => String::new(),
@@ -647,5 +647,5 @@ fn draw_empty(frame: &mut Frame, area: Rect, app: &App) {
         );
         return;
     }
-    empty::draw(frame, area, "Agent hasn't raised any signals yet");
+    empty::draw(frame, area, "Nothing has been asked yet");
 }

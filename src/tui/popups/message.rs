@@ -70,7 +70,7 @@ pub fn draw(frame: &mut Frame, area: Rect, prompt: &MessagePrompt) -> Rect {
     .areas(inner);
     frame.render_widget(
         Paragraph::new(Line::styled(
-            "This becomes task input. The agent answers through its signals.",
+            "This becomes task input. The agent answers in its threads, or in what it says.",
             palette::muted(),
         ))
         .wrap(Wrap { trim: true }),

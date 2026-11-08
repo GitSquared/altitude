@@ -24,7 +24,7 @@ pub(super) fn draw_plan_tabs(frame: &mut Frame, area: Rect, app: &App) {
     // Only the labels are the tabs' to clear: the rule under them is the pane's,
     // and the separators between tabs are drawn onto it.
     surface::cover(frame, Rect { height: 1, ..area });
-    let tabs = [Tab::new("Signals"), Tab::new("Plan")];
+    let tabs = [Tab::new("Threads"), Tab::new("Plan")];
     let selected = usize::from(app.signal_plan_open);
     tabs::draw(frame, area, &tabs, selected);
 }

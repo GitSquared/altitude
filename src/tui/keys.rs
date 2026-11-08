@@ -76,7 +76,7 @@ pub fn help_sections() -> Vec<HelpSection> {
                     "Typing (open menu)",
                     "Narrow the choices; enter takes one, esc closes it",
                 ),
-                ("Enter / i", "Read and answer the selected task's signals"),
+                ("Enter / i", "Read and answer the selected task's threads"),
                 (
                     "Ctrl-Enter",
                     "Take over the task; a remote task moves here first",
@@ -156,9 +156,9 @@ pub fn help_sections() -> Vec<HelpSection> {
             ],
         },
         HelpSection {
-            title: "Signals",
+            title: "Threads",
             bindings: &[
-                ("j/k · ↓/↑", "Move between signal threads"),
+                ("j/k · ↓/↑", "Move between threads"),
                 (
                     "Enter",
                     "Take the primary action: acknowledge a decision, accept a review, resolve a log the agent finished, or reply where that is all there is",
@@ -185,7 +185,7 @@ pub fn help_sections() -> Vec<HelpSection> {
                     "Enter (writing a reply)",
                     "Send it; shift-enter adds a line and esc puts it away",
                 ),
-                ("Esc / q", "Close signals; esc leaves the reply box first"),
+                ("Esc / q", "Close threads; esc leaves the reply box first"),
             ],
         },
         HelpSection {

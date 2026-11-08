@@ -273,7 +273,7 @@ impl App {
                 let (local, remote) = self.visible_counts();
                 if local + remote > 0 {
                     hints.extend([
-                        Hint::new("enter", "signals"),
+                        Hint::new("enter", "threads"),
                         Hint::new("ctrl-enter", "take over"),
                     ]);
                 }
