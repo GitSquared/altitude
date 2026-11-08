@@ -119,9 +119,9 @@ pub(super) fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App) {
         frame,
         title,
         if app.signal_show_thoughts {
-            "RECORD + THOUGHTS"
+            "ACTIVITY + THOUGHTS"
         } else {
-            "RECORD"
+            "ACTIVITY"
         },
         String::new(),
         focused,
@@ -134,9 +134,9 @@ pub(super) fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App) {
             frame,
             body,
             if app.signal_show_thoughts {
-                "Nothing said yet"
+                "Nothing yet"
             } else {
-                "Nothing said yet · t shows what the agent is thinking"
+                "Nothing yet · t shows what the agent is thinking"
             },
         );
         app.signal_activity_scroll_max = 0;
