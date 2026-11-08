@@ -85,8 +85,10 @@ impl RemoteTracker {
         // An answer in the issue belongs in the ask it answers. One is open at a time,
         // so there is nothing to choose between; a task with none is steered directly.
         let Some(signal) = waiting.first().copied() else {
+            self.note_wake(&report, "the operator answered").await;
             return host.steer(report.task_id.clone(), answer.to_owned()).await;
         };
+        self.note_wake(&report, "the operator answered").await;
         host.reply(report.task_id.clone(), signal.id.clone(), answer.to_owned())
             .await
     }
@@ -191,6 +193,8 @@ impl RemoteTracker {
                 } else {
                     event.body.clone()
                 };
+                self.note_wake(&report, "the operator wrote on the issue")
+                    .await;
                 if let Some(thread) = &answered {
                     // The reply answers the thread it is in. Whether an answer
                     // settles a question is the agent's to judge and it says so with
@@ -292,6 +296,8 @@ impl RemoteTracker {
             "The operator reacted {} to this comment:\n\n{about}",
             event.emoji
         );
+        self.note_wake(&report, "the operator reacted to a message")
+            .await;
         host.reply(report.task_id, thread.id, said).await
     }
 

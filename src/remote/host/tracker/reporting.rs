@@ -444,6 +444,56 @@ impl RemoteTracker {
     // the state it is in, replaced by the next thing this machine says. Neither is a
     // reply: nothing here is addressed to anybody and nothing here is news worth a
     // notification.
+    // A conclusion this machine has not said yet, and the one it replaces: a message
+    // ends the turn it is sent in, so what a run concluded is held for the end of the
+    // turn while the conclusion before it goes into the record.
+    fn hold_speech(&self, task_id: &str, text: &str) -> Option<String> {
+        self.speech
+            .lock()
+            .ok()?
+            .insert(task_id.to_owned(), text.to_owned())
+    }
+
+    fn take_speech(&self, task_id: &str) -> Option<String> {
+        self.speech.lock().ok()?.remove(task_id)
+    }
+
+    // The run has stopped talking: say the last thing it concluded, which is the turn's
+    // one message. Nothing is said when it concluded nothing.
+    pub(super) async fn flush_speech(&self, report: &Cursor) {
+        let Some(text) = self.take_speech(&report.task_id) else {
+            return;
+        };
+        let (said, _) = self.activity_state(&report.task_id);
+        let id = stable_id(
+            &report.task_id,
+            &format!("speech-end-{}:{said}", self.started_at_ms),
+        );
+        if let Err(error) = self
+            .say(report, &id, AgentActivityContent::Response { body: text })
+            .await
+        {
+            tracing::debug!(task = %report.task_id, %error, "could not say what the agent concluded");
+        }
+    }
+
+    // A task this machine has just woken says so before the agent's first line: the
+    // operator who wrote in has to see that it was taken, and a session that is about
+    // to work should not sit at "finished" until the model catches up.
+    pub(super) async fn note_wake(&self, report: &Cursor, why: &str) {
+        let id = stable_id(
+            &report.task_id,
+            &format!("wake-{}:{}", self.started_at_ms, now_ms()),
+        );
+        let body = format!("⛰ Altitude is waking this task: {why}.");
+        if let Err(error) = self
+            .say(report, &id, AgentActivityContent::Thought { body })
+            .await
+        {
+            tracing::debug!(task = %report.task_id, %error, "could not say a task was woken");
+        }
+    }
+
     pub(super) async fn report_activity(&self, host: &dyn Host) {
         let bound = match host.bound_tasks().await {
             Ok(bound) => bound,
@@ -453,6 +503,13 @@ impl RemoteTracker {
             }
         };
         for task in bound {
+            // A task that is no longer running has stopped talking: anything it held
+            // back is said here, so a turn whose end was missed still gets its message.
+            if task.status != TaskExecutionStatus::Running
+                && let Some(report) = self.report_for_task(&task.task_id)
+            {
+                self.flush_speech(&report).await;
+            }
             let activity = match host.current_activity(task.task_id.clone()).await {
                 Ok(Some(activity)) if !activity.text.trim().is_empty() => activity,
                 _ => continue,
@@ -495,14 +552,23 @@ impl RemoteTracker {
                     .await
                 }
                 ActivityKind::Speech | ActivityKind::Remote => {
-                    self.say(
-                        &report,
-                        &activity_id,
-                        AgentActivityContent::Response {
-                            body: activity.text.clone(),
-                        },
-                    )
-                    .await
+                    match self.hold_speech(&task.task_id, &activity.text) {
+                        // The conclusion this one replaces belongs to the record now:
+                        // it was worth reading when it was said, and it is not the
+                        // turn's message any more.
+                        Some(earlier) => {
+                            self.say(
+                                &report,
+                                &stable_id(
+                                    &report.task_id,
+                                    &format!("speech-{}:{published}", self.started_at_ms),
+                                ),
+                                AgentActivityContent::Thought { body: earlier },
+                            )
+                            .await
+                        }
+                        None => Ok(()),
+                    }
                 }
             };
             if let Err(error) = published_activity {

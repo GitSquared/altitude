@@ -74,9 +74,9 @@ impl TaskExecutionPauseReason {
             Self::AgentWentQuiet => {
                 "The agent kept taking turns without anything to report, so the task stopped here."
             }
-            Self::ApplicationShutdown => {
-                "The machine running this task restarted. The task resumes when it is back."
-            }
+            // What happened, not what will happen: a pause that is over by the time it
+            // is read must not promise a resume the line under it contradicts.
+            Self::ApplicationShutdown => "The machine running this task restarted.",
             // The one pause nobody has to clear. It names the clock's owner and not the
             // hour, because a time is right for one machine's timezone and not another's.
             Self::AwaitingLimit => {

@@ -228,6 +228,7 @@ impl RemoteTracker {
                 execution_pause_reason,
                 ..
             } => {
+                self.flush_speech(report).await;
                 let id = stable_id(&format!("{}-{index}", report.task_id), "paused");
                 // Per pause, not per task: a thread that says nothing the second time
                 // it waits is a thread the operator thinks is still thinking.
@@ -264,6 +265,7 @@ impl RemoteTracker {
             // claiming the agent is still busy, which is what it looked like while
             // the machine had already given up.
             TaskHistoryEvent::ExecutionFailed { error, .. } => {
+                self.flush_speech(report).await;
                 self.say(
                     report,
                     &stable_id(&format!("{}-{index}", report.task_id), "failed"),
@@ -395,12 +397,14 @@ impl RemoteTracker {
                 }
             }
             TaskHistoryEvent::OperatorSignalConfirmed { signal_id } => {
+                self.flush_speech(report).await;
                 self.follow_signal_thread(report, signal_id, true).await;
                 self.finish_accepted(host, report, &events[..=index])
                     .await?;
                 return Ok(Some(()));
             }
             TaskHistoryEvent::TaskCompleted { .. } => {
+                self.flush_speech(report).await;
                 self.resolve_signal_comments(report, &events[..=index])
                     .await;
                 self.finish_accepted(host, report, &events[..=index])
