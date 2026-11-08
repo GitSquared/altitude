@@ -6,7 +6,6 @@ use crate::{
     tracker::{TrackerKind, providers::linear::automation::AgentActivityContent},
 };
 
-use super::intake::Unprepared;
 use super::ledger::ReactionInput;
 use super::*;
 impl RemoteTracker {
@@ -365,37 +364,16 @@ impl RemoteTracker {
         }
     }
 
-    pub(super) async fn post_sync_guidance(
-        &self,
-        session_id: &str,
-        cause: Unprepared,
-    ) -> Result<(), String> {
+    pub(super) async fn post_sync_guidance(&self, session_id: &str) -> Result<(), String> {
         let tracker = TrackerKind::Linear.label();
-        let host = whoami::hostname().unwrap_or_else(|_| "this remote".to_owned());
-        // Two different things stop a delegation here, and naming the wrong one sends
-        // the operator to a setting that is already right.
-        let body = match cause {
-            Unprepared::NoProjects => format!(
-                "**This remote has no projects yet.**\n\n\
-                 No one has added this remote to a project in Altitude, so it has no code, \
-                 no agent, and no settings to run this issue with.\n\n\
-                 On your computer:\n\n\
-                 1. Open Altitude, or install it if you don't have it.\n\
-                 2. In Settings → Remotes, add this remote: {host}\n\
-                 3. In Settings → Task tracker, sign in to {tracker}, so Altitude knows \
-                 whose work this is.\n\n\
-                 Altitude passes your setup to this remote in the background. Reply here \
-                 once that's done, and this issue gets picked up."
-            ),
-            Unprepared::UnknownOperator => format!(
-                "**Altitude does not know whose work this is.**\n\n\
-                 This remote holds no {tracker} login from a person it could report to, so \
-                 it cannot start a task for you.\n\n\
-                 On your computer, in Settings → Task tracker, sign in to {tracker} as \
-                 yourself. The login is passed to this remote in the background; reply \
-                 here once that's done."
-            ),
-        };
+        let body = format!(
+            "**Altitude does not know whose work this is.**\n\n\
+             This remote holds no {tracker} login from a person it could report to, so it \
+             cannot start a task for you.\n\n\
+             On your computer, in Settings → Task tracker, sign in to {tracker} as \
+             yourself. The login is passed to this remote in the background; reply here \
+             once that's done."
+        );
         self.config
             .automation
             .create_activity(

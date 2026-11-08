@@ -8,7 +8,6 @@ use crate::{
 };
 use iroh::EndpointId;
 
-use super::intake::Unprepared;
 use super::*;
 impl RemoteTracker {
     pub(super) async fn recover_delegations(&self, host: &dyn Host) {
@@ -233,24 +232,16 @@ impl RemoteTracker {
             );
             return Ok(());
         }
-        // The session's creator is the delegation author. An automation- or
-        // agent-started session has no responsible human, so there is nobody to
-        // report through and no assignee fallback is invented. An app-created id
-        // cannot be guessed back to a person, and an issue already being worked
-        // on is not news, so only an unknown issue is worth educating.
+        // The session's creator is the delegation author. A session this app opens is
+        // one it opened to report into, and a session another app opens has an app to
+        // answer for it: neither has a person to report through, and saying anything
+        // about the machine's setup in them is advice nobody asked this machine for.
+        // That advice is for a delegation a person made, and it is given further down.
         let Some(author) = event
             .creator_id
             .as_deref()
             .filter(|id| *id != self.config.automation.app_user_id())
         else {
-            if host
-                .work_for_issue(issue_id.to_owned(), Vec::new())
-                .await?
-                .is_none()
-            {
-                self.post_sync_guidance(&event.session_id, Unprepared::NoProjects)
-                    .await?;
-            }
             return Ok(());
         };
         let label = event.creator_name.as_deref().unwrap_or(author);
@@ -398,8 +389,7 @@ impl RemoteTracker {
         }
 
         let Some(owner) = self.owner_for_user(author) else {
-            self.post_sync_guidance(session_id, Unprepared::UnknownOperator)
-                .await?;
+            self.post_sync_guidance(session_id).await?;
             return Ok(());
         };
         let peer: EndpointId = owner
