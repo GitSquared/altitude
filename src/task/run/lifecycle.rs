@@ -571,13 +571,26 @@ where
                     // machine does now depends on what it cut in half: a task that was
                     // waiting is still waiting, and a task that was working has a turn
                     // to finish.
-                    let history = service.events(&task.id).await.unwrap_or_default();
-                    let interrupted = was_running(
-                        &history
-                            .iter()
-                            .map(|(_, event)| event.clone())
-                            .collect::<Vec<_>>(),
-                    );
+                    // A history that cannot be read is not a history that says the task
+                    // was idle: saying nothing happened and saying nothing are the same
+                    // answer here, and only one of them is honest.
+                    let interrupted = match service.events(&task.id).await {
+                        Ok(history) => {
+                            let events: Vec<_> = history
+                                .into_iter()
+                                .map(|(_, event)| event)
+                                .collect();
+                            was_running(&events)
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                task = %task.id,
+                                %error,
+                                "could not read a task's history to see what the restart cut in half"
+                            );
+                            false
+                        }
+                    };
                     let mut events = vec![if interrupted {
                         TaskHistoryEvent::ExecutionRecovered {
                             execution_status: TaskExecutionStatus::Pending,
