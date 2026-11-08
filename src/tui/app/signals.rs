@@ -74,20 +74,38 @@ impl App {
         self.select_signal_message_at_scroll();
     }
 
+    // Which message the eye is on, given where the conversation is scrolled to: the one
+    // with the most of itself on screen, and the later one when two are level. Scrolling
+    // is by the line — a message taller than the pane can be read from its top — so the
+    // cursor follows the lines rather than deciding where they go.
     pub(super) fn select_signal_message_at_scroll(&mut self) {
         if self.signal_message_rows.is_empty() {
             return;
         }
-        let current = if self.signal_scroll == u16::MAX {
+        let top = i32::from(if self.signal_scroll == u16::MAX {
             self.signal_scroll_max
         } else {
             self.signal_scroll
-        };
-        self.signal_message_cursor = self
-            .signal_message_rows
-            .iter()
-            .position(|&(top, height)| current < top.saturating_add(height))
-            .unwrap_or(self.signal_message_rows.len() - 1);
+        });
+        let bottom = top.saturating_add(i32::from(self.signal_viewport_rows.max(1)));
+        let mut best: Option<(i32, usize)> = None;
+        for (index, &(at, height)) in self.signal_message_rows.iter().enumerate() {
+            let first = i32::from(at).max(top);
+            let last = i32::from(at).saturating_add(i32::from(height)).min(bottom);
+            let seen = last - first;
+            if seen <= 0 {
+                continue;
+            }
+            // `>=` rather than `>` so that two messages sharing the screen equally leave
+            // the cursor on the newer of them: the newest thing said is the thing being
+            // read, and it is at the bottom.
+            if best.is_none_or(|(most, _)| seen >= most) {
+                best = Some((seen, index));
+            }
+        }
+        self.signal_message_cursor = best
+            .map(|(_, index)| index)
+            .unwrap_or_else(|| self.signal_message_rows.len() - 1);
     }
 
     pub(in crate::tui) fn page_signal(&mut self, up: bool) {
@@ -312,19 +330,11 @@ impl App {
         })
     }
 
+    // One line at a time, because a message is not the unit a reader moves in: a long
+    // one is taller than the pane, and scrolling it whole hides the end that was being
+    // read.
     pub(super) fn move_signal_message(&mut self, forward: bool) {
-        let len = self
-            .signal_thread()
-            .map_or(0, |thread| thread.messages.len());
-        if len == 0 {
-            return;
-        }
-        self.signal_message_cursor = if forward {
-            (self.signal_message_cursor + 1).min(len - 1)
-        } else {
-            self.signal_message_cursor.saturating_sub(1)
-        };
-        self.reveal_signal_message();
+        self.scroll_signal(if forward { 1 } else { -1 });
     }
 
     pub(super) fn copy_signal_message(&mut self) {
@@ -353,8 +363,10 @@ impl App {
             let len = self
                 .signal_thread()
                 .map_or(0, |thread| thread.messages.len());
+            // Only the cursor is clamped: the scroll is where the reader put it, and
+            // revealing a message here would undo a line-by-line move by scrolling the
+            // conversation back to the message the cursor landed on.
             self.signal_message_cursor = self.signal_message_cursor.min(len.saturating_sub(1));
-            self.reveal_signal_message();
         }
     }
 

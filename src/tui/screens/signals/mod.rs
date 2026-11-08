@@ -165,7 +165,11 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     surface::cover(frame, title);
     draw_pane_title(
         frame,
-        title,
+        Rect {
+            x: title.x.saturating_add(LIST_PADDING),
+            width: title.width.saturating_sub(LIST_PADDING),
+            ..title
+        },
         "HISTORY",
         format!("  {}", app.signal_threads.len()),
     );
