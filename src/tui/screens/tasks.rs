@@ -321,7 +321,7 @@ fn draw_controls(frame: &mut Frame, area: Rect, popup_area: Rect, app: &mut App)
         );
     }
     app.tasks_list
-        .headers(frame, area, LIST_PADDING, &["Asks", "Issue", "PRs", "Age"]);
+        .headers(frame, area, LIST_PADDING, &["", "Issue", "PRs", "Age"]);
 }
 
 #[allow(clippy::too_many_arguments)]

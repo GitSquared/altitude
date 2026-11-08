@@ -168,7 +168,6 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         title,
         "HISTORY",
         format!("  {}", app.signal_threads.len()),
-        app.signal_focus == SignalFocus::List,
     );
     surface::horizontal_divider(frame, list, divider.y);
     draw_threads(frame, threads, app);

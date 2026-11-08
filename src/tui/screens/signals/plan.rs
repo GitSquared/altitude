@@ -31,7 +31,6 @@ pub(super) fn draw_plan(frame: &mut Frame, area: Rect, app: &mut App) {
         } else {
             format!("  {done}/{}", plan.len())
         },
-        focused,
     );
     if plan.is_empty() {
         empty::draw(frame, body, "No plan yet");
@@ -109,7 +108,7 @@ pub(super) fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App) {
     let (title, _, body) = pane_body(area);
     app.signal_focus_ring.add(SignalFocus::Activity);
     let focused = app.signal_focus == SignalFocus::Activity;
-    draw_pane_title(frame, title, "ACTIVITY", String::new(), focused);
+    draw_pane_title(frame, title, "ACTIVITY", String::new());
     app.signal_activity_rows = body.height.max(1);
     app.signal_targets.add(body, SignalHit::Activity);
     draw_focus_rail(frame, area, body, focused);

@@ -46,6 +46,8 @@ pub(super) fn draw_threads(frame: &mut Frame, area: Rect, app: &mut App) {
             let day = day_of(thread.opened_at_ms, now);
             let starts = previous.as_ref() != Some(&day);
             previous = Some(day.clone());
+            // The row's own mark says what the ask was; the heading only says which
+            // day it happened on.
             let mark = if thread.is_resolved() {
                 '✓'
             } else {

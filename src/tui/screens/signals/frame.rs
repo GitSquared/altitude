@@ -70,23 +70,13 @@ pub(super) fn split_plan_and_activity(frame: &mut Frame, area: Rect, app: &mut A
     draw_plan(frame, plan, app);
 }
 
-pub(super) fn draw_pane_title(
-    frame: &mut Frame,
-    area: Rect,
-    title: &str,
-    detail: String,
-    focused: bool,
-) {
+pub(super) fn draw_pane_title(frame: &mut Frame, area: Rect, title: &str, detail: String) {
+    // A pane's title is a name, not a cursor: where the keys are is said by the rail
+    // around the pane, and colouring the name as well made one of the three look
+    // chosen for no reason.
     frame.render_widget(
         Paragraph::new(Line::from_iter([
-            Span::styled(
-                title.to_owned(),
-                if focused {
-                    palette::accent()
-                } else {
-                    palette::heading()
-                },
-            ),
+            Span::styled(title.to_owned(), palette::heading()),
             Span::styled(detail, palette::muted()),
         ])),
         Rect { height: 1, ..area },

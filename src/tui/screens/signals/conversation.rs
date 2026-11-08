@@ -52,7 +52,6 @@ pub(super) fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
             Some(thread) => format!("  {}", thread.title),
             None => String::new(),
         },
-        app.signal_focus == SignalFocus::Detail,
     );
     let Some(thread) = app.signal_thread().cloned() else {
         draw_empty(frame, rest, app);
