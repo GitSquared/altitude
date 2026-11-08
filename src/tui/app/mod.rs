@@ -23,7 +23,7 @@ use crate::{
         RemoteKey, RemoteKeyStatus, RemoteKeys, TaskOrigin, TaskSummary, TrackerConnection, meet,
         transfer, transfer::TransferUpdate,
     },
-    task::{Task, TaskExecutionPauseReason, TaskOperatorSignalThread, TaskServiceError},
+    task::{Task, TaskAsk, TaskExecutionPauseReason, TaskServiceError},
     tracker::{IssueSnapshot, IssueSummary, ScopeSummary, TrackerKind},
     tui::keys::{is_dismiss, is_remove},
     tui::popups,
@@ -434,7 +434,7 @@ enum CommitIdentityEdit {
 pub(in crate::tui) enum RemoteSignalsReply {
     Opened {
         remote: RemoteSignals,
-        signals: Result<Vec<TaskOperatorSignalThread>, String>,
+        signals: Result<Vec<TaskAsk>, String>,
     },
     Resolved {
         remote: RemoteSignals,
@@ -531,8 +531,8 @@ pub struct App {
     commit_edit: Option<CommitIdentityEdit>,
     git_identity_over_card: bool,
     pub(in crate::tui) signal_task_id: Option<String>,
-    pub(in crate::tui) signal_all_threads: Vec<TaskOperatorSignalThread>,
-    pub(in crate::tui) signal_threads: Vec<TaskOperatorSignalThread>,
+    pub(in crate::tui) signal_all_threads: Vec<TaskAsk>,
+    pub(in crate::tui) signal_threads: Vec<TaskAsk>,
     pub(in crate::tui) signal_filter: Select<SignalFilter>,
     pub(in crate::tui) signal_sort: Select<SignalSort>,
     pub(in crate::tui) signals_list: list::List,

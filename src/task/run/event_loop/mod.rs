@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::remote::Watching;
-use crate::task::{ProjectMemoryFile, SendsTasksHome, TaskOperatorSignalThread};
+use crate::task::{ProjectMemoryFile, SendsTasksHome, TaskAsk};
 use tokio::sync::mpsc;
 
 use crate::{
@@ -165,10 +165,7 @@ where
             .await
     }
 
-    pub async fn signal_threads(
-        &self,
-        task_id: &str,
-    ) -> Result<Vec<TaskOperatorSignalThread>, TaskServiceError> {
+    pub async fn signal_threads(&self, task_id: &str) -> Result<Vec<TaskAsk>, TaskServiceError> {
         self.service.signal_threads(task_id).await
     }
 

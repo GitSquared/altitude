@@ -12,8 +12,8 @@ use crate::{
     isolation::EnvironmentProgress,
     remote::TaskSummary,
     task::{
-        SIGNAL_ORDER, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
-        TaskOperatorSignalKind, place_in_queue,
+        TaskAskKind, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
+        place_in_queue,
     },
     tui::{
         App,
@@ -45,8 +45,6 @@ pub enum Standing {
     Failed,
     NeedsYou,
     ReadyToReview,
-    Decisions,
-    Info,
     Working,
     Queued,
     Limited,
@@ -61,11 +59,9 @@ impl Standing {
             TaskExecutionStatus::Completed => return Self::Done,
             _ => {}
         }
-        match summary.leading_signal_kind {
-            Some(TaskOperatorSignalKind::Blocked) => return Self::NeedsYou,
-            Some(TaskOperatorSignalKind::InReview) => return Self::ReadyToReview,
-            Some(TaskOperatorSignalKind::Decision) => return Self::Decisions,
-            Some(TaskOperatorSignalKind::Update) => return Self::Info,
+        match summary.leading_ask_kind {
+            Some(TaskAskKind::Steer) => return Self::NeedsYou,
+            Some(TaskAskKind::Review) => return Self::ReadyToReview,
             None => {}
         }
         // A question that came through the pause rather than a signal is the same
@@ -89,15 +85,6 @@ impl Standing {
         matches!(self, Self::NeedsYou | Self::ReadyToReview)
     }
 
-    // The section a row is filed under on the list that shows everything: an update
-    // is a report from the same work, not a place of its own.
-    fn filed(self) -> Self {
-        match self {
-            Self::Info => Self::Working,
-            other => other,
-        }
-    }
-
     fn title(self) -> String {
         match self {
             Self::Failed => "FAILED".to_owned(),
@@ -107,28 +94,16 @@ impl Standing {
             Self::Paused => "PAUSED".to_owned(),
             Self::Done => "DONE".to_owned(),
             // The signals' own words, in the case a heading is written in.
-            Self::NeedsYou => signal::view(TaskOperatorSignalKind::Blocked)
-                .task_label
-                .to_uppercase(),
-            Self::ReadyToReview => signal::view(TaskOperatorSignalKind::InReview)
-                .task_label
-                .to_uppercase(),
-            Self::Decisions => signal::view(TaskOperatorSignalKind::Decision)
-                .task_label
-                .to_uppercase(),
-            Self::Info => signal::view(TaskOperatorSignalKind::Update)
-                .task_label
-                .to_uppercase(),
+            Self::NeedsYou => signal::view(TaskAskKind::Steer).task_label.to_uppercase(),
+            Self::ReadyToReview => signal::view(TaskAskKind::Review).task_label.to_uppercase(),
         }
     }
 
     fn mark(self) -> char {
         match self {
             Self::Failed => '✕',
-            Self::NeedsYou => signal::view(TaskOperatorSignalKind::Blocked).symbol,
-            Self::ReadyToReview => signal::view(TaskOperatorSignalKind::InReview).symbol,
-            Self::Decisions => signal::view(TaskOperatorSignalKind::Decision).symbol,
-            Self::Info => signal::view(TaskOperatorSignalKind::Update).symbol,
+            Self::NeedsYou => signal::view(TaskAskKind::Steer).symbol,
+            Self::ReadyToReview => signal::view(TaskAskKind::Review).symbol,
             Self::Working => '●',
             Self::Queued => '◔',
             Self::Limited => '◷',
@@ -142,10 +117,7 @@ impl Standing {
             Self::Failed => palette::bad(),
             Self::NeedsYou => palette::attention(),
             Self::ReadyToReview => palette::good(),
-            Self::Decisions => palette::decision(),
-            Self::Info | Self::Queued | Self::Limited | Self::Paused | Self::Done => {
-                palette::muted()
-            }
+            Self::Queued | Self::Limited | Self::Paused | Self::Done => palette::muted(),
             Self::Working => palette::primary(),
         }
     }
@@ -160,8 +132,6 @@ pub enum TaskFilter {
     Active,
     NeedsYou,
     ReadyToReview,
-    Decisions,
-    Info,
     Working,
     Queued,
     Limited,
@@ -177,8 +147,6 @@ impl TaskFilter {
             Self::Active => standing != Standing::Done,
             Self::NeedsYou => standing == Standing::NeedsYou,
             Self::ReadyToReview => standing == Standing::ReadyToReview,
-            Self::Decisions => standing == Standing::Decisions,
-            Self::Info => standing == Standing::Info,
             Self::Working => standing == Standing::Working,
             Self::Queued => standing == Standing::Queued,
             Self::Limited => standing == Standing::Limited,
@@ -186,12 +154,6 @@ impl TaskFilter {
             Self::Failed => standing == Standing::Failed,
             Self::Done => standing == Standing::Done,
         }
-    }
-
-    // On the lists that show all the work at once, a report from that work is not
-    // a section of its own.
-    fn files_reporting_with_work(self) -> bool {
-        matches!(self, Self::All | Self::Active)
     }
 
     // A filter of one status has said which section the rows are in, so a heading
@@ -467,13 +429,7 @@ fn rows(app: &App) -> Built {
             ),
         );
         entries.push(Held {
-            // Where the row is filed: work that is only reporting does not need a
-            // section of its own, so on the unfiltered list it sits with the work.
-            standing: if filter.files_reporting_with_work() {
-                standing.filed()
-            } else {
-                standing
-            },
+            standing,
             changed_at_ms: summary.shown_updated_at_ms,
             created_at_ms: summary.created_at_ms,
             row,
@@ -498,13 +454,7 @@ fn rows(app: &App) -> Built {
             row = row.reference(format!("on {}", summary.host));
         }
         entries.push(Held {
-            // Where the row is filed: work that is only reporting does not need a
-            // section of its own, so on the unfiltered list it sits with the work.
-            standing: if filter.files_reporting_with_work() {
-                standing.filed()
-            } else {
-                standing
-            },
+            standing,
             changed_at_ms: summary.shown_updated_at_ms,
             created_at_ms: summary.created_at_ms,
             row,
@@ -578,11 +528,6 @@ fn row_of(summary: &TaskSummary, standing: Standing, live: bool, detail: String)
             .join(", ");
         row = row.link(pulls, first.url.clone());
     }
-    // What the agent has said that nobody has read, by kind: the section says
-    // which one leads, the column says how much of each is waiting.
-    if let Some(counts) = signal_counts(summary) {
-        row = row.note(counts);
-    }
     match standing {
         // Nothing is asked of the operator by work that is only waiting, so it
         // leans back; so does a title the agent has not written yet.
@@ -603,7 +548,7 @@ fn detail_of(app: &App, summary: &TaskSummary, ahead: Option<usize>, taking_work
     // model is saying this second changes faster than a list is read, so it is the
     // activity pane's line rather than the row's.
     // A question is worth reading as itself rather than as a count of questions.
-    if let Some(question) = &summary.leading_signal_title
+    if let Some(question) = &summary.leading_ask_title
         && summary.status != TaskExecutionStatus::Failed
     {
         return question.clone();
@@ -649,8 +594,15 @@ fn detail_of(app: &App, summary: &TaskSummary, ahead: Option<usize>, taking_work
         let status = contribution.summary.as_deref().unwrap_or("needs action");
         return format!("PR #{} · {status}", contribution.reference);
     }
-    if summary.unresolved_signal_count > 0 {
-        return notes(summary.unresolved_signal_count);
+    if let Some(kind) = summary.leading_ask_kind
+        && let Some(title) = summary.leading_ask_title.as_deref()
+    {
+        // The operator answered a question and the task has not picked it up: the
+        // line should not still read as the question it asked.
+        if summary.blocking_ask_kind.is_some() {
+            return format!("{} {}", signal::view(kind).symbol, truncate(title, 48));
+        }
+        return format!("answered · {title}");
     }
     match summary.status {
         TaskExecutionStatus::Failed => summary
@@ -693,27 +645,6 @@ fn limit_of(summary: &TaskSummary) -> String {
     match summary.resumes_at_ms {
         Some(at) if at > now_ms() => format!("{window} limit · back at {}", clock(at)),
         _ => format!("{window} limit"),
-    }
-}
-
-// Every kind with something waiting, in the order the row reads them: what
-// stopped it, what is waiting to be read, what it is asking, what it is telling.
-fn signal_counts(summary: &TaskSummary) -> Option<String> {
-    let counts = SIGNAL_ORDER
-        .iter()
-        .filter_map(|kind| {
-            let count = summary.signal_counts.count(*kind);
-            (count > 0).then(|| format!("{}{count}", signal::view(*kind).symbol))
-        })
-        .collect::<Vec<_>>();
-    (!counts.is_empty()).then(|| counts.join(" "))
-}
-
-fn notes(count: u32) -> String {
-    if count == 1 {
-        "1 note".to_owned()
-    } else {
-        format!("{count} notes")
     }
 }
 

@@ -30,7 +30,7 @@ use crate::task::memory;
 use crate::task::picture;
 
 use crate::remote::host::clients::{ClientLog, ClientRecord};
-use crate::task::TaskOperatorSignalThread;
+use crate::task::TaskAsk;
 
 use crate::remote::{
     LinkResult,
@@ -363,7 +363,7 @@ pub trait TaskHost: Send + Sync + 'static {
         &self,
         peer: EndpointId,
         task_id: String,
-    ) -> BoxFuture<Result<Vec<TaskOperatorSignalThread>, String>>;
+    ) -> BoxFuture<Result<Vec<TaskAsk>, String>>;
     fn signal(&self, peer: EndpointId, command: SignalCommand) -> BoxFuture<Result<(), String>>;
     fn input(
         &self,

@@ -1,9 +1,6 @@
 use super::ledger::{Cursor, Delivery, StoredEvent};
 use crate::{
-    task::{
-        TaskExecutionPauseReason, TaskHistoryEvent, TaskOperatorSignalAuthor,
-        TaskOperatorSignalThread,
-    },
+    task::{TaskAsk, TaskAskAuthor, TaskExecutionPauseReason, TaskHistoryEvent},
     tracker::{
         TrackerStatus,
         providers::linear::automation::{AgentActivityContent, CommentSite},
@@ -301,7 +298,7 @@ impl RemoteTracker {
                             matches!(
                                 event,
                                 TaskHistoryEvent::OperatorSignalMessage {
-                                    author: TaskOperatorSignalAuthor::Operator,
+                                    author: TaskAskAuthor::Operator,
                                     ..
                                 }
                             )
@@ -327,7 +324,7 @@ impl RemoteTracker {
             // and never the answer.
             TaskHistoryEvent::OperatorSignalMessage {
                 signal_id,
-                author: TaskOperatorSignalAuthor::Agent,
+                author: TaskAskAuthor::Agent,
                 body,
             } => {
                 self.post_signal_reply(report, signal_id, body).await;
@@ -355,8 +352,7 @@ impl RemoteTracker {
                 resolved: true,
                 ..
             } => {
-                self.follow_signal_thread(report, signal_id, &events[..=index], true)
-                    .await;
+                self.follow_signal_thread(report, signal_id, true).await;
                 // Answering a question puts the work back in progress: the issue
                 // said In Review while the task was waiting, and it is not waiting
                 // any more. An issue whose ending was already written is left as
@@ -370,8 +366,7 @@ impl RemoteTracker {
             } => {
                 // Reopening a thread says the question is live again, so the
                 // tracker shows it open and the issue is waiting on the operator.
-                self.follow_signal_thread(report, signal_id, &events[..=index], false)
-                    .await;
+                self.follow_signal_thread(report, signal_id, false).await;
                 if !self.is_settled(&report.issue_id)
                     && let Err(error) = self
                         .write_status(host, report, TrackerStatus::InReview)
@@ -381,8 +376,7 @@ impl RemoteTracker {
                 }
             }
             TaskHistoryEvent::OperatorSignalConfirmed { signal_id } => {
-                self.follow_signal_thread(report, signal_id, &events[..=index], true)
-                    .await;
+                self.follow_signal_thread(report, signal_id, true).await;
                 self.finish_accepted(host, report, &events[..=index])
                     .await?;
                 return Ok(Some(()));
@@ -414,7 +408,7 @@ impl RemoteTracker {
             .signal_threads(report.task_id.clone())
             .await?
             .into_iter()
-            .filter(TaskOperatorSignalThread::is_unresolved)
+            .filter(TaskAsk::is_unresolved)
             .map(|signal| signal.id)
             .collect();
         // A report that only began after a transfer must not replay the source's

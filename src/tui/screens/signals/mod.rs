@@ -5,7 +5,7 @@ use ratatui::{
 };
 
 use crate::{
-    task::{TaskOperatorSignalAuthor, TaskOperatorSignalKind, TaskOperatorSignalThread},
+    task::{TaskAsk, TaskAskAuthor, TaskAskKind},
     tui::{
         App,
         widgets::{
@@ -21,9 +21,9 @@ pub(super) fn one_line(body: &str) -> String {
     markdown::preview(body)
 }
 
-fn who(resolved_by: Option<TaskOperatorSignalAuthor>, agent: &str) -> &str {
+fn who(resolved_by: Option<TaskAskAuthor>, agent: &str) -> &str {
     match resolved_by {
-        Some(TaskOperatorSignalAuthor::Operator) => "you",
+        Some(TaskAskAuthor::Operator) => "you",
         _ => agent,
     }
 }
@@ -53,21 +53,17 @@ pub enum SignalFilter {
     Unresolved,
     NeedsYou,
     Review,
-    Decisions,
-    Info,
     Resolved,
 }
 
 impl SignalFilter {
-    pub fn matches(self, thread: &TaskOperatorSignalThread) -> bool {
+    pub fn matches(self, thread: &TaskAsk) -> bool {
         match self {
             Self::All => true,
             Self::Unresolved => thread.is_unresolved(),
             Self::Resolved => thread.is_resolved(),
-            Self::NeedsYou => thread.kind == TaskOperatorSignalKind::Blocked,
-            Self::Review => thread.kind == TaskOperatorSignalKind::InReview,
-            Self::Decisions => thread.kind == TaskOperatorSignalKind::Decision,
-            Self::Info => thread.kind == TaskOperatorSignalKind::Update,
+            Self::NeedsYou => thread.kind == TaskAskKind::Steer,
+            Self::Review => thread.kind == TaskAskKind::Review,
         }
     }
 }
@@ -115,31 +111,25 @@ pub enum SignalAction {
 }
 
 impl SignalAction {
-    pub fn label(self, kind: TaskOperatorSignalKind, resolved: bool) -> &'static str {
+    pub fn label(self, resolved: bool) -> &'static str {
         match self {
             Self::Reply => "reply",
             Self::Accept => "accept",
             Self::Apply => "apply change",
-            Self::Resolve => match (kind, resolved) {
-                (TaskOperatorSignalKind::Update, _) => "resolve",
-                (_, true) => "reopen",
-                (TaskOperatorSignalKind::Decision, false) => "acknowledge",
-                _ => "resolve",
+            Self::Resolve => match resolved {
+                true => "reopen",
+                false => "resolve",
             },
         }
     }
 }
 
-pub fn primary_action(thread: &TaskOperatorSignalThread) -> Option<SignalAction> {
+pub fn primary_action(thread: &TaskAsk) -> Option<SignalAction> {
     if thread.is_resolved() {
-        // A closed log stays closed; a question or a decision can be opened again
-        // by the person who closed it, and reopening is what puts it back in front
-        // of the agent.
-        return matches!(
-            thread.kind,
-            TaskOperatorSignalKind::Decision | TaskOperatorSignalKind::Blocked
-        )
-        .then_some(SignalAction::Resolve);
+        // A question the operator closed can be opened again by them, and reopening
+        // is what puts it back in front of the agent. A review is theirs as well, but
+        // it ends on acceptance rather than on a toggle.
+        return (thread.kind == TaskAskKind::Steer).then_some(SignalAction::Resolve);
     }
     // A blocked thread that carries a change is answered by making it: the
     // operator's other option, replying, is still there beside it.
@@ -147,25 +137,19 @@ pub fn primary_action(thread: &TaskOperatorSignalThread) -> Option<SignalAction>
         return Some(SignalAction::Apply);
     }
     Some(match thread.kind {
-        TaskOperatorSignalKind::Blocked => SignalAction::Reply,
-        TaskOperatorSignalKind::Update | TaskOperatorSignalKind::Decision => SignalAction::Resolve,
-        TaskOperatorSignalKind::InReview => SignalAction::Accept,
+        TaskAskKind::Steer => SignalAction::Reply,
+        TaskAskKind::Review => SignalAction::Accept,
     })
 }
 
-pub fn secondary_action(thread: &TaskOperatorSignalThread) -> Option<SignalAction> {
+pub fn secondary_action(thread: &TaskAsk) -> Option<SignalAction> {
     if thread.is_resolved() {
-        return matches!(
-            thread.kind,
-            TaskOperatorSignalKind::Decision | TaskOperatorSignalKind::Blocked
-        )
-        .then_some(SignalAction::Reply);
+        return (thread.kind == TaskAskKind::Steer).then_some(SignalAction::Reply);
     }
-    (thread.kind != TaskOperatorSignalKind::Blocked || thread.proposal.is_some())
-        .then_some(SignalAction::Reply)
+    (thread.kind != TaskAskKind::Steer || thread.proposal.is_some()).then_some(SignalAction::Reply)
 }
 
-pub fn actions(thread: &TaskOperatorSignalThread) -> Vec<SignalAction> {
+pub fn actions(thread: &TaskAsk) -> Vec<SignalAction> {
     secondary_action(thread)
         .into_iter()
         .chain(primary_action(thread))
@@ -178,7 +162,7 @@ struct Group {
     tone: Style,
 }
 
-fn group_of(thread: &TaskOperatorSignalThread) -> Group {
+fn group_of(thread: &TaskAsk) -> Group {
     if thread.is_resolved() {
         return Group {
             title: "RESOLVED",
@@ -188,10 +172,8 @@ fn group_of(thread: &TaskOperatorSignalThread) -> Group {
     }
     let view = signal::view(thread.kind);
     let title = match thread.kind {
-        TaskOperatorSignalKind::Blocked => "NEEDS YOU",
-        TaskOperatorSignalKind::InReview => "READY TO REVIEW",
-        TaskOperatorSignalKind::Decision => "DECISIONS",
-        TaskOperatorSignalKind::Update => "INFO LOG",
+        TaskAskKind::Steer => "NEEDS YOU",
+        TaskAskKind::Review => "READY TO REVIEW",
     };
     Group {
         title,

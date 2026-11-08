@@ -20,7 +20,7 @@ use tokio::{
 
 use crate::{
     config::{Config, InstallationIdentity, LinearSettings},
-    task::{TaskHistoryEvent, TaskOperatorSignalThread, TrackerHost},
+    task::{TaskAsk, TaskHistoryEvent, TrackerHost},
     tracker::{
         IssueSnapshot, Linear, TrackerProvider, TrackerStatus,
         providers::linear::{automation::LinearAutomation, oauth},
@@ -256,10 +256,7 @@ impl tracker::Host for OwnTasks {
         })
     }
 
-    fn signal_threads(
-        &self,
-        task_id: String,
-    ) -> tracker::HostFuture<'_, Vec<TaskOperatorSignalThread>> {
+    fn signal_threads(&self, task_id: String) -> tracker::HostFuture<'_, Vec<TaskAsk>> {
         Box::pin(async move {
             self.tasks
                 .service()

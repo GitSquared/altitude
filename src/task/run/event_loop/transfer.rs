@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::remote::{TRANSCRIPT_FILE, WORK_PLAIN_FILE};
-use crate::task::{TaskArrival, TaskError, TaskOperatorSignalKind, file_arrivals};
+use crate::task::{TaskArrival, TaskAskKind, TaskError, file_arrivals};
 
 use crate::{
     agent::AgentKind,
@@ -387,12 +387,7 @@ where
             .unresolved_signal_threads(task_id)
             .await?
             .iter()
-            .any(|thread| {
-                matches!(
-                    thread.kind,
-                    TaskOperatorSignalKind::Blocked | TaskOperatorSignalKind::InReview
-                )
-            });
+            .any(|thread| matches!(thread.kind, TaskAskKind::Steer | TaskAskKind::Review));
         self.service
             .record(
                 task_id,

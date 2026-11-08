@@ -12,8 +12,8 @@ use crate::isolation::IsolationEngine;
 use crate::agent::tool::{AgentTool, AgentToolError, AgentToolFuture, AgentToolProvider};
 use crate::project::validate_cache;
 use crate::task::{
-    ProjectProposal, Task, TaskHistoryEvent, TaskOperatorSignalAuthor, TaskOperatorSignalKind,
-    TaskOperatorSignalThread, TaskPlanStatus, TaskPlanStep, TaskStore, normalize_title, picture,
+    ProjectProposal, Task, TaskAsk, TaskAskAuthor, TaskAskKind, TaskHistoryEvent, TaskPlanStatus,
+    TaskPlanStep, TaskStore, normalize_title, picture,
 };
 use crate::tracker::IssueReader;
 
@@ -299,18 +299,16 @@ impl TaskAgentTools {
         let title = argument(arguments, "title")?;
         let body = argument(arguments, "body")?;
         let kind = match arguments.get("kind").and_then(Value::as_str) {
-            Some("update") => TaskOperatorSignalKind::Update,
-            Some("decision") => TaskOperatorSignalKind::Decision,
-            Some("blocked") => TaskOperatorSignalKind::Blocked,
-            Some("in_review") => TaskOperatorSignalKind::InReview,
+            Some("steer") => TaskAskKind::Steer,
+            Some("review") => TaskAskKind::Review,
             Some(other) => {
                 return Err(AgentToolError::new(format!(
-                    "unknown signal kind {other:?}; use update, decision, blocked or in_review"
+                    "unknown ask kind {other:?}; use steer or review"
                 )));
             }
             None => {
                 return Err(AgentToolError::new(
-                    "tasks_signal action=open needs kind: update, decision, blocked or in_review",
+                    "tasks_signal action=open needs kind: steer or review",
                 ));
             }
         };
@@ -418,7 +416,7 @@ impl TaskAgentTools {
         // close. A review is the exception, because acceptance is their act and the
         // task ends on it.
         if resolved {
-            if thread.kind == TaskOperatorSignalKind::InReview {
+            if thread.kind == TaskAskKind::Review {
                 return Err(AgentToolError::new(
                     "a review request ends when the operator accepts it, not when the agent \
                      resolves it",
@@ -440,12 +438,7 @@ impl TaskAgentTools {
                 .map_err(tool_failure)?;
         }
         self.store
-            .resolve_signal(
-                &self.task_id,
-                signal_id,
-                resolved,
-                TaskOperatorSignalAuthor::Agent,
-            )
+            .resolve_signal(&self.task_id, signal_id, resolved, TaskAskAuthor::Agent)
             .await
             .map_err(tool_failure)?;
         self.announce();
@@ -518,7 +511,7 @@ impl TaskAgentTools {
             .store
             .open_signal(
                 &self.task_id,
-                TaskOperatorSignalKind::Blocked,
+                TaskAskKind::Steer,
                 "The project setup needs a change",
                 reason,
                 Some(proposal),
@@ -533,7 +526,7 @@ impl TaskAgentTools {
         }))
     }
 
-    async fn thread(&self, signal_id: &str) -> Result<TaskOperatorSignalThread, AgentToolError> {
+    async fn thread(&self, signal_id: &str) -> Result<TaskAsk, AgentToolError> {
         self.store
             .signal_thread(&self.task_id, signal_id)
             .await
@@ -562,7 +555,7 @@ fn argument<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, AgentToolEr
         .ok_or_else(|| AgentToolError::new(format!("this tool needs a {name}")))
 }
 
-fn thread_json(thread: &TaskOperatorSignalThread, attachments: &Path) -> Value {
+fn thread_json(thread: &TaskAsk, attachments: &Path) -> Value {
     // What a picture is called and what it weighs, never what it is: an agent reasons
     // about a picture's role, and the bytes belong to the interface.
     let pictures: Vec<Value> = thread

@@ -18,9 +18,8 @@ use crate::remote::{TRANSCRIPT_FILE, WORK_PLAIN_FILE};
 use crate::task::{
     Task, TaskAgentRun, TaskAgentRunOutcome, TaskDraft, TaskError, TaskExecutionMode,
     TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent, TaskInput, TaskInputAuthor,
-    TaskInputSource, TaskOperatorSignal, TaskOperatorSignalAuthor, TaskOperatorSignalKind,
-    TaskService, TaskServiceError, failure_events, run_ended, should_resume, should_suspend,
-    snapshot_name,
+    TaskInputSource, TaskService, TaskServiceError, failure_events, run_ended, should_resume,
+    should_suspend, snapshot_name,
 };
 
 impl<E> TaskService<E>
@@ -734,31 +733,17 @@ where
     }
 }
 
-// A restart is the machine's news, not the agent's. The operator watching this task
-// should see that it stopped with the machine and is moving again, so that is a
-// thread of its own; it is resolved in the same breath because it asks for nothing.
+// A restart is the machine's news, not the agent's: it has to know its workspace
+// moved under it, and the operator reads it in the record rather than in a question,
+// because it asks nothing of anybody.
 fn restart_events(task: &Task, said: &str) -> Vec<TaskHistoryEvent> {
-    let signal_id = uuid::Uuid::new_v4().to_string();
-    let signal = TaskOperatorSignal {
-        id: signal_id.clone(),
-        task_id: task.id.clone(),
-        kind: TaskOperatorSignalKind::Update,
-        title: "Altitude restarted".to_owned(),
-        body: format!(
+    notice_event(
+        task,
+        &format!(
             "Altitude on {} restarted and is picking this task back up. {said}",
             task.host
         ),
-        raised_at_ms: chrono::Utc::now().timestamp_millis(),
-        proposal: None,
-    };
-    vec![
-        TaskHistoryEvent::OperatorSignalRaised { signal },
-        TaskHistoryEvent::OperatorSignalResolved {
-            signal_id,
-            resolved: true,
-            by: TaskOperatorSignalAuthor::Agent,
-        },
-    ]
+    )
 }
 
 // The machine telling the agent something it has to know at its next turn: what it is
@@ -787,7 +772,7 @@ fn woke_up_saying(task: &Task) -> String {
         return "It was waiting on its pull requests, and the machine is watching them again."
             .to_owned();
     }
-    if task.facts.blocking_signal_kind.is_some() {
+    if task.facts.blocking_ask_kind.is_some() {
         return "It was waiting on the operator, and still is.".to_owned();
     }
     "Its sandbox was saved when the machine went down, so the work resumes where it left off."
@@ -803,7 +788,7 @@ fn resumed(task: &Task, snapshot_path: String) -> TaskHistoryEvent {
             execution_pause_reason: TaskExecutionPauseReason::AwaitingReviewChecks,
             snapshot_path,
         }
-    } else if task.facts.blocking_signal_kind.is_some() {
+    } else if task.facts.blocking_ask_kind.is_some() {
         TaskHistoryEvent::ExecutionPaused {
             execution_status: TaskExecutionStatus::Paused,
             sandbox_available: false,

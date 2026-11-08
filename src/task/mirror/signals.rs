@@ -1,9 +1,9 @@
 use crate::isolation::{CommandSession, IsolationEngine};
 
 use crate::task::{
-    Task, TaskAgentRun, TaskError, TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent,
-    TaskInput, TaskInputAuthor, TaskInputSource, TaskOperatorSignalAuthor,
-    TaskOperatorSignalThread, TaskService, TaskServiceError,
+    Task, TaskAgentRun, TaskAsk, TaskAskAuthor, TaskError, TaskExecutionPauseReason,
+    TaskExecutionStatus, TaskHistoryEvent, TaskInput, TaskInputAuthor, TaskInputSource,
+    TaskService, TaskServiceError,
 };
 
 impl<E> TaskService<E>
@@ -84,17 +84,14 @@ where
     pub async fn unresolved_signal_threads(
         &self,
         task_id: &str,
-    ) -> Result<Vec<TaskOperatorSignalThread>, TaskServiceError> {
+    ) -> Result<Vec<TaskAsk>, TaskServiceError> {
         self.store
             .unresolved_signal_threads(task_id)
             .await
             .map_err(TaskServiceError::Task)
     }
 
-    pub async fn signal_threads(
-        &self,
-        task_id: &str,
-    ) -> Result<Vec<TaskOperatorSignalThread>, TaskServiceError> {
+    pub async fn signal_threads(&self, task_id: &str) -> Result<Vec<TaskAsk>, TaskServiceError> {
         self.store
             .signal_threads(task_id)
             .await
@@ -108,12 +105,7 @@ where
         resolved: bool,
     ) -> Result<Task, TaskServiceError> {
         self.store
-            .resolve_signal(
-                task_id,
-                signal_id,
-                resolved,
-                TaskOperatorSignalAuthor::Operator,
-            )
+            .resolve_signal(task_id, signal_id, resolved, TaskAskAuthor::Operator)
             .await
             .map_err(TaskServiceError::Task)
     }

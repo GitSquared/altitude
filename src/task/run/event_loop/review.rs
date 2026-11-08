@@ -6,8 +6,8 @@ use crate::{
     isolation::IsolationEngine,
     task::mirror::review::{OBSERVATION_ATTEMPTS, REVIEW_POLL_INTERVAL, news, unreadable},
     task::{
-        DeferredReview, Task, TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent,
-        TaskInput, TaskInputAuthor, TaskInputSource, TaskOperatorSignal, TaskOperatorSignalAuthor,
+        DeferredReview, Task, TaskAskAuthor, TaskAskQuestion, TaskExecutionPauseReason,
+        TaskExecutionStatus, TaskHistoryEvent, TaskInput, TaskInputAuthor, TaskInputSource,
     },
     vcs::{ContributionObservation, ContributionOutlook, ContributionReadiness, now_ms},
 };
@@ -184,7 +184,7 @@ where
             .await;
     }
 
-    pub(super) async fn deliver_review(&self, task: &Task, signal: TaskOperatorSignal) {
+    pub(super) async fn deliver_review(&self, task: &Task, signal: TaskAskQuestion) {
         let events = [
             TaskHistoryEvent::OperatorSignalRaised { signal },
             TaskHistoryEvent::ExecutionPaused {
@@ -228,7 +228,7 @@ where
             TaskHistoryEvent::OperatorSignalResolved {
                 signal_id: deferred.signal.id.clone(),
                 resolved: true,
-                by: TaskOperatorSignalAuthor::Agent,
+                by: TaskAskAuthor::Agent,
             },
         ];
         if is_running {

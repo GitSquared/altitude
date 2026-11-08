@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 use crate::{
     config::DEFAULT_PORT,
     remote::{LinkClient, RemoteKeyStatus, RemoteKeys, meet},
-    task::TaskOperatorSignalThread,
+    task::TaskAsk,
     tui::screens,
 };
 
@@ -39,7 +39,7 @@ impl App {
 
     pub(super) async fn collect_remote_pictures(
         address: &str,
-        threads: &[TaskOperatorSignalThread],
+        threads: &[TaskAsk],
         keys: &RemoteKeys,
         client: &LinkClient,
         store: &Path,
@@ -71,7 +71,7 @@ impl App {
         task_id: &str,
         keys: &RemoteKeys,
         client: &LinkClient,
-    ) -> Result<Vec<TaskOperatorSignalThread>, String> {
+    ) -> Result<Vec<TaskAsk>, String> {
         let peer = Self::remote_peer(address, keys).await?;
         client
             .signal_threads(peer, task_id)

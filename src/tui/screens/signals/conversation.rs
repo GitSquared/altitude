@@ -12,7 +12,7 @@ use ratatui::{
 
 use crate::{
     project::Project,
-    task::{ProjectProposal, SignalTransition, TaskOperatorSignalAuthor, TaskOperatorSignalThread},
+    task::{AskTransition, ProjectProposal, TaskAsk, TaskAskAuthor},
     tui::{
         App, Pictures,
         widgets::{
@@ -190,7 +190,7 @@ pub(super) fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
             .iter()
             .enumerate()
             .map(|(index, action)| {
-                let label = action.label(thread.kind, thread.is_resolved());
+                let label = action.label(thread.is_resolved());
                 let focused = app.signal_focus == SignalFocus::Action(index);
                 if Some(*action) == primary {
                     button::Action::primary(label).focused(focused)
@@ -218,7 +218,7 @@ pub(super) fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
 }
 
 pub(super) struct Conversation<'a> {
-    thread: &'a TaskOperatorSignalThread,
+    thread: &'a TaskAsk,
     project: Option<&'a Project>,
     agent: &'a str,
     selected: Option<usize>,
@@ -336,11 +336,11 @@ fn draw_messages(
     let last_operator = thread
         .messages
         .iter()
-        .rposition(|message| message.author == TaskOperatorSignalAuthor::Operator);
+        .rposition(|message| message.author == TaskAskAuthor::Operator);
     let last_agent = thread
         .messages
         .iter()
-        .rposition(|message| message.author == TaskOperatorSignalAuthor::Agent);
+        .rposition(|message| message.author == TaskAskAuthor::Agent);
     let proposed = thread.proposal.as_ref().map(|proposal| card::Nested {
         title: "proposed change",
         lines: proposal_lines(proposal, project, usize::from(width.saturating_sub(6))),
@@ -437,7 +437,7 @@ fn draw_messages(
             Entry::Message(index) => index,
         };
         let message = &thread.messages[index];
-        let from_operator = message.author == TaskOperatorSignalAuthor::Operator;
+        let from_operator = message.author == TaskAskAuthor::Operator;
         let tick = from_operator.then(|| {
             if last_agent.is_some_and(|agent| agent > index) {
                 card::Tick::Read
@@ -513,7 +513,7 @@ fn draw_messages(
 #[derive(Clone, Copy)]
 pub(super) enum Entry {
     Message(usize),
-    Transition(SignalTransition),
+    Transition(AskTransition),
 }
 
 pub(super) struct Body {
@@ -560,7 +560,7 @@ impl Body {
     }
 }
 
-fn conversation_entries(thread: &TaskOperatorSignalThread) -> Vec<Entry> {
+fn conversation_entries(thread: &TaskAsk) -> Vec<Entry> {
     let mut entries: Vec<(i64, Entry)> = thread
         .messages
         .iter()
@@ -577,7 +577,7 @@ fn conversation_entries(thread: &TaskOperatorSignalThread) -> Vec<Entry> {
     entries.into_iter().map(|(_, entry)| entry).collect()
 }
 
-fn transition_line(transition: SignalTransition, agent: &str, now: i64) -> Line<'static> {
+fn transition_line(transition: AskTransition, agent: &str, now: i64) -> Line<'static> {
     let who = who(Some(transition.by), agent);
     let what = if transition.resolved {
         format!("✓ resolved by {who}")

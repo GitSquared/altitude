@@ -14,10 +14,7 @@ use crate::agent::{Activity, ActivityKind};
 use crate::isolation::{EnvironmentProgress, Pressure};
 use crate::remote::identity::write_private;
 use crate::{
-    task::{
-        TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent, TaskOperatorSignalKind,
-        TaskOperatorSignalThread,
-    },
+    task::{TaskAsk, TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent},
     tracker::{
         IssueReference, IssueSnapshot, TrackerStatus,
         providers::linear::automation::LinearAutomation,
@@ -143,7 +140,7 @@ pub trait Host: Send + Sync + 'static {
     fn stop(&self, task_id: String, reason: TaskExecutionPauseReason) -> HostFuture<'_, ()>;
     fn complete(&self, task_id: String) -> HostFuture<'_, ()>;
     fn record_status(&self, task_id: String, status: TrackerStatus) -> HostFuture<'_, ()>;
-    fn signal_threads(&self, task_id: String) -> HostFuture<'_, Vec<TaskOperatorSignalThread>>;
+    fn signal_threads(&self, task_id: String) -> HostFuture<'_, Vec<TaskAsk>>;
     fn reopen_signal(&self, task_id: String, signal_id: String) -> HostFuture<'_, ()>;
     fn events(&self, task_id: String) -> HostFuture<'_, Vec<(i64, TaskHistoryEvent)>>;
     fn steer(&self, task_id: String, message: String) -> HostFuture<'_, ()>;
@@ -247,18 +244,6 @@ fn persist(path: &Path, ledger: &Ledger) -> Result<(), String> {
         .map_err(|error| format!("could not encode the tracker ledger: {error}"))?;
     write_private(path, &text)
         .map_err(|error| format!("could not write the tracker ledger: {error}"))
-}
-
-fn signal_kind(
-    events: &[(i64, TaskHistoryEvent)],
-    signal_id: &str,
-) -> Option<TaskOperatorSignalKind> {
-    events.iter().rev().find_map(|(_, event)| match event {
-        TaskHistoryEvent::OperatorSignalRaised { signal } if signal.id == signal_id => {
-            Some(signal.kind)
-        }
-        _ => None,
-    })
 }
 
 fn stable_id(namespace: &str, discriminator: &str) -> String {

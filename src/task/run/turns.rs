@@ -16,9 +16,9 @@ const TURNS_BEFORE_THE_OPERATOR: usize = 12;
 use crate::{
     agent::AgentWindow,
     task::{
-        IsolationError, Task, TaskAgentRun, TaskAgentRunOutcome, TaskError, TaskExecutionMode,
-        TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent, TaskOperatorSignalAuthor,
-        TaskOperatorSignalKind, TaskService, TaskServiceError, run_ended, snapshot_name,
+        IsolationError, Task, TaskAgentRun, TaskAgentRunOutcome, TaskAskAuthor, TaskAskKind,
+        TaskError, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
+        TaskHistoryEvent, TaskService, TaskServiceError, run_ended, snapshot_name,
     },
 };
 
@@ -234,7 +234,7 @@ where
                         TaskHistoryEvent::OperatorSignalResolved {
                             signal_id: deferred.signal.id,
                             resolved: true,
-                            by: TaskOperatorSignalAuthor::Operator,
+                            by: TaskAskAuthor::Operator,
                         },
                     ],
                 )
@@ -247,17 +247,14 @@ where
         let mut answered = Vec::new();
         for thread in self.signal_threads(&task.id).await? {
             if !thread.is_unresolved()
-                || !matches!(
-                    thread.kind,
-                    TaskOperatorSignalKind::Blocked | TaskOperatorSignalKind::InReview
-                )
+                || !matches!(thread.kind, TaskAskKind::Steer | TaskAskKind::Review)
             {
                 continue;
             }
             answered.push(TaskHistoryEvent::OperatorSignalResolved {
                 signal_id: thread.id,
                 resolved: true,
-                by: TaskOperatorSignalAuthor::Operator,
+                by: TaskAskAuthor::Operator,
             });
         }
         if !answered.is_empty() {
@@ -364,10 +361,7 @@ where
                 // and it stops nothing: an agent that raises one every turn is
                 // circling exactly like one that says nothing at all.
                 TaskHistoryEvent::OperatorSignalRaised { signal }
-                    if !matches!(
-                        signal.kind,
-                        TaskOperatorSignalKind::Blocked | TaskOperatorSignalKind::InReview
-                    ) =>
+                    if !matches!(signal.kind, TaskAskKind::Steer | TaskAskKind::Review) =>
                 {
                     continue;
                 }

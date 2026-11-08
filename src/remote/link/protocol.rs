@@ -9,9 +9,8 @@ use iroh::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::task::{
-    SignalCounts, Task, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
-    TaskHistoryEvent, TaskOperatorAttentionLevel, TaskOperatorSignalKind, TaskOperatorSignalThread,
-    TaskPlanStep,
+    Task, TaskAsk, TaskAskKind, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
+    TaskHistoryEvent, TaskOperatorAttentionLevel, TaskPlanStep,
 };
 use crate::tracker::{IssueReference, IssueSnapshot, TrackerKind, TrackerStatus};
 use crate::vcs::ContributionState;
@@ -167,7 +166,7 @@ pub enum LinkResponse {
     },
     Ready,
     Signals {
-        signals: Vec<TaskOperatorSignalThread>,
+        signals: Vec<TaskAsk>,
     },
     Picture {
         id: String,
@@ -272,17 +271,13 @@ pub struct TaskSummary {
     pub activity: Option<String>,
     pub attention: TaskOperatorAttentionLevel,
     #[serde(default)]
-    pub blocking_signal_kind: Option<TaskOperatorSignalKind>,
+    pub blocking_ask_kind: Option<TaskAskKind>,
     #[serde(default)]
-    pub leading_signal_kind: Option<TaskOperatorSignalKind>,
+    pub leading_ask_kind: Option<TaskAskKind>,
     // The question itself, when there is one: a row can say what the agent is
     // asking rather than only that it is asking something.
     #[serde(default)]
-    pub leading_signal_title: Option<String>,
-    #[serde(default)]
-    pub unresolved_signal_count: u32,
-    #[serde(default)]
-    pub signal_counts: SignalCounts,
+    pub leading_ask_title: Option<String>,
     #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default)]
@@ -338,11 +333,9 @@ impl TaskSummary {
             standing: task.facts.standing.clone(),
             activity: None,
             attention: task.facts.operator_attention_level.clone(),
-            blocking_signal_kind: task.facts.blocking_signal_kind,
-            leading_signal_kind: task.facts.leading_signal_kind,
-            leading_signal_title: task.facts.leading_signal_title.clone(),
-            unresolved_signal_count: task.facts.unresolved_signal_count,
-            signal_counts: task.facts.signal_counts,
+            blocking_ask_kind: task.facts.blocking_ask_kind,
+            leading_ask_kind: task.facts.leading_ask_kind,
+            leading_ask_title: task.facts.leading_ask_title.clone(),
             last_error: task.facts.last_error.clone(),
             tracker_issue: task.facts.tracker_issue.clone(),
             tracker_state: task.facts.tracker_status,

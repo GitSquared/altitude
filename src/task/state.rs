@@ -47,55 +47,12 @@ pub enum TaskInputSource {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
 #[sqlx(rename_all = "snake_case")]
-// Update is a log that asks for nothing, Decision is an assumption the operator may
-// challenge while the work continues, and Blocked is the only kind that stops it.
-pub enum TaskOperatorSignalKind {
-    Update,
-    Decision,
-    InReview,
-    Blocked,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SignalCounts {
-    #[serde(default)]
-    pub blocked: u32,
-    #[serde(default)]
-    pub in_review: u32,
-    #[serde(default)]
-    pub decision: u32,
-    #[serde(default)]
-    pub update: u32,
-}
-
-impl SignalCounts {
-    pub fn count(self, kind: TaskOperatorSignalKind) -> u32 {
-        match kind {
-            TaskOperatorSignalKind::Blocked => self.blocked,
-            TaskOperatorSignalKind::InReview => self.in_review,
-            TaskOperatorSignalKind::Decision => self.decision,
-            TaskOperatorSignalKind::Update => self.update,
-        }
-    }
-}
-
-// The order a row says its counts in: what stopped it, what is waiting to be
-// read, what it is asking, and what it is only telling.
-pub const SIGNAL_ORDER: [TaskOperatorSignalKind; 4] = [
-    TaskOperatorSignalKind::Blocked,
-    TaskOperatorSignalKind::InReview,
-    TaskOperatorSignalKind::Decision,
-    TaskOperatorSignalKind::Update,
-];
-
-impl TaskOperatorSignalKind {
-    pub fn tier(self) -> u8 {
-        match self {
-            Self::Blocked | Self::InReview => 0,
-            Self::Decision => 1,
-            Self::Update => 2,
-        }
-    }
+// An ask is the one thing a task can want from a person: a question that stops the work
+// until it is answered, or a delivery that wants accepting. Everything else a task has to
+// say is a message, and a message wants nothing.
+pub enum TaskAskKind {
+    Steer,
+    Review,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
@@ -163,10 +120,10 @@ pub struct TaskAgentRun {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TaskOperatorSignal {
+pub struct TaskAskQuestion {
     pub id: String,
     pub task_id: String,
-    pub kind: TaskOperatorSignalKind,
+    pub kind: TaskAskKind,
     pub title: String,
     pub body: String,
     pub raised_at_ms: i64,
@@ -189,48 +146,48 @@ impl ProjectProposal {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TaskOperatorSignalThread {
+pub struct TaskAsk {
     pub id: String,
     pub task_id: String,
-    pub kind: TaskOperatorSignalKind,
+    pub kind: TaskAskKind,
     pub title: String,
     pub opened_at_ms: i64,
     pub last_raised_at_ms: i64,
-    pub messages: Vec<TaskOperatorSignalMessage>,
+    pub messages: Vec<TaskAskMessage>,
     pub resolved: bool,
-    pub resolved_by: Option<TaskOperatorSignalAuthor>,
+    pub resolved_by: Option<TaskAskAuthor>,
     pub resolved_at_ms: Option<i64>,
     #[serde(default)]
-    pub transitions: Vec<SignalTransition>,
+    pub transitions: Vec<AskTransition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposal: Option<ProjectProposal>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-pub struct SignalTransition {
+pub struct AskTransition {
     pub at_ms: i64,
     pub resolved: bool,
-    pub by: TaskOperatorSignalAuthor,
+    pub by: TaskAskAuthor,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TaskOperatorSignalMessage {
+pub struct TaskAskMessage {
     #[serde(default)]
     pub id: String,
-    pub author: TaskOperatorSignalAuthor,
+    pub author: TaskAskAuthor,
     pub body: String,
     pub at_ms: i64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum TaskOperatorSignalAuthor {
+pub enum TaskAskAuthor {
     #[default]
     Agent,
     Operator,
 }
 
-impl TaskOperatorSignalThread {
+impl TaskAsk {
     pub fn is_resolved(&self) -> bool {
         self.resolved
     }
@@ -239,11 +196,11 @@ impl TaskOperatorSignalThread {
         !self.resolved
     }
 
-    pub fn latest_agent_message(&self) -> Option<&TaskOperatorSignalMessage> {
+    pub fn latest_agent_message(&self) -> Option<&TaskAskMessage> {
         self.messages
             .iter()
             .rev()
-            .find(|message| message.author == TaskOperatorSignalAuthor::Agent)
+            .find(|message| message.author == TaskAskAuthor::Agent)
     }
 
     // Whether the operator has said anything here at all. It is what makes a thread
@@ -252,13 +209,13 @@ impl TaskOperatorSignalThread {
     pub fn is_answered(&self) -> bool {
         self.messages
             .iter()
-            .any(|message| message.author == TaskOperatorSignalAuthor::Operator)
+            .any(|message| message.author == TaskAskAuthor::Operator)
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeferredReview {
-    pub signal: TaskOperatorSignal,
+    pub signal: TaskAskQuestion,
 }
 
 #[derive(Clone, Debug)]
@@ -310,7 +267,7 @@ pub struct TaskFacts {
     pub standing: Option<AgentStanding>,
     pub last_error: Option<String>,
     #[sqlx(json(nullable))]
-    pub latest_operator_message: Option<TaskOperatorSignalMessage>,
+    pub latest_operator_message: Option<TaskAskMessage>,
     #[sqlx(json(nullable))]
     pub tracker_issue: Option<IssueReference>,
     // None means no delegation asked for this task, never one that is unknown: it is
@@ -322,12 +279,9 @@ pub struct TaskFacts {
     pub arrived_from: Option<String>,
     #[sqlx(default)]
     pub tracker_status: Option<TrackerStatus>,
-    pub blocking_signal_kind: Option<TaskOperatorSignalKind>,
-    pub leading_signal_kind: Option<TaskOperatorSignalKind>,
-    pub leading_signal_title: Option<String>,
-    pub unresolved_signal_count: u32,
-    #[sqlx(json)]
-    pub signal_counts: SignalCounts,
+    pub blocking_ask_kind: Option<TaskAskKind>,
+    pub leading_ask_kind: Option<TaskAskKind>,
+    pub leading_ask_title: Option<String>,
     #[sqlx(json(nullable))]
     pub deferred_review: Option<DeferredReview>,
     // The news the run that is starting was woken with, and the last news any run
@@ -407,17 +361,17 @@ pub enum TaskHistoryEvent {
         steps: Vec<TaskPlanStep>,
     },
     OperatorSignalRaised {
-        signal: TaskOperatorSignal,
+        signal: TaskAskQuestion,
     },
     OperatorSignalMessage {
         signal_id: String,
-        author: TaskOperatorSignalAuthor,
+        author: TaskAskAuthor,
         body: String,
     },
     OperatorSignalResolved {
         signal_id: String,
         resolved: bool,
-        by: TaskOperatorSignalAuthor,
+        by: TaskAskAuthor,
     },
     OperatorSignalConfirmed {
         signal_id: String,
@@ -429,7 +383,7 @@ pub enum TaskHistoryEvent {
         observation: ContributionObservation,
     },
     ReviewDeferred {
-        signal: TaskOperatorSignal,
+        signal: TaskAskQuestion,
     },
     ReviewDeferralCleared {
         signal_id: String,
@@ -583,11 +537,10 @@ pub struct TaskAgentTurnContext {
     pub execution_status: TaskExecutionStatus,
     pub execution_mode: TaskExecutionMode,
     pub operator_attention_level: TaskOperatorAttentionLevel,
-    pub blocking_signal_kind: Option<TaskOperatorSignalKind>,
-    pub unresolved_signal_count: u32,
+    pub blocking_ask_kind: Option<TaskAskKind>,
     pub last_error: Option<String>,
     pub datetime: String,
-    pub latest_operator_message: Option<TaskOperatorSignalMessage>,
+    pub latest_operator_message: Option<TaskAskMessage>,
     pub code_contribution_observations: Vec<ContributionObservation>,
     pub pending_inputs: Vec<TaskInput>,
     // The login this project's work is contributed as, which is the one person
@@ -630,12 +583,11 @@ impl fmt::Display for TaskAgentTurnContext {
         writeln!(
             formatter,
             "execution_status={:?}; execution_mode={:?}; attention={:?}; \
-             blocking_signal={:?}; unresolved_signals={}; last_error={}",
+             blocking_ask={:?}; last_error={}",
             self.execution_status,
             self.execution_mode,
             self.operator_attention_level,
-            self.blocking_signal_kind,
-            self.unresolved_signal_count,
+            self.blocking_ask_kind,
             self.last_error.as_deref().unwrap_or("none"),
         )?;
         write!(formatter, "current_datetime={}", self.datetime)?;
@@ -730,8 +682,7 @@ impl Task {
             execution_status: TaskExecutionStatus::Running,
             execution_mode,
             operator_attention_level: self.facts.operator_attention_level.clone(),
-            blocking_signal_kind: self.facts.blocking_signal_kind,
-            unresolved_signal_count: self.facts.unresolved_signal_count,
+            blocking_ask_kind: self.facts.blocking_ask_kind,
             last_error: self.facts.last_error.clone(),
             datetime: Local::now().to_rfc3339_opts(SecondsFormat::Secs, true),
             latest_operator_message: self.facts.latest_operator_message.clone(),

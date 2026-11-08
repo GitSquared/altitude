@@ -2,7 +2,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     isolation::IsolationEngine,
-    task::{TaskEventLoop, TaskOperatorSignalThread},
+    task::{TaskAsk, TaskEventLoop},
 };
 
 use super::*;
@@ -10,7 +10,7 @@ use super::*;
 impl App {
     pub(super) async fn apply_project_proposal<E>(
         &mut self,
-        thread: &TaskOperatorSignalThread,
+        thread: &TaskAsk,
         remote_signals: &mpsc::Sender<RemoteSignalsReply>,
         event_loop: &TaskEventLoop<E>,
     ) where

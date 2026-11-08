@@ -1,9 +1,6 @@
 use super::ledger::{Cursor, SessionEvent, TerminatedSession};
 use crate::{
-    task::{
-        TaskExecutionPauseReason, TaskHistoryEvent, TaskOperatorSignalKind,
-        TaskOperatorSignalThread,
-    },
+    task::{TaskAsk, TaskAskKind, TaskExecutionPauseReason, TaskHistoryEvent},
     tracker::providers::linear::automation::AgentActivityContent,
 };
 use iroh::EndpointId;
@@ -591,7 +588,7 @@ impl RemoteTracker {
         report: &Cursor,
         occurred_at_ms: i64,
         host: &dyn Host,
-    ) -> Result<Option<TaskOperatorSignalThread>, String> {
+    ) -> Result<Option<TaskAsk>, String> {
         let was_waiting = host
             .events(report.task_id.clone())
             .await?
@@ -619,10 +616,9 @@ impl RemoteTracker {
             .signal_threads(report.task_id.clone())
             .await?
             .into_iter()
-            .filter(TaskOperatorSignalThread::is_unresolved)
+            .filter(TaskAsk::is_unresolved)
             .find(|signal| {
-                signal.kind == TaskOperatorSignalKind::InReview
-                    && signal.last_raised_at_ms <= occurred_at_ms
+                signal.kind == TaskAskKind::Review && signal.last_raised_at_ms <= occurred_at_ms
             }))
     }
 

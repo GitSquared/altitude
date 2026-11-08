@@ -8,9 +8,9 @@ use crate::{
     isolation::IsolationEngine,
     project::Project,
     task::{
-        SignalTransition, TaskEventLoop, TaskExecutionPauseReason, TaskExecutionStatus,
-        TaskExecutionUpdate, TaskOperatorSignalAuthor, TaskOperatorSignalKind,
-        TaskOperatorSignalMessage, TaskOperatorSignalThread, TaskPlanStep, TaskService,
+        AskTransition, TaskAsk, TaskAskAuthor, TaskAskKind, TaskAskMessage, TaskEventLoop,
+        TaskExecutionPauseReason, TaskExecutionStatus, TaskExecutionUpdate, TaskPlanStep,
+        TaskService,
     },
     tui::popups,
     tui::screens,
@@ -377,18 +377,11 @@ impl App {
             .cloned()
             .collect();
         threads.sort_by(|left, right| {
-            let group = |thread: &TaskOperatorSignalThread| {
-                let settled = thread.is_resolved();
-                // Resolved threads share one RESOLVED heading, so their kind's
-                // tier is not a visible group; ordering them by it would put a
-                // newer update below an older decision for no reason.
-                (
-                    u8::from(settled),
-                    if settled { 0 } else { thread.kind.tier() },
-                )
-            };
+            // Open asks first, then the history; within each, the order the menu
+            // asks for.
+            let group = |thread: &TaskAsk| u8::from(thread.is_resolved());
             group(left).cmp(&group(right)).then_with(|| {
-                let when = |thread: &TaskOperatorSignalThread| thread.opened_at_ms;
+                let when = |thread: &TaskAsk| thread.opened_at_ms;
                 match sort {
                     SignalSort::Oldest => when(left).cmp(&when(right)),
                     SignalSort::Newest => when(right).cmp(&when(left)),
@@ -425,14 +418,14 @@ impl App {
         {
             let at_ms = chrono::Utc::now().timestamp_millis();
             thread.resolved = resolved;
-            thread.resolved_by = resolved.then_some(TaskOperatorSignalAuthor::Operator);
+            thread.resolved_by = resolved.then_some(TaskAskAuthor::Operator);
             thread.resolved_at_ms = resolved.then_some(at_ms);
             // The line belongs in the conversation without waiting for the next
             // read: this is what the operator just did.
-            thread.transitions.push(SignalTransition {
+            thread.transitions.push(AskTransition {
                 at_ms,
                 resolved,
-                by: TaskOperatorSignalAuthor::Operator,
+                by: TaskAskAuthor::Operator,
             });
         }
         self.apply_signal_view();
@@ -477,9 +470,9 @@ impl App {
             .iter_mut()
             .find(|thread| thread.id == signal_id)
         {
-            thread.messages.push(TaskOperatorSignalMessage {
+            thread.messages.push(TaskAskMessage {
                 id: format!("m{}", thread.messages.len() + 1),
-                author: TaskOperatorSignalAuthor::Operator,
+                author: TaskAskAuthor::Operator,
                 body: answer,
                 at_ms: chrono::Utc::now().timestamp_millis(),
             });
@@ -538,20 +531,12 @@ impl App {
                 }
             }
             SignalAction::Resolve => {
-                if !matches!(
-                    thread.kind,
-                    TaskOperatorSignalKind::Update
-                        | TaskOperatorSignalKind::Decision
-                        | TaskOperatorSignalKind::Blocked
-                ) {
+                // A review ends on acceptance, which is the operator's act and a
+                // different button; a question is closed and opened by them.
+                if thread.kind != TaskAskKind::Steer {
                     return;
                 }
-                // An update is resolved, never reopened: once read it is history.
-                let resolved = if thread.kind == TaskOperatorSignalKind::Update {
-                    true
-                } else {
-                    !thread.resolved
-                };
+                let resolved = !thread.resolved;
                 if resolved == thread.resolved {
                     return;
                 }
@@ -583,7 +568,7 @@ impl App {
                     .await;
             }
             SignalAction::Accept => {
-                if thread.kind != TaskOperatorSignalKind::InReview || thread.resolved {
+                if thread.kind != TaskAskKind::Review || thread.resolved {
                     return;
                 }
                 let question = "Accept this work and close the task?\n\

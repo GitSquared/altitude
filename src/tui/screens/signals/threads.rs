@@ -5,7 +5,7 @@ use chrono::Utc;
 use ratatui::{Frame, layout::Rect};
 
 use crate::{
-    task::TaskOperatorSignalAuthor,
+    task::TaskAskAuthor,
     tui::{
         App,
         widgets::{format::since, list::Row, palette, signal},
@@ -84,8 +84,8 @@ pub(super) fn draw_threads(frame: &mut Frame, area: Rect, app: &mut App) {
                 (false, None) => format!("resolved by {}", who(thread.resolved_by, &agent)),
                 (true, Some(message)) => {
                     let author = match message.author {
-                        TaskOperatorSignalAuthor::Operator => "you",
-                        TaskOperatorSignalAuthor::Agent => agent.as_str(),
+                        TaskAskAuthor::Operator => "you",
+                        TaskAskAuthor::Agent => agent.as_str(),
                     };
                     format!("{author}: {}", one_line(&message.body))
                 }

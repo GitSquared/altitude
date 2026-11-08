@@ -2,7 +2,7 @@ use super::admission::{self, Actor, Admission, InputFacts};
 use super::ledger::{CommentInput, SessionEvent};
 use crate::remote::StartRefusal;
 use crate::{
-    task::{TaskOperatorSignalKind, TaskOperatorSignalThread},
+    task::TaskAsk,
     tracker::{TrackerKind, providers::linear::automation::AgentActivityContent},
 };
 
@@ -77,24 +77,14 @@ impl RemoteTracker {
         // A prompt answers only what was already waiting when it was written. A
         // prompt that predates a signal is stale, and letting it resolve the
         // newer question would answer something the operator never saw.
-        let waiting: Vec<&TaskOperatorSignalThread> = signals
+        let waiting: Vec<&TaskAsk> = signals
             .iter()
             .filter(|signal| signal.is_unresolved())
             .filter(|signal| signal.last_raised_at_ms <= event.occurred_at_ms)
             .collect();
-        // A decision is not blocking, but a reply from the issue still belongs
-        // in its thread; an update is a log and is not answered here.
-        let question = waiting.iter().copied().find(|signal| {
-            matches!(
-                signal.kind,
-                TaskOperatorSignalKind::Blocked | TaskOperatorSignalKind::Decision
-            )
-        });
-        let review = waiting
-            .iter()
-            .copied()
-            .find(|signal| signal.kind == TaskOperatorSignalKind::InReview);
-        let Some(signal) = question.or(review) else {
+        // An answer in the issue belongs in the ask it answers. One is open at a time,
+        // so there is nothing to choose between; a task with none is steered directly.
+        let Some(signal) = waiting.first().copied() else {
             return host.steer(report.task_id.clone(), answer.to_owned()).await;
         };
         host.reply(report.task_id.clone(), signal.id.clone(), answer.to_owned())

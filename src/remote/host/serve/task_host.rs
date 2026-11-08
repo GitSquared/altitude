@@ -23,7 +23,7 @@ use crate::{
         announce::Phase,
         server::{BoxFuture, TaskHost},
     },
-    task::{TaskHistoryEvent, TaskOperatorSignalThread},
+    task::{TaskAsk, TaskHistoryEvent},
 };
 
 use super::OwnTasks;
@@ -47,7 +47,7 @@ impl TaskHost for OwnTasks {
         &self,
         peer: EndpointId,
         task_id: String,
-    ) -> BoxFuture<Result<Vec<TaskOperatorSignalThread>, String>> {
+    ) -> BoxFuture<Result<Vec<TaskAsk>, String>> {
         let tasks = self.tasks.clone();
         Box::pin(async move {
             let task = tasks

@@ -6,7 +6,7 @@ use crate::remote::TransferPart;
 use iroh::{Endpoint, EndpointAddr, EndpointId, endpoint::Connection};
 use tokio::sync::mpsc;
 
-use crate::task::TaskOperatorSignalThread;
+use crate::task::TaskAsk;
 use crate::task::picture;
 
 use crate::remote::protocol::SignalCommand;
@@ -448,7 +448,7 @@ impl LinkClient {
         &self,
         peer: impl Into<EndpointAddr>,
         task_id: &str,
-    ) -> LinkResult<Vec<TaskOperatorSignalThread>> {
+    ) -> LinkResult<Vec<TaskAsk>> {
         match self
             .say(
                 peer,

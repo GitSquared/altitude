@@ -1,6 +1,6 @@
 use super::ledger::Cursor;
 use crate::{
-    task::{TaskHistoryEvent, TaskOperatorSignalKind, picture},
+    task::{TaskAskKind, TaskHistoryEvent, picture},
     tracker::{IssueReference, TrackerStatus, providers::linear::automation::AgentActivityContent},
 };
 use futures_util::future::join_all;
@@ -550,7 +550,7 @@ impl RemoteTracker {
         &self,
         report: &Cursor,
         signal_id: &str,
-        kind: TaskOperatorSignalKind,
+        kind: TaskAskKind,
         title: &str,
         body: &str,
         contributions: &[String],
@@ -558,31 +558,7 @@ impl RemoteTracker {
         let comment_id = published_comment_id(&report.task_id, signal_id);
         let body = &self.hosted_body(body).await;
         match kind {
-            // Updates are the session's transcript, not an issue comment.
-            TaskOperatorSignalKind::Update => {
-                // A reply rather than a thought: a thought is folded away in the
-                // session's sidebar, and an update the operator never unfolds is an
-                // update that was never delivered.
-                let body = format!("**○ Info:** {}\n\n{}", title.trim(), body.trim());
-                self.say(
-                    report,
-                    &stable_id(&report.task_id, signal_id),
-                    AgentActivityContent::Response { body },
-                )
-                .await
-                .map_err(|error| error.to_string())?;
-                Ok(None)
-            }
-            TaskOperatorSignalKind::Decision => {
-                let body = format!("**→ Decision:** {}\n\n{}", title.trim(), body.trim());
-                self.config
-                    .automation
-                    .comment_on_issue(&report.issue_id, &body, &comment_id)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                Ok(None)
-            }
-            TaskOperatorSignalKind::Blocked => {
+            TaskAskKind::Steer => {
                 // A question is not a review: the work is still in progress, and
                 // moving the issue would tell a reader the milestone is finished.
                 // The comment is what asks for attention.
@@ -595,7 +571,7 @@ impl RemoteTracker {
                     .map_err(|error| error.to_string())?;
                 Ok(None)
             }
-            TaskOperatorSignalKind::InReview => {
+            TaskAskKind::Review => {
                 let who = self.operator_mention(&report.tracker_user_id).await;
                 let mut body = format!(
                     "**◆ Ready to review:** {}\n\n{who} {}",
@@ -647,15 +623,8 @@ impl RemoteTracker {
         &self,
         report: &Cursor,
         signal_id: &str,
-        events: &[(i64, TaskHistoryEvent)],
         resolved: bool,
     ) {
-        let Some(kind) = signal_kind(events, signal_id) else {
-            return;
-        };
-        if kind == TaskOperatorSignalKind::Update {
-            return;
-        }
         let comment_id = published_comment_id(&report.task_id, signal_id);
         // A signal resolved before this machine could report it has no thread to
         // close: asking first is how that stays a fact rather than an error the
@@ -697,11 +666,10 @@ impl RemoteTracker {
             let TaskHistoryEvent::OperatorSignalRaised { signal } = event else {
                 continue;
             };
-            if signal.kind == TaskOperatorSignalKind::Update || !seen.insert(signal.id.clone()) {
+            if !seen.insert(signal.id.clone()) {
                 continue;
             }
-            self.follow_signal_thread(report, &signal.id, events, true)
-                .await;
+            self.follow_signal_thread(report, &signal.id, true).await;
         }
     }
 
