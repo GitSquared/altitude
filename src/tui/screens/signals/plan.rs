@@ -148,11 +148,18 @@ pub(super) fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App) {
     // newest one is at full strength across all of its rows rather than its tail.
     const MARK_WIDTH: u16 = 2;
     let text_width = body.width.saturating_sub(MARK_WIDTH).max(1);
-    let mut rows: Vec<(String, bool, Style)> = Vec::new();
+    let mut rows: Vec<(String, bool, Style, char)> = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         let newest = index + 1 == lines.len();
+        // The gutter says who is speaking at a glance: the machine, the agent, or the
+        // agent thinking. A wrapped row leaves it empty so one line reads as one line.
+        let mark = match line.kind {
+            ActivityKind::Altitude => '⛰',
+            ActivityKind::Thinking => '·',
+            ActivityKind::Speech | ActivityKind::Remote => '›',
+        };
         for (part, wrapped) in wrap_lines(&line.text, text_width).into_iter().enumerate() {
-            rows.push((wrapped, part == 0, activity_tone(line.kind, newest)));
+            rows.push((wrapped, part == 0, activity_tone(line.kind, newest), mark));
         }
     }
     app.signal_activity_scroll_max =
@@ -164,7 +171,7 @@ pub(super) fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App) {
             .min(app.signal_activity_scroll_max)
     };
     let first = usize::from(scroll);
-    for (offset, (row, starts, style)) in rows
+    for (offset, (row, starts, style, mark)) in rows
         .iter()
         .skip(first)
         .take(usize::from(body.height))
@@ -173,7 +180,11 @@ pub(super) fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App) {
         let y = body.y.saturating_add(offset as u16);
         frame.render_widget(
             Paragraph::new(Line::styled(
-                if *starts { "› " } else { "  " }.to_owned(),
+                if *starts {
+                    format!("{mark} ")
+                } else {
+                    "  ".to_owned()
+                },
                 *style,
             )),
             Rect {
@@ -202,6 +213,8 @@ fn activity_tone(kind: ActivityKind, newest: bool) -> Style {
     match (kind, newest) {
         (ActivityKind::Thinking, true) => palette::muted(),
         (ActivityKind::Thinking, false) => palette::backdrop(),
+        (ActivityKind::Altitude, true) => palette::attention(),
+        (ActivityKind::Altitude, false) => palette::muted(),
         (ActivityKind::Speech | ActivityKind::Remote, true) => palette::primary(),
         (ActivityKind::Speech | ActivityKind::Remote, false) => palette::muted(),
     }

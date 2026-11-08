@@ -204,40 +204,7 @@ fn pause_message(
             format!("Waiting for {operator} on the review.")
         }
         (TaskExecutionPauseReason::AwaitingOperator, None) => format!("Waiting for {operator}."),
-        (reason, _) => format!("{} Tell {operator} what to do next.", pause_record(reason)),
-    }
-}
-
-fn pause_record(reason: &TaskExecutionPauseReason) -> &'static str {
-    match reason {
-        TaskExecutionPauseReason::AwaitingOperator => "Waiting for your reply on this task.",
-        TaskExecutionPauseReason::AwaitingReviewChecks => {
-            "Waiting for the pull request checks to settle."
-        }
-        TaskExecutionPauseReason::AgentWentQuiet => {
-            "The agent kept taking turns without anything to report, so the task stopped here."
-        }
-        TaskExecutionPauseReason::ApplicationShutdown => {
-            "The machine running this task restarted. The task resumes when it is back."
-        }
-        // The one pause nobody has to clear. It names the clock's owner and not the
-        // hour, because a time is right for one machine's timezone and not another's.
-        TaskExecutionPauseReason::AwaitingLimit => {
-            "The account's usage limit is used up. This task resumes on its own when the \
-             limit clears; nothing here is waiting on you."
-        }
-        TaskExecutionPauseReason::Transfer => {
-            "The operator is taking this task over on their own machine; it keeps running there."
-        }
-        TaskExecutionPauseReason::TrackerEnded => {
-            "The issue this task was working on ended, so the task stopped."
-        }
-        TaskExecutionPauseReason::StoppedInTracker => {
-            "This task was stopped in the tracker, so it stopped here."
-        }
-        TaskExecutionPauseReason::DelegationWithdrawn => {
-            "This issue is no longer delegated to Altitude, so the task stopped."
-        }
+        (reason, _) => format!("{} Tell {operator} what to do next.", reason.notice()),
     }
 }
 

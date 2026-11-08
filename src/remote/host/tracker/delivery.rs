@@ -252,7 +252,7 @@ impl RemoteTracker {
                     }
                 } else {
                     AgentActivityContent::Thought {
-                        body: format!("⛰ {}", pause_record(execution_pause_reason)),
+                        body: format!("⛰ {}", execution_pause_reason.notice()),
                     }
                 };
                 self.say(report, &id, content)

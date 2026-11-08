@@ -26,14 +26,21 @@ impl App {
     }
 
     pub(in crate::tui) fn replace_task(&mut self, task: Task) {
-        let Some(current) = self.tasks.iter_mut().find(|current| current.id == task.id) else {
+        let Some(index) = self.tasks.iter().position(|current| current.id == task.id) else {
             self.tasks.insert(0, task);
             return;
         };
+        let news = machine_news(&self.tasks[index], &task);
         let stays = is_listed(&task);
-        *current = task;
+        self.tasks[index] = task.clone();
         if !stays {
             self.tasks.retain(is_listed);
+        }
+        if let Some(news) = news {
+            let lines = self.activities.entry(task.id.clone()).or_default();
+            lines.push(news);
+            let excess = lines.len().saturating_sub(Self::ACTIVITY_LINES);
+            lines.drain(..excess);
         }
     }
 
@@ -360,4 +367,27 @@ impl App {
                 .under()
                 .is_some_and(Foreground::shows_get_started)
     }
+}
+
+// What the machine did that the operator has not been told, if anything: a pause it
+// stopped for, or a task it finished. Worded by the task's own vocabulary so the
+// tracker and the interface say the same thing.
+fn machine_news(before: &Task, after: &Task) -> Option<Activity> {
+    let was = (
+        &before.facts.execution_status,
+        &before.facts.execution_pause_reason,
+    );
+    let now = (
+        &after.facts.execution_status,
+        &after.facts.execution_pause_reason,
+    );
+    if was == now {
+        return None;
+    }
+    let news = match now {
+        (TaskExecutionStatus::Paused, Some(reason)) => reason.notice().to_owned(),
+        (TaskExecutionStatus::Completed, _) => "The task is accepted and finished.".to_owned(),
+        _ => return None,
+    };
+    Some(Activity::altitude(news))
 }

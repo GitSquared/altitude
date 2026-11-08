@@ -63,6 +63,38 @@ pub enum TaskOperatorAttentionLevel {
     Requested,
 }
 
+// What a pause means, said once. The tracker writes it into a session and the
+// interface writes it into its own stream, and a task that stopped is the same news in
+// both places.
+impl TaskExecutionPauseReason {
+    pub fn notice(&self) -> &'static str {
+        match self {
+            Self::AwaitingOperator => "Waiting for a reply on this task.",
+            Self::AwaitingReviewChecks => "Waiting for the pull request checks to settle.",
+            Self::AgentWentQuiet => {
+                "The agent kept taking turns without anything to report, so the task stopped here."
+            }
+            Self::ApplicationShutdown => {
+                "The machine running this task restarted. The task resumes when it is back."
+            }
+            // The one pause nobody has to clear. It names the clock's owner and not the
+            // hour, because a time is right for one machine's timezone and not another's.
+            Self::AwaitingLimit => {
+                "The account's usage limit is used up. This task resumes on its own when the \
+                 limit clears; nothing here is waiting on you."
+            }
+            Self::Transfer => {
+                "The operator is taking this task over on their own machine; it keeps running there."
+            }
+            Self::TrackerEnded => "The issue this task was working on ended, so the task stopped.",
+            Self::StoppedInTracker => "This task was stopped in the tracker, so it stopped here.",
+            Self::DelegationWithdrawn => {
+                "This issue is no longer delegated to Altitude, so the task stopped."
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
 #[sqlx(rename_all = "snake_case")]

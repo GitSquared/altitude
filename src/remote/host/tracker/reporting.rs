@@ -295,7 +295,7 @@ impl RemoteTracker {
                 pause_message(reason, &operator, task.ask)
             }
             (TaskExecutionStatus::Paused, Some(reason)) => {
-                format!("⛰ {}", pause_record(reason))
+                format!("⛰ {}", reason.notice())
             }
             (TaskExecutionStatus::Pending, _) => format!(
                 "Altitude has this task queued on {}; it starts when the machine has room.",
@@ -482,6 +482,18 @@ impl RemoteTracker {
                 // the one thing in a run that is addressed to a person: as a message it
                 // is read where the operator already is, and in the tracker it lands in
                 // the session's own thread instead of being folded into the reasoning.
+                // The machine's own news is written where it does not read as a
+                // message, and it already carries the mountain.
+                ActivityKind::Altitude => {
+                    self.say(
+                        &report,
+                        &activity_id,
+                        AgentActivityContent::Thought {
+                            body: activity.text.clone(),
+                        },
+                    )
+                    .await
+                }
                 ActivityKind::Speech | ActivityKind::Remote => {
                     self.say(
                         &report,
