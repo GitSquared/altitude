@@ -313,8 +313,10 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
             .map(|runtime| runtime.tracker.clone()),
         delegation_paused: settings.pause_delegated_work,
     });
+    let mut waking = None;
     if let Some(runtime) = linear_runtime {
         let tracker = runtime.tracker.clone();
+        waking = Some(Arc::clone(&tracker));
         let delegated_host: Arc<dyn tracker::Host> = host.clone();
         tokio::spawn(tracker.run(delegated_host));
         tokio::spawn(async move {
@@ -396,6 +398,13 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
             if let Err(error) = result {
                 tracing::warn!(%error, "a task needs attention after restart");
             }
+        }
+        // Recovery is the one place a task's history moves without a run to say so,
+        // and the tracker wakes on a run's updates: without this, what a restart
+        // concluded sits in the history until something else happens to arrive, and
+        // a task waiting on the operator says so only after they have written again.
+        if let Some(tracker) = waking {
+            tracker.wake();
         }
         resumed.enable_admission();
         readiness.send_replace(Phase::Ready);
