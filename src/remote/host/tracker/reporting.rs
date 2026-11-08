@@ -217,7 +217,7 @@ impl RemoteTracker {
                     .create_ephemeral_thought(
                         &session,
                         &activity,
-                        "Altitude is shutting down, so this run stops here. The task is not \
+                        "⛰ Altitude is shutting down, so this run stops here. The task is not \
                          finished: Altitude picks it back up when the machine is back."
                             .to_owned(),
                     )
@@ -283,6 +283,7 @@ impl RemoteTracker {
         let Some(task) = bound.iter().find(|task| task.task_id == report.task_id) else {
             return;
         };
+        let operator = self.operator_name(&report.tracker_user_id).await;
         let body = match (&task.status, task.pause_reason.as_ref()) {
             (TaskExecutionStatus::Running, _) => {
                 format!(
@@ -290,7 +291,12 @@ impl RemoteTracker {
                     self.config.host_label
                 )
             }
-            (TaskExecutionStatus::Paused, Some(reason)) => pause_notice(reason).to_owned(),
+            (TaskExecutionStatus::Paused, Some(reason)) if waits_on_a_person(reason) => {
+                pause_message(reason, &operator, task.ask)
+            }
+            (TaskExecutionStatus::Paused, Some(reason)) => {
+                format!("⛰ {}", pause_record(reason))
+            }
             (TaskExecutionStatus::Pending, _) => format!(
                 "Altitude has this task queued on {}; it starts when the machine has room.",
                 self.config.host_label
@@ -472,11 +478,15 @@ impl RemoteTracker {
                     self.say_ephemerally(&report, &activity_id, activity.text.clone())
                         .await
                 }
+                // What the agent says is what it has concluded, and a conclusion is
+                // the one thing in a run that is addressed to a person: as a message it
+                // is read where the operator already is, and in the tracker it lands in
+                // the session's own thread instead of being folded into the reasoning.
                 ActivityKind::Speech | ActivityKind::Remote => {
                     self.say(
                         &report,
                         &activity_id,
-                        AgentActivityContent::Thought {
+                        AgentActivityContent::Response {
                             body: activity.text.clone(),
                         },
                     )

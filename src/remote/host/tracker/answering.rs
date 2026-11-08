@@ -354,6 +354,15 @@ impl RemoteTracker {
         }
     }
 
+    // The operator's own name, for the lines that say who a task is waiting on: a
+    // tracker is shared with a team, and "you" is only one of the people reading it.
+    pub(super) async fn operator_name(&self, user_id: &str) -> String {
+        match self.config.automation.user_name(user_id).await {
+            Ok(name) if !name.trim().is_empty() => name,
+            Ok(_) | Err(_) => "the operator".to_owned(),
+        }
+    }
+
     pub(super) async fn post_sync_guidance(&self, session_id: &str) -> Result<(), String> {
         let tracker = TrackerKind::Linear.label();
         let body = format!(

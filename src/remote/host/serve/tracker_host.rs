@@ -358,6 +358,7 @@ impl tracker::Host for OwnTasks {
                     session_agent: task.session_agent(),
                     status: task.facts.execution_status,
                     pause_reason: task.facts.execution_pause_reason.clone(),
+                    ask: task.facts.leading_ask_kind,
                 })
             }))
         })
@@ -455,6 +456,7 @@ impl tracker::Host for OwnTasks {
                         session_agent: task.session_agent(),
                         status: task.facts.execution_status,
                         pause_reason: task.facts.execution_pause_reason.clone(),
+                        ask: task.facts.leading_ask_kind,
                     })
                 })
                 .collect())

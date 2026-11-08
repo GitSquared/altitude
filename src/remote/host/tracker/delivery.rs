@@ -228,17 +228,36 @@ impl RemoteTracker {
                 execution_pause_reason,
                 ..
             } => {
-                self.say(
-                    report,
-                    // Per pause, not per task: a thread that says nothing the second
-                    // time it waits is a thread the operator thinks is still thinking.
-                    &stable_id(&format!("{}-{index}", report.task_id), "paused"),
+                let id = stable_id(&format!("{}-{index}", report.task_id), "paused");
+                // Per pause, not per task: a thread that says nothing the second time
+                // it waits is a thread the operator thinks is still thinking.
+                let content = if waits_on_a_person(execution_pause_reason) {
+                    let asking = events[..=index]
+                        .iter()
+                        .rev()
+                        .find_map(|(_, event)| match event {
+                            TaskHistoryEvent::OperatorSignalRaised { signal }
+                                if unresolved.contains(&signal.id) =>
+                            {
+                                Some(signal.kind)
+                            }
+                            _ => None,
+                        });
+                    let operator = self.operator_name(&report.tracker_user_id).await;
+                    // The last thing a run says is the handoff, and it is said to a
+                    // person: it is what leaves the session waiting on them rather than
+                    // ticking as if the work were still going on.
                     AgentActivityContent::Response {
-                        body: pause_notice(execution_pause_reason).to_owned(),
-                    },
-                )
-                .await
-                .map_err(|error| error.to_string())?;
+                        body: pause_message(execution_pause_reason, &operator, asking),
+                    }
+                } else {
+                    AgentActivityContent::Thought {
+                        body: format!("⛰ {}", pause_record(execution_pause_reason)),
+                    }
+                };
+                self.say(report, &id, content)
+                    .await
+                    .map_err(|error| error.to_string())?;
             }
             // A task that stopped is not a task that is working. The thread the
             // failure raised carries the detail; this is what stops the session

@@ -14,7 +14,7 @@ use crate::agent::{Activity, ActivityKind};
 use crate::isolation::{EnvironmentProgress, Pressure};
 use crate::remote::identity::write_private;
 use crate::{
-    task::{TaskAsk, TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent},
+    task::{TaskAsk, TaskAskKind, TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent},
     tracker::{
         IssueReference, IssueSnapshot, TrackerStatus,
         providers::linear::automation::LinearAutomation,
@@ -93,6 +93,7 @@ pub struct BoundTask {
     pub session_agent: Option<String>,
     pub status: TaskExecutionStatus,
     pub pause_reason: Option<TaskExecutionPauseReason>,
+    pub ask: Option<TaskAskKind>,
 }
 
 // Where a task stands on the machine it was sent to: what is in front of it in the
@@ -178,15 +179,43 @@ fn failure_notice(error: &str) -> String {
     )
 }
 
-fn pause_notice(reason: &TaskExecutionPauseReason) -> &'static str {
+// A pause that asks a person for something is the last thing a run says, and it is
+// addressed to them. The rest are the machine's own record: they explain a silence
+// without asking anything, so they are written where they do not read as a message.
+fn waits_on_a_person(reason: &TaskExecutionPauseReason) -> bool {
+    matches!(
+        reason,
+        TaskExecutionPauseReason::AwaitingOperator | TaskExecutionPauseReason::AgentWentQuiet
+    )
+}
+
+// The handoff, in the operator's own name: a tracker is shared with a team, and "you"
+// is only one of the people reading it.
+fn pause_message(
+    reason: &TaskExecutionPauseReason,
+    operator: &str,
+    asking: Option<TaskAskKind>,
+) -> String {
+    match (reason, asking) {
+        (TaskExecutionPauseReason::AwaitingOperator, Some(TaskAskKind::Steer)) => {
+            format!("Waiting for {operator} on the question.")
+        }
+        (TaskExecutionPauseReason::AwaitingOperator, Some(TaskAskKind::Review)) => {
+            format!("Waiting for {operator} on the review.")
+        }
+        (TaskExecutionPauseReason::AwaitingOperator, None) => format!("Waiting for {operator}."),
+        (reason, _) => format!("{} Tell {operator} what to do next.", pause_record(reason)),
+    }
+}
+
+fn pause_record(reason: &TaskExecutionPauseReason) -> &'static str {
     match reason {
         TaskExecutionPauseReason::AwaitingOperator => "Waiting for your reply on this task.",
         TaskExecutionPauseReason::AwaitingReviewChecks => {
             "Waiting for the pull request checks to settle."
         }
         TaskExecutionPauseReason::AgentWentQuiet => {
-            "The agent kept taking turns without anything to report, so the task stopped \
-             here. Tell it what to do next."
+            "The agent kept taking turns without anything to report, so the task stopped here."
         }
         TaskExecutionPauseReason::ApplicationShutdown => {
             "The machine running this task restarted. The task resumes when it is back."
