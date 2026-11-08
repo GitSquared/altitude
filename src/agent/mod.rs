@@ -3,7 +3,7 @@ use crate::task::{TaskAgentTurnContext, TaskInputAuthor, TaskInputSource};
 pub use channel::AgentChannels;
 use serde::{Deserialize, Serialize};
 use sqlx::Type;
-use std::{error::Error as StdError, fmt, str::FromStr};
+use std::{error::Error as StdError, fmt, str::FromStr, sync::Arc};
 mod activity;
 
 pub use activity::{Activity, ActivityKind};
@@ -261,25 +261,36 @@ pub trait TaskProgressDecoder: Send {
     fn take_activity(&mut self) -> Option<Activity>;
 }
 
+// The harnesses a task can name. Held behind `dyn` rather than by concrete type so
+// a test can put a scripted one where a real harness would be.
 #[derive(Clone)]
 pub struct AgentEngines {
-    claude: ClaudeCode,
-    pi: PiCode,
+    claude: Arc<dyn AgentEngine>,
+    pi: Arc<dyn AgentEngine>,
 }
 
 impl AgentEngines {
     pub fn new() -> Self {
         Self {
-            claude: ClaudeCode,
-            pi: PiCode,
+            claude: Arc::new(ClaudeCode),
+            pi: Arc::new(PiCode),
         }
     }
 
     pub fn engine(&self, kind: AgentKind) -> &dyn AgentEngine {
         match kind {
-            AgentKind::Claude => &self.claude,
-            AgentKind::Pi => &self.pi,
+            AgentKind::Claude => &*self.claude,
+            AgentKind::Pi => &*self.pi,
         }
+    }
+
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn with(mut self, kind: AgentKind, engine: Arc<dyn AgentEngine>) -> Self {
+        match kind {
+            AgentKind::Claude => self.claude = engine,
+            AgentKind::Pi => self.pi = engine,
+        }
+        self
     }
 }
 

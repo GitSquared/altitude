@@ -29,6 +29,8 @@ mod logging;
 mod project;
 mod remote;
 mod task;
+#[cfg(any(test, feature = "testkit"))]
+mod testkit;
 mod tracker;
 mod tui;
 

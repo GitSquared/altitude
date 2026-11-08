@@ -81,6 +81,18 @@ impl Config {
         &self.data_dir
     }
 
+    // A configuration pointed at directories a caller already made, so a test does
+    // not have to write process-wide environment variables to place its state.
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn at(config_dir: PathBuf, data_dir: PathBuf, cache_dir: PathBuf) -> Self {
+        Self {
+            config_dir,
+            data_dir,
+            cache_dir,
+            scope: ConfigScope::Personal,
+        }
+    }
+
     pub fn has_lost_identity(&self) -> bool {
         self.data_dir.join("identity").is_file() && !self.data_dir.join("identity.key").is_file()
     }
