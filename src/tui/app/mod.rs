@@ -49,7 +49,7 @@ use popups::sign_in::SignIn;
 use screens::get_started::GetStarted;
 use screens::settings::{GitIdentity, Panel, SettingsHit};
 use screens::shell::{GuestRequest, Shell};
-use screens::signals::{Composer, SignalFilter, SignalFocus, SignalHit, SignalSort};
+use screens::signals::{Composer, SignalFocus, SignalHit};
 use screens::tasks::{Menu, TaskControl, TaskFilter, TaskRef, TaskSort};
 
 #[derive(Default)]
@@ -536,8 +536,6 @@ pub struct App {
     pub(in crate::tui) signal_task_id: Option<String>,
     pub(in crate::tui) signal_all_threads: Vec<TaskAsk>,
     pub(in crate::tui) signal_threads: Vec<TaskAsk>,
-    pub(in crate::tui) signal_filter: Select<SignalFilter>,
-    pub(in crate::tui) signal_sort: Select<SignalSort>,
     pub(in crate::tui) signals_list: list::List,
     pub(in crate::tui) signal_scroll: u16,
     pub(in crate::tui) signal_message_rows: Vec<(u16, u16)>,

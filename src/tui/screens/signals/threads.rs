@@ -12,112 +12,72 @@ use crate::{
     },
 };
 
-pub(super) fn draw_controls(frame: &mut Frame, toolbar: Rect, popup_area: Rect, app: &mut App) {
-    let filter_at = Rect {
-        x: toolbar.x.saturating_add(LIST_PADDING),
-        y: toolbar.y,
-        width: app
-            .signal_filter
-            .pill_width(true)
-            .min(toolbar.width.saturating_sub(LIST_PADDING)),
-        height: 1,
-    };
-    let sort_at = Rect {
-        x: filter_at.right().saturating_add(1),
-        y: toolbar.y,
-        width: app.signal_sort.pill_width(true).min(
-            toolbar
-                .right()
-                .saturating_sub(filter_at.right().saturating_add(1)),
-        ),
-        height: 1,
-    };
-    let filter_focused = app.signal_focus == SignalFocus::Filter || app.signal_filter.is_open();
-    let sort_focused = app.signal_focus == SignalFocus::Sort || app.signal_sort.is_open();
-    app.signal_filter
-        .draw_pill(frame, filter_at, filter_focused, true);
-    app.signal_sort
-        .draw_pill(frame, sort_at, sort_focused, true);
-    app.signal_targets.add(filter_at, SignalHit::Filter);
-    app.signal_targets.add(sort_at, SignalHit::Sort);
-    if app.signal_filter.is_open() {
-        for (rect, index) in app
-            .signal_filter
-            .draw_list_below(frame, popup_area, filter_at)
-        {
-            app.signal_targets.add(rect, SignalHit::FilterOffer(index));
-        }
-    }
-    if app.signal_sort.is_open() {
-        for (rect, index) in app.signal_sort.draw_list_below(frame, popup_area, sort_at) {
-            app.signal_targets.add(rect, SignalHit::SortOffer(index));
-        }
-    }
-}
-
+// The task's history: every ask it ever made, newest first, the open one at the top.
+// A day heading is enough to place a row in time, and the mark says what it was — a
+// question, a delivery, or one that has been settled.
 pub(super) fn draw_threads(frame: &mut Frame, area: Rect, app: &mut App) {
     app.signal_targets.add(area, SignalHit::List);
     let agent = app.signal_agent_label();
     let now = Utc::now().timestamp_millis();
-    let mut counts: HashMap<&'static str, usize> = HashMap::new();
+    let tone = |thread: &TaskAsk| {
+        if thread.is_resolved() {
+            palette::muted()
+        } else {
+            signal::view(thread.kind).tone
+        }
+    };
+    // Rows are grouped by the day they were asked on, so the list reads as a
+    // timeline rather than as a pile of one-off decisions.
+    let mut counts: HashMap<String, String> = HashMap::new();
     for thread in &app.signal_threads {
-        *counts.entry(group_of(thread).title).or_default() += 1;
+        let day = day_of(thread.opened_at_ms, now);
+        let count = counts.entry(day).or_insert_with(|| "0".to_owned());
+        *count = count
+            .parse::<usize>()
+            .unwrap_or_default()
+            .saturating_add(1)
+            .to_string();
     }
-    let mut previous: Option<&'static str> = None;
+    let mut previous: Option<String> = None;
     let rows = app
         .signal_threads
         .iter()
         .map(|thread| {
-            let group = group_of(thread);
-            let starts = previous != Some(group.title);
-            previous = Some(group.title);
-            let view = signal::view(thread.kind);
-            let unresolved = thread.is_unresolved();
-            let last = thread.messages.last();
-            let note = last.map(|message| since(message.at_ms, now));
-            let detail = match (unresolved, last) {
-                (false, Some(message)) => format!(
-                    "resolved by {} · {}",
-                    who(thread.resolved_by, &agent),
-                    one_line(&message.body)
-                ),
-                (false, None) => format!("resolved by {}", who(thread.resolved_by, &agent)),
-                (true, Some(message)) => {
-                    let author = match message.author {
+            let day = day_of(thread.opened_at_ms, now);
+            let starts = previous.as_ref() != Some(&day);
+            previous = Some(day.clone());
+            let mark = if thread.is_resolved() {
+                '✓'
+            } else {
+                signal::view(thread.kind).symbol
+            };
+            let detail = thread
+                .messages
+                .last()
+                .map(|message| {
+                    let who = match message.author {
                         TaskAskAuthor::Operator => "you",
                         TaskAskAuthor::Agent => agent.as_str(),
                     };
-                    format!("{author}: {}", one_line(&message.body))
-                }
-                (true, None) => view.label.to_owned(),
-            };
+                    format!("{who}: {}", one_line(&message.body))
+                })
+                .unwrap_or_else(|| signal::view(thread.kind).label.to_owned());
             let arriving = app.animations()
-                && unresolved
+                && thread.is_unresolved()
                 && app
                     .signal_arrivals
                     .get(&thread.id)
                     .is_some_and(|noticed| noticed.elapsed() < Duration::from_millis(1600));
-            // The group heading carries the kind's mark and colour, so the row
-            // can spend its width on the title and the age instead.
             let mut row = Row::new(thread.title.clone()).detail(detail);
             if starts {
-                row = row.heading(
-                    group.title,
-                    counts[group.title].to_string(),
-                    group.symbol,
-                    group.tone.bold(),
-                );
+                row = row.heading(day.clone(), counts[&day].clone(), mark, palette::muted());
             }
-            if arriving {
-                row = row.tone(palette::accent());
-            } else if !unresolved {
-                row = row.tone(palette::muted());
+            row = row.tone(if arriving {
+                palette::accent()
             } else {
-                row = row.tone(view.tone);
-            }
-            if let Some(note) = note {
-                row = row.note(note);
-            }
+                tone(thread)
+            });
+            row = row.note(since(thread.opened_at_ms, now));
             row
         })
         .collect::<Vec<_>>();
@@ -131,5 +91,18 @@ pub(super) fn draw_threads(frame: &mut Frame, area: Rect, app: &mut App) {
     );
     for (rect, index) in hitboxes {
         app.signal_targets.add(rect, SignalHit::Thread(index.row));
+    }
+}
+
+// Which day a row belongs under, said the way the operator would say it: today, then
+// yesterday, then the date itself.
+fn day_of(at_ms: i64, now_ms: i64) -> String {
+    let at = chrono::DateTime::from_timestamp_millis(at_ms).unwrap_or_default();
+    let now = chrono::DateTime::from_timestamp_millis(now_ms).unwrap_or_default();
+    let days = (now.date_naive() - at.date_naive()).num_days();
+    match days {
+        0 => "TODAY".to_owned(),
+        1 => "YESTERDAY".to_owned(),
+        _ => at.format("%-d %b").to_string().to_uppercase(),
     }
 }

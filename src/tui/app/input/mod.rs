@@ -26,10 +26,6 @@ impl App {
             Foreground::Tasks => {
                 select::opened([&mut self.task_filter as &mut dyn Menu, &mut self.task_sort])
             }
-            Foreground::Signals => select::opened([
-                &mut self.signal_filter as &mut dyn Menu,
-                &mut self.signal_sort,
-            ]),
             _ => None,
         }
     }

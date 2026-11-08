@@ -20,7 +20,7 @@ use crate::{
 use crate::tui::widgets::list;
 use popups::confirm::PendingConfirm;
 use screens::shell::Shell;
-use screens::signals::{Composer, SignalAction, SignalFilter, SignalFocus, SignalSort, actions};
+use screens::signals::{Composer, SignalAction, SignalFocus, actions};
 
 use super::*;
 
@@ -358,45 +358,32 @@ impl App {
         }
     }
 
+    // The list is the task's history, newest first: every ask it ever made, the open
+    // one at the top where it belongs. There is nothing to filter, because one ask is
+    // open at a time and everything else has already been read.
     pub(in crate::tui) fn apply_signal_view(&mut self) {
         let selected = self.signal_thread().map(|thread| thread.id.clone());
-        let filter = self
-            .signal_filter
-            .chosen_value()
-            .copied()
-            .unwrap_or(SignalFilter::Unresolved);
-        let sort = self
-            .signal_sort
-            .chosen_value()
-            .copied()
-            .unwrap_or(SignalSort::Oldest);
-        let mut threads: Vec<_> = self
-            .signal_all_threads
-            .iter()
-            .filter(|thread| filter.matches(thread))
-            .cloned()
-            .collect();
-        threads.sort_by(|left, right| {
-            // Open asks first, then the history; within each, the order the menu
-            // asks for.
-            let group = |thread: &TaskAsk| u8::from(thread.is_resolved());
-            group(left).cmp(&group(right)).then_with(|| {
-                let when = |thread: &TaskAsk| thread.opened_at_ms;
-                match sort {
-                    SignalSort::Oldest => when(left).cmp(&when(right)),
-                    SignalSort::Newest => when(right).cmp(&when(left)),
-                }
-            })
+        self.signal_threads = self.signal_all_threads.clone();
+        self.signal_threads.sort_by(|left, right| {
+            let open = |thread: &TaskAsk| u8::from(thread.is_resolved());
+            open(left)
+                .cmp(&open(right))
+                .then(right.opened_at_ms.cmp(&left.opened_at_ms))
         });
-        self.signal_threads = threads;
-        match selected.as_ref().and_then(|id| {
-            self.signal_threads
-                .iter()
-                .position(|thread| &thread.id == id)
-        }) {
-            Some(index) => self.signals_list.select(index),
-            None => self.signals_list.select(0),
-        }
+        let chosen = selected
+            .as_ref()
+            .and_then(|id| {
+                self.signal_threads
+                    .iter()
+                    .position(|thread| &thread.id == id)
+            })
+            .or_else(|| {
+                self.signal_threads
+                    .iter()
+                    .position(|thread| thread.is_unresolved())
+            })
+            .unwrap_or(0);
+        self.signals_list.select(chosen);
         self.normalise_signal_focus();
     }
 

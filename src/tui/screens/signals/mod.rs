@@ -1,7 +1,6 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    style::Style,
 };
 
 use crate::{
@@ -10,7 +9,7 @@ use crate::{
         App,
         widgets::{
             columns::Columns,
-            header, markdown, palette, signal,
+            header, markdown,
             surface::{self, Surface},
             text::TextBox,
         },
@@ -34,9 +33,9 @@ mod plan;
 mod threads;
 
 use conversation::draw_conversation;
-use frame::{draw_plan_tabs, split_plan_and_activity};
+use frame::{draw_pane_title, draw_plan_tabs, split_plan_and_activity};
 use plan::draw_activity;
-use threads::{draw_controls, draw_threads};
+use threads::draw_threads;
 
 const LIST_WIDTH: u16 = 40;
 const PLAN_PADDING: u16 = 1;
@@ -48,41 +47,12 @@ const LIST_PADDING: u16 = 1;
 const COMPOSER_HEIGHT: u16 = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SignalFilter {
-    All,
-    Unresolved,
-    NeedsYou,
-    Review,
-    Resolved,
-}
-
-impl SignalFilter {
-    pub fn matches(self, thread: &TaskAsk) -> bool {
-        match self {
-            Self::All => true,
-            Self::Unresolved => thread.is_unresolved(),
-            Self::Resolved => thread.is_resolved(),
-            Self::NeedsYou => thread.kind == TaskAskKind::Steer,
-            Self::Review => thread.kind == TaskAskKind::Review,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SignalSort {
-    Oldest,
-    Newest,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignalFocus {
     List,
     Detail,
     Plan,
     Activity,
     Action(usize),
-    Filter,
-    Sort,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,10 +66,6 @@ pub enum SignalHit {
     Action(usize),
     ComposerSend,
     ComposerCancel,
-    Filter,
-    Sort,
-    FilterOffer(usize),
-    SortOffer(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,32 +122,6 @@ pub fn actions(thread: &TaskAsk) -> Vec<SignalAction> {
         .collect()
 }
 
-struct Group {
-    title: &'static str,
-    symbol: char,
-    tone: Style,
-}
-
-fn group_of(thread: &TaskAsk) -> Group {
-    if thread.is_resolved() {
-        return Group {
-            title: "RESOLVED",
-            symbol: '✓',
-            tone: palette::muted(),
-        };
-    }
-    let view = signal::view(thread.kind);
-    let title = match thread.kind {
-        TaskAskKind::Steer => "NEEDS YOU",
-        TaskAskKind::Review => "READY TO REVIEW",
-    };
-    Group {
-        title,
-        symbol: view.symbol,
-        tone: view.tone,
-    }
-}
-
 pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     app.signal_targets.clear();
     app.signal_focus_ring.clear();
@@ -216,12 +156,21 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     let columns = Columns::new(&[LIST_WIDTH]).draw(frame, inner);
     let list = columns[0];
     let detail = columns[1];
-    let [toolbar, divider, threads] = Layout::vertical([
+    let [title, divider, threads] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(0),
     ])
     .areas(list);
+    surface::cover(frame, title);
+    draw_pane_title(
+        frame,
+        title,
+        "HISTORY",
+        format!("  {}", app.signal_threads.len()),
+        app.signal_focus == SignalFocus::List,
+    );
+    surface::horizontal_divider(frame, list, divider.y);
     draw_threads(frame, threads, app);
     app.signal_plan_tabs = inner.width < PLAN_COLUMN_MIN;
     if inner.width >= PLAN_COLUMN_MIN {
@@ -254,13 +203,6 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
             draw_conversation(frame, pane, app);
         }
     }
-    // The controls sit above the list they change in their own subdivision of the
-    // panel; their open lists overlay the rows rather than pushing them.
-    surface::cover(frame, toolbar);
-    app.signal_focus_ring.add(SignalFocus::Filter);
-    app.signal_focus_ring.add(SignalFocus::Sort);
-    draw_controls(frame, toolbar, threads, app);
-    surface::horizontal_divider(frame, list, divider.y);
     // Whatever the focus was on may have gone with the last draw — a tab closed, a
     // thread with no actions left. Saying so once here is cheaper than every key
     // handler asking whether the thing it is about to act on is still on screen.

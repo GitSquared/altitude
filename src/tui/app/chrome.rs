@@ -198,13 +198,6 @@ impl App {
                         Hint::new("esc", "cancel"),
                     ];
                 }
-                if self.signal_filter.is_open() || self.signal_sort.is_open() {
-                    return vec![
-                        Hint::new("j/k", "choose"),
-                        Hint::new("enter", "take"),
-                        Hint::new("esc", "close"),
-                    ];
-                }
                 let mut hints = vec![
                     Hint::new("tab", "focus"),
                     Hint::new(
@@ -215,19 +208,14 @@ impl App {
                             SignalFocus::Plan => "plan",
                             SignalFocus::Activity => "activity",
                             SignalFocus::Action(_) => "button",
-                            SignalFocus::Filter | SignalFocus::Sort => "control",
                         },
                     ),
-                    Hint::new("f", "filter"),
-                    Hint::new("s", "sort"),
                 ];
                 hints.push(Hint::new("n", "message agent"));
                 if self.signal_focus == SignalFocus::Detail {
                     hints.push(Hint::new("y", "copy message"));
                 }
-                if matches!(self.signal_focus, SignalFocus::Filter | SignalFocus::Sort) {
-                    hints.push(Hint::new("enter", "open"));
-                } else if let Some(thread) = self.signal_thread() {
+                if let Some(thread) = self.signal_thread() {
                     if let SignalFocus::Action(index) = self.signal_focus
                         && let Some(action) = self.signal_actions().get(index).copied()
                     {
