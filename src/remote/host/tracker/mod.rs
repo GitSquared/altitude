@@ -127,12 +127,6 @@ pub struct RemoteTracker {
     // cannot reuse an id Linear already has and be folded into something nobody saw.
     started_at_ms: i64,
     refusals: Mutex<HashMap<String, String>>,
-    // What the agent has concluded and this machine has not said yet. A conclusion is
-    // a message, and a message ends the turn it is sent in: sending one per paragraph
-    // made a working run finish and start again between its own sentences. The newest
-    // conclusion is held for the end of the turn, and the one before it goes into the
-    // record, so a run speaks once and the stream still moves.
-    speech: Mutex<HashMap<String, String>>,
     delivered: AtomicBool,
 }
 
@@ -342,7 +336,6 @@ impl RemoteTracker {
             queue_notices: Mutex::new(HashMap::new()),
             ledger: Mutex::new(ledger),
             refusals: Mutex::new(HashMap::new()),
-            speech: Mutex::new(HashMap::new()),
             notify: Notify::new(),
             started_at_ms: now_ms(),
             delivered: AtomicBool::new(false),
