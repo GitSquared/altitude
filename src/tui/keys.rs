@@ -168,11 +168,6 @@ pub fn help_sections() -> Vec<HelpSection> {
                     "Take the secondary action where the thread has one: reply to the agent. A reply reopens the thread it answers",
                 ),
                 (
-                    "t",
-                    "Show or hide what the agent is thinking beside what it said",
-                ),
-                ("f / s", "Filter or sort the thread list"),
-                (
                     "Space",
                     "Fold or unfold the group the cursor is in; Home / End go to either end",
                 ),

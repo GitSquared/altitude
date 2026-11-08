@@ -222,10 +222,6 @@ impl App {
                 self.copy_signal_message();
             }
             KeyCode::Char('p') => self.signal_plan_open = !self.signal_plan_open,
-            KeyCode::Char('t') => {
-                self.signal_show_thoughts = !self.signal_show_thoughts;
-                self.signal_activity_scroll = u16::MAX;
-            }
             KeyCode::Char('n') if self.remote_signals.is_none() => {
                 if let Some(task_id) = self.signal_task_id.clone() {
                     let agent = self.signal_agent_label();

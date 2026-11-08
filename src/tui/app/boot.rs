@@ -89,7 +89,6 @@ impl App {
             commit_edit: None,
             git_identity_over_card: false,
             pictures,
-            signal_show_thoughts: false,
             signal_task_id: None,
             signal_all_threads: Vec::new(),
             signal_threads: Vec::new(),

@@ -512,9 +512,6 @@ pub struct App {
     // What this terminal can draw, and the diagrams it has been asked for. Owned
     // here so a picture outlives the frame that first wanted it.
     pub(in crate::tui) pictures: Pictures,
-    // Reasoning is the depth of a run rather than its record: it is what proves the
-    // agent is alive when somebody wonders, so it is one key away and not on the way.
-    pub(in crate::tui) signal_show_thoughts: bool,
     pub(in crate::tui) signal_activity_scroll: u16,
     pub(in crate::tui) signal_activity_scroll_max: u16,
     pub(in crate::tui) signal_activity_rows: u16,

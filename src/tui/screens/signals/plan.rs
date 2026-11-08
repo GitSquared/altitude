@@ -105,40 +105,16 @@ pub(super) fn draw_plan(frame: &mut Frame, area: Rect, app: &mut App) {
 }
 
 pub(super) fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App) {
-    let all = app.signal_activity().cloned().unwrap_or_default();
-    // The record is what the run concluded; the reasoning behind it is the depth of
-    // the same record, so it is one key away rather than mixed into it.
-    let lines: Vec<_> = all
-        .into_iter()
-        .filter(|line| app.signal_show_thoughts || line.kind != ActivityKind::Thinking)
-        .collect();
+    let lines = app.signal_activity().cloned().unwrap_or_default();
     let (title, _, body) = pane_body(area);
     app.signal_focus_ring.add(SignalFocus::Activity);
     let focused = app.signal_focus == SignalFocus::Activity;
-    draw_pane_title(
-        frame,
-        title,
-        if app.signal_show_thoughts {
-            "ACTIVITY + THOUGHTS"
-        } else {
-            "ACTIVITY"
-        },
-        String::new(),
-        focused,
-    );
+    draw_pane_title(frame, title, "ACTIVITY", String::new(), focused);
     app.signal_activity_rows = body.height.max(1);
     app.signal_targets.add(body, SignalHit::Activity);
     draw_focus_rail(frame, area, body, focused);
     if lines.is_empty() {
-        empty::draw(
-            frame,
-            body,
-            if app.signal_show_thoughts {
-                "Nothing yet"
-            } else {
-                "Nothing yet · t shows what the agent is thinking"
-            },
-        );
+        empty::draw(frame, body, "Nothing yet");
         app.signal_activity_scroll_max = 0;
         app.signal_activity_scroll = u16::MAX;
         return;
