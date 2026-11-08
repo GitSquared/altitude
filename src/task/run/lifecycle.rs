@@ -567,14 +567,28 @@ where
                 {
                     // The shutdown had already suspended the capsule, so there is
                     // nothing to stop and no live sandbox to stop it: the task was
-                    // left holding a snapshot and nothing picked it up again. This
-                    // is the shape a restart leaves behind for every task it was
-                    // running, and it resumes exactly as a live pause does.
-                    let mut events = vec![resumed(
-                        &task,
-                        task.facts.snapshot_path.clone().unwrap_or_default(),
-                    )];
-                    events.extend(restart_events(&task, &woke_up_saying(&task)));
+                    // left holding a snapshot and nothing picked it up again. What the
+                    // machine does now depends on what it cut in half: a task that was
+                    // waiting is still waiting, and a task that was working has a turn
+                    // to finish.
+                    let history = service.events(&task.id).await.unwrap_or_default();
+                    let interrupted = was_running(
+                        &history
+                            .iter()
+                            .map(|(_, event)| event.clone())
+                            .collect::<Vec<_>>(),
+                    );
+                    let mut events = vec![if interrupted {
+                        TaskHistoryEvent::ExecutionRecovered {
+                            execution_status: TaskExecutionStatus::Pending,
+                            sandbox_available: false,
+                            snapshot_available: true,
+                            snapshot_path: task.facts.snapshot_path.clone().unwrap_or_default(),
+                        }
+                    } else {
+                        resumed(&task, task.facts.snapshot_path.clone().unwrap_or_default())
+                    }];
+                    events.extend(restart_events(&task, &woke_up_saying(&task, interrupted)));
                     task = service.record(&task.id, &events).await?;
                 } else if task.facts.deferred_review.is_some() && task.facts.snapshot_available {
                     // A shutdown can catch a review between the hold being
@@ -587,7 +601,7 @@ where
                         execution_pause_reason: TaskExecutionPauseReason::AwaitingReviewChecks,
                         snapshot_path: task.facts.snapshot_path.clone().unwrap_or_default(),
                     }];
-                    events.extend(restart_events(&task, &woke_up_saying(&task)));
+                    events.extend(restart_events(&task, &woke_up_saying(&task, false)));
                     task = service.record(&task.id, &events).await?;
                 }
                 Ok(task)
@@ -767,7 +781,28 @@ fn notice_event(task: &Task, body: &str) -> Vec<TaskHistoryEvent> {
 
 // What a restart left this task doing, in the words the operator reads: a task that
 // was waiting on a person or on a pull request is not "resuming" anything.
-fn woke_up_saying(task: &Task) -> String {
+// The last thing the task's history said it was doing: a run that started and never
+// ended is a run the machine stopped in the middle of.
+fn was_running(events: &[TaskHistoryEvent]) -> bool {
+    for event in events.iter().rev() {
+        match event {
+            TaskHistoryEvent::AgentRunStarted { .. } => return true,
+            TaskHistoryEvent::AgentRunEnded { .. }
+            | TaskHistoryEvent::ExecutionPaused { .. }
+            | TaskHistoryEvent::ExecutionRecovered { .. }
+            | TaskHistoryEvent::ExecutionQueued { .. }
+            | TaskHistoryEvent::TaskCompleted { .. }
+            | TaskHistoryEvent::ExecutionFailed { .. } => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
+fn woke_up_saying(task: &Task, interrupted: bool) -> String {
+    if interrupted {
+        return "Its run was cut in half by the restart, so it picks the work back up.".to_owned();
+    }
     if task.facts.deferred_review.is_some() {
         return "It was waiting on its pull requests, and the machine is watching them again."
             .to_owned();
