@@ -161,11 +161,15 @@ pub fn help_sections() -> Vec<HelpSection> {
                 ("j/k · ↓/↑", "Move between threads"),
                 (
                     "Enter",
-                    "Take the primary action: acknowledge a decision, accept a review, resolve a log the agent finished, or reply where that is all there is",
+                    "Take the primary action: accept a delivery, or reply to the question that is open",
                 ),
                 (
                     "Ctrl-Enter",
                     "Take the secondary action where the thread has one: reply to the agent. A reply reopens the thread it answers",
+                ),
+                (
+                    "t",
+                    "Show or hide what the agent is thinking beside what it said",
                 ),
                 ("f / s", "Filter or sort the thread list"),
                 (
