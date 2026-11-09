@@ -4,12 +4,66 @@ use crate::remote::host::admission::{self, Actor, Admission, InputFacts};
 use crate::tracker::ask_marker;
 use crate::{
     task::TaskAsk,
-    tracker::{TrackerKind, providers::linear::automation::AgentActivityContent},
+    tracker::{
+        TrackerKind,
+        providers::linear::automation::{AgentActivityContent, CommentSite},
+    },
 };
 
 use super::ledger::ReactionInput;
 use super::*;
 impl RemoteTracker {
+    // Where a comment in the tracker belongs. A comment can be for no task, and every
+    // kind of comment that arrives says so the same way, so the saying lives here
+    // rather than in each of the three that ask.
+    pub(super) async fn task_holding_comment(
+        &self,
+        site: &CommentSite,
+        issue_id: Option<&str>,
+        host: &dyn DelegatedWork,
+    ) -> Result<Option<BoundTask>, String> {
+        // The generated session root is Linear's own transcript surface, not a signal
+        // comment. Its replies arrive as prompts on the session.
+        if site.is_artificial_session_root {
+            return Ok(None);
+        }
+        let Some(issue_id) = issue_id else {
+            tracing::debug!(comment = %site.comment_id, "a Linear comment belongs to no issue");
+            return Ok(None);
+        };
+        // The task holding the issue is what decides whether a comment has anywhere to
+        // go. Asking whether *this pass* already reports on it made a message reach
+        // nothing whenever the report was not there yet, and said nothing about it: an
+        // operator writing on a delegated issue is the one thing this machine must
+        // never swallow.
+        let Some(task) = host.work_for_issue(issue_id.to_owned(), Vec::new()).await? else {
+            tracing::info!(comment = %site.comment_id, issue = %issue_id, "a Linear comment reached no task on this machine");
+            return Ok(None);
+        };
+        if !host.is_kept(task.task_id.clone()).await? {
+            tracing::info!(comment = %site.comment_id, task = %task.task_id, "a Linear comment reached a task that is gone");
+            return Ok(None);
+        }
+        Ok(Some(task))
+    }
+
+    // The question a comment was written under, found by the marker this machine
+    // publishes its asks with: the reply belongs to the thread it is in, and the ids
+    // derive from the task and the signal, so neither side keeps a table.
+    pub(super) async fn thread_of_comment(
+        &self,
+        task_id: &str,
+        site: &CommentSite,
+        host: &dyn DelegatedWork,
+    ) -> Result<Option<TaskAsk>, String> {
+        let root = site.root_comment_id.as_str();
+        Ok(host
+            .signal_threads(task_id.to_owned())
+            .await?
+            .into_iter()
+            .find(|thread| ask_marker(task_id, &thread.id) == root))
+    }
+
     pub(super) async fn answer_prompt(
         &self,
         event: &SessionEvent,
@@ -131,33 +185,13 @@ impl RemoteTracker {
             .comment_site(&event.comment_id)
             .await
             .map_err(|error| error.to_string())?;
-        // The generated session root is Linear's own transcript surface, not a
-        // signal comment. Its replies arrive as prompts on the session.
-        if site.is_artificial_session_root {
-            return Ok(());
-        }
         let issue_id = site.issue_id.clone().or_else(|| event.issue_id.clone());
-        let Some(issue_id) = issue_id else {
-            tracing::debug!(comment = %event.comment_id, "a Linear comment belongs to no issue");
+        let Some(task) = self
+            .task_holding_comment(&site, issue_id.as_deref(), host)
+            .await?
+        else {
             return Ok(());
         };
-        // The task holding the issue is what decides whether a comment has anywhere
-        // to go. Asking whether *this pass* already reports on it made a message
-        // reach nothing whenever the report was not there yet, and said nothing about
-        // it: an operator writing on a delegated issue is the one thing this machine
-        // must never swallow.
-        let Some(task) = host.work_for_issue(issue_id.clone(), Vec::new()).await? else {
-            tracing::info!(
-                comment = %event.comment_id,
-                issue = %issue_id,
-                "a Linear comment reached no task on this machine"
-            );
-            return Ok(());
-        };
-        if !host.is_kept(task.task_id.clone()).await? {
-            tracing::info!(comment = %event.comment_id, task = %task.task_id, "a Linear comment reached a task that is gone");
-            return Ok(());
-        }
         let report = self.report_for_task(&task.task_id);
         let operator = self.user_for_owner(&task.owner);
         let actor = if operator.as_deref() == Some(event.actor_id.as_str()) {
@@ -178,16 +212,13 @@ impl RemoteTracker {
         // reply in a closed thread is exactly that: nobody writes into an answered
         // question unless it is being asked again.
         self.reopen_closed_thread(&task.task_id, &site, host).await;
-        // A reply inside a thread this machine published is an answer to the
-        // question that thread asked, and the thread is which question it is. The
-        // ids are derived from the task and the signal, so either side can work
-        // them out and no table of published comments has to be kept.
-        let root = site.root_comment_id.clone();
-        let answered = host
-            .signal_threads(task.task_id.clone())
+        // A reply inside a thread this machine published is an answer to the question
+        // that thread asked. One is open at a time, so only an open thread is an
+        // answer rather than a memory of one.
+        let answered = self
+            .thread_of_comment(&task.task_id, &site, host)
             .await?
-            .into_iter()
-            .find(|thread| thread.is_unresolved() && ask_marker(&task.task_id, &thread.id) == root);
+            .filter(TaskAsk::is_unresolved);
         let facts = InputFacts {
             actor,
             is_mention: event.is_mention,
@@ -197,7 +228,7 @@ impl RemoteTracker {
                 && site.document_creator_id.as_deref() == Some(app_user_id),
             is_tracked_signal: answered.is_some(),
             is_task_issue: site.document_content_id.is_none()
-                && site.issue_id.as_deref() == Some(issue_id.as_str())
+                && site.issue_id.is_some()
                 && site.parent_id.is_none(),
             has_other_humans,
         };
@@ -284,23 +315,13 @@ impl RemoteTracker {
             .comment_site(&event.comment_id)
             .await
             .map_err(|error| error.to_string())?;
-        let Some(issue_id) = site.issue_id.clone() else {
-            return Ok(());
-        };
-        let Some(task) = host.work_for_issue(issue_id, Vec::new()).await? else {
-            tracing::info!(comment = %event.comment_id, "a thread was closed on an issue no task holds");
-            return Ok(());
-        };
-        if !host.is_kept(task.task_id.clone()).await? {
-            return Ok(());
-        }
-        let root = site.root_comment_id.clone();
-        let thread = host
-            .signal_threads(task.task_id.clone())
+        let Some(task) = self
+            .task_holding_comment(&site, site.issue_id.as_deref(), host)
             .await?
-            .into_iter()
-            .find(|thread| ask_marker(&task.task_id, &thread.id) == root);
-        let Some(thread) = thread else {
+        else {
+            return Ok(());
+        };
+        let Some(thread) = self.thread_of_comment(&task.task_id, &site, host).await? else {
             return Ok(());
         };
         if thread.is_resolved() == event.resolved {
@@ -336,14 +357,10 @@ impl RemoteTracker {
             .comment_site(&event.comment_id)
             .await
             .map_err(|error| error.to_string())?;
-        if site.is_artificial_session_root {
-            return Ok(());
-        }
-        let issue_id = site.issue_id.clone();
-        let Some(issue_id) = issue_id else {
-            return Ok(());
-        };
-        let Some(task) = host.work_for_issue(issue_id, Vec::new()).await? else {
+        let Some(task) = self
+            .task_holding_comment(&site, site.issue_id.as_deref(), host)
+            .await?
+        else {
             return Ok(());
         };
         // Only the operator directs this task. A teammate's symbol is not a decision,
@@ -351,16 +368,7 @@ impl RemoteTracker {
         if self.user_for_owner(&task.owner).as_deref() != Some(event.actor_id.as_str()) {
             return Ok(());
         }
-        if !host.is_kept(task.task_id.clone()).await? {
-            return Ok(());
-        }
-        let root = site.root_comment_id.clone();
-        let thread = host
-            .signal_threads(task.task_id.clone())
-            .await?
-            .into_iter()
-            .find(|thread| ask_marker(&task.task_id, &thread.id) == root);
-        let Some(thread) = thread else {
+        let Some(thread) = self.thread_of_comment(&task.task_id, &site, host).await? else {
             return Ok(());
         };
         let about = site
