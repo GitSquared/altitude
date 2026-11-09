@@ -346,6 +346,10 @@ impl RemoteTracker {
         let Some(task) = bound.iter().find(|task| task.task_id == report.task_id) else {
             return;
         };
+        self.introduce_task(report, task).await;
+    }
+
+    async fn introduce_task(&self, report: &Cursor, task: &BoundTask) {
         let operator = self.operator_name(&report.tracker_user_id).await;
         let body = match (&task.status, task.pause_reason.as_ref()) {
             (TaskExecutionStatus::Running, _) => {
@@ -926,18 +930,11 @@ impl RemoteTracker {
         &self,
         host: &dyn DelegatedWork,
         report: &Cursor,
+        threads: &[TaskAsk],
         events: &[(i64, TaskHistoryEvent)],
     ) -> Result<(), String> {
-        let threads = host.signal_threads(report.task_id.clone()).await?;
-        let open: Vec<&TaskAsk> = threads
-            .iter()
-            .filter(|signal| signal.is_unresolved())
-            .collect();
-        if open.is_empty() {
-            return Ok(());
-        }
         let contributions = contribution_details(events);
-        for signal in open {
+        for signal in threads.iter().filter(|signal| signal.is_unresolved()) {
             let marker = ask_marker(&report.task_id, &signal.id);
             match self.config.automation.has_ask(&marker).await {
                 Ok(true) => continue,
@@ -981,6 +978,7 @@ impl RemoteTracker {
         host: &dyn DelegatedWork,
         report: &Cursor,
         events: &[(i64, TaskHistoryEvent)],
+        threads: &[TaskAsk],
     ) -> Result<(), String> {
         if let Some(steps) = events.iter().rev().find_map(|(_, event)| match event {
             TaskHistoryEvent::PlanUpdated { steps } => Some(steps),
@@ -990,7 +988,7 @@ impl RemoteTracker {
                 .await
                 .map_err(|error| error.to_string())?;
         }
-        self.ensure_asks_said(host, report, events).await?;
+        self.ensure_asks_said(host, report, threads, events).await?;
         let asking = host
             .bound_tasks()
             .await
@@ -1012,7 +1010,9 @@ impl RemoteTracker {
         if let Some(status) = status {
             self.write_status(host, report, status).await?;
         }
-        self.introduce(host, report).await;
+        if let Some(task) = asking.as_ref() {
+            self.introduce_task(report, task).await;
+        }
         Ok(())
     }
 }

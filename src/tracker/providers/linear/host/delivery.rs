@@ -7,7 +7,6 @@ use crate::{
         providers::linear::automation::{AgentActivityContent, CommentSite},
     },
 };
-use std::collections::HashSet;
 use std::time::Instant;
 
 use super::*;
@@ -212,7 +211,7 @@ impl RemoteTracker {
         report: &Cursor,
         events: &[(i64, TaskHistoryEvent)],
         index: usize,
-        unresolved: &HashSet<String>,
+        threads: &[TaskAsk],
         status: &mut Option<TrackerStatus>,
     ) -> Result<Option<()>, String> {
         let (_, event) = &events[index];
@@ -247,7 +246,7 @@ impl RemoteTracker {
                         .rev()
                         .find_map(|(_, event)| match event {
                             TaskHistoryEvent::OperatorSignalRaised { signal }
-                                if unresolved.contains(&signal.id) =>
+                                if open_in(threads, &signal.id) =>
                             {
                                 Some(signal.kind)
                             }
@@ -369,7 +368,7 @@ impl RemoteTracker {
                 self.post_signal_reply(report, signal_id, body).await;
             }
             TaskHistoryEvent::OperatorSignalRaised { signal } => {
-                if unresolved.contains(&signal.id) {
+                if open_in(threads, &signal.id) {
                     let contributions = contribution_details(&events[..=index]);
                     if let Some(published) = self
                         .publish_signal(
@@ -443,15 +442,9 @@ impl RemoteTracker {
             self.advance_cursor(&report.task_id, events.len())?;
             return Ok(());
         }
-        // Signals still open are the only ones worth publishing; one already
-        // answered or confirmed must not be raised again on the next pass.
-        let unresolved: HashSet<String> = host
-            .signal_threads(report.task_id.clone())
-            .await?
-            .into_iter()
-            .filter(TaskAsk::is_unresolved)
-            .map(|signal| signal.id)
-            .collect();
+        // What the task is waiting on, read once: publishing an ask and repairing
+        // one that never landed both need the same list.
+        let threads = host.signal_threads(report.task_id.clone()).await?;
         // A report says what happens from when it existed. A task can be older than
         // the report watching it — adopted after a restart, or moved here — and the
         // turn it took before then is not news now: replaying it says this week what
@@ -472,7 +465,7 @@ impl RemoteTracker {
         let mut status = None;
         for index in start..events.len() {
             let outcome = self
-                .report_event(host, report, &events, index, &unresolved, &mut status)
+                .report_event(host, report, &events, index, &threads, &mut status)
                 .await;
             match outcome {
                 Ok(Some(done)) => return Ok(done),
@@ -487,11 +480,11 @@ impl RemoteTracker {
             self.write_status(host, report, status).await?;
         }
         if projecting {
-            self.project_state(host, report, &events).await?;
+            self.project_state(host, report, &events, &threads).await?;
             self.advance_cursor(&report.task_id, events.len())?;
-        } else {
-            self.ensure_asks_said(host, report, &events).await?;
         }
+        self.ensure_asks_said(host, report, &threads, &events)
+            .await?;
         Ok(())
     }
 

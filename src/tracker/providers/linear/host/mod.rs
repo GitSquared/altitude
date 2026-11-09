@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::remote::identity::write_private;
-use crate::task::{TaskAskKind, TaskExecutionPauseReason, TaskHistoryEvent};
+use crate::task::{TaskAsk, TaskAskKind, TaskExecutionPauseReason, TaskHistoryEvent};
 use crate::tracker::host::{BoundTask, DelegatedWork, QueueStanding, Start};
 use crate::tracker::providers::linear::automation::{LinearAutomation, is_absence};
 use axum::{Router, extract::DefaultBodyLimit, routing::post};
@@ -134,6 +134,12 @@ fn pause_message(
         (TaskExecutionPauseReason::AwaitingOperator, None) => format!("Waiting for {operator}."),
         (reason, _) => format!("{} Tell {operator} what to do next.", reason.notice()),
     }
+}
+
+fn open_in(threads: &[TaskAsk], signal_id: &str) -> bool {
+    threads
+        .iter()
+        .any(|thread| thread.id == signal_id && thread.is_unresolved())
 }
 
 fn picking_up(operator: Option<&str>, agent: Option<&str>) -> String {
