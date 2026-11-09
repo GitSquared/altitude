@@ -365,7 +365,7 @@ impl RemoteTracker {
     pub(super) async fn boundary_reply(&self, operator_id: &str) -> String {
         let operator = self.operator_mention(operator_id).await;
         format!(
-            "This task belongs to {operator}, so Altitude only takes direction from them here. \
+            "This task belongs to {operator}, so altitude only takes direction from them here. \
              Ask them to reply if you want it changed."
         )
     }
@@ -421,7 +421,7 @@ impl RemoteTracker {
     pub(super) async fn post_sync_guidance(&self, session_id: &str) -> Result<(), String> {
         let tracker = TrackerKind::Linear.label();
         let body = format!(
-            "**Altitude does not know whose work this is.**\n\n\
+            "**altitude does not know whose work this is.**\n\n\
              This remote holds no {tracker} login from a person it could report to, so it \
              cannot start a task for you.\n\n\
              On your computer, in Settings → Task tracker, sign in to {tracker} as \
@@ -444,7 +444,7 @@ impl RemoteTracker {
     ) -> Result<(), String> {
         let body = format!(
             "**Nothing was started.**\n\n{refusal}\n\n\
-             Reply here once that's sorted, and Altitude will try again."
+             Reply here once that's sorted, and altitude will try again."
         );
         self.create_system_activity(
             session_id,

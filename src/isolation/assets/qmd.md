@@ -26,5 +26,5 @@ feeding results back to yourself. Re-run `qmd embed` after you write a file so
 the index includes it. The index lives outside this folder and is cheap to
 rebuild: the markdown files are the truth, never the index.
 
-Altitude refreshes this file during provisioning; keep your own notes in
+altitude refreshes this file during provisioning; keep your own notes in
 markdown files of your own beside it.

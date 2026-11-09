@@ -233,7 +233,7 @@ impl Setup {
 
     fn title(&self) -> String {
         match &self.kind {
-            SetupKind::Remote => "Altitude remote guide".to_owned(),
+            SetupKind::Remote => "altitude remote guide".to_owned(),
             SetupKind::RemoteTrackers => "Choose a task tracker".to_owned(),
             SetupKind::RemoteTrackerGuide(kind) => {
                 format!("Set up {} on the remote", kind.label())

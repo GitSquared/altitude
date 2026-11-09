@@ -30,7 +30,7 @@ const DEFAULT_MCP: &str = r#"{
       "command": "python3",
       "args": ["/altitude/pi/altitude-bridge.py"],
       "exposure": "direct",
-      "description": "Altitude's control plane for this task: its title, and the signals it and the operator exchange."
+      "description": "altitude's control plane for this task: its title, and the signals it and the operator exchange."
     }
   }
 }
@@ -241,7 +241,7 @@ impl AgentEngine for PiCode {
             shell_quote(&self.conversation_transcript_path(conversation_id)),
             shell_quote(&system_prompt(AUTOPILOT_SYSTEM_PROMPT, context)),
             shell_quote(&format!(
-                "{prompt}\n\nAltitude task context at the start of this turn: {context}"
+                "{prompt}\n\naltitude task context at the start of this turn: {context}"
             )),
         )
     }

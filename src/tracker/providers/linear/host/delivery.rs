@@ -348,7 +348,7 @@ impl RemoteTracker {
                             report,
                             &stable_id(&report.task_id, agent_run_id),
                             AgentActivityContent::Thought {
-                                body: "Got your reply. Altitude is continuing the task.".into(),
+                                body: "Got your reply. altitude is continuing the task.".into(),
                             },
                         )
                         .await
@@ -528,7 +528,7 @@ impl RemoteTracker {
                 &stable_id(&report.task_id, "unhooked"),
                 AgentActivityContent::Response {
                     body:
-                        "This issue isn't delegated to Altitude anymore, so the task was stopped."
+                        "This issue isn't delegated to altitude anymore, so the task was stopped."
                             .to_owned(),
                 },
             )

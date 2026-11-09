@@ -147,10 +147,10 @@ where
                     .facts
                     .review_wake_news
                     .as_ref()
-                    .map(|news| format!("Altitude checked the pull requests linked to this task:\n\n{news}"))
+                    .map(|news| format!("altitude checked the pull requests linked to this task:\n\n{news}"))
                     .unwrap_or_else(|| {
                     if resume {
-                        "Altitude paused this task and restored its sandbox from a snapshot. You \
+                        "altitude paused this task and restored its sandbox from a snapshot. You \
                          are continuing the same conversation, and the current time is in the \
                          context below. Review the conversation and workspace state, then continue \
                          the task where it left off."
@@ -210,7 +210,7 @@ where
             }];
             events.extend(notice_event(
                 &task,
-                "Altitude lost this task's sandbox, so the workspace from earlier turns is \
+                "altitude lost this task's sandbox, so the workspace from earlier turns is \
                  gone. The project's repository is checked out fresh for you; recreate what \
                  you need and carry on with the work.",
             ));
@@ -767,7 +767,7 @@ fn restart_events(task: &Task, said: &str) -> Vec<TaskHistoryEvent> {
     notice_event(
         task,
         &format!(
-            "Altitude on {} restarted and is picking this task back up. {said}",
+            "altitude on {} restarted and is picking this task back up. {said}",
             task.host
         ),
     )

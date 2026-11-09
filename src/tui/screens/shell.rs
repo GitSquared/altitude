@@ -269,7 +269,7 @@ impl vt100::Callbacks for HostCallbacks {
     }
 }
 
-// The keys the terminal keeps for Altitude, because they belong to the take-over
+// The keys the terminal keeps for altitude, because they belong to the take-over
 // rather than to the program in it. `ctrl-q` leaves, `alt-s` steps into the shell and
 // back: neither is bound by the harness or by bash's line editor, which is why they
 // are not the `ctrl-a` this used to be.

@@ -136,7 +136,7 @@ impl IssueSnapshot {
         if let Some(who) = delegated_by.map(str::trim).filter(|who| !who.is_empty()) {
             prompt.push_str(&format!(
                 "Delegated by: {who}, through the tracker. They are away from the terminal: \
-                 your updates and questions appear on this issue, and Altitude answers you \
+                 your updates and questions appear on this issue, and altitude answers you \
                  here when they reply.\n"
             ));
         }

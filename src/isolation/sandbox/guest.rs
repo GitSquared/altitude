@@ -46,7 +46,7 @@ pub(crate) fn project_scripts(project: &Project) -> Result<String, IsolationErro
         .map(|path| expand_guest_path(&path))
         .transpose()?
         .map(|path| path.to_string_lossy().into_owned());
-    // The brief and Altitude's rules are mounted read-only, not written here: a
+    // The brief and altitude's rules are mounted read-only, not written here: a
     // document the agent may not edit does not belong on the disk the agent owns.
     let mut script = String::new();
     if let (Some(repository), Some(checkout)) = (&project.repository, &checkout) {

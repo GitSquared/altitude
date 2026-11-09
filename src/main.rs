@@ -118,7 +118,7 @@ async fn client() -> Result<(), Box<dyn Error>> {
                 &mut interrupt,
                 animations,
                 "Lost identity",
-                "Altitude's local configuration seems corrupted. Remotes might not \
+                "altitude's local configuration seems corrupted. Remotes might not \
                  recognize this host anymore. Reset configuration to start from a clean \
                  slate?",
                 &["no, quit", "yes, reset"],
@@ -128,7 +128,7 @@ async fn client() -> Result<(), Box<dyn Error>> {
                 let aside = config.forget_installation()?;
                 tracing::info!(moved_to = %aside.display(), "installation forgotten");
                 farewell = Some(format!(
-                    "Everything Altitude had recorded was moved to {}. Start it again to begin \
+                    "Everything altitude had recorded was moved to {}. Start it again to begin \
                      from a clean slate.",
                     aside.display()
                 ));

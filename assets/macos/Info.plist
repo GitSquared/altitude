@@ -7,7 +7,7 @@
     <key>CFBundleDisplayName</key>
     <string>altitude</string>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>Altitude uses your network to discover and connect to remote servers, so your agents can keep working while you’re away.</string>
+    <string>altitude uses your network to discover and connect to remote servers, so your agents can keep working while you’re away.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_altitude._udp</string>

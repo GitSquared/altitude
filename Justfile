@@ -81,7 +81,7 @@ logs:
 
     exec tail -n 100 -F "$logs_dir/altitude.log"
 
-# Remove only Altitude's task database for a fresh local task history.
+# Remove only altitude's task database for a fresh local task history.
 reset:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -97,7 +97,7 @@ reset:
 
     database="${ALTITUDE_DATA_DIR:-$(dirname "$database")}/altitude.db"
 
-    echo "This removes only Altitude's task database:"
+    echo "This removes only altitude's task database:"
     echo "  $database"
     echo "Snapshots, persistent profiles, isolation state, and logs are kept."
     read -r -p "Make sure altitude is not running. Continue? [y/N] " answer

@@ -34,7 +34,7 @@ static LINEAR: Guide = Guide {
                 Item::Code(
                     "https://raw.githubusercontent.com/GitSquared/altitude/main/assets/icon.png",
                 ),
-                Item::Bullet("Application name: Altitude."),
+                Item::Bullet("Application name: altitude."),
                 Item::Bullet("Developer name and URL: your own."),
                 Item::Bullet(
                     "Redirect URIs: public_url followed by /altitude/linear/oauth/callback. \
@@ -55,7 +55,7 @@ static LINEAR: Guide = Guide {
                      remote should hear what people do on the issue.",
                 ),
                 Item::Detail(
-                    "Issues: without it Altitude still reports status out, but does not notice \
+                    "Issues: without it altitude still reports status out, but does not notice \
                      an issue being completed or moved",
                 ),
                 Item::Detail(
@@ -112,7 +112,7 @@ static LINEAR: Guide = Guide {
     closing: &[
         "Then sign in here under Settings → Task tracker, choosing Linear: that account decides \
          which machine a delegated issue runs on.",
-        "A remote with no shared app still runs work sent from Altitude, and reports through each \
+        "A remote with no shared app still runs work sent from altitude, and reports through each \
          operator's own login.",
     ],
 };

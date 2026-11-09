@@ -120,7 +120,7 @@ impl SettingsFile {
 
     pub fn save(&mut self, settings: Settings) -> Result<(), SettingsError> {
         settings.validate()?;
-        // The stable lock file serializes Altitude writers across atomic renames.
+        // The stable lock file serializes altitude writers across atomic renames.
         let _lock = lock_settings(&self.path)?;
         let current = fs::read_to_string(&self.path).map_err(SettingsError::Io)?;
         if current != self.source {
@@ -684,7 +684,7 @@ impl Settings {
                 .validate()
                 .map_err(|error| SettingsError::Invalid(error.to_string()))?;
             // A project id is a uuid, because storage is keyed by it and because
-            // Altitude builds a few sandboxes under ids of its own.
+            // altitude builds a few sandboxes under ids of its own.
             if project.id.parse::<uuid::Uuid>().is_err() {
                 return Err(SettingsError::Invalid(format!(
                     "project id {:?} must be a uuid",

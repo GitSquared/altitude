@@ -400,7 +400,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         }
         resumed.enable_admission();
         readiness.send_replace(Phase::Ready);
-        tracing::info!("Remote ready · open Altitude → Settings → Remotes");
+        tracing::info!("Remote ready · open altitude → Settings → Remotes");
         if !listen.ip().is_loopback() {
             tracing::info!("Clients on the same network can discover this remote automatically");
         }

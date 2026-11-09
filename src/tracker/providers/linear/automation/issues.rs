@@ -169,7 +169,7 @@ impl LinearAutomation {
             after = Some(cursor);
         }
         Err(TrackerError::new(
-            "this issue has more discussion than Altitude can read in one pass",
+            "this issue has more discussion than altitude can read in one pass",
         ))
     }
 }

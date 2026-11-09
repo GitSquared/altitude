@@ -64,7 +64,7 @@ pub enum AgentActivityContent {
 }
 
 impl AgentActivityContent {
-    // Altitude's own words, marked once. The agent's words go out unmarked: the
+    // altitude's own words, marked once. The agent's words go out unmarked: the
     // mountain says the machine is speaking, and the app is already the author of
     // everything it publishes.
     pub fn system(self) -> Self {

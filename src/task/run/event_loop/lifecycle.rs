@@ -216,7 +216,7 @@ where
     }
 
     // The tracker is where the operator said this work is over, which is the same
-    // ending accepting it in Altitude would be: the task is done, not paused with a
+    // ending accepting it in altitude would be: the task is done, not paused with a
     // reason someone has to interpret later.
     pub async fn complete_task(&self, task_id: &str) -> Result<(), TaskServiceError> {
         let Some(task) = self

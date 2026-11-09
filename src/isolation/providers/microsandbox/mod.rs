@@ -122,9 +122,9 @@ impl MicrosandboxIsolation {
             .open("/dev/kvm")
             .map_err(|error| {
                 let guidance = match error.kind() {
-                    ErrorKind::PermissionDenied => "Grant the account running Altitude read/write access to /dev/kvm. On Ubuntu, run `sudo usermod -aG kvm $(id -un)`, then reconnect your SSH session (or log out and back in) and restart Altitude. For a service, grant access to its service account instead.",
+                    ErrorKind::PermissionDenied => "Grant the account running altitude read/write access to /dev/kvm. On Ubuntu, run `sudo usermod -aG kvm $(id -un)`, then reconnect your SSH session (or log out and back in) and restart altitude. For a service, grant access to its service account instead.",
                     ErrorKind::NotFound => "Enable hardware virtualization in the host firmware and load the appropriate KVM kernel module. If this machine is itself a VM, its host must expose nested virtualization and /dev/kvm.",
-                    _ => "Check that hardware virtualization is available and /dev/kvm is accessible to the account running Altitude.",
+                    _ => "Check that hardware virtualization is available and /dev/kvm is accessible to the account running altitude.",
                 };
                 IsolationError::new(format!(
                     "Microsandbox requires Linux KVM, but cannot open /dev/kvm: {error}.\n{guidance}"

@@ -524,7 +524,7 @@ impl IsolationEngine for MicrosandboxIsolation {
             .stop_with_timeout(Duration::from_secs(10))
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
-        // Altitude keeps one checkpoint per capsule; each capture owns its snapshot group.
+        // altitude keeps one checkpoint per capsule; each capture owns its snapshot group.
         let capture = Snapshot::builder(&snapshot_name)
             .group(snapshot_name)
             .from_sandbox(&id)

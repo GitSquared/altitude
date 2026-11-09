@@ -7,7 +7,7 @@ use std::{
 
 use crate::task::{ProjectMemoryFile, TaskHistoryEvent};
 
-// The notes Altitude keeps in the directory: what it is, and how to search it.
+// The notes altitude keeps in the directory: what it is, and how to search it.
 // They are the machine's, refreshed at provisioning, so they are not the project's
 // memory and no machine carries them.
 const NOTES: [&str; 2] = ["README.md", "QMD.md"];

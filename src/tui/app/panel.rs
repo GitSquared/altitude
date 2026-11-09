@@ -171,7 +171,7 @@ impl App {
             Some(RowKind::Discovered(remote)) => {
                 if remote.compatibility == Compatibility::RequiresUpdate {
                     self.say(format!(
-                        "{} runs Altitude v{}, and this machine runs v{}. Update both to the \
+                        "{} runs altitude v{}, and this machine runs v{}. Update both to the \
                          same version to use it",
                         remote.label, remote.version, LOCAL_VERSION
                     ));

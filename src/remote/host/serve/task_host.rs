@@ -218,7 +218,7 @@ impl TaskHost for OwnTasks {
             let prepared: PreparedTransfer = serde_json::from_slice(
                 &fs::read(directory.join("transfer.json")).map_err(|e| e.to_string())?,
             )
-            .map_err(|_| "this transfer was prepared by another version of Altitude".to_owned())?;
+            .map_err(|_| "this transfer was prepared by another version of altitude".to_owned())?;
             if prepared.recipient != peer.to_string() {
                 return Err("this transfer belongs to another recipient".into());
             }

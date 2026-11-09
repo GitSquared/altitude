@@ -1,6 +1,6 @@
 #!/bin/sh
-# Altitude's opener. There is no browser in here, so a web address is handed to
-# the terminal Altitude is streaming this sandbox through, and Altitude asks the
+# altitude's opener. There is no browser in here, so a web address is handed to
+# the terminal altitude is streaming this sandbox through, and altitude asks the
 # operator on the other end of it before anything opens on their machine.
 #
 # A real xdg-open returns as soon as it has handed the address over, and so does
@@ -20,7 +20,7 @@ done
 { printf '\033]1337;open;%s\007' "$url" > /dev/tty; } 2>/dev/null && exit 0
 # 2. A detached opener has no controlling terminal, but the program that started
 #    it still holds the pty on its own stdout. Writing there is writing to the
-#    terminal Altitude streams.
+#    terminal altitude streams.
 parent="/proc/$PPID/fd/1"
 if [ -c "$parent" ] && { printf '\033]1337;open;%s\007' "$url" > "$parent"; } 2>/dev/null; then
 	exit 0

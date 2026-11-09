@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Carries MCP between a harness's stdio and Altitude, over virtio-vsock.
+"""Carries MCP between a harness's stdio and altitude, over virtio-vsock.
 
-Altitude listens on a host Unix socket that this sandbox reaches as host CID 2 on
+altitude listens on a host Unix socket that this sandbox reaches as host CID 2 on
 ``ALTITUDE_MCP_PORT``. The harness launches this file as an MCP stdio server; it
-is a byte pump, so the MCP framing belongs to Altitude and the harness alone.
+is a byte pump, so the MCP framing belongs to altitude and the harness alone.
 
-The connection stays open for the session. Altitude owns the other end and
+The connection stays open for the session. altitude owns the other end and
 decides what the tools are.
 """
 
@@ -41,7 +41,7 @@ def to_host(connection):
 
 
 def to_stdout(connection):
-    """Everything Altitude answers, until the connection closes."""
+    """Everything altitude answers, until the connection closes."""
     while True:
         try:
             data = connection.recv(65536)
@@ -66,5 +66,5 @@ if __name__ == "__main__":
     except OSError as error:
         # The harness treats a server that cannot start as a failed server and
         # carries on, so a missing channel must not look like a crash.
-        print(f"altitude bridge could not reach Altitude: {error}", file=sys.stderr)
+        print(f"altitude bridge could not reach altitude: {error}", file=sys.stderr)
         sys.exit(1)

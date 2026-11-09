@@ -312,7 +312,7 @@ pub(crate) fn remote_connector(
             Reach::Off,
             "update required",
             Some(format!(
-                "This machine runs Altitude v{local}; {title} runs v{remote}."
+                "This machine runs altitude v{local}; {title} runs v{remote}."
             )),
             Some("Update both machines to the same version."),
         ),
@@ -352,7 +352,7 @@ pub(crate) fn remote_connector(
         identity: None,
         note,
         action,
-        purpose: "A machine that keeps running your tasks after you close Altitude, so work \
+        purpose: "A machine that keeps running your tasks after you close altitude, so work \
                   carries on while you are away. Yours alone, or shared with a team.",
         used_by: None,
         fields,

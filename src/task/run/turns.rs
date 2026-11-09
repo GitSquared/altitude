@@ -52,7 +52,7 @@ where
         &self,
         task: Task,
     ) -> Result<(Task, TaskAgentRun, CommandSession), TaskServiceError> {
-        self.start_autopilot_turn(task, "The operator has returned control to Altitude. Review the preceding conversation and current workspace state, then continue the task autonomously wherever the original intent reasonably permits. Do not wait for routine confirmation.", None).await
+        self.start_autopilot_turn(task, "The operator has returned control to altitude. Review the preceding conversation and current workspace state, then continue the task autonomously wherever the original intent reasonably permits. Do not wait for routine confirmation.", None).await
     }
     // A shell in the sandbox the operator is working in. It is not a run and it says
     // nothing in the task's history: the agent is at its prompt while this is open,
@@ -267,7 +267,7 @@ where
             .await?;
         let command = engine.operator_command(
             &conversation_id,
-            "Altitude: the operator has taken this task over and will speak to you \
+            "altitude: the operator has taken this task over and will speak to you \
              directly from here. They are at the terminal now.",
         );
         let mut bound = None;

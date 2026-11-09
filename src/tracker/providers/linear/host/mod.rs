@@ -94,9 +94,9 @@ pub struct RemoteTracker {
 // which is why the way out of it is part of the same message.
 fn failure_notice(error: &str) -> String {
     format!(
-        "**Altitude stopped this task.**\n\n{}\n\n\
-         Take it over with ctrl-enter in the Altitude terminal and unblock it there: leaving \
-         the terminal hands the work back to Altitude, which carries on from where you left \
+        "**altitude stopped this task.**\n\n{}\n\n\
+         Take it over with ctrl-enter in the altitude terminal and unblock it there: leaving \
+         the terminal hands the work back to altitude, which carries on from where you left \
          it. A message here restarts it too, without a terminal.",
         error.trim()
     )
@@ -137,7 +137,7 @@ fn worth_retrying(refusal: &str) -> bool {
 
 fn picking_up(operator: Option<&str>, agent: Option<&str>) -> String {
     let operator = operator.map(str::trim).filter(|name| !name.is_empty());
-    // Altitude names its agents in lower case, which belongs mid-sentence in the
+    // altitude names its agents in lower case, which belongs mid-sentence in the
     // session summary and not in a sentence the operator reads.
     let agent = agent
         .map(str::trim)
@@ -154,7 +154,7 @@ fn picking_up(operator: Option<&str>, agent: Option<&str>) -> String {
         (Some(operator), Some(agent)) => format!("{operator}'s {agent} is picking up this task."),
         (None, Some(agent)) => format!("{agent} is picking up this task."),
         (Some(operator), None) => format!("{operator}'s agent is picking up this task."),
-        (None, None) => "Altitude is picking up this task.".to_owned(),
+        (None, None) => "altitude is picking up this task.".to_owned(),
     }
 }
 

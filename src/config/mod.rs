@@ -211,7 +211,7 @@ impl Config {
                     label,
                 })
             }
-            // Another Altitude instance named this installation first; keep its name.
+            // Another altitude instance named this installation first; keep its name.
             Err(error) if error.kind() == ErrorKind::AlreadyExists => self.identity(),
             Err(error) => Err(error),
         }
@@ -468,7 +468,7 @@ impl Config {
             .join("memory")
     }
 
-    // The project's brief and Altitude's rules, kept on the machine so the sandbox
+    // The project's brief and altitude's rules, kept on the machine so the sandbox
     // mounts them read-only rather than writing them into a disk the agent owns.
     pub fn project_brief_dir(&self, project_id: &str) -> PathBuf {
         self.scoped_data_dir()

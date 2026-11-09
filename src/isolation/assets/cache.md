@@ -1,4 +1,4 @@
-# Altitude shared cache
+# altitude shared cache
 
 Guest: `{{guest_path}}`
 Host: `{{host_path}}`
@@ -8,4 +8,4 @@ Another task may be using it at the same time: read and write it freely, and do
 not clear it. Losing it costs a rebuild, never any work.
 
 {{instructions}}
-Altitude refreshes this README during provisioning.
+altitude refreshes this README during provisioning.

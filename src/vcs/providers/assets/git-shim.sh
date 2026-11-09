@@ -1,5 +1,5 @@
 #!/bin/sh
-# Altitude's git: clones through this machine's shared object cache.
+# altitude's git: clones through this machine's shared object cache.
 #
 # A capsule is disposable, so the repository cloned into it is too, and a machine
 # running task after task over the same few repositories was pulling each one

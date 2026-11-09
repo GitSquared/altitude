@@ -228,7 +228,7 @@ fn render_inputs(inputs: &[TaskInput]) -> String {
     for input in inputs {
         let source = match &input.source {
             TaskInputSource::TaskCreated => "task created".to_owned(),
-            TaskInputSource::Altitude | TaskInputSource::Notice => "Altitude".to_owned(),
+            TaskInputSource::Altitude | TaskInputSource::Notice => "altitude".to_owned(),
             TaskInputSource::TrackerComment { provider, .. } => {
                 format!("{} comment", provider.label())
             }

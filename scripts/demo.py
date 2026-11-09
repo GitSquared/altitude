@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds a throwaway Altitude home with fake tasks, so the interface can be
+"""Builds a throwaway altitude home with fake tasks, so the interface can be
 looked at without starting any real work.
 
     scripts/demo.py [--root DIR]

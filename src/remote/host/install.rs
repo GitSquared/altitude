@@ -59,14 +59,14 @@ pub async fn uninstall(_args: &ServeArgs, _base: &Config) -> Result<(), Box<dyn 
     }
     let installations = Installation::find();
     if installations.is_empty() {
-        println!("\nNo Altitude service on this machine.\n");
+        println!("\nNo altitude service on this machine.\n");
         for scope in [Scope::User, Scope::Machine] {
             field("looked", Installation::path(scope).display());
         }
         return Ok(());
     }
 
-    println!("\nAltitude remote · remove the service\n");
+    println!("\naltitude remote · remove the service\n");
     for installation in &installations {
         field(
             "found",
@@ -290,7 +290,7 @@ impl Service {
         let systemd = matches!(env::consts::OS, "linux");
         if !systemd && env::consts::OS != "macos" {
             return Err(io::Error::other(
-                "Altitude installs a service on macOS and systemd Linux only; start it from your \
+                "altitude installs a service on macOS and systemd Linux only; start it from your \
                  own init system on this platform",
             )
             .into());
@@ -358,7 +358,7 @@ impl Service {
 
     fn systemd_unit(&self, scope: Scope) -> String {
         let mut unit = String::from(
-            "[Unit]\nDescription=Altitude remote\nAfter=network-online.target\n\n[Service]\n",
+            "[Unit]\nDescription=altitude remote\nAfter=network-online.target\n\n[Service]\n",
         );
         let executable = self
             .command_parts()
@@ -511,7 +511,7 @@ fn launchctl(arguments: &[&str]) -> Vec<String> {
 
 impl Plan {
     fn show(&self, service: &Service) {
-        println!("\nAltitude remote · as a service\n");
+        println!("\naltitude remote · as a service\n");
         field("file", self.path.display());
         field("scope", scope_name(self.scope));
         field("starts", starts(self.scope));
@@ -542,7 +542,7 @@ impl Plan {
             "launch job"
         };
         paragraph(&format!(
-            "The file is an ordinary {kind} you can read or edit later; Altitude does not manage \
+            "The file is an ordinary {kind} you can read or edit later; altitude does not manage \
              it again after this."
         ));
     }

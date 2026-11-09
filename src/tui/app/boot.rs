@@ -42,7 +42,7 @@ impl App {
             Err(error) => (
                 None,
                 Some(format!(
-                    "Altitude could not read {}.\n\n{error}",
+                    "altitude could not read {}.\n\n{error}",
                     config.settings_path().display()
                 )),
             ),

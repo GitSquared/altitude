@@ -31,7 +31,7 @@ pub enum TaskInputAuthor {
 pub enum TaskInputSource {
     TaskCreated,
     Altitude,
-    // Altitude's own news rather than something the operator said: a machine that
+    // altitude's own news rather than something the operator said: a machine that
     // restarted under the work, a pull request that needs attention.
     Notice,
     TrackerComment {
@@ -79,7 +79,7 @@ impl TaskExecutionPauseReason {
             Self::TrackerEnded => "The issue this task was working on ended, so the task stopped.",
             Self::StoppedInTracker => "This task was stopped in the tracker, so it stopped here.",
             Self::DelegationWithdrawn => {
-                "This issue is no longer delegated to Altitude, so the task stopped."
+                "This issue is no longer delegated to altitude, so the task stopped."
             }
         }
     }

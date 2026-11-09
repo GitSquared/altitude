@@ -385,7 +385,7 @@ impl AgentEngine for ClaudeCode {
             shell_quote(MCP_TOOLS),
             shell_quote(&system_prompt(AUTOPILOT_SYSTEM_PROMPT, context)),
             shell_quote(&format!(
-                "{prompt}\n\nAltitude task context at the start of this turn: {context}"
+                "{prompt}\n\naltitude task context at the start of this turn: {context}"
             )),
         )
     }
@@ -420,7 +420,7 @@ impl AgentEngine for ClaudeCode {
             sign_in_command: SignInCommand::Interactive("exec claude"),
             // Claude Code writes this file when it is signed in, and its own CLI has
             // no way to be asked. Existence and size only: the contents are the
-            // credential, and Altitude does not read it.
+            // credential, and altitude does not read it.
             status_command: "test -s /altitude/claude/.credentials.json && echo a login is here",
             label: "installing Claude Code",
             setup_command: Self::install_command(),

@@ -287,7 +287,7 @@ impl App {
             Err(error) => {
                 self.settings_file = None;
                 self.problem(format!(
-                    "Altitude could not read {}.\n\n{error}",
+                    "altitude could not read {}.\n\n{error}",
                     self.config.settings_path().display()
                 ));
                 false

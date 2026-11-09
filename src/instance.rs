@@ -47,7 +47,7 @@ impl fmt::Display for ClaimError {
         match self {
             Self::InUse { database } => write!(
                 formatter,
-                "Altitude is already running with {}. Quit it there first, or start this one \
+                "altitude is already running with {}. Quit it there first, or start this one \
                  with another ALTITUDE_DATA_DIR.",
                 database.display()
             ),

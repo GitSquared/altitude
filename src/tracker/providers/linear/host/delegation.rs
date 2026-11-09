@@ -362,7 +362,7 @@ impl RemoteTracker {
                 continue;
             }
             if let Some(report) = self.report_for_task(&task.task_id) {
-                let body = "A newer delegation replaced this one, so Altitude stopped this \
+                let body = "A newer delegation replaced this one, so altitude stopped this \
                             task.";
                 if let Err(error) = self
                     .say_system(
@@ -396,7 +396,7 @@ impl RemoteTracker {
             session_id,
             &stable_id(session_id, "starting"),
             AgentActivityContent::Thought {
-                body: format!("Altitude is setting up this task for {label}."),
+                body: format!("altitude is setting up this task for {label}."),
             },
         )
         .await
@@ -517,8 +517,8 @@ impl RemoteTracker {
             &report,
             &stable_id(&report.task_id, "stopped"),
             AgentActivityContent::Response {
-                body: "Stopped. Altitude stopped this task and handed the issue back; \
-                       the work it had done is still in Altitude, if you want it."
+                body: "Stopped. altitude stopped this task and handed the issue back; \
+                       the work it had done is still in altitude, if you want it."
                     .to_owned(),
             },
         )
@@ -622,10 +622,10 @@ impl RemoteTracker {
         is_done: bool,
     ) -> Result<(), String> {
         let notice = if is_done {
-            "You moved this issue to Done, so Altitude stopped the task: no more work is asked \
+            "You moved this issue to Done, so altitude stopped the task: no more work is asked \
              for. Raise a new task when you want more from it."
         } else {
-            "You canceled this issue, so Altitude stopped the task."
+            "You canceled this issue, so altitude stopped the task."
         };
         if is_done {
             // Done is the operator's ending, the same as accepting the work: the

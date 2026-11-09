@@ -129,7 +129,7 @@ async fn sign_in(
         })?
         .port();
     let request = AuthorizationRequest::new(format!("http://127.0.0.1:{port}/callback"))
-        .with_client_name("Altitude");
+        .with_client_name("altitude");
     let session = AuthorizationSession::new(authorization, request)
         .await
         .map_err(|(_, error)| {
@@ -164,7 +164,7 @@ async fn wait_for_redirect(listener: TcpListener, port: u16) -> Result<String, T
         .and_then(|line| line.split_whitespace().nth(1))
         .ok_or_else(|| TrackerError::new("the Linear sign-in returned nothing readable"))?;
     let body =
-        "<html><body>Altitude is connected to Linear. You can close this page.</body></html>";
+        "<html><body>altitude is connected to Linear. You can close this page.</body></html>";
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()

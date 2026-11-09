@@ -329,7 +329,7 @@ where
             TaskExecutionMode::Autopilot => {
                 // What a turn decided is what it said. A turn that left something
                 // for the operator waits for them; one that left nothing is resumed,
-                // because Altitude keeps a task going until the agent can say why it
+                // because altitude keeps a task going until the agent can say why it
                 // should stop. Nothing is asked again: the signals are the answer,
                 // and the ending each of these paths records is the run's own.
                 let task = match self.service.store.get(&task.id).await {
@@ -406,8 +406,8 @@ where
                     .service
                     .express_input(
                         &task.id,
-                        "Altitude: the operator has left the task. You are back under \
-                         Altitude's control; continue the work from wherever the \
+                        "altitude: the operator has left the task. You are back under \
+                         altitude's control; continue the work from wherever the \
                          conversation left it."
                             .to_owned(),
                     )

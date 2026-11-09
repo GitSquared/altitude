@@ -135,7 +135,7 @@ impl LinearAutomation {
 
     // HTTP success alone does not establish that a GraphQL operation succeeded.
     // A picture goes into Linear's own storage, which is what an issue comment can
-    // show. The bytes were vetted when they entered Altitude, so nothing is checked
+    // show. The bytes were vetted when they entered altitude, so nothing is checked
     // again here: this is a courier.
 
     pub async fn upload_picture(

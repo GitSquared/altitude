@@ -24,7 +24,7 @@ impl TrackerKind {
     }
 
     pub fn purpose(self) -> &'static str {
-        "A task tracking and product management tool. Altitude reads your issues and updates their status as it works on them."
+        "A task tracking and product management tool. altitude reads your issues and updates their status as it works on them."
     }
 
     pub fn looks_like_issue(self, value: &str) -> bool {

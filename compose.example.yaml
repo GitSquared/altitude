@@ -6,11 +6,11 @@
 #      sudo modprobe kvm_amd     # AMD
 #    Stop here if KVM remains unavailable; Docker cannot enable host virtualization.
 # 3. This Compose file passes /dev/kvm and its numeric group into the container.
-#    Host kvm-group membership is only needed to run Altitude outside Docker:
+#    Host kvm-group membership is only needed to run altitude outside Docker:
 #      sudo usermod -aG kvm "$USER"   # then log out and back in
 # 4. Create ALTITUDE_HOME owned by UID 1000, for example:
 #      sudo install -d -o 1000 -g 1000 -m 0700 /srv/altitude
-# Altitude downloads its matching Microsandbox runtime on first startup.
+# altitude downloads its matching Microsandbox runtime on first startup.
 # No separate Microsandbox installation, QEMU, or libvirt service is required.
 #
 # Set KVM_GID=$(stat -c %g /dev/kvm), ALTITUDE_HOME to an absolute host directory,

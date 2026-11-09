@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Makes a sandbox's own listening ports reachable on Altitude's loopback.
+"""Makes a sandbox's own listening ports reachable on altitude's loopback.
 
 A program run in this sandbox listens on the sandbox's loopback, and the browser
-Altitude opens for it reaches Altitude's machine instead. This watches the
-sandbox's TCP listeners and announces each one over the relay channel Altitude
-gave this sandbox; Altitude binds the same number on its own loopback when that
+altitude opens for it reaches altitude's machine instead. This watches the
+sandbox's TCP listeners and announces each one over the relay channel altitude
+gave this sandbox; altitude binds the same number on its own loopback when that
 number is free.
 
-For each client that reaches Altitude, Altitude asks for one connection over the
+For each client that reaches altitude, altitude asks for one connection over the
 channel; this dials a fresh connection back to the host and joins it to the
 sandbox's own service. Nothing here listens on a port, and nothing is reachable
 until someone on the host asks.
@@ -38,7 +38,7 @@ signal.signal(signal.SIGHUP, signal.SIG_IGN)
 POLL_SECONDS = 0.25
 RETRY_SECONDS = 5.0
 
-# Below this a port is not announced: Binding it needs privileges Altitude's
+# Below this a port is not announced: Binding it needs privileges altitude's
 # machine may not give, and what listens there is the sandbox's own plumbing.
 FIRST_FORWARDED_PORT = 1024
 
@@ -81,7 +81,7 @@ def pipe(source, sink):
 
 
 def carry(port):
-    """One client: ask Altitude for a connection and join it to the service."""
+    """One client: ask altitude for a connection and join it to the service."""
     relay = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
     service = None
     try:
@@ -108,7 +108,7 @@ def carry(port):
 
 
 def orders(port, control, retry_at, stop, closing):
-    """One listener: one client per byte Altitude sends, until the host hangs up."""
+    """One listener: one client per byte altitude sends, until the host hangs up."""
     try:
         while True:
             signal = control.recv(1)
@@ -122,7 +122,7 @@ def orders(port, control, retry_at, stop, closing):
             elif signal:
                 continue
             else:
-                # Altitude let go of the relay: this helper has nothing left to
+                # altitude let go of the relay: this helper has nothing left to
                 # announce to. The listener ending on its own is not that.
                 if not closing.is_set():
                     stop.set()

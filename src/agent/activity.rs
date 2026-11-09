@@ -7,7 +7,7 @@ pub enum ActivityKind {
     Remote,
     // The machine's own news: it started, it is waiting on something, the sandbox
     // moved, a run stopped. It is the one kind marked with the mountain, so a reader
-    // can tell what Altitude did from what the agent said.
+    // can tell what altitude did from what the agent said.
     Altitude,
 }
 

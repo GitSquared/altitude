@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-// What a run cost, as the harness counted it. Altitude records the harness's number
+// What a run cost, as the harness counted it. altitude records the harness's number
 // and never works one out for itself: which model was used, at what rate, and whether
 // the price came from the provider or from the harness's own table are all things the
 // harness knows and this does not.

@@ -276,8 +276,8 @@ impl RemoteTracker {
                         &session,
                         &activity,
                         brand::mark(
-                            "Altitude is shutting down, so this run stops here. The task is not \
-                             finished: Altitude picks it back up when the machine is back.",
+                            "altitude is shutting down, so this run stops here. The task is not \
+                             finished: altitude picks it back up when the machine is back.",
                         ),
                     )
                     .await
@@ -346,7 +346,7 @@ impl RemoteTracker {
         let body = match (&task.status, task.pause_reason.as_ref()) {
             (TaskExecutionStatus::Running, _) => {
                 format!(
-                    "Altitude is working on this task on {}.",
+                    "altitude is working on this task on {}.",
                     self.config.host_label
                 )
             }
@@ -355,11 +355,11 @@ impl RemoteTracker {
             }
             (TaskExecutionStatus::Paused, Some(reason)) => reason.notice().to_owned(),
             (TaskExecutionStatus::Pending, _) => format!(
-                "Altitude has this task queued on {}; it starts when the machine has room.",
+                "altitude has this task queued on {}; it starts when the machine has room.",
                 self.config.host_label
             ),
             _ => format!(
-                "Altitude is reporting on this task from {}.",
+                "altitude is reporting on this task from {}.",
                 self.config.host_label
             ),
         };
@@ -512,7 +512,7 @@ impl RemoteTracker {
             &report.task_id,
             &format!("wake-{}:{}", self.started_at_ms, now_ms()),
         );
-        let body = format!("Altitude is waking this task: {why}.");
+        let body = format!("altitude is waking this task: {why}.");
         if let Err(error) = self
             .say_system(report, &id, AgentActivityContent::Thought { body })
             .await
@@ -873,7 +873,7 @@ impl RemoteTracker {
 
     // A picture in a signal becomes a picture in Linear's storage, which is the only
     // form an issue comment can show. The bytes were vetted when they entered
-    // Altitude, so nothing is checked again here.
+    // altitude, so nothing is checked again here.
     pub(super) async fn hosted_body(&self, body: &str) -> String {
         let (text, pictures) = picture::take(body);
         if pictures.is_empty() {

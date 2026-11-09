@@ -319,7 +319,7 @@ pub(crate) fn news(needing_action: &[ContributionObservation]) -> String {
 pub(crate) fn unreadable(signal: &TaskAskQuestion, reason: &str) -> TaskAskQuestion {
     let mut signal = signal.clone();
     signal.body = format!(
-        "{}\n\nAltitude could not read this task's pull requests after {OBSERVATION_ATTEMPTS} attempts, so it has stopped waiting on them. What the provider said: {reason}",
+        "{}\n\naltitude could not read this task's pull requests after {OBSERVATION_ATTEMPTS} attempts, so it has stopped waiting on them. What the provider said: {reason}",
         signal.body
     );
     signal

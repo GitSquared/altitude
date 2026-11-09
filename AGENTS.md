@@ -1,6 +1,6 @@
-# Altitude development guide
+# altitude development guide
 
-Altitude is a personal, headless intent control plane for delegated coding work.
+altitude is a personal, headless intent control plane for delegated coding work.
 
 ## Collaboration agreement
 
@@ -45,7 +45,7 @@ and implementer of bounded pieces—not an autonomous author of the whole v1.
 
 ## Repository direction
 
-- Altitude is unreleased and iterating quickly. Implement the current design
+- altitude is unreleased and iterating quickly. Implement the current design
   directly; do not preserve compatibility with intermediate development states
   unless Gabriel explicitly requests it.
 - Do not add migrations, fallback paths, version detection, or automatic repair
@@ -74,6 +74,12 @@ and implementer of bounded pieces—not an autonomous author of the whole v1.
 
 ## Writing
 
+The software's name is `altitude`, lowercase, wherever it is written: help text,
+log lines, error messages, tracker bodies, the notes mounted into a sandbox,
+comments, and these instructions. Capitalizing the start of a sentence is not a
+reason to capitalize it. Rust identifiers keep the casing the language asks for
+(`ActivityKind::Altitude`), and so does the Homebrew formula's class name.
+
 A comment says **why**. If it says **what**, either the code says it or the name
 should. Three kinds, and what happens to each:
 
@@ -87,7 +93,7 @@ should. Three kinds, and what happens to each:
 - **A compensation** — a comment that explains a name — means the name is wrong.
   Change the name.
 
-Altitude is an application, not a library. Do not add `///` item documentation
+altitude is an application, not a library. Do not add `///` item documentation
 or `//!` module documentation. Keep comments sparse: use `//` only when a
 non-obvious decision, constraint, or invariant genuinely helps the reader
 understand the surrounding code. Do not replace deleted documentation with
@@ -194,7 +200,7 @@ machine). `task` is `store`, `agent`, `run` and `mirror`.
   up again".
 - Lead with what someone upgrading will notice. Keep the mechanical work — layout,
   dependencies, comment passes — out of the notes unless it changes how someone builds
-  or configures Altitude, and then it is a line, not a section.
+  or configures altitude, and then it is a line, not a section.
 - Number small steps as small steps: a few days of fixes and one visible improvement is
   a patch, not a milestone.
 - Never claim verification that did not happen. If a fix is compiled and reasoned but

@@ -49,7 +49,7 @@ A remote can run work delegated from a task tracker. That needs, on this machine
 \x20    tracker's webhook port (127.0.0.1:25849 by default)
 \x20 3. the application installed once, by `altitude serve connect linear`
 
-Without one, this remote still runs work sent from Altitude, and reports through
+Without one, this remote still runs work sent from altitude, and reports through
 each operator's own login.
 
 Set LOG_LEVEL=debug for detailed logs. Terminal colors are automatic; set NO_COLOR to disable them.";
@@ -64,7 +64,7 @@ The steps:
 \x20 5. Run this command on the remote.
 
 Every fact it prints belongs to this machine: the steps are the same ones
-Altitude shows anywhere, but the addresses, ports and logins are this host's own.";
+altitude shows anywhere, but the addresses, ports and logins are this host's own.";
 
 #[derive(Debug, Args)]
 pub struct ServeArgs {

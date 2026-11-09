@@ -44,7 +44,7 @@ pub fn help_sections() -> Vec<HelpSection> {
                     "Esc / q",
                     "Close a panel; quit from the task list or the first screen",
                 ),
-                ("Ctrl-C", "Quit Altitude"),
+                ("Ctrl-C", "Quit altitude"),
                 ("?", "Open or close this keyboard guide"),
                 (
                     "PgUp / PgDn · Home / End",

@@ -48,7 +48,7 @@ pub(super) struct SandboxPlan {
     options: SandboxOptions,
     defaults: Vec<(PathBuf, &'static str)>,
     managed_files: Vec<(PathBuf, String)>,
-    // Files Altitude owns, mounted read-only over their guest paths so the agent
+    // Files altitude owns, mounted read-only over their guest paths so the agent
     // reads them and cannot rewrite them. They are separate from `options.mounts`
     // because their guest paths sit inside a writable directory mount, and the
     // provider has to apply the directory before the file on top of it.
@@ -120,7 +120,7 @@ impl SandboxPlan {
             ("HOME".into(), GUEST_HOME.into()),
             ("SHELL".into(), "/bin/bash".into()),
             // So that a tool which asks a browser to open something uses the
-            // opener Altitude answers, not a browser that is not there.
+            // opener altitude answers, not a browser that is not there.
             ("BROWSER".into(), OPENER.into()),
         ];
         if let Some(commits) = &commits {
@@ -249,7 +249,7 @@ impl SandboxPlan {
                 .replace("{{host_path}}", &host_path.to_string_lossy())
                 .replace(
                     "{{instructions}}",
-                    "Altitude created it for this project and will not put anything \
+                    "altitude created it for this project and will not put anything \
                      else here.",
                 );
             plan.managed_files
@@ -294,7 +294,7 @@ impl SandboxPlan {
                 .replace("{{host_path}}", &host_path.to_string_lossy());
             plan.managed_files
                 .push((host_path.join("README.md"), readme));
-            // How to wield the indexer on this folder. Altitude refreshes both notes,
+            // How to wield the indexer on this folder. altitude refreshes both notes,
             // so an edit to them is lost rather than kept: the memory is the agent's,
             // the instructions are the machine's.
             plan.managed_files.push((
@@ -308,9 +308,9 @@ impl SandboxPlan {
                 // Markdown to read and edit, never a program to run.
                 noexec: true,
             });
-            // The project's brief and Altitude's rules are files too. They live on
+            // The project's brief and altitude's rules are files too. They live on
             // the machine rather than in the guest so they can be mounted read-only
-            // like every other note Altitude owns, and the agent can reread them.
+            // like every other note altitude owns, and the agent can reread them.
             let checkout = plan
                 .project
                 .checkout_path()
@@ -335,7 +335,7 @@ impl SandboxPlan {
                 });
             }
         }
-        // Altitude's own files are read-only to the agent: each one is mounted over
+        // altitude's own files are read-only to the agent: each one is mounted over
         // its guest path, after the directory that holds it, so the notes and
         // guides cannot be rewritten from inside the sandbox.
         let mut read_only = read_only_managed_files(&plan);
@@ -355,7 +355,7 @@ impl SandboxPlan {
             if let Some(parent) = path.parent() {
                 private_directory(parent)?;
             }
-            // Replace Altitude's own file without following a guest-created symlink.
+            // Replace altitude's own file without following a guest-created symlink.
             let temporary = path.with_file_name(format!(".managed-{}", uuid::Uuid::new_v4()));
             let mut file = OpenOptions::new()
                 .write(true)
@@ -399,7 +399,7 @@ impl SandboxPlan {
     }
 }
 
-// Each managed file is Altitude's own, written to the host and mounted into the
+// Each managed file is altitude's own, written to the host and mounted into the
 // sandbox. Mounting it again over its guest path, read-only, is what keeps the
 // agent from editing it: the directory mount is writable, the file on top is not.
 fn read_only_managed_files(plan: &SandboxPlan) -> Vec<SandboxMount> {

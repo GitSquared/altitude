@@ -154,7 +154,7 @@ impl Project {
         let mut brief = format!("# Project: {}\n\n", self.name);
         if let (Some(repository), Some(checkout)) = (&self.repository, checkout) {
             brief.push_str(&format!(
-                "Altitude cloned the project's repository into this sandbox before \
+                "altitude cloned the project's repository into this sandbox before \
                  the first turn, and the checkout is part of this task's sandbox.\n\n\
                  repository: {repository}\ncheckout: {checkout}\n"
             ));
@@ -188,7 +188,7 @@ impl Project {
              mounted here. Read it before you start, and search it with `qmd` — the \
              instructions are in `QMD.md` beside it. Write there what a later task \
              should not have to rediscover — a convention, the command that works, the \
-             pitfall you hit — as markdown files of your own. Altitude keeps those \
+             pitfall you hit — as markdown files of your own. altitude keeps those \
              files in step between the machines that run this project.\n",
         );
         brief

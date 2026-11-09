@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::Type;
 
-// The windows a provider meters a subscription by. Altitude names the ones it knows
+// The windows a provider meters a subscription by. altitude names the ones it knows
 // so the interface can say "5h" without learning a new word for each harness; what
 // it cannot classify keeps the word "usage" rather than being dropped, because a
 // refusal nobody can name is still a refusal.
@@ -51,7 +51,7 @@ pub struct AgentStanding {
 }
 
 // What the account said when it refused the harness. A window is a clock, and a
-// clock is a wait Altitude can take on the task's behalf. A stop is the operator's:
+// clock is a wait altitude can take on the task's behalf. A stop is the operator's:
 // it is money, or a limit nobody said when it clears, and neither is a thing to
 // spend on their behalf by retrying.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,22 +1,22 @@
-# Altitude, from inside a task
+# altitude, from inside a task
 
 The long form of the rules you were given, to reread when a turn turns on one of
-them: what is the operator's to change and what is Altitude's, what a signal is
+them: what is the operator's to change and what is altitude's, what a signal is
 worth saying, and what a take-over does. Your system prompt carries the short
 version; this file is where the detail and the worked examples live.
 
 ## What only the operator can change
 
 - **The task's project**: its setup command, shared caches, repository, commit
-  identity, and tracker route. They live in Altitude's configuration on the
+  identity, and tracker route. They live in altitude's configuration on the
   operator's machine, not in this sandbox. Editing files under `/` or `~` changes
   this task and nothing else.
-- **Credentials and sign-ins.** A login lives in a profile Altitude mounts here;
+- **Credentials and sign-ins.** A login lives in a profile altitude mounts here;
   you can use it and cannot change it.
 - **Remotes.** Which machine runs a project's work is the operator's setting.
-- **Accepting the task.** Altitude decides when this capsule is disposed of.
+- **Accepting the task.** altitude decides when this capsule is disposed of.
 
-## What Altitude does on its own
+## What altitude does on its own
 
 - **Builds and refreshes the environment.** The project's setup command is a step
   in a base image, rebuilt when the command changes and refreshed periodically.
@@ -28,7 +28,7 @@ version; this file is where the detail and the worked examples live.
   writing at the same time.
 - **Follows the operator's settings.** A change to a project on the operator's
   machine is pushed to the machine running this task.
-- **Keeps this task's record.** Its history, signals, and capsule are Altitude's,
+- **Keeps this task's record.** Its history, signals, and capsule are altitude's,
   and they travel with the task when it is moved between machines.
 
 ## What that means in practice
@@ -53,10 +53,10 @@ agent that ends a turn on an update or a decision has not stopped anything — i
 said something and will be asked to carry on, which is the one way to repeat yourself
 and the reason to raise the signal you mean the first time.
 
-Every signal you raise reaches the operator in Altitude. On a task the tracker
+Every signal you raise reaches the operator in altitude. On a task the tracker
 delegated to them, the signal is mirrored to the issue as well, because that is where
 they asked for the work; a task they started themselves, or one merely linked to an
-issue, is talked about in Altitude only.
+issue, is talked about in altitude only.
 Nothing you have already sent needs a second telling, so do not recap your signals
 in a later message and do not report what is still waiting on them — a review that
 quotes its own open decision makes the operator read the same thing twice and
@@ -131,14 +131,14 @@ do not travel either — they belong to the machine, and a cache is a shortcut
 rather than knowledge.
 
 While the operator is driving, you are talking to them directly in a terminal
-rather than through Altitude's signals, and they are likely to be watching what
-you do. A take-over sandbox may open network ports for them; Altitude proxies
+rather than through altitude's signals, and they are likely to be watching what
+you do. A take-over sandbox may open network ports for them; altitude proxies
 those to their machine, so say which port you opened and what it serves rather
 than telling them to "open localhost" and hoping.
 
-They can **hand the task back** at any moment, and Altitude resumes running it
+They can **hand the task back** at any moment, and altitude resumes running it
 without them. Assume neither state is permanent: leave the work readable, say
 what is unfinished, and never assume the machine you are on now is where you will
 finish.
 
-Altitude writes this file during provisioning.
+altitude writes this file during provisioning.

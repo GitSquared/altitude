@@ -19,18 +19,18 @@ impl fmt::Display for StartRefusal {
                  in its serve.toml. Turn it off, restart the remote, then reply here.",
             ),
             Self::NoSetup => formatter.write_str(
-                "This remote has no settings from your Altitude yet, so it doesn't know your \
+                "This remote has no settings from your altitude yet, so it doesn't know your \
                  projects. In Settings → Projects, set a project's \"Start new tasks on\" to \
                  this remote, then reply here.",
             ),
             Self::NoScope => formatter.write_str(
-                "The tracker didn't say which team this issue belongs to, so Altitude can't \
+                "The tracker didn't say which team this issue belongs to, so altitude can't \
                  tell which project should take it. Put the issue in a team, then reply \
                  here.",
             ),
             Self::NoProject { scope } => write!(
                 formatter,
-                "No project in your Altitude is set up for {scope}. Open Settings → Projects, \
+                "No project in your altitude is set up for {scope}. Open Settings → Projects, \
                  choose the project that should take this work, and set its \"Task tracker \
                  team\" to that team; then reply here."
             ),
@@ -41,7 +41,7 @@ impl fmt::Display for StartRefusal {
                  \"Accept delegated work\", then reply here."
             ),
             Self::NoAgent => formatter.write_str(
-                "Your project has no coding agent yet, so Altitude has nothing to run this task \
+                "Your project has no coding agent yet, so altitude has nothing to run this task \
                  with. Open Settings → Projects, select the project, and choose one under \
                  \"Coding agent\"; then reply here.",
             ),

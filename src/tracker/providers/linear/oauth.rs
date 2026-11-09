@@ -218,7 +218,7 @@ async fn callback(
     if query.state.as_deref() != Some(&installation.state) {
         return (
             StatusCode::BAD_REQUEST,
-            "This sign-in does not belong to this Altitude installation.",
+            "This sign-in does not belong to this altitude installation.",
         );
     }
     // Consume once before exchanging: a repeated callback cannot replace the installed workspace.
@@ -240,12 +240,12 @@ async fn callback(
     if is_ok {
         (
             StatusCode::OK,
-            "Altitude is connected. You can close this page and return to the remote host.",
+            "altitude is connected. You can close this page and return to the remote host.",
         )
     } else {
         (
             StatusCode::BAD_REQUEST,
-            "Altitude could not connect. Check the remote host for setup guidance.",
+            "altitude could not connect. Check the remote host for setup guidance.",
         )
     }
 }
@@ -289,7 +289,7 @@ async fn install(settings: &LinearSettings, code: &str) -> Result<AppCredentials
         .pointer("/data/viewer")
         .ok_or("Linear returned no app identity")?;
     if viewer.get("app").and_then(serde_json::Value::as_bool) != Some(true) {
-        return Err("Linear installed a personal login instead of the Altitude app".into());
+        return Err("Linear installed a personal login instead of the altitude app".into());
     }
     let app_user_id = viewer
         .get("id")
