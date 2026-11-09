@@ -38,13 +38,20 @@ pub fn logins_of(operator_dir: &Path, owner: &str, provider: TrackerKind) -> Vec
     if yielded_providers(operator_dir).contains(&provider) {
         return Vec::new();
     }
-    let Ok(entries) = fs::read_dir(operator_dir.join(provider.profile())) else {
+    let provider_dir = operator_dir.join(provider.profile());
+    let Ok(entries) = fs::read_dir(&provider_dir) else {
         return Vec::new();
     };
-    let mut logins: Vec<Login> = entries
+    // A login is a named identity under the provider, or the provider's own default
+    // one, whose profile sits directly in the provider's directory: the id a first
+    // sign-in from the get-started screen takes.
+    let login_dirs = entries
         .flatten()
+        .map(|entry| entry.path())
+        .chain([provider_dir]);
+    let mut logins: Vec<Login> = login_dirs
         .filter_map(|login| {
-            let identity = login.path().join("profile").join(ACCOUNT_FILE);
+            let identity = login.join("profile").join(ACCOUNT_FILE);
             let arrived = fs::metadata(&identity).ok()?.modified().ok()?;
             let account = fs::read(&identity)
                 .ok()
