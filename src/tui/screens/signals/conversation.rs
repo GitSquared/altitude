@@ -87,9 +87,30 @@ pub(super) fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
             ),
             palette::muted(),
         ));
+    } else if thread.waits_on_operator() {
+        meta_line.push(Span::styled(
+            format!(
+                " · needs you · raised {}",
+                ago(thread.last_raised_at_ms, now)
+            ),
+            palette::muted(),
+        ));
     } else {
         meta_line.push(Span::styled(
-            format!(" · raised {}", ago(thread.last_raised_at_ms, now)),
+            format!(
+                " · you spoke last {} · raised {}",
+                ago(
+                    thread
+                        .messages
+                        .iter()
+                        .rev()
+                        .find(|message| message.author == TaskAskAuthor::Operator)
+                        .map(|message| message.at_ms)
+                        .unwrap_or(thread.last_raised_at_ms),
+                    now
+                ),
+                ago(thread.last_raised_at_ms, now)
+            ),
             palette::muted(),
         ));
     }
@@ -189,7 +210,7 @@ pub(super) fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut App) {
             .iter()
             .enumerate()
             .map(|(index, action)| {
-                let label = action.label(thread.is_resolved());
+                let label = action.label();
                 let focused = app.signal_focus == SignalFocus::Action(index);
                 if Some(*action) == primary {
                     button::Action::primary(label).focused(focused)

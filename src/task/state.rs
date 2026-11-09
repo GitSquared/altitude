@@ -16,8 +16,6 @@ pub struct TaskInput {
     pub source: TaskInputSource,
     pub body: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub responding_to: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_id: Option<String>,
 }
 
@@ -53,14 +51,6 @@ pub enum TaskInputSource {
 pub enum TaskAskKind {
     Steer,
     Review,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
-#[serde(rename_all = "snake_case")]
-#[sqlx(rename_all = "snake_case")]
-pub enum TaskOperatorAttentionLevel {
-    Nominal,
-    Requested,
 }
 
 // What a pause means, said once. The tracker writes it into a session and the
@@ -235,13 +225,48 @@ impl TaskAsk {
             .find(|message| message.author == TaskAskAuthor::Agent)
     }
 
+    pub fn last_author(&self) -> Option<TaskAskAuthor> {
+        self.messages.last().map(|message| message.author)
+    }
+
     // Whether the operator has said anything here at all. It is what makes a thread
     // the agent's to close: until they have spoken, what was asked for has not arrived
     // and there is nothing for the thread to be over.
-    pub fn is_answered(&self) -> bool {
+    pub fn has_operator_spoken(&self) -> bool {
         self.messages
             .iter()
             .any(|message| message.author == TaskAskAuthor::Operator)
+    }
+
+    // An open thread whose last word is the agent's is one the task is waiting on a
+    // person for. A thread the operator spoke in last is not: they have spoken, and
+    // the work owes them the next thing.
+    pub fn waits_on_operator(&self) -> bool {
+        self.is_unresolved() && self.last_author() == Some(TaskAskAuthor::Agent)
+    }
+}
+
+// What a task is in the middle of asking, without the thread: enough for a row, a
+// summary and a pause, and no second opinion about whether it is waiting.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LeadingAsk {
+    pub kind: TaskAskKind,
+    pub title: String,
+    #[serde(default)]
+    pub last_author: TaskAskAuthor,
+}
+
+impl LeadingAsk {
+    pub fn waits_on_operator(&self) -> bool {
+        self.last_author == TaskAskAuthor::Agent
+    }
+}
+
+impl TaskFacts {
+    pub fn waits_on_operator(&self) -> bool {
+        self.leading_ask
+            .as_ref()
+            .is_some_and(LeadingAsk::waits_on_operator)
     }
 }
 
@@ -278,7 +303,6 @@ pub struct TaskFacts {
     pub execution_status: TaskExecutionStatus,
     pub execution_pause_reason: Option<TaskExecutionPauseReason>,
     pub execution_mode: TaskExecutionMode,
-    pub operator_attention_level: TaskOperatorAttentionLevel,
     pub sandbox_id: Option<String>,
     pub sandbox_available: bool,
     pub snapshot_path: Option<String>,
@@ -311,9 +335,10 @@ pub struct TaskFacts {
     pub arrived_from: Option<String>,
     #[sqlx(default)]
     pub tracker_status: Option<TrackerStatus>,
-    pub blocking_ask_kind: Option<TaskAskKind>,
-    pub leading_ask_kind: Option<TaskAskKind>,
-    pub leading_ask_title: Option<String>,
+    // The ask the task is in the middle of, read once from the threads so the row, the
+    // pause and the agent all read the same answer to "does this wait on them?".
+    #[sqlx(json(nullable))]
+    pub leading_ask: Option<LeadingAsk>,
     #[sqlx(json(nullable))]
     pub deferred_review: Option<DeferredReview>,
     // The news the run that is starting was woken with, and the last news any run
@@ -353,7 +378,6 @@ pub enum TaskHistoryEvent {
     IntentExpressed {
         execution_status: TaskExecutionStatus,
         execution_mode: TaskExecutionMode,
-        operator_attention_level: TaskOperatorAttentionLevel,
         sandbox_available: bool,
         snapshot_available: bool,
         intent: String,
@@ -568,8 +592,7 @@ pub struct TaskAgentTurnContext {
     pub plan: Vec<TaskPlanStep>,
     pub execution_status: TaskExecutionStatus,
     pub execution_mode: TaskExecutionMode,
-    pub operator_attention_level: TaskOperatorAttentionLevel,
-    pub blocking_ask_kind: Option<TaskAskKind>,
+    pub leading_ask: Option<LeadingAsk>,
     pub last_error: Option<String>,
     pub datetime: String,
     pub latest_operator_message: Option<TaskAskMessage>,
@@ -614,12 +637,10 @@ impl fmt::Display for TaskAgentTurnContext {
         }
         writeln!(
             formatter,
-            "execution_status={:?}; execution_mode={:?}; attention={:?}; \
-             blocking_ask={:?}; last_error={}",
+            "execution_status={:?}; execution_mode={:?}; ask={:?}; last_error={}",
             self.execution_status,
             self.execution_mode,
-            self.operator_attention_level,
-            self.blocking_ask_kind,
+            self.leading_ask,
             self.last_error.as_deref().unwrap_or("none"),
         )?;
         write!(formatter, "current_datetime={}", self.datetime)?;
@@ -713,8 +734,7 @@ impl Task {
             plan: self.facts.plan.clone().unwrap_or_default(),
             execution_status: TaskExecutionStatus::Running,
             execution_mode,
-            operator_attention_level: self.facts.operator_attention_level.clone(),
-            blocking_ask_kind: self.facts.blocking_ask_kind,
+            leading_ask: self.facts.leading_ask.clone(),
             last_error: self.facts.last_error.clone(),
             datetime: Local::now().to_rfc3339_opts(SecondsFormat::Secs, true),
             latest_operator_message: self.facts.latest_operator_message.clone(),

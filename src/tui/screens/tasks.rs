@@ -59,7 +59,7 @@ impl Standing {
             TaskExecutionStatus::Completed => return Self::Done,
             _ => {}
         }
-        match summary.leading_ask_kind {
+        match summary.leading_ask.as_ref().map(|ask| ask.kind) {
             Some(TaskAskKind::Steer) => return Self::NeedsYou,
             Some(TaskAskKind::Review) => return Self::ReadyToReview,
             None => {}
@@ -544,10 +544,10 @@ fn detail_of(app: &App, summary: &TaskSummary, ahead: Option<usize>, taking_work
     // model is saying this second changes faster than a list is read, so it is the
     // activity pane's line rather than the row's.
     // A question is worth reading as itself rather than as a count of questions.
-    if let Some(question) = &summary.leading_ask_title
+    if let Some(question) = summary.leading_ask.as_ref().map(|ask| ask.title.as_str())
         && summary.status != TaskExecutionStatus::Failed
     {
-        return question.clone();
+        return question.to_owned();
     }
     if let Some(moving) = app
         .moving
@@ -590,15 +590,17 @@ fn detail_of(app: &App, summary: &TaskSummary, ahead: Option<usize>, taking_work
         let status = contribution.summary.as_deref().unwrap_or("needs action");
         return format!("PR #{} · {status}", contribution.reference);
     }
-    if let Some(kind) = summary.leading_ask_kind
-        && let Some(title) = summary.leading_ask_title.as_deref()
-    {
+    if let Some(ask) = &summary.leading_ask {
         // The operator answered a question and the task has not picked it up: the
         // line should not still read as the question it asked.
-        if summary.blocking_ask_kind.is_some() {
-            return format!("{} {}", signal::view(kind).symbol, truncate(title, 48));
+        if ask.waits_on_operator() {
+            return format!(
+                "{} {}",
+                signal::view(ask.kind).symbol,
+                truncate(&ask.title, 48)
+            );
         }
-        return format!("answered · {title}");
+        return format!("answered · {}", ask.title);
     }
     match summary.status {
         TaskExecutionStatus::Failed => summary

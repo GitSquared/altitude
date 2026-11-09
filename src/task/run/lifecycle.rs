@@ -786,7 +786,6 @@ fn notice_event(task: &Task, body: &str) -> Vec<TaskHistoryEvent> {
             },
             source: TaskInputSource::Notice,
             body: body.to_owned(),
-            responding_to: None,
             external_id: None,
         },
     }]
@@ -820,7 +819,7 @@ fn woke_up_saying(task: &Task, interrupted: bool) -> String {
         return "It was waiting on its pull requests, and the machine is watching them again."
             .to_owned();
     }
-    if task.facts.blocking_ask_kind.is_some() {
+    if task.facts.waits_on_operator() {
         return "It was waiting on the operator, and still is.".to_owned();
     }
     "Its sandbox was saved when the machine went down, so the work resumes where it left off."
@@ -836,7 +835,7 @@ fn resumed(task: &Task, snapshot_path: String) -> TaskHistoryEvent {
             execution_pause_reason: TaskExecutionPauseReason::AwaitingReviewChecks,
             snapshot_path,
         }
-    } else if task.facts.blocking_ask_kind.is_some() {
+    } else if task.facts.waits_on_operator() {
         TaskHistoryEvent::ExecutionPaused {
             execution_status: TaskExecutionStatus::Paused,
             sandbox_available: false,

@@ -9,8 +9,8 @@ use iroh::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::task::{
-    Task, TaskAsk, TaskAskKind, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
-    TaskHistoryEvent, TaskOperatorAttentionLevel, TaskPlanStep,
+    LeadingAsk, Task, TaskAsk, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
+    TaskHistoryEvent, TaskPlanStep,
 };
 use crate::tracker::{IssueReference, IssueSnapshot, TrackerKind, TrackerStatus};
 use crate::vcs::ContributionState;
@@ -269,15 +269,10 @@ pub struct TaskSummary {
     // line, and a summary that has none describes a task that is not working.
     #[serde(default)]
     pub activity: Option<String>,
-    pub attention: TaskOperatorAttentionLevel,
+    // The ask a task is in the middle of, with the thread's own answer to whether it
+    // is waiting: a row can say what the agent asked and whether it needs them.
     #[serde(default)]
-    pub blocking_ask_kind: Option<TaskAskKind>,
-    #[serde(default)]
-    pub leading_ask_kind: Option<TaskAskKind>,
-    // The question itself, when there is one: a row can say what the agent is
-    // asking rather than only that it is asking something.
-    #[serde(default)]
-    pub leading_ask_title: Option<String>,
+    pub leading_ask: Option<LeadingAsk>,
     #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default)]
@@ -332,10 +327,7 @@ impl TaskSummary {
             usage: task.facts.usage.clone(),
             standing: task.facts.standing.clone(),
             activity: None,
-            attention: task.facts.operator_attention_level.clone(),
-            blocking_ask_kind: task.facts.blocking_ask_kind,
-            leading_ask_kind: task.facts.leading_ask_kind,
-            leading_ask_title: task.facts.leading_ask_title.clone(),
+            leading_ask: task.facts.leading_ask.clone(),
             last_error: task.facts.last_error.clone(),
             tracker_issue: task.facts.tracker_issue.clone(),
             tracker_state: task.facts.tracker_status,

@@ -242,7 +242,6 @@ where
                     },
                     source: TaskInputSource::Notice,
                     body: reason,
-                    responding_to: None,
                     external_id: None,
                 },
             });

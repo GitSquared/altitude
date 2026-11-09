@@ -31,7 +31,6 @@ impl TaskStore {
                         },
                         source: TaskInputSource::TaskCreated,
                         body: intent,
-                        responding_to: None,
                         external_id: None,
                     });
                 }
@@ -44,7 +43,7 @@ impl TaskStore {
                     let task = self.get(task_id).await?;
                     let Some(task) = task else { continue };
                     inputs.push(TaskInput {
-                        id: format!("legacy-signal:{task_id}:{signal_id}:{at_ms}"),
+                        id: format!("signal:{task_id}:{signal_id}:{at_ms}"),
                         at_ms,
                         author: TaskInputAuthor::Operator {
                             id: task.facts.operator_id.unwrap_or_default(),
@@ -52,7 +51,6 @@ impl TaskStore {
                         },
                         source: TaskInputSource::Altitude,
                         body,
-                        responding_to: Some(signal_id),
                         external_id: None,
                     });
                 }
@@ -116,36 +114,15 @@ impl TaskStore {
                         }),
                     }
                 }
-                TaskHistoryEvent::TaskInputExpressed { input } => {
-                    let Some(signal_id) = input.responding_to.as_deref() else {
-                        continue;
-                    };
-                    if let Some(thread) = threads.iter_mut().find(|thread| thread.id == signal_id) {
-                        thread.resolved = false;
-                        thread.resolved_by = None;
-                        thread.resolved_at_ms = None;
-                        thread.messages.push(TaskAskMessage {
-                            id: format!("m{}", thread.messages.len() + 1),
-                            author: match input.author {
-                                TaskInputAuthor::Operator { .. } => TaskAskAuthor::Operator,
-                                TaskInputAuthor::Participant { .. } => TaskAskAuthor::Operator,
-                            },
-                            body: input.body,
-                            at_ms,
-                        });
-                    }
-                }
+                // Talking in a thread is talking, not asking: a message joins the
+                // conversation and leaves the thread as open or as closed as it was.
+                // Reopening is the separate act it sounds like.
                 TaskHistoryEvent::OperatorSignalMessage {
                     signal_id,
                     author,
                     body,
                 } => {
                     if let Some(thread) = threads.iter_mut().find(|thread| thread.id == signal_id) {
-                        // A message is the whole conversation. It reopens a
-                        // resolved thread; the other side sees it when it reads.
-                        thread.resolved = false;
-                        thread.resolved_by = None;
-                        thread.resolved_at_ms = None;
                         thread.messages.push(TaskAskMessage {
                             id: format!("m{}", thread.messages.len() + 1),
                             author,
