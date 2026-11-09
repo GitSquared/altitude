@@ -3,7 +3,13 @@ use std::{fmt, sync::RwLock};
 use serde_json::{Value, json};
 
 use super::scope_of;
-use crate::tracker::{IssueReference, IssueSnapshot, TrackerError};
+use crate::task::TaskPlanStep;
+use crate::tracker::host::automation::{
+    DelegatedIssue, IssueDelegation, SessionStanding, TrackerAutomation,
+};
+use crate::tracker::{
+    IssueReference, IssueSnapshot, TrackerError, TrackerFuture, TrackerKind, TrackerStatus,
+};
 
 mod agent_sessions;
 mod comments;
@@ -265,4 +271,158 @@ pub(super) fn graphql_error_message(errors: &[Value]) -> String {
         .unwrap_or("Linear rejected the request");
     let detail: String = detail.chars().take(200).collect();
     format!("Linear rejected the request: {detail}")
+}
+
+// The remote's report loop speaks to Linear through the same calls it makes of any
+// tracker; these say which of Linear's own they are.
+impl TrackerAutomation for LinearAutomation {
+    fn kind(&self) -> TrackerKind {
+        TrackerKind::Linear
+    }
+
+    fn app_user_id(&self) -> &str {
+        &self.app_user_id
+    }
+
+    fn is_absence(&self, refusal: &str) -> bool {
+        is_absence(refusal)
+    }
+
+    fn issue_reference(&self, issue_id: &str) -> IssueReference {
+        IssueReference {
+            provider: TrackerKind::Linear,
+            workspace_id: self.workspace_id.clone(),
+            id: issue_id.to_owned(),
+            identifier: String::new(),
+            url: String::new(),
+        }
+    }
+
+    fn upload_picture<'a>(
+        &'a self,
+        bytes: &'a [u8],
+        mime: &'a str,
+        name: &'a str,
+    ) -> TrackerFuture<'a, String> {
+        Box::pin(Self::upload_picture(self, bytes, mime, name))
+    }
+
+    fn comment_site<'a>(&'a self, comment_id: &'a str) -> TrackerFuture<'a, CommentSite> {
+        Box::pin(Self::comment_site(self, comment_id))
+    }
+
+    fn comment_reply<'a>(
+        &'a self,
+        issue_id: Option<&'a str>,
+        document_content_id: Option<&'a str>,
+        parent_id: &'a str,
+        body: &'a str,
+        id: &'a str,
+    ) -> TrackerFuture<'a, ()> {
+        Box::pin(Self::comment_reply(
+            self,
+            issue_id,
+            document_content_id,
+            parent_id,
+            body,
+            id,
+        ))
+    }
+
+    fn react_to_comment<'a>(
+        &'a self,
+        comment_id: &'a str,
+        emoji: &'a str,
+        id: Option<&'a str>,
+    ) -> TrackerFuture<'a, ()> {
+        Box::pin(Self::react_to_comment(self, comment_id, emoji, id))
+    }
+
+    fn update_session_summary<'a>(
+        &'a self,
+        session_id: &'a str,
+        summary: &'a str,
+    ) -> TrackerFuture<'a, ()> {
+        Box::pin(Self::update_session_summary(self, session_id, summary))
+    }
+
+    fn update_session_plan<'a>(
+        &'a self,
+        session_id: &'a str,
+        steps: &'a [TaskPlanStep],
+    ) -> TrackerFuture<'a, ()> {
+        Box::pin(Self::update_session_plan(self, session_id, steps))
+    }
+
+    fn user_url<'a>(&'a self, user_id: &'a str) -> TrackerFuture<'a, String> {
+        Box::pin(Self::user_url(self, user_id))
+    }
+
+    fn user_mention<'a>(&'a self, user_id: &'a str) -> TrackerFuture<'a, String> {
+        Box::pin(Self::user_mention(self, user_id))
+    }
+
+    fn user_name<'a>(&'a self, user_id: &'a str) -> TrackerFuture<'a, String> {
+        Box::pin(Self::user_name(self, user_id))
+    }
+
+    fn create_session_on_issue<'a>(&'a self, issue_id: &'a str) -> TrackerFuture<'a, String> {
+        Box::pin(Self::create_session_on_issue(self, issue_id))
+    }
+
+    fn session_standing<'a>(&'a self, session_id: &'a str) -> TrackerFuture<'a, SessionStanding> {
+        Box::pin(Self::session_standing(self, session_id))
+    }
+
+    fn create_activity<'a>(
+        &'a self,
+        session_id: &'a str,
+        activity_id: &'a str,
+        content: AgentActivityContent,
+    ) -> TrackerFuture<'a, ()> {
+        Box::pin(Self::create_activity(
+            self,
+            session_id,
+            activity_id,
+            content,
+        ))
+    }
+
+    fn create_ephemeral_thought<'a>(
+        &'a self,
+        session_id: &'a str,
+        activity_id: &'a str,
+        body: String,
+    ) -> TrackerFuture<'a, ()> {
+        Box::pin(Self::create_ephemeral_thought(
+            self,
+            session_id,
+            activity_id,
+            body,
+        ))
+    }
+
+    fn delegated_issues(&self) -> TrackerFuture<'_, Vec<DelegatedIssue>> {
+        Box::pin(Self::delegated_issues(self))
+    }
+
+    fn issue_delegation<'a>(&'a self, issue_id: &'a str) -> TrackerFuture<'a, IssueDelegation> {
+        Box::pin(Self::issue_delegation(self, issue_id))
+    }
+
+    fn status<'a>(
+        &'a self,
+        reference: &'a IssueReference,
+        status: TrackerStatus,
+    ) -> TrackerFuture<'a, ()> {
+        Box::pin(Self::status(self, reference, status))
+    }
+
+    fn release_issue<'a>(&'a self, reference: &'a IssueReference) -> TrackerFuture<'a, ()> {
+        Box::pin(Self::release_issue(self, reference))
+    }
+
+    fn claim_issue<'a>(&'a self, reference: &'a IssueReference) -> TrackerFuture<'a, ()> {
+        Box::pin(Self::claim_issue(self, reference))
+    }
 }

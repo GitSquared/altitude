@@ -1,7 +1,7 @@
 use super::ledger::{Cursor, SessionEvent, TerminatedSession};
 use crate::{
     task::{TaskAsk, TaskAskKind, TaskExecutionPauseReason, TaskHistoryEvent},
-    tracker::providers::linear::automation::AgentActivityContent,
+    tracker::host::automation::AgentActivityContent,
 };
 use iroh::EndpointId;
 
@@ -163,7 +163,7 @@ impl RemoteTracker {
                 .lock()
                 .ok()
                 .and_then(|refusals| refusals.get(&task.task_id).cloned())
-                .is_some_and(|reason| is_absence(&reason));
+                .is_some_and(|reason| self.config.automation.is_absence(&reason));
             if refused_for_good {
                 continue;
             }

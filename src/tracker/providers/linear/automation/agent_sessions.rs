@@ -10,58 +10,10 @@ use serde::{Deserialize, Serialize};
 use crate::brand;
 use sha2::Sha256;
 
-use crate::tracker::IssueReference;
-
 use super::queries::{AGENT_SESSION_EVENT, WEBHOOK_MAX_AGE};
-
-#[derive(Clone, Debug)]
-pub struct DelegatedIssue {
-    pub reference: IssueReference,
-    pub session: Option<String>,
-    // When the operator made the delegation: how old the newest session is. A
-    // delegation nobody picked up while it was news is not picked up on a boot
-    // sweep days later.
-    pub delegated_at_ms: Option<i64>,
-}
-
-pub struct IssueDelegation {
-    pub delegate_id: Option<String>,
-    pub state: WorkflowState,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkflowState {
-    pub id: String,
-    pub name: String,
-    #[serde(rename = "type")]
-    pub state_type: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct CommentSite {
-    pub comment_id: String,
-    pub body: String,
-    pub parent_id: Option<String>,
-    pub issue_id: Option<String>,
-    pub document_content_id: Option<String>,
-    pub document_id: Option<String>,
-    pub root_comment_id: String,
-    pub root_author_id: Option<String>,
-    pub document_creator_id: Option<String>,
-    pub author_name: Option<String>,
-    pub is_artificial_session_root: bool,
-    pub authors_truncated: bool,
-    pub human_authors: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum AgentActivityContent {
-    Thought { body: String },
-    Response { body: String },
-    Error { body: String },
-}
+pub use crate::tracker::host::automation::{
+    AgentActivityContent, CommentSite, DelegatedIssue, IssueDelegation, WorkflowState,
+};
 
 impl AgentActivityContent {
     // altitude's own words, marked once. The agent's words go out unmarked: the

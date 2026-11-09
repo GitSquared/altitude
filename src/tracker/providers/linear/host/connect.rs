@@ -12,11 +12,14 @@ use crate::tracker::providers::linear::automation::LinearAutomation;
 use crate::tracker::providers::linear::oauth;
 use crate::tracker::providers::linear::settings::LinearSettings;
 
-use super::RemoteTracker;
+use super::{LinearIntake, webhook_router};
+use crate::tracker::host::automation::TrackerAutomation;
+use crate::tracker::host::remote::{RemoteTracker, RemoteTrackerConfig};
 
 pub struct LinearRuntime {
     automation: Arc<LinearAutomation>,
     tracker: Arc<RemoteTracker>,
+    router: Mutex<Option<axum::Router>>,
     listener: Mutex<Option<TcpListener>>,
     webhook_address: String,
     workspace_name: String,
@@ -73,15 +76,20 @@ pub async fn connect(
         fingerprint = %fingerprint(&webhook_secret),
         "Linear webhook secret loaded"
     );
-    let tracker = RemoteTracker::new(super::RemoteTrackerConfig {
-        automation: Arc::clone(&automation),
-        webhook_secret: webhook_secret.into_bytes(),
-        oauth_client_id: settings.client_id.clone(),
+    let tracker = RemoteTracker::new(RemoteTrackerConfig {
+        automation: Arc::clone(&automation) as Arc<dyn TrackerAutomation>,
         storage_path: config.data_dir().join("trackers/linear/deliveries.json"),
         attachments_dir: config.attachments_dir(),
         operators_dir: config.data_dir().join("operators"),
         host_label: whoami::hostname().unwrap_or_else(|_| "remote".to_owned()),
     })?;
+    let router = webhook_router(LinearIntake {
+        tracker: Arc::clone(&tracker),
+        automation: Arc::clone(&automation),
+        webhook_secret: webhook_secret.into_bytes(),
+        oauth_client_id: settings.client_id.clone(),
+        delivered: Default::default(),
+    });
     let settings = settings.clone();
     let path = credentials_path.to_owned();
     let refreshed_automation = Arc::clone(&automation);
@@ -111,6 +119,7 @@ pub async fn connect(
     Ok(Arc::new(LinearRuntime {
         automation,
         tracker,
+        router: Mutex::new(Some(router)),
         listener: Mutex::new(Some(listener)),
         webhook_address,
         workspace_name,
@@ -143,13 +152,13 @@ impl TrackerIntegration for LinearRuntime {
     }
 
     fn run(self: Arc<Self>, work: Arc<dyn DelegatedWork>) {
-        let router = self.tracker.webhook_router();
+        let router = self.router.lock().ok().and_then(|mut router| router.take());
         let listener = self
             .listener
             .lock()
             .ok()
             .and_then(|mut listener| listener.take());
-        if let Some(listener) = listener {
+        if let (Some(listener), Some(router)) = (listener, router) {
             tokio::spawn(async move {
                 if let Err(error) = axum::serve(listener, router).await {
                     tracing::error!(%error, "Linear webhook listener stopped");
