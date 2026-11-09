@@ -62,7 +62,7 @@ impl SendTask {
     pub(in crate::tui) fn hints(&self) -> Vec<chrome::Hint> {
         let mut hints = Vec::new();
         if self.any_ready() {
-            hints.push(chrome::Hint::new("enter", "send"));
+            hints.push(chrome::Hint::new("↩", "send"));
         } else {
             hints.push(chrome::Hint::new("s", "settings"));
         }

@@ -282,10 +282,7 @@ fn detail(panel: &Panel, view: &View, tick: Option<usize>) -> Paragraph<'static>
             ];
             if discovered.compatibility.is_compatible() {
                 lines.push(Line::from(""));
-                lines.push(Line::styled(
-                    "Press enter to start using it",
-                    palette::accent(),
-                ));
+                lines.push(Line::styled("Press ↩ to start using it", palette::accent()));
             } else {
                 lines.push(Line::from(""));
                 lines.push(Line::from(format!(

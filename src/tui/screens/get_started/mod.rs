@@ -244,16 +244,16 @@ impl GetStarted {
                 CommitsField::Name | CommitsField::Email => vec![
                     Hint::new("type", "the value"),
                     Hint::new("tab", "next"),
-                    Hint::new("enter", "save"),
+                    Hint::new("↩", "save"),
                     Hint::new("esc", "save and leave"),
                 ],
                 CommitsField::Sign => vec![
-                    Hint::new("enter", "turn it on or off"),
+                    Hint::new("↩", "turn it on or off"),
                     Hint::new("tab", "next"),
                     Hint::new("esc", "save and leave"),
                 ],
                 CommitsField::Key => vec![
-                    Hint::new("enter", "show or make the key"),
+                    Hint::new("↩", "show or make the key"),
                     Hint::new("tab", "next"),
                     Hint::new("esc", "save and leave"),
                 ],
@@ -274,30 +274,27 @@ impl GetStarted {
         if self.name_editing {
             return vec![
                 Hint::new("type", "the name"),
-                Hint::new("enter", "save"),
+                Hint::new("↩", "save"),
                 Hint::new("esc", "save and leave"),
             ];
         }
         if self.focus == Focus::Name {
-            return vec![
-                Hint::new("enter", "edit the name"),
-                Hint::new("j/k", "move"),
-            ];
+            return vec![Hint::new("↩", "edit the name"), Hint::new("j/k", "move")];
         }
         let mut hints = vec![Hint::new("j/k", "move")];
         match self.focus {
             Focus::Agent => match setup.agent {
                 Some(_) => {
-                    hints.insert(0, Hint::new("enter", "sign in"));
+                    hints.insert(0, Hint::new("↩", "sign in"));
                     hints.insert(1, Hint::new("space", "change"));
                 }
-                None => hints.insert(0, Hint::new("enter", "choose")),
+                None => hints.insert(0, Hint::new("↩", "choose")),
             },
             Focus::VersionControl => {
                 hints.insert(
                     0,
                     Hint::new(
-                        "enter",
+                        "↩",
                         if signed_in(&setup.vcs_status) {
                             "choose repository"
                         } else {
@@ -306,11 +303,11 @@ impl GetStarted {
                     ),
                 );
             }
-            Focus::Commits => hints.insert(0, Hint::new("enter", "edit")),
+            Focus::Commits => hints.insert(0, Hint::new("↩", "edit")),
             Focus::Tracker => hints.insert(
                 0,
                 Hint::new(
-                    "enter",
+                    "↩",
                     if setup.tracker == TrackerState::Connected {
                         "manage"
                     } else {
@@ -320,13 +317,13 @@ impl GetStarted {
             ),
             Focus::Remote => {
                 if setup.host.is_none() && setup.offer.is_some() {
-                    hints.insert(0, Hint::new("enter", "add it"));
+                    hints.insert(0, Hint::new("↩", "add it"));
                 }
             }
             Focus::Ready => hints.insert(
                 0,
                 Hint::new(
-                    "enter",
+                    "↩",
                     if ready(setup, &self.name) {
                         "start"
                     } else {
@@ -334,7 +331,7 @@ impl GetStarted {
                     },
                 ),
             ),
-            Focus::Settings => hints.insert(0, Hint::new("enter", "open settings")),
+            Focus::Settings => hints.insert(0, Hint::new("↩", "open settings")),
             Focus::Name => {}
         }
         hints

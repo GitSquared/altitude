@@ -181,7 +181,7 @@ impl<T> Select<T> {
             return vec![
                 chrome::Hint::new("type", "narrow"),
                 chrome::Hint::new("↑/↓", "choose"),
-                chrome::Hint::new("enter", "take it"),
+                chrome::Hint::new("↩", "take it"),
                 chrome::Hint::new("esc", "clear"),
             ];
         }
@@ -189,7 +189,7 @@ impl<T> Select<T> {
         if self.is_searchable() {
             hints.push(chrome::Hint::new("/", "filter"));
         }
-        hints.push(chrome::Hint::new("enter", "take it"));
+        hints.push(chrome::Hint::new("↩", "take it"));
         hints.push(chrome::Hint::new("esc", "close"));
         hints
     }

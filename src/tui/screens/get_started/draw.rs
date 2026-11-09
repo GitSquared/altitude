@@ -40,7 +40,7 @@ pub fn draw(
     }
     let detail = if panel.commits.open {
         "Commits carry this name and email, and signing marks them as yours. The key lives in \
-         your version-control profile, not in a task. Enter saves; Esc puts back what is saved."
+         your version-control profile, not in a task. ↩ saves; Esc puts back what is saved."
             .to_owned()
     } else {
         detail_text(panel.focus, setup)
@@ -152,9 +152,9 @@ pub(super) fn checklist(
         "Project name",
         &name_value,
         if panel.name_editing {
-            "enter save"
+            "↩ save"
         } else {
-            "enter edit"
+            "↩ edit"
         },
         focused == Focus::Name,
         width,
@@ -196,9 +196,9 @@ pub(super) fn checklist(
         "Coding agent",
         agent_value,
         if setup.agent.is_some() {
-            "enter sign in"
+            "↩ sign in"
         } else {
-            "enter choose"
+            "↩ choose"
         },
         focused == Focus::Agent,
         width,
@@ -245,7 +245,7 @@ pub(super) fn checklist(
             },
             "Version control",
             pill,
-            "enter choose",
+            "↩ choose",
             focused == Focus::VersionControl,
             width,
         ));
@@ -255,7 +255,7 @@ pub(super) fn checklist(
             Marker::Unset,
             "Version control",
             "not chosen",
-            "enter choose",
+            "↩ choose",
             focused == Focus::VersionControl,
             width,
         ));
@@ -283,7 +283,7 @@ pub(super) fn checklist(
         },
         "Commits",
         &commits_value,
-        "enter edit",
+        "↩ edit",
         focused == Focus::Commits,
         width,
     ));
@@ -307,9 +307,9 @@ pub(super) fn checklist(
         "Task tracker",
         &tracker_value,
         if tracker == TrackerState::Connected {
-            "enter manage"
+            "↩ manage"
         } else {
-            "enter connect"
+            "↩ connect"
         },
         focused == Focus::Tracker,
         width,
@@ -330,7 +330,7 @@ pub(super) fn checklist(
         "Remote",
         &remote_value,
         if setup.host.is_none() && setup.offer.is_some() {
-            "enter add"
+            "↩ add"
         } else {
             ""
         },

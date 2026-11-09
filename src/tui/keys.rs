@@ -39,7 +39,7 @@ pub fn help_sections() -> Vec<HelpSection> {
                     "Tab / Shift-Tab",
                     "Switch screen tabs; in a form, move between fields",
                 ),
-                ("Enter", "Activate the selected item or action"),
+                ("↩", "Activate the selected item or action"),
                 (
                     "Esc / q",
                     "Close a panel; quit from the task list or the first screen",
@@ -74,11 +74,11 @@ pub fn help_sections() -> Vec<HelpSection> {
                 ("s", "Order the list: recent, newest, oldest"),
                 (
                     "Typing (open menu)",
-                    "Narrow the choices; enter takes one, esc closes it",
+                    "Narrow the choices; ↩ takes one, esc closes it",
                 ),
-                ("Enter / i", "Read and answer the selected task's threads"),
+                ("↩ / i", "Read and answer the selected task's threads"),
                 (
-                    "Ctrl-Enter",
+                    "Ctrl-↩",
                     "Take over the task; a remote task moves here first",
                 ),
                 (
@@ -98,10 +98,7 @@ pub fn help_sections() -> Vec<HelpSection> {
                 ("Tab / l / →", "Move to the next column"),
                 ("Shift-Tab / h / ←", "Move to the previous column"),
                 ("j / k · ↓ / ↑", "Choose a section or an item"),
-                (
-                    "Enter",
-                    "Open a section, sign in, or use the selected action",
-                ),
+                ("↩", "Open a section, sign in, or use the selected action"),
                 ("Space (Agents)", "Use the selected agent by default"),
                 (
                     "Delete / Backspace",
@@ -127,11 +124,11 @@ pub fn help_sections() -> Vec<HelpSection> {
         HelpSection {
             title: "Task creation",
             bindings: &[
-                ("Ctrl-Enter", "Start work using the displayed settings"),
-                ("Enter (prompt)", "Add a line to the prompt"),
-                ("Enter (project)", "Open the projects"),
+                ("Ctrl-↩", "Start work using the displayed settings"),
+                ("↩ (prompt)", "Add a line to the prompt"),
+                ("↩ (project)", "Open the projects"),
                 (
-                    "j/k · ↑/↓ · Enter/Esc",
+                    "j/k · ↑/↓ · ↩/Esc",
                     "Move through the open list, take or close it",
                 ),
                 (
@@ -160,11 +157,11 @@ pub fn help_sections() -> Vec<HelpSection> {
             bindings: &[
                 ("j/k · ↓/↑", "Move between threads"),
                 (
-                    "Enter",
+                    "↩",
                     "Take the primary action: accept a delivery, or reply to the question that is open",
                 ),
                 (
-                    "Ctrl-Enter",
+                    "Ctrl-↩",
                     "Take the secondary action where the thread has one: reply to the agent. A reply reopens the thread it answers",
                 ),
                 (
@@ -181,8 +178,8 @@ pub fn help_sections() -> Vec<HelpSection> {
                     "Scroll the conversation by a message",
                 ),
                 (
-                    "Enter (writing a reply)",
-                    "Send it; shift-enter adds a line and esc puts it away",
+                    "↩ (writing a reply)",
+                    "Send it; shift-↩ adds a line and esc puts it away",
                 ),
                 ("Esc / q", "Close threads; esc leaves the reply box first"),
             ],
@@ -192,7 +189,7 @@ pub fn help_sections() -> Vec<HelpSection> {
             bindings: &[
                 ("Tab / Shift-Tab", "Move between fields or buttons"),
                 (
-                    "Ctrl-Enter",
+                    "Ctrl-↩",
                     "Save a project or remote from wherever the caret is",
                 ),
                 ("← / → (confirmation)", "Switch between cancel and confirm"),
@@ -202,7 +199,7 @@ pub fn help_sections() -> Vec<HelpSection> {
                 ),
                 ("j/k · ↓/↑ (send task)", "Choose a remote"),
                 ("s (send task)", "Open Settings if no remote is ready"),
-                ("Enter", "Use the selected button or submit the form"),
+                ("↩", "Use the selected button or submit the form"),
                 (
                     "d / Delete / Backspace",
                     "Confirm removal in a removal dialog",
@@ -217,7 +214,7 @@ pub fn help_sections() -> Vec<HelpSection> {
                     "j/k · ↓/↑",
                     "Scroll the instructions, or choose a tracker's guide",
                 ),
-                ("Enter (task trackers)", "Open the selected tracker's guide"),
+                ("↩ (task trackers)", "Open the selected tracker's guide"),
                 (
                     "PgUp / PgDn · Home / End",
                     "Scroll by a page, or to either end",

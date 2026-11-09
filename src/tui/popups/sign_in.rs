@@ -41,7 +41,7 @@ impl SignIn {
 
     pub fn hints(&self) -> Vec<chrome::Hint> {
         vec![
-            chrome::Hint::new("enter", "open the terminal"),
+            chrome::Hint::new("↩", "open the terminal"),
             chrome::Hint::new("esc", "cancel"),
         ]
     }

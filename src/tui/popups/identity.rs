@@ -228,7 +228,7 @@ impl GitIdentitySetup {
         );
         frame.render_widget(
             Paragraph::new(Line::styled(
-                "space toggles signing · enter saves · esc cancels",
+                "space toggles signing · ↩ saves · esc cancels",
                 palette::muted(),
             )),
             hint,

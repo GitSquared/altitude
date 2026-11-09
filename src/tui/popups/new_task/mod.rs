@@ -197,9 +197,9 @@ impl NewTask {
             hints.push(chrome::Hint::new("↑/↓", "result"));
         }
         hints.push(if self.issue {
-            chrome::Hint::new("enter", "link")
+            chrome::Hint::new("↩", "link")
         } else {
-            chrome::Hint::new("ctrl-enter", "create")
+            chrome::Hint::new("ctrl-↩", "create")
         });
         hints.push(chrome::Hint::new("esc", "cancel"));
         hints

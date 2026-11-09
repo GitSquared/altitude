@@ -58,7 +58,7 @@ impl App {
         if self.alert.is_some() || self.transfer.is_some() {
             let mut hints = Vec::new();
             if self.alert.is_some() {
-                hints.push(Hint::new("enter", "dismiss"));
+                hints.push(Hint::new("↩", "dismiss"));
             }
             if self.transfer.is_some() {
                 hints.push(Hint::new("esc", "stop the transfer"));
@@ -71,8 +71,8 @@ impl App {
                 && !matches!((hint.keys, hint.what), ("esc", "close") | ("q", "quit"))
         });
         for hint in &mut hints {
-            if hint.keys == "enter / tab" {
-                hint.keys = "enter";
+            if hint.keys == "↩ / tab" {
+                hint.keys = "↩";
             }
         }
         if !self.is_typing()
@@ -95,18 +95,18 @@ impl App {
             ],
             Foreground::IdentitySetup(_) => vec![
                 Hint::new("j/k", "move"),
-                Hint::new("enter", "choose"),
+                Hint::new("↩", "choose"),
                 Hint::new("esc", "close"),
             ],
             Foreground::RenameIdentity(_) => vec![
                 Hint::new("type", "the name"),
-                Hint::new("enter", "save"),
+                Hint::new("↩", "save"),
                 Hint::new("esc", "cancel"),
             ],
             Foreground::GitIdentity(_) => vec![
                 Hint::new("tab", "field"),
                 Hint::new("space", "toggle signing"),
-                Hint::new("enter", "save"),
+                Hint::new("↩", "save"),
                 Hint::new("esc", "cancel"),
             ],
             Foreground::Confirm(pending) => pending.hints(),
@@ -138,8 +138,8 @@ impl App {
                     }
                     let hints = vec![
                         Hint::new("tab", "next"),
-                        Hint::new("ctrl-enter", "save"),
-                        Hint::new("enter", "next, or add a line"),
+                        Hint::new("ctrl-↩", "save"),
+                        Hint::new("↩", "next, or add a line"),
                         Hint::new("esc", "leave the box, then the page"),
                     ];
                     return hints;
@@ -147,7 +147,7 @@ impl App {
                 if self.panel.depth == Depth::Rail {
                     return vec![
                         Hint::new("j/k", "section"),
-                        Hint::new("enter / tab", "open"),
+                        Hint::new("↩ / tab", "open"),
                         dismiss(),
                     ];
                 }
@@ -175,7 +175,7 @@ impl App {
             Foreground::Setup(setup) => match &setup.kind {
                 SetupKind::RemoteTrackers => vec![
                     Hint::new("j/k", "choose"),
-                    Hint::new("enter", "setup guide"),
+                    Hint::new("↩", "setup guide"),
                     Hint::new("esc / q", "close"),
                 ],
                 SetupKind::RemoteTrackerGuide(_) => vec![
@@ -193,8 +193,8 @@ impl App {
             Foreground::Signals => {
                 if self.signal_composer.is_some() {
                     return vec![
-                        Hint::new("enter", "send"),
-                        Hint::new("shift-enter", "new line"),
+                        Hint::new("↩", "send"),
+                        Hint::new("shift-↩", "new line"),
                         Hint::new("esc", "cancel"),
                     ];
                 }
@@ -219,12 +219,12 @@ impl App {
                     if let SignalFocus::Action(index) = self.signal_focus
                         && let Some(action) = self.signal_actions().get(index).copied()
                     {
-                        hints.push(Hint::new("enter", action.label()));
+                        hints.push(Hint::new("↩", action.label()));
                     } else if let Some(action) = primary_action(thread) {
-                        hints.push(Hint::new("enter", action.label()));
+                        hints.push(Hint::new("↩", action.label()));
                     }
                     if let Some(action) = secondary_action(thread) {
-                        hints.push(Hint::new("ctrl-enter", action.label()));
+                        hints.push(Hint::new("ctrl-↩", action.label()));
                     }
                 }
                 hints.push(Hint::new("pgup/pgdn", "scroll"));
@@ -260,10 +260,7 @@ impl App {
                 }
                 let (local, remote) = self.visible_counts();
                 if local + remote > 0 {
-                    hints.extend([
-                        Hint::new("enter", "threads"),
-                        Hint::new("ctrl-enter", "take over"),
-                    ]);
+                    hints.extend([Hint::new("↩", "threads"), Hint::new("ctrl-↩", "take over")]);
                 }
                 // Drawn from different places, but acted on the same way: a task is
                 // moved across with one key, and deleted by the machine holding it.

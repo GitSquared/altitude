@@ -95,7 +95,7 @@ pub struct RemoteTracker {
 fn failure_notice(error: &str) -> String {
     format!(
         "**altitude stopped this task.**\n\n{}\n\n\
-         Take it over with ctrl-enter in the altitude terminal and unblock it there: leaving \
+         Take it over with ctrl-↩ in the altitude terminal and unblock it there: leaving \
          the terminal hands the work back to altitude, which carries on from where you left \
          it. A message here restarts it too, without a terminal.",
         error.trim()

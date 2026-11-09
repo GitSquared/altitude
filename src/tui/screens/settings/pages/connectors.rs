@@ -60,7 +60,7 @@ pub(crate) fn profile_connector(
                 ..
             } | CredentialStatus::Unanswered
         )
-        .then_some("Press enter to sign in."),
+        .then_some("Press ↩ to sign in."),
         purpose,
         used_by: None,
         fields: vec![("saved at", tilde(directory))],
@@ -81,7 +81,7 @@ pub(crate) fn credential_connector(credential: &Credential) -> Connector {
             status_value: Some(short_key(key)),
             identity: None,
             note: None,
-            action: Some("Press enter to learn more about altitude remotes."),
+            action: Some("Press ↩ to learn more about altitude remotes."),
             purpose: "How a remote recognises this installation. It travels with \
                       every task you delegate, and a remote you have used remembers it.",
             used_by: None,
@@ -140,7 +140,7 @@ pub(crate) fn git_connector(identity: &GitIdentity) -> Connector {
         status_value: None,
         identity: None,
         note: None,
-        action: Some("Press enter to configure Git."),
+        action: Some("Press ↩ to configure Git."),
         purpose: "The name, email, and signing key your tasks commit under, read from the \
                   version-control profile's git config.",
         used_by: Some(identity.used_by.clone()),
@@ -178,7 +178,7 @@ pub(crate) fn tracker_connector(state: TrackerState, profile_dir: &Path) -> Conn
             None,
         ),
         TrackerState::Connecting => (Reach::Asking, None, None),
-        TrackerState::NotConnected => (Reach::Off, None, Some("Press enter to sign in.")),
+        TrackerState::NotConnected => (Reach::Off, None, Some("Press ↩ to sign in.")),
     };
     let status = state.summary();
     Connector {
@@ -306,7 +306,7 @@ pub(crate) fn remote_connector(
             Reach::Off,
             "disconnected",
             Some("It is not the machine this client knew.".to_owned()),
-            Some("Press enter to accept its identity."),
+            Some("Press ↩ to accept its identity."),
         ),
         RemoteStatus::Incompatible { local, remote } => (
             Reach::Off,
@@ -323,13 +323,13 @@ pub(crate) fn remote_connector(
             // configuration did answer, so the line says what happened rather
             // than guessing that nothing came back.
             Some(format!("{reason}.")),
-            Some("Press enter to try again."),
+            Some("Press ↩ to try again."),
         ),
         RemoteStatus::Unknown => (
             Reach::Off,
             "disconnected",
             None,
-            Some("Press enter to reach it."),
+            Some("Press ↩ to reach it."),
         ),
     };
     // Its own name is the row's title, and its key is what this client

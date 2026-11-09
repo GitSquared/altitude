@@ -144,9 +144,9 @@ pub(super) fn commits_editor(
         "○ off".to_owned()
     };
     let key = if setup.has_key {
-        "present · enter show".to_owned()
+        "present · ↩ show".to_owned()
     } else {
-        "none · enter generate".to_owned()
+        "none · ↩ generate".to_owned()
     };
     vec![
         editor_line(
@@ -259,13 +259,13 @@ pub(super) fn detail_text(focus: Focus, setup: &SetupState) -> String {
                 .to_owned()
         }
         Focus::Commits if setup.commits.is_set() => {
-            "Commits carry your name and email, and a signature proves they came from you. Enter \
-             edits them here; the key is made once and stays in your version-control profile, so \
+            "Commits carry your name and email, and a signature proves they came from you. ↩ edits \
+             them here; the key is made once and stays in your version-control profile, so \
              every task commits the same way."
                 .to_owned()
         }
         Focus::Commits => {
-            "A commit needs a name and an email before a task can deliver its work. Enter edits \
+            "A commit needs a name and an email before a task can deliver its work. ↩ edits \
              them here; signing is set up from the same place, with a key that stays in your \
              version-control profile."
                 .to_owned()

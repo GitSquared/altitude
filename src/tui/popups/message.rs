@@ -32,7 +32,7 @@ impl MessagePrompt {
 
     pub fn hints(&self) -> Vec<chrome::Hint> {
         vec![
-            chrome::Hint::new("ctrl-enter", "send"),
+            chrome::Hint::new("ctrl-↩", "send"),
             chrome::Hint::new("esc", "cancel"),
         ]
     }

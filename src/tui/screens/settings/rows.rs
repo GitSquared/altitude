@@ -114,10 +114,10 @@ impl Row {
 
     pub fn hints(&self, connecting_tracker: bool) -> Vec<chrome::Hint> {
         match &self.kind {
-            RowKind::Project { .. } => vec![chrome::Hint::new("enter", "edit")],
+            RowKind::Project { .. } => vec![chrome::Hint::new("↩", "edit")],
             RowKind::GitIdentity(identity) => {
                 let mut hints = vec![
-                    chrome::Hint::new("enter", "edit"),
+                    chrome::Hint::new("↩", "edit"),
                     chrome::Hint::new("r", "rename"),
                 ];
                 if identity.saved.is_some() {
@@ -127,18 +127,18 @@ impl Row {
             }
             RowKind::Credential(credential) => match &credential.kind {
                 CredentialKind::Installation { .. } => {
-                    vec![chrome::Hint::new("enter", "remote guide")]
+                    vec![chrome::Hint::new("↩", "remote guide")]
                 }
                 CredentialKind::Profile { .. } if credential.is_pending() => {
                     vec![chrome::Hint::new("r", "rename")]
                 }
                 CredentialKind::Profile { .. } => vec![
-                    chrome::Hint::new("enter", "sign in"),
+                    chrome::Hint::new("↩", "sign in"),
                     chrome::Hint::new("r", "rename"),
                 ],
                 CredentialKind::Tracker { .. } => vec![
                     chrome::Hint::new(
-                        "enter",
+                        "↩",
                         if connecting_tracker {
                             "cancel sign-in"
                         } else {
@@ -157,7 +157,7 @@ impl Row {
                     _ => "connect",
                 };
                 let mut hints = vec![
-                    chrome::Hint::new("enter", enter_action),
+                    chrome::Hint::new("↩", enter_action),
                     chrome::Hint::new("e", "edit"),
                 ];
                 if !tracker_is_set_up(trackers.as_deref())
@@ -169,12 +169,12 @@ impl Row {
             }
             RowKind::Discovered(remote) => {
                 if remote.compatibility.is_compatible() {
-                    vec![chrome::Hint::new("enter", "use remote")]
+                    vec![chrome::Hint::new("↩", "use remote")]
                 } else {
                     Vec::new()
                 }
             }
-            RowKind::Switch { .. } => vec![chrome::Hint::new("enter", "toggle")],
+            RowKind::Switch { .. } => vec![chrome::Hint::new("↩", "toggle")],
         }
     }
 }
