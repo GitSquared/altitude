@@ -125,6 +125,7 @@ pub(super) enum StoredEvent {
     Session(Box<SessionEvent>),
     IssueStateChanged(IssueStateChanged),
     Comment(CommentInput),
+    CommentResolved(CommentResolution),
     Reaction(ReactionInput),
 }
 
@@ -137,6 +138,15 @@ impl StoredEvent {
             StoredEvent::IssueStateChanged(change) => {
                 format!("issue {} · state {}", change.issue_id, change.state_id)
             }
+            StoredEvent::CommentResolved(resolution) => format!(
+                "comment {} · {}",
+                resolution.comment_id,
+                if resolution.resolved {
+                    "resolved"
+                } else {
+                    "reopened"
+                }
+            ),
             StoredEvent::Comment(comment) => {
                 format!(
                     "comment {} · {}",
@@ -161,6 +171,9 @@ impl StoredEvent {
                 "issue:{}:{}:{}:{}",
                 change.issue_id, change.state_id, change.actor_id, change.occurred_at_ms
             ),
+            StoredEvent::CommentResolved(resolution) => {
+                format!("comment:{}:{}", resolution.comment_id, resolution.resolved)
+            }
             StoredEvent::Comment(comment) => format!("comment:{}", comment.comment_id),
             StoredEvent::Reaction(reaction) => format!("reaction:{}", reaction.id),
         }
@@ -207,6 +220,14 @@ pub(super) struct IssueStateChanged {
     pub(super) state_id: String,
     pub(super) actor_id: String,
     pub(super) occurred_at_ms: i64,
+}
+
+// A thread closed or reopened in the tracker. It names the comment the thread was
+// raised on, because that is what both sides already know how to find.
+#[derive(Clone, Serialize, Deserialize)]
+pub(super) struct CommentResolution {
+    pub(super) comment_id: String,
+    pub(super) resolved: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

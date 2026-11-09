@@ -121,6 +121,9 @@ impl RemoteTracker {
                 .await
             }
             StoredEvent::Comment(comment) => self.answer_comment(comment, host).await,
+            StoredEvent::CommentResolved(resolution) => {
+                self.answer_thread_resolution(resolution, host).await
+            }
             StoredEvent::Reaction(reaction) => self.answer_reaction(reaction, host).await,
         }
     }
@@ -141,7 +144,7 @@ impl RemoteTracker {
             return;
         };
         if let Err(error) = host
-            .reopen_signal(report.task_id.clone(), thread.id.clone())
+            .set_signal_resolved(report.task_id.clone(), thread.id.clone(), false)
             .await
         {
             tracing::warn!(task = %report.task_id, signal = %thread.id, %error, "could not reopen a closed thread");

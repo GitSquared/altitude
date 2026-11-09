@@ -1,5 +1,5 @@
 use super::admission::{self, Actor, Admission, InputFacts};
-use super::ledger::{CommentInput, SessionEvent};
+use super::ledger::{CommentInput, CommentResolution, SessionEvent};
 use crate::remote::StartRefusal;
 use crate::{
     task::TaskAsk,
@@ -234,6 +234,56 @@ impl RemoteTracker {
                     .map_err(|error| error.to_string())
             }
         }
+    }
+
+    // Closing a thread in the tracker is the operator saying what they would say in
+    // the interface, and it is read the same way: the question needs nothing more, so
+    // the task stops waiting on it — and, if that was what held it, it works again.
+    pub(super) async fn answer_thread_resolution(
+        &self,
+        event: &CommentResolution,
+        host: &dyn Host,
+    ) -> Result<(), String> {
+        let site = self
+            .config
+            .automation
+            .comment_site(&event.comment_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let Some(issue_id) = site.issue_id.clone() else {
+            return Ok(());
+        };
+        let Some(report) = host
+            .work_for_issue(issue_id, Vec::new())
+            .await?
+            .and_then(|task| self.report_for_task(&task.task_id))
+        else {
+            return Ok(());
+        };
+        if !host.is_kept(report.task_id.clone()).await? {
+            return Ok(());
+        }
+        let root = site.root_comment_id.clone();
+        let thread = host
+            .signal_threads(report.task_id.clone())
+            .await?
+            .into_iter()
+            .find(|thread| published_comment_id(&report.task_id, &thread.id) == root);
+        let Some(thread) = thread else {
+            return Ok(());
+        };
+        if thread.is_resolved() == event.resolved {
+            return Ok(());
+        }
+        host.set_signal_resolved(report.task_id.clone(), thread.id.clone(), event.resolved)
+            .await?;
+        tracing::info!(
+            task = %report.task_id,
+            signal = %thread.id,
+            resolved = event.resolved,
+            "the operator closed or reopened a thread in the tracker"
+        );
+        Ok(())
     }
 
     // A reaction is the operator answering with a symbol. What it means is theirs and
