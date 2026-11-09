@@ -52,6 +52,11 @@ const EVENT_ATTEMPTS: usize = 3;
 
 const UNHOOK_GRACE_MS: i64 = 60_000;
 
+// How old a task's history has to be, relative to the report that watches it, for the
+// report to be adopting a task rather than starting one: a delegation's task is
+// created in the same breath as its report.
+const ADOPTION_WINDOW_MS: i64 = 60_000;
+
 const RETRY: Duration = Duration::from_secs(10);
 
 const DONE_RETENTION: Duration = Duration::from_secs(600);
@@ -177,17 +182,6 @@ fn stable_id(namespace: &str, discriminator: &str) -> String {
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     uuid::Uuid::from_bytes(bytes).to_string()
-}
-
-fn was_transferred(events: &[(i64, TaskHistoryEvent)]) -> bool {
-    events.iter().any(|(_, event)| {
-        matches!(
-            event,
-            TaskHistoryEvent::TransferStaged { .. }
-                | TaskHistoryEvent::TransferLanded { .. }
-                | TaskHistoryEvent::TransferCommitted { .. }
-        )
-    })
 }
 
 fn contribution_urls(events: &[(i64, TaskHistoryEvent)]) -> Vec<String> {

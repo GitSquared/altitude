@@ -67,11 +67,6 @@ impl RemoteTracker {
             .map(|report| (*report).clone())
     }
 
-    // The session this issue is reported in: the one a report still in play is using,
-    // and otherwise the one the issue's last report used. A session is the issue's
-    // conversation — the thread the operator reads — not a task's, so a task that
-    // replaces another on the same issue carries that conversation on instead of
-    // starting one the issue never shows.
     // A session write failed: the session may have been dismissed or closed, and the
     // next pass replaces it. What has already been said in it does not count as said in
     // the one that replaces it, so the line is forgotten with it.
@@ -97,6 +92,11 @@ impl RemoteTracker {
         })
     }
 
+    // The session this issue is reported in: the one a report still in play is using,
+    // and otherwise the one the issue's last report used. A session is the issue's
+    // conversation — the thread the operator reads — not a task's, so a task that
+    // replaces another on the same issue carries that conversation on instead of
+    // starting one the issue never shows.
     pub(super) fn session_for_issue(&self, issue_id: &str) -> Option<String> {
         let ledger = self.lock().ok()?;
         let reports: Vec<&Cursor> = ledger

@@ -455,14 +455,23 @@ impl RemoteTracker {
             .filter(TaskAsk::is_unresolved)
             .map(|signal| signal.id)
             .collect();
-        // A report that only began after a transfer must not replay the source's
-        // whole life as new activity. Folding leaves the projected state below.
-        let folded = report.reported_events == 0 && was_transferred(&events);
-        let start = if folded {
-            events.len()
-        } else {
-            report.reported_events
-        };
+        // A report says what happens from when it existed. A task can be older than
+        // the report watching it — adopted after a restart, or moved here — and the
+        // turn it took before then is not news now: replaying it says this week what
+        // was said last week, in the same thread the operator is reading.
+        let watched_from = events
+            .iter()
+            .position(|(recorded_at_ms, _)| *recorded_at_ms > report.created_at_ms)
+            .unwrap_or(events.len());
+        let start = report.reported_events.max(watched_from);
+        // Nothing before the report began is replayed. A task founded for this report
+        // is seconds old when it is made, and its first run says what is happening; a
+        // task this machine adopted was already going, and the only thing to say about
+        // it is where it stands now.
+        let adopted = events.first().is_some_and(|(first_at_ms, _)| {
+            first_at_ms + ADOPTION_WINDOW_MS < report.created_at_ms
+        });
+        let projecting = report.reported_events == 0 && adopted;
         for index in start..events.len() {
             let outcome = self
                 .report_event(host, report, &events, index, &unresolved)
@@ -474,9 +483,11 @@ impl RemoteTracker {
             }
             self.advance_cursor(&report.task_id, index + 1)?;
         }
-        if folded {
-            self.ensure_asks_said(host, report, &events).await?;
+        if projecting {
+            self.project_state(host, report, &events).await?;
             self.advance_cursor(&report.task_id, events.len())?;
+        } else {
+            self.ensure_asks_said(host, report, &events).await?;
         }
         Ok(())
     }

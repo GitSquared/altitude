@@ -87,6 +87,11 @@ pub(super) struct Cursor {
     pub(super) owner: String,
     pub(super) tracker_user_id: String,
     pub(super) task_id: String,
+    // When this report began. A task outlives the report watching it, and what
+    // happened before this is the task's own history rather than something the issue
+    // was told. Zero on a report written before this was recorded, which replays.
+    #[serde(default)]
+    pub(super) created_at_ms: i64,
     #[serde(default)]
     pub(super) reported_events: usize,
     #[serde(default)]

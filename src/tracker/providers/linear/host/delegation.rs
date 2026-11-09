@@ -432,6 +432,7 @@ impl RemoteTracker {
             owner,
             tracker_user_id: author.to_owned(),
             task_id: task_id.clone(),
+            created_at_ms: now_ms(),
             reported_events: 0,
             finished: false,
             last_status: None,

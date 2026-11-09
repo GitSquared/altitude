@@ -187,6 +187,7 @@ impl RemoteTracker {
             owner: owner.to_owned(),
             tracker_user_id: tracker_user_id.clone(),
             task_id,
+            created_at_ms: now_ms(),
             reported_events: 0,
             finished: false,
             last_status: None,
@@ -977,6 +978,50 @@ impl RemoteTracker {
                 self.write_status(host, report, status).await?;
             }
         }
+        Ok(())
+    }
+
+    // A report that begins on a task which was already running says where that task
+    // stands now, rather than replaying the turns it took before this machine was
+    // watching: the operator reads the issue as one conversation, and a transcript of
+    // last week's turn arriving today is this machine talking to itself.
+    pub(super) async fn project_state(
+        &self,
+        host: &dyn DelegatedWork,
+        report: &Cursor,
+        events: &[(i64, TaskHistoryEvent)],
+    ) -> Result<(), String> {
+        if let Some(steps) = events.iter().rev().find_map(|(_, event)| match event {
+            TaskHistoryEvent::PlanUpdated { steps } => Some(steps),
+            _ => None,
+        }) {
+            self.set_plan(report, steps)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        self.ensure_asks_said(host, report, events).await?;
+        let asking = host
+            .bound_tasks()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .find(|task| task.task_id == report.task_id);
+        let status = match asking.as_ref().map(|task| (task.status.clone(), task.ask)) {
+            Some((TaskExecutionStatus::Running | TaskExecutionStatus::Pending, _)) => {
+                Some(TrackerStatus::InProgress)
+            }
+            Some((TaskExecutionStatus::Paused, Some(TaskAskKind::Review))) => {
+                Some(TrackerStatus::InReview)
+            }
+            Some((TaskExecutionStatus::Completed, _)) if !self.is_settled(&report.issue_id) => {
+                Some(TrackerStatus::Done)
+            }
+            _ => None,
+        };
+        if let Some(status) = status {
+            self.write_status(host, report, status).await?;
+        }
+        self.introduce(host, report).await;
         Ok(())
     }
 }
