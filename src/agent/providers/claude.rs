@@ -171,7 +171,7 @@ impl TaskStreamDecoder for ClaudeStream {
                     .filter_map(|(name, window)| {
                         let used = window.get("utilization").and_then(Value::as_f64);
                         used.map(|used| AgentWindowReading {
-                            window: AgentWindow::of(Some(name)),
+                            window: window_of(Some(name)),
                             // The header's utilization is a fraction; the record keeps
                             // the percentage a person reads.
                             used_percent: Some(used * 100.0),
@@ -214,7 +214,7 @@ impl TaskStreamDecoder for ClaudeStream {
         if limit.get("status").and_then(Value::as_str) != Some("rejected") {
             return None;
         }
-        let window = AgentWindow::of(limit.get("rateLimitType").and_then(Value::as_str));
+        let window = window_of(limit.get("rateLimitType").and_then(Value::as_str));
         // Epoch seconds, which is what the header carries; the record keeps
         // milliseconds, like every other time it holds.
         let clears_at_ms = ["resetsAt", "overageResetsAt"]
@@ -475,5 +475,17 @@ impl AgentEngine for ClaudeCode {
 
     fn conversation_transcript_path(&self, conversation_id: &str) -> String {
         format!("/altitude/claude/projects/-/{conversation_id}.jsonl")
+    }
+}
+
+// The names are Claude's own; the windows they mean are the interface's vocabulary.
+fn window_of(name: Option<&str>) -> AgentWindow {
+    match name {
+        Some("five_hour") => AgentWindow::Session,
+        Some("seven_day") => AgentWindow::Weekly,
+        Some("seven_day_opus") => AgentWindow::WeeklyOpus,
+        Some("seven_day_sonnet") => AgentWindow::WeeklySonnet,
+        Some("overage" | "seven_day_overage_included") => AgentWindow::Overage,
+        _ => AgentWindow::Other,
     }
 }

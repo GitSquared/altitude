@@ -4,12 +4,9 @@ use crate::remote::LinkResult;
 use crate::{
     config::Config,
     db::Database,
-    remote::{
-        ClientRecord,
-        tracker::{Login, logins_of},
-    },
+    remote::ClientRecord,
     task::TaskStore,
-    tracker::TrackerKind,
+    tracker::{Login, TrackerKind, logins_of},
 };
 
 pub struct KnownClient {

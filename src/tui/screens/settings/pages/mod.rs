@@ -7,12 +7,10 @@ use std::{
 use ratatui::text::{Line, Span};
 
 use crate::{
-    agent::AgentKind,
     credentials::Service,
     remote::{TrackerConnection, TrackerReadiness},
     tui::widgets::{
-        format::plain,
-        palette,
+        format, palette,
         shimmer::{Dot, shimmer},
     },
 };
@@ -182,45 +180,14 @@ pub(super) fn tracker_summary(
 }
 
 pub(super) fn profile_purpose(profile: &str) -> &'static str {
-    match Service::from_id(profile) {
-        Some(Service::VersionControl(_)) => {
-            "The GitHub CLI login your tasks clone, push, and read pull requests with."
-        }
-        Some(Service::Agent(AgentKind::Pi)) => "Pi uses your provider account to run tasks.",
-        Some(Service::Agent(AgentKind::Claude)) => "Claude Code uses your account to run tasks.",
-        _ => "A login a task is given.",
-    }
+    Service::from_id(profile).map_or("A login a task is given.", Service::purpose)
 }
 
 pub(super) fn public_identity(profile: &str, output: &str) -> Option<String> {
-    match Service::from_id(profile)? {
-        Service::VersionControl(_) => github_account(output),
-        _ => None,
-    }
-}
-
-pub(super) fn github_account(output: &str) -> Option<String> {
-    const MARKERS: [&str; 2] = [
-        "Logged in to github.com as ",
-        "Logged in to github.com account ",
-    ];
-    for line in plain(output).lines() {
-        for marker in MARKERS {
-            let Some((_, rest)) = line.split_once(marker) else {
-                continue;
-            };
-            let Some(name) = rest.split_whitespace().next() else {
-                continue;
-            };
-            if name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-            {
-                return Some(name.to_owned());
-            }
-        }
-    }
-    None
+    let Service::VersionControl(kind) = Service::from_id(profile)? else {
+        return None;
+    };
+    format::identity_from_output(output, kind.account_markers())
 }
 
 pub(super) fn hostname() -> String {

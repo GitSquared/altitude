@@ -22,7 +22,7 @@ use tokio::{
 };
 
 use super::automation::LinearAutomation;
-use crate::config::LinearSettings;
+use super::settings::LinearSettings;
 use crate::tracker::TrackerError;
 
 const TOKEN_URL: &str = "https://api.linear.app/oauth/token";

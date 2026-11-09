@@ -1,6 +1,7 @@
-use super::admission::{self, Actor, Admission, InputFacts};
 use super::ledger::{CommentInput, CommentResolution, SessionEvent};
 use crate::remote::StartRefusal;
+use crate::remote::host::admission::{self, Actor, Admission, InputFacts};
+use crate::tracker::ask_marker;
 use crate::{
     task::TaskAsk,
     tracker::{TrackerKind, providers::linear::automation::AgentActivityContent},
@@ -12,7 +13,7 @@ impl RemoteTracker {
     pub(super) async fn answer_prompt(
         &self,
         event: &SessionEvent,
-        host: &dyn Host,
+        host: &dyn DelegatedWork,
     ) -> Result<(), String> {
         let Some(answer) = event.prompt_body.as_deref() else {
             return Ok(());
@@ -59,18 +60,16 @@ impl RemoteTracker {
                 .activity_id
                 .as_deref()
                 .unwrap_or(event.session_id.as_str());
-            self.config
-                .automation
-                .create_activity(
+            self.create_system_activity(
+                &event.session_id,
+                &stable_id(
                     &event.session_id,
-                    &stable_id(
-                        &event.session_id,
-                        &format!("teammate-redirect:{discriminator}"),
-                    ),
-                    AgentActivityContent::Response { body },
-                )
-                .await
-                .map_err(|error| error.to_string())?;
+                    &format!("teammate-redirect:{discriminator}"),
+                ),
+                AgentActivityContent::Response { body },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
             return Ok(());
         }
         let signals = host.signal_threads(report.task_id.clone()).await?;
@@ -96,7 +95,7 @@ impl RemoteTracker {
     pub(super) async fn answer_comment(
         &self,
         event: &CommentInput,
-        host: &dyn Host,
+        host: &dyn DelegatedWork,
     ) -> Result<(), String> {
         // Everything this machine says on an issue comes back as a delivery too. There
         // is nothing to read in it, and asking the tracker which thread it belongs to
@@ -158,7 +157,7 @@ impl RemoteTracker {
             .await?
             .into_iter()
             .find(|thread| {
-                thread.is_unresolved() && published_comment_id(&report.task_id, &thread.id) == root
+                thread.is_unresolved() && ask_marker(&report.task_id, &thread.id) == root
             });
         let facts = InputFacts {
             actor,
@@ -242,7 +241,7 @@ impl RemoteTracker {
     pub(super) async fn answer_thread_resolution(
         &self,
         event: &CommentResolution,
-        host: &dyn Host,
+        host: &dyn DelegatedWork,
     ) -> Result<(), String> {
         let site = self
             .config
@@ -268,7 +267,7 @@ impl RemoteTracker {
             .signal_threads(report.task_id.clone())
             .await?
             .into_iter()
-            .find(|thread| published_comment_id(&report.task_id, &thread.id) == root);
+            .find(|thread| ask_marker(&report.task_id, &thread.id) == root);
         let Some(thread) = thread else {
             return Ok(());
         };
@@ -292,7 +291,7 @@ impl RemoteTracker {
     pub(super) async fn answer_reaction(
         &self,
         event: &ReactionInput,
-        host: &dyn Host,
+        host: &dyn DelegatedWork,
     ) -> Result<(), String> {
         // This machine's own reaction — the acknowledgement it adds to a comment it has
         // read — is not the operator answering anything.
@@ -332,7 +331,7 @@ impl RemoteTracker {
             .signal_threads(report.task_id.clone())
             .await?
             .into_iter()
-            .find(|thread| published_comment_id(&report.task_id, &thread.id) == root);
+            .find(|thread| ask_marker(&report.task_id, &thread.id) == root);
         let Some(thread) = thread else {
             return Ok(());
         };
@@ -429,15 +428,13 @@ impl RemoteTracker {
              yourself. The login is passed to this remote in the background; reply here \
              once that's done."
         );
-        self.config
-            .automation
-            .create_activity(
-                session_id,
-                &stable_id(session_id, "sync-error"),
-                AgentActivityContent::Error { body },
-            )
-            .await
-            .map_err(|error| error.to_string())
+        self.create_system_activity(
+            session_id,
+            &stable_id(session_id, "sync-error"),
+            AgentActivityContent::Error { body },
+        )
+        .await
+        .map_err(|error| error.to_string())
     }
 
     pub(super) async fn post_start_guidance(
@@ -449,14 +446,12 @@ impl RemoteTracker {
             "**Nothing was started.**\n\n{refusal}\n\n\
              Reply here once that's sorted, and Altitude will try again."
         );
-        self.config
-            .automation
-            .create_activity(
-                session_id,
-                &stable_id(session_id, "start-error"),
-                AgentActivityContent::Error { body },
-            )
-            .await
-            .map_err(|error| error.to_string())
+        self.create_system_activity(
+            session_id,
+            &stable_id(session_id, "start-error"),
+            AgentActivityContent::Error { body },
+        )
+        .await
+        .map_err(|error| error.to_string())
     }
 }

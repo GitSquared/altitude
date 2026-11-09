@@ -17,7 +17,7 @@ const ROOT_HELP_TEMPLATE: &str = "\
 #[derive(Debug, Parser)]
 #[command(
     name = "altitude",
-    display_name = "⛰  altitude",
+    display_name = crate::brand::TITLE,
     version = VERSION,
     about = env!("CARGO_PKG_DESCRIPTION"),
     long_about = format!(

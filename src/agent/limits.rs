@@ -18,17 +18,6 @@ pub enum AgentWindow {
 }
 
 impl AgentWindow {
-    pub fn of(name: Option<&str>) -> Self {
-        match name {
-            Some("five_hour") => Self::Session,
-            Some("seven_day") => Self::Weekly,
-            Some("seven_day_opus") => Self::WeeklyOpus,
-            Some("seven_day_sonnet") => Self::WeeklySonnet,
-            Some("overage" | "seven_day_overage_included") => Self::Overage,
-            _ => Self::Other,
-        }
-    }
-
     pub fn word(&self) -> &'static str {
         match self {
             Self::Session => "5h",

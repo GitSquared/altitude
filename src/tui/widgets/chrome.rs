@@ -13,7 +13,9 @@ use crate::{
     version::VERSION,
 };
 
-const TITLE: &str = "⛰  altitude";
+use crate::brand;
+
+const TITLE: &str = brand::TITLE;
 
 #[derive(Clone)]
 pub struct Hint {

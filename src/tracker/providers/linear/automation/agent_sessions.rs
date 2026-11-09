@@ -6,6 +6,8 @@ use std::{
 
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
+
+use crate::brand;
 use sha2::Sha256;
 
 use crate::tracker::IssueReference;
@@ -59,6 +61,25 @@ pub enum AgentActivityContent {
     Thought { body: String },
     Response { body: String },
     Error { body: String },
+}
+
+impl AgentActivityContent {
+    // Altitude's own words, marked once. The agent's words go out unmarked: the
+    // mountain says the machine is speaking, and the app is already the author of
+    // everything it publishes.
+    pub fn system(self) -> Self {
+        match self {
+            Self::Thought { body } => Self::Thought {
+                body: brand::mark(body),
+            },
+            Self::Response { body } => Self::Response {
+                body: brand::mark(body),
+            },
+            Self::Error { body } => Self::Error {
+                body: brand::mark(body),
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

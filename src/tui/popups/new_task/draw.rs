@@ -7,7 +7,7 @@ use ratatui::{
     widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-use crate::tracker::IssueSummary;
+use crate::tracker::{IssueSummary, TrackerKind};
 use crate::tui::widgets::{
     button, chrome, empty, format::truncate, palette, pointer::Targets, shimmer::shimmer,
 };
@@ -148,15 +148,18 @@ pub fn draw_issue(frame: &mut Frame, area: Rect, new_task: &NewTask, tick: Optio
     match &new_task.phase {
         IssuePhase::Idle => frame.render_widget(
             Paragraph::new(Line::styled(
-                "Type an issue ID, paste a Linear URL, or search terms.",
+                format!(
+                    "Type an issue ID, paste a {} URL, or search terms.",
+                    TrackerKind::sole().label()
+                ),
                 palette::muted(),
             ))
             .wrap(Wrap { trim: true }),
             body,
         ),
         IssuePhase::Searching => {
-            let label = "searching Linear…";
-            frame.render_widget(Paragraph::new(Line::from_iter(shimmer(label, tick))), body);
+            let label = format!("searching {}…", TrackerKind::sole().label());
+            frame.render_widget(Paragraph::new(Line::from_iter(shimmer(&label, tick))), body);
         }
         IssuePhase::Failed(message) => frame.render_widget(
             Paragraph::new(Line::styled(message.clone(), palette::bad())).wrap(Wrap { trim: true }),
@@ -226,15 +229,5 @@ pub fn draw_choices(frame: &mut Frame, area: Rect, new_task: &NewTask) -> Rect {
 }
 
 pub fn looks_like_issue(value: &str) -> bool {
-    if value.starts_with("https://linear.app/") && value.contains("/issue/") {
-        return true;
-    }
-    let Some((key, number)) = value.rsplit_once('-') else {
-        return false;
-    };
-    !key.is_empty()
-        && key.len() <= 10
-        && key.chars().all(|character| character.is_ascii_uppercase())
-        && !number.is_empty()
-        && number.chars().all(|character| character.is_ascii_digit())
+    TrackerKind::sole().looks_like_issue(value)
 }

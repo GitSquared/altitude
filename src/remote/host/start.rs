@@ -24,8 +24,9 @@ impl fmt::Display for StartRefusal {
                  this remote, then reply here.",
             ),
             Self::NoScope => formatter.write_str(
-                "Linear didn't say which team this issue belongs to, so Altitude can't tell \
-                 which project should take it. Put the issue in a team, then reply here.",
+                "The tracker didn't say which team this issue belongs to, so Altitude can't \
+                 tell which project should take it. Put the issue in a team, then reply \
+                 here.",
             ),
             Self::NoProject { scope } => write!(
                 formatter,

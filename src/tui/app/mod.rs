@@ -28,7 +28,6 @@ use crate::{
     tui::keys::{is_dismiss, is_remove},
     tui::popups,
     tui::screens,
-    tui::widgets::format::plain,
     tui::widgets::{focus::FocusRing, layers::Behind, pointer::Targets, select::Select},
     vcs::Repository,
 };
@@ -650,30 +649,6 @@ fn is_listed_summary(summary: &TaskSummary) -> bool {
 // in, so every one of them holds it.
 fn belongs_to(project: Option<&str>, tab: &str) -> bool {
     project.is_none_or(|own| own == tab)
-}
-
-fn github_login(output: &str) -> Option<String> {
-    const MARKERS: [&str; 2] = [
-        "Logged in to github.com as ",
-        "Logged in to github.com account ",
-    ];
-    for line in plain(output).lines() {
-        for marker in MARKERS {
-            let Some((_, rest)) = line.split_once(marker) else {
-                continue;
-            };
-            let Some(name) = rest.split_whitespace().next() else {
-                continue;
-            };
-            if name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-            {
-                return Some(name.to_owned());
-            }
-        }
-    }
-    None
 }
 
 fn credential_status(answer: CredentialAnswer) -> CredentialStatus {

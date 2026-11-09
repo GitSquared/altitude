@@ -1,5 +1,6 @@
 use super::frame::{draw_focus_rail, draw_pane_title, pane_body};
 use super::*;
+use crate::brand;
 use std::mem;
 
 use ratatui::{Frame, layout::Rect, style::Style, text::Line, widgets::Paragraph};
@@ -129,7 +130,7 @@ pub(super) fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App) {
         // The gutter says who is speaking at a glance: the machine, the agent, or the
         // agent thinking. A wrapped row leaves it empty so one line reads as one line.
         let mark = match line.kind {
-            ActivityKind::Altitude => '⛰',
+            ActivityKind::Altitude => brand::MOUNTAIN_CHAR,
             ActivityKind::Thinking => '·',
             ActivityKind::Speech | ActivityKind::Remote => '›',
         };

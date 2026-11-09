@@ -50,3 +50,7 @@ pub(super) fn looks_like_identifier(value: &str) -> bool {
         && !number.is_empty()
         && number.chars().all(|c| c.is_ascii_digit())
 }
+
+pub(crate) fn looks_like_issue(value: &str) -> bool {
+    issue_identifier_from_url(value).is_some() || looks_like_identifier(value)
+}

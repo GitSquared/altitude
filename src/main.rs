@@ -15,9 +15,11 @@ use crate::{
     isolation::MicrosandboxIsolation,
     remote::{InstallationKey, LinkClient, RemoteKeys},
     task::{TaskEventLoop, TaskService, TaskStore, TrackerHost},
+    tracker::TrackerKind,
 };
 
 mod agent;
+mod brand;
 mod cli;
 mod config;
 mod credentials;
@@ -150,7 +152,7 @@ async fn client() -> Result<(), Box<dyn Error>> {
         };
         let trackers = Arc::new(task::OwnTrackers::new(config.clone()));
         let issue_reader = trackers
-            .for_credential(&identity.id, "trackers/linear")
+            .for_credential(&identity.id, TrackerKind::sole().profile())
             .map(|tracker| tracker as Arc<dyn tracker::IssueReader>);
         let tasks = TaskService::new(
             TaskStore::new(&database),

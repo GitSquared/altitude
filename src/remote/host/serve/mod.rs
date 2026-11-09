@@ -24,9 +24,10 @@ use crate::{
     task::{Task, TaskEventLoop, TaskHistoryEvent},
 };
 
-use crate::remote::host::tracker;
+use crate::tracker::TrackerIntegration;
 
 mod run;
+pub(crate) mod settings;
 mod task_host;
 mod tracker_host;
 mod transfer;
@@ -47,7 +48,7 @@ struct OwnTasks {
     read_slots: Arc<Semaphore>,
     readiness: watch::Sender<Phase>,
     runtime: watch::Receiver<IsolationStatus>,
-    tracker: Option<Arc<tracker::RemoteTracker>>,
+    tracker: Option<Arc<dyn TrackerIntegration>>,
     delegation_paused: bool,
 }
 

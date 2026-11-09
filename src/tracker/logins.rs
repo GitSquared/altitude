@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::tracker::{ACCOUNT_FILE, TrackerAccount, TrackerKind};
 
-use super::write_private;
+use crate::remote::identity::write_private;
 
 pub struct Login {
     pub owner: String,

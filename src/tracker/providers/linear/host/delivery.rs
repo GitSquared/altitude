@@ -1,4 +1,5 @@
 use super::ledger::{Cursor, Delivery, StoredEvent};
+use crate::tracker::ask_marker;
 use crate::{
     task::{TaskAsk, TaskAskAuthor, TaskExecutionPauseReason, TaskHistoryEvent},
     tracker::{
@@ -67,7 +68,7 @@ impl RemoteTracker {
 
     // Answers when the next delivery is due to be tried again, if one is waiting on a
     // retry rather than on this machine doing something.
-    pub(super) async fn process_deliveries(&self, host: &dyn Host) -> Option<Instant> {
+    pub(super) async fn process_deliveries(&self, host: &dyn DelegatedWork) -> Option<Instant> {
         let mut retry = None;
         for delivery in self.pending() {
             if delivery.next_attempt_at_ms > now_ms() {
@@ -97,7 +98,7 @@ impl RemoteTracker {
     pub(super) async fn apply_delivery(
         &self,
         event: &StoredEvent,
-        host: &dyn Host,
+        host: &dyn DelegatedWork,
     ) -> Result<(), String> {
         match event {
             StoredEvent::Session(session) => {
@@ -132,15 +133,16 @@ impl RemoteTracker {
         &self,
         report: &Cursor,
         site: &CommentSite,
-        host: &dyn Host,
+        host: &dyn DelegatedWork,
     ) {
         let root = site.root_comment_id.as_str();
         let Ok(threads) = host.signal_threads(report.task_id.clone()).await else {
             return;
         };
-        let Some(thread) = threads.iter().find(|thread| {
-            thread.is_resolved() && published_comment_id(&report.task_id, &thread.id) == root
-        }) else {
+        let Some(thread) = threads
+            .iter()
+            .find(|thread| thread.is_resolved() && ask_marker(&report.task_id, &thread.id) == root)
+        else {
             return;
         };
         if let Err(error) = host
@@ -202,7 +204,7 @@ impl RemoteTracker {
 
     pub(super) async fn report_event(
         &self,
-        host: &dyn Host,
+        host: &dyn DelegatedWork,
         report: &Cursor,
         events: &[(i64, TaskHistoryEvent)],
         index: usize,
@@ -259,10 +261,10 @@ impl RemoteTracker {
                     }
                 } else {
                     AgentActivityContent::Thought {
-                        body: format!("⛰ {}", execution_pause_reason.notice()),
+                        body: execution_pause_reason.notice().to_owned(),
                     }
                 };
-                self.say(report, &id, content)
+                self.say_system(report, &id, content)
                     .await
                     .map_err(|error| error.to_string())?;
                 // A review the operator has not accepted is work waiting on them, and
@@ -283,7 +285,7 @@ impl RemoteTracker {
             // claiming the agent is still busy, which is what it looked like while
             // the machine had already given up.
             TaskHistoryEvent::ExecutionFailed { error, .. } => {
-                self.say(
+                self.say_system(
                     report,
                     &stable_id(&format!("{}-{index}", report.task_id), "failed"),
                     AgentActivityContent::Error {
@@ -318,7 +320,7 @@ impl RemoteTracker {
                             .user_name(&report.tracker_user_id)
                             .await
                             .ok();
-                        self.say(
+                        self.say_system(
                             report,
                             &stable_id(&report.task_id, "picked-up"),
                             AgentActivityContent::Thought {
@@ -342,7 +344,7 @@ impl RemoteTracker {
                             )
                         }) =>
                     {
-                        self.say(
+                        self.say_system(
                             report,
                             &stable_id(&report.task_id, agent_run_id),
                             AgentActivityContent::Thought {
@@ -431,7 +433,11 @@ impl RemoteTracker {
         Ok(None)
     }
 
-    pub(super) async fn sync_report(&self, host: &dyn Host, report: &Cursor) -> Result<(), String> {
+    pub(super) async fn sync_report(
+        &self,
+        host: &dyn DelegatedWork,
+        report: &Cursor,
+    ) -> Result<(), String> {
         let events = host.events(report.task_id.clone()).await?;
         // A cursor past the end means the history it counted is gone, which is not a
         // reason to replay from the beginning: a replay re-writes statuses and
@@ -505,7 +511,7 @@ impl RemoteTracker {
         })
     }
 
-    pub(super) async fn unhook(&self, host: &dyn Host, report: &Cursor) {
+    pub(super) async fn unhook(&self, host: &dyn DelegatedWork, report: &Cursor) {
         if host
             .stop(
                 report.task_id.clone(),
@@ -517,7 +523,7 @@ impl RemoteTracker {
             return;
         }
         if let Err(error) = self
-            .say(
+            .say_system(
                 report,
                 &stable_id(&report.task_id, "unhooked"),
                 AgentActivityContent::Response {
@@ -536,7 +542,7 @@ impl RemoteTracker {
         }
     }
 
-    pub(super) async fn poll_reports(&self, host: &dyn Host) {
+    pub(super) async fn poll_reports(&self, host: &dyn DelegatedWork) {
         for report in self.cursors().into_iter().filter(|report| !report.finished) {
             // A task the operator removed is no longer work: stop writing about
             // it rather than reporting a history that will never advance. A task

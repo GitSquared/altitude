@@ -9,7 +9,7 @@ use crate::{
     task::TaskService,
     tui::popups,
     tui::screens,
-    vcs::VcsProviderKind,
+    tui::widgets::format,
 };
 
 use popups::confirm::PendingConfirm;
@@ -345,9 +345,8 @@ impl App {
                 signed_in: true,
                 output,
             } = &status
-                && Service::from_id(&profile)
-                    == Some(Service::VersionControl(VcsProviderKind::GitHub))
-                && let Some(login) = github_login(output)
+                && let Some(Service::VersionControl(kind)) = Service::from_id(&profile)
+                && let Some(login) = format::identity_from_output(output, kind.account_markers())
             {
                 suggested = Some((profile.clone(), login));
             }

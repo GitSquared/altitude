@@ -20,7 +20,9 @@ use crate::{
     tui::widgets::shimmer::{shimmer, shimmer_clock},
 };
 
-const TITLE: &str = "⛰  altitude";
+use crate::brand;
+
+const TITLE: &str = brand::TITLE;
 
 pub async fn database<T, E>(
     terminal: &mut DefaultTerminal,

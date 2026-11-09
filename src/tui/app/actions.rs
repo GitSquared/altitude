@@ -423,7 +423,10 @@ impl App {
     }
 
     pub(in crate::tui) async fn refresh_git_identity(&mut self) {
-        let path = self.config.profile_dir("vcs/github").join("git/config");
+        let path = self
+            .config
+            .profile_dir(self.active_vcs().profile())
+            .join("git/config");
         let output = HostCommand::new("git")
             .args(["config", "--no-includes", "--file"])
             .arg(path)

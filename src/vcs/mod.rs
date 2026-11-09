@@ -2,9 +2,8 @@ pub(crate) mod listing;
 mod providers;
 pub mod tools;
 
-pub use providers::GitHub;
-
 use crate::isolation::ProfileRecipe;
+use providers::answering;
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,18 +18,6 @@ impl VcsProviderKind {
 
     pub fn sole() -> Self {
         Self::ALL[0]
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::GitHub => "GitHub",
-        }
-    }
-
-    pub fn profile(self) -> &'static str {
-        match self {
-            Self::GitHub => "vcs/github",
-        }
     }
 }
 
@@ -67,6 +54,18 @@ pub trait VcsProvider: Send + Sync {
     fn repository_list_command(&self) -> String;
 
     fn repositories(&self, output: &str) -> Option<Vec<Repository>>;
+
+    fn short_repository(&self, repository: &str) -> Option<String>;
+
+    // The lines a signed-in CLI writes that name the account, so the interface can
+    // call a profile by the person it belongs to rather than by the host's name.
+    fn account_markers(&self) -> &'static [&'static str];
+
+    fn purpose(&self) -> &'static str;
+
+    fn login_files(&self) -> &'static [&'static str];
+
+    fn signing_key_instructions(&self) -> (&'static str, &'static str);
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -303,12 +302,6 @@ pub fn profile_recipes() -> Vec<ProfileRecipe> {
 
 pub(crate) fn profile_recipe(kind: VcsProviderKind) -> ProfileRecipe {
     answering(kind).profile_recipe()
-}
-
-fn answering(kind: VcsProviderKind) -> &'static dyn VcsProvider {
-    match kind {
-        VcsProviderKind::GitHub => &GitHub,
-    }
 }
 
 pub(crate) fn now_ms() -> i64 {

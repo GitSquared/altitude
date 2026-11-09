@@ -8,7 +8,7 @@ use crate::{
     credentials::{Service, Slot},
     isolation::IsolationEngine,
     project::Project,
-    tracker::{IssueSnapshot, Linear, TrackerError, TrackerProvider, TrackerStatus},
+    tracker::{self, IssueSnapshot, TrackerError, TrackerKind, TrackerProvider, TrackerStatus},
 };
 
 use crate::task::{
@@ -27,7 +27,7 @@ pub(crate) struct OwnTrackers {
 }
 
 struct Opened {
-    tracker: Arc<Linear>,
+    tracker: Arc<dyn TrackerProvider>,
     signed_in_at: Option<SystemTime>,
 }
 
@@ -45,8 +45,10 @@ impl TrackerHost for OwnTrackers {
         if Service::from_id(credential)?.slot() != Slot::Tracker {
             return None;
         }
-        let tracker = Linear::from_directory(&self.config.profile_dir(credential)).ok()?;
-        Some(Arc::new(tracker) as Arc<dyn TrackerProvider>)
+        let Service::Tracker(kind) = Service::from_id(credential)? else {
+            return None;
+        };
+        tracker::provider(kind, &self.config.profile_dir(credential))
     }
 
     fn for_credential(
@@ -54,22 +56,21 @@ impl TrackerHost for OwnTrackers {
         _operator: &str,
         credential: &str,
     ) -> Option<Arc<dyn TrackerProvider>> {
-        if Service::from_id(credential)?.slot() != Slot::Tracker {
+        let Service::Tracker(kind) = Service::from_id(credential)? else {
             return None;
-        }
+        };
         if let Ok(opened) = self.opened.try_lock()
             && let Some(opened) = opened.get(credential)
             && opened.signed_in_at == opened.tracker.sign_in_changed_at()
         {
-            return Some(opened.tracker.clone() as Arc<dyn TrackerProvider>);
+            return Some(Arc::clone(&opened.tracker));
         }
         let directory = self.config.profile_dir(credential);
-        let tracker = Linear::from_directory(&directory).ok()?;
+        let tracker = tracker::provider(kind, &directory)?;
         if !tracker.is_signed_in() {
             return None;
         }
         let signed_in_at = tracker.sign_in_changed_at();
-        let tracker = Arc::new(tracker);
         if let Ok(mut opened) = self.opened.try_lock() {
             opened.insert(
                 credential.to_owned(),
@@ -79,7 +80,7 @@ impl TrackerHost for OwnTrackers {
                 },
             );
         }
-        Some(tracker as Arc<dyn TrackerProvider>)
+        Some(tracker)
     }
 }
 
@@ -162,7 +163,7 @@ where
             .project()
             .and_then(|project| project.tracker.as_ref())
             .and_then(|binding| binding.credential.as_deref())
-            .unwrap_or("trackers/linear");
+            .unwrap_or(TrackerKind::sole().profile());
         let Some(provider) = task
             .operator_id()
             .and_then(|owner| host.for_credential(owner, credential))
@@ -196,7 +197,7 @@ where
                 .project()
                 .and_then(|project| project.tracker.as_ref())
                 .and_then(|route| route.credential.as_deref())
-                .unwrap_or("trackers/linear");
+                .unwrap_or(TrackerKind::sole().profile());
             let Some(provider) = task
                 .operator_id()
                 .and_then(|owner| host.for_credential(owner, credential))

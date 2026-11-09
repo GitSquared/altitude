@@ -5,9 +5,11 @@ use crate::{
 };
 use iroh::EndpointId;
 
+use crate::tracker::{Login, logins};
+
 use super::*;
 impl RemoteTracker {
-    pub(super) async fn recover_delegations(&self, host: &dyn Host) {
+    pub(super) async fn recover_delegations(&self, host: &dyn DelegatedWork) {
         let delegated = match self.config.automation.delegated_issues().await {
             Ok(delegated) => delegated,
             Err(error) => {
@@ -144,7 +146,7 @@ impl RemoteTracker {
         }
     }
 
-    pub(super) async fn adopt_bound_tasks(&self, host: &dyn Host) {
+    pub(super) async fn adopt_bound_tasks(&self, host: &dyn DelegatedWork) {
         let bound = match host.bound_tasks().await {
             Ok(bound) => bound,
             Err(error) => {
@@ -210,7 +212,7 @@ impl RemoteTracker {
     pub(super) async fn delegate_new_session(
         &self,
         event: &SessionEvent,
-        host: &dyn Host,
+        host: &dyn DelegatedWork,
     ) -> Result<(), String> {
         let Some(issue_id) = event.issue_id.as_deref() else {
             return Ok(());
@@ -284,31 +286,26 @@ impl RemoteTracker {
                         ),
                     )
                     .await?;
-                    self.config
-                        .automation
-                        .create_activity(
-                            &event.session_id,
-                            &stable_id(&event.session_id, "already-running"),
-                            AgentActivityContent::Response {
-                                body: "Added to the task already running for this issue."
-                                    .to_owned(),
-                            },
-                        )
-                        .await
-                        .map_err(|error| error.to_string())?;
+                    self.create_system_activity(
+                        &event.session_id,
+                        &stable_id(&event.session_id, "already-running"),
+                        AgentActivityContent::Response {
+                            body: "Added to the task already running for this issue.".to_owned(),
+                        },
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
                 }
                 return Ok(());
             }
             let body = self.boundary_reply(&report.tracker_user_id).await;
-            self.config
-                .automation
-                .create_activity(
-                    &event.session_id,
-                    &stable_id(&event.session_id, "redirect"),
-                    AgentActivityContent::Response { body },
-                )
-                .await
-                .map_err(|error| error.to_string())?;
+            self.create_system_activity(
+                &event.session_id,
+                &stable_id(&event.session_id, "redirect"),
+                AgentActivityContent::Response { body },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
             return Ok(());
         }
         self.delegate(issue_id, &event.session_id, author, label, host)
@@ -321,7 +318,7 @@ impl RemoteTracker {
         session_id: &str,
         author: &str,
         label: &str,
-        host: &dyn Host,
+        host: &dyn DelegatedWork,
     ) -> Result<(), String> {
         if self.is_terminated(session_id) {
             return Ok(());
@@ -368,7 +365,7 @@ impl RemoteTracker {
                 let body = "A newer delegation replaced this one, so Altitude stopped this \
                             task.";
                 if let Err(error) = self
-                    .say(
+                    .say_system(
                         &report,
                         &stable_id(&task.task_id, "redelegated"),
                         AgentActivityContent::Response {
@@ -395,17 +392,15 @@ impl RemoteTracker {
 
         // Say the work is starting before the issue is fetched and a capsule is
         // provisioned. The id is stable, so a redelivery is one thought.
-        self.config
-            .automation
-            .create_activity(
-                session_id,
-                &stable_id(session_id, "starting"),
-                AgentActivityContent::Thought {
-                    body: format!("Altitude is setting up this task for {label}."),
-                },
-            )
-            .await
-            .map_err(|error| error.to_string())?;
+        self.create_system_activity(
+            session_id,
+            &stable_id(session_id, "starting"),
+            AgentActivityContent::Thought {
+                body: format!("Altitude is setting up this task for {label}."),
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
 
         let snapshot = self
             .config
@@ -458,17 +453,15 @@ impl RemoteTracker {
             tracing::warn!(session = %session_id, %error, "could not name a delegated session");
         }
         if redelegation {
-            self.config
-                .automation
-                .create_activity(
-                    session_id,
-                    &stable_id(&task_id, "redelegated"),
-                    AgentActivityContent::Thought {
-                        body: format!("Redelegated: this task now runs for {label}."),
-                    },
-                )
-                .await
-                .map_err(|error| error.to_string())?;
+            self.create_system_activity(
+                session_id,
+                &stable_id(&task_id, "redelegated"),
+                AgentActivityContent::Thought {
+                    body: format!("Redelegated: this task now runs for {label}."),
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
         }
         Ok(())
     }
@@ -484,7 +477,7 @@ impl RemoteTracker {
     pub(super) async fn stop_for_terminated_session(
         &self,
         event: &SessionEvent,
-        host: &dyn Host,
+        host: &dyn DelegatedWork,
     ) -> Result<(), String> {
         let Some(report) = self.report_for_session(&event.session_id) else {
             if event
@@ -520,7 +513,7 @@ impl RemoteTracker {
         {
             tracing::warn!(issue = %report.issue_id, %error, "could not release a stopped task's issue");
         }
-        self.say(
+        self.say_system(
             &report,
             &stable_id(&report.task_id, "stopped"),
             AgentActivityContent::Response {
@@ -540,7 +533,7 @@ impl RemoteTracker {
         state_id: &str,
         actor_id: &str,
         occurred_at_ms: i64,
-        host: &dyn Host,
+        host: &dyn DelegatedWork,
     ) -> Result<(), String> {
         let Some(report) = host
             .work_for_issue(issue_id.to_owned(), Vec::new())
@@ -587,7 +580,7 @@ impl RemoteTracker {
         &self,
         report: &Cursor,
         occurred_at_ms: i64,
-        host: &dyn Host,
+        host: &dyn DelegatedWork,
     ) -> Result<Option<TaskAsk>, String> {
         let was_waiting = host
             .events(report.task_id.clone())
@@ -624,7 +617,7 @@ impl RemoteTracker {
 
     pub(super) async fn stop_for_ending(
         &self,
-        host: &dyn Host,
+        host: &dyn DelegatedWork,
         report: &Cursor,
         is_done: bool,
     ) -> Result<(), String> {
@@ -646,7 +639,7 @@ impl RemoteTracker {
             .await?;
         }
         if let Err(error) = self
-            .say(
+            .say_system(
                 report,
                 &stable_id(&report.task_id, "closed-by-operator"),
                 AgentActivityContent::Response {

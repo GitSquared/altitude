@@ -6,7 +6,7 @@ pub enum ActivityKind {
     Thinking,
     Remote,
     // The machine's own news: it started, it is waiting on something, the sandbox
-    // moved, a run stopped. It carries the mountain so an operator reading a session
+    // moved, a run stopped. It is the one kind marked with the mountain, so a reader
     // can tell what Altitude did from what the agent said.
     Altitude,
 }
@@ -30,7 +30,7 @@ impl Activity {
 
     pub fn altitude(text: String) -> Self {
         Self {
-            text: format!("\u{26f0} {text}"),
+            text,
             kind: ActivityKind::Altitude,
         }
     }

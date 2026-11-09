@@ -9,6 +9,7 @@ use crate::{
     isolation::IsolationEngine,
     project::Project,
     task::{TaskExecutionStatus, TaskService},
+    tracker::TrackerKind,
     tui::keys::is_dismiss,
     tui::popups,
     tui::screens,
@@ -32,7 +33,7 @@ impl App {
     ) where
         E: IsolationEngine + Clone + 'static,
     {
-        let credential = credential.unwrap_or_else(|| "trackers/linear".to_owned());
+        let credential = credential.unwrap_or_else(|| TrackerKind::sole().profile().to_owned());
         let Some(tracker) = task_service.tracker_for(&credential) else {
             self.say("Connect that task tracker identity before choosing a team");
             return;

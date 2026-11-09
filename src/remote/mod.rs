@@ -1,9 +1,8 @@
 mod acting;
 pub(crate) mod archive;
 mod bundle;
-mod host;
+pub(crate) mod host;
 pub(crate) mod identity;
-pub(crate) use host::tracker;
 mod link;
 pub(crate) mod transfer;
 

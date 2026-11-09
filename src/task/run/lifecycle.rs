@@ -264,7 +264,7 @@ where
                     .vcs_credential
                     .clone()
                     .or_else(|| project.vcs.map(VcsProviderKind::profile).map(str::to_owned))
-                    .unwrap_or_else(|| "vcs/github".to_owned());
+                    .unwrap_or_else(|| VcsProviderKind::sole().profile().to_owned());
                 let agent_recipe = self
                     .credentials
                     .recipe(&agent_id)

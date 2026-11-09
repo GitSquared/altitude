@@ -3,19 +3,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{agent::AgentKind, credentials::Service};
+use crate::credentials::Service;
 
 pub(super) fn login_files(profile: &str) -> Option<&'static [&'static str]> {
     // A named identity has a suffix after the service it belongs to, but it
     // keeps that service's login file in its own directory.
     match Service::from_id(profile)? {
-        // Pi keeps one credential per provider here, and nothing else.
-        Service::Agent(AgentKind::Pi) => Some(&["auth.json"]),
-        // Claude Code's own login file; its settings and MCP files stay.
-        Service::Agent(AgentKind::Claude) => Some(&[".credentials.json"]),
-        // The GitHub CLI's host sign-in. The git identity, SSH keys, and signing keys
-        // are separate material and are deliberately not touched.
-        Service::VersionControl(_) => Some(&["gh/hosts.yml"]),
+        Service::Agent(kind) => Some(kind.login_files()),
+        Service::VersionControl(kind) => Some(kind.login_files()),
         // A tracker's session is host-side, not a mounted profile.
         Service::Tracker(_) => None,
     }

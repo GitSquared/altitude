@@ -4,8 +4,12 @@ use crossterm::event::{KeyCode, KeyEvent};
 use tokio::sync::mpsc;
 
 use crate::{
-    credentials::Slot, isolation::IsolationEngine, remote::Announcement, task::TaskService,
-    tracker::TrackerAccount, tui::keys::is_dismiss,
+    credentials::Slot,
+    isolation::IsolationEngine,
+    remote::Announcement,
+    task::TaskService,
+    tracker::{TrackerAccount, TrackerKind},
+    tui::keys::is_dismiss,
 };
 
 use super::*;
@@ -154,8 +158,9 @@ impl App {
     ) where
         E: IsolationEngine + Clone + 'static,
     {
-        self.ensure_credential("trackers/linear", "Linear");
-        self.connect_tracker_for("trackers/linear", task_service, replies);
+        let kind = TrackerKind::sole();
+        self.ensure_credential(kind.profile(), kind.label());
+        self.connect_tracker_for(kind.profile(), task_service, replies);
     }
 
     pub(in crate::tui) fn tracker_connect_resolved(&mut self, reply: TrackerConnectReply) {

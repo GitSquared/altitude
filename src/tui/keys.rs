@@ -60,7 +60,7 @@ pub fn help_sections() -> Vec<HelpSection> {
             title: "Tasks",
             bindings: &[
                 ("c", "Create a task"),
-                ("Ctrl-L", "Link a Linear issue and start work on it"),
+                ("Ctrl-L", "Link a tracker issue and start work on it"),
                 (
                     "Tab / Shift-Tab · [ / ]",
                     "Switch project tabs; the list and a new task follow",

@@ -324,18 +324,13 @@ impl App {
     }
 
     pub(super) fn open_signing_key(&mut self, public: String) {
+        let (intro, steps) = self.active_vcs().signing_key_instructions();
         let lines = vec![
-            Line::styled(
-                "Add this key to GitHub as a signing key, so commits made here show as verified.",
-                palette::muted(),
-            ),
+            Line::styled(intro, palette::muted()),
             Line::from(""),
             Line::styled(public.clone(), palette::primary()),
             Line::from(""),
-            Line::styled(
-                "GitHub → Settings → SSH and GPG keys → New SSH key → Key type: Signing Key",
-                palette::muted(),
-            ),
+            Line::styled(steps, palette::muted()),
         ];
         self.foreground = Foreground::Setup(
             Setup::new(SetupKind::SigningKey, lines)
