@@ -1,3 +1,6 @@
+pub(crate) mod automation;
+pub(crate) mod remote;
+
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
 use crate::{

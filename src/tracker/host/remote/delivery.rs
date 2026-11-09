@@ -4,7 +4,7 @@ use crate::{
     task::{TaskAsk, TaskAskAuthor, TaskExecutionPauseReason, TaskHistoryEvent},
     tracker::{
         TrackerStatus,
-        providers::linear::automation::{AgentActivityContent, CommentSite},
+        host::automation::{AgentActivityContent, CommentSite},
     },
 };
 use std::time::Instant;
@@ -12,7 +12,7 @@ use std::time::Instant;
 use super::*;
 
 impl RemoteTracker {
-    pub(super) fn enqueue(&self, key: String, event: StoredEvent) -> Result<bool, String> {
+    pub(crate) fn enqueue(&self, key: String, event: StoredEvent) -> Result<bool, String> {
         let now = now_ms();
         let is_new = self.mutate(|ledger| {
             ledger.prune(now);
@@ -81,15 +81,15 @@ impl RemoteTracker {
                     // Said out loud so a delivery has a beginning and an end in the
                     // log: what it did is the lines between them, and one that did
                     // nothing is the thing that otherwise reads as a hang.
-                    tracing::info!(delivery = %delivery.key, "a Linear delivery was answered");
+                    tracing::info!(delivery = %delivery.key, "a tracker delivery was answered");
                     if let Err(error) = self.complete_delivery(&delivery.key) {
-                        tracing::error!(delivery = %delivery.key, %error, "could not record a completed Linear delivery; it stays queued");
+                        tracing::error!(delivery = %delivery.key, %error, "could not record a completed tracker delivery; it stays queued");
                     }
                 }
                 Err(error) => {
-                    tracing::warn!(delivery = %delivery.key, %error, "a Linear delivery will be retried");
+                    tracing::warn!(delivery = %delivery.key, %error, "a tracker delivery will be retried");
                     if let Err(persist_error) = self.defer_delivery(&delivery.key) {
-                        tracing::error!(delivery = %delivery.key, %persist_error, "could not record a deferred Linear delivery");
+                        tracing::error!(delivery = %delivery.key, %persist_error, "could not record a deferred tracker delivery");
                     }
                     retry = Some(Instant::now() + RETRY);
                 }
