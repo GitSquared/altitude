@@ -210,9 +210,18 @@ impl LinearAutomation {
     }
 
     pub async fn comment(&self, comment_id: &str) -> Result<Option<Value>, TrackerError> {
-        let data = self
+        // A comment the tracker does not have is the answer "there is none", not a
+        // failure: asking about one this machine published is how a thread that was
+        // deleted or never landed is found, and Linear refuses the query rather than
+        // returning nothing.
+        let data = match self
             .graphql(COMMENT_EXISTS_QUERY, json!({ "id": comment_id }))
-            .await?;
+            .await
+        {
+            Ok(data) => data,
+            Err(error) if error.to_string().contains("Entity not found") => return Ok(None),
+            Err(error) => return Err(error),
+        };
         Ok(data
             .get("comment")
             .filter(|comment| !comment.is_null())
