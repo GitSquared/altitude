@@ -49,7 +49,7 @@ pub use state::*;
 pub use store::{TaskDraft, TaskStore};
 
 pub(crate) use mirror::tracker;
-pub(crate) use tracker::{OwnTrackers, TrackerHost};
+pub(crate) use tracker::{OwnIssues, OwnTrackers, TrackerHost};
 
 use progress::EnvironmentProgressRegistry;
 

@@ -153,12 +153,12 @@ impl App {
 
     pub(in crate::tui) fn connect_tracker<E>(
         &mut self,
+        kind: TrackerKind,
         task_service: &TaskService<E>,
         replies: &mpsc::UnboundedSender<TrackerConnectReply>,
     ) where
         E: IsolationEngine + Clone + 'static,
     {
-        let kind = TrackerKind::sole();
         self.ensure_credential(kind.profile(), kind.label());
         self.connect_tracker_for(kind.profile(), task_service, replies);
     }
@@ -219,6 +219,13 @@ impl App {
             Foreground::NewTask(question) => question.is_awaiting(),
             _ => false,
         }
+    }
+
+    pub(in crate::tui) fn default_tracker_kind(&self) -> TrackerKind {
+        self.tracker_credential()
+            .as_deref()
+            .and_then(TrackerKind::of_credential)
+            .unwrap_or(TrackerKind::Linear)
     }
 
     pub(in crate::tui) fn tracker_credential(&self) -> Option<String> {

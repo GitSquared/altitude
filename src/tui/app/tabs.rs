@@ -21,9 +21,17 @@ impl App {
                 .is_some_and(|(from, taking)| from == address && taking == id)
     }
 
+    // A form opens before a tracker is chosen in it, so the word is the default
+    // tracker's: the one most projects are bound to.
     pub(super) fn scope_label(&self) -> String {
-        let kind = TrackerKind::sole();
-        format!("Task tracker {}", kind.scope_noun())
+        match self
+            .tracker_credential()
+            .as_deref()
+            .and_then(TrackerKind::of_credential)
+        {
+            Some(kind) => format!("Task tracker {}", kind.scope_noun()),
+            None => "Task tracker scope".to_owned(),
+        }
     }
 
     pub(super) fn remotes(&self) -> Vec<String> {

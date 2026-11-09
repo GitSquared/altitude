@@ -16,19 +16,27 @@ use std::{error::Error, fmt, future::Future, pin::Pin, time::SystemTime};
 
 use serde::{Deserialize, Serialize};
 
+use crate::credentials::Service;
+
 pub type TrackerFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, TrackerError>> + Send + 'a>>;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TrackerKind {
     Linear,
+    GitHub,
 }
 
 impl TrackerKind {
-    pub const ALL: [Self; 1] = [Self::Linear];
+    pub const ALL: [Self; 2] = [Self::Linear, Self::GitHub];
 
-    pub fn sole() -> Self {
-        Self::ALL[0]
+    // A tracker credential's id is its kind's profile, so the id is the whole of
+    // what says which tracker a login belongs to.
+    pub fn of_credential(credential: &str) -> Option<Self> {
+        match Service::from_id(credential)? {
+            Service::Tracker(kind) => Some(kind),
+            _ => None,
+        }
     }
 
     pub fn slug(self) -> &'static str {

@@ -48,7 +48,7 @@ impl ServeSettings {
 }
 
 fn template() -> String {
-    let kind = TrackerKind::sole();
+    let kind = TrackerKind::Linear;
     format!(
         "# Where clients reach this remote: discovery over TCP, tasks over UDP.\n\
          listen = \"{listen}\"\n\

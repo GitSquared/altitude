@@ -8,13 +8,10 @@ use ratatui::{
     widgets::{Paragraph, Wrap},
 };
 
-use crate::{
-    tracker::TrackerKind,
-    tui::{
-        app::{CredentialStatus, TrackerState},
-        popups::repositories::Repositories,
-        widgets::{button::Button, palette, shimmer::shimmer},
-    },
+use crate::tui::{
+    app::{CredentialStatus, TrackerState},
+    popups::repositories::Repositories,
+    widgets::{button::Button, palette, shimmer::shimmer},
 };
 
 pub fn draw(
@@ -294,7 +291,7 @@ pub(super) fn checklist(
 
     let tracker = setup.tracker;
     let tracker_value = if tracker == TrackerState::Connected {
-        format!("{} · connected", TrackerKind::sole().label())
+        format!("{} · connected", panel.tracker_kind().label())
     } else {
         "none · optional".to_owned()
     };
