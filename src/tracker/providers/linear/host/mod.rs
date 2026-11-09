@@ -52,11 +52,6 @@ const EVENT_ATTEMPTS: usize = 3;
 
 const UNHOOK_GRACE_MS: i64 = 60_000;
 
-// How old a task's history has to be, relative to the report that watches it, for the
-// report to be adopting a task rather than starting one: a delegation's task is
-// created in the same breath as its report.
-const ADOPTION_WINDOW_MS: i64 = 60_000;
-
 const RETRY: Duration = Duration::from_secs(10);
 
 const DONE_RETENTION: Duration = Duration::from_secs(600);

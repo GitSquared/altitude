@@ -454,14 +454,18 @@ impl RemoteTracker {
             .position(|(recorded_at_ms, _)| *recorded_at_ms > report.created_at_ms)
             .unwrap_or(events.len());
         let start = report.reported_events.max(watched_from);
-        // Nothing before the report began is replayed. A task founded for this report
-        // is seconds old when it is made, and its first run says what is happening; a
-        // task this machine adopted was already going, and the only thing to say about
-        // it is where it stands now.
-        let adopted = events.first().is_some_and(|(first_at_ms, _)| {
-            first_at_ms + ADOPTION_WINDOW_MS < report.created_at_ms
+        // A task founded for this report is the only thing its unwatched history can
+        // hold; anything more means this machine adopted a task that was already
+        // going, and the only thing to say about it is where it stands now.
+        let founded_only = events[..start].iter().all(|(_, event)| {
+            matches!(
+                event,
+                TaskHistoryEvent::IntentExpressed { .. }
+                    | TaskHistoryEvent::TrackerIssueBound { .. }
+                    | TaskHistoryEvent::TaskTitleSet { .. }
+            )
         });
-        let projecting = report.reported_events == 0 && adopted;
+        let projecting = report.reported_events == 0 && !founded_only;
         let mut status = None;
         for index in start..events.len() {
             let outcome = self
