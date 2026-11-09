@@ -142,7 +142,14 @@ pub trait Host: Send + Sync + 'static {
     fn complete(&self, task_id: String) -> HostFuture<'_, ()>;
     fn record_status(&self, task_id: String, status: TrackerStatus) -> HostFuture<'_, ()>;
     fn signal_threads(&self, task_id: String) -> HostFuture<'_, Vec<TaskAsk>>;
-    fn reopen_signal(&self, task_id: String, signal_id: String) -> HostFuture<'_, ()>;
+    // Closing and reopening are one act with a flag: the operator's word on whether a
+    // thread needs anything more, said the same way from the interface and the tracker.
+    fn set_signal_resolved(
+        &self,
+        task_id: String,
+        signal_id: String,
+        resolved: bool,
+    ) -> HostFuture<'_, ()>;
     fn events(&self, task_id: String) -> HostFuture<'_, Vec<(i64, TaskHistoryEvent)>>;
     fn steer(&self, task_id: String, message: String) -> HostFuture<'_, ()>;
     fn reply(&self, task_id: String, signal_id: String, answer: String) -> HostFuture<'_, ()>;
@@ -182,11 +189,11 @@ fn failure_notice(error: &str) -> String {
 // A pause that asks a person for something is the last thing a run says, and it is
 // addressed to them. The rest are the machine's own record: they explain a silence
 // without asking anything, so they are written where they do not read as a message.
+//
+// A run that kept taking turns with nothing to say stopped itself, so it asks nobody:
+// putting that in the operator's inbox says someone needs them when nobody does.
 fn waits_on_a_person(reason: &TaskExecutionPauseReason) -> bool {
-    matches!(
-        reason,
-        TaskExecutionPauseReason::AwaitingOperator | TaskExecutionPauseReason::AgentWentQuiet
-    )
+    matches!(reason, TaskExecutionPauseReason::AwaitingOperator)
 }
 
 // The handoff, in the operator's own name: a tracker is shared with a team, and "you"

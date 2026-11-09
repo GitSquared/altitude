@@ -506,7 +506,6 @@ impl App {
     pub(super) async fn act_on_signal<E>(
         &mut self,
         action: SignalAction,
-        task_service: &TaskService<E>,
         remote_signals: &mpsc::Sender<RemoteSignalsReply>,
         event_loop: &TaskEventLoop<E>,
     ) where
@@ -529,13 +528,12 @@ impl App {
                     self.say("This task is no longer in the list");
                 }
             }
-            SignalAction::Resolve => {
-                // A review ends on acceptance, which is the operator's act and a
-                // different button; a question is closed and opened by them.
-                if thread.kind != TaskAskKind::Steer {
-                    return;
-                }
-                let resolved = !thread.resolved;
+            // Closing answers "this needs nothing more from me", which is the
+            // operator's to say about any thread. It is not acceptance: the work a
+            // review holds is still theirs to accept, and closing it says only that
+            // the conversation is over.
+            SignalAction::Resolve | SignalAction::Reopen => {
+                let resolved = action == SignalAction::Resolve;
                 if resolved == thread.resolved {
                     return;
                 }
@@ -547,13 +545,14 @@ impl App {
                         remote_signals,
                     );
                 } else {
-                    match task_service
-                        .resolve_signal(&thread.task_id, &thread.id, resolved)
+                    // Through the run loop like a reply, so closing a thread that was
+                    // holding the task starts the work it was holding.
+                    match event_loop
+                        .close_signal(&thread.task_id, &thread.id, resolved)
                         .await
                     {
-                        Ok(task) => {
+                        Ok(()) => {
                             self.resolve_signal_locally(&thread.id, resolved);
-                            self.replace_task(task);
                             if resolved {
                                 self.select_next_open_thread();
                             }

@@ -185,6 +185,24 @@ where
         Ok(())
     }
 
+    // Closing or reopening a thread is the same act whether it frees the task to work
+    // or takes the question back from it, so there is one way in.
+    pub async fn close_signal(
+        &self,
+        task_id: &str,
+        signal_id: &str,
+        resolved: bool,
+    ) -> Result<(), TaskServiceError> {
+        if let Some(run) = self
+            .service
+            .close_signal(task_id, signal_id, resolved)
+            .await?
+        {
+            self.watch_agent_run(Ok(run));
+        }
+        Ok(())
+    }
+
     pub async fn express_input(&self, task_id: &str, body: String) -> Result<(), TaskServiceError> {
         if let Some(run) = self.service.express_input(task_id, body).await? {
             self.watch_agent_run(Ok(run));

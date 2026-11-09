@@ -266,13 +266,16 @@ impl tracker::Host for OwnTasks {
         })
     }
 
-    fn reopen_signal(&self, task_id: String, signal_id: String) -> tracker::HostFuture<'_, ()> {
+    fn set_signal_resolved(
+        &self,
+        task_id: String,
+        signal_id: String,
+        resolved: bool,
+    ) -> tracker::HostFuture<'_, ()> {
         Box::pin(async move {
             self.tasks
-                .service()
-                .resolve_signal(&task_id, &signal_id, false)
+                .close_signal(&task_id, &signal_id, resolved)
                 .await
-                .map(|_| ())
                 .map_err(|error| error.to_string())
         })
     }
@@ -358,7 +361,7 @@ impl tracker::Host for OwnTasks {
                     session_agent: task.session_agent(),
                     status: task.facts.execution_status,
                     pause_reason: task.facts.execution_pause_reason.clone(),
-                    ask: task.facts.leading_ask_kind,
+                    ask: task.facts.leading_ask.as_ref().map(|ask| ask.kind),
                 })
             }))
         })
@@ -456,7 +459,7 @@ impl tracker::Host for OwnTasks {
                         session_agent: task.session_agent(),
                         status: task.facts.execution_status,
                         pause_reason: task.facts.execution_pause_reason.clone(),
-                        ask: task.facts.leading_ask_kind,
+                        ask: task.facts.leading_ask.as_ref().map(|ask| ask.kind),
                     })
                 })
                 .collect())

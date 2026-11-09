@@ -3,7 +3,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     isolation::IsolationEngine,
-    task::{TaskEventLoop, TaskService},
+    task::TaskEventLoop,
     tui::keys::{is_dismiss, is_secondary},
     tui::popups,
     tui::screens,
@@ -20,7 +20,6 @@ impl App {
     pub(in crate::tui) async fn signals_mouse<E>(
         &mut self,
         mouse: MouseEvent,
-        task_service: &TaskService<E>,
         remote_signals: &mpsc::Sender<RemoteSignalsReply>,
         event_loop: &TaskEventLoop<E>,
     ) where
@@ -72,8 +71,7 @@ impl App {
                     SignalHit::Action(index) => {
                         self.signal_focus = SignalFocus::Action(index);
                         if let Some(action) = self.signal_actions().get(index).copied() {
-                            self.act_on_signal(action, task_service, remote_signals, event_loop)
-                                .await;
+                            self.act_on_signal(action, remote_signals, event_loop).await;
                         }
                     }
                     SignalHit::ComposerSend => {
@@ -127,7 +125,6 @@ impl App {
     pub(in crate::tui) async fn signals_key<E>(
         &mut self,
         key: KeyEvent,
-        task_service: &TaskService<E>,
         remote_signals: &mpsc::Sender<RemoteSignalsReply>,
         event_loop: &TaskEventLoop<E>,
     ) where
@@ -231,15 +228,13 @@ impl App {
             }
             KeyCode::Enter if is_secondary(key) => {
                 if let Some(action) = self.signal_thread().and_then(secondary_action) {
-                    self.act_on_signal(action, task_service, remote_signals, event_loop)
-                        .await
+                    self.act_on_signal(action, remote_signals, event_loop).await
                 }
             }
             KeyCode::Enter => match self.signal_focus {
                 SignalFocus::Action(index) => {
                     if let Some(action) = self.signal_actions().get(index).copied() {
-                        self.act_on_signal(action, task_service, remote_signals, event_loop)
-                            .await
+                        self.act_on_signal(action, remote_signals, event_loop).await
                     }
                 }
                 SignalFocus::List
@@ -247,8 +242,7 @@ impl App {
                 | SignalFocus::Plan
                 | SignalFocus::Activity => {
                     if let Some(action) = self.signal_thread().and_then(primary_action) {
-                        self.act_on_signal(action, task_service, remote_signals, event_loop)
-                            .await
+                        self.act_on_signal(action, remote_signals, event_loop).await
                     }
                 }
             },

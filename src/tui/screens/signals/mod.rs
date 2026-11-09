@@ -72,33 +72,29 @@ pub enum SignalHit {
 pub enum SignalAction {
     Reply,
     Resolve,
+    Reopen,
     Accept,
     Apply,
 }
 
 impl SignalAction {
-    pub fn label(self, resolved: bool) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::Reply => "reply",
             Self::Accept => "accept",
             Self::Apply => "apply change",
-            Self::Resolve => match resolved {
-                true => "reopen",
-                false => "resolve",
-            },
+            Self::Resolve => "resolve",
+            Self::Reopen => "reopen",
         }
     }
 }
 
 pub fn primary_action(thread: &TaskAsk) -> Option<SignalAction> {
     if thread.is_resolved() {
-        // A question the operator closed can be opened again by them, and reopening
-        // is what puts it back in front of the agent. A review is theirs as well, but
-        // it ends on acceptance rather than on a toggle.
-        return (thread.kind == TaskAskKind::Steer).then_some(SignalAction::Resolve);
+        return Some(SignalAction::Reopen);
     }
-    // A blocked thread that carries a change is answered by making it: the
-    // operator's other option, replying, is still there beside it.
+    // A thread that carries a change is answered by making it: the operator's other
+    // option, replying, is still there beside it.
     if thread.proposal.is_some() {
         return Some(SignalAction::Apply);
     }
@@ -108,11 +104,19 @@ pub fn primary_action(thread: &TaskAsk) -> Option<SignalAction> {
     })
 }
 
+// Closing is theirs on any thread, an unanswered review included: they can see that
+// the work has moved on, and the agent reading the thread is told what they decided.
 pub fn secondary_action(thread: &TaskAsk) -> Option<SignalAction> {
     if thread.is_resolved() {
-        return (thread.kind == TaskAskKind::Steer).then_some(SignalAction::Reply);
+        return None;
     }
-    (thread.kind != TaskAskKind::Steer || thread.proposal.is_some()).then_some(SignalAction::Reply)
+    Some(
+        if thread.kind == TaskAskKind::Steer || thread.proposal.is_some() {
+            SignalAction::Resolve
+        } else {
+            SignalAction::Reply
+        },
+    )
 }
 
 pub fn actions(thread: &TaskAsk) -> Vec<SignalAction> {

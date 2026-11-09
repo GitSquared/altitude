@@ -219,12 +219,12 @@ impl App {
                     if let SignalFocus::Action(index) = self.signal_focus
                         && let Some(action) = self.signal_actions().get(index).copied()
                     {
-                        hints.push(Hint::new("enter", action.label(thread.is_resolved())));
+                        hints.push(Hint::new("enter", action.label()));
                     } else if let Some(action) = primary_action(thread) {
-                        hints.push(Hint::new("enter", action.label(thread.is_resolved())));
+                        hints.push(Hint::new("enter", action.label()));
                     }
                     if let Some(action) = secondary_action(thread) {
-                        hints.push(Hint::new("ctrl-enter", action.label(thread.is_resolved())));
+                        hints.push(Hint::new("ctrl-enter", action.label()));
                     }
                 }
                 hints.push(Hint::new("pgup/pgdn", "scroll"));

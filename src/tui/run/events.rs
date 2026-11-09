@@ -109,8 +109,7 @@ where
             return Ok(false);
         }
         if matches!(app.foreground, Foreground::Signals) {
-            app.signals_mouse(mouse, task_service, remote_signals, event_loop)
-                .await;
+            app.signals_mouse(mouse, remote_signals, event_loop).await;
             return Ok(false);
         }
         if matches!(app.foreground, Foreground::Tasks) {
@@ -241,10 +240,7 @@ where
         Foreground::GitIdentity(_) => app.git_identity_key(key).await,
         Foreground::Setup(_) => app.setup_key(key),
         Foreground::SignIn(_) => app.sign_in_key(key, task_service, credential_events).await,
-        Foreground::Signals => {
-            app.signals_key(key, task_service, remote_signals, event_loop)
-                .await
-        }
+        Foreground::Signals => app.signals_key(key, remote_signals, event_loop).await,
         Foreground::Shell(_) => app.shell_key(key, terminal, event_loop, task_service).await,
         Foreground::Tasks => {
             if app.list_key(key, task_service, remote_signals).await? {

@@ -113,13 +113,10 @@ impl TaskHost for OwnTasks {
                     task_id,
                     signal_id,
                     resolved,
-                } => {
-                    tasks
-                        .service()
-                        .resolve_signal(&task_id, &signal_id, resolved)
-                        .await
-                        .map_err(|error| error.to_string())?;
-                }
+                } => tasks
+                    .close_signal(&task_id, &signal_id, resolved)
+                    .await
+                    .map_err(|error| error.to_string())?,
                 SignalCommand::Accept { task_id, signal_id } => {
                     tasks
                         .service()

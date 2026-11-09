@@ -60,7 +60,6 @@ where
             },
             source: TaskInputSource::Altitude,
             body,
-            responding_to: None,
             external_id: None,
         };
         let task = self
@@ -108,6 +107,38 @@ where
             .resolve_signal(task_id, signal_id, resolved, TaskAskAuthor::Operator)
             .await
             .map_err(TaskServiceError::Task)
+    }
+
+    // Closing a thread is the operator's word like any other, and a word wakes the
+    // task it was waiting on: leaving a task paused behind a question nobody is asking
+    // any more is the same silence as a question that was never heard.
+    pub async fn close_signal(
+        &self,
+        task_id: &str,
+        signal_id: &str,
+        resolved: bool,
+    ) -> Result<Option<(Task, TaskAgentRun, CommandSession)>, TaskServiceError> {
+        let thread = self
+            .store
+            .signal_thread(task_id, signal_id)
+            .await
+            .map_err(TaskServiceError::Task)?;
+        let task = self.resolve_signal(task_id, signal_id, resolved).await?;
+        let was_waiting = thread.as_ref().is_some_and(TaskAsk::waits_on_operator);
+        if !resolved
+            || !was_waiting
+            || task.facts.waits_on_operator()
+            || task.facts.accepted
+            || task.facts.execution_pause_reason != Some(TaskExecutionPauseReason::AwaitingOperator)
+        {
+            return Ok(None);
+        }
+        let title = thread.map(|thread| thread.title).unwrap_or_default();
+        let prompt = format!(
+            "The operator closed the thread \"{title}\", so it needs nothing more from them. Read the task, carry on with the work, and say what you are doing in the thread if it is still worth saying."
+        );
+        let (task, run, session) = self.start_autopilot_turn(task, &prompt, None).await?;
+        Ok(Some((task, run, session)))
     }
 
     pub async fn reply_operator_signal(
@@ -202,13 +233,8 @@ fn render_inputs(inputs: &[TaskInput]) -> String {
                 format!("{} comment", provider.label())
             }
         };
-        let reply = input
-            .responding_to
-            .as_deref()
-            .map(|signal| format!(", reply to signal {signal}"))
-            .unwrap_or_default();
         text.push_str(&format!(
-            "- [{} · {source}{reply}] {}\n",
+            "- [{} · {source}] {}\n",
             chrono::DateTime::from_timestamp_millis(input.at_ms)
                 .map(|at| at
                     .with_timezone(&chrono::Local)
