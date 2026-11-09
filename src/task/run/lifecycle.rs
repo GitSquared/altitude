@@ -799,6 +799,15 @@ fn was_running(events: &[TaskHistoryEvent]) -> bool {
     for event in events.iter().rev() {
         match event {
             TaskHistoryEvent::AgentRunStarted { .. } => return true,
+            // The shutdown's own pause is the interrupt being recorded, not the
+            // answer to the question: it is written for every task the machine
+            // suspends, the ones it cut in half included. Reading it as an ending
+            // is how a restart told a task mid-turn that it had been waiting all
+            // along, and left the turn unfinished.
+            TaskHistoryEvent::ExecutionPaused {
+                execution_pause_reason: TaskExecutionPauseReason::ApplicationShutdown,
+                ..
+            } => {}
             TaskHistoryEvent::AgentRunEnded { .. }
             | TaskHistoryEvent::ExecutionPaused { .. }
             | TaskHistoryEvent::ExecutionRecovered { .. }
