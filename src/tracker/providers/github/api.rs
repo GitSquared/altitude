@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use reqwest::{Method, Response, StatusCode, header};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::tracker::TrackerError;
 
@@ -84,6 +84,38 @@ impl GitHubApi {
             ));
         }
         Ok(items)
+    }
+
+    pub(crate) async fn graphql(
+        &self,
+        token: &str,
+        query: &str,
+        variables: Value,
+    ) -> Result<Value, TrackerError> {
+        let payload = self
+            .send(
+                token,
+                Method::POST,
+                "/graphql",
+                Some(json!({ "query": query, "variables": variables })),
+            )
+            .await?;
+        if let Some(message) = payload
+            .get("errors")
+            .and_then(Value::as_array)
+            .and_then(|errors| errors.first())
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+        {
+            return Err(TrackerError::new(format!(
+                "GitHub rejected the request: {}",
+                clipped(message)
+            )));
+        }
+        payload
+            .get("data")
+            .cloned()
+            .ok_or_else(|| TrackerError::new("GitHub returned no data"))
     }
 
     pub(crate) async fn request(

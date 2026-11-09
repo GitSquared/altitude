@@ -57,6 +57,10 @@ pub(crate) async fn write_status(
     Ok(())
 }
 
+pub(crate) fn has_label(issue: &Value, wanted: &str) -> bool {
+    label_names(issue).any(|label| label.eq_ignore_ascii_case(wanted))
+}
+
 pub(crate) async fn remove_label(
     api: &GitHubApi,
     token: &str,

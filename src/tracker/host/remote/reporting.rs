@@ -721,7 +721,12 @@ impl RemoteTracker {
     // the one thing a conversation cannot recover from.
     pub(super) async fn post_signal_reply(&self, report: &Cursor, signal_id: &str, body: &str) {
         let marker = ask_marker(&report.task_id, signal_id);
-        match self.config.automation.has_ask(&marker).await {
+        match self
+            .config
+            .automation
+            .has_ask(&self.issue_reference(&report.issue_id), &marker)
+            .await
+        {
             Ok(true) => {}
             // A discussion this machine never opened has nowhere to put a reply.
             Ok(false) => return,
@@ -756,7 +761,12 @@ impl RemoteTracker {
         // A signal resolved before this machine could report it has no discussion to
         // close: asking first is how that stays a fact rather than an error the
         // provider might also be giving for a real failure.
-        match self.config.automation.has_ask(&marker).await {
+        match self
+            .config
+            .automation
+            .has_ask(&self.issue_reference(&report.issue_id), &marker)
+            .await
+        {
             Ok(true) => {}
             Ok(false) => return,
             Err(error) => {
@@ -764,7 +774,12 @@ impl RemoteTracker {
                 return;
             }
         }
-        if let Err(error) = self.config.automation.close_ask(&marker, resolved).await {
+        if let Err(error) = self
+            .config
+            .automation
+            .close_ask(&self.issue_reference(&report.issue_id), &marker, resolved)
+            .await
+        {
             tracing::warn!(
                 task = %report.task_id,
                 signal = signal_id,
@@ -939,7 +954,12 @@ impl RemoteTracker {
         let contributions = contribution_details(events);
         for signal in threads.iter().filter(|signal| signal.is_unresolved()) {
             let marker = ask_marker(&report.task_id, &signal.id);
-            match self.config.automation.has_ask(&marker).await {
+            match self
+                .config
+                .automation
+                .has_ask(&self.issue_reference(&report.issue_id), &marker)
+                .await
+            {
                 Ok(true) => continue,
                 Ok(false) => {}
                 Err(error) => {

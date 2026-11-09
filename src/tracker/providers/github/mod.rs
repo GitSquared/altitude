@@ -8,7 +8,10 @@ use reqwest::Method;
 use serde_json::{Value, json};
 
 pub(crate) mod api;
+pub(crate) mod automation;
+pub(crate) mod host;
 pub(crate) mod issues;
+pub(crate) mod settings;
 pub(crate) mod setup;
 mod sign_in;
 pub(crate) mod status;
