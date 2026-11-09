@@ -1,9 +1,10 @@
 // Helpers for driving Altitude without a real agent, network or microVM. Compiled
-// under `cfg(test)` for the module tests, and behind the `testkit` feature for a
-// driver that wants the same scripted harness in a real binary.
+// under `cfg(test)`, in a debug build, and behind the `testkit` feature: the module
+// tests use it, and a debug build honours `ALTITUDE_SCRIPTED_AGENT` so the interface
+// can be driven end to end without an account, a network or a model.
 #![allow(dead_code)]
 
-use std::{path::Path, sync::Arc};
+use std::{env, path::Path, sync::Arc};
 
 use crate::{
     agent::{AgentEngine, AgentEngines, AgentKind, AgentUsage, TaskStreamDecoder, TaskUsage},
@@ -189,4 +190,10 @@ impl TaskStreamDecoder for ScriptedStream {
 
 pub fn engines() -> AgentEngines {
     AgentEngines::new().with(AgentKind::Pi, Arc::new(ScriptedAgent))
+}
+
+// Whether this run was asked for a scripted harness. A debug build, or one with the
+// `testkit` feature, honours it; a release build does not know the name.
+pub fn is_scripted() -> bool {
+    env::var_os("ALTITUDE_SCRIPTED_AGENT").is_some()
 }

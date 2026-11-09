@@ -29,7 +29,7 @@ mod logging;
 mod project;
 mod remote;
 mod task;
-#[cfg(any(test, feature = "testkit"))]
+#[cfg(any(test, debug_assertions, feature = "testkit"))]
 mod testkit;
 mod tracker;
 mod tui;
@@ -74,6 +74,18 @@ async fn client() -> Result<(), Box<dyn Error>> {
         }
         IsolationBackend::Testbed => client_with(TestbedIsolation::new(&config), config).await,
     }
+}
+
+// The harnesses this machine runs turns with. A debug build, or one asked for the
+// testkit, can put a scripted harness in their place, so the interface can be driven
+// end to end without an account, a network or a model.
+fn agent_engines() -> AgentEngines {
+    #[cfg(any(debug_assertions, feature = "testkit"))]
+    if testkit::is_scripted() {
+        tracing::warn!("the scripted agent is running turns; no real harness is called");
+        return testkit::engines();
+    }
+    AgentEngines::new()
 }
 
 async fn client_with<E>(isolation: E, config: Config) -> Result<(), Box<dyn Error>>
@@ -165,15 +177,21 @@ where
         let issue_reader = trackers
             .for_credential(&identity.id, "trackers/linear")
             .map(|tracker| tracker as Arc<dyn tracker::IssueReader>);
-        let tasks = TaskService::new(
+        let mut tasks = TaskService::new(
             TaskStore::new(&database),
             isolation,
             config.clone(),
-            AgentEngines::new(),
+            agent_engines(),
             identity,
         )
         .with_trackers(trackers)
         .with_issue_reader(issue_reader);
+        // The scripted harness answers for this machine's version control too, so a
+        // task can be provisioned and run without a client being installed here.
+        #[cfg(any(debug_assertions, feature = "testkit"))]
+        if testkit::is_scripted() {
+            tasks.override_recipe("vcs/github", testkit::scripted_vcs_recipe());
+        }
         // Every body is known before any turn runs, which is the only moment a picture
         // nothing names can be told apart from one a signal is about to name.
         match tasks.sweep_pictures().await {

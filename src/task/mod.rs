@@ -24,7 +24,7 @@ use tokio::sync::broadcast;
 use crate::remote::{TRANSCRIPT_FILE, WORK_PLAIN_FILE};
 use uuid::Uuid;
 
-#[cfg(any(test, feature = "testkit"))]
+#[cfg(any(test, debug_assertions, feature = "testkit"))]
 use crate::isolation::ProfileRecipe;
 
 mod agent;
@@ -256,7 +256,7 @@ where
     // A profile's recipe a test put in place of the installed one, so a task can be
     // provisioned without a harness or a version-control client being installed on
     // the machine first.
-    #[cfg(any(test, feature = "testkit"))]
+    #[cfg(any(test, debug_assertions, feature = "testkit"))]
     pub fn override_recipe(&mut self, profile: &str, recipe: ProfileRecipe) {
         self.credentials.override_recipe(profile, recipe);
     }

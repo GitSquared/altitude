@@ -4,7 +4,7 @@ mod shell;
 
 use std::{error::Error, fmt, path::PathBuf};
 
-#[cfg(any(test, feature = "testkit"))]
+#[cfg(any(test, debug_assertions, feature = "testkit"))]
 use std::collections::HashMap;
 
 use crate::vcs;
@@ -56,7 +56,7 @@ pub struct Credentials<E> {
     relays: PortRelays,
     // Recipes a test put in place of the real ones, so a scripted provider does not
     // have to install anything on the machine to answer for a profile.
-    #[cfg(any(test, feature = "testkit"))]
+    #[cfg(any(test, debug_assertions, feature = "testkit"))]
     overrides: HashMap<String, ProfileRecipe>,
 }
 
@@ -77,12 +77,12 @@ where
             relays,
             config,
             agents,
-            #[cfg(any(test, feature = "testkit"))]
+            #[cfg(any(test, debug_assertions, feature = "testkit"))]
             overrides: HashMap::new(),
         }
     }
 
-    #[cfg(any(test, feature = "testkit"))]
+    #[cfg(any(test, debug_assertions, feature = "testkit"))]
     pub(crate) fn override_recipe(&mut self, profile: &str, recipe: ProfileRecipe) {
         self.overrides.insert(profile.to_owned(), recipe);
     }
@@ -103,7 +103,7 @@ where
     }
 
     pub(crate) fn recipe(&self, profile: &str) -> Result<ProfileRecipe, CredentialsError> {
-        #[cfg(any(test, feature = "testkit"))]
+        #[cfg(any(test, debug_assertions, feature = "testkit"))]
         if let Some(recipe) = self.overrides.get(profile) {
             return Ok(recipe.clone());
         }

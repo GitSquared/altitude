@@ -284,7 +284,7 @@ impl AgentEngines {
         }
     }
 
-    #[cfg(any(test, feature = "testkit"))]
+    #[cfg(any(test, debug_assertions, feature = "testkit"))]
     pub fn with(mut self, kind: AgentKind, engine: Arc<dyn AgentEngine>) -> Self {
         match kind {
             AgentKind::Claude => self.claude = engine,
