@@ -27,14 +27,21 @@ pub trait AskSurface: Send + Sync {
     // Closing is the operator's word that the question is over. A surface without
     // the idea keeps the ask where it is and returns success: there is nothing to
     // do, not something that failed.
-    fn close_ask<'a>(&'a self, _marker: &'a str, _closed: bool) -> TrackerFuture<'a, ()> {
+    fn close_ask<'a>(
+        &'a self,
+        _issue: &'a IssueReference,
+        _marker: &'a str,
+        _closed: bool,
+    ) -> TrackerFuture<'a, ()> {
         Box::pin(async { Ok(()) })
     }
 
     // Whether this machine ever opened the discussion. A reply into a discussion
     // that does not exist is not an answer, and a close that finds nothing is not
-    // an error.
-    fn has_ask<'a>(&'a self, marker: &'a str) -> TrackerFuture<'a, bool>;
+    // an error. The issue is where a flat feed has to look for the marker; a tracker
+    // that finds a discussion by its id alone does not need it.
+    fn has_ask<'a>(&'a self, issue: &'a IssueReference, marker: &'a str)
+    -> TrackerFuture<'a, bool>;
 }
 
 // The one place ask identity is derived. The task and the signal are what both

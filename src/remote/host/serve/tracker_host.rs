@@ -12,11 +12,12 @@ use iroh::EndpointId;
 
 use crate::{
     config::{Config, InstallationIdentity},
-    credentials::Service,
+    credentials::{Service, Slot},
+    project::{Project, TrackerBinding},
     task::{TaskAsk, TaskHistoryEvent, TrackerHost},
     tracker::{
         self, BoundTask, DelegatedWork, DelegatedWorkFuture, IssueSnapshot, QueueStanding, Start,
-        TrackerProvider, TrackerStatus,
+        TrackerKind, TrackerProvider, TrackerStatus,
     },
 };
 
@@ -66,22 +67,32 @@ impl DelegatedWork for OwnTasks {
             // An exact claim beats a project that claims its whole account, so a
             // workspace that grows a second scope does not start sending both to
             // whichever project was there first.
+            // A project hears from the tracker its binding signs in to. One bound before
+            // there was a second tracker names no credential and meant Linear.
+            let default_tracker = settings.settings().default_credential(Slot::Tracker);
+            let provider = issue.issue.reference.provider;
+            let hears_from = |project: &Project, wants: &dyn Fn(&TrackerBinding) -> bool| {
+                project.tracker.as_ref().is_some_and(|route| {
+                    route
+                        .credential
+                        .as_deref()
+                        .or(default_tracker)
+                        .and_then(TrackerKind::of_credential)
+                        .unwrap_or(TrackerKind::Linear)
+                        == provider
+                        && wants(route)
+                })
+            };
             let projects = settings.settings().projects();
             let project = projects
                 .iter()
                 .find(|project| {
-                    project
-                        .tracker
-                        .as_ref()
-                        .is_some_and(|route| route.claims(&scope.id, &scope.aliases))
+                    hears_from(project, &|route| route.claims(&scope.id, &scope.aliases))
                 })
                 .or_else(|| {
-                    projects.iter().find(|project| {
-                        project
-                            .tracker
-                            .as_ref()
-                            .is_some_and(|route| route.claims_anything())
-                    })
+                    projects
+                        .iter()
+                        .find(|project| hears_from(project, &|route| route.claims_anything()))
                 })
                 .cloned();
             let Some(project) = project else {

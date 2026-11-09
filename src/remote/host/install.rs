@@ -238,10 +238,14 @@ impl Service {
 
     fn warn_about_inherited_secrets(&self) -> Result<(), Box<dyn Error>> {
         let settings = ServeSettings::load_or_create(&self.settings_path)?;
-        let Some(tracker) = settings.tracker else {
-            return Ok(());
-        };
-        if tracker.client_secret.is_some() && tracker.webhook_secret.is_some() {
+        let inherits_linear = settings.tracker.as_ref().is_some_and(|tracker| {
+            tracker.client_secret.is_none() || tracker.webhook_secret.is_none()
+        });
+        let inherits_github = settings
+            .github
+            .as_ref()
+            .is_some_and(|github| github.webhook_secret.is_none());
+        if !inherits_linear && !inherits_github {
             return Ok(());
         }
         println!();
