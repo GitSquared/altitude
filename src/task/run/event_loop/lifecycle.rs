@@ -315,39 +315,32 @@ where
         Ok(task)
     }
 
+    // The newest task on an issue that is still in play, which is the one the issue
+    // is being worked on by. Every condition is asked of the same task: the list is
+    // ordered by whatever moved last, so a task on another issue answering "which
+    // task is this issue's" is the bug this shape had — a mention, a comment and a
+    // reply all found nothing to wake whenever a more recent task was running.
     pub async fn work_for_issue(
         &self,
         issue_id: &str,
         delegations: &[&str],
     ) -> Result<Option<Task>, TaskServiceError> {
-        Ok(self
-            .list()
-            .await?
-            .into_iter()
-            .find(|task| {
-                task.facts.execution_pause_reason.is_none()
-                    || !matches!(
-                        task.facts.execution_pause_reason,
-                        Some(
-                            TaskExecutionPauseReason::TrackerEnded
-                                | TaskExecutionPauseReason::StoppedInTracker
-                                | TaskExecutionPauseReason::DelegationWithdrawn
-                        )
-                    )
-            })
-            .filter(|task| {
-                task.facts
-                    .tracker_issue
+        Ok(self.list().await?.into_iter().find(|task| {
+            task.facts
+                .tracker_issue
+                .as_ref()
+                .is_some_and(|bound| bound.id == issue_id || bound.identifier == issue_id)
+                && !task
+                    .facts
+                    .execution_pause_reason
                     .as_ref()
-                    .is_some_and(|bound| bound.id == issue_id || bound.identifier == issue_id)
-            })
-            .filter(|task| {
-                delegations.is_empty()
+                    .is_some_and(TaskExecutionPauseReason::is_out_of_play)
+                && (delegations.is_empty()
                     || task
                         .facts
                         .tracker_delegation
                         .as_deref()
-                        .is_some_and(|held| delegations.contains(&held))
-            }))
+                        .is_some_and(|held| delegations.contains(&held)))
+        }))
     }
 }
