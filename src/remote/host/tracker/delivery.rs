@@ -231,8 +231,8 @@ impl RemoteTracker {
                 let id = stable_id(&format!("{}-{index}", report.task_id), "paused");
                 // Per pause, not per task: a thread that says nothing the second time
                 // it waits is a thread the operator thinks is still thinking.
-                let content = if waits_on_a_person(execution_pause_reason) {
-                    let asking = events[..=index]
+                let asking = if waits_on_a_person(execution_pause_reason) {
+                    events[..=index]
                         .iter()
                         .rev()
                         .find_map(|(_, event)| match event {
@@ -242,7 +242,11 @@ impl RemoteTracker {
                                 Some(signal.kind)
                             }
                             _ => None,
-                        });
+                        })
+                } else {
+                    None
+                };
+                let content = if waits_on_a_person(execution_pause_reason) {
                     let operator = self.operator_name(&report.tracker_user_id).await;
                     // The last thing a run says is the handoff, and it is said to a
                     // person: it is what leaves the session waiting on them rather than
@@ -258,6 +262,18 @@ impl RemoteTracker {
                 self.say(report, &id, content)
                     .await
                     .map_err(|error| error.to_string())?;
+                // A review the operator has not accepted is work waiting on them, and
+                // the issue said In Progress because the run that just ended put it
+                // there. Leaving it says the agent is still busy when the only thing
+                // busy is the operator's attention.
+                if asking == Some(TaskAskKind::Review)
+                    && !self.is_settled(&report.issue_id)
+                    && let Err(error) = self
+                        .write_status(host, report, TrackerStatus::InReview)
+                        .await
+                {
+                    tracing::warn!(issue = %report.issue_id, %error, "could not say the task is waiting on a review");
+                }
             }
             // A task that stopped is not a task that is working. The thread the
             // failure raised carries the detail; this is what stops the session
