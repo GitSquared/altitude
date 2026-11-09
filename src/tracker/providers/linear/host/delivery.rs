@@ -475,7 +475,8 @@ impl RemoteTracker {
             self.advance_cursor(&report.task_id, index + 1)?;
         }
         if folded {
-            self.replay_signals(host, report, &events).await?;
+            self.ensure_asks_said(host, report, &events).await?;
+            self.advance_cursor(&report.task_id, events.len())?;
         }
         Ok(())
     }

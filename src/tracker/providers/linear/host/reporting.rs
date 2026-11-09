@@ -1,7 +1,7 @@
 use super::ledger::Cursor;
 use crate::tracker::{AskSurface, ask_marker};
 use crate::{
-    task::{TaskAskKind, TaskHistoryEvent, picture},
+    task::{TaskAsk, TaskAskKind, TaskHistoryEvent, picture},
     tracker::{IssueReference, TrackerStatus, providers::linear::automation::AgentActivityContent},
 };
 use futures_util::future::join_all;
@@ -924,18 +924,45 @@ impl RemoteTracker {
         self.finish_report(report)
     }
 
-    pub(super) async fn replay_signals(
+    // What the tracker says a task is waiting on is the only record of whether the
+    // question reached the operator. A pass that failed to publish an ask leaves a
+    // signal nobody has seen and a thread that does not exist, which then reads as an
+    // error for as long as the task lives; asking the tracker where each open question
+    // stands is cheaper than keeping a second copy of the answer here. The marker is
+    // the comment's own id, so publishing one twice says the same thing once.
+    pub(super) async fn ensure_asks_said(
         &self,
         host: &dyn DelegatedWork,
         report: &Cursor,
         events: &[(i64, TaskHistoryEvent)],
     ) -> Result<(), String> {
         let threads = host.signal_threads(report.task_id.clone()).await?;
+        let open: Vec<&TaskAsk> = threads
+            .iter()
+            .filter(|signal| signal.is_unresolved())
+            .collect();
+        if open.is_empty() {
+            return Ok(());
+        }
         let contributions = contribution_details(events);
-        for signal in threads.iter().filter(|signal| signal.is_unresolved()) {
+        for signal in open {
+            let marker = ask_marker(&report.task_id, &signal.id);
+            match self.config.automation.has_ask(&marker).await {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::debug!(task = %report.task_id, signal = %signal.id, %error, "could not ask the tracker about an open question");
+                    continue;
+                }
+            }
             let Some(message) = signal.latest_agent_message() else {
                 continue;
             };
+            tracing::info!(
+                task = %report.task_id,
+                signal = %signal.id,
+                "a question never reached the issue, so it is asked again"
+            );
             if let Some(status) = self
                 .publish_signal(
                     report,
@@ -950,7 +977,7 @@ impl RemoteTracker {
                 self.write_status(host, report, status).await?;
             }
         }
-        self.advance_cursor(&report.task_id, events.len())
+        Ok(())
     }
 }
 
