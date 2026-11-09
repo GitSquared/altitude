@@ -10,7 +10,7 @@ use std::{
 use crate::remote::identity::write_private;
 use crate::task::{TaskAskKind, TaskExecutionPauseReason, TaskHistoryEvent};
 use crate::tracker::host::{BoundTask, DelegatedWork, QueueStanding, Start};
-use crate::tracker::providers::linear::automation::LinearAutomation;
+use crate::tracker::providers::linear::automation::{LinearAutomation, is_absence};
 use axum::{Router, extract::DefaultBodyLimit, routing::post};
 use ledger::{IssueStateChanged, Ledger, StoredEvent};
 use std::time::Instant;
@@ -134,10 +134,6 @@ fn pause_message(
         (TaskExecutionPauseReason::AwaitingOperator, None) => format!("Waiting for {operator}."),
         (reason, _) => format!("{} Tell {operator} what to do next.", reason.notice()),
     }
-}
-
-fn worth_retrying(refusal: &str) -> bool {
-    !refusal.contains("not found") && !refusal.contains("Entity not found")
 }
 
 fn picking_up(operator: Option<&str>, agent: Option<&str>) -> String {

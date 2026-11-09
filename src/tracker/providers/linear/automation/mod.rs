@@ -19,6 +19,13 @@ pub use agent_sessions::{
 use self::issues::summary_of;
 use self::queries::*;
 
+// Linear refuses a request about something it does not have rather than answering
+// with nothing, and that is the one refusal that is not a failure: a question about
+// a comment or an issue that is gone is answered, not retried forever.
+pub fn is_absence(refusal: &str) -> bool {
+    refusal.contains("not found") || refusal.contains("Entity not found")
+}
+
 pub struct LinearAutomation {
     token: RwLock<String>,
     workspace_id: String,

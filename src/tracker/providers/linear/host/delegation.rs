@@ -163,7 +163,7 @@ impl RemoteTracker {
                 .lock()
                 .ok()
                 .and_then(|refusals| refusals.get(&task.task_id).cloned())
-                .is_some_and(|reason| !worth_retrying(&reason));
+                .is_some_and(|reason| is_absence(&reason));
             if refused_for_good {
                 continue;
             }
