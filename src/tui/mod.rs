@@ -5,6 +5,7 @@ mod graphics;
 mod keys;
 mod links;
 mod popups;
+mod poster;
 #[cfg(any(debug_assertions, feature = "preview"))]
 mod preview;
 mod run;
@@ -17,6 +18,7 @@ pub use boot::{
     task_resume as boot_task_resume,
 };
 pub use graphics::Pictures;
+pub use poster::run as poster;
 #[cfg(any(debug_assertions, feature = "preview"))]
 pub(crate) use preview::run as preview;
 pub use run::Feeds;

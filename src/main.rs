@@ -55,6 +55,7 @@ async fn main() -> ExitCode {
     }
     let result = match Cli::parse().command {
         Some(Command::Serve(args)) => remote::serve::run(args).await,
+        Some(Command::Poster) => tui::poster().await.map_err(Into::into),
         None => client().await,
     };
     match result {

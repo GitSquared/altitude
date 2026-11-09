@@ -6,6 +6,9 @@ use crate::{tracker::TrackerKind, version::VERSION};
 
 const SERVE_MODE: &str = "Run altitude serve on a headless server to let your team run agents beyond their own machines, and pilot them directly from your task tracker.";
 
+const POSTER_MODE: &str =
+    "Render the terrain altitude opens with, fullscreen and moving, until q or Esc quits.";
+
 const ROOT_HELP_TEMPLATE: &str = "\
 {name} {version}
 {about}
@@ -35,6 +38,8 @@ pub struct Cli {
 pub enum Command {
     #[command(long_about = SERVE_MODE, after_help = SERVE_AFTER_HELP)]
     Serve(ServeArgs),
+    #[command(long_about = POSTER_MODE)]
+    Poster,
 }
 
 const SERVE_AFTER_HELP: &str = "\
