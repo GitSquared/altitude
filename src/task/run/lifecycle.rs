@@ -795,29 +795,20 @@ fn notice_event(task: &Task, body: &str) -> Vec<TaskHistoryEvent> {
 // was waiting on a person or on a pull request is not "resuming" anything.
 // The last thing the task's history said it was doing: a run that started and never
 // ended is a run the machine stopped in the middle of.
+// Whether a run was in flight, which is the only thing a restart needs to know
+// about a history it is picking up. The two run markers answer it and nothing else
+// does: a pause is written after the run whose end it explains, and the machine's
+// own suspend writes one at the end of every history it touches.
 fn was_running(events: &[TaskHistoryEvent]) -> bool {
-    for event in events.iter().rev() {
-        match event {
-            TaskHistoryEvent::AgentRunStarted { .. } => return true,
-            // The shutdown's own pause is the interrupt being recorded, not the
-            // answer to the question: it is written for every task the machine
-            // suspends, the ones it cut in half included. Reading it as an ending
-            // is how a restart told a task mid-turn that it had been waiting all
-            // along, and left the turn unfinished.
-            TaskHistoryEvent::ExecutionPaused {
-                execution_pause_reason: TaskExecutionPauseReason::ApplicationShutdown,
-                ..
-            } => {}
-            TaskHistoryEvent::AgentRunEnded { .. }
-            | TaskHistoryEvent::ExecutionPaused { .. }
-            | TaskHistoryEvent::ExecutionRecovered { .. }
-            | TaskHistoryEvent::ExecutionQueued { .. }
-            | TaskHistoryEvent::TaskCompleted { .. }
-            | TaskHistoryEvent::ExecutionFailed { .. } => return false,
-            _ => {}
-        }
-    }
-    false
+    events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            TaskHistoryEvent::AgentRunStarted { .. } => Some(true),
+            TaskHistoryEvent::AgentRunEnded { .. } => Some(false),
+            _ => None,
+        })
+        .unwrap_or(false)
 }
 
 fn woke_up_saying(task: &Task, interrupted: bool) -> String {
