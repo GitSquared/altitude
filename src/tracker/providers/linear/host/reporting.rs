@@ -830,18 +830,6 @@ impl RemoteTracker {
         })
     }
 
-    pub(super) async fn say_task_is_running(&self, host: &dyn DelegatedWork, report: &Cursor) {
-        if self.is_settled(&report.issue_id) {
-            return;
-        }
-        if let Err(error) = self
-            .write_status(host, report, TrackerStatus::InProgress)
-            .await
-        {
-            tracing::warn!(issue = %report.issue_id, %error, "could not say the task is running again");
-        }
-    }
-
     pub(super) async fn finish_accepted(
         &self,
         host: &dyn DelegatedWork,

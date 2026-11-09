@@ -209,6 +209,7 @@ impl RemoteTracker {
         events: &[(i64, TaskHistoryEvent)],
         index: usize,
         unresolved: &HashSet<String>,
+        status: &mut Option<TrackerStatus>,
     ) -> Result<Option<()>, String> {
         let (_, event) = &events[index];
         match event {
@@ -271,13 +272,8 @@ impl RemoteTracker {
                 // the issue said In Progress because the run that just ended put it
                 // there. Leaving it says the agent is still busy when the only thing
                 // busy is the operator's attention.
-                if asking == Some(TaskAskKind::Review)
-                    && !self.is_settled(&report.issue_id)
-                    && let Err(error) = self
-                        .write_status(host, report, TrackerStatus::InReview)
-                        .await
-                {
-                    tracing::warn!(issue = %report.issue_id, %error, "could not say the task is waiting on a review");
+                if asking == Some(TaskAskKind::Review) && !self.is_settled(&report.issue_id) {
+                    *status = Some(TrackerStatus::InReview);
                 }
             }
             // A task that stopped is not a task that is working. The thread the
@@ -356,8 +352,7 @@ impl RemoteTracker {
                     }
                     Some(_) => {}
                 }
-                self.write_status(host, report, TrackerStatus::InProgress)
-                    .await?;
+                *status = Some(TrackerStatus::InProgress);
             }
             // What the agent says in a thread belongs to the thread. Until this, a reply
             // lived only in the task's history: whoever read the issue saw the question
@@ -372,7 +367,7 @@ impl RemoteTracker {
             TaskHistoryEvent::OperatorSignalRaised { signal } => {
                 if unresolved.contains(&signal.id) {
                     let contributions = contribution_details(&events[..=index]);
-                    if let Some(status) = self
+                    if let Some(published) = self
                         .publish_signal(
                             report,
                             &signal.id,
@@ -383,7 +378,7 @@ impl RemoteTracker {
                         )
                         .await?
                     {
-                        self.write_status(host, report, status).await?;
+                        *status = Some(published);
                     }
                 }
             }
@@ -397,7 +392,9 @@ impl RemoteTracker {
                 // said In Review while the task was waiting, and it is not waiting
                 // any more. An issue whose ending was already written is left as
                 // the operator left it.
-                self.say_task_is_running(host, report).await;
+                if !self.is_settled(&report.issue_id) {
+                    *status = Some(TrackerStatus::InProgress);
+                }
             }
             TaskHistoryEvent::OperatorSignalResolved {
                 signal_id,
@@ -407,12 +404,8 @@ impl RemoteTracker {
                 // Reopening a thread says the question is live again, so the
                 // tracker shows it open and the issue is waiting on the operator.
                 self.follow_signal_thread(report, signal_id, false).await;
-                if !self.is_settled(&report.issue_id)
-                    && let Err(error) = self
-                        .write_status(host, report, TrackerStatus::InReview)
-                        .await
-                {
-                    tracing::warn!(issue = %report.issue_id, %error, "could not say the task is waiting again");
+                if !self.is_settled(&report.issue_id) {
+                    *status = Some(TrackerStatus::InReview);
                 }
             }
             TaskHistoryEvent::OperatorSignalConfirmed { signal_id } => {
@@ -472,9 +465,10 @@ impl RemoteTracker {
             first_at_ms + ADOPTION_WINDOW_MS < report.created_at_ms
         });
         let projecting = report.reported_events == 0 && adopted;
+        let mut status = None;
         for index in start..events.len() {
             let outcome = self
-                .report_event(host, report, &events, index, &unresolved)
+                .report_event(host, report, &events, index, &unresolved, &mut status)
                 .await;
             match outcome {
                 Ok(Some(done)) => return Ok(done),
@@ -482,6 +476,11 @@ impl RemoteTracker {
                 Err(error) => return self.refused_event(report, index, error),
             }
             self.advance_cursor(&report.task_id, index + 1)?;
+        }
+        // One write for the whole pass: a status per event made the issue flicker
+        // through every state a batch passed through before settling on the last.
+        if let Some(status) = status {
+            self.write_status(host, report, status).await?;
         }
         if projecting {
             self.project_state(host, report, &events).await?;
