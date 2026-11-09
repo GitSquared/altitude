@@ -122,6 +122,20 @@ impl LinearAutomation {
         Ok(())
     }
 
+    // A mention on an issue nobody delegated is the operator asking this machine for
+    // the work, and the tracker is where that is recorded. Without this the task that
+    // mention starts is one the tracker never asked for, and the next pass stops it.
+    pub async fn claim_issue(&self, reference: &IssueReference) -> Result<(), TrackerError> {
+        let data = self
+            .graphql(
+                UPDATE_STATE_MUTATION,
+                json!({ "id": reference.id, "input": { "delegateId": self.app_user_id } }),
+            )
+            .await?;
+        mutation_succeeded(&data, "issueUpdate")?;
+        Ok(())
+    }
+
     pub(super) async fn comments(&self, issue_id: &str) -> Result<Vec<IssueComment>, TrackerError> {
         let mut comments = Vec::new();
         let mut after: Option<String> = None;

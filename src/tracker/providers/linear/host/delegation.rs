@@ -244,72 +244,100 @@ impl RemoteTracker {
             return Ok(());
         };
         let label = event.creator_name.as_deref().unwrap_or(author);
-        // A mention creates a new session beside the existing task. It is a
-        // message into that task, never a redelegation. A delegation's comment is
-        // the generated session root; a mention's comment is a human thread.
-        let is_mention = match event.comment_id.as_deref() {
-            Some(comment_id) => {
-                !self
-                    .config
-                    .automation
-                    .comment_site(comment_id)
-                    .await
-                    .map_err(|error| error.to_string())?
-                    .is_artificial_session_root
-            }
-            None => false,
-        };
-        // A teammate's mention is a boundary case: acknowledge it and name the
-        // operator, but do not run work for them.
-        let working = host
-            .work_for_issue(issue_id.to_owned(), Vec::new())
-            .await?
-            .and_then(|task| self.report_for_task(&task.task_id));
-        if let Some(report) = working
-            && is_mention
-        {
-            if let Some(source_comment_id) = event
-                .source_comment_id
-                .as_ref()
-                .or(event.comment_id.as_ref())
-            {
-                self.react_eyes(source_comment_id).await;
-            }
-            if author == report.tracker_user_id {
-                let body = event.prompt_body.clone().unwrap_or_default();
-                if !body.trim().is_empty() {
-                    host.steer(
-                        report.task_id,
-                        format!(
-                            "A mention from the task's operator:\n\n{body}\n\n\
-                             This comment was addressed to you. Continue the task with it."
-                        ),
-                    )
-                    .await?;
-                    self.create_system_activity(
-                        &event.session_id,
-                        &stable_id(&event.session_id, "already-running"),
-                        AgentActivityContent::Response {
-                            body: "Added to the task already running for this issue.".to_owned(),
-                        },
-                    )
-                    .await
-                    .map_err(|error| error.to_string())?;
+        if self.is_mention_session(event).await? {
+            // The task holding the issue is what a mention is for. Asking for the
+            // report as well made the message reach nothing whenever a task existed
+            // but this machine was not reporting on it yet.
+            if let Some(task) = host.work_for_issue(issue_id.to_owned(), Vec::new()).await? {
+                if let Some(source_comment_id) = event
+                    .source_comment_id
+                    .as_ref()
+                    .or(event.comment_id.as_ref())
+                {
+                    self.react_eyes(source_comment_id).await;
                 }
+                self.mention_into_task(
+                    &event.session_id,
+                    &task,
+                    author,
+                    event.prompt_body.as_deref(),
+                    host,
+                )
+                .await?;
                 return Ok(());
             }
-            let body = self.boundary_reply(&report.tracker_user_id).await;
+        }
+        self.delegate(issue_id, &event.session_id, author, label, host)
+            .await
+    }
+
+    // A mention opens a session beside the task that holds the issue: a message into
+    // that task, never a redelegation. The operator asking the agent something in a
+    // new thread has not asked for the conversation to start over, so nothing here
+    // starts work — it says the message where the task can read it.
+    pub(super) async fn mention_into_task(
+        &self,
+        session_id: &str,
+        task: &BoundTask,
+        author: &str,
+        body: Option<&str>,
+        host: &dyn DelegatedWork,
+    ) -> Result<(), String> {
+        // A teammate's mention is a boundary case: acknowledge it and name the
+        // operator, but do not run work for them.
+        let operator = self.user_for_owner(&task.owner);
+        if operator.as_deref() != Some(author) {
+            let Some(operator) = operator else {
+                tracing::info!(task = %task.task_id, "a mention arrived for work with no operator on this machine");
+                return Ok(());
+            };
+            let body = self.boundary_reply(&operator).await;
             self.create_system_activity(
-                &event.session_id,
-                &stable_id(&event.session_id, "redirect"),
+                session_id,
+                &stable_id(session_id, "redirect"),
                 AgentActivityContent::Response { body },
             )
             .await
             .map_err(|error| error.to_string())?;
             return Ok(());
         }
-        self.delegate(issue_id, &event.session_id, author, label, host)
+        let body = body.unwrap_or_default();
+        if body.trim().is_empty() {
+            return Ok(());
+        }
+        host.steer(
+            task.task_id.clone(),
+            format!(
+                "A mention from the task's operator:\n\n{body}\n\n\
+                 This comment was addressed to you. Continue the task with it."
+            ),
+        )
+        .await?;
+        self.create_system_activity(
+            session_id,
+            &stable_id(session_id, "already-running"),
+            AgentActivityContent::Response {
+                body: "Added to the task already running for this issue.".to_owned(),
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())
+    }
+
+    // A delegation's comment is the generated session root; a mention's comment is a
+    // human thread beside it. That difference is the only thing that tells the two
+    // kinds of session apart.
+    pub(super) async fn is_mention_session(&self, event: &SessionEvent) -> Result<bool, String> {
+        let Some(comment_id) = event.comment_id.as_deref() else {
+            return Ok(false);
+        };
+        Ok(!self
+            .config
+            .automation
+            .comment_site(comment_id)
             .await
+            .map_err(|error| error.to_string())?
+            .is_artificial_session_root)
     }
 
     pub(super) async fn delegate(
@@ -386,6 +414,38 @@ impl RemoteTracker {
             self.post_sync_guidance(session_id).await?;
             return Ok(());
         };
+        // Work the tracker is not asking for is work nothing will keep watching: the
+        // pass that reads the issue's delegation stops a task the issue does not name
+        // this app for. An operator who mentions the app on an issue nobody delegated
+        // is asking for it, and the tracker is where that is written down — one
+        // minute later the task they asked for was being killed for the delegation
+        // nobody had made.
+        let delegation = self
+            .config
+            .automation
+            .issue_delegation(issue_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        if delegation.delegate_id.as_deref() != Some(self.config.automation.app_user_id()) {
+            if delegation.delegate_id.is_some() {
+                tracing::info!(issue = %issue_id, "an issue delegated to another app is not this machine's work");
+                return Ok(());
+            }
+            if let Err(error) = self
+                .config
+                .automation
+                .claim_issue(&self.issue_reference(issue_id))
+                .await
+            {
+                tracing::warn!(issue = %issue_id, %error, "could not delegate an issue asked for by a mention");
+                return Ok(());
+            }
+            tracing::info!(
+                issue = %issue_id,
+                session = %session_id,
+                "an issue asked for by a mention was delegated to this app"
+            );
+        }
         let peer: EndpointId = owner
             .parse()
             .map_err(|_| "the remote's key could not be read".to_owned())?;
@@ -493,6 +553,26 @@ impl RemoteTracker {
                     })
                 })?;
             }
+            // The task that holds the issue is what the operator stopped, even when
+            // this machine never got as far as reporting on it: a stop that only
+            // records a session leaves work running that nobody is watching. Only the
+            // delegation this task was founded in can stop it, because an issue has
+            // newer sessions than the one the running task belongs to.
+            if let Some(issue_id) = event.issue_id.as_deref()
+                && let Some(task) = host.work_for_issue(issue_id.to_owned(), Vec::new()).await?
+                && task.delegation.as_deref() == Some(event.session_id.as_str())
+            {
+                host.stop(
+                    task.task_id.clone(),
+                    TaskExecutionPauseReason::StoppedInTracker,
+                )
+                .await?;
+                tracing::info!(
+                    task = %task.task_id,
+                    session = %event.session_id,
+                    "a stopped session stopped the task it founded"
+                );
+            }
             return Ok(());
         };
         if !event.is_from(&report.tracker_user_id) {
@@ -536,14 +616,10 @@ impl RemoteTracker {
         occurred_at_ms: i64,
         host: &dyn DelegatedWork,
     ) -> Result<(), String> {
-        let Some(report) = host
-            .work_for_issue(issue_id.to_owned(), Vec::new())
-            .await?
-            .and_then(|task| self.report_for_task(&task.task_id))
-        else {
+        let Some(task) = host.work_for_issue(issue_id.to_owned(), Vec::new()).await? else {
             return Ok(());
         };
-        if report.tracker_user_id.as_str() != actor_id {
+        if self.user_for_owner(&task.owner).as_deref() != Some(actor_id) {
             return Ok(());
         }
         let delegation = self
@@ -555,6 +631,19 @@ impl RemoteTracker {
         if delegation.state.id != state_id {
             return Ok(());
         }
+        // A task this machine is not reporting on has said nothing on the issue, so
+        // there is no status to forget and no thread to end: the ending is the
+        // operator's word alone, and all this machine has to do is stop treating the
+        // issue as work a later sweep could pick up.
+        let Some(report) = self.report_for_task(&task.task_id) else {
+            if matches!(
+                delegation.state.state_type.as_str(),
+                "completed" | "canceled"
+            ) {
+                self.settle(issue_id)?;
+            }
+            return Ok(());
+        };
         if let Err(error) = self.forget_status(&report.issue_id) {
             tracing::warn!(issue = %report.issue_id, %error, "could not forget the issue's status");
         }

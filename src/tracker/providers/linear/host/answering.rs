@@ -29,6 +29,30 @@ impl RemoteTracker {
                 tracing::info!(session = %event.session_id, "a prompt arrived in a session with no issue");
                 return Ok(());
             };
+            // A prompt in a session this machine has not reported into is either a
+            // mention beside the task holding the issue or a delegation. Only the
+            // second is work to start: steering the task is what the first one asked
+            // for, and delegating over it would stop the conversation the operator is
+            // having to answer a message they wrote to it.
+            if self.is_mention_session(event).await?
+                && let Some(task) = host.work_for_issue(issue_id.to_owned(), Vec::new()).await?
+            {
+                if let Some(source_comment_id) = event
+                    .source_comment_id
+                    .as_ref()
+                    .or(event.comment_id.as_ref())
+                {
+                    self.react_eyes(source_comment_id).await;
+                }
+                let author = event
+                    .prompt_author_id
+                    .as_deref()
+                    .or(event.creator_id.as_deref())
+                    .unwrap_or_default();
+                return self
+                    .mention_into_task(&event.session_id, &task, author, Some(answer), host)
+                    .await;
+            }
             let delegation = self
                 .config
                 .automation
