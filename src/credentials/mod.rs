@@ -4,6 +4,9 @@ mod shell;
 
 use std::{error::Error, fmt, path::PathBuf};
 
+#[cfg(any(test, debug_assertions, feature = "testkit"))]
+use std::collections::HashMap;
+
 use crate::vcs;
 
 pub use model::{Credential, Service, Slot, agent_of, describe, new_id};
@@ -51,6 +54,10 @@ pub struct Credentials<E> {
     agents: AgentEngines,
     channels: AgentChannels,
     relays: PortRelays,
+    // Recipes a test put in place of the real ones, so a scripted provider does not
+    // have to install anything on the machine to answer for a profile.
+    #[cfg(any(test, debug_assertions, feature = "testkit"))]
+    overrides: HashMap<String, ProfileRecipe>,
 }
 
 impl<E> Credentials<E> {
@@ -70,7 +77,14 @@ where
             relays,
             config,
             agents,
+            #[cfg(any(test, debug_assertions, feature = "testkit"))]
+            overrides: HashMap::new(),
         }
+    }
+
+    #[cfg(any(test, debug_assertions, feature = "testkit"))]
+    pub(crate) fn override_recipe(&mut self, profile: &str, recipe: ProfileRecipe) {
+        self.overrides.insert(profile.to_owned(), recipe);
     }
 }
 
@@ -89,6 +103,10 @@ where
     }
 
     pub(crate) fn recipe(&self, profile: &str) -> Result<ProfileRecipe, CredentialsError> {
+        #[cfg(any(test, debug_assertions, feature = "testkit"))]
+        if let Some(recipe) = self.overrides.get(profile) {
+            return Ok(recipe.clone());
+        }
         if let Some(recipe) = mounts::every(&self.agents)
             .into_iter()
             .find(|recipe| recipe.profile == profile)

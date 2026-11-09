@@ -16,6 +16,10 @@ absolute_paths = "warn"
 # it anyway; a release build needs asking, because a debug build's arithmetic is
 # nowhere near fast enough to judge the interface by.
 preview = []
+# Helpers for driving Altitude without a real agent, network or microVM: the
+# scripted harness and the fixtures tests and the TUI driver build on. Compiled
+# into the binary for a test build, and under `cfg(test)` always.
+testkit = []
 
 [dependencies]
 axum = "0.8.9"
@@ -83,3 +87,4 @@ mermaid-rs-renderer = "0.3.1"
 resvg = "0.49.0"
 image = "0.25.10"
 ratatui-image = { version = "11.1.0", default-features = false, features = ["image-defaults"] }
+portable-pty = { version = "0.9.0", default-features = false }

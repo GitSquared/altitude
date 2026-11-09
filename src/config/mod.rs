@@ -81,6 +81,18 @@ impl Config {
         &self.data_dir
     }
 
+    // A configuration pointed at directories a caller already made, so a test does
+    // not have to write process-wide environment variables to place its state.
+    #[cfg(any(test, debug_assertions, feature = "testkit"))]
+    pub fn at(config_dir: PathBuf, data_dir: PathBuf, cache_dir: PathBuf) -> Self {
+        Self {
+            config_dir,
+            data_dir,
+            cache_dir,
+            scope: ConfigScope::Personal,
+        }
+    }
+
     pub fn cache_dir(&self) -> &Path {
         &self.cache_dir
     }

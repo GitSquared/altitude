@@ -1,2 +1,6 @@
 /target
 /linear-probe/
+
+# Python bytecode from the scripts.
+__pycache__/
+*.pyc

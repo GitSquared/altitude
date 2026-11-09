@@ -13,8 +13,16 @@ use crate::project::Project;
 use super::{CommandEvent, IsolationEngine, IsolationError, OutputStream};
 
 pub(crate) fn opener_script() -> String {
+    // The opener is a convenience, not a sandbox's reason to exist: a sandbox whose
+    // `/usr/local/bin` cannot be written still works, just without a browser to hand
+    // links to.
     format!(
-        "mkdir -p /usr/local/bin\ncat > {OPENER} <<'ALTITUDE_OPENER'\n{}ALTITUDE_OPENER\nchmod 0755 {OPENER}\n",
+        "mkdir -p /usr/local/bin 2>/dev/null || true\n\
+         if [ -w /usr/local/bin ]; then\n\
+         cat > {OPENER} <<'ALTITUDE_OPENER'\n\
+         {}ALTITUDE_OPENER\n\
+         chmod 0755 {OPENER}\n\
+         fi\n",
         include_str!("../assets/xdg-open.sh")
     )
 }

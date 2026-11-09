@@ -24,6 +24,9 @@ use tokio::sync::broadcast;
 use crate::remote::{TRANSCRIPT_FILE, WORK_PLAIN_FILE};
 use uuid::Uuid;
 
+#[cfg(any(test, debug_assertions, feature = "testkit"))]
+use crate::isolation::ProfileRecipe;
+
 mod agent;
 pub(crate) mod memory;
 mod mirror;
@@ -248,6 +251,14 @@ where
     pub fn with_trackers(mut self, trackers: Arc<dyn TrackerHost>) -> Self {
         self.trackers = Some(trackers);
         self
+    }
+
+    // A profile's recipe a test put in place of the installed one, so a task can be
+    // provisioned without a harness or a version-control client being installed on
+    // the machine first.
+    #[cfg(any(test, debug_assertions, feature = "testkit"))]
+    pub fn override_recipe(&mut self, profile: &str, recipe: ProfileRecipe) {
+        self.credentials.override_recipe(profile, recipe);
     }
 
     pub fn with_issue_reader(mut self, reader: Option<Arc<dyn IssueReader>>) -> Self {

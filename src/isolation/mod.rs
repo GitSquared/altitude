@@ -23,7 +23,7 @@ mod providers;
 mod relay;
 mod sandbox;
 
-pub use providers::MicrosandboxIsolation;
+pub use providers::{IsolationBackend, MicrosandboxIsolation, TestbedIsolation};
 pub(crate) use relay::{PORT_RELAY_GUEST_PORT, install_script, with_port_relay};
 pub use relay::{PortNotice, PortRelays};
 pub(crate) use sandbox::guest_absolute;
