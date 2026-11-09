@@ -306,7 +306,6 @@ impl TaskStore {
         title: &str,
         body: &str,
         proposal: Option<ProjectProposal>,
-        supersedes: Option<&str>,
     ) -> Result<(Task, String), TaskError> {
         let task = self
             .get(task_id)
@@ -320,26 +319,14 @@ impl TaskStore {
             ));
         }
         // One ask is one wait, and two open asks are two threads to read where the
-        // operator wanted an answer to the first. An ask whose premise they have
-        // moved past is the exception, and it is replaced rather than kept: it is
-        // closed by this same act, so the swap cannot half-happen and leave them with
-        // the old question standing in front of the new one.
-        let mut superseded = None;
-        for thread in self.unresolved_signal_threads(task_id).await? {
-            match supersedes {
-                Some(id) if id == thread.id => superseded = Some(thread.id),
-                _ => {
-                    return Err(TaskError::OperationRejected(
-                        "this task is already asking something; reply in that thread with what \
-                         changed instead, or pass supersedes to replace it when the operator has \
-                         moved past it",
-                    ));
-                }
-            }
-        }
-        if supersedes.is_some() && superseded.is_none() {
+        // operator wanted an answer to the first. An answered thread is not a wait:
+        // closing it is the agent's to do before the next question, and this is what
+        // makes doing it first the only way to ask again.
+        if !self.unresolved_signal_threads(task_id).await?.is_empty() {
             return Err(TaskError::OperationRejected(
-                "the ask named by supersedes is not open on this task",
+                "this task is already asking something: if their answer has ended that
+                 question, resolve it first and then open this one; if it has not, reply
+                 in that thread with what changed",
             ));
         }
         // A review this machine is holding for its pull requests is a wait of its own:
@@ -366,22 +353,12 @@ impl TaskStore {
         // host watches them and delivers it when they can answer, so the operator
         // is asked to look at work that is actually reviewable. One with nothing to
         // watch goes out at once.
-        let mut events = Vec::new();
-        if let Some(superseded) = superseded {
-            events.push(TaskHistoryEvent::OperatorSignalResolved {
-                signal_id: superseded,
-                resolved: true,
-                by: TaskAskAuthor::Agent,
-            });
-        }
-        events.push(
-            if kind == TaskAskKind::Review && !task.code_contributions.is_empty() {
-                TaskHistoryEvent::ReviewDeferred { signal }
-            } else {
-                TaskHistoryEvent::OperatorSignalRaised { signal }
-            },
-        );
-        let task = self.append_events(task_id, &events).await?;
+        let event = if kind == TaskAskKind::Review && !task.code_contributions.is_empty() {
+            TaskHistoryEvent::ReviewDeferred { signal }
+        } else {
+            TaskHistoryEvent::OperatorSignalRaised { signal }
+        };
+        let task = self.append_events(task_id, &[event]).await?;
         Ok((task, id))
     }
 
