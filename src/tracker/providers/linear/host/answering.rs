@@ -26,6 +26,7 @@ impl RemoteTracker {
             // is actually asking for becomes work: a prompt on anything else must
             // not found a task nobody asked for.
             let Some(issue_id) = event.issue_id.as_deref() else {
+                tracing::info!(session = %event.session_id, "a prompt arrived in a session with no issue");
                 return Ok(());
             };
             let delegation = self
@@ -38,6 +39,11 @@ impl RemoteTracker {
             // the prompt is a memory of a session this machine is done with, and
             // founding a task from it is work nobody asked for.
             if delegation.delegate_id.as_deref() != Some(self.config.automation.app_user_id()) {
+                tracing::info!(
+                    session = %event.session_id,
+                    issue = %issue_id,
+                    "a prompt arrived in a session whose issue this app is not delegated"
+                );
                 return Ok(());
             }
             if let Some(author) = event.prompt_author_id.as_deref()
@@ -117,19 +123,29 @@ impl RemoteTracker {
         }
         let issue_id = site.issue_id.clone().or_else(|| event.issue_id.clone());
         let Some(issue_id) = issue_id else {
+            tracing::debug!(comment = %event.comment_id, "a Linear comment belongs to no issue");
             return Ok(());
         };
-        let Some(report) = host
-            .work_for_issue(issue_id.clone(), Vec::new())
-            .await?
-            .and_then(|task| self.report_for_task(&task.task_id))
-        else {
+        // The task holding the issue is what decides whether a comment has anywhere
+        // to go. Asking whether *this pass* already reports on it made a message
+        // reach nothing whenever the report was not there yet, and said nothing about
+        // it: an operator writing on a delegated issue is the one thing this machine
+        // must never swallow.
+        let Some(task) = host.work_for_issue(issue_id.clone(), Vec::new()).await? else {
+            tracing::info!(
+                comment = %event.comment_id,
+                issue = %issue_id,
+                "a Linear comment reached no task on this machine"
+            );
             return Ok(());
         };
-        if !host.is_kept(report.task_id.clone()).await? {
+        if !host.is_kept(task.task_id.clone()).await? {
+            tracing::info!(comment = %event.comment_id, task = %task.task_id, "a Linear comment reached a task that is gone");
             return Ok(());
         }
-        let actor = if event.actor_id == report.tracker_user_id {
+        let report = self.report_for_task(&task.task_id);
+        let operator = self.user_for_owner(&task.owner);
+        let actor = if operator.as_deref() == Some(event.actor_id.as_str()) {
             Actor::Operator
         } else {
             Actor::OtherHuman
@@ -141,24 +157,22 @@ impl RemoteTracker {
             || site
                 .human_authors
                 .iter()
-                .any(|id| id.as_str() != report.tracker_user_id && id.as_str() != app_user_id);
+                .any(|id| Some(id.as_str()) != operator.as_deref() && id.as_str() != app_user_id);
         // A comment on a thread this machine closed is the thread being reopened.
         // The tracker does not tell a separate story about an un-resolve, but a
         // reply in a closed thread is exactly that: nobody writes into an answered
         // question unless it is being asked again.
-        self.reopen_closed_thread(&report, &site, host).await;
+        self.reopen_closed_thread(&task.task_id, &site, host).await;
         // A reply inside a thread this machine published is an answer to the
         // question that thread asked, and the thread is which question it is. The
         // ids are derived from the task and the signal, so either side can work
         // them out and no table of published comments has to be kept.
         let root = site.root_comment_id.clone();
         let answered = host
-            .signal_threads(report.task_id.clone())
+            .signal_threads(task.task_id.clone())
             .await?
             .into_iter()
-            .find(|thread| {
-                thread.is_unresolved() && ask_marker(&report.task_id, &thread.id) == root
-            });
+            .find(|thread| thread.is_unresolved() && ask_marker(&task.task_id, &thread.id) == root);
         let facts = InputFacts {
             actor,
             is_mention: event.is_mention,
@@ -177,7 +191,7 @@ impl RemoteTracker {
             comment = %event.comment_id,
             root = %site.root_comment_id,
             site_comment = %site.comment_id,
-            task = %report.task_id,
+            task = %task.task_id,
             ?decision,
             reason = decision.reason(),
             mention = event.is_mention,
@@ -192,8 +206,10 @@ impl RemoteTracker {
                 } else {
                     event.body.clone()
                 };
-                self.note_wake(&report, "the operator wrote on the issue")
-                    .await;
+                if let Some(report) = &report {
+                    self.note_wake(report, "the operator wrote on the issue")
+                        .await;
+                }
                 if let Some(thread) = &answered {
                     // The reply answers the thread it is in. Whether an answer
                     // settles a question is the agent's to judge and it says so with
@@ -202,7 +218,7 @@ impl RemoteTracker {
                     // moving the issue to Done, which is theirs to do and cannot be
                     // misread as a comment.
                     return host
-                        .reply(report.task_id.clone(), thread.id.clone(), body)
+                        .reply(task.task_id.clone(), thread.id.clone(), body)
                         .await;
                 }
                 let source = if site.document_id.is_some() {
@@ -215,11 +231,15 @@ impl RemoteTracker {
                     "A comment from {author} on the task's {source}:\n\n{body}\n\n\
                      This comment was addressed to you. Continue the task with it."
                 );
-                host.steer(report.task_id, instruction).await
+                host.steer(task.task_id, instruction).await
             }
             Admission::Redirect => {
                 self.react_eyes(&event.comment_id).await;
-                let body = self.boundary_reply(&report.tracker_user_id).await;
+                let Some(operator) = operator else {
+                    tracing::info!(comment = %event.comment_id, "a teammate wrote on an issue this machine has no operator for");
+                    return Ok(());
+                };
+                let body = self.boundary_reply(&operator).await;
                 self.config
                     .automation
                     .comment_reply(
@@ -252,32 +272,29 @@ impl RemoteTracker {
         let Some(issue_id) = site.issue_id.clone() else {
             return Ok(());
         };
-        let Some(report) = host
-            .work_for_issue(issue_id, Vec::new())
-            .await?
-            .and_then(|task| self.report_for_task(&task.task_id))
-        else {
+        let Some(task) = host.work_for_issue(issue_id, Vec::new()).await? else {
+            tracing::info!(comment = %event.comment_id, "a thread was closed on an issue no task holds");
             return Ok(());
         };
-        if !host.is_kept(report.task_id.clone()).await? {
+        if !host.is_kept(task.task_id.clone()).await? {
             return Ok(());
         }
         let root = site.root_comment_id.clone();
         let thread = host
-            .signal_threads(report.task_id.clone())
+            .signal_threads(task.task_id.clone())
             .await?
             .into_iter()
-            .find(|thread| ask_marker(&report.task_id, &thread.id) == root);
+            .find(|thread| ask_marker(&task.task_id, &thread.id) == root);
         let Some(thread) = thread else {
             return Ok(());
         };
         if thread.is_resolved() == event.resolved {
             return Ok(());
         }
-        host.set_signal_resolved(report.task_id.clone(), thread.id.clone(), event.resolved)
+        host.set_signal_resolved(task.task_id.clone(), thread.id.clone(), event.resolved)
             .await?;
         tracing::info!(
-            task = %report.task_id,
+            task = %task.task_id,
             signal = %thread.id,
             resolved = event.resolved,
             "the operator closed or reopened a thread in the tracker"
@@ -311,27 +328,23 @@ impl RemoteTracker {
         let Some(issue_id) = issue_id else {
             return Ok(());
         };
-        let Some(report) = host
-            .work_for_issue(issue_id, Vec::new())
-            .await?
-            .and_then(|task| self.report_for_task(&task.task_id))
-        else {
+        let Some(task) = host.work_for_issue(issue_id, Vec::new()).await? else {
             return Ok(());
         };
         // Only the operator directs this task. A teammate's symbol is not a decision,
         // and this machine's own acknowledgements are not anybody speaking.
-        if event.actor_id != report.tracker_user_id {
+        if self.user_for_owner(&task.owner).as_deref() != Some(event.actor_id.as_str()) {
             return Ok(());
         }
-        if !host.is_kept(report.task_id.clone()).await? {
+        if !host.is_kept(task.task_id.clone()).await? {
             return Ok(());
         }
         let root = site.root_comment_id.clone();
         let thread = host
-            .signal_threads(report.task_id.clone())
+            .signal_threads(task.task_id.clone())
             .await?
             .into_iter()
-            .find(|thread| ask_marker(&report.task_id, &thread.id) == root);
+            .find(|thread| ask_marker(&task.task_id, &thread.id) == root);
         let Some(thread) = thread else {
             return Ok(());
         };
@@ -345,9 +358,11 @@ impl RemoteTracker {
             "The operator reacted {} to this comment:\n\n{about}",
             event.emoji
         );
-        self.note_wake(&report, "the operator reacted to a message")
-            .await;
-        host.reply(report.task_id, thread.id, said).await
+        if let Some(report) = self.report_for_task(&task.task_id) {
+            self.note_wake(&report, "the operator reacted to a message")
+                .await;
+        }
+        host.reply(task.task_id, thread.id, said).await
     }
 
     pub(super) async fn react_eyes(&self, comment_id: &str) {

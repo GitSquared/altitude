@@ -79,6 +79,10 @@ impl RemoteTracker {
             }
             match self.apply_delivery(&delivery.event, host).await {
                 Ok(()) => {
+                    // Said out loud so a delivery has a beginning and an end in the
+                    // log: what it did is the lines between them, and one that did
+                    // nothing is the thing that otherwise reads as a hang.
+                    tracing::info!(delivery = %delivery.key, "a Linear delivery was answered");
                     if let Err(error) = self.complete_delivery(&delivery.key) {
                         tracing::error!(delivery = %delivery.key, %error, "could not record a completed Linear delivery; it stays queued");
                     }
@@ -131,29 +135,29 @@ impl RemoteTracker {
 
     pub(super) async fn reopen_closed_thread(
         &self,
-        report: &Cursor,
+        task_id: &str,
         site: &CommentSite,
         host: &dyn DelegatedWork,
     ) {
         let root = site.root_comment_id.as_str();
-        let Ok(threads) = host.signal_threads(report.task_id.clone()).await else {
+        let Ok(threads) = host.signal_threads(task_id.to_owned()).await else {
             return;
         };
         let Some(thread) = threads
             .iter()
-            .find(|thread| thread.is_resolved() && ask_marker(&report.task_id, &thread.id) == root)
+            .find(|thread| thread.is_resolved() && ask_marker(task_id, &thread.id) == root)
         else {
             return;
         };
         if let Err(error) = host
-            .set_signal_resolved(report.task_id.clone(), thread.id.clone(), false)
+            .set_signal_resolved(task_id.to_owned(), thread.id.clone(), false)
             .await
         {
-            tracing::warn!(task = %report.task_id, signal = %thread.id, %error, "could not reopen a closed thread");
+            tracing::warn!(task = task_id, signal = %thread.id, %error, "could not reopen a closed thread");
             return;
         }
         tracing::info!(
-            task = %report.task_id,
+            task = task_id,
             signal = %thread.id,
             "a reply reopened a closed thread"
         );
