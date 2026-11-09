@@ -69,13 +69,18 @@ pub(super) fn command_session(
     // `bash -c script name argument`: the name is `$0`, the command `$1`.
     builder.arg("altitude-testbed");
     builder.arg(command);
+    // `portable-pty` would otherwise start the child in `$HOME`, which is the
+    // sandbox's `/root`; starting at the sandbox's own root keeps the spawn from
+    // depending on whether the machine's account can reach that path. `chroot`
+    // puts the command at `/` inside it either way.
+    builder.cwd(&root);
     builder.env("PATH", machine_path());
     for (key, value) in &record.environment {
         builder.env(key, value);
     }
 
     let mut child = pair.slave.spawn_command(builder).map_err(|error| {
-        IsolationError::new(format!("could not start a testbed command: {error}"))
+        IsolationError::new(format!("could not start a testbed command: {error:#}"))
     })?;
     drop(pair.slave);
 
@@ -190,7 +195,8 @@ fn mount_script(root: &Path, record: &SandboxRecord) -> String {
         quote(&root.join("sys"))
     ));
     script.push_str(&format!(
-        "mount -t proc proc {}\n",
+        "mount -t proc proc {} 2>/dev/null || mount --rbind /proc {}\n",
+        quote(&root.join("proc")),
         quote(&root.join("proc"))
     ));
     script.push_str(&format!(

@@ -258,9 +258,9 @@ pub(super) fn check_environment() -> Result<(), IsolationError> {
     }
     match Command::new("/usr/bin/unshare")
         .args(["--mount", "true"])
-        .status()
+        .output()
     {
-        Ok(status) if status.success() => Ok(()),
+        Ok(output) if output.status.success() => Ok(()),
         Ok(_) => Err(IsolationError::new(
             "the testbed isolation cannot create a mount namespace on this machine",
         )),
