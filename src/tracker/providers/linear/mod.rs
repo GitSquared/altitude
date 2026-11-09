@@ -7,7 +7,9 @@ use std::{
 
 pub(crate) mod auth;
 pub(crate) mod automation;
+pub(crate) mod host;
 pub(crate) mod oauth;
+pub(crate) mod settings;
 pub(crate) mod setup;
 
 use crate::isolation::private_directory;
@@ -27,6 +29,8 @@ mod issue;
 mod session;
 mod status;
 mod url;
+
+pub(crate) use self::url::looks_like_issue;
 
 use self::issue::{
     fetch_issue, issue_description, issue_list, issue_url, object_list, read_account,
@@ -380,6 +384,14 @@ impl TrackerProvider for Linear {
 
     fn is_connected(&self) -> bool {
         self.session().is_some()
+    }
+
+    fn is_signed_in(&self) -> bool {
+        self.is_signed_in()
+    }
+
+    fn sign_in_changed_at(&self) -> Option<SystemTime> {
+        self.sign_in_changed_at()
     }
 
     fn search<'a>(&'a self, query: &'a str) -> TrackerFuture<'a, Vec<IssueSummary>> {

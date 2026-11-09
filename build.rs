@@ -6,6 +6,11 @@ use std::{
 
 fn main() {
     println!("cargo::rerun-if-changed=assets/macos/Info.plist");
+    // Migrations are read by the compiler rather than by the program, so a new file
+    // has to reach it: without this a build that already compiled the crate keeps the
+    // migrations it was built with, and the database is migrated by a list that does
+    // not have the newest one in it.
+    println!("cargo::rerun-if-changed=migrations");
     println!("cargo::rerun-if-env-changed=ALTITUDE_GIT_SHA");
     watch_commits();
 

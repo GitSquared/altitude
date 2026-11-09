@@ -1,16 +1,15 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    style::Style,
 };
 
 use crate::{
-    task::{TaskOperatorSignalAuthor, TaskOperatorSignalKind, TaskOperatorSignalThread},
+    task::{TaskAsk, TaskAskAuthor, TaskAskKind},
     tui::{
         App,
         widgets::{
             columns::Columns,
-            header, markdown, palette, signal,
+            header, markdown,
             surface::{self, Surface},
             text::TextBox,
         },
@@ -21,9 +20,9 @@ pub(super) fn one_line(body: &str) -> String {
     markdown::preview(body)
 }
 
-fn who(resolved_by: Option<TaskOperatorSignalAuthor>, agent: &str) -> &str {
+fn who(resolved_by: Option<TaskAskAuthor>, agent: &str) -> &str {
     match resolved_by {
-        Some(TaskOperatorSignalAuthor::Operator) => "you",
+        Some(TaskAskAuthor::Operator) => "you",
         _ => agent,
     }
 }
@@ -34,9 +33,9 @@ mod plan;
 mod threads;
 
 use conversation::draw_conversation;
-use frame::{draw_plan_tabs, split_plan_and_activity};
+use frame::{draw_pane_title, draw_plan_tabs, split_plan_and_activity};
 use plan::draw_activity;
-use threads::{draw_controls, draw_threads};
+use threads::draw_threads;
 
 const LIST_WIDTH: u16 = 40;
 const PLAN_PADDING: u16 = 1;
@@ -48,45 +47,12 @@ const LIST_PADDING: u16 = 1;
 const COMPOSER_HEIGHT: u16 = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SignalFilter {
-    All,
-    Unresolved,
-    NeedsYou,
-    Review,
-    Decisions,
-    Info,
-    Resolved,
-}
-
-impl SignalFilter {
-    pub fn matches(self, thread: &TaskOperatorSignalThread) -> bool {
-        match self {
-            Self::All => true,
-            Self::Unresolved => thread.is_unresolved(),
-            Self::Resolved => thread.is_resolved(),
-            Self::NeedsYou => thread.kind == TaskOperatorSignalKind::Blocked,
-            Self::Review => thread.kind == TaskOperatorSignalKind::InReview,
-            Self::Decisions => thread.kind == TaskOperatorSignalKind::Decision,
-            Self::Info => thread.kind == TaskOperatorSignalKind::Update,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SignalSort {
-    Oldest,
-    Newest,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignalFocus {
     List,
     Detail,
     Plan,
     Activity,
     Action(usize),
-    Filter,
-    Sort,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,104 +66,64 @@ pub enum SignalHit {
     Action(usize),
     ComposerSend,
     ComposerCancel,
-    Filter,
-    Sort,
-    FilterOffer(usize),
-    SortOffer(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignalAction {
     Reply,
     Resolve,
+    Reopen,
     Accept,
     Apply,
 }
 
 impl SignalAction {
-    pub fn label(self, kind: TaskOperatorSignalKind, resolved: bool) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::Reply => "reply",
             Self::Accept => "accept",
             Self::Apply => "apply change",
-            Self::Resolve => match (kind, resolved) {
-                (TaskOperatorSignalKind::Update, _) => "resolve",
-                (_, true) => "reopen",
-                (TaskOperatorSignalKind::Decision, false) => "acknowledge",
-                _ => "resolve",
-            },
+            Self::Resolve => "resolve",
+            Self::Reopen => "reopen",
         }
     }
 }
 
-pub fn primary_action(thread: &TaskOperatorSignalThread) -> Option<SignalAction> {
+pub fn primary_action(thread: &TaskAsk) -> Option<SignalAction> {
     if thread.is_resolved() {
-        // A closed log stays closed; a question or a decision can be opened again
-        // by the person who closed it, and reopening is what puts it back in front
-        // of the agent.
-        return matches!(
-            thread.kind,
-            TaskOperatorSignalKind::Decision | TaskOperatorSignalKind::Blocked
-        )
-        .then_some(SignalAction::Resolve);
+        return Some(SignalAction::Reopen);
     }
-    // A blocked thread that carries a change is answered by making it: the
-    // operator's other option, replying, is still there beside it.
+    // A thread that carries a change is answered by making it: the operator's other
+    // option, replying, is still there beside it.
     if thread.proposal.is_some() {
         return Some(SignalAction::Apply);
     }
     Some(match thread.kind {
-        TaskOperatorSignalKind::Blocked => SignalAction::Reply,
-        TaskOperatorSignalKind::Update | TaskOperatorSignalKind::Decision => SignalAction::Resolve,
-        TaskOperatorSignalKind::InReview => SignalAction::Accept,
+        TaskAskKind::Steer => SignalAction::Reply,
+        TaskAskKind::Review => SignalAction::Accept,
     })
 }
 
-pub fn secondary_action(thread: &TaskOperatorSignalThread) -> Option<SignalAction> {
+// Closing is theirs on any thread, an unanswered review included: they can see that
+// the work has moved on, and the agent reading the thread is told what they decided.
+pub fn secondary_action(thread: &TaskAsk) -> Option<SignalAction> {
     if thread.is_resolved() {
-        return matches!(
-            thread.kind,
-            TaskOperatorSignalKind::Decision | TaskOperatorSignalKind::Blocked
-        )
-        .then_some(SignalAction::Reply);
+        return None;
     }
-    (thread.kind != TaskOperatorSignalKind::Blocked || thread.proposal.is_some())
-        .then_some(SignalAction::Reply)
+    Some(
+        if thread.kind == TaskAskKind::Steer || thread.proposal.is_some() {
+            SignalAction::Resolve
+        } else {
+            SignalAction::Reply
+        },
+    )
 }
 
-pub fn actions(thread: &TaskOperatorSignalThread) -> Vec<SignalAction> {
+pub fn actions(thread: &TaskAsk) -> Vec<SignalAction> {
     secondary_action(thread)
         .into_iter()
         .chain(primary_action(thread))
         .collect()
-}
-
-struct Group {
-    title: &'static str,
-    symbol: char,
-    tone: Style,
-}
-
-fn group_of(thread: &TaskOperatorSignalThread) -> Group {
-    if thread.is_resolved() {
-        return Group {
-            title: "RESOLVED",
-            symbol: '✓',
-            tone: palette::muted(),
-        };
-    }
-    let view = signal::view(thread.kind);
-    let title = match thread.kind {
-        TaskOperatorSignalKind::Blocked => "NEEDS YOU",
-        TaskOperatorSignalKind::InReview => "READY TO REVIEW",
-        TaskOperatorSignalKind::Decision => "DECISIONS",
-        TaskOperatorSignalKind::Update => "INFO LOG",
-    };
-    Group {
-        title,
-        symbol: view.symbol,
-        tone: view.tone,
-    }
 }
 
 pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -234,12 +160,24 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     let columns = Columns::new(&[LIST_WIDTH]).draw(frame, inner);
     let list = columns[0];
     let detail = columns[1];
-    let [toolbar, divider, threads] = Layout::vertical([
+    let [title, divider, threads] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(0),
     ])
     .areas(list);
+    surface::cover(frame, title);
+    draw_pane_title(
+        frame,
+        Rect {
+            x: title.x.saturating_add(LIST_PADDING),
+            width: title.width.saturating_sub(LIST_PADDING),
+            ..title
+        },
+        "HISTORY",
+        format!("  {}", app.signal_threads.len()),
+    );
+    surface::horizontal_divider(frame, list, divider.y);
     draw_threads(frame, threads, app);
     app.signal_plan_tabs = inner.width < PLAN_COLUMN_MIN;
     if inner.width >= PLAN_COLUMN_MIN {
@@ -272,13 +210,6 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
             draw_conversation(frame, pane, app);
         }
     }
-    // The controls sit above the list they change in their own subdivision of the
-    // panel; their open lists overlay the rows rather than pushing them.
-    surface::cover(frame, toolbar);
-    app.signal_focus_ring.add(SignalFocus::Filter);
-    app.signal_focus_ring.add(SignalFocus::Sort);
-    draw_controls(frame, toolbar, threads, app);
-    surface::horizontal_divider(frame, list, divider.y);
     // Whatever the focus was on may have gone with the last draw — a tab closed, a
     // thread with no actions left. Saying so once here is cheaper than every key
     // handler asking whether the thing it is about to act on is still on screen.

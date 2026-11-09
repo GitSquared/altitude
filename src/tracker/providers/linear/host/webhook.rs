@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use super::{
     IssueStateChanged, StoredEvent, WEBHOOK_MAX_AGE,
-    ledger::{CommentInput, ReactionInput},
+    ledger::{CommentInput, CommentResolution, ReactionInput},
 };
 
 #[derive(Clone, Deserialize)]
@@ -191,6 +191,17 @@ pub(super) struct CommentData {
     pub(super) document_id: Option<String>,
     #[serde(default)]
     pub(super) user_id: Option<String>,
+    // Whether the thread this comment belongs to is closed, and by whom. Absent means
+    // the event did not speak about it; null means it was reopened.
+    #[serde(default, deserialize_with = "present_or_null")]
+    pub(super) resolved_at: Option<Option<String>>,
+}
+
+fn present_or_null<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 pub(super) fn parse_comment_event(body: &[u8]) -> Result<CommentEvent, serde_json::Error> {
@@ -210,7 +221,19 @@ impl CommentEvent {
     // comment, so which one comes first decides what is known about it: this one knows
     // only that something was said, and saying it is enough to admit it.
     pub(super) fn into_stored(self) -> Option<StoredEvent> {
-        if self.action != "create" || self.actor.actor_type != "user" {
+        if self.actor.actor_type != "user" {
+            return None;
+        }
+        // Resolving a thread is a comment event that says nothing new in the body: the
+        // operator's word on whether the question is over, which the task reads as the
+        // same close it would make in the interface.
+        if let Some(resolved_at) = self.data.resolved_at {
+            return Some(StoredEvent::CommentResolved(CommentResolution {
+                comment_id: self.data.id,
+                resolved: resolved_at.is_some(),
+            }));
+        }
+        if self.action != "create" {
             return None;
         }
         let actor_id = self

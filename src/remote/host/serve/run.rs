@@ -7,6 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::brand;
 use crate::version::VERSION;
 
 // A machine stopped for host maintenance gives its guest a minute to shut down.
@@ -26,7 +27,7 @@ use tokio::{
 use crate::{
     agent::{AgentEngines, AgentKind},
     cli::{ServeArgs, ServeCommand, Tracker},
-    config::{Config, DEFAULT_PORT, ServeSettings},
+    config::{Config, DEFAULT_PORT},
     db::Database,
     isolation::{self, IsolationStatus, MicrosandboxIsolation, Unwatched},
     logging,
@@ -38,13 +39,14 @@ use crate::{
         server::ServerParts,
     },
     task::{TaskEventLoop, TaskExecutionUpdate, TaskService, TaskStore},
-    tracker::{IssueReader, TrackerKind, providers::linear::oauth},
+    tracker::providers::linear::host as linear_host,
+    tracker::{DelegatedWork, TrackerIntegration, TrackerKind},
 };
 
-use super::tracker_host::{PushedTrackers, connect_tracker};
+use super::settings::ServeSettings;
+use super::tracker_host::PushedTrackers;
 use super::{OwnTasks, Transfers, Watchers};
-use crate::remote::host::tracker;
-use crate::remote::host::{admin, install, tracker_setup};
+use crate::remote::host::{admin, install};
 
 pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     let base = match &args.data_dir {
@@ -83,10 +85,10 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
             }
             ServeCommand::Connect(connect) => {
                 let settings = ServeSettings::load_or_create(&settings_path)?;
-                let credentials_path = config.data_dir().join("trackers/linear/oauth.json");
+                let credentials_path = linear_host::credentials_path(&config);
                 return match connect.tracker {
                     Tracker::Linear => {
-                        tracker_setup::connect_linear(&settings, &settings_path, &credentials_path)
+                        linear_host::connect_remote(&settings, &settings_path, &credentials_path)
                             .await
                     }
                 };
@@ -95,9 +97,9 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     }
 
     let settings = ServeSettings::load_or_create(&settings_path)?;
-    let credentials_path = config.data_dir().join("trackers/linear/oauth.json");
+    let credentials_path = linear_host::credentials_path(&config);
     logging::init_service();
-    tracing::info!("⛰  altitude {VERSION} · remote");
+    tracing::info!("{}  altitude {VERSION} · remote", brand::MOUNTAIN);
     tracing::debug!("Checking sandbox host requirements");
     MicrosandboxIsolation::check_host()?;
     tracing::debug!("Sandbox host requirements passed");
@@ -121,52 +123,54 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
             ))
         })?;
 
-    let mut linear_runtime = None;
-    let mut linear_error = None;
-    if let Some(linear) = settings.linear.clone() {
-        match connect_tracker(&config, &linear, &credentials_path).await {
-            Ok(runtime) => linear_runtime = Some(runtime),
+    let mut tracker_integration: Option<Arc<dyn TrackerIntegration>> = None;
+    let mut tracker_error = None;
+    if let Some(tracker_settings) = settings.tracker.clone() {
+        match linear_host::connect(&config, &tracker_settings, &credentials_path).await {
+            Ok(runtime) => tracker_integration = Some(runtime),
             // Reported once, below, with what to run about it.
-            Err(error) => linear_error = Some(error),
+            Err(error) => tracker_error = Some(error),
         }
     }
-    // A machine that will never run Linear must not tell every client that Linear
+    // A machine that will never run a tracker must not tell every client that one
     // is missing, so only a configured tracker is announced. An app that was never
     // installed is worth telling apart from one that will not sign in: they send
     // its owner to different steps.
-    let readiness = settings.linear.as_ref().map(|_| match &linear_runtime {
-        Some(_) => TrackerReadiness::Ready,
-        None if oauth::installed(&credentials_path).is_some() => TrackerReadiness::Unavailable,
-        None => TrackerReadiness::NotInstalled,
-    });
+    let readiness = settings
+        .tracker
+        .as_ref()
+        .map(|_| match &tracker_integration {
+            Some(_) => TrackerReadiness::Ready,
+            None => linear_host::readiness(&credentials_path),
+        });
+    let kind = TrackerKind::sole();
     let trackers = readiness
         .map(|state| {
             vec![TrackerConnection {
-                provider: TrackerKind::Linear,
+                provider: kind,
                 state,
             }]
         })
         .unwrap_or_default();
-    match (readiness, &linear_runtime) {
+    match (readiness, &tracker_integration) {
         (Some(_), Some(runtime)) => tracing::info!(
             "{}: workspace {} · webhooks on {}",
-            TrackerKind::Linear.label(),
-            runtime.workspace_name,
-            runtime
-                .listener
-                .local_addr()
-                .map(|address| address.to_string())
-                .unwrap_or_default(),
+            kind.label(),
+            runtime.workspace_label(),
+            runtime.webhook_address(),
         ),
         (Some(state), None) => tracing::warn!(
-            error = linear_error.as_deref().unwrap_or("no reason given"),
-            "{}: {} · run `altitude serve connect linear` on this machine",
-            TrackerKind::Linear.label(),
+            error = tracker_error.as_deref().unwrap_or("no reason given"),
+            "{}: {} · run `altitude serve connect {}` on this machine",
+            kind.label(),
             state.said(),
+            kind.slug()
         ),
         (None, _) => tracing::info!(
-            "Task tracker: none configured · run `altitude serve connect linear` to pilot work \
-             from Linear"
+            "Task tracker: none configured · run `altitude serve connect {}` to pilot work \
+             from {}",
+            kind.slug(),
+            kind.label()
         ),
     }
 
@@ -190,14 +194,14 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         AgentEngines::new(),
         config.identity().map_err(io::Error::other)?,
     );
-    // A remote with no Linear app of its own still reports task status, through
+    // A remote with no tracker app of its own still reports task status, through
     // the login the task's own peer synced here. When the app is configured,
     // agent sessions own reporting and this would be a second voice.
-    let reports_through_pushed_logins = linear_runtime.is_none();
+    let reports_through_pushed_logins = tracker_integration.is_none();
     let mut tasks = tasks.with_issue_reader(
-        linear_runtime
+        tracker_integration
             .as_ref()
-            .map(|runtime| runtime.automation.clone() as Arc<dyn IssueReader>),
+            .and_then(|integration| integration.issue_reader()),
     );
     if reports_through_pushed_logins {
         tasks = tasks.with_trackers(Arc::new(PushedTrackers::new(config.clone())));
@@ -227,9 +231,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         let tasks = Arc::clone(&task_loop);
         // A task's history moving is what the tracker has to look at, so it is told
         // here rather than left to ask on a clock of its own.
-        let tracker = linear_runtime
-            .as_ref()
-            .map(|runtime| Arc::clone(&runtime.tracker));
+        let tracker = tracker_integration.clone();
         // The path that reports through the operator's own login has no tracker to
         // wake, so it gets told the same way.
         let sync_signal = Arc::clone(&logout_sync);
@@ -308,22 +310,14 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         read_slots: Arc::new(Semaphore::new(4)),
         readiness: phase.clone(),
         runtime: prepared,
-        tracker: linear_runtime
-            .as_ref()
-            .map(|runtime| runtime.tracker.clone()),
+        tracker: tracker_integration.clone(),
         delegation_paused: settings.pause_delegated_work,
     });
-    if let Some(runtime) = linear_runtime {
-        let tracker = runtime.tracker.clone();
-        let delegated_host: Arc<dyn tracker::Host> = host.clone();
-        tokio::spawn(tracker.run(delegated_host));
-        tokio::spawn(async move {
-            if let Err(error) =
-                axum::serve(runtime.listener, runtime.tracker.webhook_router()).await
-            {
-                tracing::error!(%error, "Linear webhook listener stopped");
-            }
-        });
+    let mut waking = None;
+    if let Some(integration) = tracker_integration {
+        waking = Some(Arc::clone(&integration));
+        let delegated_work: Arc<dyn DelegatedWork> = host.clone();
+        integration.run(delegated_work);
     }
     let server = LinkServer::serve(ServerParts {
         identity,
@@ -397,6 +391,13 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
                 tracing::warn!(%error, "a task needs attention after restart");
             }
         }
+        // Recovery is the one place a task's history moves without a run to say so,
+        // and the tracker wakes on a run's updates: without this, what a restart
+        // concluded sits in the history until something else happens to arrive, and
+        // a task waiting on the operator says so only after they have written again.
+        if let Some(tracker) = waking {
+            tracker.wake();
+        }
         resumed.enable_admission();
         readiness.send_replace(Phase::Ready);
         tracing::info!("Remote ready · open Altitude → Settings → Remotes");
@@ -443,7 +444,9 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     // before the process goes: a session that just ends reads as a hang. It goes
     // first and it is bounded, because the tasks are what the minute is for.
     if let Some(tracker) = host.tracker.as_ref() {
-        tracker.announce_shutdown(host.as_ref()).await;
+        tracker
+            .announce_shutdown(host.as_ref() as &dyn DelegatedWork)
+            .await;
     }
     // Suspension comes before the links close: every task's disk is flushed to
     // this host first, so a link that refuses to shut down cleanly is a smaller

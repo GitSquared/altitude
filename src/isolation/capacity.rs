@@ -31,7 +31,10 @@ pub const DISK_FLOOR_MIB: u64 = 5 * 1_024;
 
 pub const MIN_READINGS: usize = 4;
 
-pub const SANDBOX_DISK_CEILING_MIB: u32 = 15 * 1_024;
+// What one sandbox's disk may grow to. A ceiling is a bound rather than a reservation,
+// and the disk is the one resource whose exhaustion is a machine stopping mid-build
+// instead of slowing down, so it is sized for a Rust workspace with room to spare.
+pub const SANDBOX_DISK_CEILING_MIB: u32 = 30 * 1_024;
 
 pub const MEMORY_SHARE_OF_HOST: u64 = 80;
 pub const MINIMUM_CEILING_MIB: u64 = 2 * 1_024;

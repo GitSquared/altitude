@@ -1,9 +1,7 @@
 use super::ledger::{Cursor, Delivery, StoredEvent};
+use crate::tracker::ask_marker;
 use crate::{
-    task::{
-        TaskExecutionPauseReason, TaskHistoryEvent, TaskOperatorSignalAuthor,
-        TaskOperatorSignalThread,
-    },
+    task::{TaskAsk, TaskAskAuthor, TaskExecutionPauseReason, TaskHistoryEvent},
     tracker::{
         TrackerStatus,
         providers::linear::automation::{AgentActivityContent, CommentSite},
@@ -70,7 +68,7 @@ impl RemoteTracker {
 
     // Answers when the next delivery is due to be tried again, if one is waiting on a
     // retry rather than on this machine doing something.
-    pub(super) async fn process_deliveries(&self, host: &dyn Host) -> Option<Instant> {
+    pub(super) async fn process_deliveries(&self, host: &dyn DelegatedWork) -> Option<Instant> {
         let mut retry = None;
         for delivery in self.pending() {
             if delivery.next_attempt_at_ms > now_ms() {
@@ -100,7 +98,7 @@ impl RemoteTracker {
     pub(super) async fn apply_delivery(
         &self,
         event: &StoredEvent,
-        host: &dyn Host,
+        host: &dyn DelegatedWork,
     ) -> Result<(), String> {
         match event {
             StoredEvent::Session(session) => {
@@ -124,6 +122,9 @@ impl RemoteTracker {
                 .await
             }
             StoredEvent::Comment(comment) => self.answer_comment(comment, host).await,
+            StoredEvent::CommentResolved(resolution) => {
+                self.answer_thread_resolution(resolution, host).await
+            }
             StoredEvent::Reaction(reaction) => self.answer_reaction(reaction, host).await,
         }
     }
@@ -132,19 +133,20 @@ impl RemoteTracker {
         &self,
         report: &Cursor,
         site: &CommentSite,
-        host: &dyn Host,
+        host: &dyn DelegatedWork,
     ) {
         let root = site.root_comment_id.as_str();
         let Ok(threads) = host.signal_threads(report.task_id.clone()).await else {
             return;
         };
-        let Some(thread) = threads.iter().find(|thread| {
-            thread.is_resolved() && published_comment_id(&report.task_id, &thread.id) == root
-        }) else {
+        let Some(thread) = threads
+            .iter()
+            .find(|thread| thread.is_resolved() && ask_marker(&report.task_id, &thread.id) == root)
+        else {
             return;
         };
         if let Err(error) = host
-            .reopen_signal(report.task_id.clone(), thread.id.clone())
+            .set_signal_resolved(report.task_id.clone(), thread.id.clone(), false)
             .await
         {
             tracing::warn!(task = %report.task_id, signal = %thread.id, %error, "could not reopen a closed thread");
@@ -202,7 +204,7 @@ impl RemoteTracker {
 
     pub(super) async fn report_event(
         &self,
-        host: &dyn Host,
+        host: &dyn DelegatedWork,
         report: &Cursor,
         events: &[(i64, TaskHistoryEvent)],
         index: usize,
@@ -231,24 +233,59 @@ impl RemoteTracker {
                 execution_pause_reason,
                 ..
             } => {
-                self.say(
-                    report,
-                    // Per pause, not per task: a thread that says nothing the second
-                    // time it waits is a thread the operator thinks is still thinking.
-                    &stable_id(&format!("{}-{index}", report.task_id), "paused"),
+                let id = stable_id(&format!("{}-{index}", report.task_id), "paused");
+                // Per pause, not per task: a thread that says nothing the second time
+                // it waits is a thread the operator thinks is still thinking.
+                let asking = if waits_on_a_person(execution_pause_reason) {
+                    events[..=index]
+                        .iter()
+                        .rev()
+                        .find_map(|(_, event)| match event {
+                            TaskHistoryEvent::OperatorSignalRaised { signal }
+                                if unresolved.contains(&signal.id) =>
+                            {
+                                Some(signal.kind)
+                            }
+                            _ => None,
+                        })
+                } else {
+                    None
+                };
+                let content = if waits_on_a_person(execution_pause_reason) {
+                    let operator = self.operator_name(&report.tracker_user_id).await;
+                    // The last thing a run says is the handoff, and it is said to a
+                    // person: it is what leaves the session waiting on them rather than
+                    // ticking as if the work were still going on.
                     AgentActivityContent::Response {
-                        body: pause_notice(execution_pause_reason).to_owned(),
-                    },
-                )
-                .await
-                .map_err(|error| error.to_string())?;
+                        body: pause_message(execution_pause_reason, &operator, asking),
+                    }
+                } else {
+                    AgentActivityContent::Thought {
+                        body: execution_pause_reason.notice().to_owned(),
+                    }
+                };
+                self.say_system(report, &id, content)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                // A review the operator has not accepted is work waiting on them, and
+                // the issue said In Progress because the run that just ended put it
+                // there. Leaving it says the agent is still busy when the only thing
+                // busy is the operator's attention.
+                if asking == Some(TaskAskKind::Review)
+                    && !self.is_settled(&report.issue_id)
+                    && let Err(error) = self
+                        .write_status(host, report, TrackerStatus::InReview)
+                        .await
+                {
+                    tracing::warn!(issue = %report.issue_id, %error, "could not say the task is waiting on a review");
+                }
             }
             // A task that stopped is not a task that is working. The thread the
             // failure raised carries the detail; this is what stops the session
             // claiming the agent is still busy, which is what it looked like while
             // the machine had already given up.
             TaskHistoryEvent::ExecutionFailed { error, .. } => {
-                self.say(
+                self.say_system(
                     report,
                     &stable_id(&format!("{}-{index}", report.task_id), "failed"),
                     AgentActivityContent::Error {
@@ -283,7 +320,7 @@ impl RemoteTracker {
                             .user_name(&report.tracker_user_id)
                             .await
                             .ok();
-                        self.say(
+                        self.say_system(
                             report,
                             &stable_id(&report.task_id, "picked-up"),
                             AgentActivityContent::Thought {
@@ -301,13 +338,13 @@ impl RemoteTracker {
                             matches!(
                                 event,
                                 TaskHistoryEvent::OperatorSignalMessage {
-                                    author: TaskOperatorSignalAuthor::Operator,
+                                    author: TaskAskAuthor::Operator,
                                     ..
                                 }
                             )
                         }) =>
                     {
-                        self.say(
+                        self.say_system(
                             report,
                             &stable_id(&report.task_id, agent_run_id),
                             AgentActivityContent::Thought {
@@ -327,7 +364,7 @@ impl RemoteTracker {
             // and never the answer.
             TaskHistoryEvent::OperatorSignalMessage {
                 signal_id,
-                author: TaskOperatorSignalAuthor::Agent,
+                author: TaskAskAuthor::Agent,
                 body,
             } => {
                 self.post_signal_reply(report, signal_id, body).await;
@@ -355,8 +392,7 @@ impl RemoteTracker {
                 resolved: true,
                 ..
             } => {
-                self.follow_signal_thread(report, signal_id, &events[..=index], true)
-                    .await;
+                self.follow_signal_thread(report, signal_id, true).await;
                 // Answering a question puts the work back in progress: the issue
                 // said In Review while the task was waiting, and it is not waiting
                 // any more. An issue whose ending was already written is left as
@@ -370,8 +406,7 @@ impl RemoteTracker {
             } => {
                 // Reopening a thread says the question is live again, so the
                 // tracker shows it open and the issue is waiting on the operator.
-                self.follow_signal_thread(report, signal_id, &events[..=index], false)
-                    .await;
+                self.follow_signal_thread(report, signal_id, false).await;
                 if !self.is_settled(&report.issue_id)
                     && let Err(error) = self
                         .write_status(host, report, TrackerStatus::InReview)
@@ -381,8 +416,7 @@ impl RemoteTracker {
                 }
             }
             TaskHistoryEvent::OperatorSignalConfirmed { signal_id } => {
-                self.follow_signal_thread(report, signal_id, &events[..=index], true)
-                    .await;
+                self.follow_signal_thread(report, signal_id, true).await;
                 self.finish_accepted(host, report, &events[..=index])
                     .await?;
                 return Ok(Some(()));
@@ -399,7 +433,11 @@ impl RemoteTracker {
         Ok(None)
     }
 
-    pub(super) async fn sync_report(&self, host: &dyn Host, report: &Cursor) -> Result<(), String> {
+    pub(super) async fn sync_report(
+        &self,
+        host: &dyn DelegatedWork,
+        report: &Cursor,
+    ) -> Result<(), String> {
         let events = host.events(report.task_id.clone()).await?;
         // A cursor past the end means the history it counted is gone, which is not a
         // reason to replay from the beginning: a replay re-writes statuses and
@@ -414,7 +452,7 @@ impl RemoteTracker {
             .signal_threads(report.task_id.clone())
             .await?
             .into_iter()
-            .filter(TaskOperatorSignalThread::is_unresolved)
+            .filter(TaskAsk::is_unresolved)
             .map(|signal| signal.id)
             .collect();
         // A report that only began after a transfer must not replay the source's
@@ -473,7 +511,7 @@ impl RemoteTracker {
         })
     }
 
-    pub(super) async fn unhook(&self, host: &dyn Host, report: &Cursor) {
+    pub(super) async fn unhook(&self, host: &dyn DelegatedWork, report: &Cursor) {
         if host
             .stop(
                 report.task_id.clone(),
@@ -485,7 +523,7 @@ impl RemoteTracker {
             return;
         }
         if let Err(error) = self
-            .say(
+            .say_system(
                 report,
                 &stable_id(&report.task_id, "unhooked"),
                 AgentActivityContent::Response {
@@ -504,7 +542,7 @@ impl RemoteTracker {
         }
     }
 
-    pub(super) async fn poll_reports(&self, host: &dyn Host) {
+    pub(super) async fn poll_reports(&self, host: &dyn DelegatedWork) {
         for report in self.cursors().into_iter().filter(|report| !report.finished) {
             // A task the operator removed is no longer work: stop writing about
             // it rather than reporting a history that will never advance. A task

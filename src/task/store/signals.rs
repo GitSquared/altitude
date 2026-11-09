@@ -3,13 +3,12 @@ use super::*;
 use std::cmp::Ordering;
 
 use sqlx::types::Json;
-use uuid::Uuid;
 
 use crate::id;
 use crate::task::{
-    ProjectProposal, SignalTransition, Task, TaskError, TaskExecutionStatus, TaskHistoryEvent,
-    TaskInput, TaskInputAuthor, TaskInputSource, TaskOperatorSignal, TaskOperatorSignalAuthor,
-    TaskOperatorSignalKind, TaskOperatorSignalMessage, TaskOperatorSignalThread, TaskPlanStep,
+    AskTransition, ProjectProposal, Task, TaskAsk, TaskAskAuthor, TaskAskKind, TaskAskMessage,
+    TaskAskQuestion, TaskError, TaskExecutionStatus, TaskHistoryEvent, TaskInput, TaskInputAuthor,
+    TaskInputSource, TaskPlanStep,
 };
 
 impl TaskStore {
@@ -32,20 +31,19 @@ impl TaskStore {
                         },
                         source: TaskInputSource::TaskCreated,
                         body: intent,
-                        responding_to: None,
                         external_id: None,
                     });
                 }
                 TaskHistoryEvent::TaskInputExpressed { input } => inputs.push(input),
                 TaskHistoryEvent::OperatorSignalMessage {
                     signal_id,
-                    author: TaskOperatorSignalAuthor::Operator,
+                    author: TaskAskAuthor::Operator,
                     body,
                 } => {
                     let task = self.get(task_id).await?;
                     let Some(task) = task else { continue };
                     inputs.push(TaskInput {
-                        id: format!("legacy-signal:{task_id}:{signal_id}:{at_ms}"),
+                        id: format!("signal:{task_id}:{signal_id}:{at_ms}"),
                         at_ms,
                         author: TaskInputAuthor::Operator {
                             id: task.facts.operator_id.unwrap_or_default(),
@@ -53,7 +51,6 @@ impl TaskStore {
                         },
                         source: TaskInputSource::Altitude,
                         body,
-                        responding_to: Some(signal_id),
                         external_id: None,
                     });
                 }
@@ -63,39 +60,20 @@ impl TaskStore {
         Ok(inputs)
     }
 
-    pub async fn has_unanswered_question(&self, task_id: &str) -> Result<bool, TaskError> {
-        Ok(self
-            .unresolved_signal_threads(task_id)
-            .await?
-            .iter()
-            .any(|thread| {
-                matches!(
-                    thread.kind,
-                    TaskOperatorSignalKind::Blocked | TaskOperatorSignalKind::InReview
-                ) && !thread
-                    .messages
-                    .iter()
-                    .any(|message| message.author == TaskOperatorSignalAuthor::Operator)
-            }))
-    }
-
     pub async fn unresolved_signal_threads(
         &self,
         task_id: &str,
-    ) -> Result<Vec<TaskOperatorSignalThread>, TaskError> {
+    ) -> Result<Vec<TaskAsk>, TaskError> {
         Ok(self
             .signal_threads(task_id)
             .await?
             .into_iter()
-            .filter(TaskOperatorSignalThread::is_unresolved)
+            .filter(TaskAsk::is_unresolved)
             .collect())
     }
 
-    pub async fn signal_threads(
-        &self,
-        task_id: &str,
-    ) -> Result<Vec<TaskOperatorSignalThread>, TaskError> {
-        let mut threads: Vec<TaskOperatorSignalThread> = Vec::new();
+    pub async fn signal_threads(&self, task_id: &str) -> Result<Vec<TaskAsk>, TaskError> {
+        let mut threads: Vec<TaskAsk> = Vec::new();
         for (at_ms, event) in self.events(task_id).await? {
             match event {
                 TaskHistoryEvent::OperatorSignalRaised { signal } => {
@@ -108,23 +86,23 @@ impl TaskStore {
                             thread.resolved = false;
                             thread.resolved_by = None;
                             thread.resolved_at_ms = None;
-                            thread.messages.push(TaskOperatorSignalMessage {
+                            thread.messages.push(TaskAskMessage {
                                 id: format!("m{}", thread.messages.len() + 1),
-                                author: TaskOperatorSignalAuthor::Agent,
+                                author: TaskAskAuthor::Agent,
                                 body: signal.body,
                                 at_ms,
                             });
                         }
-                        None => threads.push(TaskOperatorSignalThread {
+                        None => threads.push(TaskAsk {
                             id: signal.id,
                             task_id: signal.task_id,
                             kind: signal.kind,
                             title: signal.title,
                             opened_at_ms: signal.raised_at_ms,
                             last_raised_at_ms: at_ms,
-                            messages: vec![TaskOperatorSignalMessage {
+                            messages: vec![TaskAskMessage {
                                 id: "m1".to_owned(),
-                                author: TaskOperatorSignalAuthor::Agent,
+                                author: TaskAskAuthor::Agent,
                                 body: signal.body,
                                 at_ms,
                             }],
@@ -136,41 +114,16 @@ impl TaskStore {
                         }),
                     }
                 }
-                TaskHistoryEvent::TaskInputExpressed { input } => {
-                    let Some(signal_id) = input.responding_to.as_deref() else {
-                        continue;
-                    };
-                    if let Some(thread) = threads.iter_mut().find(|thread| thread.id == signal_id) {
-                        thread.resolved = false;
-                        thread.resolved_by = None;
-                        thread.resolved_at_ms = None;
-                        thread.messages.push(TaskOperatorSignalMessage {
-                            id: format!("m{}", thread.messages.len() + 1),
-                            author: match input.author {
-                                TaskInputAuthor::Operator { .. } => {
-                                    TaskOperatorSignalAuthor::Operator
-                                }
-                                TaskInputAuthor::Participant { .. } => {
-                                    TaskOperatorSignalAuthor::Operator
-                                }
-                            },
-                            body: input.body,
-                            at_ms,
-                        });
-                    }
-                }
+                // Talking in a thread is talking, not asking: a message joins the
+                // conversation and leaves the thread as open or as closed as it was.
+                // Reopening is the separate act it sounds like.
                 TaskHistoryEvent::OperatorSignalMessage {
                     signal_id,
                     author,
                     body,
                 } => {
                     if let Some(thread) = threads.iter_mut().find(|thread| thread.id == signal_id) {
-                        // A message is the whole conversation. It reopens a
-                        // resolved thread; the other side sees it when it reads.
-                        thread.resolved = false;
-                        thread.resolved_by = None;
-                        thread.resolved_at_ms = None;
-                        thread.messages.push(TaskOperatorSignalMessage {
+                        thread.messages.push(TaskAskMessage {
                             id: format!("m{}", thread.messages.len() + 1),
                             author,
                             body,
@@ -187,7 +140,7 @@ impl TaskStore {
                         thread.resolved = resolved;
                         thread.resolved_by = resolved.then_some(by);
                         thread.resolved_at_ms = resolved.then_some(at_ms);
-                        thread.transitions.push(SignalTransition {
+                        thread.transitions.push(AskTransition {
                             at_ms,
                             resolved,
                             by,
@@ -197,23 +150,17 @@ impl TaskStore {
                 TaskHistoryEvent::OperatorSignalConfirmed { signal_id } => {
                     if let Some(thread) = threads.iter_mut().find(|thread| thread.id == signal_id) {
                         thread.resolved = true;
-                        thread.resolved_by = Some(TaskOperatorSignalAuthor::Operator);
+                        thread.resolved_by = Some(TaskAskAuthor::Operator);
                         thread.resolved_at_ms = Some(at_ms);
                     }
                 }
                 _ => {}
             }
         }
-        // Unresolved first, in the order the operator has to deal with them:
-        // blocked and review share the top tier, decisions are context, and
-        // updates are the log. Within a tier the oldest is highest, so a thread
-        // does not jump when somebody replies.
+        // Unresolved first, oldest first: an ask is answered in the order it was
+        // asked, and it does not jump when somebody replies.
         threads.sort_by(|left, right| match (left.resolved, right.resolved) {
-            (false, false) => left
-                .kind
-                .tier()
-                .cmp(&right.kind.tier())
-                .then(left.opened_at_ms.cmp(&right.opened_at_ms)),
+            (false, false) => left.opened_at_ms.cmp(&right.opened_at_ms),
             (false, true) => Ordering::Less,
             (true, false) => Ordering::Greater,
             (true, true) => right
@@ -228,7 +175,7 @@ impl TaskStore {
         &self,
         task_id: &str,
         signal_id: &str,
-    ) -> Result<Option<TaskOperatorSignalThread>, TaskError> {
+    ) -> Result<Option<TaskAsk>, TaskError> {
         Ok(self
             .signal_threads(task_id)
             .await?
@@ -242,7 +189,7 @@ impl TaskStore {
         signal_id: &str,
         body: &str,
     ) -> Result<Task, TaskError> {
-        self.message_signal_as(task_id, signal_id, TaskOperatorSignalAuthor::Agent, body)
+        self.message_signal_as(task_id, signal_id, TaskAskAuthor::Agent, body)
             .await
     }
 
@@ -255,32 +202,17 @@ impl TaskStore {
             .await
     }
 
+    // What the operator says in a thread is a message in it, and the turn that answers
+    // reads it from there. Recording it only as a task input put their words in front
+    // of the agent and nowhere the operator could see them: the thread still ended
+    // with the agent's question, so the task read as unanswered after being answered.
     pub async fn message_operator_signal(
         &self,
         task_id: &str,
         signal_id: &str,
         body: &str,
     ) -> Result<Task, TaskError> {
-        self.thread_of(task_id, signal_id).await?;
-        let task = self
-            .get(task_id)
-            .await?
-            .ok_or(TaskError::OperationRejected(
-                "this task is no longer in play",
-            ))?;
-        let input = TaskInput {
-            id: Uuid::new_v4().to_string(),
-            at_ms: now_ms(),
-            author: TaskInputAuthor::Operator {
-                id: task.facts.operator_id.unwrap_or_default(),
-                label: task.facts.operator_label.unwrap_or_default(),
-            },
-            source: TaskInputSource::Altitude,
-            body: body.to_owned(),
-            responding_to: Some(signal_id.to_owned()),
-            external_id: None,
-        };
-        self.append_events(task_id, &[TaskHistoryEvent::TaskInputExpressed { input }])
+        self.message_signal_as(task_id, signal_id, TaskAskAuthor::Operator, body)
             .await
     }
 
@@ -288,7 +220,7 @@ impl TaskStore {
         &self,
         task_id: &str,
         signal_id: &str,
-        author: TaskOperatorSignalAuthor,
+        author: TaskAskAuthor,
         body: &str,
     ) -> Result<Task, TaskError> {
         self.thread_of(task_id, signal_id).await?;
@@ -308,7 +240,7 @@ impl TaskStore {
         task_id: &str,
         signal_id: &str,
         resolved: bool,
-        by: TaskOperatorSignalAuthor,
+        by: TaskAskAuthor,
     ) -> Result<Task, TaskError> {
         self.thread_of(task_id, signal_id).await?;
         self.append_events(
@@ -347,7 +279,7 @@ impl TaskStore {
     pub async fn open_signal(
         &self,
         task_id: &str,
-        kind: TaskOperatorSignalKind,
+        kind: TaskAskKind,
         title: &str,
         body: &str,
         proposal: Option<ProjectProposal>,
@@ -363,49 +295,28 @@ impl TaskStore {
                 "this task has already been accepted",
             ));
         }
-        // A review is one question with one answer — this milestone, to you — so a second
-        // one while the first is still open asks it twice. Whether the operator has
-        // answered the first does not change that: an answered review is still the review
-        // they are looking at, and what has changed belongs in it.
-        if kind == TaskOperatorSignalKind::InReview
-            && self
-                .unresolved_signal_threads(task_id)
-                .await?
-                .iter()
-                .any(|thread| thread.kind == TaskOperatorSignalKind::InReview)
-        {
+        // One ask is one wait, and two open asks are two threads to read where the
+        // operator wanted an answer to the first. An answered thread is not a wait:
+        // closing it is the agent's to do before the next question, and this is what
+        // makes doing it first the only way to ask again.
+        if !self.unresolved_signal_threads(task_id).await?.is_empty() {
             return Err(TaskError::OperationRejected(
-                "a review of this task is already open; reply in it with what changed instead \
-                 of asking for another",
+                "this task is already asking something: if their answer has ended that
+                 question, resolve it first and then open this one; if it has not, reply
+                 in that thread with what changed",
             ));
         }
-        // One request is one thread. A second question while the first is open is
-        // the machine being asked to hold two waits at once, and it costs the
-        // operator a second thread to read instead of an answer to the first.
-        if matches!(
-            kind,
-            TaskOperatorSignalKind::Blocked | TaskOperatorSignalKind::InReview
-        ) {
-            // Two blockers wear one coat here and they are not the same wait: a
-            // thread the operator has not answered is theirs to answer, and a review
-            // this machine is holding for its pull requests is nobody's — it becomes
-            // a thread by itself once they settle. Saying which one it is is the
-            // difference between an instruction and a puzzle.
-            if task.facts.deferred_review.is_some() {
-                return Err(TaskError::OperationRejected(
-                    "this task's review is already asked for and held until its pull requests \
-                     settle; it becomes a thread by itself then, and nothing about it waits on \
-                     the operator",
-                ));
-            }
-            if self.has_unanswered_question(task_id).await? {
-                return Err(TaskError::OperationRejected(
-                    "this task is already waiting on the operator in a thread they have not \
-                     answered; open a new one only once that has been answered",
-                ));
-            }
+        // A review this machine is holding for its pull requests is a wait of its own:
+        // it becomes a thread once they settle, so a second one now would be the same
+        // question asked twice with nothing to review in between.
+        if task.facts.deferred_review.is_some() {
+            return Err(TaskError::OperationRejected(
+                "this task's review is already asked for and held until its pull requests \
+                 settle; it becomes a thread by itself then, and nothing about it waits on \
+                 the operator",
+            ));
         }
-        let signal = TaskOperatorSignal {
+        let signal = TaskAskQuestion {
             id: self.next_signal_id(task_id).await?,
             task_id: task_id.to_owned(),
             kind,
@@ -419,12 +330,11 @@ impl TaskStore {
         // host watches them and delivers it when they can answer, so the operator
         // is asked to look at work that is actually reviewable. One with nothing to
         // watch goes out at once.
-        let event =
-            if kind == TaskOperatorSignalKind::InReview && !task.code_contributions.is_empty() {
-                TaskHistoryEvent::ReviewDeferred { signal }
-            } else {
-                TaskHistoryEvent::OperatorSignalRaised { signal }
-            };
+        let event = if kind == TaskAskKind::Review && !task.code_contributions.is_empty() {
+            TaskHistoryEvent::ReviewDeferred { signal }
+        } else {
+            TaskHistoryEvent::OperatorSignalRaised { signal }
+        };
         let task = self.append_events(task_id, &[event]).await?;
         Ok((task, id))
     }
@@ -433,7 +343,7 @@ impl TaskStore {
         &self,
         task_id: &str,
         signal_id: &str,
-    ) -> Result<TaskOperatorSignalThread, TaskError> {
+    ) -> Result<TaskAsk, TaskError> {
         self.signal_thread(task_id, signal_id)
             .await?
             .ok_or(TaskError::OperationRejected(
@@ -451,7 +361,7 @@ impl TaskStore {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(TaskError::Database)?;
-        let (task_id, kind): (String, Json<TaskOperatorSignalKind>) = sqlx::query_as(
+        let (task_id, kind): (String, Json<TaskAskKind>) = sqlx::query_as(
             r#"
             SELECT task_id, json_quote(kind)
             FROM task_operator_signals
@@ -465,7 +375,7 @@ impl TaskStore {
         .fetch_one(&mut *transaction)
         .await
         .map_err(TaskError::Database)?;
-        if kind.0 != TaskOperatorSignalKind::InReview {
+        if kind.0 != TaskAskKind::Review {
             return Err(TaskError::OperationRejected(
                 "only a review request can be accepted",
             ));

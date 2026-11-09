@@ -345,7 +345,7 @@ where
                         .send(TaskExecutionUpdate::Finished(task.id, result));
                     return Ok(());
                 }
-                if task.facts.blocking_signal_kind.is_some() {
+                if task.facts.waits_on_operator() {
                     let result = self
                         .service
                         .await_operator(&task, run, TaskExecutionPauseReason::AwaitingOperator)

@@ -211,6 +211,40 @@ impl VcsProvider for GitHub {
         }
         Some(observations)
     }
+
+    fn short_repository(&self, repository: &str) -> Option<String> {
+        let short = repository
+            .strip_prefix("https://github.com/")
+            .or_else(|| repository.strip_prefix("http://github.com/"))
+            .or_else(|| repository.strip_prefix("git@github.com:"))
+            .unwrap_or(repository);
+        let short = short.strip_suffix(".git").unwrap_or(short);
+        (!short.trim().is_empty()).then(|| short.trim().to_owned())
+    }
+
+    fn account_markers(&self) -> &'static [&'static str] {
+        &[
+            "Logged in to github.com as ",
+            "Logged in to github.com account ",
+        ]
+    }
+
+    fn purpose(&self) -> &'static str {
+        "The GitHub CLI login your tasks clone, push, and read pull requests with."
+    }
+
+    fn login_files(&self) -> &'static [&'static str] {
+        // The git identity, SSH keys, and signing keys are separate material and are
+        // deliberately not touched.
+        &["gh/hosts.yml"]
+    }
+
+    fn signing_key_instructions(&self) -> (&'static str, &'static str) {
+        (
+            "Add this key to GitHub as a signing key, so commits made here show as verified.",
+            "GitHub → Settings → SSH and GPG keys → New SSH key → Key type: Signing Key",
+        )
+    }
 }
 
 const CONTRIBUTION_FIELDS: &str = r#"    ... on PullRequest {

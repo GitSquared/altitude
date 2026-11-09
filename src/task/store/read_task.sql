@@ -59,12 +59,6 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      WHERE task_id = tasks.id
        AND json_type(payload, '$.data.execution_mode') IS NOT NULL
      ORDER BY sequence DESC LIMIT 1) AS execution_mode,
-    -- Whether this task is waiting on the operator, read from the threads that are
-    -- open rather than stored beside them: one fact, one place.
-    CASE WHEN EXISTS (
-        SELECT 1 FROM task_operator_signals
-        WHERE task_id = tasks.id AND resolved = 0 AND kind IN ('blocked', 'in_review')
-    ) THEN 'requested' ELSE 'nominal' END AS operator_attention_level,
     (SELECT payload ->> '$.data.sandbox_id'
      FROM task_event_logs
      WHERE task_id = tasks.id
@@ -156,68 +150,23 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      FROM task_event_logs
      WHERE task_id = tasks.id AND event_type = 'task_arrived_from'
      ORDER BY sequence DESC LIMIT 1) AS arrived_from,
-    -- A thread whose last word is the operator's is not waiting on them: they have
-    -- spoken and the task is the one that owes an answer, so it is working rather
-    -- than asking. One nothing has been said in, or one the agent spoke in last, is.
-    (SELECT kind
+    -- The ask a task is in the middle of, and which side spoke last in it, read once:
+    -- the row, the pause notice and the agent's own guard all ask this line whether it
+    -- waits on a person, rather than deciding again for themselves.
+    (SELECT json_object(
+         'kind', kind,
+         'title', title,
+         'last_author', COALESCE(
+             (SELECT json_extract(spoken.payload, '$.data.author')
+              FROM task_event_logs AS spoken
+              WHERE spoken.task_id = tasks.id
+                AND spoken.event_type = 'operator_signal_message'
+                AND json_extract(spoken.payload, '$.data.signal_id') = task_operator_signals.id
+              ORDER BY spoken.sequence DESC LIMIT 1),
+             'agent'))
      FROM task_operator_signals
-     WHERE task_id = tasks.id
-       AND resolved = 0
-       AND kind IN ('blocked', 'in_review')
-       AND (SELECT json_extract(spoken.payload, '$.data.author')
-            FROM task_event_logs AS spoken
-            WHERE spoken.task_id = tasks.id
-              AND spoken.event_type = 'operator_signal_message'
-              AND json_extract(spoken.payload, '$.data.signal_id') = task_operator_signals.id
-            ORDER BY spoken.sequence DESC LIMIT 1) IS NOT 'operator'
-     ORDER BY raised_at_ms DESC LIMIT 1) AS blocking_signal_kind,
-    -- The kind a list shows the task under: the most urgent unresolved thread,
-    -- which is not the same question as whether the task is blocked.
-    (SELECT kind
-     FROM task_operator_signals
-     WHERE task_id = tasks.id
-       AND resolved = 0
-       AND (SELECT json_extract(spoken.payload, '$.data.author')
-            FROM task_event_logs AS spoken
-            WHERE spoken.task_id = tasks.id
-              AND spoken.event_type = 'operator_signal_message'
-              AND json_extract(spoken.payload, '$.data.signal_id') = task_operator_signals.id
-            ORDER BY spoken.sequence DESC LIMIT 1) IS NOT 'operator'
-     ORDER BY CASE kind
-         WHEN 'blocked' THEN 0
-         WHEN 'in_review' THEN 1
-         WHEN 'decision' THEN 2
-         ELSE 3
-     END, raised_at_ms DESC
-     LIMIT 1) AS leading_signal_kind,
-    -- And what that thread is about, because a row can say the question itself
-    -- rather than only that there is one.
-    (SELECT title
-     FROM task_operator_signals
-     WHERE task_id = tasks.id
-       AND resolved = 0
-       AND (SELECT json_extract(spoken.payload, '$.data.author')
-            FROM task_event_logs AS spoken
-            WHERE spoken.task_id = tasks.id
-              AND spoken.event_type = 'operator_signal_message'
-              AND json_extract(spoken.payload, '$.data.signal_id') = task_operator_signals.id
-            ORDER BY spoken.sequence DESC LIMIT 1) IS NOT 'operator'
-     ORDER BY CASE kind
-         WHEN 'blocked' THEN 0
-         WHEN 'in_review' THEN 1
-         WHEN 'decision' THEN 2
-         ELSE 3
-     END, raised_at_ms DESC
-     LIMIT 1) AS leading_signal_title,
-    (SELECT count(*) FROM task_operator_signals
-     WHERE task_id = tasks.id AND resolved = 0) AS unresolved_signal_count,
-    -- How many of each kind. One number says a row is noisy; the numbers by kind
-    -- say whether it is asking something or only reporting.
-    COALESCE((SELECT json_group_object(kind, total) FROM (
-         SELECT kind, count(*) AS total
-         FROM task_operator_signals
-         WHERE task_id = tasks.id AND resolved = 0
-         GROUP BY kind)), '{}') AS signal_counts,
+     WHERE task_id = tasks.id AND resolved = 0
+     ORDER BY raised_at_ms DESC LIMIT 1) AS leading_ask,
     (SELECT json_object('signal', json(payload -> '$.data.signal'))
      FROM task_deferred_reviews
      WHERE task_id = tasks.id

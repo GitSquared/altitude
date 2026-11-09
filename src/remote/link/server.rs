@@ -30,7 +30,7 @@ use crate::task::memory;
 use crate::task::picture;
 
 use crate::remote::host::clients::{ClientLog, ClientRecord};
-use crate::task::TaskOperatorSignalThread;
+use crate::task::TaskAsk;
 
 use crate::remote::{
     LinkResult,
@@ -47,9 +47,9 @@ use crate::remote::protocol::{
     TRANSFER_PIECE_BYTES, TaskRequest, TaskSummary, WatchEvent, builder, read_body, read_frame,
     write_frame,
 };
-use crate::remote::tracker::{claim_account, logins_of, yield_account};
 use crate::remote::transfer::{TransferUpdate, Unit};
 use crate::tracker::{ACCOUNT_FILE, TrackerAccount, TrackerKind};
+use crate::tracker::{claim_account, logins_of, yield_account};
 
 enum ConfigWrite {
     Written {
@@ -68,8 +68,8 @@ fn arriving_accounts(decoded: &[(PathBuf, Vec<u8>)]) -> Vec<(TrackerKind, Option
             if path.file_name()? != ACCOUNT_FILE {
                 return None;
             }
-            // `trackers/linear/gaby/profile/identity.json` names the login two
-            // directories up.
+            // `trackers/<provider>/<operator>/profile/identity.json` names the
+            // login two directories up.
             let login = path.parent()?.parent()?;
             Some((login.to_string_lossy().into_owned(), bytes.as_slice()))
         })
@@ -363,7 +363,7 @@ pub trait TaskHost: Send + Sync + 'static {
         &self,
         peer: EndpointId,
         task_id: String,
-    ) -> BoxFuture<Result<Vec<TaskOperatorSignalThread>, String>>;
+    ) -> BoxFuture<Result<Vec<TaskAsk>, String>>;
     fn signal(&self, peer: EndpointId, command: SignalCommand) -> BoxFuture<Result<(), String>>;
     fn input(
         &self,

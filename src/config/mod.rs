@@ -16,7 +16,7 @@ use crate::{
 
 mod serve;
 mod settings;
-pub use serve::{DEFAULT_PORT, LinearSettings, ServeSettings};
+pub use serve::DEFAULT_PORT;
 pub use settings::{Settings, SettingsError, SettingsFile};
 
 #[derive(Clone, Debug)]
@@ -91,6 +91,10 @@ impl Config {
             cache_dir,
             scope: ConfigScope::Personal,
         }
+    }
+
+    pub fn cache_dir(&self) -> &Path {
+        &self.cache_dir
     }
 
     pub fn has_lost_identity(&self) -> bool {
@@ -297,10 +301,6 @@ impl Config {
 
     pub fn git_cache_dir(&self) -> PathBuf {
         self.cache_dir.join("git")
-    }
-
-    pub fn microsandbox_socket_dir(&self) -> PathBuf {
-        self.cache_dir.join("msb")
     }
 
     pub fn task_snapshots_dir(&self) -> PathBuf {

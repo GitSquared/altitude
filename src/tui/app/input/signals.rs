@@ -3,7 +3,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     isolation::IsolationEngine,
-    task::{TaskEventLoop, TaskService},
+    task::TaskEventLoop,
     tui::keys::{is_dismiss, is_secondary},
     tui::popups,
     tui::screens,
@@ -20,7 +20,6 @@ impl App {
     pub(in crate::tui) async fn signals_mouse<E>(
         &mut self,
         mouse: MouseEvent,
-        task_service: &TaskService<E>,
         remote_signals: &mpsc::Sender<RemoteSignalsReply>,
         event_loop: &TaskEventLoop<E>,
     ) where
@@ -30,14 +29,6 @@ impl App {
         match mouse.kind {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 let up = mouse.kind == MouseEventKind::ScrollUp;
-                if self.signal_filter.is_open() {
-                    self.signal_filter.scroll(up);
-                    return;
-                }
-                if self.signal_sort.is_open() {
-                    self.signal_sort.scroll(up);
-                    return;
-                }
                 match target {
                     Some(SignalHit::List | SignalHit::Thread(_)) => {
                         self.move_signal_cursor(!up);
@@ -51,11 +42,7 @@ impl App {
                         self.scroll_activity(if up { -1 } else { 1 });
                     }
                     Some(
-                        SignalHit::Action(_)
-                        | SignalHit::ComposerSend
-                        | SignalHit::ComposerCancel
-                        | SignalHit::Filter
-                        | SignalHit::Sort,
+                        SignalHit::Action(_) | SignalHit::ComposerSend | SignalHit::ComposerCancel,
                     ) => {}
                     _ => {
                         self.signal_focus = SignalFocus::Detail;
@@ -64,16 +51,6 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                if (self.signal_filter.is_open() || self.signal_sort.is_open())
-                    && !matches!(
-                        target,
-                        Some(SignalHit::FilterOffer(_) | SignalHit::SortOffer(_))
-                    )
-                {
-                    self.signal_filter.close();
-                    self.signal_sort.close();
-                    return;
-                }
                 let Some(target) = target else {
                     return;
                 };
@@ -94,8 +71,7 @@ impl App {
                     SignalHit::Action(index) => {
                         self.signal_focus = SignalFocus::Action(index);
                         if let Some(action) = self.signal_actions().get(index).copied() {
-                            self.act_on_signal(action, task_service, remote_signals, event_loop)
-                                .await;
+                            self.act_on_signal(action, remote_signals, event_loop).await;
                         }
                     }
                     SignalHit::ComposerSend => {
@@ -106,24 +82,6 @@ impl App {
                         );
                     }
                     SignalHit::ComposerCancel => self.signal_composer = None,
-                    SignalHit::Filter => {
-                        self.signal_focus = SignalFocus::Filter;
-                        self.signal_filter.open();
-                    }
-                    SignalHit::Sort => {
-                        self.signal_focus = SignalFocus::Sort;
-                        self.signal_sort.open();
-                    }
-                    SignalHit::FilterOffer(index) => {
-                        self.signal_filter.choose(index);
-                        self.signal_filter.close();
-                        self.apply_signal_view();
-                    }
-                    SignalHit::SortOffer(index) => {
-                        self.signal_sort.choose(index);
-                        self.signal_sort.close();
-                        self.apply_signal_view();
-                    }
                 }
             }
             _ => {}
@@ -167,7 +125,6 @@ impl App {
     pub(in crate::tui) async fn signals_key<E>(
         &mut self,
         key: KeyEvent,
-        task_service: &TaskService<E>,
         remote_signals: &mpsc::Sender<RemoteSignalsReply>,
         event_loop: &TaskEventLoop<E>,
     ) where
@@ -180,13 +137,12 @@ impl App {
         // Tab switches the screen's tabs where it has them; the horizontal
         // arrows and h/l move between the parts of the screen. j/k and the
         // vertical arrows move inside the part that has the keys.
-        // In the thread list, moving and folding are the list's own; a list
-        // already at its top hands the focus back to the filters above it.
+        // In the history, moving and folding are the list's own.
         if self.signal_focus == SignalFocus::List
             && let Some(event) = self.signals_list.key(key)
         {
             match event {
-                Event::AtStart => self.signal_focus = SignalFocus::Filter,
+                Event::AtStart => {}
                 Event::Moved => self.reset_signal_message(),
                 Event::AtEnd | Event::Folded { .. } => {}
             }
@@ -251,34 +207,16 @@ impl App {
                 SignalFocus::Plan => self.scroll_plan(1),
                 SignalFocus::Activity => self.scroll_activity(1),
                 SignalFocus::Action(_) => self.move_signal_focus(true),
-                SignalFocus::Filter | SignalFocus::Sort => {
-                    self.signal_focus = SignalFocus::List;
-                }
             },
             KeyCode::Up | KeyCode::Char('k') => match self.signal_focus {
-                SignalFocus::List => {
-                    if self.signals_list.selected() == 0 {
-                        self.signal_focus = SignalFocus::Filter;
-                    } else {
-                        self.move_signal_cursor(false);
-                    }
-                }
+                SignalFocus::List => self.move_signal_cursor(false),
                 SignalFocus::Detail => self.move_signal_message(false),
                 SignalFocus::Plan => self.scroll_plan(-1),
                 SignalFocus::Activity => self.scroll_activity(-1),
                 SignalFocus::Action(_) => self.move_signal_focus(false),
-                SignalFocus::Filter | SignalFocus::Sort => {}
             },
             KeyCode::Char('y') if self.signal_focus == SignalFocus::Detail => {
                 self.copy_signal_message();
-            }
-            KeyCode::Char('f') => {
-                self.signal_focus = SignalFocus::Filter;
-                self.signal_filter.open();
-            }
-            KeyCode::Char('s') => {
-                self.signal_focus = SignalFocus::Sort;
-                self.signal_sort.open();
             }
             KeyCode::Char('p') => self.signal_plan_open = !self.signal_plan_open,
             KeyCode::Char('n') if self.remote_signals.is_none() => {
@@ -290,17 +228,13 @@ impl App {
             }
             KeyCode::Enter if is_secondary(key) => {
                 if let Some(action) = self.signal_thread().and_then(secondary_action) {
-                    self.act_on_signal(action, task_service, remote_signals, event_loop)
-                        .await
+                    self.act_on_signal(action, remote_signals, event_loop).await
                 }
             }
             KeyCode::Enter => match self.signal_focus {
-                SignalFocus::Filter => self.signal_filter.open(),
-                SignalFocus::Sort => self.signal_sort.open(),
                 SignalFocus::Action(index) => {
                     if let Some(action) = self.signal_actions().get(index).copied() {
-                        self.act_on_signal(action, task_service, remote_signals, event_loop)
-                            .await
+                        self.act_on_signal(action, remote_signals, event_loop).await
                     }
                 }
                 SignalFocus::List
@@ -308,8 +242,7 @@ impl App {
                 | SignalFocus::Plan
                 | SignalFocus::Activity => {
                     if let Some(action) = self.signal_thread().and_then(primary_action) {
-                        self.act_on_signal(action, task_service, remote_signals, event_loop)
-                            .await
+                        self.act_on_signal(action, remote_signals, event_loop).await
                     }
                 }
             },

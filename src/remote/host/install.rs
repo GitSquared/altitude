@@ -8,12 +8,10 @@ use std::{
     process::{Command, Stdio},
 };
 
-use crate::{
-    cli::ServeArgs,
-    config::{Config, ServeSettings},
-};
+use crate::{cli::ServeArgs, config::Config};
 
 use crate::remote::console::{ask, choose, field, has_terminal, paragraph};
+use crate::remote::serve::settings::ServeSettings;
 
 const UNIT: &str = "altitude.service";
 const LABEL: &str = "dev.saillard.altitude.remote";
@@ -240,21 +238,21 @@ impl Service {
 
     fn warn_about_inherited_secrets(&self) -> Result<(), Box<dyn Error>> {
         let settings = ServeSettings::load_or_create(&self.settings_path)?;
-        let Some(linear) = settings.linear else {
+        let Some(tracker) = settings.tracker else {
             return Ok(());
         };
-        if linear.client_secret.is_some() && linear.webhook_secret.is_some() {
+        if tracker.client_secret.is_some() && tracker.webhook_secret.is_some() {
             return Ok(());
         }
         println!();
         paragraph(
-            "Some of this machine's Linear secrets come from the environment it is running in \
-             now. A service starts with its own environment and will not see them, so the remote \
-             would come up without a task tracker.",
+            "Some of this machine's task tracker secrets come from the environment it is running \
+             in now. A service starts with its own environment and will not see them, so the \
+             remote would come up without a task tracker.",
         );
         println!();
         paragraph(&format!(
-            "Put them in the [linear] section of {} before it starts — that file is only readable \
+            "Put them in the tracker section of {} before it starts — that file is only readable \
              by this machine's user.",
             self.settings_path.display()
         ));

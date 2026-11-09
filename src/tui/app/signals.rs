@@ -8,9 +8,9 @@ use crate::{
     isolation::IsolationEngine,
     project::Project,
     task::{
-        SignalTransition, TaskEventLoop, TaskExecutionPauseReason, TaskExecutionStatus,
-        TaskExecutionUpdate, TaskOperatorSignalAuthor, TaskOperatorSignalKind,
-        TaskOperatorSignalMessage, TaskOperatorSignalThread, TaskPlanStep, TaskService,
+        AskTransition, TaskAsk, TaskAskAuthor, TaskAskKind, TaskAskMessage, TaskEventLoop,
+        TaskExecutionPauseReason, TaskExecutionStatus, TaskExecutionUpdate, TaskPlanStep,
+        TaskService,
     },
     tui::popups,
     tui::screens,
@@ -20,7 +20,7 @@ use crate::{
 use crate::tui::widgets::list;
 use popups::confirm::PendingConfirm;
 use screens::shell::Shell;
-use screens::signals::{Composer, SignalAction, SignalFilter, SignalFocus, SignalSort, actions};
+use screens::signals::{Composer, SignalAction, SignalFocus, actions};
 
 use super::*;
 
@@ -74,20 +74,38 @@ impl App {
         self.select_signal_message_at_scroll();
     }
 
+    // Which message the eye is on, given where the conversation is scrolled to: the one
+    // with the most of itself on screen, and the later one when two are level. Scrolling
+    // is by the line — a message taller than the pane can be read from its top — so the
+    // cursor follows the lines rather than deciding where they go.
     pub(super) fn select_signal_message_at_scroll(&mut self) {
         if self.signal_message_rows.is_empty() {
             return;
         }
-        let current = if self.signal_scroll == u16::MAX {
+        let top = i32::from(if self.signal_scroll == u16::MAX {
             self.signal_scroll_max
         } else {
             self.signal_scroll
-        };
-        self.signal_message_cursor = self
-            .signal_message_rows
-            .iter()
-            .position(|&(top, height)| current < top.saturating_add(height))
-            .unwrap_or(self.signal_message_rows.len() - 1);
+        });
+        let bottom = top.saturating_add(i32::from(self.signal_viewport_rows.max(1)));
+        let mut best: Option<(i32, usize)> = None;
+        for (index, &(at, height)) in self.signal_message_rows.iter().enumerate() {
+            let first = i32::from(at).max(top);
+            let last = i32::from(at).saturating_add(i32::from(height)).min(bottom);
+            let seen = last - first;
+            if seen <= 0 {
+                continue;
+            }
+            // `>=` rather than `>` so that two messages sharing the screen equally leave
+            // the cursor on the newer of them: the newest thing said is the thing being
+            // read, and it is at the bottom.
+            if best.is_none_or(|(most, _)| seen >= most) {
+                best = Some((seen, index));
+            }
+        }
+        self.signal_message_cursor = best
+            .map(|(_, index)| index)
+            .unwrap_or_else(|| self.signal_message_rows.len() - 1);
     }
 
     pub(in crate::tui) fn page_signal(&mut self, up: bool) {
@@ -312,19 +330,11 @@ impl App {
         })
     }
 
+    // One line at a time, because a message is not the unit a reader moves in: a long
+    // one is taller than the pane, and scrolling it whole hides the end that was being
+    // read.
     pub(super) fn move_signal_message(&mut self, forward: bool) {
-        let len = self
-            .signal_thread()
-            .map_or(0, |thread| thread.messages.len());
-        if len == 0 {
-            return;
-        }
-        self.signal_message_cursor = if forward {
-            (self.signal_message_cursor + 1).min(len - 1)
-        } else {
-            self.signal_message_cursor.saturating_sub(1)
-        };
-        self.reveal_signal_message();
+        self.scroll_signal(if forward { 1 } else { -1 });
     }
 
     pub(super) fn copy_signal_message(&mut self) {
@@ -353,57 +363,39 @@ impl App {
             let len = self
                 .signal_thread()
                 .map_or(0, |thread| thread.messages.len());
+            // Only the cursor is clamped: the scroll is where the reader put it, and
+            // revealing a message here would undo a line-by-line move by scrolling the
+            // conversation back to the message the cursor landed on.
             self.signal_message_cursor = self.signal_message_cursor.min(len.saturating_sub(1));
-            self.reveal_signal_message();
         }
     }
 
+    // The list is the task's history, newest first: every ask it ever made, the open
+    // one at the top where it belongs. There is nothing to filter, because one ask is
+    // open at a time and everything else has already been read.
     pub(in crate::tui) fn apply_signal_view(&mut self) {
         let selected = self.signal_thread().map(|thread| thread.id.clone());
-        let filter = self
-            .signal_filter
-            .chosen_value()
-            .copied()
-            .unwrap_or(SignalFilter::Unresolved);
-        let sort = self
-            .signal_sort
-            .chosen_value()
-            .copied()
-            .unwrap_or(SignalSort::Oldest);
-        let mut threads: Vec<_> = self
-            .signal_all_threads
-            .iter()
-            .filter(|thread| filter.matches(thread))
-            .cloned()
-            .collect();
-        threads.sort_by(|left, right| {
-            let group = |thread: &TaskOperatorSignalThread| {
-                let settled = thread.is_resolved();
-                // Resolved threads share one RESOLVED heading, so their kind's
-                // tier is not a visible group; ordering them by it would put a
-                // newer update below an older decision for no reason.
-                (
-                    u8::from(settled),
-                    if settled { 0 } else { thread.kind.tier() },
-                )
-            };
-            group(left).cmp(&group(right)).then_with(|| {
-                let when = |thread: &TaskOperatorSignalThread| thread.opened_at_ms;
-                match sort {
-                    SignalSort::Oldest => when(left).cmp(&when(right)),
-                    SignalSort::Newest => when(right).cmp(&when(left)),
-                }
-            })
+        self.signal_threads = self.signal_all_threads.clone();
+        self.signal_threads.sort_by(|left, right| {
+            let open = |thread: &TaskAsk| u8::from(thread.is_resolved());
+            open(left)
+                .cmp(&open(right))
+                .then(right.opened_at_ms.cmp(&left.opened_at_ms))
         });
-        self.signal_threads = threads;
-        match selected.as_ref().and_then(|id| {
-            self.signal_threads
-                .iter()
-                .position(|thread| &thread.id == id)
-        }) {
-            Some(index) => self.signals_list.select(index),
-            None => self.signals_list.select(0),
-        }
+        let chosen = selected
+            .as_ref()
+            .and_then(|id| {
+                self.signal_threads
+                    .iter()
+                    .position(|thread| &thread.id == id)
+            })
+            .or_else(|| {
+                self.signal_threads
+                    .iter()
+                    .position(|thread| thread.is_unresolved())
+            })
+            .unwrap_or(0);
+        self.signals_list.select(chosen);
         self.normalise_signal_focus();
     }
 
@@ -425,14 +417,14 @@ impl App {
         {
             let at_ms = chrono::Utc::now().timestamp_millis();
             thread.resolved = resolved;
-            thread.resolved_by = resolved.then_some(TaskOperatorSignalAuthor::Operator);
+            thread.resolved_by = resolved.then_some(TaskAskAuthor::Operator);
             thread.resolved_at_ms = resolved.then_some(at_ms);
             // The line belongs in the conversation without waiting for the next
             // read: this is what the operator just did.
-            thread.transitions.push(SignalTransition {
+            thread.transitions.push(AskTransition {
                 at_ms,
                 resolved,
-                by: TaskOperatorSignalAuthor::Operator,
+                by: TaskAskAuthor::Operator,
             });
         }
         self.apply_signal_view();
@@ -477,9 +469,9 @@ impl App {
             .iter_mut()
             .find(|thread| thread.id == signal_id)
         {
-            thread.messages.push(TaskOperatorSignalMessage {
+            thread.messages.push(TaskAskMessage {
                 id: format!("m{}", thread.messages.len() + 1),
-                author: TaskOperatorSignalAuthor::Operator,
+                author: TaskAskAuthor::Operator,
                 body: answer,
                 at_ms: chrono::Utc::now().timestamp_millis(),
             });
@@ -514,7 +506,6 @@ impl App {
     pub(super) async fn act_on_signal<E>(
         &mut self,
         action: SignalAction,
-        task_service: &TaskService<E>,
         remote_signals: &mpsc::Sender<RemoteSignalsReply>,
         event_loop: &TaskEventLoop<E>,
     ) where
@@ -537,21 +528,12 @@ impl App {
                     self.say("This task is no longer in the list");
                 }
             }
-            SignalAction::Resolve => {
-                if !matches!(
-                    thread.kind,
-                    TaskOperatorSignalKind::Update
-                        | TaskOperatorSignalKind::Decision
-                        | TaskOperatorSignalKind::Blocked
-                ) {
-                    return;
-                }
-                // An update is resolved, never reopened: once read it is history.
-                let resolved = if thread.kind == TaskOperatorSignalKind::Update {
-                    true
-                } else {
-                    !thread.resolved
-                };
+            // Closing answers "this needs nothing more from me", which is the
+            // operator's to say about any thread. It is not acceptance: the work a
+            // review holds is still theirs to accept, and closing it says only that
+            // the conversation is over.
+            SignalAction::Resolve | SignalAction::Reopen => {
+                let resolved = action == SignalAction::Resolve;
                 if resolved == thread.resolved {
                     return;
                 }
@@ -563,13 +545,14 @@ impl App {
                         remote_signals,
                     );
                 } else {
-                    match task_service
-                        .resolve_signal(&thread.task_id, &thread.id, resolved)
+                    // Through the run loop like a reply, so closing a thread that was
+                    // holding the task starts the work it was holding.
+                    match event_loop
+                        .close_signal(&thread.task_id, &thread.id, resolved)
                         .await
                     {
-                        Ok(task) => {
+                        Ok(()) => {
                             self.resolve_signal_locally(&thread.id, resolved);
-                            self.replace_task(task);
                             if resolved {
                                 self.select_next_open_thread();
                             }
@@ -583,7 +566,7 @@ impl App {
                     .await;
             }
             SignalAction::Accept => {
-                if thread.kind != TaskOperatorSignalKind::InReview || thread.resolved {
+                if thread.kind != TaskAskKind::Review || thread.resolved {
                     return;
                 }
                 let question = "Accept this work and close the task?\n\

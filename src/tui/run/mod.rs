@@ -196,14 +196,14 @@ where
     // installed the first time, so it is off this loop like every other wait.
     let (repository_lists, mut repositories_listed) = mpsc::unbounded_channel();
     let (tracker_scopes, mut tracker_scopes_replied) = mpsc::unbounded_channel();
-    // Searching Linear and reading one issue are network calls, so they happen on
+    // Searching a tracker and reading one issue are network calls, so they happen on
     // their own clock and away from this loop. Each reply carries the popup and
     // query it answers, so a late one is dropped rather than shown under the
     // wrong question.
     let (issue_search_replies, mut issue_search_replied) =
         mpsc::unbounded_channel::<IssueSearchReply>();
     let (issue_read_replies, mut issue_read_replied) = mpsc::unbounded_channel::<IssueReadReply>();
-    // Signing in to Linear opens a browser and waits on an OAuth callback, which
+    // Signing in to a tracker opens a browser and waits on an OAuth callback, which
     // is minutes rather than frames, so it happens off this loop and reports back
     // like a task's run does.
     let (tracker_connects, mut tracker_connect_replied) =

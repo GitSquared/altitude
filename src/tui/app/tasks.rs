@@ -6,7 +6,7 @@ use crate::{
     agent::Activity,
     isolation::IsolationEngine,
     remote::TaskOrigin,
-    task::{Task, TaskEventLoop, TaskOperatorSignalAuthor, TaskOperatorSignalThread, TaskService},
+    task::{Task, TaskAsk, TaskAskAuthor, TaskEventLoop, TaskService},
     tracker::IssueReference,
     tui::popups,
     tui::screens,
@@ -230,7 +230,7 @@ impl App {
         }
     }
 
-    pub(in crate::tui) fn signal_thread(&self) -> Option<&TaskOperatorSignalThread> {
+    pub(in crate::tui) fn signal_thread(&self) -> Option<&TaskAsk> {
         self.signal_threads.get(self.signals_list.selected())
     }
 
@@ -244,8 +244,7 @@ impl App {
             return false;
         };
         if thread.is_resolved()
-            || thread.messages.last().map(|message| message.author)
-                != Some(TaskOperatorSignalAuthor::Operator)
+            || thread.messages.last().map(|message| message.author) != Some(TaskAskAuthor::Operator)
         {
             return false;
         }

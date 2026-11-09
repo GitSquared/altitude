@@ -1,8 +1,18 @@
+pub(crate) mod host;
+mod logins;
 pub(crate) mod providers;
+mod surface;
 
-pub use providers::linear::Linear;
+pub(crate) use logins::{Login, claim_account, logins, logins_of, yield_account};
 
-use std::{error::Error, fmt, future::Future, pin::Pin};
+pub use host::TrackerReadiness;
+pub(crate) use host::{
+    BoundTask, DelegatedWork, DelegatedWorkFuture, QueueStanding, Start, TrackerIntegration,
+};
+pub(crate) use providers::provider;
+pub(crate) use surface::{AskSurface, ask_marker};
+
+use std::{error::Error, fmt, future::Future, pin::Pin, time::SystemTime};
 
 use serde::{Deserialize, Serialize};
 
@@ -17,26 +27,12 @@ pub enum TrackerKind {
 impl TrackerKind {
     pub const ALL: [Self; 1] = [Self::Linear];
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Linear => "Linear",
-        }
-    }
-
-    pub fn scope_noun(self) -> &'static str {
-        match self {
-            Self::Linear => "team",
-        }
-    }
-
     pub fn sole() -> Self {
         Self::ALL[0]
     }
 
-    pub fn profile(self) -> &'static str {
-        match self {
-            Self::Linear => "trackers/linear",
-        }
+    pub fn slug(self) -> &'static str {
+        self.profile().rsplit('/').next().unwrap_or_default()
     }
 }
 
@@ -206,6 +202,12 @@ pub trait TrackerProvider: IssueReader {
     fn clear_credentials<'a>(&'a self) -> TrackerFuture<'a, ()>;
 
     fn is_connected(&self) -> bool;
+
+    // A saved login, whether or not this process has opened a session with it. The
+    // machine that holds the profile can answer before anything starts.
+    fn is_signed_in(&self) -> bool;
+
+    fn sign_in_changed_at(&self) -> Option<SystemTime>;
 
     fn search<'a>(&'a self, query: &'a str) -> TrackerFuture<'a, Vec<IssueSummary>>;
 

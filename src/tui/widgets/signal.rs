@@ -1,7 +1,7 @@
 use ratatui::style::Style;
 
 use super::palette;
-use crate::task::TaskOperatorSignalKind;
+use crate::task::TaskAskKind;
 
 pub struct SignalView {
     pub label: &'static str,
@@ -10,27 +10,15 @@ pub struct SignalView {
     pub tone: Style,
 }
 
-pub fn view(kind: TaskOperatorSignalKind) -> SignalView {
+pub fn view(kind: TaskAskKind) -> SignalView {
     match kind {
-        TaskOperatorSignalKind::Update => SignalView {
-            label: "Info",
-            task_label: "Info",
-            symbol: '○',
-            tone: palette::muted(),
-        },
-        TaskOperatorSignalKind::Decision => SignalView {
-            label: "Decision",
-            task_label: "Decision",
-            symbol: '→',
-            tone: palette::decision(),
-        },
-        TaskOperatorSignalKind::InReview => SignalView {
+        TaskAskKind::Review => SignalView {
             label: "Ready to review",
             task_label: "Ready to review",
             symbol: '◆',
             tone: palette::good(),
         },
-        TaskOperatorSignalKind::Blocked => SignalView {
+        TaskAskKind::Steer => SignalView {
             label: "Blocked",
             task_label: "Needs you",
             symbol: '?',

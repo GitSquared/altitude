@@ -1,4 +1,5 @@
 use super::*;
+use crate::brand;
 
 use ratatui::{
     Frame,
@@ -27,7 +28,7 @@ pub fn draw(
     let x = area.x + area.width.saturating_sub(width) / 2;
 
     let subtitle = subtitle();
-    let subtitle_height = wrapped_height(subtitle_plain(), width);
+    let subtitle_height = wrapped_height(&subtitle_plain(), width);
     let (rows, row_focuses) = checklist(panel, setup, width, tick);
     let rows_height = rows.len() as u16;
     // The ring is the rows that were drawn, in the order they were drawn: a row
@@ -108,7 +109,7 @@ pub(super) fn subtitle() -> Text<'static> {
     Text::from(vec![
         Line::from(vec![
             Span::styled("welcome to ", palette::primary()),
-            Span::styled("⛰  altitude", palette::heading()),
+            Span::styled(brand::TITLE, palette::heading()),
             Span::styled(
                 ", a tool to pilot agents efficiently and keep your focus on the decisions that matter.",
                 palette::primary(),
@@ -119,9 +120,12 @@ pub(super) fn subtitle() -> Text<'static> {
     ])
 }
 
-pub(super) fn subtitle_plain() -> &'static str {
-    "welcome to ⛰  altitude, a tool to pilot agents efficiently and keep your focus on the \
-     decisions that matter.\n\nlet's get you set up:"
+pub(super) fn subtitle_plain() -> String {
+    format!(
+        "welcome to {}, a tool to pilot agents efficiently and keep your focus on the \
+         decisions that matter.\n\nlet's get you set up:",
+        brand::TITLE
+    )
 }
 
 pub(super) fn checklist(

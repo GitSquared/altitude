@@ -1,34 +1,26 @@
-use crate::remote::{StartFuture, StartRefusal};
-
 use std::{
     collections::HashMap,
-    path::Path,
     sync::{Arc, Mutex},
     time::SystemTime,
 };
 
 use crate::agent::Activity;
+use crate::remote::{StartFuture, StartRefusal};
 use crate::task::tasks_waiting_for_room;
 use crate::task::{TaskExecutionPauseReason, TaskExecutionStatus};
 use iroh::EndpointId;
-use sha2::{Digest, Sha256};
-
-use tokio::{
-    net::TcpListener,
-    time::{self, Duration as TokioDuration},
-};
 
 use crate::{
-    config::{Config, InstallationIdentity, LinearSettings},
-    task::{TaskHistoryEvent, TaskOperatorSignalThread, TrackerHost},
+    config::{Config, InstallationIdentity},
+    credentials::Service,
+    task::{TaskAsk, TaskHistoryEvent, TrackerHost},
     tracker::{
-        IssueSnapshot, Linear, TrackerProvider, TrackerStatus,
-        providers::linear::{automation::LinearAutomation, oauth},
+        self, BoundTask, DelegatedWork, DelegatedWorkFuture, IssueSnapshot, QueueStanding, Start,
+        TrackerProvider, TrackerStatus,
     },
 };
 
 use super::OwnTasks;
-use crate::remote::host::tracker;
 
 pub(super) struct PushedTrackers {
     config: Config,
@@ -36,95 +28,11 @@ pub(super) struct PushedTrackers {
 }
 
 struct Opened {
-    tracker: Arc<Linear>,
+    tracker: Arc<dyn TrackerProvider>,
     signed_in_at: Option<SystemTime>,
 }
 
-pub(super) struct LinearRuntime {
-    pub(super) automation: Arc<LinearAutomation>,
-    pub(super) tracker: Arc<tracker::RemoteTracker>,
-    pub(super) listener: TcpListener,
-    pub(super) workspace_name: String,
-}
-
-// Six bytes of the digest: enough to tell two secrets apart, far too little to be
-// a secret itself.
-fn fingerprint(secret: &str) -> String {
-    hex::encode(&Sha256::digest(secret.as_bytes())[..6])
-}
-
-pub(super) async fn connect_tracker(
-    config: &Config,
-    settings: &LinearSettings,
-    credentials_path: &Path,
-) -> Result<LinearRuntime, String> {
-    let mut credentials = oauth::AppCredentials::load(credentials_path)?;
-    credentials
-        .refresh_if_needed(settings, credentials_path)
-        .await?;
-    let workspace_name = credentials.workspace_name.clone();
-    let automation = Arc::new(
-        credentials
-            .client()
-            .await
-            .map_err(|error| error.to_string())?,
-    );
-    let listener = TcpListener::bind(&settings.listen)
-        .await
-        .map_err(|error| format!("could not listen for Linear webhooks: {error}"))?;
-    let webhook_secret = settings.webhook_secret()?;
-    // A fingerprint rather than the secret: when Linear rejects a delivery the
-    // question an operator has is which value this machine is holding, and twelve
-    // hex characters answer it against `printf '%s' '<the app secret>' | sha256sum`
-    // without a secret reaching a log.
-    tracing::info!(
-        fingerprint = %fingerprint(&webhook_secret),
-        "Linear webhook secret loaded"
-    );
-    let tracker = tracker::RemoteTracker::new(tracker::RemoteTrackerConfig {
-        automation: automation.clone(),
-        webhook_secret: webhook_secret.into_bytes(),
-        oauth_client_id: settings.client_id.clone(),
-        storage_path: config.data_dir().join("trackers/linear/deliveries.json"),
-        attachments_dir: config.attachments_dir(),
-        operators_dir: config.data_dir().join("operators"),
-        host_label: whoami::hostname().unwrap_or_else(|_| "remote".to_owned()),
-    })?;
-    let settings = settings.clone();
-    let path = credentials_path.to_owned();
-    let refreshed_automation = automation.clone();
-    tokio::spawn(async move {
-        // The token says when it expires, so renewing it is a moment to wait for
-        // rather than a question to ask every minute.
-        loop {
-            time::sleep(credentials.refresh_in()).await;
-            match credentials.refresh_if_needed(&settings, &path).await {
-                Ok(true) => {
-                    if let Err(error) =
-                        refreshed_automation.replace_token(credentials.access_token().to_owned())
-                    {
-                        tracing::warn!(%error, "Linear login needs attention");
-                    }
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    tracing::warn!(%error, "Linear login refresh remains queued");
-                    // A refresh that failed did not move the expiry, so the next wait
-                    // would be no wait at all.
-                    time::sleep(TokioDuration::from_secs(60)).await;
-                }
-            }
-        }
-    });
-    Ok(LinearRuntime {
-        automation,
-        tracker,
-        listener,
-        workspace_name,
-    })
-}
-
-impl tracker::Host for OwnTasks {
+impl DelegatedWork for OwnTasks {
     fn start_issue(
         &self,
         peer: EndpointId,
@@ -215,7 +123,7 @@ impl tracker::Host for OwnTasks {
         })
     }
 
-    fn complete(&self, task_id: String) -> tracker::HostFuture<'_, ()> {
+    fn complete(&self, task_id: String) -> DelegatedWorkFuture<'_, ()> {
         Box::pin(async move {
             self.tasks
                 .complete_task(&task_id)
@@ -228,7 +136,7 @@ impl tracker::Host for OwnTasks {
         &self,
         task_id: String,
         reason: TaskExecutionPauseReason,
-    ) -> tracker::HostFuture<'_, ()> {
+    ) -> DelegatedWorkFuture<'_, ()> {
         Box::pin(async move {
             if let Some(task) = self
                 .tasks
@@ -247,7 +155,7 @@ impl tracker::Host for OwnTasks {
         })
     }
 
-    fn record_status(&self, task_id: String, status: TrackerStatus) -> tracker::HostFuture<'_, ()> {
+    fn record_status(&self, task_id: String, status: TrackerStatus) -> DelegatedWorkFuture<'_, ()> {
         Box::pin(async move {
             self.tasks
                 .record_status(&task_id, status)
@@ -256,10 +164,7 @@ impl tracker::Host for OwnTasks {
         })
     }
 
-    fn signal_threads(
-        &self,
-        task_id: String,
-    ) -> tracker::HostFuture<'_, Vec<TaskOperatorSignalThread>> {
+    fn signal_threads(&self, task_id: String) -> DelegatedWorkFuture<'_, Vec<TaskAsk>> {
         Box::pin(async move {
             self.tasks
                 .service()
@@ -269,18 +174,21 @@ impl tracker::Host for OwnTasks {
         })
     }
 
-    fn reopen_signal(&self, task_id: String, signal_id: String) -> tracker::HostFuture<'_, ()> {
+    fn set_signal_resolved(
+        &self,
+        task_id: String,
+        signal_id: String,
+        resolved: bool,
+    ) -> DelegatedWorkFuture<'_, ()> {
         Box::pin(async move {
             self.tasks
-                .service()
-                .resolve_signal(&task_id, &signal_id, false)
+                .close_signal(&task_id, &signal_id, resolved)
                 .await
-                .map(|_| ())
                 .map_err(|error| error.to_string())
         })
     }
 
-    fn events(&self, task_id: String) -> tracker::HostFuture<'_, Vec<(i64, TaskHistoryEvent)>> {
+    fn events(&self, task_id: String) -> DelegatedWorkFuture<'_, Vec<(i64, TaskHistoryEvent)>> {
         Box::pin(async move {
             self.tasks
                 .events(&task_id)
@@ -293,7 +201,7 @@ impl tracker::Host for OwnTasks {
     // recorded as an operator input and the agent reads it on its next turn. What it
     // must not do is stop the run to rewrite the intent, which throws away the
     // sandbox it was working in.
-    fn steer(&self, task_id: String, message: String) -> tracker::HostFuture<'_, ()> {
+    fn steer(&self, task_id: String, message: String) -> DelegatedWorkFuture<'_, ()> {
         Box::pin(async move {
             self.tasks
                 .express_input(&task_id, message)
@@ -308,7 +216,7 @@ impl tracker::Host for OwnTasks {
         task_id: String,
         signal_id: String,
         answer: String,
-    ) -> tracker::HostFuture<'_, ()> {
+    ) -> DelegatedWorkFuture<'_, ()> {
         Box::pin(async move {
             self.tasks
                 .reply(&task_id, &signal_id, answer)
@@ -317,7 +225,7 @@ impl tracker::Host for OwnTasks {
         })
     }
 
-    fn accept(&self, task_id: String, signal_id: String) -> tracker::HostFuture<'_, ()> {
+    fn accept(&self, task_id: String, signal_id: String) -> DelegatedWorkFuture<'_, ()> {
         Box::pin(async move {
             self.tasks
                 .service()
@@ -328,7 +236,7 @@ impl tracker::Host for OwnTasks {
         })
     }
 
-    fn delegation_of(&self, task_id: String) -> tracker::HostFuture<'_, Option<String>> {
+    fn delegation_of(&self, task_id: String) -> DelegatedWorkFuture<'_, Option<String>> {
         Box::pin(async move {
             Ok(self
                 .tasks
@@ -343,7 +251,7 @@ impl tracker::Host for OwnTasks {
         &self,
         issue_id: String,
         delegations: Vec<String>,
-    ) -> tracker::HostFuture<'_, Option<tracker::BoundTask>> {
+    ) -> DelegatedWorkFuture<'_, Option<BoundTask>> {
         Box::pin(async move {
             let wanted: Vec<&str> = delegations.iter().map(String::as_str).collect();
             let task = self
@@ -353,7 +261,7 @@ impl tracker::Host for OwnTasks {
                 .map_err(|error| error.to_string())?;
             Ok(task.and_then(|task| {
                 let issue = task.facts.tracker_issue.clone()?;
-                Some(tracker::BoundTask {
+                Some(BoundTask {
                     task_id: task.id.clone(),
                     owner: task.operator_id()?.to_owned(),
                     issue,
@@ -361,12 +269,13 @@ impl tracker::Host for OwnTasks {
                     session_agent: task.session_agent(),
                     status: task.facts.execution_status,
                     pause_reason: task.facts.execution_pause_reason.clone(),
+                    ask: task.facts.leading_ask.as_ref().map(|ask| ask.kind),
                 })
             }))
         })
     }
 
-    fn session_agent(&self, task_id: String) -> tracker::HostFuture<'_, Option<String>> {
+    fn session_agent(&self, task_id: String) -> DelegatedWorkFuture<'_, Option<String>> {
         Box::pin(async move {
             Ok(self
                 .tasks
@@ -379,13 +288,13 @@ impl tracker::Host for OwnTasks {
         })
     }
 
-    fn current_activity(&self, task_id: String) -> tracker::HostFuture<'_, Option<Activity>> {
+    fn current_activity(&self, task_id: String) -> DelegatedWorkFuture<'_, Option<Activity>> {
         Box::pin(async move { Ok(self.tasks.current_activity(&task_id)) })
     }
 
     // One read of the queue for every task on it, rather than one read per task: the
     // queue, the machine and the start are the same three facts for all of them.
-    fn queue_standings(&self) -> tracker::HostFuture<'_, HashMap<String, tracker::QueueStanding>> {
+    fn queue_standings(&self) -> DelegatedWorkFuture<'_, HashMap<String, QueueStanding>> {
         Box::pin(async move {
             let tasks = self.tasks.list().await.map_err(|error| error.to_string())?;
             // A task waiting for room has no capsule, so every capsule counted here
@@ -401,13 +310,13 @@ impl tracker::Host for OwnTasks {
                 .map(|(ahead, task)| {
                     let start = self.tasks.is_starting(&task.id).then(|| {
                         match self.tasks.service().environment_step(&task.id) {
-                            Some(progress) => tracker::Start::Building(progress),
-                            None => tracker::Start::Provisioning,
+                            Some(progress) => Start::Building(progress),
+                            None => Start::Provisioning,
                         }
                     });
                     (
                         task.id.clone(),
-                        tracker::QueueStanding {
+                        QueueStanding {
                             ahead,
                             on_machine,
                             holding,
@@ -419,7 +328,7 @@ impl tracker::Host for OwnTasks {
         })
     }
 
-    fn bound_tasks(&self) -> tracker::HostFuture<'_, Vec<tracker::BoundTask>> {
+    fn bound_tasks(&self) -> DelegatedWorkFuture<'_, Vec<BoundTask>> {
         Box::pin(async move {
             let tasks = self.tasks.list().await.map_err(|error| error.to_string())?;
             Ok(tasks
@@ -450,7 +359,7 @@ impl tracker::Host for OwnTasks {
                     }
                     let issue = task.facts.tracker_issue.clone()?;
                     let owner = task.operator_id()?.to_owned();
-                    Some(tracker::BoundTask {
+                    Some(BoundTask {
                         task_id: task.id.clone(),
                         owner,
                         issue,
@@ -458,13 +367,14 @@ impl tracker::Host for OwnTasks {
                         session_agent: task.session_agent(),
                         status: task.facts.execution_status,
                         pause_reason: task.facts.execution_pause_reason.clone(),
+                        ask: task.facts.leading_ask.as_ref().map(|ask| ask.kind),
                     })
                 })
                 .collect())
         })
     }
 
-    fn is_kept(&self, task_id: String) -> tracker::HostFuture<'_, bool> {
+    fn is_kept(&self, task_id: String) -> DelegatedWorkFuture<'_, bool> {
         Box::pin(async move {
             Ok(self
                 .tasks
@@ -488,35 +398,39 @@ impl PushedTrackers {
 
 impl TrackerHost for PushedTrackers {
     fn connectable(&self, operator: &str, credential: &str) -> Option<Arc<dyn TrackerProvider>> {
+        let Service::Tracker(kind) = Service::from_id(credential)? else {
+            return None;
+        };
         let directory = self
             .config
             .for_operator(operator)
             .ok()?
             .profile_dir(credential);
-        let tracker = Linear::from_directory(&directory).ok()?;
-        Some(Arc::new(tracker) as Arc<dyn TrackerProvider>)
+        tracker::provider(kind, &directory)
     }
 
     fn for_credential(&self, operator: &str, credential: &str) -> Option<Arc<dyn TrackerProvider>> {
+        let Service::Tracker(kind) = Service::from_id(credential)? else {
+            return None;
+        };
         let key = (operator.to_owned(), credential.to_owned());
         if let Some(opened) = self.opened.lock().ok()?.get(&key)
             && opened.signed_in_at == opened.tracker.sign_in_changed_at()
         {
-            return Some(opened.tracker.clone() as Arc<dyn TrackerProvider>);
+            return Some(Arc::clone(&opened.tracker));
         }
         let directory = self
             .config
             .for_operator(operator)
             .ok()?
             .profile_dir(credential);
-        let tracker = Linear::from_directory(&directory).ok()?;
+        let tracker = tracker::provider(kind, &directory)?;
         // A peer that pushed a tracker profile without signing in has nothing to
         // report through, and is not an error worth warning about every pass.
         if !tracker.is_signed_in() {
             return None;
         }
         let signed_in_at = tracker.sign_in_changed_at();
-        let tracker = Arc::new(tracker);
         self.opened.lock().ok()?.insert(
             key,
             Opened {
@@ -524,6 +438,6 @@ impl TrackerHost for PushedTrackers {
                 signed_in_at,
             },
         );
-        Some(tracker as Arc<dyn TrackerProvider>)
+        Some(tracker)
     }
 }

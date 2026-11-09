@@ -279,23 +279,13 @@ impl Project {
 }
 
 pub fn repository_display(provider: VcsProviderKind, repository: &str) -> Option<String> {
-    let short = short_repository(repository)?;
+    let short = provider.short_repository(repository)?;
     let (owner, name) = short.split_once('/')?;
     Some(describe(
         Service::VersionControl(provider),
         Some(owner),
         name,
     ))
-}
-
-fn short_repository(repository: &str) -> Option<String> {
-    let short = repository
-        .strip_prefix("https://github.com/")
-        .or_else(|| repository.strip_prefix("http://github.com/"))
-        .or_else(|| repository.strip_prefix("git@github.com:"))
-        .unwrap_or(repository);
-    let short = short.strip_suffix(".git").unwrap_or(short);
-    (!short.trim().is_empty()).then(|| short.trim().to_owned())
 }
 
 pub fn normalize_repository(value: &str) -> Result<String, ProjectError> {
@@ -328,7 +318,7 @@ pub fn normalize_repository(value: &str) -> Result<String, ProjectError> {
             .filter(|segment| !segment.is_empty())
             .count();
         if segments < 3 || (!host.contains('.') && host != "localhost") {
-            return invalid("must name a host, as in https://github.com/owner/repo");
+            return invalid("must name a host, as in https://git.example.com/owner/repo");
         }
         format!("https://{trimmed}")
     };

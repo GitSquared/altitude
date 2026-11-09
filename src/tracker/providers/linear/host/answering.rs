@@ -1,19 +1,19 @@
-use super::admission::{self, Actor, Admission, InputFacts};
-use super::ledger::{CommentInput, SessionEvent};
+use super::ledger::{CommentInput, CommentResolution, SessionEvent};
 use crate::remote::StartRefusal;
+use crate::remote::host::admission::{self, Actor, Admission, InputFacts};
+use crate::tracker::ask_marker;
 use crate::{
-    task::{TaskOperatorSignalKind, TaskOperatorSignalThread},
+    task::TaskAsk,
     tracker::{TrackerKind, providers::linear::automation::AgentActivityContent},
 };
 
-use super::intake::Unprepared;
 use super::ledger::ReactionInput;
 use super::*;
 impl RemoteTracker {
     pub(super) async fn answer_prompt(
         &self,
         event: &SessionEvent,
-        host: &dyn Host,
+        host: &dyn DelegatedWork,
     ) -> Result<(), String> {
         let Some(answer) = event.prompt_body.as_deref() else {
             return Ok(());
@@ -60,44 +60,34 @@ impl RemoteTracker {
                 .activity_id
                 .as_deref()
                 .unwrap_or(event.session_id.as_str());
-            self.config
-                .automation
-                .create_activity(
+            self.create_system_activity(
+                &event.session_id,
+                &stable_id(
                     &event.session_id,
-                    &stable_id(
-                        &event.session_id,
-                        &format!("teammate-redirect:{discriminator}"),
-                    ),
-                    AgentActivityContent::Response { body },
-                )
-                .await
-                .map_err(|error| error.to_string())?;
+                    &format!("teammate-redirect:{discriminator}"),
+                ),
+                AgentActivityContent::Response { body },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
             return Ok(());
         }
         let signals = host.signal_threads(report.task_id.clone()).await?;
         // A prompt answers only what was already waiting when it was written. A
         // prompt that predates a signal is stale, and letting it resolve the
         // newer question would answer something the operator never saw.
-        let waiting: Vec<&TaskOperatorSignalThread> = signals
+        let waiting: Vec<&TaskAsk> = signals
             .iter()
             .filter(|signal| signal.is_unresolved())
             .filter(|signal| signal.last_raised_at_ms <= event.occurred_at_ms)
             .collect();
-        // A decision is not blocking, but a reply from the issue still belongs
-        // in its thread; an update is a log and is not answered here.
-        let question = waiting.iter().copied().find(|signal| {
-            matches!(
-                signal.kind,
-                TaskOperatorSignalKind::Blocked | TaskOperatorSignalKind::Decision
-            )
-        });
-        let review = waiting
-            .iter()
-            .copied()
-            .find(|signal| signal.kind == TaskOperatorSignalKind::InReview);
-        let Some(signal) = question.or(review) else {
+        // An answer in the issue belongs in the ask it answers. One is open at a time,
+        // so there is nothing to choose between; a task with none is steered directly.
+        let Some(signal) = waiting.first().copied() else {
+            self.note_wake(&report, "the operator answered").await;
             return host.steer(report.task_id.clone(), answer.to_owned()).await;
         };
+        self.note_wake(&report, "the operator answered").await;
         host.reply(report.task_id.clone(), signal.id.clone(), answer.to_owned())
             .await
     }
@@ -105,7 +95,7 @@ impl RemoteTracker {
     pub(super) async fn answer_comment(
         &self,
         event: &CommentInput,
-        host: &dyn Host,
+        host: &dyn DelegatedWork,
     ) -> Result<(), String> {
         // Everything this machine says on an issue comes back as a delivery too. There
         // is nothing to read in it, and asking the tracker which thread it belongs to
@@ -167,7 +157,7 @@ impl RemoteTracker {
             .await?
             .into_iter()
             .find(|thread| {
-                thread.is_unresolved() && published_comment_id(&report.task_id, &thread.id) == root
+                thread.is_unresolved() && ask_marker(&report.task_id, &thread.id) == root
             });
         let facts = InputFacts {
             actor,
@@ -202,6 +192,8 @@ impl RemoteTracker {
                 } else {
                     event.body.clone()
                 };
+                self.note_wake(&report, "the operator wrote on the issue")
+                    .await;
                 if let Some(thread) = &answered {
                     // The reply answers the thread it is in. Whether an answer
                     // settles a question is the agent's to judge and it says so with
@@ -243,13 +235,63 @@ impl RemoteTracker {
         }
     }
 
+    // Closing a thread in the tracker is the operator saying what they would say in
+    // the interface, and it is read the same way: the question needs nothing more, so
+    // the task stops waiting on it — and, if that was what held it, it works again.
+    pub(super) async fn answer_thread_resolution(
+        &self,
+        event: &CommentResolution,
+        host: &dyn DelegatedWork,
+    ) -> Result<(), String> {
+        let site = self
+            .config
+            .automation
+            .comment_site(&event.comment_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let Some(issue_id) = site.issue_id.clone() else {
+            return Ok(());
+        };
+        let Some(report) = host
+            .work_for_issue(issue_id, Vec::new())
+            .await?
+            .and_then(|task| self.report_for_task(&task.task_id))
+        else {
+            return Ok(());
+        };
+        if !host.is_kept(report.task_id.clone()).await? {
+            return Ok(());
+        }
+        let root = site.root_comment_id.clone();
+        let thread = host
+            .signal_threads(report.task_id.clone())
+            .await?
+            .into_iter()
+            .find(|thread| ask_marker(&report.task_id, &thread.id) == root);
+        let Some(thread) = thread else {
+            return Ok(());
+        };
+        if thread.is_resolved() == event.resolved {
+            return Ok(());
+        }
+        host.set_signal_resolved(report.task_id.clone(), thread.id.clone(), event.resolved)
+            .await?;
+        tracing::info!(
+            task = %report.task_id,
+            signal = %thread.id,
+            resolved = event.resolved,
+            "the operator closed or reopened a thread in the tracker"
+        );
+        Ok(())
+    }
+
     // A reaction is the operator answering with a symbol. What it means is theirs and
     // the agent's to read: this says what happened in the thread the comment belongs
     // to, and leaves every judgement about it to the one who has the tools to make it.
     pub(super) async fn answer_reaction(
         &self,
         event: &ReactionInput,
-        host: &dyn Host,
+        host: &dyn DelegatedWork,
     ) -> Result<(), String> {
         // This machine's own reaction — the acknowledgement it adds to a comment it has
         // read — is not the operator answering anything.
@@ -289,7 +331,7 @@ impl RemoteTracker {
             .signal_threads(report.task_id.clone())
             .await?
             .into_iter()
-            .find(|thread| published_comment_id(&report.task_id, &thread.id) == root);
+            .find(|thread| ask_marker(&report.task_id, &thread.id) == root);
         let Some(thread) = thread else {
             return Ok(());
         };
@@ -303,6 +345,8 @@ impl RemoteTracker {
             "The operator reacted {} to this comment:\n\n{about}",
             event.emoji
         );
+        self.note_wake(&report, "the operator reacted to a message")
+            .await;
         host.reply(report.task_id, thread.id, said).await
     }
 
@@ -365,46 +409,32 @@ impl RemoteTracker {
         }
     }
 
-    pub(super) async fn post_sync_guidance(
-        &self,
-        session_id: &str,
-        cause: Unprepared,
-    ) -> Result<(), String> {
+    // The operator's own name, for the lines that say who a task is waiting on: a
+    // tracker is shared with a team, and "you" is only one of the people reading it.
+    pub(super) async fn operator_name(&self, user_id: &str) -> String {
+        match self.config.automation.user_name(user_id).await {
+            Ok(name) if !name.trim().is_empty() => name,
+            Ok(_) | Err(_) => "the operator".to_owned(),
+        }
+    }
+
+    pub(super) async fn post_sync_guidance(&self, session_id: &str) -> Result<(), String> {
         let tracker = TrackerKind::Linear.label();
-        let host = whoami::hostname().unwrap_or_else(|_| "this remote".to_owned());
-        // Two different things stop a delegation here, and naming the wrong one sends
-        // the operator to a setting that is already right.
-        let body = match cause {
-            Unprepared::NoProjects => format!(
-                "**This remote has no projects yet.**\n\n\
-                 No one has added this remote to a project in Altitude, so it has no code, \
-                 no agent, and no settings to run this issue with.\n\n\
-                 On your computer:\n\n\
-                 1. Open Altitude, or install it if you don't have it.\n\
-                 2. In Settings → Remotes, add this remote: {host}\n\
-                 3. In Settings → Task tracker, sign in to {tracker}, so Altitude knows \
-                 whose work this is.\n\n\
-                 Altitude passes your setup to this remote in the background. Reply here \
-                 once that's done, and this issue gets picked up."
-            ),
-            Unprepared::UnknownOperator => format!(
-                "**Altitude does not know whose work this is.**\n\n\
-                 This remote holds no {tracker} login from a person it could report to, so \
-                 it cannot start a task for you.\n\n\
-                 On your computer, in Settings → Task tracker, sign in to {tracker} as \
-                 yourself. The login is passed to this remote in the background; reply \
-                 here once that's done."
-            ),
-        };
-        self.config
-            .automation
-            .create_activity(
-                session_id,
-                &stable_id(session_id, "sync-error"),
-                AgentActivityContent::Error { body },
-            )
-            .await
-            .map_err(|error| error.to_string())
+        let body = format!(
+            "**Altitude does not know whose work this is.**\n\n\
+             This remote holds no {tracker} login from a person it could report to, so it \
+             cannot start a task for you.\n\n\
+             On your computer, in Settings → Task tracker, sign in to {tracker} as \
+             yourself. The login is passed to this remote in the background; reply here \
+             once that's done."
+        );
+        self.create_system_activity(
+            session_id,
+            &stable_id(session_id, "sync-error"),
+            AgentActivityContent::Error { body },
+        )
+        .await
+        .map_err(|error| error.to_string())
     }
 
     pub(super) async fn post_start_guidance(
@@ -416,14 +446,12 @@ impl RemoteTracker {
             "**Nothing was started.**\n\n{refusal}\n\n\
              Reply here once that's sorted, and Altitude will try again."
         );
-        self.config
-            .automation
-            .create_activity(
-                session_id,
-                &stable_id(session_id, "start-error"),
-                AgentActivityContent::Error { body },
-            )
-            .await
-            .map_err(|error| error.to_string())
+        self.create_system_activity(
+            session_id,
+            &stable_id(session_id, "start-error"),
+            AgentActivityContent::Error { body },
+        )
+        .await
+        .map_err(|error| error.to_string())
     }
 }

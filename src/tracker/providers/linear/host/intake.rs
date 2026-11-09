@@ -14,14 +14,7 @@ use axum::{
 use serde::Deserialize;
 use std::sync::{Arc, atomic::Ordering};
 
-// Why a delegation here cannot be started. Two answers, because they point at two
-// different settings and only one of them is the operator's to fix.
 use super::*;
-#[derive(Clone, Copy)]
-pub(super) enum Unprepared {
-    NoProjects,
-    UnknownOperator,
-}
 
 pub(super) enum WebhookOutcome {
     Store(StoredEvent),

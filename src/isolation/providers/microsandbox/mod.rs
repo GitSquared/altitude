@@ -138,7 +138,7 @@ impl MicrosandboxIsolation {
             config: config.clone(),
             data_home: config.isolation_data_dir(),
             cache_home: config.isolation_cache_dir(),
-            socket_safe_home: config.microsandbox_socket_dir(),
+            socket_safe_home: config.cache_dir().join("msb"),
             build_lock: BuildLock::new(config),
             host_pressure: Arc::new(Mutex::new(HostPressure::new(&config.isolation_data_dir()))),
         }

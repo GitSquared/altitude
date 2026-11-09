@@ -70,7 +70,7 @@ fn write_secret(path: &Path, secret_key: &SecretKey) -> LinkResult<()> {
     Ok(())
 }
 
-pub(super) fn write_private(path: &Path, text: &str) -> LinkResult<()> {
+pub(crate) fn write_private(path: &Path, text: &str) -> LinkResult<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }

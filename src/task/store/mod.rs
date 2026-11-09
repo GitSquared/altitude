@@ -4,7 +4,7 @@ use crate::id;
 use crate::project::Project;
 use crate::task::{
     Task, TaskError, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus, TaskFacts,
-    TaskHistoryEvent, TaskOperatorAttentionLevel,
+    TaskHistoryEvent,
 };
 use crate::{
     agent::AgentKind,
@@ -185,7 +185,6 @@ impl TaskStore {
                     &[TaskHistoryEvent::IntentExpressed {
                         execution_status: TaskExecutionStatus::Pending,
                         execution_mode: TaskExecutionMode::Autopilot,
-                        operator_attention_level: TaskOperatorAttentionLevel::Nominal,
                         sandbox_available: false,
                         snapshot_available: false,
                         intent,

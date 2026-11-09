@@ -1,19 +1,20 @@
 use std::{error::Error, io, path::Path, time::SystemTime};
 
 use crate::{
-    config::{LinearSettings, ServeSettings},
+    remote::serve::settings::ServeSettings,
+    tracker::providers::linear::settings::LinearSettings,
     tracker::{Guide, Item, Step, TrackerKind, providers::linear::oauth},
 };
 
 use crate::remote::console::{ask, bold, field, has_terminal, paragraph, prose};
 
-pub async fn connect_linear(
+pub async fn connect_remote(
     settings: &ServeSettings,
     settings_path: &Path,
     credentials_path: &Path,
 ) -> Result<(), Box<dyn Error>> {
     let guide = TrackerKind::Linear.guide();
-    let Some(linear) = settings.linear.clone() else {
+    let Some(linear) = settings.tracker.clone() else {
         print_guide(guide);
         return Err(io::Error::other(format!(
             "{} has no [linear] section; the sample above is what it needs",

@@ -76,3 +76,25 @@ pub fn money(cost_usd_micros: i64) -> String {
         format!("${dollars:.4}")
     }
 }
+
+// A sign-in command answers with a line naming the account. Which line is the
+// provider's word; reading the name out of it is the same for all of them.
+pub fn identity_from_output(output: &str, markers: &[&str]) -> Option<String> {
+    for line in plain(output).lines() {
+        for marker in markers {
+            let Some((_, rest)) = line.split_once(marker) else {
+                continue;
+            };
+            let Some(name) = rest.split_whitespace().next() else {
+                continue;
+            };
+            if name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                return Some(name.to_owned());
+            }
+        }
+    }
+    None
+}

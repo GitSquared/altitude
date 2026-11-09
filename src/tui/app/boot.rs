@@ -23,7 +23,7 @@ use crate::tui::Pictures;
 use crate::tui::background::terrain::Terrain;
 use crate::tui::widgets::{alert::Alert, list};
 use screens::settings::{GitIdentity, Panel};
-use screens::signals::{SignalFilter, SignalFocus, SignalSort};
+use screens::signals::SignalFocus;
 
 use super::*;
 
@@ -59,8 +59,6 @@ impl App {
                     Offer::new(TaskFilter::Failed, "✕ failed"),
                     Offer::new(TaskFilter::NeedsYou, "? needs you"),
                     Offer::new(TaskFilter::ReadyToReview, "◆ ready to review"),
-                    Offer::new(TaskFilter::Decisions, "→ decisions"),
-                    Offer::new(TaskFilter::Info, "○ info"),
                     Offer::new(TaskFilter::Working, "● working"),
                     Offer::new(TaskFilter::Queued, "◔ queued"),
                     Offer::new(TaskFilter::Limited, "◷ limited"),
@@ -94,27 +92,6 @@ impl App {
             signal_task_id: None,
             signal_all_threads: Vec::new(),
             signal_threads: Vec::new(),
-            signal_filter: Select::new(
-                "Filter",
-                vec![
-                    Offer::new(SignalFilter::Unresolved, "Unresolved"),
-                    Offer::new(SignalFilter::All, "All"),
-                    Offer::new(SignalFilter::NeedsYou, "Needs you"),
-                    Offer::new(SignalFilter::Review, "Ready to review"),
-                    Offer::new(SignalFilter::Decisions, "Decisions"),
-                    Offer::new(SignalFilter::Info, "Info log"),
-                    Offer::new(SignalFilter::Resolved, "Resolved"),
-                ],
-                0,
-            ),
-            signal_sort: Select::new(
-                "Sort",
-                vec![
-                    Offer::new(SignalSort::Oldest, "Oldest"),
-                    Offer::new(SignalSort::Newest, "Newest"),
-                ],
-                0,
-            ),
             signals_list: list::List::default(),
             signal_scroll: 0,
             signal_message_rows: Vec::new(),

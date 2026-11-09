@@ -115,11 +115,6 @@ impl Row {
         self
     }
 
-    pub fn note(mut self, note: impl Into<String>) -> Self {
-        self.note = Some(note.into());
-        self
-    }
-
     pub fn mark(mut self, mark: Vec<Span<'static>>) -> Self {
         self.mark = mark;
         self

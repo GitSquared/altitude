@@ -1,42 +1,30 @@
-use crate::remote::StartFuture;
-pub use logins::{Login, claim_account, logins, logins_of, yield_account};
+pub use connect::{connect, credentials_path, readiness};
+pub use setup::connect_remote;
 use std::{
     collections::HashMap,
-    future::Future,
     path::{Path, PathBuf},
-    pin::Pin,
     sync::{Arc, Mutex, atomic::AtomicBool},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use super::admission::{self};
-use crate::agent::{Activity, ActivityKind};
-use crate::isolation::{EnvironmentProgress, Pressure};
 use crate::remote::identity::write_private;
-use crate::{
-    task::{
-        TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent, TaskOperatorSignalKind,
-        TaskOperatorSignalThread,
-    },
-    tracker::{
-        IssueReference, IssueSnapshot, TrackerStatus,
-        providers::linear::automation::LinearAutomation,
-    },
-};
+use crate::task::{TaskAskKind, TaskExecutionPauseReason, TaskHistoryEvent};
+use crate::tracker::host::{BoundTask, DelegatedWork, QueueStanding, Start};
+use crate::tracker::providers::linear::automation::LinearAutomation;
 use axum::{Router, extract::DefaultBodyLimit, routing::post};
-use iroh::EndpointId;
 use ledger::{IssueStateChanged, Ledger, StoredEvent};
 use std::time::Instant;
 use tokio::{sync::Notify, time};
 
 mod answering;
+mod connect;
 mod delegation;
 mod delivery;
 mod intake;
 mod ledger;
-mod logins;
 mod records;
 mod reporting;
+mod setup;
 mod webhook;
 
 // How old a delegation may be and still be picked up by a sweep. Two days is long
@@ -76,8 +64,6 @@ const MAX_TERMINATED: usize = 1024;
 
 const WEBHOOK_MAX_AGE: Duration = Duration::from_secs(300);
 
-pub type HostFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
-
 pub struct RemoteTrackerConfig {
     pub automation: Arc<LinearAutomation>,
     pub webhook_secret: Vec<u8>,
@@ -86,35 +72,6 @@ pub struct RemoteTrackerConfig {
     pub attachments_dir: PathBuf,
     pub operators_dir: PathBuf,
     pub host_label: String,
-}
-
-pub struct BoundTask {
-    pub task_id: String,
-    pub owner: String,
-    pub issue: IssueReference,
-    pub delegation: Option<String>,
-    pub session_agent: Option<String>,
-    pub status: TaskExecutionStatus,
-    pub pause_reason: Option<TaskExecutionPauseReason>,
-}
-
-// Where a task stands on the machine it was sent to: what is in front of it in the
-// queue, what the machine already has on it, and what is being done to this task if
-// the machine has picked it up. One answer, because a queue number alone cannot say
-// whether a wait is a queue, a machine with no room, or a start under way.
-pub struct QueueStanding {
-    pub ahead: usize,
-    pub on_machine: usize,
-    pub holding: Option<Pressure>,
-    pub start: Option<Start>,
-}
-
-// A start is minutes of work before the first sandbox exists, and the steps of an
-// environment build are what fills them. Calling that a wait for a sandbox told the
-// operator nothing about a machine that was working the whole time.
-pub enum Start {
-    Provisioning,
-    Building(EnvironmentProgress),
 }
 
 use intake::webhook as intake_webhook;
@@ -132,42 +89,6 @@ pub struct RemoteTracker {
     delivered: AtomicBool,
 }
 
-pub trait Host: Send + Sync + 'static {
-    fn start_issue(
-        &self,
-        peer: EndpointId,
-        issue: IssueSnapshot,
-        label: String,
-        delegation: Option<String>,
-    ) -> StartFuture<'_, String>;
-    fn stop(&self, task_id: String, reason: TaskExecutionPauseReason) -> HostFuture<'_, ()>;
-    fn complete(&self, task_id: String) -> HostFuture<'_, ()>;
-    fn record_status(&self, task_id: String, status: TrackerStatus) -> HostFuture<'_, ()>;
-    fn signal_threads(&self, task_id: String) -> HostFuture<'_, Vec<TaskOperatorSignalThread>>;
-    fn reopen_signal(&self, task_id: String, signal_id: String) -> HostFuture<'_, ()>;
-    fn events(&self, task_id: String) -> HostFuture<'_, Vec<(i64, TaskHistoryEvent)>>;
-    fn steer(&self, task_id: String, message: String) -> HostFuture<'_, ()>;
-    fn reply(&self, task_id: String, signal_id: String, answer: String) -> HostFuture<'_, ()>;
-    fn accept(&self, task_id: String, signal_id: String) -> HostFuture<'_, ()>;
-    fn is_kept(&self, task_id: String) -> HostFuture<'_, bool>;
-
-    fn bound_tasks(&self) -> HostFuture<'_, Vec<BoundTask>>;
-    fn delegation_of(&self, task_id: String) -> HostFuture<'_, Option<String>>;
-    fn work_for_issue(
-        &self,
-        issue_id: String,
-        delegations: Vec<String>,
-    ) -> HostFuture<'_, Option<BoundTask>>;
-    fn session_agent(&self, task_id: String) -> HostFuture<'_, Option<String>>;
-
-    fn queue_standings(&self) -> HostFuture<'_, HashMap<String, QueueStanding>>;
-    fn current_activity(&self, task_id: String) -> HostFuture<'_, Option<Activity>>;
-}
-
-fn published_comment_id(task_id: &str, signal_id: &str) -> String {
-    stable_id("comment", &format!("signal:{task_id}:{signal_id}"))
-}
-
 // An error activity ends the session's "working" state, so it says what stopped the
 // task rather than only that something did. A failure is a state and not a question,
 // which is why the way out of it is part of the same message.
@@ -181,37 +102,32 @@ fn failure_notice(error: &str) -> String {
     )
 }
 
-fn pause_notice(reason: &TaskExecutionPauseReason) -> &'static str {
-    match reason {
-        TaskExecutionPauseReason::AwaitingOperator => "Waiting for your reply on this task.",
-        TaskExecutionPauseReason::AwaitingReviewChecks => {
-            "Waiting for the pull request checks to settle."
+// A pause that asks a person for something is the last thing a run says, and it is
+// addressed to them. The rest are the machine's own record: they explain a silence
+// without asking anything, so they are written where they do not read as a message.
+//
+// A run that kept taking turns with nothing to say stopped itself, so it asks nobody:
+// putting that in the operator's inbox says someone needs them when nobody does.
+fn waits_on_a_person(reason: &TaskExecutionPauseReason) -> bool {
+    matches!(reason, TaskExecutionPauseReason::AwaitingOperator)
+}
+
+// The handoff, in the operator's own name: a tracker is shared with a team, and "you"
+// is only one of the people reading it.
+fn pause_message(
+    reason: &TaskExecutionPauseReason,
+    operator: &str,
+    asking: Option<TaskAskKind>,
+) -> String {
+    match (reason, asking) {
+        (TaskExecutionPauseReason::AwaitingOperator, Some(TaskAskKind::Steer)) => {
+            format!("Waiting for {operator} on the question.")
         }
-        TaskExecutionPauseReason::AgentWentQuiet => {
-            "The agent kept taking turns without anything to report, so the task stopped \
-             here. Tell it what to do next."
+        (TaskExecutionPauseReason::AwaitingOperator, Some(TaskAskKind::Review)) => {
+            format!("Waiting for {operator} on the review.")
         }
-        TaskExecutionPauseReason::ApplicationShutdown => {
-            "The machine running this task restarted. The task resumes when it is back."
-        }
-        // The one pause nobody has to clear. It names the clock's owner and not the
-        // hour, because a time is right for one machine's timezone and not another's.
-        TaskExecutionPauseReason::AwaitingLimit => {
-            "The account's usage limit is used up. This task resumes on its own when the \
-             limit clears; nothing here is waiting on you."
-        }
-        TaskExecutionPauseReason::Transfer => {
-            "The operator is taking this task over on their own machine; it keeps running there."
-        }
-        TaskExecutionPauseReason::TrackerEnded => {
-            "The issue this task was working on ended, so the task stopped."
-        }
-        TaskExecutionPauseReason::StoppedInTracker => {
-            "This task was stopped in the tracker, so it stopped here."
-        }
-        TaskExecutionPauseReason::DelegationWithdrawn => {
-            "This issue is no longer delegated to Altitude, so the task stopped."
-        }
+        (TaskExecutionPauseReason::AwaitingOperator, None) => format!("Waiting for {operator}."),
+        (reason, _) => format!("{} Tell {operator} what to do next.", reason.notice()),
     }
 }
 
@@ -247,18 +163,6 @@ fn persist(path: &Path, ledger: &Ledger) -> Result<(), String> {
         .map_err(|error| format!("could not encode the tracker ledger: {error}"))?;
     write_private(path, &text)
         .map_err(|error| format!("could not write the tracker ledger: {error}"))
-}
-
-fn signal_kind(
-    events: &[(i64, TaskHistoryEvent)],
-    signal_id: &str,
-) -> Option<TaskOperatorSignalKind> {
-    events.iter().rev().find_map(|(_, event)| match event {
-        TaskHistoryEvent::OperatorSignalRaised { signal } if signal.id == signal_id => {
-            Some(signal.kind)
-        }
-        _ => None,
-    })
 }
 
 fn stable_id(namespace: &str, discriminator: &str) -> String {
@@ -378,7 +282,7 @@ impl RemoteTracker {
     // something already knows it has to happen at — a delivery that is being retried,
     // a queue notice that is worth repeating — are the only reasons to do anything,
     // and until one of them arrives this loop waits.
-    pub async fn run(self: Arc<Self>, host: Arc<dyn Host>) {
+    pub async fn run(self: Arc<Self>, host: Arc<dyn DelegatedWork>) {
         // The two things that are not events, both of them once: a delegation made
         // while this machine was not listening left no webhook to find, and a session a
         // previous run was talking into may have been finished with since.
@@ -406,7 +310,7 @@ impl RemoteTracker {
 
     // Everything that is due, in the order it has to happen, and when it should be
     // asked again if that is a moment rather than an event.
-    async fn pass(&self, host: &dyn Host) -> Option<Instant> {
+    async fn pass(&self, host: &dyn DelegatedWork) -> Option<Instant> {
         self.repair_sessions(host).await;
         let retry = self.process_deliveries(host).await;
         self.adopt_bound_tasks(host).await;

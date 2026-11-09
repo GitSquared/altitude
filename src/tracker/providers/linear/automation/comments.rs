@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use crate::tracker::TrackerError;
+use crate::tracker::{AskSurface, IssueReference, TrackerError, TrackerFuture};
 
 use super::agent_sessions::CommentSite;
 use super::issues::mutation_succeeded;
@@ -263,5 +263,43 @@ impl LinearAutomation {
             .graphql(CREATE_REACTION_MUTATION, json!({ "input": input }))
             .await?;
         mutation_succeeded(&data, "reactionCreate").map(|_| ())
+    }
+}
+
+impl AskSurface for LinearAutomation {
+    fn open_ask<'a>(
+        &'a self,
+        issue: &'a IssueReference,
+        marker: &'a str,
+        body: &'a str,
+    ) -> TrackerFuture<'a, ()> {
+        Box::pin(async move { self.comment_on_issue(&issue.id, body, marker).await })
+    }
+
+    fn answer_ask<'a>(
+        &'a self,
+        issue: &'a IssueReference,
+        marker: &'a str,
+        reply_marker: &'a str,
+        body: &'a str,
+    ) -> TrackerFuture<'a, ()> {
+        Box::pin(async move {
+            self.comment_reply(Some(&issue.id), None, marker, body, reply_marker)
+                .await
+        })
+    }
+
+    fn close_ask<'a>(&'a self, marker: &'a str, closed: bool) -> TrackerFuture<'a, ()> {
+        Box::pin(async move {
+            if closed {
+                self.resolve_comment(marker, None).await
+            } else {
+                self.reopen_comment(marker).await
+            }
+        })
+    }
+
+    fn has_ask<'a>(&'a self, marker: &'a str) -> TrackerFuture<'a, bool> {
+        Box::pin(async move { self.comment(marker).await.map(|comment| comment.is_some()) })
     }
 }

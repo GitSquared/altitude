@@ -12,8 +12,8 @@ use crate::isolation::IsolationEngine;
 use crate::agent::tool::{AgentTool, AgentToolError, AgentToolFuture, AgentToolProvider};
 use crate::project::validate_cache;
 use crate::task::{
-    ProjectProposal, Task, TaskHistoryEvent, TaskOperatorSignalAuthor, TaskOperatorSignalKind,
-    TaskOperatorSignalThread, TaskPlanStatus, TaskPlanStep, TaskStore, normalize_title, picture,
+    ProjectProposal, Task, TaskAsk, TaskAskAuthor, TaskAskKind, TaskHistoryEvent, TaskPlanStatus,
+    TaskPlanStep, TaskStore, normalize_title, picture,
 };
 use crate::tracker::IssueReader;
 
@@ -260,7 +260,7 @@ impl TaskAgentTools {
         // the agent reading its own signals is exactly who needs to know.
         let held_review = self.task().await?.facts.deferred_review.map(|review| {
             json!({
-                "kind": "in_review",
+                "kind": "review",
                 "title": review.signal.title,
                 "held_until": "its pull requests settle",
             })
@@ -299,18 +299,16 @@ impl TaskAgentTools {
         let title = argument(arguments, "title")?;
         let body = argument(arguments, "body")?;
         let kind = match arguments.get("kind").and_then(Value::as_str) {
-            Some("update") => TaskOperatorSignalKind::Update,
-            Some("decision") => TaskOperatorSignalKind::Decision,
-            Some("blocked") => TaskOperatorSignalKind::Blocked,
-            Some("in_review") => TaskOperatorSignalKind::InReview,
+            Some("steer") => TaskAskKind::Steer,
+            Some("review") => TaskAskKind::Review,
             Some(other) => {
                 return Err(AgentToolError::new(format!(
-                    "unknown signal kind {other:?}; use update, decision, blocked or in_review"
+                    "unknown ask kind {other:?}; use steer or review"
                 )));
             }
             None => {
                 return Err(AgentToolError::new(
-                    "tasks_signal action=open needs kind: update, decision, blocked or in_review",
+                    "tasks_signal action=open needs kind: steer or review",
                 ));
             }
         };
@@ -414,22 +412,14 @@ impl TaskAgentTools {
             .unwrap_or(true);
         // A thread ends when the reason it exists is over, and an unanswered thread has
         // no such reason: what was asked for has not arrived. So one rule covers every
-        // kind — the operator's word in the thread is what makes it the agent's to
-        // close. A review is the exception, because acceptance is their act and the
-        // task ends on it.
-        if resolved {
-            if thread.kind == TaskOperatorSignalKind::InReview {
-                return Err(AgentToolError::new(
-                    "a review request ends when the operator accepts it, not when the agent \
-                     resolves it",
-                ));
-            }
-            if !thread.is_answered() {
-                return Err(AgentToolError::new(
-                    "nothing has been answered in this thread yet, so there is nothing it can be \
-                     over: the operator closes what only they have read",
-                ));
-            }
+        // kind, reviews included — the operator's word in the thread is what makes it
+        // the agent's to close. Closing a review is not accepting it: acceptance is
+        // theirs alone, and it is what ends the task.
+        if resolved && !thread.has_operator_spoken() {
+            return Err(AgentToolError::new(
+                "nothing has been answered in this thread yet, so there is nothing it can be \
+                 over: the operator closes what only they have read",
+            ));
         }
         if let Some(reason) = arguments.get("reason").and_then(Value::as_str)
             && !reason.trim().is_empty()
@@ -440,12 +430,7 @@ impl TaskAgentTools {
                 .map_err(tool_failure)?;
         }
         self.store
-            .resolve_signal(
-                &self.task_id,
-                signal_id,
-                resolved,
-                TaskOperatorSignalAuthor::Agent,
-            )
+            .resolve_signal(&self.task_id, signal_id, resolved, TaskAskAuthor::Agent)
             .await
             .map_err(tool_failure)?;
         self.announce();
@@ -518,7 +503,7 @@ impl TaskAgentTools {
             .store
             .open_signal(
                 &self.task_id,
-                TaskOperatorSignalKind::Blocked,
+                TaskAskKind::Steer,
                 "The project setup needs a change",
                 reason,
                 Some(proposal),
@@ -533,7 +518,7 @@ impl TaskAgentTools {
         }))
     }
 
-    async fn thread(&self, signal_id: &str) -> Result<TaskOperatorSignalThread, AgentToolError> {
+    async fn thread(&self, signal_id: &str) -> Result<TaskAsk, AgentToolError> {
         self.store
             .signal_thread(&self.task_id, signal_id)
             .await
@@ -562,7 +547,7 @@ fn argument<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, AgentToolEr
         .ok_or_else(|| AgentToolError::new(format!("this tool needs a {name}")))
 }
 
-fn thread_json(thread: &TaskOperatorSignalThread, attachments: &Path) -> Value {
+fn thread_json(thread: &TaskAsk, attachments: &Path) -> Value {
     // What a picture is called and what it weighs, never what it is: an agent reasons
     // about a picture's role, and the bytes belong to the interface.
     let pictures: Vec<Value> = thread
@@ -613,14 +598,14 @@ impl AgentToolProvider for TaskAgentTools {
             ),
             AgentTool::new(
                 "tasks_signal",
-                "Read and change this task's conversations with the operator, which is the only way you speak to them. A body is markdown their interface draws, and may carry diagrams and pictures. A thread has a kind, messages, and one state: unresolved or resolved. action=list returns every thread; action=read needs signal_id; action=open needs kind, title and body; action=reply needs signal_id and body; action=resolve needs signal_id, defaults resolved=true, and accepts an optional reason. A reply is a message, not a new question, and reopens a resolved thread. Messages carry ids m1, m2, ... inside their thread.\n\nThe kind you open is what tells Altitude what to do next. `update` is news they cannot see for themselves, and `decision` is an assumption they may challenge: both leave the task running. `blocked` stops it until they answer. `in_review` finishes the milestone and puts it to them, which is the only way to ask for acceptance, and Altitude holds it until the linked pull requests settle. One review at a time: while one is open, what has changed goes in that thread rather than in a second one. A blocked thread ends once they answer, so a new block is a new question.\n\nResolving a thread means it needs nothing more from the operator. It does not mean you have said your part, and it does not mean your last reply was answered: it means the reason the thread exists is over and this task is not waiting on anything in it. One rule decides whether a thread is yours to close: it ends once the operator has said something in it and the reason it exists is over. Until they have spoken there is nothing it can be over — a decision nobody has read, a block nobody has lifted — so those stay open for them to find, which is what makes a non-blocking kind cheap to leave alone. If their message asks you something, or you still need a direction from them, it stays unresolved. Only the operator accepts a review.",
+                "Read and change this task's conversations with the operator, which is the only way you address them. A body is markdown their interface draws, and may carry diagrams and pictures.\n\nAn ask is the one thing that needs a person, and there are two kinds. `steer` stops the work until they answer, because continuing without their word would be guessing at their intent. `review` puts finished work to them for acceptance, which only they can give; Altitude holds it until the linked pull requests settle. One ask is open at a time, and an ask is a wait rather than a log. While it is open and unanswered, what has changed belongs in that thread. When their answer moves you past what you asked about, that thread is answered: say so in it, resolve it, do the work, and when you have the next thing to look at, open a new ask on what you now have. A review of work you have since replaced, left open in front of the new one, is a decision they cannot make.\n\nEverything else you have to say is a message: say it in your turn and it is delivered, in a form the operator reads at a glance and can unfold. What you assumed, what you found, what you deliberately did not do, and what you chose without them belong there, because they ask nothing and cost nobody a reply. A conclusion you wrote down so that they may challenge it later is a message, not a question: a question is only for what you cannot proceed without.\n\nA review is the operator's whole picture of a delivery, so it reads in the order they would ask it: what changed since they last looked, what you decided without them and how to undo it, what you verified and what you could not, and anything you deliberately left undone. Prose, because a form is longer to read than a paragraph: headings only when the answer is genuinely long. Altitude appends what it can confirm for itself, so do not restate the pull request and the checks. A question is only for what you cannot proceed without: if you can name what you would do without their answer, that is a decision, and decisions are what messages are for.\n\naction=list returns every thread; action=read needs signal_id; action=open needs kind, title and body; action=reply needs signal_id and body; action=resolve needs signal_id, defaults resolved=true, and accepts an optional reason. A reply is a message and not a question: it joins the thread and leaves it as open or closed as it was, so reopening one is its own action. Messages carry ids m1, m2, ... inside their thread.\n\nResolving a thread means it needs nothing more from the operator. It does not mean you have said your part, and it does not mean your last reply was answered: it means the reason the thread exists is over and this task is not waiting on anything in it. One rule decides whether a thread is yours to close: it ends once the operator has said something in it and the reason it exists is over. Until they have spoken there is nothing it can be over, so a question nobody has read stays open for them to find. If their message asks you something, or you still need a direction from them, it stays unresolved. This holds for a review: when their answer moves you past what you put in front of them, that review is over and closing it is yours to do before you open the next one — but only they accept one, and a review you closed is not work they agreed to.",
                 json!({
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
-                        "action": { "enum": ["list", "read", "open", "reply", "resolve"], "description": "list all threads; read one; open an update or decision; reply in one; resolve or reopen one." },
+                        "action": { "enum": ["list", "read", "open", "reply", "resolve"], "description": "list all threads; read one; open a steer or a review; reply in one; resolve or reopen one." },
                         "signal_id": { "type": "string", "description": "The thread for read, reply, or resolve." },
-                        "kind": { "enum": ["update", "decision", "blocked", "in_review"], "description": "For open: update is news; decision is an assumption worth review; blocked stops the task until they answer; in_review asks for acceptance." },
+                        "kind": { "enum": ["steer", "review"], "description": "For open: steer stops the task until they answer, because you cannot proceed without their word; review puts finished work to them for acceptance." },
                         "title": { "type": "string", "description": "For open: one line the operator reads in the list." },
                         "body": { "type": "string", "description": "For open or reply: the message itself, as the operator reads it. Markdown: headings, lists, tables, `code`, quotes and links are drawn as such. A fenced ```mermaid block is drawn as a diagram in the operator's interface and in the task's issue. A picture from your workspace goes in as ordinary markdown, `![what it shows](/absolute/path/in/your/workspace.png)`, and the operator sees the picture where you put it: use one for what only pixels can show, such as the screen you changed or the failure you are explaining. Do not prefix the body with status or a summary heading." },
                         "resolved": { "type": "boolean", "description": "For resolve: true to resolve, false to reopen. Defaults to true." },

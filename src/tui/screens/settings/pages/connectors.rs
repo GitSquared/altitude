@@ -4,6 +4,7 @@ use std::path::Path;
 
 use crate::{
     remote::{Phase, RemoteKey},
+    tracker::TrackerKind,
     tui::{
         app::{CredentialStatus, RemoteStatus, Sync, TrackerState},
         widgets::progress,
@@ -165,14 +166,15 @@ pub(crate) fn git_connector(identity: &GitIdentity) -> Connector {
 }
 
 pub(crate) fn tracker_connector(state: TrackerState, profile_dir: &Path) -> Connector {
+    let kind = TrackerKind::sole();
     let (reach, note, action) = match state {
         TrackerState::Connected => (
             Reach::On,
-            Some(
+            Some(format!(
                 "This account syncs to your remotes, and decides which machine receives \
-                 an issue delegated in Linear."
-                    .to_owned(),
-            ),
+                 an issue delegated in {tracker}.",
+                tracker = kind.label()
+            )),
             None,
         ),
         TrackerState::Connecting => (Reach::Asking, None, None),
@@ -180,14 +182,14 @@ pub(crate) fn tracker_connector(state: TrackerState, profile_dir: &Path) -> Conn
     };
     let status = state.summary();
     Connector {
-        title: "Linear".to_owned(),
+        title: kind.label().to_owned(),
         reach,
         status: status.to_owned(),
         status_value: None,
         identity: None,
         note,
         action,
-        purpose: "A task tracking and product management tool. Altitude reads your issues and updates their status as it works on them.",
+        purpose: kind.purpose(),
         used_by: None,
         fields: vec![("profile", tilde(&profile_dir.display().to_string()))],
     }

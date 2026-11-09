@@ -22,7 +22,7 @@ impl VcsAgentTools {
             .ok_or_else(|| AgentToolError::new("vcs_link_pull_request needs a url"))?;
         let contribution = contribution_from_url(url).ok_or_else(|| {
             AgentToolError::new(format!(
-                "{url:?} is not a pull request URL Altitude can link; pass the full https URL of a GitHub pull request, for example https://github.com/owner/repository/pull/123"
+                "{url:?} is not a pull request URL Altitude can link; pass the full https URL the code host shows for a pull request"
             ))
         })?;
         if !self
@@ -67,7 +67,7 @@ impl AgentToolProvider for VcsAgentTools {
                 "properties": {
                     "url": {
                         "type": "string",
-                        "description": "The full https URL of a pull request, for example https://github.com/owner/repository/pull/123."
+                        "description": "The full https URL the code host shows for a pull request."
                     }
                 },
                 "required": ["url"],

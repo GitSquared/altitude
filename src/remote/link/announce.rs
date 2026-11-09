@@ -39,23 +39,7 @@ impl Announcement {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TrackerReadiness {
-    Ready,
-    NotInstalled,
-    Unavailable,
-}
-
-impl TrackerReadiness {
-    pub fn said(self) -> &'static str {
-        match self {
-            Self::Ready => "ready",
-            Self::NotInstalled => "not installed",
-            Self::Unavailable => "cannot sign in",
-        }
-    }
-}
+pub use crate::tracker::TrackerReadiness;
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct TrackerConnection {

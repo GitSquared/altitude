@@ -16,8 +16,6 @@ pub struct TaskInput {
     pub source: TaskInputSource,
     pub body: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub responding_to: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_id: Option<String>,
 }
 
@@ -47,63 +45,44 @@ pub enum TaskInputSource {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
 #[sqlx(rename_all = "snake_case")]
-// Update is a log that asks for nothing, Decision is an assumption the operator may
-// challenge while the work continues, and Blocked is the only kind that stops it.
-pub enum TaskOperatorSignalKind {
-    Update,
-    Decision,
-    InReview,
-    Blocked,
+// An ask is the one thing a task can want from a person: a question that stops the work
+// until it is answered, or a delivery that wants accepting. Everything else a task has to
+// say is a message, and a message wants nothing.
+pub enum TaskAskKind {
+    Steer,
+    Review,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SignalCounts {
-    #[serde(default)]
-    pub blocked: u32,
-    #[serde(default)]
-    pub in_review: u32,
-    #[serde(default)]
-    pub decision: u32,
-    #[serde(default)]
-    pub update: u32,
-}
-
-impl SignalCounts {
-    pub fn count(self, kind: TaskOperatorSignalKind) -> u32 {
-        match kind {
-            TaskOperatorSignalKind::Blocked => self.blocked,
-            TaskOperatorSignalKind::InReview => self.in_review,
-            TaskOperatorSignalKind::Decision => self.decision,
-            TaskOperatorSignalKind::Update => self.update,
-        }
-    }
-}
-
-// The order a row says its counts in: what stopped it, what is waiting to be
-// read, what it is asking, and what it is only telling.
-pub const SIGNAL_ORDER: [TaskOperatorSignalKind; 4] = [
-    TaskOperatorSignalKind::Blocked,
-    TaskOperatorSignalKind::InReview,
-    TaskOperatorSignalKind::Decision,
-    TaskOperatorSignalKind::Update,
-];
-
-impl TaskOperatorSignalKind {
-    pub fn tier(self) -> u8 {
+// What a pause means, said once. The tracker writes it into a session and the
+// interface writes it into its own stream, and a task that stopped is the same news in
+// both places.
+impl TaskExecutionPauseReason {
+    pub fn notice(&self) -> &'static str {
         match self {
-            Self::Blocked | Self::InReview => 0,
-            Self::Decision => 1,
-            Self::Update => 2,
+            Self::AwaitingOperator => "Waiting for a reply on this task.",
+            Self::AwaitingReviewChecks => "Waiting for the pull request checks to settle.",
+            Self::AgentWentQuiet => {
+                "The agent kept taking turns without anything to report, so the task stopped here."
+            }
+            // What happened, not what will happen: a pause that is over by the time it
+            // is read must not promise a resume the line under it contradicts.
+            Self::ApplicationShutdown => "The machine running this task restarted.",
+            // The one pause nobody has to clear. It names the clock's owner and not the
+            // hour, because a time is right for one machine's timezone and not another's.
+            Self::AwaitingLimit => {
+                "The account's usage limit is used up. This task resumes on its own when the \
+                 limit clears; nothing here is waiting on you."
+            }
+            Self::Transfer => {
+                "The operator is taking this task over on their own machine; it keeps running there."
+            }
+            Self::TrackerEnded => "The issue this task was working on ended, so the task stopped.",
+            Self::StoppedInTracker => "This task was stopped in the tracker, so it stopped here.",
+            Self::DelegationWithdrawn => {
+                "This issue is no longer delegated to Altitude, so the task stopped."
+            }
         }
     }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
-#[serde(rename_all = "snake_case")]
-#[sqlx(rename_all = "snake_case")]
-pub enum TaskOperatorAttentionLevel {
-    Nominal,
-    Requested,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
@@ -163,10 +142,10 @@ pub struct TaskAgentRun {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TaskOperatorSignal {
+pub struct TaskAskQuestion {
     pub id: String,
     pub task_id: String,
-    pub kind: TaskOperatorSignalKind,
+    pub kind: TaskAskKind,
     pub title: String,
     pub body: String,
     pub raised_at_ms: i64,
@@ -189,48 +168,48 @@ impl ProjectProposal {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TaskOperatorSignalThread {
+pub struct TaskAsk {
     pub id: String,
     pub task_id: String,
-    pub kind: TaskOperatorSignalKind,
+    pub kind: TaskAskKind,
     pub title: String,
     pub opened_at_ms: i64,
     pub last_raised_at_ms: i64,
-    pub messages: Vec<TaskOperatorSignalMessage>,
+    pub messages: Vec<TaskAskMessage>,
     pub resolved: bool,
-    pub resolved_by: Option<TaskOperatorSignalAuthor>,
+    pub resolved_by: Option<TaskAskAuthor>,
     pub resolved_at_ms: Option<i64>,
     #[serde(default)]
-    pub transitions: Vec<SignalTransition>,
+    pub transitions: Vec<AskTransition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposal: Option<ProjectProposal>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-pub struct SignalTransition {
+pub struct AskTransition {
     pub at_ms: i64,
     pub resolved: bool,
-    pub by: TaskOperatorSignalAuthor,
+    pub by: TaskAskAuthor,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TaskOperatorSignalMessage {
+pub struct TaskAskMessage {
     #[serde(default)]
     pub id: String,
-    pub author: TaskOperatorSignalAuthor,
+    pub author: TaskAskAuthor,
     pub body: String,
     pub at_ms: i64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum TaskOperatorSignalAuthor {
+pub enum TaskAskAuthor {
     #[default]
     Agent,
     Operator,
 }
 
-impl TaskOperatorSignalThread {
+impl TaskAsk {
     pub fn is_resolved(&self) -> bool {
         self.resolved
     }
@@ -239,26 +218,61 @@ impl TaskOperatorSignalThread {
         !self.resolved
     }
 
-    pub fn latest_agent_message(&self) -> Option<&TaskOperatorSignalMessage> {
+    pub fn latest_agent_message(&self) -> Option<&TaskAskMessage> {
         self.messages
             .iter()
             .rev()
-            .find(|message| message.author == TaskOperatorSignalAuthor::Agent)
+            .find(|message| message.author == TaskAskAuthor::Agent)
+    }
+
+    pub fn last_author(&self) -> Option<TaskAskAuthor> {
+        self.messages.last().map(|message| message.author)
     }
 
     // Whether the operator has said anything here at all. It is what makes a thread
     // the agent's to close: until they have spoken, what was asked for has not arrived
     // and there is nothing for the thread to be over.
-    pub fn is_answered(&self) -> bool {
+    pub fn has_operator_spoken(&self) -> bool {
         self.messages
             .iter()
-            .any(|message| message.author == TaskOperatorSignalAuthor::Operator)
+            .any(|message| message.author == TaskAskAuthor::Operator)
+    }
+
+    // An open thread whose last word is the agent's is one the task is waiting on a
+    // person for. A thread the operator spoke in last is not: they have spoken, and
+    // the work owes them the next thing.
+    pub fn waits_on_operator(&self) -> bool {
+        self.is_unresolved() && self.last_author() == Some(TaskAskAuthor::Agent)
+    }
+}
+
+// What a task is in the middle of asking, without the thread: enough for a row, a
+// summary and a pause, and no second opinion about whether it is waiting.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LeadingAsk {
+    pub kind: TaskAskKind,
+    pub title: String,
+    #[serde(default)]
+    pub last_author: TaskAskAuthor,
+}
+
+impl LeadingAsk {
+    pub fn waits_on_operator(&self) -> bool {
+        self.last_author == TaskAskAuthor::Agent
+    }
+}
+
+impl TaskFacts {
+    pub fn waits_on_operator(&self) -> bool {
+        self.leading_ask
+            .as_ref()
+            .is_some_and(LeadingAsk::waits_on_operator)
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeferredReview {
-    pub signal: TaskOperatorSignal,
+    pub signal: TaskAskQuestion,
 }
 
 #[derive(Clone, Debug)]
@@ -289,7 +303,6 @@ pub struct TaskFacts {
     pub execution_status: TaskExecutionStatus,
     pub execution_pause_reason: Option<TaskExecutionPauseReason>,
     pub execution_mode: TaskExecutionMode,
-    pub operator_attention_level: TaskOperatorAttentionLevel,
     pub sandbox_id: Option<String>,
     pub sandbox_available: bool,
     pub snapshot_path: Option<String>,
@@ -310,7 +323,7 @@ pub struct TaskFacts {
     pub standing: Option<AgentStanding>,
     pub last_error: Option<String>,
     #[sqlx(json(nullable))]
-    pub latest_operator_message: Option<TaskOperatorSignalMessage>,
+    pub latest_operator_message: Option<TaskAskMessage>,
     #[sqlx(json(nullable))]
     pub tracker_issue: Option<IssueReference>,
     // None means no delegation asked for this task, never one that is unknown: it is
@@ -322,12 +335,10 @@ pub struct TaskFacts {
     pub arrived_from: Option<String>,
     #[sqlx(default)]
     pub tracker_status: Option<TrackerStatus>,
-    pub blocking_signal_kind: Option<TaskOperatorSignalKind>,
-    pub leading_signal_kind: Option<TaskOperatorSignalKind>,
-    pub leading_signal_title: Option<String>,
-    pub unresolved_signal_count: u32,
-    #[sqlx(json)]
-    pub signal_counts: SignalCounts,
+    // The ask the task is in the middle of, read once from the threads so the row, the
+    // pause and the agent all read the same answer to "does this wait on them?".
+    #[sqlx(json(nullable))]
+    pub leading_ask: Option<LeadingAsk>,
     #[sqlx(json(nullable))]
     pub deferred_review: Option<DeferredReview>,
     // The news the run that is starting was woken with, and the last news any run
@@ -367,7 +378,6 @@ pub enum TaskHistoryEvent {
     IntentExpressed {
         execution_status: TaskExecutionStatus,
         execution_mode: TaskExecutionMode,
-        operator_attention_level: TaskOperatorAttentionLevel,
         sandbox_available: bool,
         snapshot_available: bool,
         intent: String,
@@ -407,17 +417,17 @@ pub enum TaskHistoryEvent {
         steps: Vec<TaskPlanStep>,
     },
     OperatorSignalRaised {
-        signal: TaskOperatorSignal,
+        signal: TaskAskQuestion,
     },
     OperatorSignalMessage {
         signal_id: String,
-        author: TaskOperatorSignalAuthor,
+        author: TaskAskAuthor,
         body: String,
     },
     OperatorSignalResolved {
         signal_id: String,
         resolved: bool,
-        by: TaskOperatorSignalAuthor,
+        by: TaskAskAuthor,
     },
     OperatorSignalConfirmed {
         signal_id: String,
@@ -429,7 +439,7 @@ pub enum TaskHistoryEvent {
         observation: ContributionObservation,
     },
     ReviewDeferred {
-        signal: TaskOperatorSignal,
+        signal: TaskAskQuestion,
     },
     ReviewDeferralCleared {
         signal_id: String,
@@ -582,12 +592,10 @@ pub struct TaskAgentTurnContext {
     pub plan: Vec<TaskPlanStep>,
     pub execution_status: TaskExecutionStatus,
     pub execution_mode: TaskExecutionMode,
-    pub operator_attention_level: TaskOperatorAttentionLevel,
-    pub blocking_signal_kind: Option<TaskOperatorSignalKind>,
-    pub unresolved_signal_count: u32,
+    pub leading_ask: Option<LeadingAsk>,
     pub last_error: Option<String>,
     pub datetime: String,
-    pub latest_operator_message: Option<TaskOperatorSignalMessage>,
+    pub latest_operator_message: Option<TaskAskMessage>,
     pub code_contribution_observations: Vec<ContributionObservation>,
     pub pending_inputs: Vec<TaskInput>,
     // The login this project's work is contributed as, which is the one person
@@ -629,13 +637,10 @@ impl fmt::Display for TaskAgentTurnContext {
         }
         writeln!(
             formatter,
-            "execution_status={:?}; execution_mode={:?}; attention={:?}; \
-             blocking_signal={:?}; unresolved_signals={}; last_error={}",
+            "execution_status={:?}; execution_mode={:?}; ask={:?}; last_error={}",
             self.execution_status,
             self.execution_mode,
-            self.operator_attention_level,
-            self.blocking_signal_kind,
-            self.unresolved_signal_count,
+            self.leading_ask,
             self.last_error.as_deref().unwrap_or("none"),
         )?;
         write!(formatter, "current_datetime={}", self.datetime)?;
@@ -729,9 +734,7 @@ impl Task {
             plan: self.facts.plan.clone().unwrap_or_default(),
             execution_status: TaskExecutionStatus::Running,
             execution_mode,
-            operator_attention_level: self.facts.operator_attention_level.clone(),
-            blocking_signal_kind: self.facts.blocking_signal_kind,
-            unresolved_signal_count: self.facts.unresolved_signal_count,
+            leading_ask: self.facts.leading_ask.clone(),
             last_error: self.facts.last_error.clone(),
             datetime: Local::now().to_rfc3339_opts(SecondsFormat::Secs, true),
             latest_operator_message: self.facts.latest_operator_message.clone(),

@@ -5,6 +5,10 @@ pub enum ActivityKind {
     Speech,
     Thinking,
     Remote,
+    // The machine's own news: it started, it is waiting on something, the sandbox
+    // moved, a run stopped. It is the one kind marked with the mountain, so a reader
+    // can tell what Altitude did from what the agent said.
+    Altitude,
 }
 
 // A line of the agent's own words. It is the whole of what was said rather than a
@@ -21,6 +25,13 @@ impl Activity {
         Self {
             text,
             kind: ActivityKind::Remote,
+        }
+    }
+
+    pub fn altitude(text: String) -> Self {
+        Self {
+            text,
+            kind: ActivityKind::Altitude,
         }
     }
 }

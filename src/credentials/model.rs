@@ -63,6 +63,14 @@ impl Service {
         }
     }
 
+    pub fn purpose(self) -> &'static str {
+        match self {
+            Self::Agent(kind) => kind.purpose(),
+            Self::VersionControl(kind) => kind.purpose(),
+            Self::Tracker(kind) => kind.purpose(),
+        }
+    }
+
     pub fn is_mounted(self) -> bool {
         !matches!(self, Self::Tracker(_))
     }

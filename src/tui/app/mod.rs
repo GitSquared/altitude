@@ -23,12 +23,11 @@ use crate::{
         RemoteKey, RemoteKeyStatus, RemoteKeys, TaskOrigin, TaskSummary, TrackerConnection, meet,
         transfer, transfer::TransferUpdate,
     },
-    task::{Task, TaskExecutionPauseReason, TaskOperatorSignalThread, TaskServiceError},
+    task::{Task, TaskAsk, TaskExecutionPauseReason, TaskServiceError},
     tracker::{IssueSnapshot, IssueSummary, ScopeSummary, TrackerKind},
     tui::keys::{is_dismiss, is_remove},
     tui::popups,
     tui::screens,
-    tui::widgets::format::plain,
     tui::widgets::{focus::FocusRing, layers::Behind, pointer::Targets, select::Select},
     vcs::Repository,
 };
@@ -49,7 +48,7 @@ use popups::sign_in::SignIn;
 use screens::get_started::GetStarted;
 use screens::settings::{GitIdentity, Panel, SettingsHit};
 use screens::shell::{GuestRequest, Shell};
-use screens::signals::{Composer, SignalFilter, SignalFocus, SignalHit, SignalSort};
+use screens::signals::{Composer, SignalFocus, SignalHit};
 use screens::tasks::{Menu, TaskControl, TaskFilter, TaskRef, TaskSort};
 
 #[derive(Default)]
@@ -434,7 +433,7 @@ enum CommitIdentityEdit {
 pub(in crate::tui) enum RemoteSignalsReply {
     Opened {
         remote: RemoteSignals,
-        signals: Result<Vec<TaskOperatorSignalThread>, String>,
+        signals: Result<Vec<TaskAsk>, String>,
     },
     Resolved {
         remote: RemoteSignals,
@@ -531,10 +530,8 @@ pub struct App {
     commit_edit: Option<CommitIdentityEdit>,
     git_identity_over_card: bool,
     pub(in crate::tui) signal_task_id: Option<String>,
-    pub(in crate::tui) signal_all_threads: Vec<TaskOperatorSignalThread>,
-    pub(in crate::tui) signal_threads: Vec<TaskOperatorSignalThread>,
-    pub(in crate::tui) signal_filter: Select<SignalFilter>,
-    pub(in crate::tui) signal_sort: Select<SignalSort>,
+    pub(in crate::tui) signal_all_threads: Vec<TaskAsk>,
+    pub(in crate::tui) signal_threads: Vec<TaskAsk>,
     pub(in crate::tui) signals_list: list::List,
     pub(in crate::tui) signal_scroll: u16,
     pub(in crate::tui) signal_message_rows: Vec<(u16, u16)>,
@@ -652,30 +649,6 @@ fn is_listed_summary(summary: &TaskSummary) -> bool {
 // in, so every one of them holds it.
 fn belongs_to(project: Option<&str>, tab: &str) -> bool {
     project.is_none_or(|own| own == tab)
-}
-
-fn github_login(output: &str) -> Option<String> {
-    const MARKERS: [&str; 2] = [
-        "Logged in to github.com as ",
-        "Logged in to github.com account ",
-    ];
-    for line in plain(output).lines() {
-        for marker in MARKERS {
-            let Some((_, rest)) = line.split_once(marker) else {
-                continue;
-            };
-            let Some(name) = rest.split_whitespace().next() else {
-                continue;
-            };
-            if name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-            {
-                return Some(name.to_owned());
-            }
-        }
-    }
-    None
 }
 
 fn credential_status(answer: CredentialAnswer) -> CredentialStatus {

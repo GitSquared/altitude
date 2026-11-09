@@ -18,9 +18,8 @@ use crate::remote::{TRANSCRIPT_FILE, WORK_PLAIN_FILE};
 use crate::task::{
     Task, TaskAgentRun, TaskAgentRunOutcome, TaskDraft, TaskError, TaskExecutionMode,
     TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent, TaskInput, TaskInputAuthor,
-    TaskInputSource, TaskOperatorSignal, TaskOperatorSignalAuthor, TaskOperatorSignalKind,
-    TaskService, TaskServiceError, failure_events, run_ended, should_resume, should_suspend,
-    snapshot_name,
+    TaskInputSource, TaskService, TaskServiceError, failure_events, run_ended, should_resume,
+    should_suspend, snapshot_name,
 };
 
 impl<E> TaskService<E>
@@ -265,7 +264,7 @@ where
                     .vcs_credential
                     .clone()
                     .or_else(|| project.vcs.map(VcsProviderKind::profile).map(str::to_owned))
-                    .unwrap_or_else(|| "vcs/github".to_owned());
+                    .unwrap_or_else(|| VcsProviderKind::sole().profile().to_owned());
                 let agent_recipe = self
                     .credentials
                     .recipe(&agent_id)
@@ -568,14 +567,41 @@ where
                 {
                     // The shutdown had already suspended the capsule, so there is
                     // nothing to stop and no live sandbox to stop it: the task was
-                    // left holding a snapshot and nothing picked it up again. This
-                    // is the shape a restart leaves behind for every task it was
-                    // running, and it resumes exactly as a live pause does.
-                    let mut events = vec![resumed(
-                        &task,
-                        task.facts.snapshot_path.clone().unwrap_or_default(),
-                    )];
-                    events.extend(restart_events(&task, &woke_up_saying(&task)));
+                    // left holding a snapshot and nothing picked it up again. What the
+                    // machine does now depends on what it cut in half: a task that was
+                    // waiting is still waiting, and a task that was working has a turn
+                    // to finish.
+                    // A history that cannot be read is not a history that says the task
+                    // was idle: saying nothing happened and saying nothing are the same
+                    // answer here, and only one of them is honest.
+                    let interrupted = match service.events(&task.id).await {
+                        Ok(history) => {
+                            let events: Vec<_> = history
+                                .into_iter()
+                                .map(|(_, event)| event)
+                                .collect();
+                            was_running(&events)
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                task = %task.id,
+                                %error,
+                                "could not read a task's history to see what the restart cut in half"
+                            );
+                            false
+                        }
+                    };
+                    let mut events = vec![if interrupted {
+                        TaskHistoryEvent::ExecutionRecovered {
+                            execution_status: TaskExecutionStatus::Pending,
+                            sandbox_available: false,
+                            snapshot_available: true,
+                            snapshot_path: task.facts.snapshot_path.clone().unwrap_or_default(),
+                        }
+                    } else {
+                        resumed(&task, task.facts.snapshot_path.clone().unwrap_or_default())
+                    }];
+                    events.extend(restart_events(&task, &woke_up_saying(&task, interrupted)));
                     task = service.record(&task.id, &events).await?;
                 } else if task.facts.deferred_review.is_some() && task.facts.snapshot_available {
                     // A shutdown can catch a review between the hold being
@@ -588,7 +614,7 @@ where
                         execution_pause_reason: TaskExecutionPauseReason::AwaitingReviewChecks,
                         snapshot_path: task.facts.snapshot_path.clone().unwrap_or_default(),
                     }];
-                    events.extend(restart_events(&task, &woke_up_saying(&task)));
+                    events.extend(restart_events(&task, &woke_up_saying(&task, false)));
                     task = service.record(&task.id, &events).await?;
                 }
                 Ok(task)
@@ -734,31 +760,17 @@ where
     }
 }
 
-// A restart is the machine's news, not the agent's. The operator watching this task
-// should see that it stopped with the machine and is moving again, so that is a
-// thread of its own; it is resolved in the same breath because it asks for nothing.
+// A restart is the machine's news, not the agent's: it has to know its workspace
+// moved under it, and the operator reads it in the record rather than in a question,
+// because it asks nothing of anybody.
 fn restart_events(task: &Task, said: &str) -> Vec<TaskHistoryEvent> {
-    let signal_id = uuid::Uuid::new_v4().to_string();
-    let signal = TaskOperatorSignal {
-        id: signal_id.clone(),
-        task_id: task.id.clone(),
-        kind: TaskOperatorSignalKind::Update,
-        title: "Altitude restarted".to_owned(),
-        body: format!(
+    notice_event(
+        task,
+        &format!(
             "Altitude on {} restarted and is picking this task back up. {said}",
             task.host
         ),
-        raised_at_ms: chrono::Utc::now().timestamp_millis(),
-        proposal: None,
-    };
-    vec![
-        TaskHistoryEvent::OperatorSignalRaised { signal },
-        TaskHistoryEvent::OperatorSignalResolved {
-            signal_id,
-            resolved: true,
-            by: TaskOperatorSignalAuthor::Agent,
-        },
-    ]
+    )
 }
 
 // The machine telling the agent something it has to know at its next turn: what it is
@@ -774,7 +786,6 @@ fn notice_event(task: &Task, body: &str) -> Vec<TaskHistoryEvent> {
             },
             source: TaskInputSource::Notice,
             body: body.to_owned(),
-            responding_to: None,
             external_id: None,
         },
     }]
@@ -782,12 +793,33 @@ fn notice_event(task: &Task, body: &str) -> Vec<TaskHistoryEvent> {
 
 // What a restart left this task doing, in the words the operator reads: a task that
 // was waiting on a person or on a pull request is not "resuming" anything.
-fn woke_up_saying(task: &Task) -> String {
+// The last thing the task's history said it was doing: a run that started and never
+// ended is a run the machine stopped in the middle of.
+fn was_running(events: &[TaskHistoryEvent]) -> bool {
+    for event in events.iter().rev() {
+        match event {
+            TaskHistoryEvent::AgentRunStarted { .. } => return true,
+            TaskHistoryEvent::AgentRunEnded { .. }
+            | TaskHistoryEvent::ExecutionPaused { .. }
+            | TaskHistoryEvent::ExecutionRecovered { .. }
+            | TaskHistoryEvent::ExecutionQueued { .. }
+            | TaskHistoryEvent::TaskCompleted { .. }
+            | TaskHistoryEvent::ExecutionFailed { .. } => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
+fn woke_up_saying(task: &Task, interrupted: bool) -> String {
+    if interrupted {
+        return "Its run was cut in half by the restart, so it picks the work back up.".to_owned();
+    }
     if task.facts.deferred_review.is_some() {
         return "It was waiting on its pull requests, and the machine is watching them again."
             .to_owned();
     }
-    if task.facts.blocking_signal_kind.is_some() {
+    if task.facts.waits_on_operator() {
         return "It was waiting on the operator, and still is.".to_owned();
     }
     "Its sandbox was saved when the machine went down, so the work resumes where it left off."
@@ -803,7 +835,7 @@ fn resumed(task: &Task, snapshot_path: String) -> TaskHistoryEvent {
             execution_pause_reason: TaskExecutionPauseReason::AwaitingReviewChecks,
             snapshot_path,
         }
-    } else if task.facts.blocking_signal_kind.is_some() {
+    } else if task.facts.waits_on_operator() {
         TaskHistoryEvent::ExecutionPaused {
             execution_status: TaskExecutionStatus::Paused,
             sandbox_available: false,

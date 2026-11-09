@@ -17,6 +17,10 @@ use crate::tui::{
     },
 };
 
+// A plan longer than this scrolls rather than pushing the activity out of the way: a
+// plan is reference, and the record above it is what changes.
+const PLAN_MAX_HEIGHT: u16 = 9;
+
 pub(super) fn draw_plan_tabs(frame: &mut Frame, area: Rect, app: &App) {
     if area.height == 0 {
         return;
@@ -24,7 +28,7 @@ pub(super) fn draw_plan_tabs(frame: &mut Frame, area: Rect, app: &App) {
     // Only the labels are the tabs' to clear: the rule under them is the pane's,
     // and the separators between tabs are drawn onto it.
     surface::cover(frame, Rect { height: 1, ..area });
-    let tabs = [Tab::new("Signals"), Tab::new("Plan")];
+    let tabs = [Tab::new("Threads"), Tab::new("Plan")];
     let selected = usize::from(app.signal_plan_open);
     tabs::draw(frame, area, &tabs, selected);
 }
@@ -38,42 +42,41 @@ pub(super) fn split_plan_and_activity(frame: &mut Frame, area: Rect, app: &mut A
     // room. Below this there is not enough height for two titles and a line each,
     // which is the one case where the plan has the column to itself.
     if area.height < PANE_TITLE_ROWS * 2 + 4 {
-        app.signal_activity_scroll_max = 0;
-        app.signal_activity_scroll = u16::MAX;
-        draw_plan(frame, area, app);
+        // Not enough height for two titles and a line each: what is happening beats
+        // how far along it is, and the plan is one key away.
+        app.signal_plan_scroll_max = 0;
+        app.signal_plan_scroll = u16::MAX;
+        draw_activity(frame, area, app);
         return;
     }
-    let usable = area.height.saturating_sub(1);
-    let plan_height = usable / 2;
-    let [plan, divider, activity] = Layout::vertical([
-        Constraint::Length(plan_height),
-        Constraint::Length(1),
+    // What is happening takes the room and how far along it is takes what it needs:
+    // the activity is the part that keeps growing, and the plan is a list that fits
+    // in as many rows as it has steps. Small steps stay visible below this, and the
+    // plan keeps a floor so a single step is not a sliver.
+    let steps = app.signal_plan().len().max(1) + PANE_TITLE_ROWS as usize;
+    let plan_height = u16::try_from(steps)
+        .unwrap_or(u16::MAX)
+        .min(PLAN_MAX_HEIGHT);
+    let [activity, divider, plan] = Layout::vertical([
         Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(plan_height),
     ])
     .areas(area);
-    surface::horizontal_divider(frame, area, divider.y);
-    draw_plan(frame, plan, app);
     surface::cover(frame, activity);
     draw_activity(frame, activity, app);
+    surface::horizontal_divider(frame, area, divider.y);
+    surface::cover(frame, plan);
+    draw_plan(frame, plan, app);
 }
 
-pub(super) fn draw_pane_title(
-    frame: &mut Frame,
-    area: Rect,
-    title: &str,
-    detail: String,
-    focused: bool,
-) {
+pub(super) fn draw_pane_title(frame: &mut Frame, area: Rect, title: &str, detail: String) {
+    // A pane's title is a name, not a cursor: where the keys are is said by the rail
+    // around the pane, and colouring the name as well made one of the three look
+    // chosen for no reason.
     frame.render_widget(
         Paragraph::new(Line::from_iter([
-            Span::styled(
-                title.to_owned(),
-                if focused {
-                    palette::accent()
-                } else {
-                    palette::heading()
-                },
-            ),
+            Span::styled(title.to_owned(), palette::heading()),
             Span::styled(detail, palette::muted()),
         ])),
         Rect { height: 1, ..area },
