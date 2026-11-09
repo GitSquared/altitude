@@ -183,7 +183,6 @@ impl ContributionState {
             | MergeStanding::ChangesRequested
             | MergeStanding::Blocked
             | MergeStanding::Behind
-            | MergeStanding::Unstable
             | MergeStanding::Conflicting => ContributionReadiness::NeedsAction,
             // A failing check is the agent's too, whichever standing names it.
             _ if self.checks_failing > 0 => ContributionReadiness::NeedsAction,
@@ -211,8 +210,11 @@ impl ContributionState {
             }
             // A provider that cannot say is a wait, not a yes: it computes
             // mergeability asynchronously and a repository rule may block what it
-            // does not name.
-            MergeStanding::Unknown => ContributionReadiness::Pending,
+            // does not name. So is a merge state that says "not clean" while the
+            // checks are the thing making it so — GitHub calls a pull request with
+            // checks still running unstable, which is a run in progress and not
+            // work the agent has been given.
+            MergeStanding::Unknown | MergeStanding::Unstable => ContributionReadiness::Pending,
         }
     }
 }
