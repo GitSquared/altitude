@@ -270,15 +270,20 @@ impl vt100::Callbacks for HostCallbacks {
 }
 
 // The keys the terminal keeps for altitude, because they belong to the take-over
-// rather than to the program in it. `ctrl-q` leaves, `alt-s` steps into the shell and
+// rather than to the program in it. `ctrl-q` leaves, `ctrl-o` steps into the shell and
 // back: neither is bound by the harness or by bash's line editor, which is why they
 // are not the `ctrl-a` this used to be.
+//
+// A bare `alt-` key cannot be one of them: a mac sends option-s as `ß` unless the
+// terminal is told to send it as meta, so the shell key has to be a control one. It is
+// `ctrl-o` for the other half of the take-over rather than `ctrl-s` for the shell,
+// because `ctrl-s` is save in everything the shell is likely to be running.
 pub fn is_exit_key(key: KeyEvent) -> bool {
     key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 pub fn is_shell_key(key: KeyEvent) -> bool {
-    key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::ALT)
+    key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 pub fn size(area: Rect) -> (u16, u16) {

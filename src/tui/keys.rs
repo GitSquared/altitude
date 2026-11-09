@@ -243,7 +243,7 @@ pub fn help_sections() -> Vec<HelpSection> {
                     "Close a login shell, or hand a task back to autopilot",
                 ),
                 (
-                    "Alt-S",
+                    "Ctrl-O",
                     "Step into a bash shell in the task's sandbox, and back",
                 ),
                 (

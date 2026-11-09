@@ -235,11 +235,11 @@ impl App {
             // and the sandbox shell are two halves of one take-over, so each hint
             // names the other.
             Foreground::Shell(ShellId::Task(_)) => vec![
-                Hint::new("alt-s", "shell"),
+                Hint::new("ctrl-o", "shell"),
                 Hint::new("ctrl-q", "back on autopilot"),
             ],
             Foreground::Shell(ShellId::TaskShell(_)) => vec![
-                Hint::new("alt-s", "agent"),
+                Hint::new("ctrl-o", "agent"),
                 Hint::new("ctrl-q", "back on autopilot"),
             ],
             // Nothing to hand back to: the sandbox goes with the shell.
