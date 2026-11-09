@@ -1,6 +1,6 @@
 use super::ledger::{Cursor, SessionEvent, TerminatedSession};
 use crate::{
-    task::{TaskAsk, TaskAskKind, TaskExecutionPauseReason, TaskHistoryEvent},
+    task::{TaskAsk, TaskAskKind, TaskExecutionPauseReason, TaskExecutionStatus, TaskHistoryEvent},
     tracker::providers::linear::automation::AgentActivityContent,
 };
 use iroh::EndpointId;
@@ -167,13 +167,26 @@ impl RemoteTracker {
             if refused_for_good {
                 continue;
             }
-            // A task with a cursor is already being told about; whether the issue
-            // has work at all is the question the tasks answer, and adopting a task
-            // the tracker did not just ask for is what attached new work to an old
-            // one.
-            if self.report_for_task(&task.task_id).is_some()
+            // A task this machine is already telling the issue about needs nothing
+            // here; whether the issue has work at all is the question the tasks
+            // answer, and adopting a task the tracker did not just ask for is what
+            // attached new work to an old one.
+            //
+            // A report that *ended* is not that: unhooking ends the report, and the
+            // operator's next message starts the task again, so the work goes on with
+            // nobody telling the issue about it and the questions it asks are asked
+            // into a thread that was closed.
+            if self
+                .report_for_task(&task.task_id)
+                .is_some_and(|report| !report.finished)
                 || task.delegation.is_none()
                 || self.user_for_owner(&task.owner).is_none()
+                || task.status == TaskExecutionStatus::Completed
+                || task.status == TaskExecutionStatus::Failed
+                || task
+                    .pause_reason
+                    .as_ref()
+                    .is_some_and(TaskExecutionPauseReason::is_out_of_play)
             {
                 continue;
             }

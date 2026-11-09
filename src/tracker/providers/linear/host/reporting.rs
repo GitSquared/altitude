@@ -152,7 +152,10 @@ impl RemoteTracker {
         // One cursor per task: the task is what a report is about, and a second
         // record keyed by the issue is what used to make two mechanisms disagree
         // about which task was current.
-        if self.report_for_task(&task_id).is_some() {
+        if self
+            .report_for_task(&task_id)
+            .is_some_and(|report| !report.finished)
+        {
             return Ok(());
         }
         // The session is the issue's, not the delegation's. An issue has one
