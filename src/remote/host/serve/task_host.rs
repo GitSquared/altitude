@@ -1,7 +1,9 @@
 use crate::isolation::Unwatched;
 use crate::remote::protocol::{self, SignalCommand};
 use crate::remote::server::Watching;
-use crate::remote::{HISTORY_FILE, HeldConfig, TRANSCRIPT_FILE, TransferPart, WORK_FILE};
+use crate::remote::{
+    HISTORY_FILE, HeldConfig, TRANSCRIPT_FILE, TransferPart, WORK_FILE, WatchEvent,
+};
 
 use std::{
     collections::HashSet,
@@ -579,10 +581,17 @@ impl TaskHost for OwnTasks {
     fn watch(&self, peer: EndpointId) -> BoxFuture<Result<Watching, String>> {
         let tasks = Arc::clone(&self.tasks);
         let watchers = Arc::clone(&self.watchers);
+        let readiness = self.readiness.clone();
         Box::pin(async move {
             // Registered before the snapshot is read, so a change made while it is
             // being read is queued behind it rather than lost.
-            let changes = watchers.subscribe(peer);
+            let (say, changes) = watchers.subscribe(peer);
+            // Read after subscribing, not before: a build that finishes in between
+            // is the one case this read could miss, and there the broadcast that
+            // follows it reaches a peer already in the list.
+            if readiness.borrow().is_ready() {
+                let _ = say.send(WatchEvent::Ready);
+            }
             let owner = peer.to_string();
             let snapshot = tasks
                 .list()

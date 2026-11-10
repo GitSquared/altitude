@@ -124,12 +124,24 @@ struct WatchingPeer {
 }
 
 impl Watchers {
-    fn subscribe(&self, peer: EndpointId) -> mpsc::UnboundedReceiver<WatchEvent> {
+    // The sender comes back with the receiver because a client can open a watch on
+    // a machine that is already ready, and the one word that says so was broadcast
+    // to the clients listening when the build finished.
+    fn subscribe(
+        &self,
+        peer: EndpointId,
+    ) -> (
+        mpsc::UnboundedSender<WatchEvent>,
+        mpsc::UnboundedReceiver<WatchEvent>,
+    ) {
         let (changes, receiving) = mpsc::unbounded_channel();
         let mut peers = self.peers.lock().expect("watchers lock poisoned");
         peers.retain(|watching| !watching.changes.is_closed());
-        peers.push(WatchingPeer { peer, changes });
-        receiving
+        peers.push(WatchingPeer {
+            peer,
+            changes: changes.clone(),
+        });
+        (changes, receiving)
     }
 
     fn changed(&self, operator: &str, summary: TaskSummary) {
