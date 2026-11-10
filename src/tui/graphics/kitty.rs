@@ -6,8 +6,6 @@ use std::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ratatui::layout::Rect;
 
-use super::mermaid::Raster;
-
 // One piece of a transmission carries at most 4096 characters of base64, and every
 // piece but the last is followed by another: 3072 raw bytes encode to exactly that.
 const PIECE: usize = 3072;
@@ -32,7 +30,9 @@ pub struct Cells {
 
 pub struct Placement<'a> {
     pub key: u64,
-    pub raster: &'a Raster,
+    // The picture as the PNG this terminal decodes, which is all it ever needs of one.
+    pub png: &'a [u8],
+    pub pixels_high: u32,
     pub columns: u16,
     pub rows: u16,
     // Where the picture starts, in cells relative to the viewport it is drawn in.
@@ -73,7 +73,8 @@ impl Cells {
         }
         let Placement {
             key,
-            raster,
+            png,
+            pixels_high,
             columns,
             rows,
             at,
@@ -108,14 +109,14 @@ impl Cells {
             }
         };
         let transmit = if self.sent.insert(id) {
-            Some(transmit(id, &raster.picture))
+            Some(transmit(id, png))
         } else {
             None
         };
         self.pending.push(Emission {
             id,
             columns,
-            crop: crop_of(raster, rows, hidden, shown),
+            crop: crop_of(pixels_high, rows, hidden, shown),
             at: (
                 u16::try_from(left).unwrap_or(0),
                 u16::try_from(visible_top).unwrap_or(0),
@@ -153,32 +154,26 @@ impl Cells {
 
 // The pixels the picture is shown from, so a partly scrolled picture shows the part
 // that is left rather than a squashed whole.
-fn crop_of(raster: &Raster, rows: u16, hidden: u16, shown: u16) -> Option<(u32, u32)> {
+fn crop_of(height: u32, rows: u16, hidden: u16, shown: u16) -> Option<(u32, u32)> {
     if hidden == 0 && shown >= rows {
         return None;
     }
-    let height = raster.picture.height();
     let cells = u32::from(rows).max(1);
     let y = height.saturating_mul(u32::from(hidden)) / cells;
     let h = height.saturating_mul(u32::from(shown)) / cells;
     Some((y, h.max(1)))
 }
 
-// Pixels, not a PNG: the format key that carries image files is the one place
-// terminals disagree, and a raw RGBA payload is what the reference client sends.
-fn transmit(id: u32, picture: &image::DynamicImage) -> String {
-    let rgba = picture.to_rgba8();
-    let raw = rgba.as_raw();
-    let pieces = raw.len().div_ceil(PIECE).max(1);
-    let mut out = String::with_capacity(raw.len() / 3 * 4 + 64);
-    for (index, piece) in raw.chunks(PIECE).enumerate() {
+// A diagram is mostly flat colour and repeated glyphs, so the PNG it is sent as is a
+// fortieth of the bytes of its pixels: the terminal decodes the one image it is given
+// rather than receiving eight megabytes of them.
+fn transmit(id: u32, png: &[u8]) -> String {
+    let pieces = png.len().div_ceil(PIECE).max(1);
+    let mut out = String::with_capacity(png.len() / 3 * 4 + 64);
+    for (index, piece) in png.chunks(PIECE).enumerate() {
         let more = u8::from(index + 1 < pieces);
         let head = if index == 0 {
-            format!(
-                "a=t,f=32,t=d,q=2,i={id},s={},v={},m={more};",
-                rgba.width(),
-                rgba.height()
-            )
+            format!("a=t,f=100,t=d,q=2,i={id},m={more};")
         } else {
             format!("m={more};")
         };

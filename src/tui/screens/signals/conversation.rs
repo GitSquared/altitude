@@ -365,35 +365,14 @@ fn draw_messages(
         title: "proposed change",
         lines: proposal_lines(proposal, project, usize::from(width.saturating_sub(6))),
     });
-    // A diagram this terminal can draw leaves the text and becomes a picture
-    // inside the card that carried it. A message whose diagrams will not all draw
-    // keeps its fences, so the source is never lost to a render that failed.
+    // A diagram this terminal can draw leaves the text and becomes a picture where
+    // the body named it. A message whose diagrams will not all draw keeps its fences,
+    // so the source is never lost to a render that failed.
     let text_width = width.saturating_sub(4).max(1);
-    let stripped: Vec<(String, Vec<String>)> = thread
+    let bodies: Vec<Body> = thread
         .messages
         .iter()
-        .map(|message| {
-            if pictures.has_pictures() {
-                markdown::take_pictures(&message.body)
-            } else {
-                (message.body.clone(), Vec::new())
-            }
-        })
-        .collect();
-    // One scale for the whole conversation. A diagram at its own scale reads at the
-    // size of the words around it, so the only diagram that sets the scale is the
-    // widest one: two pictures in a thread never disagree about the size of text.
-    let scale = stripped
-        .iter()
-        .flat_map(|(_, sources)| sources.iter())
-        .map(|source| pictures.allowance(source, text_width))
-        .fold(1.0_f32, f32::min);
-    let bodies: Vec<Body> = stripped
-        .into_iter()
-        .zip(&thread.messages)
-        .map(|((text, sources), message)| {
-            Body::of(text, sources, &message.body, pictures, text_width, scale)
-        })
+        .map(|message| Body::of(&message.body, pictures, text_width))
         .collect();
     // A close or a reopen is part of the conversation, not a message: it sits
     // between the cards at the point it happened, as a quiet line.
@@ -405,7 +384,7 @@ fn draw_messages(
         let height = match entry {
             Entry::Message(index) => {
                 let nested = proposed.as_ref().filter(|_| Some(index) == last_agent);
-                let height = card::height(width, &bodies[index].text, nested, &bodies[index].sizes);
+                let height = card::height(&bodies[index].rendered, nested, &bodies[index].sizes);
                 rows[index] = (u16::try_from(cursor).unwrap_or(u16::MAX), height);
                 height
             }
@@ -468,6 +447,7 @@ fn draw_messages(
             }
         });
         let body = &bodies[index];
+        let when = ago(message.at_ms, now);
         let slots = card::draw_clipped(
             frame,
             visible,
@@ -475,8 +455,8 @@ fn draw_messages(
             u16::try_from(visible_top - entry_top).unwrap_or(0),
             &card::Message {
                 author: if from_operator { "you" } else { agent },
-                when: &ago(message.at_ms, now),
-                body: &body.text,
+                when: &when,
+                body: &body.rendered,
                 from_operator,
                 focused: selected == Some(index),
                 flashing: flashing == Some(index),
@@ -488,16 +468,15 @@ fn draw_messages(
                         title: nested.title,
                         lines: nested.lines.clone(),
                     }),
-                pictures: &body.sizes,
+                sizes: &body.sizes,
             },
         );
         for slot in slots {
             pictures.draw(
                 frame,
                 area,
-                &body.sources[slot.index],
+                slot.source,
                 slot.width,
-                body.scale,
                 (
                     i16::try_from(i32::from(slot.x) - i32::from(area.x)).unwrap_or(0),
                     i16::try_from(slot.top - viewport_top).unwrap_or(0),
@@ -537,45 +516,34 @@ pub(super) enum Entry {
 }
 
 pub(super) struct Body {
-    text: String,
-    sources: Vec<String>,
+    rendered: markdown::Rendered,
+    // The cells each of the body's pictures covers, when this terminal draws them.
     sizes: Vec<Size>,
-    scale: f32,
 }
 
 impl Body {
-    fn of(
-        text: String,
-        sources: Vec<String>,
-        body: &str,
-        pictures: &mut Pictures,
-        width: u16,
-        scale: f32,
-    ) -> Self {
-        if sources.is_empty() || !pictures.has_pictures() {
-            return Self::fenced(body);
+    fn of(body: &str, pictures: &mut Pictures, width: u16) -> Self {
+        if !pictures.has_pictures() {
+            return Self::fenced(body, width);
         }
-        let sizes: Option<Vec<Size>> = sources
+        let rendered = markdown::render(body, width, true);
+        let sizes: Option<Vec<Size>> = rendered
+            .pictures
             .iter()
-            .map(|source| pictures.size(source, width, scale))
+            .map(|picture| pictures.size(&picture.source, width))
             .collect();
         match sizes {
-            Some(sizes) => Self {
-                text,
-                sources,
-                sizes,
-                scale,
-            },
-            None => Self::fenced(body),
+            Some(sizes) => Self { rendered, sizes },
+            // A picture still being drawn is a fence for now: the source stays where
+            // it is until the drawing arrives, and then it becomes a picture there.
+            None => Self::fenced(body, width),
         }
     }
 
-    fn fenced(body: &str) -> Self {
+    fn fenced(body: &str, width: u16) -> Self {
         Self {
-            text: body.to_owned(),
-            sources: Vec::new(),
+            rendered: markdown::render(body, width, false),
             sizes: Vec::new(),
-            scale: 1.0,
         }
     }
 }

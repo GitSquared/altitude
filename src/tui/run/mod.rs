@@ -182,6 +182,11 @@ where
     // Anything that waits on another machine reports back through a watch, so the
     // clock below only drives what this machine checks about itself.
     let mut ask = time::interval(Duration::from_millis(250));
+    // A picture is laid out and drawn off this loop. This is how often the loop looks
+    // for one that has arrived, so it is short: a picture is worth showing as soon as
+    // it is there, and the tick costs nothing while nothing is being drawn.
+    let mut picture_clock = time::interval(Duration::from_millis(40));
+    picture_clock.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
 
     // Bringing a task home is a dial, a transfer and a load, so it happens away from
     // this loop and reports back with the task it landed.
@@ -874,6 +879,11 @@ where
             }
             _ = paint.tick(), if scroll_pending => {
                 scroll_pending = false;
+                redraw = true;
+            }
+            // A picture that has been drawn while the interface was busy elsewhere:
+            // the frame that takes it in is the frame that shows it.
+            _ = picture_clock.tick(), if app.pictures.arrived() => {
                 redraw = true;
             }
         }

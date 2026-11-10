@@ -2,29 +2,24 @@ use std::sync::{Arc, OnceLock};
 
 use image::{DynamicImage, imageops::crop_imm};
 use mermaid_rs_renderer::{LayoutConfig, Theme, compute_layout, parse_mermaid, render_svg};
+use ratatui::layout::Size;
 use resvg::{
     tiny_skia,
     usvg::{self, fontdb::Database},
 };
 
-// Mermaid lays its labels out at 14px, which is what makes a diagram's text a
-// fixed size on screen no matter which terminal is asking: the raster is built so
-// that 14px lands on one cell row, and the picture then reads at the same size as
-// the words around it.
-const LABEL_PX: f32 = 14.0;
+use super::{Drawn, drawn_scale};
+
 // Twice the pixels the terminal will show, so a picture stays sharp on a display
 // that is finer than the cells the font reports.
 const OVERSAMPLE: f32 = 2.0;
 
-pub struct Raster {
-    pub picture: DynamicImage,
-}
-
-pub fn raster(source: &str, is_dark: bool, cell_height: u16) -> Option<Raster> {
-    let scale = OVERSAMPLE * f32::from(cell_height.max(1)) / LABEL_PX;
+// A diagram is rasterized for the column it is drawn in, so what it is drawn at is
+// counted from the column rather than from a size it is only ever shrunk from.
+pub fn raster(source: &str, is_dark: bool, cell: Size, columns: u16) -> Option<Drawn> {
     let parsed = parse_mermaid(source).ok()?;
     let theme = themed(is_dark);
-    let config = LayoutConfig::default();
+    let config = layout();
     let layout = compute_layout(&parsed.graph, &theme, &config);
     let svg = render_svg(&layout, &theme, &config);
 
@@ -36,6 +31,16 @@ pub fn raster(source: &str, is_dark: bool, cell_height: u16) -> Option<Raster> {
     // diagram of empty boxes.
     let tree = usvg::Tree::from_str(&svg, &options).ok()?;
     let size = tree.size();
+    // A label one cell row tall is the diagram at its own scale, whatever the theme's
+    // type size happens to be. Its pixels per point in the raster, and the cells it
+    // covers, are both counted from there.
+    let points = f32::from(cell.height.max(1)) / theme.font_size;
+    let natural = Size::new(
+        as_cells(size.width() * points / f32::from(cell.width.max(1))),
+        as_cells(size.height() / theme.font_size),
+    );
+
+    let scale = OVERSAMPLE * points * drawn_scale(natural, columns);
     let mut pixmap = tiny_skia::Pixmap::new(
         (size.width() * scale) as u32,
         (size.height() * scale) as u32,
@@ -45,12 +50,19 @@ pub fn raster(source: &str, is_dark: bool, cell_height: u16) -> Option<Raster> {
         tiny_skia::Transform::from_scale(scale, scale),
         &mut pixmap.as_mut(),
     );
-    // A round trip through PNG is what un-premultiplies tiny-skia's alpha, and it
-    // is paid once per diagram rather than once per frame.
-    let picture = image::load_from_memory(&pixmap.encode_png().ok()?).ok()?;
-    Some(Raster {
-        picture: tightened(&picture),
+    // tiny-skia draws premultiplied alpha and a terminal wants it straight, which is
+    // one pass over the pixels rather than a PNG round trip.
+    let (width, height) = (pixmap.width(), pixmap.height());
+    let picture = image::RgbaImage::from_raw(width, height, pixmap.take_demultiplied())?;
+    Some(Drawn {
+        picture: tightened(&picture.into()),
+        natural,
+        columns,
     })
+}
+
+fn as_cells(extent: f32) -> u16 {
+    u16::try_from(extent.round().max(1.0) as u32).unwrap_or(u16::MAX)
 }
 
 // The canvas a diagram is drawn on is not its content: cropping to the ink is what
@@ -75,6 +87,24 @@ fn tightened(picture: &DynamicImage) -> DynamicImage {
     crop_imm(&pixels, left, top, right - left + 1, bottom - top + 1)
         .to_image()
         .into()
+}
+
+// Mermaid lays a diagram out for a page: roomy boxes, wide gaps between ranks, and
+// labels left on one line. A conversation column is narrow and tall, and every pixel
+// of width a diagram takes is a pixel off the size its words are drawn at, so the
+// layout is made for the column it has to fit: boxes close to their text, ranks
+// close together, and labels wrapped early so a node grows downward instead of the
+// whole picture growing sideways.
+fn layout() -> LayoutConfig {
+    LayoutConfig {
+        node_spacing: 24.0,
+        rank_spacing: 24.0,
+        node_padding_x: 12.0,
+        node_padding_y: 8.0,
+        label_line_height: 1.3,
+        max_label_width_chars: 16,
+        ..LayoutConfig::default()
+    }
 }
 
 fn themed(is_dark: bool) -> Theme {

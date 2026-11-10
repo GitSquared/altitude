@@ -13,78 +13,40 @@ use self::table::Table;
 use super::palette;
 use crate::task::picture;
 
-pub fn lines(body: &str, width: u16) -> Vec<Line<'static>> {
+// A body as a surface draws it: its lines, and the pictures it carries at the place
+// it names them — a mermaid fence, or a reference to a picture the host has already
+// stored. A picture takes the line it comes after, so the words below it start below
+// it rather than the picture being moved to the end of what was written.
+pub struct Rendered {
+    pub lines: Vec<Line<'static>>,
+    pub pictures: Vec<Picture>,
+}
+
+pub struct Picture {
+    // How many lines of the body come before it.
+    pub after: usize,
+    // What a surface draws, or keeps where it was written, as the source it was.
+    pub source: String,
+}
+
+// `draws_pictures` says whether the surface this is for draws the pictures a body
+// carries: one that does not keeps each where it was written, as its own source.
+pub fn render(body: &str, width: u16, draws_pictures: bool) -> Rendered {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_TASKLISTS);
-    let mut block = Block::new(width);
+    let mut block = Block::new(width, draws_pictures);
     for event in Parser::new_ext(body, options) {
         block.event(event);
     }
     block.finish()
 }
 
-// The pictures a body carries, and the body without them: a mermaid fence, or a
-// reference to a picture the host has already stored. A surface that can draw them
-// shows the picture; every other surface keeps the fence in the text.
-pub fn take_pictures(body: &str) -> (String, Vec<String>) {
-    let mut text = String::new();
-    let mut diagrams = Vec::new();
-    let mut source: Option<String> = None;
-    for line in body.lines() {
-        match &mut source {
-            Some(diagram) => {
-                if line.trim_start().starts_with("```") {
-                    diagrams.push(mem::take(diagram));
-                    source = None;
-                } else {
-                    if !diagram.is_empty() {
-                        diagram.push('\n');
-                    }
-                    diagram.push_str(line);
-                }
-            }
-            None if is_mermaid_fence(line) => source = Some(String::new()),
-            None => {
-                text.push_str(line);
-                text.push('\n');
-            }
-        }
-    }
-    // An unterminated fence is not a diagram: it goes back into the text as written.
-    if let Some(diagram) = source {
-        text.push_str("```mermaid\n");
-        text.push_str(&diagram);
-        text.push('\n');
-    }
-    let (text, stored) = take_stored(text);
-    diagrams.extend(stored);
-    (text, diagrams)
-}
-
-// A stored picture is written as markdown writes one, so a surface that cannot draw
-// it still reads as words.
-fn take_stored(body: String) -> (String, Vec<String>) {
-    let (text, pictures) = picture::take(&body);
-    let sources = pictures
-        .into_iter()
-        .map(|stored| format!("{}{}", picture::PREFIX, stored.id))
-        .collect();
-    (text, sources)
-}
-
-fn is_mermaid_fence(line: &str) -> bool {
-    let line = line.trim();
-    let Some(language) = line.strip_prefix("```") else {
-        return false;
-    };
-    language.trim().eq_ignore_ascii_case("mermaid")
-}
-
 // A one-line stand-in for a body the operator only glances at, in a list.
 pub fn preview(body: &str) -> String {
-    lines(body, 400)
+    render(body, 400, false)
+        .lines
         .iter()
         .find(|line| line.width() > 0)
         .map(|line| {
@@ -120,12 +82,17 @@ struct Block {
     is_table_head: bool,
     link: Option<String>,
     image: Option<String>,
+    // Whether the surface draws the pictures this body carries, and the mermaid source
+    // of the fence being read: a fence is a picture, not text, once it is one.
+    draws_pictures: bool,
+    fence: Option<String>,
+    pictures: Vec<Picture>,
     style: Style,
     styles: Vec<Style>,
 }
 
 impl Block {
-    fn new(width: u16) -> Self {
+    fn new(width: u16, draws_pictures: bool) -> Self {
         Self {
             width: usize::from(width).max(1),
             lines: Vec::new(),
@@ -144,17 +111,28 @@ impl Block {
             is_table_head: false,
             link: None,
             image: None,
+            draws_pictures,
+            fence: None,
+            pictures: Vec::new(),
             style: palette::primary(),
             styles: Vec::new(),
         }
     }
 
-    fn finish(mut self) -> Vec<Line<'static>> {
+    fn finish(mut self) -> Rendered {
         self.close();
         while self.lines.last().is_some_and(|line| line.width() == 0) {
             self.lines.pop();
         }
-        self.lines
+        // A picture at the very end is after every line that is left, however many
+        // blank ones were just dropped.
+        for picture in &mut self.pictures {
+            picture.after = picture.after.min(self.lines.len());
+        }
+        Rendered {
+            lines: self.lines,
+            pictures: self.pictures,
+        }
     }
 
     fn event(&mut self, event: Event<'_>) {
@@ -172,6 +150,7 @@ impl Block {
             }
         }
         match event {
+            Event::Text(text) if self.fence.is_some() => self.fence_line(&text),
             Event::Text(text) if self.is_code => self.code_line(&text),
             Event::Text(text) => self.emit(&text, self.style),
             Event::Code(text) => self.emit(&text, palette::decision()),
@@ -212,6 +191,10 @@ impl Block {
                 self.close();
                 self.quote_depth = self.quote_depth.saturating_add(1);
                 self.push_style(palette::primary().add_modifier(Modifier::ITALIC));
+            }
+            Tag::CodeBlock(kind) if self.draws_fence(&kind) => {
+                self.begin_block();
+                self.fence = Some(String::new());
             }
             Tag::CodeBlock(kind) => {
                 self.begin_block();
@@ -283,8 +266,12 @@ impl Block {
                 self.quote_depth = self.quote_depth.saturating_sub(1);
             }
             TagEnd::CodeBlock => {
-                self.is_code = false;
-                self.close();
+                let Some(source) = self.fence.take() else {
+                    self.is_code = false;
+                    self.close();
+                    return;
+                };
+                self.picture(source.trim_end().to_owned());
             }
             TagEnd::List(_) => {
                 self.numbers.pop();
@@ -332,8 +319,12 @@ impl Block {
                 }
             }
             TagEnd::Image => {
-                if let Some(url) = self.image.take() {
-                    self.emit(&format!(" [image: {url}]"), palette::muted());
+                let Some(url) = self.image.take() else {
+                    return;
+                };
+                match self.stored(&url) {
+                    Some(source) => self.picture(source),
+                    None => self.emit(&format!(" [image: {url}]"), palette::muted()),
                 }
             }
             _ => {}
@@ -358,6 +349,43 @@ impl Block {
 
     fn draw_table(&mut self, table: Table) {
         self.lines.extend(table::lines(&table, self.width));
+    }
+
+    // A mermaid fence is a picture, not a listing, on a surface that draws pictures.
+    fn draws_fence(&self, kind: &CodeBlockKind<'_>) -> bool {
+        let CodeBlockKind::Fenced(language) = kind else {
+            return false;
+        };
+        self.draws_pictures && language.trim().eq_ignore_ascii_case("mermaid")
+    }
+
+    // The source of a diagram is not read out as text: it is what the picture is drawn
+    // from, so it is kept whole and nothing of it reaches the lines.
+    fn fence_line(&mut self, text: &str) {
+        let Some(fence) = self.fence.as_mut() else {
+            return;
+        };
+        fence.push_str(text);
+    }
+
+    fn picture(&mut self, source: String) {
+        if source.is_empty() {
+            return;
+        }
+        self.close();
+        let after = self.lines.len();
+        self.pictures.push(Picture { after, source });
+    }
+
+    // A picture the host has already stored is named by the digest of its bytes, which
+    // is the same picture on every machine that holds them: a surface that draws it
+    // gets that name and nothing else has to be said about it.
+    fn stored(&self, url: &str) -> Option<String> {
+        if !self.draws_pictures {
+            return None;
+        }
+        let id = url.strip_prefix(picture::PREFIX)?;
+        picture::is_id(id).then(|| format!("{}{id}", picture::PREFIX))
     }
 
     fn code_line(&mut self, text: &str) {

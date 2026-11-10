@@ -35,20 +35,22 @@ impl Tick {
 pub struct Message<'a> {
     pub author: &'a str,
     pub when: &'a str,
-    pub body: &'a str,
+    pub body: &'a markdown::Rendered,
     pub from_operator: bool,
     pub focused: bool,
     pub flashing: bool,
     pub tick: Option<Tick>,
     pub nested: Option<Nested<'a>>,
-    pub pictures: &'a [Size],
+    // The cells each picture of the body covers, in the order it carries them. A body
+    // whose pictures are not drawn carries none, and its words stand as written.
+    pub sizes: &'a [Size],
 }
 
 // Where a picture goes, in the frame's own coordinates rather than the card's: a
 // picture is drawn onto the terminal after the card has been copied there, not
 // into the card's scratch buffer.
-pub struct PictureSlot {
-    pub index: usize,
+pub struct PictureSlot<'a> {
+    pub source: &'a str,
     pub x: u16,
     pub width: u16,
     pub top: i32,
@@ -59,10 +61,7 @@ pub struct Nested<'a> {
     pub lines: Vec<Line<'a>>,
 }
 
-pub fn height(width: u16, body: &str, nested: Option<&Nested<'_>>, pictures: &[Size]) -> u16 {
-    // The border takes two columns and the padding takes two more.
-    let text_width = width.saturating_sub(4).max(1);
-    let rows = markdown::lines(body, text_width).len();
+pub fn height(body: &markdown::Rendered, nested: Option<&Nested<'_>>, pictures: &[Size]) -> u16 {
     let nested = nested.map_or(0, |nested| {
         u16::try_from(nested.lines.len())
             .unwrap_or(u16::MAX)
@@ -70,27 +69,27 @@ pub fn height(width: u16, body: &str, nested: Option<&Nested<'_>>, pictures: &[S
             // two borders.
             .saturating_add(3)
     });
-    u16::try_from(rows)
+    // A picture takes the rows it covers between the lines it stands between, so the
+    // body is as tall as its words and its pictures together.
+    let rows = u16::try_from(body.lines.len())
         .unwrap_or(u16::MAX)
-        .saturating_add(2)
-        .saturating_add(pictures_height(pictures))
-        .saturating_add(nested)
+        .saturating_add(pictures_height(pictures));
+    rows.saturating_add(2).saturating_add(nested)
 }
 
-// A blank line and then the picture, once per picture.
 fn pictures_height(pictures: &[Size]) -> u16 {
-    pictures.iter().fold(0, |total, picture| {
-        total.saturating_add(picture.height).saturating_add(1)
-    })
+    pictures
+        .iter()
+        .fold(0, |total, picture| total.saturating_add(picture.height))
 }
 
-pub fn draw_clipped(
+pub fn draw_clipped<'a>(
     frame: &mut Frame,
     visible: Rect,
     full_height: u16,
     top_offset: u16,
-    message: &Message<'_>,
-) -> Vec<PictureSlot> {
+    message: &Message<'a>,
+) -> Vec<PictureSlot<'a>> {
     if visible.width == 0 || visible.height == 0 || full_height == 0 {
         return Vec::new();
     }
@@ -122,24 +121,36 @@ pub fn draw_clipped(
     if let Some(tick) = message.tick.filter(|_| message.from_operator) {
         stamp_tick(&mut buffer, tick);
     }
-    let body = markdown::lines(message.body, inner.width.max(1));
-    let rows = u16::try_from(body.len()).unwrap_or(u16::MAX);
-    Paragraph::new(body).render(inner, &mut buffer);
-    let mut below = rows.saturating_add(1);
-    let mut slots = Vec::with_capacity(message.pictures.len());
-    for (index, picture) in message.pictures.iter().enumerate() {
-        // The rows the picture will cover are left empty here; the picture itself
-        // is drawn once this card has reached the frame.
-        let frame_top =
-            i32::from(visible.y) - i32::from(top_offset) + i32::from(inner.y) + i32::from(below);
+    // The rows a picture covers are left empty where the body names it; the picture
+    // itself is drawn once this card has reached the frame.
+    let mut laid = Vec::with_capacity(message.body.lines.len());
+    let mut slots = Vec::with_capacity(message.sizes.len());
+    let mut taken = 0;
+    for (index, picture) in message.body.pictures.iter().enumerate() {
+        let after = picture.after.min(message.body.lines.len());
+        laid.extend_from_slice(&message.body.lines[taken..after]);
+        taken = after;
+        let Some(size) = message.sizes.get(index) else {
+            continue;
+        };
+        let top = i32::from(visible.y) - i32::from(top_offset)
+            + i32::from(inner.y)
+            + i32::try_from(laid.len()).unwrap_or(i32::MAX);
         slots.push(PictureSlot {
-            index,
+            source: &picture.source,
             x: visible.x.saturating_add(inner.x),
             width: inner.width,
-            top: frame_top,
+            top,
         });
-        below = below.saturating_add(picture.height).saturating_add(1);
+        laid.resize(
+            laid.len().saturating_add(usize::from(size.height)),
+            Line::default(),
+        );
     }
+    laid.extend_from_slice(&message.body.lines[taken.min(message.body.lines.len())..]);
+    let rows = u16::try_from(laid.len()).unwrap_or(u16::MAX);
+    Paragraph::new(laid).render(inner, &mut buffer);
+    let below = rows.saturating_add(1);
     if let Some(nested) = &message.nested {
         let block = Block::bordered()
             .border_type(BorderType::Rounded)

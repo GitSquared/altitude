@@ -1,9 +1,16 @@
-mod cells;
 mod kitty;
 mod mermaid;
 
-use std::{collections::HashMap, path::PathBuf, time::Duration};
+use std::{
+    collections::HashMap,
+    io::Cursor,
+    path::{Path, PathBuf},
+    sync::mpsc::{self, Receiver, Sender, TryRecvError},
+    thread,
+    time::Duration,
+};
 
+use image::{DynamicImage, ImageFormat};
 use ratatui::{
     Frame,
     layout::{Rect, Size},
@@ -13,18 +20,9 @@ use ratatui_image::{
     sliced::{SignedPosition, SlicedImage, SlicedProtocol},
 };
 
-use self::{
-    kitty::{Cells, Placement},
-    mermaid::Raster,
-};
+use self::kitty::{Cells, Placement};
 use crate::task::picture;
 
-// A diagram taller than this is a document, not a picture in a conversation.
-const LONGEST: u16 = 40;
-// A diagram at its own scale has labels exactly one cell tall, which is how mermaid
-// would draw it at 14px next to 14px body text. A conversation is read, not studied,
-// so a picture is drawn well under that: legible, and far fewer rows.
-const COMPACT: f32 = 0.6;
 // Long enough for a terminal across an ssh link to answer, short enough that one
 // that never answers does not hold the interface up.
 const ANSWER_TIMEOUT: Duration = Duration::from_millis(800);
@@ -35,29 +33,63 @@ const WARM_RASTERS: usize = 12;
 pub struct Pictures {
     picker: Picker,
     is_dark: bool,
-    // One cell in pixels, measured rather than taken from the type size.
-    cell: Size,
-    // Where the pictures a signal carries are kept, by the digest that names them.
-    attachments: PathBuf,
-    rasters: HashMap<u64, Option<Warm>>,
+    // A diagram is laid out, drawn and encoded off this thread: the interface is
+    // waiting for the answer, and nothing about drawing one needs to happen in front
+    // of the operator. The cell size it measures with, and where the pictures a signal
+    // carries are kept, go with it.
+    drawing: Sender<Job>,
+    finished: Receiver<Answer>,
+    // What has been asked for and not answered yet, by the digest that names it and
+    // the column it was asked for in.
+    asked: HashMap<u64, u16>,
+    rasters: HashMap<u64, Option<Raster>>,
     // Only the protocols the crate lays out itself use this: a kitty picture is placed
     // by cells, so nothing about it needs a protocol object.
     sliced: HashMap<SlicedKey, Option<Sliced>>,
     cells: Cells,
 }
 
-struct Warm {
-    raster: Raster,
-    // The cells the diagram covers at its own scale, which is where every other
-    // size is measured from.
+// A diagram or an attached picture, drawn once and kept: what the terminal is given
+// of it, the cells it covers at its own scale, which is where every other size is
+// measured from, and the column it was drawn for, which is as wide as it is worth.
+struct Raster {
     natural: Size,
+    columns: u16,
+    pixels: Pixels,
+}
+
+// What is kept of a picture: a terminal that decodes the PNG it is sent never reads
+// the pixels, so only the encoding is held on to; one the crate slices an image into
+// cells is given them instead, because that is the only form it can place.
+enum Pixels {
+    Encoded { data: Vec<u8>, height: u32 },
+    Raw(DynamicImage),
+}
+
+// A picture the drawing thread has made and not yet encoded: the pixels, the cells
+// they cover at their own scale, and the column they were drawn for.
+pub(super) struct Drawn {
+    pub(super) picture: DynamicImage,
+    pub(super) natural: Size,
+    pub(super) columns: u16,
+}
+
+struct Job {
+    digest: u64,
+    source: String,
+    columns: u16,
+}
+
+struct Answer {
+    digest: u64,
+    columns: u16,
+    raster: Option<Raster>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct SlicedKey {
     source: u64,
     columns: u16,
-    scale: u16,
 }
 
 struct Sliced {
@@ -86,15 +118,30 @@ impl Pictures {
                 _ => None,
             })
             .unwrap_or(true);
+        // The size a terminal reports for a cell is the size it lays pictures out in,
+        // asked once here and carried to the thread that draws them.
         let font = picker.font_size();
-        let cell = cells::pixels()
-            .map(|(width, height)| Size::new(width, height))
-            .unwrap_or_else(|| Size::new(font.width, font.height));
+        let cell = Size::new(font.width.max(1), font.height.max(1));
+        let (drawing, jobs) = mpsc::channel();
+        let (answers, finished) = mpsc::channel();
+        let drawn_attachments = attachments.clone();
+        // The one protocol that places a picture by naming its cells is also the one
+        // that decodes the PNG it is sent, so its pictures are kept encoded and no
+        // others are.
+        let encoded = picker.protocol_type() == ProtocolType::Kitty;
+        // Named so a thread that is wedged can be found, and detached so a diagram
+        // still being drawn never holds the interface open on its way out.
+        let _ = thread::Builder::new()
+            .name("pictures".to_owned())
+            .spawn(move || {
+                draw_off_thread(jobs, answers, drawn_attachments, is_dark, cell, encoded)
+            });
         Self {
             picker,
             is_dark,
-            cell,
-            attachments,
+            drawing,
+            finished,
+            asked: HashMap::new(),
             rasters: HashMap::new(),
             sliced: HashMap::new(),
             cells: Cells::default(),
@@ -118,26 +165,19 @@ impl Pictures {
         self.picker.protocol_type() != ProtocolType::Halfblocks
     }
 
-    // At its own scale a diagram's labels match the words around it, so that is 1.0
-    // and the only question is whether it is wider than the column it has.
-    pub fn allowance(&mut self, source: &str, columns: u16) -> f32 {
-        let Some(natural) = self.warm(source).map(|warm| warm.natural) else {
-            return 1.0;
-        };
-        // Never floored: a diagram drawn larger than its column would be squashed
-        // to fit, and a squashed diagram is worse than a small one.
-        (f32::from(columns.max(1)) / f32::from(natural.width.max(1))).min(1.0)
-    }
-
-    pub fn size(&mut self, source: &str, columns: u16, scale: f32) -> Option<Size> {
-        let natural = self.warm(source)?.natural;
-        let box_size = fit(natural, columns, scale);
+    // A picture is drawn as wide as the column it has, or as wide as it is when that
+    // is narrower, and as tall as its own proportions then make it: a diagram reads at
+    // the size its words are set to, and the column decides how much of that it keeps.
+    // One still being drawn off the loop is nothing to draw yet, so its source stays.
+    pub fn size(&mut self, source: &str, columns: u16) -> Option<Size> {
+        let natural = self.warm(source, columns)?.natural;
+        let box_size = box_of(natural, drawn_scale(natural, columns));
         // A picture placed by cells covers exactly the cells it names, so the box is
         // the size; the crate reports what it will draw for everything else.
         if self.is_placing_by_cells() {
             return Some(box_size);
         }
-        self.slice(source, columns, scale).map(|sliced| sliced.size)
+        self.slice(source, columns).map(|sliced| sliced.size)
     }
 
     pub fn draw(
@@ -146,16 +186,18 @@ impl Pictures {
         viewport: Rect,
         source: &str,
         columns: u16,
-        scale: f32,
         at: (i16, i16),
     ) {
-        let Some(natural) = self.warm(source).map(|warm| warm.natural) else {
+        let Some(natural) = self.warm(source, columns).map(|raster| raster.natural) else {
             return;
         };
-        let box_size = fit(natural, columns, scale);
+        let box_size = box_of(natural, drawn_scale(natural, columns));
         if self.is_placing_by_cells() {
             let digest = digest(source);
-            let Some(warm) = self.rasters.get(&digest).and_then(Option::as_ref) else {
+            let Some(raster) = self.rasters.get(&digest).and_then(Option::as_ref) else {
+                return;
+            };
+            let Pixels::Encoded { data, height } = &raster.pixels else {
                 return;
             };
             let _ = frame;
@@ -163,7 +205,8 @@ impl Pictures {
                 viewport,
                 Placement {
                     key: digest,
-                    raster: &warm.raster,
+                    png: data,
+                    pixels_high: *height,
                     columns: box_size.width,
                     rows: box_size.height,
                     at,
@@ -173,10 +216,41 @@ impl Pictures {
         }
         // Every other protocol is laid out by the crate, which knows how to slice a
         // sixel and how much of an iTerm2 image a terminal will take.
-        if let Some(sliced) = self.slice(source, columns, scale) {
+        if let Some(sliced) = self.slice(source, columns) {
             let at = SignedPosition::from(at);
             frame.render_widget(SlicedImage::new(&sliced.protocol, at), viewport);
         }
+    }
+
+    // Whether a picture has been drawn since the last frame was: it is taken in here,
+    // and the frame that does it is the frame that shows it. One still on its way is
+    // not a reason to draw anything, because there is nothing yet to show.
+    pub fn arrived(&mut self) -> bool {
+        let mut arrived = false;
+        loop {
+            match self.finished.try_recv() {
+                Ok(answer) => {
+                    if self.asked.get(&answer.digest) != Some(&answer.columns) {
+                        continue;
+                    }
+                    self.asked.remove(&answer.digest);
+                    if self.rasters.len() >= WARM_RASTERS {
+                        self.rasters.clear();
+                        self.sliced.clear();
+                    }
+                    self.rasters.insert(answer.digest, answer.raster);
+                    arrived = true;
+                }
+                Err(TryRecvError::Empty) => break,
+                // Nothing is drawing and nothing will, so what was asked for is
+                // forgotten rather than waited on.
+                Err(TryRecvError::Disconnected) => {
+                    self.asked.clear();
+                    break;
+                }
+            }
+        }
+        arrived
     }
 
     // What the terminal has to be told after this frame: pictures are positioned by
@@ -189,93 +263,189 @@ impl Pictures {
         self.picker.protocol_type() == ProtocolType::Kitty
     }
 
-    fn warm(&mut self, source: &str) -> Option<&Warm> {
+    fn warm(&mut self, source: &str, columns: u16) -> Option<&Raster> {
         let digest = digest(source);
-        if !self.rasters.contains_key(&digest) {
-            if self.rasters.len() >= WARM_RASTERS {
-                self.rasters.clear();
-                self.sliced.clear();
+        let drawn_for = self
+            .rasters
+            .get(&digest)
+            .and_then(Option::as_ref)
+            .map_or(0, |raster| raster.columns);
+        // A picture drawn wider than the pixels it was made for is asked for again: a
+        // window that grew would otherwise show it soft for as long as it is open.
+        if drawn_for < columns && self.asked.get(&digest) != Some(&columns) {
+            // The newest column wins: a picture being dragged wider is asked for once
+            // per frame, and only the width it ends at is worth drawing. A thread that
+            // is not there to take it leaves the source where it is rather than a
+            // question nothing will answer.
+            let job = Job {
+                digest,
+                source: source.to_owned(),
+                columns,
+            };
+            if self.drawing.send(job).is_ok() {
+                self.asked.insert(digest, columns);
             }
-            let warm = self.build(source);
-            self.rasters.insert(digest, warm);
         }
         self.rasters.get(&digest)?.as_ref()
     }
 
-    fn build(&self, source: &str) -> Option<Warm> {
-        let font = self.picker.font_size();
-        let raster = match source.strip_prefix(picture::PREFIX) {
-            // A picture the host has already read out of a sandbox: its digest names
-            // the bytes, and nothing about it needs drawing.
-            Some(id) => Raster {
-                picture: image::load_from_memory(&picture::read(&self.attachments, id).ok()?)
-                    .ok()?,
-            },
-            None => mermaid::raster(source, self.is_dark, font.height)?,
-        };
-        // The raster is twice a cell in each direction, so its cell count is its pixels
-        // over two measured cells. The height follows from the width on one scale, so
-        // the box has the picture's own proportions instead of two rounded guesses.
-        let wide = raster.picture.width() as f32 / (f32::from(self.cell.width.max(1)) * 2.0);
-        // Cells are not square, so the picture's proportions in cells are its
-        // proportions in pixels turned by the ratio of a cell's sides.
-        let turned = f32::from(self.cell.width.max(1)) / f32::from(self.cell.height.max(1));
-        let tall =
-            wide * raster.picture.height() as f32 / raster.picture.width().max(1) as f32 * turned;
-        let natural = Size::new(
-            u16::try_from(wide.round().max(1.0) as u32).ok()?,
-            u16::try_from(tall.round().max(1.0) as u32).ok()?,
-        );
-        Some(Warm { raster, natural })
-    }
-
-    fn slice(&mut self, source: &str, columns: u16, scale: f32) -> Option<&Sliced> {
+    fn slice(&mut self, source: &str, columns: u16) -> Option<&Sliced> {
         let key = SlicedKey {
             source: digest(source),
             columns,
-            scale: (scale * 1000.0).round() as u16,
         };
         if !self.sliced.contains_key(&key) {
-            let sliced = self.build_sliced(source, columns, scale);
+            let sliced = build_sliced(
+                &self.picker,
+                self.rasters.get(&key.source)?.as_ref()?,
+                columns,
+            );
             self.sliced.insert(key, sliced);
         }
         self.sliced.get(&key)?.as_ref()
     }
+}
 
-    fn build_sliced(&self, source: &str, columns: u16, scale: f32) -> Option<Sliced> {
-        let warm = self.rasters.get(&digest(source))?.as_ref()?;
-        let box_size = fit(warm.natural, columns, scale);
-        let protocol =
-            SlicedProtocol::new(&self.picker, warm.raster.picture.clone(), Some(box_size)).ok()?;
-        let size = protocol.size();
-        Some(Sliced { protocol, size })
+fn build_sliced(picker: &Picker, raster: &Raster, columns: u16) -> Option<Sliced> {
+    let Pixels::Raw(picture) = &raster.pixels else {
+        return None;
+    };
+    let box_size = box_of(raster.natural, drawn_scale(raster.natural, columns));
+    let protocol = SlicedProtocol::new(picker, picture.clone(), Some(box_size)).ok()?;
+    let size = protocol.size();
+    Some(Sliced { protocol, size })
+}
+
+// The pictures, drawn as they are asked for and answered on their way back. One
+// thread, so a diagram is laid out and rasterized in the order the conversation asked
+// for them, and nothing it does can stall an interface.
+fn draw_off_thread(
+    jobs: Receiver<Job>,
+    answers: Sender<Answer>,
+    attachments: PathBuf,
+    is_dark: bool,
+    cell: Size,
+    encoded: bool,
+) {
+    while let Ok(job) = jobs.recv() {
+        // Everything already queued is superseded by the newest column asked for: a
+        // window being dragged asks for the same diagram at every width it passes, and
+        // only where it ends up is worth drawing. The one left is the last one asked
+        // for, which is the one the interface is waiting on.
+        let mut batch = HashMap::from([(job.digest, job)]);
+        while let Ok(job) = jobs.try_recv() {
+            batch.insert(job.digest, job);
+        }
+        for job in batch.into_values() {
+            let raster = build(
+                &job.source,
+                &attachments,
+                is_dark,
+                cell,
+                job.columns,
+                encoded,
+            );
+            let answer = Answer {
+                digest: job.digest,
+                columns: job.columns,
+                raster,
+            };
+            if answers.send(answer).is_err() {
+                return;
+            }
+        }
     }
 }
 
-// Only ever down from the scale the caller asked for, and never past the row budget:
-// a diagram smaller than that keeps its own size rather than being blown up into a
-// blur, and a tall one gets narrower instead of being squashed.
-fn fit(natural: Size, columns: u16, scale: f32) -> Size {
+fn build(
+    source: &str,
+    attachments: &Path,
+    is_dark: bool,
+    cell: Size,
+    columns: u16,
+    encoded: bool,
+) -> Option<Raster> {
+    let Drawn {
+        picture,
+        natural,
+        columns,
+    } = draw(source, attachments, is_dark, cell, columns)?;
+    let pixels = match encoded {
+        true => Pixels::Encoded {
+            data: encode(&picture)?,
+            height: picture.height(),
+        },
+        false => Pixels::Raw(picture),
+    };
+    Some(Raster {
+        natural,
+        columns,
+        pixels,
+    })
+}
+
+// The pixels as a PNG, which is what a terminal is sent: encoding them is the drawing
+// thread's work, so the frame that shows a picture never pays for it.
+fn encode(picture: &DynamicImage) -> Option<Vec<u8>> {
+    let mut png = Vec::new();
+    picture
+        .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
+        .ok()?;
+    Some(png)
+}
+
+fn draw(
+    source: &str,
+    attachments: &Path,
+    is_dark: bool,
+    cell: Size,
+    columns: u16,
+) -> Option<Drawn> {
+    let Some(id) = source.strip_prefix(picture::PREFIX) else {
+        return mermaid::raster(source, is_dark, cell, columns);
+    };
+    // A picture the host has already read out of a sandbox: its digest names the
+    // bytes, and it is kept at the size it arrived at rather than redrawn.
+    let picture = image::load_from_memory(&picture::read(attachments, id).ok()?).ok()?;
+    let natural = arrived_cells(&picture, cell);
+    // An arrived picture is not drawn at any size, so nothing about it is worth
+    // asking for again.
+    Some(Drawn {
+        picture,
+        natural,
+        columns: u16::MAX,
+    })
+}
+
+// An arrived picture is drawn at half its pixels, which is how a photograph of a screen
+// full of text stays a picture of the card rather than of the terminal.
+fn arrived_cells(picture: &DynamicImage, cell: Size) -> Size {
+    let across = |pixels: u32, cell: u16| {
+        u16::try_from(pixels.div_ceil(u32::from(cell.max(1)) * 2)).unwrap_or(u16::MAX)
+    };
+    Size::new(
+        across(picture.width(), cell.width),
+        across(picture.height(), cell.height),
+    )
+}
+
+// At its own scale a picture's labels are one cell row tall, so the only question a
+// column asks is how much of that scale it can hold.
+fn drawn_scale(natural: Size, columns: u16) -> f32 {
+    (f32::from(columns.max(1)) / f32::from(natural.width.max(1))).min(1.0)
+}
+
+// The cells a picture covers at that fraction, with the height following from the
+// picture's own proportions rather than from a second rounding: a diagram is as tall
+// as its content is, and a long one is read by scrolling.
+fn box_of(natural: Size, scale: f32) -> Size {
     let wide = f32::from(natural.width.max(1));
     let tall = f32::from(natural.height.max(1));
-    // Room for the picture at all, measured on both axes and applied to both: a
-    // picture fitted by width and then cut by a row budget would be squashed, and
-    // the terminal stretches whatever box it is given to fit.
-    let room = (f32::from(columns.max(1)) / wide).min(f32::from(LONGEST) / tall);
-    let scale = (scale * COMPACT).min(room).max(f32::MIN_POSITIVE);
-    let mut width = (wide * scale).round().max(1.0) as u16;
-    let mut height = (f32::from(width) * tall / wide).round().max(1.0) as u16;
-    // Rounding can push a side one cell past its budget; giving back that cell on
-    // the other axis is what keeps the proportions rather than shaving one side.
-    if height > LONGEST {
-        height = LONGEST;
-        width = (f32::from(height) * wide / tall).ceil().max(1.0) as u16;
-    }
-    if width > columns.max(1) {
-        width = columns.max(1);
-        height = (f32::from(width) * tall / wide).ceil().max(1.0) as u16;
-    }
-    Size::new(width.max(1), height.clamp(1, LONGEST))
+    let width = (wide * scale.max(f32::MIN_POSITIVE)).round().max(1.0) as u16;
+    Size::new(
+        width,
+        ((f32::from(width) * tall / wide).round().max(1.0) as u16).max(1),
+    )
 }
 
 fn is_dark_colour(red: u8, green: u8, blue: u8) -> bool {
