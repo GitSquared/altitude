@@ -229,15 +229,6 @@ impl TaskAsk {
         self.messages.last().map(|message| message.author)
     }
 
-    // Whether the operator has said anything here at all. It is what makes a thread
-    // the agent's to close: until they have spoken, what was asked for has not arrived
-    // and there is nothing for the thread to be over.
-    pub fn has_operator_spoken(&self) -> bool {
-        self.messages
-            .iter()
-            .any(|message| message.author == TaskAskAuthor::Operator)
-    }
-
     // An open thread whose last word is the agent's is one the task is waiting on a
     // person for. A thread the operator spoke in last is not: they have spoken, and
     // the work owes them the next thing.
