@@ -4,10 +4,7 @@ use crate::remote::host::admission::{self, Actor, Admission, InputFacts};
 use crate::tracker::ask_marker;
 use crate::{
     task::TaskAsk,
-    tracker::{
-        TrackerKind,
-        providers::linear::automation::{AgentActivityContent, CommentSite},
-    },
+    tracker::host::automation::{AgentActivityContent, CommentSite},
 };
 
 use super::ledger::ReactionInput;
@@ -28,7 +25,7 @@ impl RemoteTracker {
             return Ok(None);
         }
         let Some(issue_id) = issue_id else {
-            tracing::debug!(comment = %site.comment_id, "a Linear comment belongs to no issue");
+            tracing::debug!(comment = %site.comment_id, "a tracker comment belongs to no issue");
             return Ok(None);
         };
         // The task holding the issue is what decides whether a comment has anywhere to
@@ -37,11 +34,11 @@ impl RemoteTracker {
         // operator writing on a delegated issue is the one thing this machine must
         // never swallow.
         let Some(task) = host.work_for_issue(issue_id.to_owned(), Vec::new()).await? else {
-            tracing::info!(comment = %site.comment_id, issue = %issue_id, "a Linear comment reached no task on this machine");
+            tracing::info!(comment = %site.comment_id, issue = %issue_id, "a tracker comment reached no task on this machine");
             return Ok(None);
         };
         if !host.is_kept(task.task_id.clone()).await? {
-            tracing::info!(comment = %site.comment_id, task = %task.task_id, "a Linear comment reached a task that is gone");
+            tracing::info!(comment = %site.comment_id, task = %task.task_id, "a tracker comment reached a task that is gone");
             return Ok(None);
         }
         Ok(Some(task))
@@ -241,7 +238,7 @@ impl RemoteTracker {
             ?decision,
             reason = decision.reason(),
             mention = event.is_mention,
-            "Linear comment admitted"
+            "tracker comment admitted"
         );
         match decision {
             Admission::Ignore | Admission::Context => Ok(()),
@@ -457,7 +454,7 @@ impl RemoteTracker {
     }
 
     pub(super) async fn post_sync_guidance(&self, session_id: &str) -> Result<(), String> {
-        let tracker = TrackerKind::Linear.label();
+        let tracker = self.config.automation.kind().label();
         let body = format!(
             "**altitude does not know whose work this is.**\n\n\
              This remote holds no {tracker} login from a person it could report to, so it \

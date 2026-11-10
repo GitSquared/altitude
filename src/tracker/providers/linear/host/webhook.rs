@@ -2,9 +2,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
-use super::{
-    IssueStateChanged, StoredEvent, WEBHOOK_MAX_AGE,
-    ledger::{CommentInput, CommentResolution, ReactionInput},
+use super::WEBHOOK_MAX_AGE;
+use crate::tracker::host::remote::ledger::{
+    CommentInput, CommentResolution, IssueStateChanged, ReactionInput, StoredEvent,
 };
 
 #[derive(Clone, Deserialize)]

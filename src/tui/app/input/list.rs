@@ -123,6 +123,7 @@ impl App {
             KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if self.reload_settings() {
                     let question = NewTask::new(
+                        self.default_tracker_kind(),
                         self.projects(),
                         &self.active_project_id(),
                         self.task_hosts(),

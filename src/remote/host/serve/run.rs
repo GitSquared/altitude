@@ -39,7 +39,7 @@ use crate::{
         server::ServerParts,
     },
     task::{TaskEventLoop, TaskExecutionUpdate, TaskService, TaskStore},
-    tracker::providers::linear::host as linear_host,
+    tracker::providers::{github::host as github_host, linear::host as linear_host},
     tracker::{DelegatedWork, TrackerIntegration, TrackerKind},
 };
 
@@ -123,54 +123,67 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
             ))
         })?;
 
+    // A remote reports into one tracker. Linear's app is kept when both are set,
+    // because it is the one a remote set up before GitHub existed here was using.
+    if settings.tracker.is_some() && settings.github.is_some() {
+        tracing::warn!(
+            "serve.toml sets both [linear] and [github]; this remote reports into Linear"
+        );
+    }
     let mut tracker_integration: Option<Arc<dyn TrackerIntegration>> = None;
     let mut tracker_error = None;
-    if let Some(tracker_settings) = settings.tracker.clone() {
+    let configured = if let Some(tracker_settings) = settings.tracker.clone() {
         match linear_host::connect(&config, &tracker_settings, &credentials_path).await {
             Ok(runtime) => tracker_integration = Some(runtime),
             // Reported once, below, with what to run about it.
             Err(error) => tracker_error = Some(error),
         }
-    }
+        Some(TrackerKind::Linear)
+    } else if let Some(github) = settings.github.clone() {
+        match github_host::connect(&config, &github).await {
+            Ok(runtime) => tracker_integration = Some(runtime),
+            Err(error) => tracker_error = Some(error),
+        }
+        Some(TrackerKind::GitHub)
+    } else {
+        None
+    };
     // A machine that will never run a tracker must not tell every client that one
-    // is missing, so only a configured tracker is announced. An app that was never
-    // installed is worth telling apart from one that will not sign in: they send
-    // its owner to different steps.
-    let readiness = settings
-        .tracker
-        .as_ref()
-        .map(|_| match &tracker_integration {
-            Some(_) => TrackerReadiness::Ready,
-            None => linear_host::readiness(&credentials_path),
-        });
-    let kind = TrackerKind::sole();
-    let trackers = readiness
-        .map(|state| {
-            vec![TrackerConnection {
-                provider: kind,
-                state,
-            }]
-        })
+    // is missing, so only a configured tracker is announced. A Linear app that was
+    // never installed is worth telling apart from one that will not sign in: they
+    // send its owner to different steps. A GitHub App is installed on GitHub, so one
+    // that does not answer is one that cannot sign in.
+    let readiness = configured.map(|kind| match (&tracker_integration, kind) {
+        (Some(_), _) => TrackerReadiness::Ready,
+        (None, TrackerKind::Linear) => linear_host::readiness(&credentials_path),
+        (None, TrackerKind::GitHub) => TrackerReadiness::Unavailable,
+    });
+    let trackers = configured
+        .zip(readiness)
+        .map(|(provider, state)| vec![TrackerConnection { provider, state }])
         .unwrap_or_default();
-    match (readiness, &tracker_integration) {
-        (Some(_), Some(runtime)) => tracing::info!(
-            "{}: workspace {} · webhooks on {}",
+    match (configured, readiness, &tracker_integration) {
+        (Some(kind), Some(_), Some(runtime)) => tracing::info!(
+            "{}: {} · webhooks on {}",
             kind.label(),
             runtime.workspace_label(),
             runtime.webhook_address(),
         ),
-        (Some(state), None) => tracing::warn!(
+        (Some(TrackerKind::GitHub), Some(state), None) => tracing::warn!(
+            error = tracker_error.as_deref().unwrap_or("no reason given"),
+            "GitHub: {} · check [github] in serve.toml and that the app is installed",
+            state.said(),
+        ),
+        (Some(kind), Some(state), None) => tracing::warn!(
             error = tracker_error.as_deref().unwrap_or("no reason given"),
             "{}: {} · run `altitude serve connect {}` on this machine",
             kind.label(),
             state.said(),
             kind.slug()
         ),
-        (None, _) => tracing::info!(
-            "Task tracker: none configured · run `altitude serve connect {}` to pilot work \
-             from {}",
-            kind.slug(),
-            kind.label()
+        _ => tracing::info!(
+            "Task tracker: none configured · run `altitude serve connect linear`, or add a \
+             [github] app to serve.toml, to pilot work from a tracker"
         ),
     }
 

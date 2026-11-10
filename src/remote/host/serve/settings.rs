@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{DEFAULT_PORT, SettingsError};
 use crate::tracker::TrackerKind;
-use crate::tracker::providers::linear::settings::LinearSettings;
+use crate::tracker::providers::{
+    github::settings::GitHubSettings, linear::settings::LinearSettings,
+};
 
 fn default_listen() -> String {
     format!("0.0.0.0:{DEFAULT_PORT}")
@@ -20,6 +22,8 @@ pub struct ServeSettings {
     pub listen: String,
     #[serde(default, rename = "linear", skip_serializing_if = "Option::is_none")]
     pub tracker: Option<LinearSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github: Option<GitHubSettings>,
     #[serde(default)]
     pub pause_delegated_work: bool,
 }
@@ -29,6 +33,7 @@ impl Default for ServeSettings {
         Self {
             listen: default_listen(),
             tracker: None,
+            github: None,
             pause_delegated_work: false,
         }
     }
@@ -48,7 +53,7 @@ impl ServeSettings {
 }
 
 fn template() -> String {
-    let kind = TrackerKind::sole();
+    let kind = TrackerKind::Linear;
     format!(
         "# Where clients reach this remote: discovery over TCP, tasks over UDP.\n\
          listen = \"{listen}\"\n\
@@ -65,6 +70,14 @@ fn template() -> String {
          # client_id = \"\"\n\
          # public_url = \"\"\n\
          # client_secret = \"\"\n\
+         # webhook_secret = \"\"\n\
+         \n\
+         # Or a GitHub App, for work delegated by labelling an issue agent:altitude.\n\
+         # A remote reports into one tracker; with both set it uses [{slug}].\n\
+         # [github]\n\
+         # app_id = \"\"\n\
+         # public_url = \"\"\n\
+         # private_key_path = \"\"\n\
          # webhook_secret = \"\"\n",
         listen = default_listen(),
         name = kind.label(),

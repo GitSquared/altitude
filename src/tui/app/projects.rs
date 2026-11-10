@@ -9,7 +9,6 @@ use crate::{
     isolation::IsolationEngine,
     project::Project,
     task::{TaskExecutionStatus, TaskService},
-    tracker::TrackerKind,
     tui::keys::is_dismiss,
     tui::popups,
     tui::screens,
@@ -33,7 +32,10 @@ impl App {
     ) where
         E: IsolationEngine + Clone + 'static,
     {
-        let credential = credential.unwrap_or_else(|| TrackerKind::sole().profile().to_owned());
+        let Some(credential) = credential.or_else(|| self.tracker_credential()) else {
+            self.say("Choose a task tracker identity before choosing where its issues come from");
+            return;
+        };
         let Some(tracker) = task_service.tracker_for(&credential) else {
             self.say("Connect that task tracker identity before choosing a team");
             return;
@@ -459,7 +461,7 @@ impl App {
                 if self.tracker_state != TrackerState::Connecting
                     && self.tracker_state != TrackerState::Connected
                 {
-                    self.connect_tracker(task_service, tracker_connects);
+                    self.connect_tracker(panel.tracker_kind(), task_service, tracker_connects);
                 }
             }
             self.foreground = Foreground::GetStarted(panel);
@@ -586,6 +588,7 @@ impl App {
             return;
         }
         let question = NewTask::new(
+            self.default_tracker_kind(),
             self.projects(),
             &self.active_project_id(),
             self.task_hosts(),

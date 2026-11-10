@@ -14,8 +14,7 @@ use crate::{
     db::Database,
     isolation::{IsolationBackend, IsolationEngine, MicrosandboxIsolation, TestbedIsolation},
     remote::{InstallationKey, LinkClient, RemoteKeys},
-    task::{TaskEventLoop, TaskService, TaskStore, TrackerHost},
-    tracker::TrackerKind,
+    task::{TaskEventLoop, TaskService, TaskStore},
 };
 
 mod agent;
@@ -177,9 +176,10 @@ where
             return Ok(());
         };
         let trackers = Arc::new(task::OwnTrackers::new(config.clone()));
-        let issue_reader = trackers
-            .for_credential(&identity.id, TrackerKind::sole().profile())
-            .map(|tracker| tracker as Arc<dyn tracker::IssueReader>);
+        let issue_reader = Some(Arc::new(task::OwnIssues::new(
+            Arc::clone(&trackers),
+            identity.id.clone(),
+        )) as Arc<dyn tracker::IssueReader>);
         let mut tasks = TaskService::new(
             TaskStore::new(&database),
             isolation,

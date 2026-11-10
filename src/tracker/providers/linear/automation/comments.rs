@@ -296,7 +296,12 @@ impl AskSurface for LinearAutomation {
         })
     }
 
-    fn close_ask<'a>(&'a self, marker: &'a str, closed: bool) -> TrackerFuture<'a, ()> {
+    fn close_ask<'a>(
+        &'a self,
+        _issue: &'a IssueReference,
+        marker: &'a str,
+        closed: bool,
+    ) -> TrackerFuture<'a, ()> {
         Box::pin(async move {
             if closed {
                 self.resolve_comment(marker, None).await
@@ -306,7 +311,11 @@ impl AskSurface for LinearAutomation {
         })
     }
 
-    fn has_ask<'a>(&'a self, marker: &'a str) -> TrackerFuture<'a, bool> {
+    fn has_ask<'a>(
+        &'a self,
+        _issue: &'a IssueReference,
+        marker: &'a str,
+    ) -> TrackerFuture<'a, bool> {
         Box::pin(async move { self.comment(marker).await.map(|comment| comment.is_some()) })
     }
 }

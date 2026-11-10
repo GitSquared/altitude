@@ -7,11 +7,7 @@ use super::agent_sessions::AgentActivityContent;
 use super::issues::mutation_succeeded;
 use super::queries::*;
 use super::*;
-
-pub struct SessionStanding {
-    pub can_receive: bool,
-    pub never_answered: bool,
-}
+use crate::tracker::host::automation::SessionStanding;
 
 impl LinearAutomation {
     pub async fn update_session_summary(
