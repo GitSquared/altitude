@@ -202,20 +202,56 @@ jobs:
 
       - name: Commit formula
         env:
+          GH_TOKEN: ${{ github.token }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           if [[ -z "$(git status --porcelain -- Formula/altitude.rb)" ]]; then
             echo "formula is already current"
             exit 0
           fi
 
-          git add Formula/altitude.rb
-          git commit -m "chore(homebrew): altitude ${GITHUB_REF_NAME}"
-          git fetch origin "${DEFAULT_BRANCH}"
-          git rebase "origin/${DEFAULT_BRANCH}"
-          git push origin "HEAD:${DEFAULT_BRANCH}"
+          # A commit written by the workflow is unsigned, and the default branch takes
+          # signed commits only. GitHub signs the commits it is asked to make through
+          # its API, so the change is authored there instead of pushed from here. The
+          # head it expects is this run's, so a branch that moved fails loudly rather
+          # than losing whatever moved it.
+          contents="$(base64 --wrap=0 Formula/altitude.rb)"
+          if [[ -z "$contents" ]]; then
+            echo "the formula could not be encoded" >&2
+            exit 1
+          fi
+
+          read -r -d '' query <<'GRAPHQL' || true
+          mutation($input: CreateCommitOnBranchInput!) {
+            createCommitOnBranch(input: $input) {
+              commit { oid url }
+            }
+          }
+          GRAPHQL
+
+          payload="$(jq -n \
+            --arg query "$query" \
+            --arg repository "$REPOSITORY" \
+            --arg branch "$DEFAULT_BRANCH" \
+            --arg head "$(git rev-parse HEAD)" \
+            --arg headline "chore(homebrew): altitude ${GITHUB_REF_NAME}" \
+            --arg contents "$contents" \
+            '{
+              query: $query,
+              variables: {
+                input: {
+                  branch: {repositoryNameWithOwner: $repository, branchName: $branch},
+                  expectedHeadOid: $head,
+                  message: {headline: $headline},
+                  fileChanges: {
+                    additions: [{path: "Formula/altitude.rb", contents: $contents}]
+                  }
+                }
+              }
+            }')"
+
+          gh api graphql --input - <<<"$payload" | tee "$RUNNER_TEMP/commit.json"
+          jq -r '.data.createCommitOnBranch.commit.url' "$RUNNER_TEMP/commit.json"
