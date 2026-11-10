@@ -126,7 +126,7 @@ pub(super) struct TerminatedSession {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub(super) enum StoredEvent {
+pub(crate) enum StoredEvent {
     Session(Box<SessionEvent>),
     IssueStateChanged(IssueStateChanged),
     Comment(CommentInput),
@@ -135,7 +135,7 @@ pub(super) enum StoredEvent {
 }
 
 impl StoredEvent {
-    pub(super) fn describe(&self) -> String {
+    pub(crate) fn describe(&self) -> String {
         match self {
             StoredEvent::Session(event) => {
                 format!("session {} · {}", event.session_id, event.action)
@@ -169,7 +169,7 @@ impl StoredEvent {
         }
     }
 
-    pub(super) fn dedupe_key(&self) -> String {
+    pub(crate) fn dedupe_key(&self) -> String {
         match self {
             StoredEvent::Session(session) => session.dedupe_key(),
             StoredEvent::IssueStateChanged(change) => format!(
@@ -186,63 +186,118 @@ impl StoredEvent {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub(super) struct ReactionInput {
-    pub(super) id: String,
-    pub(super) comment_id: String,
-    pub(super) emoji: String,
-    pub(super) actor_id: String,
+pub(crate) struct ReactionInput {
+    pub(crate) id: String,
+    pub(crate) comment_id: String,
+    pub(crate) emoji: String,
+    pub(crate) actor_id: String,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
-pub(super) struct SessionEvent {
-    pub(super) action: String,
-    pub(super) session_id: String,
+pub(crate) struct SessionEvent {
+    pub(crate) action: String,
+    pub(crate) session_id: String,
     #[serde(default)]
-    pub(super) issue_id: Option<String>,
+    pub(crate) issue_id: Option<String>,
     #[serde(default)]
-    pub(super) comment_id: Option<String>,
+    pub(crate) comment_id: Option<String>,
     #[serde(default)]
-    pub(super) creator_id: Option<String>,
+    pub(crate) creator_id: Option<String>,
     #[serde(default)]
-    pub(super) creator_name: Option<String>,
+    pub(crate) creator_name: Option<String>,
     #[serde(default)]
-    pub(super) prompt_author_id: Option<String>,
+    pub(crate) prompt_author_id: Option<String>,
     #[serde(default)]
-    pub(super) prompt_body: Option<String>,
+    pub(crate) prompt_body: Option<String>,
     #[serde(default)]
-    pub(super) signal: Option<String>,
+    pub(crate) signal: Option<String>,
     #[serde(default)]
-    pub(super) source_comment_id: Option<String>,
+    pub(crate) source_comment_id: Option<String>,
     #[serde(default)]
-    pub(super) activity_id: Option<String>,
+    pub(crate) activity_id: Option<String>,
     #[serde(default)]
-    pub(super) occurred_at_ms: i64,
+    pub(crate) occurred_at_ms: i64,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub(super) struct IssueStateChanged {
-    pub(super) issue_id: String,
-    pub(super) state_id: String,
-    pub(super) actor_id: String,
-    pub(super) occurred_at_ms: i64,
+pub(crate) struct IssueStateChanged {
+    pub(crate) issue_id: String,
+    pub(crate) state_id: String,
+    pub(crate) actor_id: String,
+    pub(crate) occurred_at_ms: i64,
 }
 
 // A thread closed or reopened in the tracker. It names the comment the thread was
 // raised on, because that is what both sides already know how to find.
 #[derive(Clone, Serialize, Deserialize)]
-pub(super) struct CommentResolution {
-    pub(super) comment_id: String,
-    pub(super) resolved: bool,
+pub(crate) struct CommentResolution {
+    pub(crate) comment_id: String,
+    pub(crate) resolved: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub(super) struct CommentInput {
-    pub(super) comment_id: String,
+pub(crate) struct CommentInput {
+    pub(crate) comment_id: String,
     #[serde(default)]
-    pub(super) issue_id: Option<String>,
+    pub(crate) issue_id: Option<String>,
     #[serde(default)]
-    pub(super) document_id: Option<String>,
-    pub(super) actor_id: String,
-    pub(super) is_mention: bool,
-    pub(super) body: String,
+    pub(crate) document_id: Option<String>,
+    pub(crate) actor_id: String,
+    pub(crate) is_mention: bool,
+    pub(crate) body: String,
+}
+
+impl SessionEvent {
+    pub(crate) fn is_stop(&self) -> bool {
+        if self.signal.as_deref() == Some("stop") {
+            return true;
+        }
+        let action = self.action.to_ascii_lowercase();
+        if [
+            "cancel",
+            "canceled",
+            "cancelled",
+            "stop",
+            "stopped",
+            "abort",
+            "aborted",
+        ]
+        .contains(&action.as_str())
+        {
+            return true;
+        }
+        if let Some(body) = self.prompt_body.as_deref() {
+            let body = body.trim().to_ascii_lowercase();
+            if ["stop", "cancel", "cancelled", "canceled"].contains(&body.as_str()) {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub(crate) fn is_from(&self, tracker_user_id: &str) -> bool {
+        self.prompt_author_id.as_deref() == Some(tracker_user_id)
+    }
+
+    pub(crate) fn dedupe_key(&self) -> String {
+        if self.is_stop() {
+            return format!(
+                "session:{}:stop:{}",
+                self.session_id,
+                self.activity_id.as_deref().unwrap_or_default()
+            );
+        }
+        match self.action.as_str() {
+            "created" => format!("session:{}:created", self.session_id),
+            "prompted" => match &self.activity_id {
+                Some(activity_id) => format!("activity:{activity_id}"),
+                None => format!(
+                    "prompt:{}:{}",
+                    self.session_id,
+                    self.prompt_body.as_deref().unwrap_or_default()
+                ),
+            },
+            other => format!("session:{}:{other}", self.session_id),
+        }
+    }
 }

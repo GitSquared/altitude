@@ -1,5 +1,5 @@
 use super::ledger::{Cursor, Ledger, TerminatedSession};
-use crate::tracker::{IssueReference, TrackerKind};
+use crate::tracker::IssueReference;
 use std::sync::MutexGuard;
 
 use crate::tracker::logins;
@@ -97,7 +97,7 @@ impl RemoteTracker {
     // conversation — the thread the operator reads — not a task's, so a task that
     // replaces another on the same issue carries that conversation on instead of
     // starting one the issue never shows.
-    pub(super) fn session_for_issue(&self, issue_id: &str) -> Option<String> {
+    pub(crate) fn session_for_issue(&self, issue_id: &str) -> Option<String> {
         let ledger = self.lock().ok()?;
         let reports: Vec<&Cursor> = ledger
             .cursors
@@ -210,13 +210,7 @@ impl RemoteTracker {
     }
 
     pub(super) fn issue_reference(&self, issue_id: &str) -> IssueReference {
-        IssueReference {
-            provider: TrackerKind::Linear,
-            workspace_id: self.config.automation.workspace_id().to_owned(),
-            id: issue_id.to_owned(),
-            identifier: String::new(),
-            url: String::new(),
-        }
+        self.config.automation.issue_reference(issue_id)
     }
 
     pub(super) fn owner_for_user(&self, tracker_user_id: &str) -> Option<String> {

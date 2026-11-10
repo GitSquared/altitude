@@ -1,7 +1,7 @@
-use super::ledger::{SessionEvent, StoredEvent};
 use super::webhook::{
     parse_app_notification, parse_comment_event, parse_issue_event, parse_reaction_event,
 };
+use crate::tracker::host::remote::ledger::{SessionEvent, StoredEvent};
 use crate::tracker::providers::linear::automation::{
     AgentSessionEvent, WebhookError, parse_agent_session_event, verify_signature,
 };
@@ -23,7 +23,7 @@ pub(super) enum WebhookOutcome {
 }
 
 pub(super) async fn webhook(
-    State(tracker): State<Arc<RemoteTracker>>,
+    State(intake): State<Arc<LinearIntake>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -37,7 +37,7 @@ pub(super) async fn webhook(
         tracing::warn!("Linear delivery rejected · the request carried no signature header");
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    if !verify_signature(&tracker.config.webhook_secret, Some(signature), &body) {
+    if !verify_signature(&intake.webhook_secret, Some(signature), &body) {
         // Loud, and without the value: a secret that does not match the app's is
         // the one misconfiguration that otherwise looks like Linear sending
         // nothing at all.
@@ -46,7 +46,7 @@ pub(super) async fn webhook(
         );
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let event = match classify_webhook(&tracker, &body) {
+    let event = match classify_webhook(&intake, &body) {
         WebhookOutcome::Store(event) => event,
         // A well-formed webhook for another resource is not this coordinator's
         // work. Acknowledging it stops Linear retrying it forever.
@@ -65,8 +65,8 @@ pub(super) async fn webhook(
     // Identity comes from the signed body, not the unsigned delivery header:
     // a header a sender can choose is transport, not what the event is.
     let key = event.dedupe_key();
-    match tracker.enqueue(key, event) {
-        Ok(true) if !tracker.delivered.swap(true, Ordering::Relaxed) => tracing::info!(
+    match intake.tracker.enqueue(key, event) {
+        Ok(true) if !intake.delivered.swap(true, Ordering::Relaxed) => tracing::info!(
             %delivery,
             "Linear delivery received · the first one since this machine started"
         ),
@@ -80,7 +80,7 @@ pub(super) async fn webhook(
     StatusCode::OK.into_response()
 }
 
-fn classify_webhook(tracker: &RemoteTracker, body: &[u8]) -> WebhookOutcome {
+fn classify_webhook(intake: &LinearIntake, body: &[u8]) -> WebhookOutcome {
     let Some(event_type) = webhook_event_type(body) else {
         return WebhookOutcome::Reject("the body has no event type".to_owned());
     };
@@ -95,14 +95,14 @@ fn classify_webhook(tracker: &RemoteTracker, body: &[u8]) -> WebhookOutcome {
             Ok(event) => {
                 if event
                     .validate(
-                        tracker.config.automation.workspace_id(),
-                        tracker.config.automation.app_user_id(),
+                        intake.automation.workspace_id(),
+                        intake.automation.app_user_id(),
                     )
                     .is_err()
                 {
                     return WebhookOutcome::Reject("another workspace or app".to_owned());
                 }
-                if event.oauth_client_id != tracker.config.oauth_client_id {
+                if event.oauth_client_id != intake.oauth_client_id {
                     return WebhookOutcome::Reject("another OAuth application".to_owned());
                 }
                 WebhookOutcome::Store(StoredEvent::Session(Box::new(SessionEvent::from(&event))))
@@ -113,7 +113,7 @@ fn classify_webhook(tracker: &RemoteTracker, body: &[u8]) -> WebhookOutcome {
                 WebhookOutcome::Reject(format!("the issue event could not be read: {error}"))
             }
             Ok(event) => {
-                if event.organization_id != tracker.config.automation.workspace_id() {
+                if event.organization_id != intake.automation.workspace_id() {
                     return WebhookOutcome::Reject("another workspace".to_owned());
                 }
                 if !event.is_fresh() {
@@ -132,7 +132,7 @@ fn classify_webhook(tracker: &RemoteTracker, body: &[u8]) -> WebhookOutcome {
                 WebhookOutcome::Reject(format!("the comment event could not be read: {error}"))
             }
             Ok(event) => {
-                if event.organization_id != tracker.config.automation.workspace_id() {
+                if event.organization_id != intake.automation.workspace_id() {
                     return WebhookOutcome::Reject("another workspace".to_owned());
                 }
                 if !event.is_fresh() {
@@ -151,7 +151,7 @@ fn classify_webhook(tracker: &RemoteTracker, body: &[u8]) -> WebhookOutcome {
                 WebhookOutcome::Reject(format!("the reaction event could not be read: {error}"))
             }
             Ok(event) => {
-                if event.organization_id != tracker.config.automation.workspace_id() {
+                if event.organization_id != intake.automation.workspace_id() {
                     return WebhookOutcome::Reject("another workspace".to_owned());
                 }
                 if !event.is_fresh() {
@@ -170,16 +170,16 @@ fn classify_webhook(tracker: &RemoteTracker, body: &[u8]) -> WebhookOutcome {
                 WebhookOutcome::Reject(format!("the notification event could not be read: {error}"))
             }
             Ok(event) => {
-                if event.organization_id != tracker.config.automation.workspace_id() {
+                if event.organization_id != intake.automation.workspace_id() {
                     return WebhookOutcome::Reject("another workspace".to_owned());
                 }
-                if event.app_user_id != tracker.config.automation.app_user_id() {
+                if event.app_user_id != intake.automation.app_user_id() {
                     return WebhookOutcome::Reject("another app user".to_owned());
                 }
                 if event
                     .oauth_client_id
                     .as_deref()
-                    .is_some_and(|id| id != tracker.config.oauth_client_id)
+                    .is_some_and(|id| id != intake.oauth_client_id)
                 {
                     return WebhookOutcome::Reject("another OAuth application".to_owned());
                 }
@@ -207,61 +207,6 @@ fn webhook_event_type(body: &[u8]) -> Option<String> {
     serde_json::from_slice::<Envelope>(body)
         .ok()
         .map(|envelope| envelope.event_type)
-}
-
-impl SessionEvent {
-    pub(super) fn is_stop(&self) -> bool {
-        if self.signal.as_deref() == Some("stop") {
-            return true;
-        }
-        let action = self.action.to_ascii_lowercase();
-        if [
-            "cancel",
-            "canceled",
-            "cancelled",
-            "stop",
-            "stopped",
-            "abort",
-            "aborted",
-        ]
-        .contains(&action.as_str())
-        {
-            return true;
-        }
-        if let Some(body) = self.prompt_body.as_deref() {
-            let body = body.trim().to_ascii_lowercase();
-            if ["stop", "cancel", "cancelled", "canceled"].contains(&body.as_str()) {
-                return true;
-            }
-        }
-        false
-    }
-
-    pub(super) fn is_from(&self, tracker_user_id: &str) -> bool {
-        self.prompt_author_id.as_deref() == Some(tracker_user_id)
-    }
-
-    pub(super) fn dedupe_key(&self) -> String {
-        if self.is_stop() {
-            return format!(
-                "session:{}:stop:{}",
-                self.session_id,
-                self.activity_id.as_deref().unwrap_or_default()
-            );
-        }
-        match self.action.as_str() {
-            "created" => format!("session:{}:created", self.session_id),
-            "prompted" => match &self.activity_id {
-                Some(activity_id) => format!("activity:{activity_id}"),
-                None => format!(
-                    "prompt:{}:{}",
-                    self.session_id,
-                    self.prompt_body.as_deref().unwrap_or_default()
-                ),
-            },
-            other => format!("session:{}:{other}", self.session_id),
-        }
-    }
 }
 
 impl From<&AgentSessionEvent> for SessionEvent {

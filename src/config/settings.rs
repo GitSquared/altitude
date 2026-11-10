@@ -210,8 +210,10 @@ impl Settings {
             .as_deref()
             .is_none_or(|id| !known(id))
         {
-            self.defaults.tracker_credential =
-                Some(TrackerKind::sole().profile().to_owned()).filter(|id| known(id));
+            self.defaults.tracker_credential = TrackerKind::ALL
+                .iter()
+                .map(|kind| kind.profile().to_owned())
+                .find(|id| known(id));
         }
         for project in &mut self.projects {
             if project

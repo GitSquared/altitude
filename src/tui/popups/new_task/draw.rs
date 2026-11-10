@@ -7,7 +7,7 @@ use ratatui::{
     widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-use crate::tracker::{IssueSummary, TrackerKind};
+use crate::tracker::IssueSummary;
 use crate::tui::widgets::{
     button, chrome, empty, format::truncate, palette, pointer::Targets, shimmer::shimmer,
 };
@@ -150,7 +150,7 @@ pub fn draw_issue(frame: &mut Frame, area: Rect, new_task: &NewTask, tick: Optio
             Paragraph::new(Line::styled(
                 format!(
                     "Type an issue ID, paste a {} URL, or search terms.",
-                    TrackerKind::sole().label()
+                    new_task.tracker.label()
                 ),
                 palette::muted(),
             ))
@@ -158,7 +158,7 @@ pub fn draw_issue(frame: &mut Frame, area: Rect, new_task: &NewTask, tick: Optio
             body,
         ),
         IssuePhase::Searching => {
-            let label = format!("searching {}…", TrackerKind::sole().label());
+            let label = format!("searching {}…", new_task.tracker.label());
             frame.render_widget(Paragraph::new(Line::from_iter(shimmer(&label, tick))), body);
         }
         IssuePhase::Failed(message) => frame.render_widget(
@@ -226,8 +226,4 @@ pub fn draw_choices(frame: &mut Frame, area: Rect, new_task: &NewTask) -> Rect {
         .project
         .draw_pill(frame, project, new_task.focus == Focus::Project, with_name);
     project
-}
-
-pub fn looks_like_issue(value: &str) -> bool {
-    TrackerKind::sole().looks_like_issue(value)
 }

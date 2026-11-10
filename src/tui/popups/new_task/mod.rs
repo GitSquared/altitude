@@ -17,13 +17,12 @@ use crate::tui::widgets::{
 use crate::{
     agent::AgentKind,
     project::Project,
-    tracker::{IssueReference, IssueSummary},
+    tracker::{IssueReference, IssueSummary, TrackerKind},
 };
 
 mod draw;
 
 pub use draw::draw;
-use draw::looks_like_issue;
 
 const WIDTH_PERCENT: u16 = 70;
 const MAX_WIDTH: u16 = 88;
@@ -79,6 +78,7 @@ pub(in crate::tui) struct Submission {
 }
 
 pub struct NewTask {
+    tracker: TrackerKind,
     task: TextBox,
     project: Select<Project>,
     hosts: Vec<Host>,
@@ -112,7 +112,12 @@ pub enum Answer {
 }
 
 impl NewTask {
-    pub fn new(projects: Vec<Project>, default_project: &str, hosts: Vec<Host>) -> Self {
+    pub fn new(
+        tracker: TrackerKind,
+        projects: Vec<Project>,
+        default_project: &str,
+        hosts: Vec<Host>,
+    ) -> Self {
         let chosen = projects
             .iter()
             .position(|candidate| candidate.id == default_project)
@@ -129,6 +134,7 @@ impl NewTask {
             chosen,
         );
         Self {
+            tracker,
             task: TextBox::new(""),
             project,
             hosts,
@@ -443,7 +449,7 @@ impl NewTask {
     }
 
     fn after_edit(&mut self) {
-        if !self.issue && looks_like_issue(self.task.value().trim()) {
+        if !self.issue && self.tracker.looks_like_issue(self.task.value().trim()) {
             self.activate_issue();
         } else if self.issue {
             self.query_changed();

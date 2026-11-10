@@ -143,7 +143,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
             Some(_) => TrackerReadiness::Ready,
             None => linear_host::readiness(&credentials_path),
         });
-    let kind = TrackerKind::sole();
+    let kind = TrackerKind::Linear;
     let trackers = readiness
         .map(|state| {
             vec![TrackerConnection {

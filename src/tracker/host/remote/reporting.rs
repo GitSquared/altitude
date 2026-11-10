@@ -1,8 +1,8 @@
 use super::ledger::Cursor;
-use crate::tracker::{AskSurface, ask_marker};
+use crate::tracker::ask_marker;
 use crate::{
     task::{TaskAsk, TaskAskKind, TaskHistoryEvent, picture},
-    tracker::{IssueReference, TrackerStatus, providers::linear::automation::AgentActivityContent},
+    tracker::{IssueReference, TrackerStatus, host::automation::AgentActivityContent},
 };
 use futures_util::future::join_all;
 use std::{
@@ -147,7 +147,10 @@ impl RemoteTracker {
         session_agent: Option<String>,
     ) -> Result<(), String> {
         let Some(tracker_user_id) = self.user_for_owner(owner) else {
-            return Err("sync a Linear account to this remote before delegating issue work".into());
+            return Err(format!(
+                "sync a {} account to this remote before delegating issue work",
+                self.config.automation.kind().label()
+            ));
         };
         // One cursor per task: the task is what a report is about, and a second
         // record keyed by the issue is what used to make two mechanisms disagree
