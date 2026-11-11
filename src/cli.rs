@@ -133,15 +133,26 @@ To set workers up on a remote:
       provision = \"/etc/altitude/provision-worker.sh\"
       deprovision = \"/etc/altitude/deprovision-worker.sh\"
       max = 8
- 4. Stock the host image: the host is the sandbox, so it carries what a task needs
-    (git, the agent harness) or has the network to install it, and it can reach the
-    remote. It also needs /dev/fuse and the setuid fusermount3, which mount each
-    project's cache from the remote.
- 5. Run it as an ordinary user, not root. The sandbox is an unprivileged user and
-    mount namespace over the account's home, so the worker needs unprivileged user
-    namespaces (the kernel default on modern systems) and no more.
- 6. Recommended: bake a warm copy of each project's environment and caches into the
-    image, so a start does not rebuild them.
+ 4. Run it as an ordinary user, not root. The sandbox is an unprivileged user and
+    mount namespace over the account's home, so the host needs unprivileged user
+    namespaces (the kernel default on modern systems) and no more than that. Every
+    step a profile or a project runs is in that account's view: it can write its home
+    and the caches mounted there, and nothing under /usr or /etc — a step that reached
+    for apt was doing work that belongs to the image.
+ 5. Stock the host image, because the host is the sandbox and the account can install
+    nothing: what a task needs has to be here already.
+      git, gh, openssh-client   the version-control profile checks for them
+      python3                   the bridge altitude's tools arrive through
+      the agent harness         or the network to fetch it
+    It also needs /dev/fuse and, unless it runs as root, the setuid fusermount3:
+    each project's cache is mounted from the remote through them.
+ 6. Bake what a start would otherwise build. `altitude serve environment --agent
+    claude` prints a host's layers, with the commands and the marker file that says
+    they have run; a host that finds the marker starts from the built layer instead.
+    Set ALTITUDE_WORKER_ENVIRONMENT in the image to what the image is, and those
+    layers are tagged with it: rebuilding the image rebuilds them, rather than
+    trusting a marker a different image wrote. A host that sets nothing is tagged on
+    its commands alone, which is what a machine of its own can rely on.
 
 The remote spawns a host when a task needs one and destroys it when the task ends.
 Run this by hand only to debug a provision script.";
