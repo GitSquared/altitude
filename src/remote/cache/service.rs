@@ -97,7 +97,7 @@ impl CacheService {
         match &request.op {
             CacheOp::Getattr { path } => {
                 let target = Self::resolve(&root, path, true)?;
-                Ok((CacheReply::Attr(attr_of(&target, true)?), Vec::new()))
+                Ok((attrs_or_missing(&target, true)?, Vec::new()))
             }
             CacheOp::Setattr {
                 path,
@@ -120,19 +120,26 @@ impl CacheService {
                 if let Some(mtime_ms) = mtime_ms {
                     set_mtime(&target, *mtime_ms)?;
                 }
-                Ok((CacheReply::Attr(attr_of(&target, true)?), Vec::new()))
+                Ok((attrs_or_missing(&target, true)?, Vec::new()))
             }
             CacheOp::Lookup { path } => {
                 let target = Self::resolve(&root, path, true)?;
-                Ok((CacheReply::Attr(attr_of(&target, false)?), Vec::new()))
+                Ok((attrs_or_missing(&target, false)?, Vec::new()))
             }
             CacheOp::ReadDir { path } => {
                 let target = Self::resolve(&root, path, true)?;
+                let directory = match fs::read_dir(&target) {
+                    Ok(directory) => directory,
+                    Err(error) if error.kind() == ErrorKind::NotFound => {
+                        return Ok((CacheReply::Missing, Vec::new()));
+                    }
+                    Err(error) => return Err(error.to_string()),
+                };
                 let mut entries = Vec::new();
-                for entry in fs::read_dir(&target).map_err(|error| error.to_string())? {
+                for entry in directory {
                     let entry = entry.map_err(|error| error.to_string())?;
                     let name = entry.file_name().to_string_lossy().into_owned();
-                    if let Ok(attr) = attr_of(&entry.path(), false) {
+                    if let Ok(Some(attr)) = attr_of(&entry.path(), false) {
                         entries.push((name, attr));
                     }
                 }
@@ -169,7 +176,7 @@ impl CacheService {
             CacheOp::Create { path, mode } => {
                 let target = Self::resolve(&root, path, false)?;
                 create_file(&target, *mode)?;
-                Ok((CacheReply::Attr(attr_of(&target, false)?), Vec::new()))
+                Ok((attrs_or_missing(&target, false)?, Vec::new()))
             }
             CacheOp::Mkdir { path, mode } => {
                 let target = Self::resolve(&root, path, false)?;
@@ -180,13 +187,23 @@ impl CacheService {
             }
             CacheOp::Unlink { path } => {
                 let target = Self::resolve(&root, path, false)?;
-                fs::remove_file(&target).map_err(|error| error.to_string())?;
-                Ok((CacheReply::Ok, Vec::new()))
+                match fs::remove_file(&target) {
+                    Ok(()) => Ok((CacheReply::Ok, Vec::new())),
+                    Err(error) if error.kind() == ErrorKind::NotFound => {
+                        Ok((CacheReply::Missing, Vec::new()))
+                    }
+                    Err(error) => Err(error.to_string()),
+                }
             }
             CacheOp::Rmdir { path } => {
                 let target = Self::resolve(&root, path, false)?;
-                fs::remove_dir(&target).map_err(|error| error.to_string())?;
-                Ok((CacheReply::Ok, Vec::new()))
+                match fs::remove_dir(&target) {
+                    Ok(()) => Ok((CacheReply::Ok, Vec::new())),
+                    Err(error) if error.kind() == ErrorKind::NotFound => {
+                        Ok((CacheReply::Missing, Vec::new()))
+                    }
+                    Err(error) => Err(error.to_string()),
+                }
             }
             CacheOp::Rename { from, to } => {
                 let source = Self::resolve(&root, from, false)?;
@@ -245,13 +262,18 @@ fn set_mtime(path: &Path, mtime_ms: i64) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-fn attr_of(path: &Path, follow: bool) -> Result<CacheAttr, String> {
-    let metadata = if follow {
+// A path's attributes, or `None` when nothing is there: the mount turns the second
+// into ENOENT rather than an I/O error.
+fn attr_of(path: &Path, follow: bool) -> Result<Option<CacheAttr>, String> {
+    let metadata = match if follow {
         fs::metadata(path)
     } else {
         fs::symlink_metadata(path)
-    }
-    .map_err(|error| error.to_string())?;
+    } {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
     let kind = if metadata.is_dir() {
         CacheKind::Dir
     } else if metadata.file_type().is_symlink() {
@@ -259,7 +281,7 @@ fn attr_of(path: &Path, follow: bool) -> Result<CacheAttr, String> {
     } else {
         CacheKind::File
     };
-    Ok(CacheAttr {
+    Ok(Some(CacheAttr {
         ino: metadata.ino(),
         kind,
         size: metadata.len(),
@@ -268,6 +290,13 @@ fn attr_of(path: &Path, follow: bool) -> Result<CacheAttr, String> {
         mtime_ms: seconds_ms(metadata.mtime(), metadata.mtime_nsec()),
         atime_ms: seconds_ms(metadata.atime(), metadata.atime_nsec()),
         ctime_ms: seconds_ms(metadata.ctime(), metadata.ctime_nsec()),
+    }))
+}
+
+fn attrs_or_missing(path: &Path, follow: bool) -> Result<CacheReply, String> {
+    Ok(match attr_of(path, follow)? {
+        Some(attr) => CacheReply::Attr(attr),
+        None => CacheReply::Missing,
     })
 }
 

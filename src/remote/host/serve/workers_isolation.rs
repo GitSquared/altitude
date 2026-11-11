@@ -201,8 +201,7 @@ impl IsolationEngine for WorkersIsolation {
     }
 
     fn sandbox_room(&self) -> SandboxRoom {
-        let (connected, assigned, ceiling) = self.fleet.capacity();
-        let _ = connected;
+        let capacity = self.fleet.capacity();
         SandboxRoom {
             offered: Some(SandboxCeiling {
                 cpus: 2,
@@ -210,14 +209,14 @@ impl IsolationEngine for WorkersIsolation {
                 disk_mib: 30 * 1024,
             }),
             promised_mib: 0,
-            fitting: ceiling.saturating_sub(assigned),
+            fitting: capacity.ceiling.saturating_sub(capacity.assigned),
         }
     }
 
     // The master's cores say nothing about how many hosts it may start; `max` is
     // what the fleet is allowed to run.
     fn start_landings(&self) -> usize {
-        self.fleet.capacity().2
+        self.fleet.capacity().ceiling
     }
 
     fn project_memory_dir(&self, project_id: &str) -> PathBuf {

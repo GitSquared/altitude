@@ -416,6 +416,10 @@ impl Filesystem for CacheFs {
         };
         let entries = match self.call(CacheOp::ReadDir { path: path.clone() }, &[]) {
             Ok((CacheReply::Entries(entries), _)) => entries,
+            Ok((CacheReply::Missing, _)) => {
+                reply.error(ENOENT);
+                return;
+            }
             _ => {
                 reply.error(EIO);
                 return;
@@ -498,6 +502,7 @@ impl CacheFs {
         };
         match self.call(op, &[]) {
             Ok((CacheReply::Ok, _)) => reply.ok(),
+            Ok((CacheReply::Missing, _)) => reply.error(ENOENT),
             _ => reply.error(EIO),
         }
     }
