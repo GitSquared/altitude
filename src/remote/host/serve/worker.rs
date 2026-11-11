@@ -51,12 +51,12 @@ use crate::{
 
 use super::workers::HEARTBEAT_INTERVAL;
 
-// The other end of the fleet contract: an empty box that knows nothing but who
+// The other end of the fleet contract: an empty host that knows nothing but who
 // made it. It registers, says it is still there, and answers the master's calls
 // for sandboxes on the same endpoint it registered over.
 pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn Error>> {
     // A worker is spawned by a script, never typed at a terminal. Running one by
-    // hand is how a host becomes a box by accident, so say what this is instead
+    // hand is how a host becomes a host by accident, so say what this is instead
     // of taking the machine over.
     if !args.yes && io::stdin().is_terminal() && io::stdout().is_terminal() {
         println!("{WORKER_GUIDE}");
@@ -70,12 +70,12 @@ pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn E
     );
     let key = InstallationKey::load_or_create(base.data_dir().join("worker.key"))
         .map_err(io::Error::other)?;
-    // A box is spawned for one task and its whole host is the sandbox, so it
-    // needs no nested microVM: the box is the boundary. The host engine is the
+    // A host is spawned for one task and its whole host is the sandbox, so it
+    // needs no nested microVM: the host is the boundary. The host engine is the
     // closest thing we have — a chroot over the machine, not a microVM.
     let engine = TestbedIsolation::new(&base);
     // Preparing pulls the runtime and builds the base image, which is minutes of
-    // work. The box registers before it is ready so the master can see it, and
+    // work. The host registers before it is ready so the master can see it, and
     // says it is not ready until this finishes.
     let readiness = Arc::new(Mutex::new(Readiness::Preparing));
     {
@@ -183,7 +183,7 @@ struct WorkerService {
     channels: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
 }
 
-// Whether this box can make sandboxes yet. Preparing is minutes, and a master
+// Whether this host can make sandboxes yet. Preparing is minutes, and a master
 // that asks before it is done is told to wait rather than given a failure.
 enum Readiness {
     Preparing,
@@ -214,7 +214,7 @@ impl ProtocolHandler for WorkerService {
         if request.token != self.token {
             let _ = write_frame(
                 &mut send,
-                &WorkerReply::Failed("this box does not hold the master's token".into()),
+                &WorkerReply::Failed("this host does not hold the master's token".into()),
             )
             .await;
             return Ok(());
@@ -251,7 +251,7 @@ impl ProtocolHandler for WorkerService {
 }
 
 impl WorkerService {
-    // The box's end of the agent channel: it listens on the loopback the sandbox
+    // The host's end of the agent channel: it listens on the loopback the sandbox
     // shares and carries each connection to the master over the link. A vsock route
     // for the agent's channel is what says a sandbox has one.
     fn start_channels(&self, id: &str, vsock: &[VsockRoute]) {
@@ -268,7 +268,7 @@ impl WorkerService {
                 let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await {
                     Ok(listener) => listener,
                     Err(error) => {
-                        tracing::warn!(%error, port, "could not open an agent channel on this box");
+                        tracing::warn!(%error, port, "could not open an agent channel on this host");
                         return;
                     }
                 };
@@ -455,10 +455,10 @@ impl WorkerService {
                 match &*readiness {
                     Readiness::Ready => WorkerReply::Ready,
                     Readiness::Preparing => WorkerReply::Failed(
-                        "this box is still preparing its sandbox runtime".into(),
+                        "this host is still preparing its sandbox runtime".into(),
                     ),
                     Readiness::Failed(error) => WorkerReply::Failed(format!(
-                        "this box cannot prepare its sandbox runtime: {error}"
+                        "this host cannot prepare its sandbox runtime: {error}"
                     )),
                 }
             }

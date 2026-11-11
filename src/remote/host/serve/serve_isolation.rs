@@ -15,7 +15,7 @@ use crate::{
 use super::workers_isolation::WorkersIsolation;
 
 // The isolation engine a remote serves with: its own microVMs, or the disposable
-// boxes it provisions across a network. One enum so `OwnTasks` and the task loop
+// hosts it provisions across a network. One enum so `OwnTasks` and the task loop
 // do not have to be generic; every method hands the call to the chosen engine.
 #[derive(Clone)]
 pub(crate) enum ServeIsolation {

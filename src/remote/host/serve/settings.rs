@@ -56,8 +56,8 @@ pub struct WorkersSettings {
 }
 
 impl WorkersSettings {
-    // The ceiling is `max`, the most boxes this remote will have running at
-    // once. There is no floor: a box is spawned for a sandbox that needs one
+    // The ceiling is `max`, the most hosts this remote will have running at
+    // once. There is no floor: a host is spawned for a sandbox that needs one
     // and destroyed when it ends, so an idle remote runs none.
     pub fn ceiling(&self) -> usize {
         self.max

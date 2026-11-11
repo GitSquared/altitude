@@ -102,7 +102,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     }
 
     let settings = ServeSettings::load_or_create(&settings_path)?;
-    // An empty box is a script plus a token, and the fleet is what keeps the boxes
+    // An empty host is a script plus a token, and the fleet is what keeps the hosts
     // the operator asked for alive and replaced. Which sandboxes land on them is
     // the isolation provider's business, not the fleet's.
     let fleet = match settings.workers.clone() {
@@ -197,7 +197,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     let label = config.identity().map_err(io::Error::other)?.label;
     let isolation = match &fleet {
         Some(fleet) => {
-            // A remote that has boxes speaks to them on a link of its own; it
+            // A remote that has hosts speaks to them on a link of its own; it
             // needs no sandbox runtime here.
             let client = LinkClient::bind(&identity)
                 .await
@@ -384,7 +384,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
                 .as_ref()
                 .map(|workers| workers.max)
                 .unwrap_or(0),
-            "Isolation workers configured · a box is spawned as each sandbox starts",
+            "Isolation workers configured · a host is spawned as each sandbox starts",
         );
     }
     let connect_address = if listen.ip().is_unspecified() {

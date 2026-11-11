@@ -20,13 +20,13 @@ import threading
 HOST_CID = 2
 PORT = int(os.environ.get("ALTITUDE_MCP_PORT", "5000"))
 
-# A host-engine box has no nested microVM to make a vsock to, so its altitude
-# offers the same channel on the box's loopback, which the sandbox shares.
+# A host-engine host has no nested microVM to make a vsock to, so its altitude
+# offers the same channel on the host's loopback, which the sandbox shares.
 HOST = os.environ.get("ALTITUDE_MCP_HOST", "127.0.0.1")
 
 
 def connect():
-    """The channel, over vsock where there is one and TCP on the box otherwise."""
+    """The channel, over vsock where there is one and TCP on the host otherwise."""
     try:
         connection = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
         connection.connect((HOST_CID, PORT))

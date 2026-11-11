@@ -106,7 +106,7 @@ impl LinkClient {
         read_frame(&mut recv).await
     }
 
-    // A box carries one connection from an agent inside its sandbox to the
+    // A host carries one connection from an agent inside its sandbox to the
     // channel the master serves for that task.
     pub(crate) async fn pipe_agent_channel(
         &self,

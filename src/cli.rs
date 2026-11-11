@@ -96,13 +96,13 @@ pub enum ServeCommand {
 }
 
 const WORKER_MODE: &str =
-    "Run altitude serve as a disposable box that runs one task's sandbox for a remote.";
+    "Run altitude serve as a disposable host that runs one task's sandbox for a remote.";
 
 // Shown as the worker subcommand's help, and printed by the worker itself when it
 // is launched from a terminal, so that a stray invocation reads this rather than
-// turning the machine it was typed on into a box.
+// turning the machine it was typed on into a host.
 pub(crate) const WORKER_GUIDE: &str = "\
-A worker is a box a remote spawns for one task: its whole host is the sandbox, so
+A worker is a host a remote spawns for one task: the whole host is the sandbox, so
 nothing inside it needs a nested isolation. The remote does not provision it
 itself; it runs the scripts in serve.toml, which are handed:
 
@@ -115,22 +115,22 @@ To set workers up on a remote:
  1. Write a provision script that brings a machine up and starts a worker on it:
       altitude serve worker --master \"$ALTITUDE_MASTER_TICKET\" \\
         --token \"$ALTITUDE_WORKER_TOKEN\" --name \"$ALTITUDE_WORKER_NAME\"
-    It exits 0 once that box can reach the remote. A worker refuses to run in a
+    It exits 0 once that host can reach the remote. A worker refuses to run in a
     terminal, so a provision script cannot leave a person looking at a prompt.
- 2. Write a deprovision script that destroys the box named by
+ 2. Write a deprovision script that destroys the host named by
     ALTITUDE_WORKER_NAME and exits 0 once it is gone.
  3. Point the remote's serve.toml at both, with the most it may run at once:
       [workers]
       provision = \"/etc/altitude/provision-worker.sh\"
       deprovision = \"/etc/altitude/deprovision-worker.sh\"
       max = 8
- 4. Stock the box's image: its host is the sandbox, so it carries what a task needs
+ 4. Stock the host image: the host is the sandbox, so it carries what a task needs
     (git, the agent harness) or has the network to install it, and it can reach the
     remote.
  5. Recommended: bake a warm copy of each project's environment and caches into the
     image, so a start does not rebuild them.
 
-The remote spawns a box when a task needs one and destroys it when the task ends.
+The remote spawns a host when a task needs one and destroys it when the task ends.
 Run this by hand only to debug a provision script.";
 
 #[derive(Debug, Args)]
@@ -155,7 +155,7 @@ pub struct WorkerArgs {
         long,
         value_name = "NAME",
         display_order = 3,
-        help = "The name this box was provisioned under"
+        help = "The name this host was provisioned under"
     )]
     pub name: String,
 

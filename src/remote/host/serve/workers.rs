@@ -49,7 +49,7 @@ struct FleetState {
     provisioned: HashSet<String>,
     provisioning: HashSet<String>,
     // Boxes a sandbox has been placed on, so a second sandbox is not given the
-    // same box.
+    // same host.
     assigned: HashSet<String>,
     // Boxes the isolation provider is waiting for. It is raised when a sandbox
     // needs compute and lowered when one ends; nothing raises it yet.
@@ -60,7 +60,7 @@ struct FleetState {
 
 // A remote's isolation workers and the scripts that make them. It knows a worker
 // by the name it was provisioned under, because a restarted worker is a new peer
-// and the same box.
+// and the same host.
 pub(crate) struct WorkerFleet {
     settings: WorkersSettings,
     token: String,
@@ -106,7 +106,7 @@ impl WorkerFleet {
         }
     }
 
-    // The shared secret a box was provisioned with, sent on every call.
+    // The shared secret a host was provisioned with, sent on every call.
     pub(crate) fn token(&self) -> &str {
         &self.token
     }
@@ -120,7 +120,7 @@ impl WorkerFleet {
             .map(|worker| worker.peer)
     }
 
-    // How many boxes are joined, how many are given a sandbox, and how many this
+    // How many hosts are joined, how many are given a sandbox, and how many this
     // remote will ever run at once.
     pub(crate) fn capacity(&self) -> (usize, usize, usize) {
         let state = self.state.lock().expect("worker fleet lock poisoned");
@@ -131,8 +131,8 @@ impl WorkerFleet {
         )
     }
 
-    // Provision a box for one sandbox. The fleet spawns toward the demand, and
-    // this waits for one that has not already been given a sandbox. A box is not
+    // Provision a host for one sandbox. The fleet spawns toward the demand, and
+    // this waits for one that has not already been given a sandbox. A host is not
     // returned to the pool: deprovisioning it destroys it.
     pub(crate) async fn provision_worker(&self) -> Result<String, String> {
         {
@@ -166,7 +166,7 @@ impl WorkerFleet {
         }
     }
 
-    // A sandbox is over, so its box is destroyed rather than reused.
+    // A sandbox is over, so its host is destroyed rather than reused.
     pub(crate) async fn deprovision_worker(&self, name: &str) {
         {
             let mut state = self.state.lock().expect("worker fleet lock poisoned");
@@ -228,7 +228,7 @@ impl WorkerFleet {
 
     // A worker this machine made is this machine's to remove, however it left:
     // only the ones that are still here can be deprovisioned meaningfully, but the
-    // deprovision script is the place that knows whether a box is already gone.
+    // deprovision script is the place that knows whether a host is already gone.
     fn reap(&self) -> Vec<String> {
         let now = Instant::now();
         let mut state = self.state.lock().expect("worker fleet lock poisoned");

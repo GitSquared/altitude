@@ -10,23 +10,23 @@ use crate::isolation::{
 use crate::project::Project;
 
 // The ALPN a master dials a worker on. It is not the link's: the link is clients
-// talking about their tasks, and this is a master asking an empty box for compute.
+// talking about their tasks, and this is a master asking an empty host for compute.
 pub(crate) const WORKER_ALPN: &[u8] = b"altitude/worker/1";
 
 // A worker only ever speaks to the master that provisioned it, and the token it
 // was provisioned with is what says so. It travels with each call because a worker
-// holds no session: a box that restarts is the same box.
+// holds no session: a host that restarts is the same host.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct WorkerRequest {
     pub token: String,
     pub call: WorkerCall,
 }
 
-// What the master can ask a box for. The arguments are the sandbox's own
-// vocabulary rather than a path: a box composes its plan from its config, so the
+// What the master can ask a host for. The arguments are the sandbox's own
+// vocabulary rather than a path: a host composes its plan from its config, so the
 // wire never carries a host path that only makes sense on the master.
 // A profile's files as the master holds them, base64 so a token that is not text
-// still travels. The box writes them where its plan will mount the profile.
+// still travels. The host writes them where its plan will mount the profile.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct WorkerProfile {
     pub profile: String,
@@ -35,17 +35,17 @@ pub(crate) struct WorkerProfile {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) enum WorkerCall {
-    // Say whether this box can make sandboxes at all.
+    // Say whether this host can make sandboxes at all.
     Probe,
-    // Build a project's environment here and return the snapshot the box made.
+    // Build a project's environment here and return the snapshot the host made.
     // The recipes are rebuilt from the agent kind, so the wire carries no
     // `ProfileRecipe`.
     EnsureProject {
         project: Project,
         agent: AgentKind,
     },
-    // Make the one task sandbox this box was spawned for. The two profile ids
-    // name the credentials to mount; the box rebuilds their recipes itself.
+    // Make the one task sandbox this host was spawned for. The two profile ids
+    // name the credentials to mount; the host rebuilds their recipes itself.
     Provision {
         id: String,
         snapshot: Option<String>,
@@ -83,7 +83,7 @@ pub(crate) enum WorkerCall {
         root: String,
         excluded: Vec<String>,
     },
-    // A command sandbox a credential flow or a provider's read needs. The box
+    // A command sandbox a credential flow or a provider's read needs. The host
     // rebuilds the recipes from the pushed profiles, as `Provision` does.
     CredentialShell {
         id: String,
@@ -132,7 +132,7 @@ pub(crate) enum WorkerCall {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) enum WorkerReply {
-    // The box started a command and what follows on the stream is its output.
+    // The host started a command and what follows on the stream is its output.
     Ready,
     Ok,
     Snapshot(BaseSandboxSnapshot),

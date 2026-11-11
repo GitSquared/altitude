@@ -136,7 +136,7 @@ pub enum LinkRequest {
     WorkerHeartbeat {
         name: String,
     },
-    // A box carrying one connection from an agent inside its sandbox to the
+    // A host carrying one connection from an agent inside its sandbox to the
     // channel the master is serving for that task.
     AgentChannel {
         socket: String,
@@ -144,8 +144,8 @@ pub enum LinkRequest {
     },
 }
 
-// What an empty box says it can host. The master keeps its own book of what it
-// has promised; this is only the size of the box.
+// What an empty host says it can host. The master keeps its own book of what it
+// has promised; this is only the size of the host.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct WorkerReport {
     pub cpus: usize,
