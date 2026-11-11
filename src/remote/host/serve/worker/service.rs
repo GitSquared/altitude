@@ -207,22 +207,6 @@ impl WorkerService {
                 }
             }
             WorkerCall::HasSandbox { id } => WorkerReply::Bool(self.engine.has_sandbox(id).await),
-            WorkerCall::Suspend { id, name } => {
-                self.stop_channel(&id);
-                self.unmount_cache(&id);
-                match self
-                    .engine
-                    .suspend(id, name, self.snapshots_dir.clone())
-                    .await
-                {
-                    Ok(path) => WorkerReply::Path(path),
-                    Err(error) => WorkerReply::Failed(error.to_string()),
-                }
-            }
-            WorkerCall::RemoveSnapshot { path } => match self.engine.remove_snapshot(path).await {
-                Ok(()) => WorkerReply::Ok,
-                Err(error) => WorkerReply::Failed(error.to_string()),
-            },
             WorkerCall::GuestFileExists { id, path } => {
                 match self.engine.guest_regular_file_exists(id, path).await {
                     Ok(exists) => WorkerReply::Bool(exists),
@@ -321,7 +305,9 @@ impl WorkerService {
             | WorkerCall::DeliverFile { .. }
             | WorkerCall::DeliverFiles { .. }
             | WorkerCall::CollectFile { .. }
-            | WorkerCall::CollectFiles { .. } => unreachable!("this call is streamed"),
+            | WorkerCall::CollectFiles { .. }
+            | WorkerCall::Snapshot { .. }
+            | WorkerCall::Restore { .. } => unreachable!("this call is streamed"),
         }
     }
 

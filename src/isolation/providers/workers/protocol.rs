@@ -85,6 +85,17 @@ pub(crate) enum WorkerCall {
         root: String,
         excluded: Vec<String>,
     },
+    // The whole sandbox comes back as a stream: the tree it wrote and, when the task
+    // has one, the project checkout it worked in. `Restore` is the same bytes going
+    // the other way, onto a host that has just been provisioned.
+    Snapshot {
+        id: String,
+        checkout: Option<String>,
+    },
+    Restore {
+        id: String,
+        checkout: Option<String>,
+    },
     // A command sandbox a credential flow or a provider's read needs. The host
     // rebuilds the recipes from the pushed profiles, as `Provision` does.
     CredentialShell {
@@ -111,13 +122,6 @@ pub(crate) enum WorkerCall {
     },
     HasSandbox {
         id: String,
-    },
-    Suspend {
-        id: String,
-        name: String,
-    },
-    RemoveSnapshot {
-        path: PathBuf,
     },
     GuestFileExists {
         id: String,
