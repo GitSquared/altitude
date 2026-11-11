@@ -107,29 +107,39 @@ where
         if let Some(recipe) = self.overrides.get(profile) {
             return Ok(recipe.clone());
         }
-        if let Some(recipe) = mounts::every(&self.agents)
-            .into_iter()
-            .find(|recipe| recipe.profile == profile)
-        {
-            return Ok(recipe);
-        }
-        let service = Service::from_id(profile).ok_or_else(|| {
-            CredentialsError::Refused(format!(
-                "no profile recipe for {profile}; nothing can sign it in"
-            ))
-        })?;
-        let mut recipe = match service {
-            Service::Agent(kind) => self.agents.engine(kind).profile_recipe(),
-            Service::VersionControl(kind) => vcs::profile_recipe(kind),
-            Service::Tracker(_) => {
-                return Err(CredentialsError::Refused(format!(
-                    "{profile} is a host-side identity, not a sandbox profile"
-                )));
-            }
-        };
-        recipe.profile = profile.to_owned();
-        Ok(recipe)
+        profile_recipe(profile, &self.agents)
     }
+}
+
+// A profile's recipe is built from the profile id and this build's providers, not
+// from an operator's settings, so a machine that holds the profile's files can
+// rebuild it from the id alone.
+pub(crate) fn profile_recipe(
+    profile: &str,
+    agents: &AgentEngines,
+) -> Result<ProfileRecipe, CredentialsError> {
+    if let Some(recipe) = mounts::every(agents)
+        .into_iter()
+        .find(|recipe| recipe.profile == profile)
+    {
+        return Ok(recipe);
+    }
+    let service = Service::from_id(profile).ok_or_else(|| {
+        CredentialsError::Refused(format!(
+            "no profile recipe for {profile}; nothing can sign it in"
+        ))
+    })?;
+    let mut recipe = match service {
+        Service::Agent(kind) => agents.engine(kind).profile_recipe(),
+        Service::VersionControl(kind) => vcs::profile_recipe(kind),
+        Service::Tracker(_) => {
+            return Err(CredentialsError::Refused(format!(
+                "{profile} is a host-side identity, not a sandbox profile"
+            )));
+        }
+    };
+    recipe.profile = profile.to_owned();
+    Ok(recipe)
 }
 
 impl<E> Credentials<E>
