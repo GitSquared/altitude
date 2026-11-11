@@ -13,8 +13,17 @@ use super::packages::Packages;
 use super::snapshot::{BaseSandboxSnapshotStore, artifact_name, build_namespace, now_ms};
 use super::{MicrosandboxIsolation, output_tail};
 
-pub(super) const BASE_IMAGE: &str = "ubuntu:24.04";
+// The official Node image rather than a bare distribution: it already carries Node
+// 22, npm, git, and the C toolchain a project's setup expects, so building the
+// workspace is one small apt run rather than a third-party repository and a hundred
+// packages configured one at a time. Its layers are prebuilt, so the runtime unpacks
+// them in one step where dpkg would spend minutes on the same work.
+pub(super) const BASE_IMAGE: &str = "node:22-bookworm";
 
+// What a task may rely on in the workspace, and what the environment reports. Most
+// are already in the image; apt installs the rest. Node and npm come from the image
+// rather than a distribution package, so they are not in this list and the
+// description asks them for their versions separately.
 const WORKSPACE_PACKAGES: &[&str] = &[
     "bash",
     "ca-certificates",
@@ -36,19 +45,17 @@ const WORKSPACE_PACKAGES: &[&str] = &[
     "cmake",
     "clang",
     "perl",
-    "nodejs",
 ];
 
 fn workspace_setup() -> String {
     format!(
         "set -eu\n\
          export DEBIAN_FRONTEND=noninteractive\n\
-         apt-get update\n\
-         apt-get install -y --no-install-recommends ca-certificates curl gnupg\n\
-         curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/nodesource.sh\n\
-         bash /tmp/nodesource.sh\n\
-         apt-get install -y --no-install-recommends {}\n\
-         npm install -g --no-fund --no-audit --no-progress @tobilu/qmd@2\n\
+         apt-get -o Acquire::Retries=3 update\n\
+         apt-get -o Acquire::Retries=3 install -y --no-install-recommends {}\n\
+         npm install -g --no-fund --no-audit --no-progress \
+             --fetch-retries=5 --fetch-retry-mintimeout=2000 --fetch-retry-maxtimeout=120000 \
+             @tobilu/qmd@2\n\
          command -v qmd >/dev/null\n\
          mkdir -p /altitude\n\
          cat > /root/README.md <<'ALTITUDE_WORKSPACE_README'\n\
@@ -73,9 +80,10 @@ pub(super) const SETUP_SUFFIX: &str = "-setup";
 fn description_command() -> String {
     // Asked package by package, because the list is the answer: scanning every
     // installed package would include the image's plumbing, and matching names
-    // with a regex would lose ones like `libstdc++6`.
+    // with a regex would lose ones like `libstdc++6`. Node and npm are not
+    // distribution packages here, so they answer for themselves.
     format!(
-        "printf 'os\\t%s\\n' \"$(. /etc/os-release && printf '%s %s' \"$NAME\" \"$VERSION_ID\")\"\nprintf 'packages\\t%s\\n' \"$(for package in {}; do version=$(dpkg-query -W -f='${{Version}}' \"$package\" 2>/dev/null) || continue; [ -n \"$version\" ] || continue; printf '%s-%s\\n' \"$package\" \"$version\"; done | tr '\\n' ' ')\"\n",
+        "printf 'os\\t%s\\n' \"$(. /etc/os-release && printf '%s %s' \"$NAME\" \"$VERSION_ID\")\"\nprintf 'packages\\t%s\\n' \"$(for package in {}; do version=$(dpkg-query -W -f='${{Version}}' \"$package\" 2>/dev/null) || continue; [ -n \"$version\" ] || continue; printf '%s-%s\\n' \"$package\" \"$version\"; done | tr '\\n' ' ')\"\nprintf 'node\\t%s\\n' \"$(node --version 2>/dev/null | sed 's/^v//')\"\nprintf 'npm\\t%s\\n' \"$(npm --version 2>/dev/null)\"\n",
         WORKSPACE_PACKAGES.join(" "),
     )
 }
@@ -290,11 +298,23 @@ impl MicrosandboxIsolation {
         };
         let mut os = String::new();
         let mut packages = String::new();
+        let mut node = String::new();
+        let mut npm = String::new();
         for line in output.lines() {
             match line.split_once('\t') {
                 Some(("os", value)) => os = value.trim().to_owned(),
                 Some(("packages", value)) => packages = value.trim().to_owned(),
+                Some(("node", value)) => node = value.trim().to_owned(),
+                Some(("npm", value)) => npm = value.trim().to_owned(),
                 _ => {}
+            }
+        }
+        for (name, version) in [("node", node), ("npm", npm)] {
+            if !version.is_empty() {
+                if !packages.is_empty() {
+                    packages.push(' ');
+                }
+                packages.push_str(&format!("{name}-{version}"));
             }
         }
         if os.is_empty() && packages.is_empty() {
