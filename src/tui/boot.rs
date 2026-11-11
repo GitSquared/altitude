@@ -39,7 +39,7 @@ where
         terminate,
         interrupt,
         animations,
-        || BootStatus::Working("migrating the database…"),
+        || BootStatus::Working("migrating tasks database…"),
         async { initialize.await.map_err(io::Error::other) },
     )
     .await
@@ -118,11 +118,11 @@ async fn wait_for<T>(
 
     loop {
         let status = label();
-        let rate = pulled.rate(status);
+        let rate = pulled.rate(&status);
         terminal.draw(|frame| {
             draw(
                 frame,
-                status,
+                &status,
                 rate,
                 animations.then_some(shimmer),
                 animations.then_some(&mut terrain),
@@ -223,8 +223,9 @@ fn draw_question(
 
 fn isolation_status(status: &IsolationStatus) -> BootStatus {
     match status {
-        IsolationStatus::Starting | IsolationStatus::InstallingRuntime => {
-            BootStatus::Working("starting up…")
+        IsolationStatus::Starting => BootStatus::Working("starting up…"),
+        IsolationStatus::InstallingRuntime => {
+            BootStatus::Working("installing the sandbox runtime…")
         }
         IsolationStatus::PreparingBaseImage(pull) => BootStatus::Downloading {
             label: "fetching the sandbox image…",
@@ -232,13 +233,13 @@ fn isolation_status(status: &IsolationStatus) -> BootStatus {
         },
         IsolationStatus::PreparingBasePackages(install) => BootStatus::Installing {
             label: "installing base packages…",
-            install: *install,
+            install: install.clone(),
         },
         IsolationStatus::Ready | IsolationStatus::Failed(_) => BootStatus::Working("starting up…"),
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum BootStatus {
     Working(&'static str),
     Downloading {
@@ -252,7 +253,7 @@ enum BootStatus {
 }
 
 impl BootStatus {
-    fn label(self) -> &'static str {
+    fn label(&self) -> &'static str {
         match self {
             Self::Working(label)
             | Self::Downloading { label, .. }
@@ -260,12 +261,12 @@ impl BootStatus {
         }
     }
 
-    fn pull(self) -> Option<ImagePull> {
+    fn pull(&self) -> Option<ImagePull> {
         // The manifest says how large the image is before a byte of it moves, and
         // an image that is already here moves none: neither is a download to
         // report, so the line waits for the first byte.
         match self {
-            Self::Downloading { pull, .. } if pull.downloaded_bytes > 0 => Some(pull),
+            Self::Downloading { pull, .. } if pull.downloaded_bytes > 0 => Some(*pull),
             _ => None,
         }
     }
@@ -280,7 +281,7 @@ struct Pull {
 }
 
 impl Pull {
-    fn rate(&mut self, status: BootStatus) -> Option<f64> {
+    fn rate(&mut self, status: &BootStatus) -> Option<f64> {
         let Some(pull) = status.pull() else {
             self.sampled = None;
             return None;
@@ -306,7 +307,7 @@ impl Pull {
 
 fn draw(
     frame: &mut Frame,
-    status: BootStatus,
+    status: &BootStatus,
     rate: Option<f64>,
     tick: Option<usize>,
     terrain: Option<&mut terrain::Terrain>,
@@ -319,7 +320,7 @@ fn draw(
     // that used to sit above them says nothing the percentage does not.
     let measured = match status {
         BootStatus::Downloading { .. } => status.pull().map(|pull| downloaded(pull, rate)),
-        BootStatus::Installing { install, .. } if install.total > 0 => Some(installed(install)),
+        BootStatus::Installing { install, .. } if install.installed > 0 => Some(installed(install)),
         _ => None,
     };
     let mut rows = vec![
@@ -339,8 +340,9 @@ fn draw(
         rows[1],
     );
 
+    let label = status.label().to_owned();
     frame.render_widget(
-        Paragraph::new(Line::from_iter(shimmer(status.label(), tick))).centered(),
+        Paragraph::new(Line::from_iter(shimmer(&label, tick))).centered(),
         rows[3],
     );
 
@@ -378,13 +380,14 @@ fn downloaded(pull: ImagePull, rate: Option<f64>) -> Line<'static> {
     Line::from(line)
 }
 
-fn installed(install: PackageInstall) -> Line<'static> {
-    Line::styled(
-        format!(
-            "{} of {}",
-            install.installed.min(install.total),
-            install.total
-        ),
+fn installed(install: &PackageInstall) -> Line<'static> {
+    let mut line = vec![Span::styled(
+        format!("{} packages", install.installed),
         palette::primary(),
-    )
+    )];
+    if let Some(current) = &install.current {
+        line.push(Span::raw(" · "));
+        line.push(Span::raw(format!("setting up {current}")));
+    }
+    Line::from(line)
 }

@@ -433,7 +433,7 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
                 IsolationStatus::PreparingBasePackages(install) => {
                     tracing::info!(
                         installed = install.installed,
-                        total = install.total,
+                        current = install.current.as_deref().unwrap_or(""),
                         "Installing base tools"
                     );
                     Phase::BaseTools

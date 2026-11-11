@@ -47,6 +47,14 @@ demo action='':
     if [[ -n "${LOG_LEVEL:-}" ]]; then
         environment+=(LOG_LEVEL="$LOG_LEVEL")
     fi
+    # Trust belongs to the machine, not to this installation: a network that inspects
+    # TLS needs the same roots inside the demo sandbox as a real run would carry, and
+    # dropping them here is what makes npm fail to verify a registry it can reach.
+    for name in NODE_EXTRA_CA_CERTS SSL_CERT_FILE CURL_CA_BUNDLE; do
+        if [[ -n "${!name:-}" ]]; then
+            environment+=("$name=${!name}")
+        fi
+    done
 
     echo "altitude is running against $root"
     exec env -i "${environment[@]}" ./target/debug/altitude
