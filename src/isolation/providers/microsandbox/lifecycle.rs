@@ -54,7 +54,7 @@ impl MicrosandboxIsolation {
                 }
                 for mount in options.mounts {
                     restore = restore.volume(mount.guest_path, |volume| {
-                        let volume = volume.bind(mount.host_path);
+                        let volume = volume.bind(mount.host_path).quota(mount.quota_mib);
                         let volume = if mount.noexec {
                             volume.noexec()
                         } else {
@@ -95,7 +95,7 @@ impl MicrosandboxIsolation {
                 }
                 for mount in options.mounts {
                     builder = builder.volume(mount.guest_path, |volume| {
-                        let volume = volume.bind(mount.host_path);
+                        let volume = volume.bind(mount.host_path).quota(mount.quota_mib);
                         let volume = if mount.noexec {
                             volume.noexec()
                         } else {

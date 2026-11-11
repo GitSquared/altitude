@@ -4,7 +4,14 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-const BUDGET_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+const BUDGET_MIB: u32 = 10 * 1_024;
+
+const BUDGET_BYTES: u64 = BUDGET_MIB as u64 * 1024 * 1024;
+
+// What the guest may add to the mirrors, which is what this cache is willing to hold:
+// a sandbox can fill the cache and hand the next one a warm mirror, but not more than
+// eviction would keep anyway.
+pub(crate) const GUEST_QUOTA_MIB: u32 = BUDGET_MIB;
 
 const QUIET_FOR: Duration = Duration::from_secs(60 * 60);
 

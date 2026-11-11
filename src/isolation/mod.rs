@@ -16,7 +16,7 @@ use crate::project::Project;
 // machine, not about the work.
 pub(crate) mod capacity;
 
-pub use capacity::{Pressure, SandboxRoom, landings};
+pub use capacity::{PROJECT_CACHE_QUOTA_MIB, Pressure, STORE_QUOTA_MIB, SandboxRoom, landings};
 mod git_cache;
 pub(crate) mod mounts;
 mod providers;
@@ -241,6 +241,7 @@ pub(crate) fn mount_git_cache(options: &mut SandboxOptions, cache_dir: &Path) {
                 guest_path: git_cache::GUEST_PATH.to_owned(),
                 readonly: false,
                 noexec: false,
+                quota_mib: git_cache::GUEST_QUOTA_MIB,
             });
             options.environment.push((
                 git_cache::ENVIRONMENT.to_owned(),
@@ -297,6 +298,7 @@ pub(crate) fn trust_host_roots(options: &mut SandboxOptions, data_dir: &Path) ->
         guest_path: guest.to_owned(),
         readonly: true,
         noexec: true,
+        quota_mib: STORE_QUOTA_MIB,
     });
     options
         .environment
@@ -329,6 +331,9 @@ pub struct SandboxMount {
     pub guest_path: String,
     pub readonly: bool,
     pub noexec: bool,
+    // Stated by every mount rather than left to the runtime's own default, which is
+    // sized for something that must not fill a host disk and not for a cache.
+    pub quota_mib: u32,
 }
 
 pub enum Command {

@@ -12,7 +12,8 @@ use crate::{config::Config, project::Project};
 use super::{
     BaseSandboxRecipe, BaseSandboxSnapshot, CommandEvent, CredentialCheck, CredentialReport,
     CredentialSandbox, EnvironmentProgressSink, IsolationEngine, IsolationError, OutputStream,
-    PORT_RELAY_GUEST_PORT, SandboxMount, SandboxOptions, SandboxPurpose, SetupStep, VsockRoute,
+    PORT_RELAY_GUEST_PORT, PROJECT_CACHE_QUOTA_MIB, STORE_QUOTA_MIB, SandboxMount, SandboxOptions,
+    SandboxPurpose, SetupStep, VsockRoute,
 };
 
 mod guest;
@@ -209,6 +210,7 @@ impl SandboxPlan {
                     // The agent writes its own sessions and tokens here, and
                     // nothing here is a program to run.
                     noexec: true,
+                    quota_mib: STORE_QUOTA_MIB,
                 });
             }
             for (name, value) in recipe.environment {
@@ -263,6 +265,7 @@ impl SandboxPlan {
                 // here stops the tool and protects nothing — the sandbox can copy a
                 // file out and run it, so the operator's cache is theirs to share.
                 noexec: false,
+                quota_mib: PROJECT_CACHE_QUOTA_MIB,
             });
         }
         // Every project a task runs in has memory, whether it asked for it or not:
@@ -307,6 +310,7 @@ impl SandboxPlan {
                 readonly: false,
                 // Markdown to read and edit, never a program to run.
                 noexec: true,
+                quota_mib: STORE_QUOTA_MIB,
             });
             // The project's brief and altitude's rules are files too. They live on
             // the machine rather than in the guest so they can be mounted read-only
@@ -332,6 +336,7 @@ impl SandboxPlan {
                     guest_path: format!("/altitude/{name}"),
                     readonly: true,
                     noexec: true,
+                    quota_mib: STORE_QUOTA_MIB,
                 });
             }
         }
@@ -425,6 +430,7 @@ fn read_only_managed_files(plan: &SandboxPlan) -> Vec<SandboxMount> {
                 .into_owned(),
             readonly: true,
             noexec: directory.noexec,
+            quota_mib: STORE_QUOTA_MIB,
         });
     }
     mounts

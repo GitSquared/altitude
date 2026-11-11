@@ -37,6 +37,16 @@ pub const MIN_READINGS: usize = 4;
 // instead of slowing it: it is sized for a Rust workspace with room to spare.
 pub const SANDBOX_DISK_CEILING_MIB: u32 = 30 * 1_024;
 
+// How much a guest may add to a mounted host directory, beyond what the directory
+// already holds, before writes fail. The runtime's own default is four gigabytes, which
+// is a cache that refuses a build rather than a host disk that fills: a cache is build
+// output the operator chose to share, and target/ alone outgrows it in one afternoon.
+pub const PROJECT_CACHE_QUOTA_MIB: u32 = 50 * 1_024;
+
+// Sessions, tokens and notes, where a real write is kilobytes. This is headroom against
+// an agent that has gone wrong, not a size one that is working should reach.
+pub const STORE_QUOTA_MIB: u32 = 4 * 1_024;
+
 pub const MEMORY_SHARE_OF_HOST: u64 = 80;
 pub const MINIMUM_CEILING_MIB: u64 = 2 * 1_024;
 pub const MAXIMUM_CEILING_MIB: u64 = 8 * 1_024;
