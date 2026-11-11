@@ -3,7 +3,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 
 use crate::{
-    credentials::{Credential, Service, Slot, describe},
+    credentials::{Credential, Service, Slot, describe, host, new_id},
     isolation::IsolationEngine,
     remote::Announcement,
     task::TaskService,
@@ -13,7 +13,7 @@ use crate::{
 };
 
 use popups::confirm::PendingConfirm;
-use screens::settings::{Depth, RowKind};
+use screens::settings::{Depth, RowKind, Section};
 
 use super::*;
 
@@ -317,6 +317,59 @@ impl App {
             .iter()
             .filter_map(|credential| task_service.credentials().summary(&credential.id))
             .collect();
+    }
+
+    // Adopting a login the operator already has: the profile is copied, the
+    // identity is recorded, and the row that offered it is replaced by the one it
+    // became, whose own check says whether the copy signs in.
+    pub(in crate::tui) async fn import_host_login<E>(
+        &mut self,
+        login: host::HostLogin,
+        task_service: &TaskService<E>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let service = login.service;
+        let existing = self.settings_credentials();
+        let count = existing
+            .iter()
+            .filter(|credential| credential.service() == Some(service))
+            .count();
+        let label = if count == 0 {
+            service.label().to_owned()
+        } else {
+            format!("{} {}", service.label(), count + 1)
+        };
+        let id = new_id(service, &label, |candidate| {
+            existing.iter().any(|credential| credential.id == candidate)
+                || self.config.profile_dir(candidate).is_dir()
+        });
+        if let Err(error) = host::import(&self.config, &login, &id) {
+            self.problem(format!("Could not import the login: {error}"));
+            return;
+        }
+        let Some(file) = self.settings_file.as_mut() else {
+            let _ = self.config.remove_profile(&id);
+            self.problem("Settings are unavailable; fix the file and reopen");
+            return;
+        };
+        let mut proposed = file.settings().clone();
+        if let Err(error) = proposed.add_credential(Credential::new(id.clone(), label.clone())) {
+            let _ = self.config.remove_profile(&id);
+            self.problem(error.to_string());
+            return;
+        }
+        if let Err(error) = file.save(proposed) {
+            let _ = self.config.remove_profile(&id);
+            self.problem(error.to_string());
+            return;
+        }
+        self.panel.section = Section::for_service(service);
+        self.reload_profiles(task_service);
+        // The imported login has not been asked about here yet, so the row is
+        // checked again rather than left on the answer the offer carried.
+        self.credentials_visible_since = None;
+        self.say(format!("Imported the {label} login"));
     }
 
     pub(in crate::tui) fn ask_credential_checks<E>(

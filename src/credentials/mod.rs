@@ -1,4 +1,5 @@
 mod files;
+pub mod host;
 mod model;
 mod shell;
 

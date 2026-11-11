@@ -1,5 +1,5 @@
 use crate::{
-    credentials::{Credential as NamedCredential, Service, Slot},
+    credentials::{Credential as NamedCredential, Service, Slot, host},
     project::ProjectCommits,
     tui::{
         App,
@@ -8,7 +8,7 @@ use crate::{
 };
 
 use super::{
-    pages::{hostname, public_identity},
+    pages::{hostname, public_identity, tilde},
     panel::{Section, Setting},
     rows::{
         Credential, CredentialKind, GitIdentity, ProjectDefaults, Row, RowKind, TrackerBinding,
@@ -130,7 +130,26 @@ impl App {
                         .then(|| self.identity_row(credential, service))
                 }),
         );
+        rows.extend(self.host_login_rows(section));
         rows
+    }
+
+    // A login the operator already has on this machine is offered after the ones
+    // altitude knows, like a discovered remote: an offer to adopt, not a row of
+    // this installation's yet.
+    fn host_login_rows(&self, section: Section) -> Vec<Row> {
+        host::logins(&self.config, &self.settings_credentials())
+            .into_iter()
+            .filter(|login| section.services().contains(&login.service))
+            .map(|login| Row {
+                label: format!("{} login on this machine", login.service.label()),
+                detail: Some(format!(
+                    "found at {}",
+                    tilde(&login.source.display().to_string())
+                )),
+                kind: RowKind::HostLogin(login),
+            })
+            .collect()
     }
 
     fn commit_row(

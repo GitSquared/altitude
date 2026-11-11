@@ -189,6 +189,7 @@ impl App {
                     }
                 }
             }
+            Some(RowKind::HostLogin(login)) => self.import_host_login(login, task_service).await,
             Some(RowKind::GitIdentity(identity)) => match identity.saved {
                 Some(commits) => self.open_saved_commit_identity(commits),
                 None => self.open_git_identity(),
