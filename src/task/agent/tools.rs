@@ -299,16 +299,16 @@ impl TaskAgentTools {
         let title = argument(arguments, "title")?;
         let body = argument(arguments, "body")?;
         let kind = match arguments.get("kind").and_then(Value::as_str) {
-            Some("steer") => TaskAskKind::BlockingQuestion,
-            Some("review") => TaskAskKind::ReadyForReview,
+            Some("blocking_question") => TaskAskKind::BlockingQuestion,
+            Some("ready_for_review") => TaskAskKind::ReadyForReview,
             Some(other) => {
                 return Err(AgentToolError::new(format!(
-                    "unknown ask kind {other:?}; use steer or review"
+                    "unknown ask kind {other:?}; use blocking_question or ready_for_review"
                 )));
             }
             None => {
                 return Err(AgentToolError::new(
-                    "tasks_signal action=open needs kind: steer or review",
+                    "tasks_signal action=open needs kind: blocking_question or ready_for_review",
                 ));
             }
         };
