@@ -4,3 +4,5 @@
 # Python bytecode from the scripts.
 __pycache__/
 *.pyc
+
+.DS_Store
