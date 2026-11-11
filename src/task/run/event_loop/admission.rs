@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use tokio::time;
 
 use crate::isolation::capacity::SAMPLE_INTERVAL;
-use crate::isolation::{CommandSession, IsolationEngine, Pressure, landings};
+use crate::isolation::{CommandSession, IsolationEngine, Pressure};
 
 use crate::task::{
     Task, TaskAgentRun, TaskExecutionUpdate, TaskService, TaskServiceError,
@@ -190,7 +190,7 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
         // promised changes when a sandbox is made, and a start admitted in the same
         // second as another would otherwise be admitted against memory that is gone.
         let room = self.service.isolation.sandbox_room();
-        let may_land = landings().min(room.fitting);
+        let may_land = self.service.isolation.start_landings().min(room.fitting);
         // Why nothing started is the question a quiet machine raises, and this is the
         // pass that answers it.
         tracing::debug!(

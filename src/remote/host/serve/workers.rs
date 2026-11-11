@@ -48,6 +48,9 @@ struct FleetState {
     connected: HashMap<String, ConnectedWorker>,
     provisioned: HashSet<String>,
     provisioning: HashSet<String>,
+    // Boxes a sandbox has been placed on, so a second sandbox is not given the
+    // same host.
+    assigned: HashSet<String>,
     // Boxes the isolation provider is waiting for. It is raised when a sandbox
     // needs compute and lowered when one ends; nothing raises it yet.
     demand: usize,
@@ -57,7 +60,7 @@ struct FleetState {
 
 // A remote's isolation workers and the scripts that make them. It knows a worker
 // by the name it was provisioned under, because a restarted worker is a new peer
-// and the same box.
+// and the same host.
 pub(crate) struct WorkerFleet {
     settings: WorkersSettings,
     token: String,
@@ -92,7 +95,7 @@ impl WorkerFleet {
             state.stopping = true;
             state.provisioned.drain().collect()
         };
-        self.wake.notify_one();
+        self.wake.notify_waiters();
         let mut stopping = Vec::new();
         for name in names {
             let fleet = Arc::clone(self);
@@ -101,6 +104,79 @@ impl WorkerFleet {
         for task in stopping {
             let _ = task.await;
         }
+    }
+
+    // The shared secret a host was provisioned with, sent on every call.
+    pub(crate) fn token(&self) -> &str {
+        &self.token
+    }
+
+    pub(crate) fn peer(&self, name: &str) -> Option<EndpointId> {
+        self.state
+            .lock()
+            .expect("worker fleet lock poisoned")
+            .connected
+            .get(name)
+            .map(|worker| worker.peer)
+    }
+
+    // How many hosts are joined, how many are given a sandbox, and how many this
+    // remote will ever run at once.
+    pub(crate) fn capacity(&self) -> (usize, usize, usize) {
+        let state = self.state.lock().expect("worker fleet lock poisoned");
+        (
+            state.connected.len(),
+            state.assigned.len(),
+            self.settings.ceiling(),
+        )
+    }
+
+    // Provision a host for one sandbox. The fleet spawns toward the demand, and
+    // this waits for one that has not already been given a sandbox. A host is not
+    // returned to the pool: deprovisioning it destroys it.
+    pub(crate) async fn provision_worker(&self) -> Result<String, String> {
+        {
+            let mut state = self.state.lock().expect("worker fleet lock poisoned");
+            state.demand += 1;
+        }
+        self.wake.notify_waiters();
+        let deadline = Instant::now() + Duration::from_secs(self.settings.provision_timeout_secs);
+        loop {
+            {
+                let mut state = self.state.lock().expect("worker fleet lock poisoned");
+                if let Some(name) = state
+                    .connected
+                    .keys()
+                    .find(|name| !state.assigned.contains(*name))
+                    .cloned()
+                {
+                    state.assigned.insert(name.clone());
+                    return Ok(name);
+                }
+            }
+            if Instant::now() >= deadline {
+                let mut state = self.state.lock().expect("worker fleet lock poisoned");
+                state.demand = state.demand.saturating_sub(1);
+                return Err("no isolation worker joined in time".to_owned());
+            }
+            tokio::select! {
+                _ = time::sleep(Duration::from_millis(250)) => {}
+                _ = self.wake.notified() => {}
+            }
+        }
+    }
+
+    // A sandbox is over, so its host is destroyed rather than reused.
+    pub(crate) async fn deprovision_worker(&self, name: &str) {
+        {
+            let mut state = self.state.lock().expect("worker fleet lock poisoned");
+            state.assigned.remove(name);
+            state.provisioned.remove(name);
+            state.connected.remove(name);
+            state.demand = state.demand.saturating_sub(1);
+        }
+        self.deprovision(name).await;
+        self.wake.notify_waiters();
     }
 
     fn ticket(&self) -> String {
@@ -152,7 +228,7 @@ impl WorkerFleet {
 
     // A worker this machine made is this machine's to remove, however it left:
     // only the ones that are still here can be deprovisioned meaningfully, but the
-    // deprovision script is the place that knows whether a box is already gone.
+    // deprovision script is the place that knows whether a host is already gone.
     fn reap(&self) -> Vec<String> {
         let now = Instant::now();
         let mut state = self.state.lock().expect("worker fleet lock poisoned");
@@ -229,7 +305,7 @@ impl WorkerFleet {
                         let mut state = self.state.lock().expect("worker fleet lock poisoned");
                         state.provisioning.remove(&name);
                         state.provisioned.insert(name);
-                        self.wake.notify_one();
+                        self.wake.notify_waiters();
                         return;
                     }
                     tracing::warn!(
@@ -338,7 +414,7 @@ impl WorkerHost for WorkerFleet {
                 Ok(())
             }
         };
-        self.wake.notify_one();
+        self.wake.notify_waiters();
         Box::pin(async move { answer })
     }
 

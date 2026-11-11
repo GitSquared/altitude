@@ -4,10 +4,16 @@ use crate::remote::InstallationKey;
 use crate::remote::Transfer;
 use crate::remote::TransferPart;
 use iroh::{Endpoint, EndpointAddr, EndpointId, endpoint::Connection};
+use tokio::fs::File as AsyncFile;
+use tokio::io::copy;
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 use crate::task::TaskAsk;
 use crate::task::picture;
+
+use crate::isolation::worker_protocol::{CommandFrame, WorkerReply, WorkerRequest};
+use crate::isolation::{CommandEvent, CommandSession};
 
 use crate::remote::protocol::SignalCommand;
 use crate::remote::protocol::{
@@ -77,8 +83,154 @@ impl LinkClient {
         Ok(Self { endpoint })
     }
 
+    // An endpoint that also serves: the worker answers the master's calls on the
+    // same endpoint it registers over.
+    pub(crate) fn from_endpoint(endpoint: Endpoint) -> Self {
+        Self { endpoint }
+    }
+
     pub async fn scan_remotes(&self) -> LinkResult<Scan> {
         discovery::scan(&self.endpoint).await
+    }
+
+    // One sandbox call to a worker the master provisioned.
+    pub(crate) async fn worker_call(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        request: &WorkerRequest,
+    ) -> LinkResult<WorkerReply> {
+        let dial = self.dial(peer).await?;
+        let (mut send, mut recv) = dial.0.open_bi().await?;
+        write_frame(&mut send, request).await?;
+        send.finish()?;
+        read_frame(&mut recv).await
+    }
+
+    // A host carries one connection from an agent inside its sandbox to the
+    // channel the master serves for that task.
+    pub(crate) async fn pipe_agent_channel(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        socket: &str,
+        token: &str,
+        tcp: TcpStream,
+    ) -> LinkResult<()> {
+        let dial = self.dial(peer).await?;
+        let (mut send, mut recv) = dial.0.open_bi().await?;
+        write_frame(
+            &mut send,
+            &LinkRequest::AgentChannel {
+                socket: socket.to_owned(),
+                token: token.to_owned(),
+            },
+        )
+        .await?;
+        match read_frame::<_, LinkResponse>(&mut recv).await? {
+            LinkResponse::Accepted => {}
+            LinkResponse::Rejected { reason } => return Err(reason.into()),
+            other => return Err(format!("unexpected answer: {other:?}").into()),
+        }
+        let (mut box_read, mut box_write) = tcp.into_split();
+        let to_master = async {
+            let _ = copy(&mut box_read, &mut send).await;
+            let _ = send.finish();
+        };
+        let to_box = async {
+            let _ = copy(&mut recv, &mut box_write).await;
+        };
+        tokio::join!(to_master, to_box);
+        Ok(())
+    }
+
+    // Send a file's bytes to a worker on the stream that carries the call.
+    pub(crate) async fn worker_deliver(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        request: &WorkerRequest,
+        mut file: AsyncFile,
+    ) -> LinkResult<()> {
+        let dial = self.dial(peer).await?;
+        let (mut send, mut recv) = dial.0.open_bi().await?;
+        write_frame(&mut send, request).await?;
+        copy(&mut file, &mut send).await?;
+        send.finish()?;
+        match read_frame::<_, WorkerReply>(&mut recv).await? {
+            WorkerReply::Ok => Ok(()),
+            WorkerReply::Failed(reason) => Err(reason.into()),
+            other => Err(format!("unexpected answer: {other:?}").into()),
+        }
+    }
+
+    // Receive a collected file or tree on the stream the call opened.
+    pub(crate) async fn worker_collect(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        request: &WorkerRequest,
+        mut sink: AsyncFile,
+    ) -> LinkResult<(u64, u64)> {
+        let dial = self.dial(peer).await?;
+        let (mut send, mut recv) = dial.0.open_bi().await?;
+        write_frame(&mut send, request).await?;
+        send.finish()?;
+        match read_frame::<_, WorkerReply>(&mut recv).await? {
+            WorkerReply::Blob { files, bytes, .. } => {
+                copy(&mut recv, &mut sink).await?;
+                Ok((files, bytes))
+            }
+            WorkerReply::Failed(reason) => Err(reason.into()),
+            other => Err(format!("unexpected answer: {other:?}").into()),
+        }
+    }
+
+    // A command on a worker keeps its stream open: input goes one way and events
+    // the other until the command exits.
+    pub(crate) async fn worker_command(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        request: &WorkerRequest,
+    ) -> LinkResult<CommandSession> {
+        let dial = self.dial(peer).await?;
+        let (mut send, mut recv) = dial.0.open_bi().await?;
+        write_frame(&mut send, request).await?;
+        match read_frame::<_, WorkerReply>(&mut recv).await? {
+            WorkerReply::Ready => {}
+            WorkerReply::Failed(reason) => return Err(reason.into()),
+            other => return Err(format!("unexpected answer: {other:?}").into()),
+        }
+        let (commands, mut wanted) = mpsc::unbounded_channel();
+        let (producing, events) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            // The connection lives as long as the command does.
+            let _dial = dial;
+            loop {
+                tokio::select! {
+                    command = wanted.recv() => {
+                        let Some(command) = command else {
+                            break;
+                        };
+                        if write_frame(&mut send, &CommandFrame::Drive(command)).await.is_err() {
+                            break;
+                        }
+                    }
+                    frame = read_frame::<_, CommandFrame>(&mut recv) => {
+                        match frame {
+                            Ok(CommandFrame::Report(event)) => {
+                                let done = matches!(event, CommandEvent::Exited(_) | CommandEvent::Failed(_));
+                                if producing.send(event).is_err() {
+                                    break;
+                                }
+                                if done {
+                                    break;
+                                }
+                            }
+                            _ => break,
+                        }
+                    }
+                }
+            }
+            let _ = send.finish();
+        });
+        Ok(CommandSession { commands, events })
     }
 
     // A provisioned worker tying itself to the master it was made for. The token

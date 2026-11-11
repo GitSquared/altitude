@@ -13,6 +13,8 @@ use crate::remote::TransferPart;
 use cap_std::fs::{Dir, OpenOptions, OpenOptionsExt, Permissions, PermissionsExt};
 use tokio::{
     fs as async_fs,
+    io::{self as tokio_io, AsyncWriteExt},
+    net::UnixStream,
     sync::{Mutex as AsyncMutex, mpsc::UnboundedReceiver, watch},
 };
 
@@ -121,6 +123,7 @@ struct LinkHandler {
     config_lock: Arc<AsyncMutex<()>>,
     tasks: Arc<dyn TaskHost>,
     workers: Option<Arc<dyn WorkerHost>>,
+    agent_channels: Option<AgentChannelAccess>,
 }
 
 impl fmt::Debug for LinkHandler {
@@ -360,6 +363,17 @@ pub struct ServerParts {
     /// How isolation workers announce themselves, when this machine takes them.
     /// A remote with none rejects the request rather than pretending to listen.
     pub workers: Option<Arc<dyn WorkerHost>>,
+    /// Where the agent channels live and the token that may reach them, when this
+    /// machine lets its workers carry an agent's channel through.
+    pub agent_channels: Option<AgentChannelAccess>,
+}
+
+// A worker is trusted to carry the connections an agent inside its sandbox makes,
+// and to name the channel it carries them to. The token says which remote may.
+#[derive(Clone)]
+pub struct AgentChannelAccess {
+    pub directory: PathBuf,
+    pub token: String,
 }
 
 // The other half of the link that is not about tasks: a provisioned worker
@@ -775,6 +789,50 @@ async fn answer(
             };
             write_frame(&mut send, &response).await?;
         }
+        LinkRequest::AgentChannel { socket, token } => {
+            let Some(access) = &handler.agent_channels else {
+                write_frame(
+                    &mut send,
+                    &LinkResponse::Rejected {
+                        reason: "this machine serves no agent channels".into(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            };
+            let path = Path::new(&socket);
+            let allowed = token == access.token
+                && path.starts_with(&access.directory)
+                && path.extension().and_then(|kind| kind.to_str()) == Some("sock");
+            let channel = if allowed {
+                UnixStream::connect(path).await.ok()
+            } else {
+                None
+            };
+            let Some(channel) = channel else {
+                write_frame(
+                    &mut send,
+                    &LinkResponse::Rejected {
+                        reason: "that is not a channel of this machine".into(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            };
+            write_frame(&mut send, &LinkResponse::Accepted).await?;
+            // Two directions, until one side is done; the worker keeps the
+            // sandbox's connection open for the whole agent session.
+            let (mut reader, mut writer) = channel.into_split();
+            let upstream = async {
+                let _ = tokio_io::copy(&mut recv, &mut writer).await;
+                let _ = writer.shutdown().await;
+            };
+            let downstream = async {
+                let _ = tokio_io::copy(&mut reader, &mut send).await;
+            };
+            tokio::join!(upstream, downstream);
+            return Ok(());
+        }
     }
     send.finish()?;
     Ok(())
@@ -798,6 +856,7 @@ impl LinkServer {
             trackers,
             tasks,
             workers,
+            agent_channels,
         } = parts;
         let handler = LinkHandler {
             id: identity.id(),
@@ -805,6 +864,7 @@ impl LinkServer {
             config_lock: Arc::new(AsyncMutex::new(())),
             tasks,
             workers,
+            agent_channels,
         };
         let log = ClientLog {
             record: clients.clone(),

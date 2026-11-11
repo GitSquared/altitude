@@ -34,7 +34,7 @@ pub(crate) const MAX_BLOB_BYTES: u64 = 64 * 1024 * 1024;
 pub(super) const CHUNK_BYTES: usize = 64 * 1024;
 pub(crate) const TRANSFER_PIECE_BYTES: u64 = 4 * 1024 * 1024;
 
-pub(super) fn builder() -> Builder {
+pub(crate) fn builder() -> Builder {
     Endpoint::builder(presets::Minimal)
 }
 
@@ -136,10 +136,16 @@ pub enum LinkRequest {
     WorkerHeartbeat {
         name: String,
     },
+    // A host carrying one connection from an agent inside its sandbox to the
+    // channel the master is serving for that task.
+    AgentChannel {
+        socket: String,
+        token: String,
+    },
 }
 
-// What an empty box says it can host. The master keeps its own book of what it
-// has promised; this is only the size of the box.
+// What an empty host says it can host. The master keeps its own book of what it
+// has promised; this is only the size of the host.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct WorkerReport {
     pub cpus: usize,
@@ -431,7 +437,7 @@ pub struct TransferArchive {
     pub digest: String,
 }
 
-pub(super) async fn write_frame<W, T>(writer: &mut W, value: &T) -> LinkResult<()>
+pub(crate) async fn write_frame<W, T>(writer: &mut W, value: &T) -> LinkResult<()>
 where
     W: AsyncWrite + Unpin,
     T: Serialize,
@@ -445,7 +451,7 @@ where
     Ok(())
 }
 
-pub(super) async fn read_frame<R, T>(reader: &mut R) -> LinkResult<T>
+pub(crate) async fn read_frame<R, T>(reader: &mut R) -> LinkResult<T>
 where
     R: AsyncRead + Unpin,
     T: DeserializeOwned,

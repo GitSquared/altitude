@@ -18,7 +18,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::{
     config::Config,
-    isolation::{IsolationStatus, MicrosandboxIsolation},
+    isolation::IsolationStatus,
     remote::announce::Phase,
     remote::protocol::{self, TaskSummary},
     task::{QueueStanding, Task, TaskEventLoop, TaskHistoryEvent, waits_for_room},
@@ -27,12 +27,16 @@ use crate::{
 use crate::tracker::TrackerIntegration;
 
 mod run;
+mod serve_isolation;
 pub(crate) mod settings;
 mod task_host;
 mod tracker_host;
 mod transfer;
 mod worker;
 mod workers;
+mod workers_isolation;
+
+pub(crate) use serve_isolation::ServeIsolation;
 
 use transfer::TRANSFER_IDLE_MS;
 
@@ -41,8 +45,8 @@ pub(crate) use transfer::export_task;
 
 struct OwnTasks {
     config: Arc<Config>,
-    tasks: Arc<TaskEventLoop<MicrosandboxIsolation>>,
-    incoming: IncomingTransfers,
+    tasks: Arc<TaskEventLoop<ServeIsolation>>,
+    incoming: IncomingTransfers<ServeIsolation>,
     preparation_lock: Arc<AsyncMutex<()>>,
     transfers: Arc<Transfers>,
     collecting: Arc<Mutex<HashMap<String, TransferUpdate>>>,
@@ -199,11 +203,7 @@ fn summary_of(task: &Task, standing: Option<&QueueStanding>) -> protocol::TaskSu
 
 // A card for one task, and then the queue again: one start or finish moves every
 // number behind it, and the numbering is the machine's to say.
-async fn publish_change(
-    watchers: &Watchers,
-    tasks: &TaskEventLoop<MicrosandboxIsolation>,
-    task: &Task,
-) {
+async fn publish_change(watchers: &Watchers, tasks: &TaskEventLoop<ServeIsolation>, task: &Task) {
     if let Some(operator) = task.operator_id() {
         watchers.publish(operator, summary_of(task, None));
     }
@@ -212,7 +212,7 @@ async fn publish_change(
 
 // One start moves every number behind it, so a change anywhere in the queue is said to
 // every task still waiting in it.
-async fn publish_queue(watchers: &Watchers, tasks: &TaskEventLoop<MicrosandboxIsolation>) {
+async fn publish_queue(watchers: &Watchers, tasks: &TaskEventLoop<ServeIsolation>) {
     let Ok(all) = tasks.service().list_in_play().await else {
         return;
     };

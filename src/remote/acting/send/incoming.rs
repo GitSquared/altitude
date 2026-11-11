@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     config::Config,
-    isolation::{MicrosandboxIsolation, Unwatched, UnwatchedFiles, private_directory},
+    isolation::{IsolationEngine, Unwatched, UnwatchedFiles, private_directory},
     remote::{
         HISTORY_FILE, Handover, HandoverRecord, TRANSCRIPT_FILE, TransferPart, WORK_FILE,
         WORK_PLAIN_FILE, archive,
@@ -32,14 +32,17 @@ struct IncomingTransfer {
 }
 
 #[derive(Clone)]
-pub struct IncomingTransfers {
+pub struct IncomingTransfers<E> {
     config: Config,
-    tasks: Arc<TaskEventLoop<MicrosandboxIsolation>>,
+    tasks: Arc<TaskEventLoop<E>>,
     lock: Arc<Mutex<()>>,
 }
 
-impl IncomingTransfers {
-    pub fn new(config: Config, tasks: Arc<TaskEventLoop<MicrosandboxIsolation>>) -> Self {
+impl<E> IncomingTransfers<E>
+where
+    E: IsolationEngine + Clone + 'static,
+{
+    pub fn new(config: Config, tasks: Arc<TaskEventLoop<E>>) -> Self {
         Self {
             config,
             tasks,
