@@ -9,16 +9,27 @@ use crate::{
     },
 };
 
+// git and gh are the image's: a setup step runs where the sandbox does, and as often
+// as not the sandbox is an ordinary account on a worker host, where apt has a lock
+// nobody can take and `/usr` is the machine's. The workspace makes the same argument
+// for the packages it carries, and the worker guide says what a host image needs.
 const SETUP_COMMAND: &str = concat!(
-    "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git openssh-client gh gnupg\n",
+    "for tool in git gh; do\n",
+    "  command -v \"$tool\" >/dev/null && continue\n",
+    "  echo \"this image does not provide $tool, which the GitHub profile needs\" >&2\n",
+    "  exit 1\n",
+    "done\n",
     // The login this profile mounts is the GitHub CLI's, so git is pointed at the
     // same one. Without it an https clone of a private repository stops at a
     // username prompt, and the sandbox's own setup has nobody to answer it.
-    "git config --system credential.https://github.com.helper '!gh auth git-credential'\n",
-    "cat > /usr/local/bin/git <<'ALTITUDE_GIT_SHIM'\n",
+    "git config --global credential.https://github.com.helper '!gh auth git-credential'\n",
+    // `$HOME/.local/bin` rather than `/usr/local/bin`: it is the account's own and
+    // the first directory a sandbox command searches.
+    "mkdir -p \"$HOME/.local/bin\"\n",
+    "cat > \"$HOME/.local/bin/git\" <<'ALTITUDE_GIT_SHIM'\n",
     include_str!("assets/git-shim.sh"),
     "ALTITUDE_GIT_SHIM\n",
-    "chmod 0755 /usr/local/bin/git\n",
+    "chmod 0755 \"$HOME/.local/bin/git\"\n",
 );
 
 pub struct GitHub;

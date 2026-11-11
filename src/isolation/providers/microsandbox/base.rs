@@ -23,11 +23,16 @@ pub(super) const BASE_IMAGE: &str = "node:22-bookworm";
 // What a task may rely on in the workspace, and what the environment reports. Most
 // are already in the image; apt installs the rest. Node and npm come from the image
 // rather than a distribution package, so they are not in this list and the
-// description asks them for their versions separately.
+// description asks them for their versions separately. `gh` is here because the
+// GitHub profile used to install its own tools, which a setup step on a worker host
+// cannot do: there the sandbox is an ordinary account and `/usr` is the machine's.
 const WORKSPACE_PACKAGES: &[&str] = &[
     "bash",
     "ca-certificates",
     "curl",
+    "git",
+    "gh",
+    "openssh-client",
     "gnupg",
     "python3",
     "python3-pip",
