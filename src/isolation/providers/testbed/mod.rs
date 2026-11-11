@@ -1,5 +1,5 @@
 use std::{
-    fs, io,
+    env, fs, io,
     path::{Component, Path, PathBuf},
     process::Command,
     sync::{Arc, Mutex},
@@ -30,17 +30,21 @@ const LAYER_MARKER: &str = "testbed-built";
 // The directories every sandbox is given over the machine rather than from its own
 // disk. A command resolves paths against these, so the same absolute path means the
 // machine's file here and now.
-const SYSTEM_ROOTS: [&str; 7] = ["/root", "/usr", "/etc", "/dev", "/sys", "/proc", "/run"];
+const SYSTEM_ROOTS: [&str; 6] = ["/usr", "/etc", "/dev", "/sys", "/proc", "/run"];
 
 // A weaker isolation primitive for running Altitude inside one of its own sandboxes,
 // where a nested microVM has no `/dev/kvm` to boot against. Each sandbox is a
-// directory used as a `chroot` root, and every command runs in a private mount
-// namespace that binds the machine's system trees and the plan's mounts over it.
-// It is not a boundary: a testbed task shares the machine's `/usr` and `/root`, and
-// can write them. That is the point — the machine is already a disposable sandbox.
+// directory used as a `chroot` root, and every command runs in a private user and
+// mount namespace that binds the machine's system trees and the plan's mounts over
+// it. It is not a boundary: a testbed task shares the machine's `/usr`, and its
+// home is the account's own, which it can write. That is the point — the machine is
+// already a disposable sandbox, and none of it needs root.
 #[derive(Clone)]
 pub struct TestbedIsolation {
     config: Config,
+    // The account's home, which stands in for the guest's `/root`: on a disposable
+    // host the agent's home is the worker account's, so it can write it without root.
+    home: PathBuf,
     // Shared rather than per view, like the microVM provider's: how much this
     // machine can take is the same answer for every operator on it.
     host_pressure: Arc<Mutex<HostPressure>>,
@@ -63,6 +67,9 @@ impl TestbedIsolation {
     pub fn new(config: &Config) -> Self {
         Self {
             config: config.clone(),
+            home: env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/root")),
             host_pressure: Arc::new(Mutex::new(HostPressure::new(&config.isolation_data_dir()))),
         }
     }
@@ -130,6 +137,14 @@ impl TestbedIsolation {
                 return Path::new(root).join(suffix);
             }
         }
+        // The guest's home is the account's own: on a disposable host there is no
+        // separate root-owned `/root` to bind, and the agent has to be able to write.
+        if guest == "/root" {
+            return self.home.clone();
+        }
+        if let Some(suffix) = guest.strip_prefix("/root/") {
+            return self.home.join(suffix);
+        }
         self.sandbox_root(id).join(guest.trim_start_matches('/'))
     }
 
@@ -194,8 +209,8 @@ impl TestbedIsolation {
         let output = TokioCommand::new("/bin/bash")
             .arg("-c")
             .arg(command)
-            .env("HOME", "/root")
-            .env("PATH", machine_path())
+            .env("HOME", &self.home)
+            .env("PATH", machine_path(&self.home))
             .output()
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
@@ -304,9 +319,11 @@ pub(super) fn os_release() -> String {
         .unwrap_or_default()
 }
 
-pub(super) fn machine_path() -> String {
-    "/root/.cargo/bin:/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-        .to_owned()
+pub(super) fn machine_path(home: &Path) -> String {
+    format!(
+        "{home}/.cargo/bin:{home}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        home = home.display()
+    )
 }
 
 pub(super) fn output_tail(output: &str) -> &str {
@@ -327,12 +344,12 @@ pub(super) fn check_environment() -> Result<(), IsolationError> {
         }
     }
     match Command::new("/usr/bin/unshare")
-        .args(["--mount", "true"])
+        .args(["--user", "--map-root-user", "--mount", "true"])
         .output()
     {
         Ok(output) if output.status.success() => Ok(()),
         Ok(_) => Err(IsolationError::new(
-            "the testbed isolation cannot create a mount namespace on this machine",
+            "the testbed isolation cannot create a user and mount namespace on this machine",
         )),
         Err(error) => Err(IsolationError::new(format!(
             "the testbed isolation could not run unshare: {error}"

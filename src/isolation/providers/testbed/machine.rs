@@ -53,6 +53,7 @@ pub(super) fn command_session(
     root: PathBuf,
     record: SandboxRecord,
     command: String,
+    home: PathBuf,
 ) -> Result<CommandSession, IsolationError> {
     let pair = native_pty_system()
         .openpty(PtySize {
@@ -64,8 +65,16 @@ pub(super) fn command_session(
         .map_err(|error| IsolationError::new(error.to_string()))?;
 
     let mut builder = CommandBuilder::new("/usr/bin/unshare");
-    builder.args(["--mount", "--propagation", "private", "/bin/bash", "-c"]);
-    builder.arg(mount_script(&root, &record));
+    builder.args([
+        "--user",
+        "--map-root-user",
+        "--mount",
+        "--propagation",
+        "private",
+        "/bin/bash",
+        "-c",
+    ]);
+    builder.arg(mount_script(&root, &record, &home));
     // `bash -c script name argument`: the name is `$0`, the command `$1`.
     builder.arg("altitude-testbed");
     builder.arg(command);
@@ -74,7 +83,7 @@ pub(super) fn command_session(
     // depending on whether the machine's account can reach that path. `chroot`
     // puts the command at `/` inside it either way.
     builder.cwd(&root);
-    builder.env("PATH", machine_path());
+    builder.env("PATH", machine_path(&home));
     for (key, value) in &record.environment {
         builder.env(key, value);
     }
@@ -170,7 +179,7 @@ pub(super) fn command_session(
 // the guest paths mean the sandbox's files, and a namespace that outlived the
 // command would have to be kept alive by something. The mounts cost nothing to
 // repeat, and a sandbox that is swept leaves nothing mounted.
-fn mount_script(root: &Path, record: &SandboxRecord) -> String {
+fn mount_script(root: &Path, record: &SandboxRecord, home: &Path) -> String {
     let mut script = String::from("set -eu\n");
     let quote = |path: &Path| shell_quote(&path.to_string_lossy());
     let target = |guest: &str| root.join(guest.trim_start_matches('/'));
@@ -200,7 +209,8 @@ fn mount_script(root: &Path, record: &SandboxRecord) -> String {
         quote(&root.join("proc"))
     ));
     script.push_str(&format!(
-        "mount --rbind /root {}\n",
+        "mount --rbind {} {}\n",
+        quote(home),
         quote(&root.join("root"))
     ));
 

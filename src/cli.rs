@@ -126,9 +126,12 @@ To set workers up on a remote:
       max = 8
  4. Stock the host image: the host is the sandbox, so it carries what a task needs
     (git, the agent harness) or has the network to install it, and it can reach the
-    remote. It also needs /dev/fuse and, unless it runs as root, fusermount3, which
-    is what mounts each project's cache from the remote.
- 5. Recommended: bake a warm copy of each project's environment and caches into the
+    remote. It also needs /dev/fuse and the setuid fusermount3, which mount each
+    project's cache from the remote.
+ 5. Run it as an ordinary user, not root. The sandbox is an unprivileged user and
+    mount namespace over the account's home, so the worker needs unprivileged user
+    namespaces (the kernel default on modern systems) and no more.
+ 6. Recommended: bake a warm copy of each project's environment and caches into the
     image, so a start does not rebuild them.
 
 The remote spawns a host when a task needs one and destroys it when the task ends.
