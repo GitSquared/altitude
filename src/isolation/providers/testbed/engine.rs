@@ -102,7 +102,7 @@ impl IsolationEngine for TestbedIsolation {
             )));
         }
         let record = self.read_record(&id)?;
-        machine::command_session(root, record, command)
+        machine::command_session(root, record, command, self.home.clone())
     }
 
     async fn ensure_project(

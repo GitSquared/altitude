@@ -63,34 +63,27 @@ pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn E
     // needs no nested microVM: the host is the boundary. The host engine is the
     // closest thing we have — a chroot over the machine, not a microVM.
     let engine = TestbedIsolation::new(&base);
-    // Preparing pulls the runtime and builds the base image, which is minutes of
-    // work. The host registers before it is ready so the master can see it, and
-    // says it is not ready until this finishes.
-    let readiness = Arc::new(Mutex::new(Readiness::Preparing));
+    // Preparing is quick for a host engine, but it can still fail (no unprivileged
+    // user namespaces, say). A host that cannot make sandboxes must not register and
+    // take work it will fail, so it prepares before it dials the master.
     {
         let mut status = prepare(engine.clone());
-        let readiness = Arc::clone(&readiness);
-        tokio::spawn(async move {
-            loop {
-                match &*status.borrow_and_update() {
-                    IsolationStatus::Ready => {
-                        tracing::info!("sandbox runtime ready");
-                        *readiness.lock().expect("worker readiness") = Readiness::Ready;
-                        return;
-                    }
-                    IsolationStatus::Failed(error) => {
-                        tracing::error!(%error, "the sandbox runtime could not be prepared");
-                        *readiness.lock().expect("worker readiness") =
-                            Readiness::Failed(error.clone());
-                        return;
-                    }
-                    _ => {}
+        loop {
+            match &*status.borrow_and_update() {
+                IsolationStatus::Ready => {
+                    tracing::info!("sandbox runtime ready");
+                    break;
                 }
-                if status.changed().await.is_err() {
-                    return;
+                IsolationStatus::Failed(error) => {
+                    return Err(io::Error::other(format!(
+                        "the sandbox runtime could not be prepared: {error}"
+                    ))
+                    .into());
                 }
+                _ => {}
             }
-        });
+            status.changed().await.map_err(io::Error::other)?;
+        }
     }
 
     let endpoint = builder()
@@ -107,7 +100,6 @@ pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn E
         config: base.clone(),
         agents: AgentEngines::new(),
         token: args.token.clone(),
-        readiness,
         client: client.clone(),
         master: peer.clone(),
         channels: Arc::new(Mutex::new(HashMap::new())),
@@ -165,7 +157,6 @@ struct WorkerService {
     // id is enough to rebuild a recipe here.
     agents: AgentEngines,
     token: String,
-    readiness: Arc<Mutex<Readiness>>,
     client: LinkClient,
     master: EndpointAddr,
     // The loopback listeners carrying each sandbox's agent channel to the master.
@@ -174,14 +165,6 @@ struct WorkerService {
     // is gone and unmounted when it drops.
     #[cfg(target_os = "linux")]
     caches: Arc<Mutex<HashMap<String, BackgroundSession>>>,
-}
-
-// Whether this host can make sandboxes yet. Preparing is minutes, and a master
-// that asks before it is done is told to wait rather than given a failure.
-enum Readiness {
-    Preparing,
-    Ready,
-    Failed(String),
 }
 
 impl fmt::Debug for WorkerService {
