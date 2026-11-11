@@ -3,7 +3,6 @@ use std::{
     error::Error,
     fmt, io,
     io::IsTerminal,
-    path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -108,7 +107,6 @@ pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn E
         config: base.clone(),
         agents: AgentEngines::new(),
         token: args.token.clone(),
-        snapshots_dir: base.task_snapshots_dir(),
         readiness,
         client: client.clone(),
         master: peer.clone(),
@@ -167,7 +165,6 @@ struct WorkerService {
     // id is enough to rebuild a recipe here.
     agents: AgentEngines,
     token: String,
-    snapshots_dir: PathBuf,
     readiness: Arc<Mutex<Readiness>>,
     client: LinkClient,
     master: EndpointAddr,
@@ -234,6 +231,14 @@ impl ProtocolHandler for WorkerService {
             }
             WorkerCall::CollectFiles { id, root, excluded } => {
                 self.send_tree(send, recv, id, root, excluded).await;
+                Ok(())
+            }
+            WorkerCall::Snapshot { id, checkout } => {
+                self.send_snapshot(send, recv, id, checkout).await;
+                Ok(())
+            }
+            WorkerCall::Restore { id, checkout } => {
+                self.receive_snapshot(send, recv, id, checkout).await;
                 Ok(())
             }
             call => {

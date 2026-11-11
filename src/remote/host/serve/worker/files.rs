@@ -151,6 +151,68 @@ impl WorkerService {
         .await;
         let _ = send.finish();
     }
+
+    // The whole sandbox, archived on its way to the master.
+    pub(super) async fn send_snapshot(
+        &self,
+        mut send: SendStream,
+        _recv: RecvStream,
+        id: String,
+        checkout: Option<String>,
+    ) {
+        if let Ok(tar) = NamedTempFile::new()
+            && self
+                .engine
+                .archive_sandbox(&id, checkout.as_deref(), tar.path())
+                .is_ok()
+            && let Ok(metadata) = fs::metadata(tar.path())
+        {
+            if write_frame(
+                &mut send,
+                &WorkerReply::Blob {
+                    len: metadata.len(),
+                    files: 0,
+                    bytes: 0,
+                },
+            )
+            .await
+            .is_ok()
+                && let Ok(mut file) = AsyncFile::open(tar.path()).await
+            {
+                let _ = copy(&mut file, &mut send).await;
+            }
+            let _ = send.finish();
+            return;
+        }
+        let _ = write_frame(
+            &mut send,
+            &WorkerReply::Failed("could not archive the sandbox".into()),
+        )
+        .await;
+        let _ = send.finish();
+    }
+
+    // The same archive, put back on a host that has just been provisioned.
+    pub(super) async fn receive_snapshot(
+        &self,
+        mut send: SendStream,
+        mut recv: RecvStream,
+        id: String,
+        checkout: Option<String>,
+    ) {
+        let reply = match receive_to_temp(&mut recv).await {
+            Ok(tar) => match self
+                .engine
+                .restore_sandbox(&id, checkout.as_deref(), tar.path())
+            {
+                Ok(()) => WorkerReply::Ok,
+                Err(error) => WorkerReply::Failed(error.to_string()),
+            },
+            Err(error) => WorkerReply::Failed(error),
+        };
+        let _ = write_frame(&mut send, &reply).await;
+        let _ = send.finish();
+    }
 }
 
 // The bytes on an incoming stream, kept in a temporary file the engine can read as

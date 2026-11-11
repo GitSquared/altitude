@@ -1,11 +1,12 @@
 use std::{
-    fs,
-    path::{Path, PathBuf},
+    fs, io,
+    path::{Component, Path, PathBuf},
     process::Command,
     sync::{Arc, Mutex},
 };
 
 use serde::{Deserialize, Serialize};
+use tar::{Archive, Builder};
 use tokio::process::Command as TokioCommand;
 
 use crate::{
@@ -212,6 +213,75 @@ impl TestbedIsolation {
             output.status.code()
         )))
     }
+
+    // A host that is about to be destroyed has no machine to come back to, so a
+    // snapshot is the sandbox itself: the tree it wrote, and the project checkout,
+    // which lives outside it under the machine's own roots.
+    pub(crate) fn archive_sandbox(
+        &self,
+        id: &str,
+        checkout: Option<&str>,
+        destination: &Path,
+    ) -> Result<(), IsolationError> {
+        let root = self.sandbox_root(id);
+        if !root.is_dir() {
+            return Err(IsolationError::missing_sandbox(format!(
+                "this testbed sandbox is not on disk: {id}"
+            )));
+        }
+        let file = fs::File::create(destination).map_err(io_error)?;
+        let mut builder = Builder::new(file);
+        builder.append_dir_all("root", &root).map_err(io_error)?;
+        if let Some(checkout) = checkout {
+            let record = self.read_record(id)?;
+            let host = self.host_path(id, &record, checkout);
+            if host.exists() {
+                builder
+                    .append_dir_all("checkout", &host)
+                    .map_err(io_error)?;
+            }
+        }
+        builder.finish().map_err(io_error)?;
+        Ok(())
+    }
+
+    pub(crate) fn restore_sandbox(
+        &self,
+        id: &str,
+        checkout: Option<&str>,
+        source: &Path,
+    ) -> Result<(), IsolationError> {
+        let root = self.sandbox_root(id);
+        let checkout_host = match checkout {
+            Some(checkout) => {
+                let record = self.read_record(id)?;
+                Some(self.host_path(id, &record, checkout))
+            }
+            None => None,
+        };
+        let file = fs::File::open(source).map_err(io_error)?;
+        let mut archive = Archive::new(file);
+        for entry in archive.entries().map_err(io_error)? {
+            let mut entry = entry.map_err(io_error)?;
+            let path = entry.path().map_err(io_error)?.into_owned();
+            let mut components = path.components();
+            let base = components.next();
+            let rest = components.as_path();
+            let target = match base {
+                Some(Component::Normal(name)) if name == "root" => root.join(rest),
+                Some(Component::Normal(name)) if name == "checkout" && checkout_host.is_some() => {
+                    checkout_host.as_ref().expect("checked above").join(rest)
+                }
+                _ => continue,
+            };
+            entry.unpack(&target).map_err(io_error)?;
+        }
+        Ok(())
+    }
+}
+
+fn io_error(error: io::Error) -> IsolationError {
+    IsolationError::new(error.to_string())
 }
 
 fn names(path: &str, mount: &str) -> bool {
