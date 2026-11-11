@@ -31,6 +31,7 @@ use crate::task::ProjectMemoryFile;
 use crate::task::memory;
 use crate::task::picture;
 
+use crate::remote::cache::{CACHE_ALPN, CacheHandler, CacheService};
 use crate::remote::host::clients::{ClientLog, ClientRecord};
 use crate::task::TaskAsk;
 
@@ -366,6 +367,8 @@ pub struct ServerParts {
     /// Where the agent channels live and the token that may reach them, when this
     /// machine lets its workers carry an agent's channel through.
     pub agent_channels: Option<AgentChannelAccess>,
+    /// The projects' caches, when this machine serves them to workers over FUSE.
+    pub cache: Option<Arc<CacheService>>,
 }
 
 // A worker is trusted to carry the connections an agent inside its sandbox makes,
@@ -857,6 +860,7 @@ impl LinkServer {
             tasks,
             workers,
             agent_channels,
+            cache,
         } = parts;
         let handler = LinkHandler {
             id: identity.id(),
@@ -872,14 +876,18 @@ impl LinkServer {
         let endpoint = bind(
             builder()
                 .secret_key(identity.secret_key().clone())
-                .alpns(vec![LINK_ALPN.to_vec()])
+                .alpns(vec![LINK_ALPN.to_vec(), CACHE_ALPN.to_vec()])
                 .hooks(log),
             listen,
         )?
         .bind()
         .await
         .map_err(|error| format!("UDP task bind at {listen}: {error}"))?;
-        let router = Router::builder(endpoint).accept(LINK_ALPN, handler).spawn();
+        let mut router = Router::builder(endpoint).accept(LINK_ALPN, handler);
+        if let Some(cache) = cache {
+            router = router.accept(CACHE_ALPN, CacheHandler::new(cache));
+        }
+        let router = router.spawn();
         // Announced on the same address, over TCP, so that a client which has
         // only been told where this server is can still find out who it is.
         let broadcast = Broadcast::start(

@@ -467,7 +467,7 @@ where
     Ok(serde_json::from_slice(&body)?)
 }
 
-pub(super) async fn read_body<R>(reader: &mut R, len: u64, max: u64) -> LinkResult<Vec<u8>>
+pub(crate) async fn read_body<R>(reader: &mut R, len: u64, max: u64) -> LinkResult<Vec<u8>>
 where
     R: AsyncRead + Unpin,
 {
