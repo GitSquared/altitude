@@ -13,11 +13,13 @@ use crate::{
         CredentialSandbox, EnvironmentDescription, EnvironmentProgressSink, FileTally,
         FileTransferSink, IsolationEngine, IsolationError, IsolationStatus, Pressure,
         ProfileRecipe, SandboxCeiling, SandboxOptions, SandboxPurpose, SandboxRoom, VsockRoute,
-        worker_protocol::{WorkerCall, WorkerReply, WorkerRequest},
+        worker_protocol::{WorkerCall, WorkerProfile, WorkerReply, WorkerRequest},
     },
     project::Project,
     remote::LinkClient,
 };
+
+use crate::remote::bundle::ProfileBundle;
 
 use super::workers::WorkerFleet;
 
@@ -159,6 +161,27 @@ impl IsolationEngine for WorkersIsolation {
             .get(1)
             .map(|r| r.profile.clone())
             .unwrap_or_default();
+        // The box is fresh, so the operator's profile files travel with the spawn.
+        let scope = match &self.owner {
+            Some(owner) => self
+                .config
+                .for_operator(owner)
+                .map_err(|error| IsolationError::new(error.to_string()))?,
+            None => self.config.clone(),
+        };
+        let mut profiles = Vec::new();
+        for recipe in &recipes {
+            let bundle = ProfileBundle::of(scope.scoped_data_dir(), &recipe.profile)
+                .map_err(|error| IsolationError::new(error.to_string()))?;
+            profiles.push(WorkerProfile {
+                profile: bundle.profile,
+                files: bundle
+                    .files
+                    .into_iter()
+                    .map(|file| (file.path, file.contents))
+                    .collect(),
+            });
+        }
         let worker = self.lease(&id).await?;
         let call = WorkerCall::Provision {
             id: id.clone(),
@@ -167,6 +190,7 @@ impl IsolationEngine for WorkersIsolation {
             agent_profile,
             vcs_profile,
             vsock,
+            profiles,
         };
         match self.call_on(&worker, call).await.and_then(expect_ok) {
             Ok(()) => Ok(()),

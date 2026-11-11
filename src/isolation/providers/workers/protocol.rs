@@ -25,6 +25,14 @@ pub(crate) struct WorkerRequest {
 // What the master can ask a box for. The arguments are the sandbox's own
 // vocabulary rather than a path: a box composes its plan from its config, so the
 // wire never carries a host path that only makes sense on the master.
+// A profile's files as the master holds them, base64 so a token that is not text
+// still travels. The box writes them where its plan will mount the profile.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct WorkerProfile {
+    pub profile: String,
+    pub files: Vec<(String, String)>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) enum WorkerCall {
     // Say whether this box can make sandboxes at all.
@@ -45,6 +53,7 @@ pub(crate) enum WorkerCall {
         agent_profile: String,
         vcs_profile: String,
         vsock: Vec<VsockRoute>,
+        profiles: Vec<WorkerProfile>,
     },
     Create {
         id: String,

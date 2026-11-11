@@ -1,11 +1,13 @@
 use std::{
     error::Error,
-    fmt, io,
+    fmt, fs, io,
     io::IsTerminal,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
+
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 
 use iroh::{
     EndpointAddr,
@@ -25,8 +27,10 @@ use crate::{
     credentials::profile_recipe,
     isolation::{
         CommandEvent, IsolationEngine, IsolationStatus, TestbedIsolation, Unwatched, mounts,
-        prepare,
-        worker_protocol::{CommandFrame, WORKER_ALPN, WorkerCall, WorkerReply, WorkerRequest},
+        prepare, private_directory,
+        worker_protocol::{
+            CommandFrame, WORKER_ALPN, WorkerCall, WorkerProfile, WorkerReply, WorkerRequest,
+        },
     },
     logging,
     remote::{
@@ -100,6 +104,7 @@ pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn E
     let client = LinkClient::from_endpoint(endpoint.clone());
     let service = WorkerService {
         engine,
+        config: base.clone(),
         agents: AgentEngines::new(),
         token: args.token.clone(),
         snapshots_dir: base.task_snapshots_dir(),
@@ -153,6 +158,7 @@ pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn E
 
 struct WorkerService {
     engine: TestbedIsolation,
+    config: Config,
     // The same provider definitions the master builds recipes from, so a profile
     // id is enough to rebuild a recipe here.
     agents: AgentEngines,
@@ -241,7 +247,11 @@ impl WorkerService {
                 agent_profile,
                 vcs_profile,
                 vsock,
+                profiles,
             } => {
+                if let Err(error) = write_profiles(&self.config, &profiles) {
+                    return WorkerReply::Failed(error);
+                }
                 let recipes = match (
                     profile_recipe(&agent_profile, &self.agents),
                     profile_recipe(&vcs_profile, &self.agents),
@@ -356,6 +366,30 @@ impl WorkerService {
         }
         let _ = send.finish();
     }
+}
+
+// The profile files the master pushed with this sandbox, written where the plan
+// will mount the profile. A file's path is relative to the profile's directory and
+// may not climb out of it.
+fn write_profiles(config: &Config, profiles: &[WorkerProfile]) -> Result<(), String> {
+    for profile in profiles {
+        let root = config.profile_dir(&profile.profile);
+        private_directory(&root).map_err(|error| error.to_string())?;
+        for (path, contents) in &profile.files {
+            let target = root.join(path);
+            if !target.starts_with(&root) {
+                return Err(format!("a profile path leaves its directory: {path}"));
+            }
+            let bytes = BASE64
+                .decode(contents)
+                .map_err(|error| format!("an unreadable profile file: {error}"))?;
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            }
+            fs::write(&target, bytes).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 fn local_capacity() -> WorkerReport {
