@@ -38,11 +38,11 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
             loop {
                 tick.tick().await;
                 let pressure = event_loop.service.isolation.observe_pressure();
-                let ceiling = event_loop.service.isolation.sandbox_ceiling();
+                let room = event_loop.service.isolation.sandbox_room();
                 tracing::debug!(
                     ?pressure,
-                    ceiling_cpus = ceiling.cpus,
-                    ceiling_mib = ceiling.memory_mib,
+                    promised_mib = room.promised_mib,
+                    ceiling_mib = ?room.offered.map(|offered| offered.memory_mib),
                     "measured the machine"
                 );
                 event_loop.admit();
@@ -144,7 +144,7 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
         if !self.admission_enabled.load(Ordering::Acquire) {
             return;
         }
-        let mut tasks = match self.service.list().await {
+        let mut tasks = match self.service.list_in_play().await {
             Ok(tasks) => tasks,
             Err(error) => {
                 tracing::warn!(%error, "could not read tasks to admit work");
@@ -186,17 +186,25 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
             .into_iter()
             .filter(|task| !starting.contains(&task.id))
             .collect();
+        // Asked of the machine rather than taken from the last reading: what has been
+        // promised changes when a sandbox is made, and a start admitted in the same
+        // second as another would otherwise be admitted against memory that is gone.
+        let room = self.service.isolation.sandbox_room();
+        let may_land = landings().min(room.fitting);
         // Why nothing started is the question a quiet machine raises, and this is the
         // pass that answers it.
         tracing::debug!(
             ?stalled,
+            ceiling_mib = ?room.offered.map(|offered| offered.memory_mib),
+            promised_mib = room.promised_mib,
+            fitting = room.fitting,
             landing,
             waiting = waiting.len(),
             "an admission pass is deciding"
         );
         for task in waiting {
             if waits_for_room(task) {
-                if stalled.is_some() || landing >= landings() {
+                if stalled.is_some() || landing >= may_land {
                     continue;
                 }
                 landing += 1;
@@ -219,7 +227,15 @@ impl<E: IsolationEngine + Clone + 'static> TaskEventLoop<E> {
                 // over, which is the state an operator and a log both need to see.
                 let began = Instant::now();
                 let task_id = task.id.clone();
-                tracing::info!(task = %task_id, "starting a task");
+                // The first question asked of a machine that ran out of memory later.
+                let room = event_loop.service.isolation.sandbox_room();
+                tracing::info!(
+                    task = %task_id,
+                    ceiling_mib = ?room.offered.map(|offered| offered.memory_mib),
+                    promised_mib = room.promised_mib,
+                    pressure = ?event_loop.service.isolation.pressure(),
+                    "starting a task"
+                );
                 match event_loop.start_unless_wedged(&task).await {
                     Some(started) => {
                         tracing::info!(

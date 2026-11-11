@@ -11,6 +11,7 @@ use crate::{
     vcs::{CodeContribution, ContributionObservation},
 };
 
+use super::super::lifecycle::notice_event;
 use super::{ActiveRun, TaskEventLoop, TaskExecutionUpdate};
 
 impl<E> TaskEventLoop<E>
@@ -402,16 +403,23 @@ where
                 }
                 // The next turn is told what happened to it, so the agent picks up from
                 // the conversation rather than wondering why the operator went quiet.
-                let _ = self
+                // Recorded as a notice rather than as input: this task has a live
+                // sandbox and the turn continuing in it, so there is nothing to queue.
+                if let Err(error) = self
                     .service
-                    .express_input(
+                    .record(
                         &task.id,
-                        "altitude: the operator has left the task. You are back under \
-                         altitude's control; continue the work from wherever the \
-                         conversation left it."
-                            .to_owned(),
+                        &notice_event(
+                            &task,
+                            "altitude: the operator has left the task. You are back under \
+                             altitude's control; continue the work from wherever the \
+                             conversation left it.",
+                        ),
                     )
-                    .await;
+                    .await
+                {
+                    tracing::warn!(task_id = %task.id, %error, "could not say the operator left a task");
+                }
                 self.watch_agent_run(self.service.resume_autopilot_after_operator(task).await);
             }
         }

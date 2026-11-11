@@ -1,6 +1,6 @@
 -- Read facts as recorded. Absence leaves the previous value; JSON null is an explicit value.
 SELECT tasks.id, tasks.agent_kind, tasks.host,
-    EXISTS (SELECT 1 FROM task_event_logs WHERE task_id = tasks.id AND event_type IN ('operator_signal_confirmed', 'task_completed')) AS accepted,
+    EXISTS (SELECT 1 FROM finished_tasks WHERE finished_tasks.task_id = tasks.id) AS accepted,
     (SELECT MAX(sequence) FROM task_event_logs WHERE task_id = tasks.id) AS last_event_sequence,
     (SELECT payload ->> '$.data.intent'
      FROM task_event_logs
@@ -42,7 +42,7 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      WHERE task_id = tasks.id
        AND event_type = 'plan_updated'
      ORDER BY sequence DESC LIMIT 1) AS plan,
-    CASE WHEN EXISTS (SELECT 1 FROM task_event_logs WHERE task_id = tasks.id AND event_type IN ('operator_signal_confirmed', 'task_completed'))
+    CASE WHEN EXISTS (SELECT 1 FROM finished_tasks WHERE finished_tasks.task_id = tasks.id)
          THEN 'completed'
          ELSE (SELECT payload ->> '$.data.execution_status'
                FROM task_event_logs
@@ -171,17 +171,19 @@ SELECT tasks.id, tasks.agent_kind, tasks.host,
      FROM task_deferred_reviews
      WHERE task_id = tasks.id
      ORDER BY sequence DESC LIMIT 1) AS deferred_review,
-    (SELECT json_extract(cleared.payload, '$.data.reason')
-     FROM task_event_logs AS cleared
-     WHERE cleared.task_id = tasks.id
-       AND cleared.event_type = 'review_deferral_cleared'
-       AND cleared.sequence > COALESCE(
+    -- What the run that is about to start opens with, said by whatever queued the task.
+    (SELECT json_extract(queued.payload, '$.data.wake')
+     FROM task_event_logs AS queued
+     WHERE queued.task_id = tasks.id
+       AND queued.event_type = 'execution_queued'
+       AND json_extract(queued.payload, '$.data.wake') IS NOT NULL
+       AND queued.sequence > COALESCE(
          (SELECT MAX(sequence) FROM task_event_logs
           WHERE task_id = tasks.id AND event_type = 'agent_run_started'), 0)
-     ORDER BY cleared.sequence DESC LIMIT 1) AS review_wake_news,
-    -- Everything the machine has said to the agent about its pull requests, most
-    -- recently last. Saying it again when nothing has moved is what a wake loop is
-    -- made of, so the last one is what this pass compares itself against.
+     ORDER BY queued.sequence DESC LIMIT 1) AS wake_news,
+    -- Everything the machine has said about this task's pull requests, most recently
+    -- last. Saying it again when nothing has moved is what a wake loop is made of, so
+    -- the last one is what this pass compares itself against.
     (SELECT json_extract(cleared.payload, '$.data.reason')
      FROM task_event_logs AS cleared
      WHERE cleared.task_id = tasks.id

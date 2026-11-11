@@ -16,6 +16,7 @@ use crate::tracker::{IssueReference, IssueSnapshot, TrackerKind, TrackerStatus};
 use crate::vcs::ContributionState;
 use crate::{
     agent::{AgentKind, AgentStanding, AgentWindow, TaskUsage},
+    isolation::Pressure,
     project::Project,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -273,6 +274,12 @@ pub struct TaskSummary {
     // is waiting: a row can say what the agent asked and whether it needs them.
     #[serde(default)]
     pub leading_ask: Option<LeadingAsk>,
+    // Where the task stands on the machine holding it, for a task waiting for room:
+    // the numbering is the machine's, so a client cannot work it out.
+    #[serde(default)]
+    pub ahead: Option<usize>,
+    #[serde(default)]
+    pub holding: Option<Pressure>,
     #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default)]
@@ -328,6 +335,8 @@ impl TaskSummary {
             standing: task.facts.standing.clone(),
             activity: None,
             leading_ask: task.facts.leading_ask.clone(),
+            ahead: None,
+            holding: None,
             last_error: task.facts.last_error.clone(),
             tracker_issue: task.facts.tracker_issue.clone(),
             tracker_state: task.facts.tracker_status,

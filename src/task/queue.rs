@@ -1,4 +1,26 @@
-use super::{Task, TaskExecutionStatus};
+use crate::{
+    isolation::{EnvironmentProgress, Pressure},
+    task::{Task, TaskExecutionStatus},
+};
+
+// Where a task stands on the machine: what is in front of it in the queue, what the
+// machine already has on it, and what is being done to this task if the machine has
+// picked it up. One answer, because a queue number alone cannot say whether a wait is
+// a queue, a machine with no room, or a start under way.
+pub struct QueueStanding {
+    pub ahead: usize,
+    pub on_machine: usize,
+    pub holding: Option<Pressure>,
+    pub start: Option<Start>,
+}
+
+// A start is minutes of work before the first sandbox exists, and the steps of an
+// environment build are what fills them. Calling that a wait for a sandbox told the
+// operator nothing about a machine that was working the whole time.
+pub enum Start {
+    Provisioning,
+    Building(EnvironmentProgress),
+}
 
 pub fn tasks_waiting_to_start(tasks: &[Task]) -> Vec<&Task> {
     let mut waiting: Vec<&Task> = tasks

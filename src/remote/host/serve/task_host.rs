@@ -329,7 +329,7 @@ impl TaskHost for OwnTasks {
             if let Ok(all) = tasks.list().await
                 && let Some(task) = all.iter().find(|task| task.id == task_id)
             {
-                watchers.publish(task);
+                super::publish_change(&watchers, &tasks, task).await;
             }
             Ok(task_id)
         })
@@ -567,13 +567,12 @@ impl TaskHost for OwnTasks {
         let tasks = Arc::clone(&self.tasks);
         Box::pin(async move {
             let owner = peer.to_string();
-            Ok(tasks
-                .list()
-                .await
-                .map_err(|e| e.to_string())?
+            let all = tasks.list().await.map_err(|e| e.to_string())?;
+            let standings = tasks.standings(&all);
+            Ok(all
                 .iter()
                 .filter(|task| task.operator_id() == Some(owner.as_str()))
-                .map(TaskSummary::of)
+                .map(|task| super::summary_of(task, standings.get(&task.id)))
                 .collect())
         })
     }
@@ -593,13 +592,12 @@ impl TaskHost for OwnTasks {
                 let _ = say.send(WatchEvent::Ready);
             }
             let owner = peer.to_string();
-            let snapshot = tasks
-                .list()
-                .await
-                .map_err(|error| error.to_string())?
+            let all = tasks.list().await.map_err(|error| error.to_string())?;
+            let standings = tasks.standings(&all);
+            let snapshot = all
                 .iter()
                 .filter(|task| task.operator_id() == Some(owner.as_str()))
-                .map(TaskSummary::of)
+                .map(|task| super::summary_of(task, standings.get(&task.id)))
                 .collect();
             Ok(Watching { snapshot, changes })
         })

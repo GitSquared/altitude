@@ -16,7 +16,7 @@ use crate::project::Project;
 // machine, not about the work.
 pub(crate) mod capacity;
 
-pub use capacity::{Pressure, landings};
+pub use capacity::{Pressure, SandboxRoom, landings};
 mod git_cache;
 pub(crate) mod mounts;
 mod providers;
@@ -396,7 +396,7 @@ pub trait IsolationEngine: Send + Sync {
 
     fn observe_pressure(&self) -> Option<Pressure>;
 
-    fn sandbox_ceiling(&self) -> SandboxCeiling;
+    fn sandbox_room(&self) -> SandboxRoom;
 
     // Where a project's memory lives on this machine. It comes from the engine rather
     // than from the caller's config because the engine is the piece that knows

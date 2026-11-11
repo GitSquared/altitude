@@ -12,7 +12,10 @@ use crate::{
     agent::Activity,
     isolation::{Command, IsolationEngine, OutputStream},
     task::mirror::review::{ReviewWaits, Watchers},
-    task::{Task, TaskExecutionMode, TaskHistoryEvent, TaskService, TaskServiceError},
+    task::{
+        QueueStanding, Start, Task, TaskExecutionMode, TaskHistoryEvent, TaskService,
+        TaskServiceError, tasks_waiting_for_room,
+    },
 };
 
 mod admission;
@@ -136,6 +139,45 @@ where
         self.service.task(task_id).await
     }
 
+    // Where every task waiting for room stands, read once for the whole queue. A
+    // client cannot number the queue a machine is serving: the order is the order the
+    // machine takes them in, so the machine is where the answer comes from.
+    pub fn standings(&self, tasks: &[Task]) -> HashMap<String, QueueStanding> {
+        let holding = self.pressure();
+        let on_machine = tasks
+            .iter()
+            .filter(|task| task.facts.sandbox_available)
+            .count();
+        tasks_waiting_for_room(tasks)
+            .into_iter()
+            .enumerate()
+            .map(|(ahead, task)| {
+                let start = self.is_starting(&task.id).then(|| {
+                    match self.service.environment_step(&task.id) {
+                        Some(progress) => Start::Building(progress),
+                        None => Start::Provisioning,
+                    }
+                });
+                (
+                    task.id.clone(),
+                    QueueStanding {
+                        ahead,
+                        on_machine,
+                        holding,
+                        start,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    pub async fn queue_standings(
+        &self,
+    ) -> Result<HashMap<String, QueueStanding>, TaskServiceError> {
+        let tasks = self.service.list_in_play().await?;
+        Ok(self.standings(&tasks))
+    }
+
     pub async fn list(&self) -> Result<Vec<Task>, TaskServiceError> {
         self.service.list().await
     }
@@ -175,13 +217,10 @@ where
         signal_id: &str,
         answer: String,
     ) -> Result<(), TaskServiceError> {
-        if let Some(run) = self
-            .service
+        self.service
             .reply_operator_signal(task_id, signal_id, answer)
-            .await?
-        {
-            self.watch_agent_run(Ok(run));
-        }
+            .await?;
+        self.admit();
         Ok(())
     }
 
@@ -193,20 +232,16 @@ where
         signal_id: &str,
         resolved: bool,
     ) -> Result<(), TaskServiceError> {
-        if let Some(run) = self
-            .service
+        self.service
             .close_signal(task_id, signal_id, resolved)
-            .await?
-        {
-            self.watch_agent_run(Ok(run));
-        }
+            .await?;
+        self.admit();
         Ok(())
     }
 
     pub async fn express_input(&self, task_id: &str, body: String) -> Result<(), TaskServiceError> {
-        if let Some(run) = self.service.express_input(task_id, body).await? {
-            self.watch_agent_run(Ok(run));
-        }
+        self.service.express_input(task_id, body).await?;
+        self.admit();
         Ok(())
     }
 

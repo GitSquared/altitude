@@ -1,9 +1,8 @@
-use crate::isolation::{CommandSession, IsolationEngine};
+use crate::isolation::IsolationEngine;
 
 use crate::task::{
-    Task, TaskAgentRun, TaskAsk, TaskAskAuthor, TaskError, TaskExecutionPauseReason,
-    TaskExecutionStatus, TaskHistoryEvent, TaskInput, TaskInputAuthor, TaskInputSource,
-    TaskService, TaskServiceError,
+    Task, TaskAsk, TaskAskAuthor, TaskError, TaskExecutionPauseReason, TaskExecutionStatus,
+    TaskHistoryEvent, TaskInput, TaskInputAuthor, TaskInputSource, TaskService, TaskServiceError,
 };
 
 impl<E> TaskService<E>
@@ -28,11 +27,7 @@ where
             .map_err(TaskServiceError::Task)
     }
 
-    pub async fn express_input(
-        &self,
-        task_id: &str,
-        body: String,
-    ) -> Result<Option<(Task, TaskAgentRun, CommandSession)>, TaskServiceError> {
+    pub async fn express_input(&self, task_id: &str, body: String) -> Result<(), TaskServiceError> {
         let task = self
             .store
             .get(task_id)
@@ -69,15 +64,14 @@ where
             task.facts.execution_status,
             TaskExecutionStatus::Running | TaskExecutionStatus::Pending
         ) {
-            return Ok(None);
+            return Ok(());
         }
         let intends = self.inputs(&task.id).await?;
         let prompt = format!(
             "The operator sent a new message. Read it and the task, answer through a signal              if needed, and continue autonomously.\n\nExpressed intent so far:\n{}",
             render_inputs(&intends)
         );
-        let (task, run, session) = self.start_autopilot_turn(task, &prompt, None).await?;
-        Ok(Some((task, run, session)))
+        self.queue_wake(&task, prompt).await
     }
 
     pub async fn unresolved_signal_threads(
@@ -117,7 +111,7 @@ where
         task_id: &str,
         signal_id: &str,
         resolved: bool,
-    ) -> Result<Option<(Task, TaskAgentRun, CommandSession)>, TaskServiceError> {
+    ) -> Result<(), TaskServiceError> {
         let thread = self
             .store
             .signal_thread(task_id, signal_id)
@@ -131,14 +125,13 @@ where
             || task.facts.accepted
             || task.facts.execution_pause_reason != Some(TaskExecutionPauseReason::AwaitingOperator)
         {
-            return Ok(None);
+            return Ok(());
         }
         let title = thread.map(|thread| thread.title).unwrap_or_default();
         let prompt = format!(
             "The operator closed the thread \"{title}\", so it needs nothing more from them. Read the task, carry on with the work, and say what you are doing in the thread if it is still worth saying."
         );
-        let (task, run, session) = self.start_autopilot_turn(task, &prompt, None).await?;
-        Ok(Some((task, run, session)))
+        self.queue_wake(&task, prompt).await
     }
 
     pub async fn reply_operator_signal(
@@ -146,7 +139,7 @@ where
         task_id: &str,
         signal_id: &str,
         reply: String,
-    ) -> Result<Option<(Task, TaskAgentRun, CommandSession)>, TaskServiceError> {
+    ) -> Result<(), TaskServiceError> {
         // Re-read rather than trusting a caller-held task: the operator may have
         // opened the signal list some time before replying.
         let task = self
@@ -161,21 +154,29 @@ where
             )
             || task.facts.execution_pause_reason == Some(TaskExecutionPauseReason::Transfer)
         {
-            return Ok(None);
+            return Ok(());
         }
         // The turn reads the whole task and the thread; it does not receive a
-        // pre-digested command. Keeping the answering id lets a report that has
-        // nothing to add resolve the thread it was continuing.
-        let (task, run, session) = self
-            .start_autopilot_turn(
-                task,
-                &format!(
-                    "The operator replied on signal {signal_id}. Read the thread and the task, answer in the thread, and do the work the reply asks for. Continue autonomously if there is more to do."
-                ),
-                Some(signal_id.to_owned()),
-            )
-            .await?;
-        Ok(Some((task, run, session)))
+        // pre-digested command.
+        let prompt = format!(
+            "The operator replied on signal {signal_id}. Read the thread and the task, answer in the thread, and do the work the reply asks for. Continue autonomously if there is more to do."
+        );
+        self.queue_wake(&task, prompt).await
+    }
+
+    // Every way a person or a pull request puts a task back to work ends here: the
+    // task is queued with what woke it, and admission decides when the machine has
+    // room for its sandbox. A wake is never the thing that makes a sandbox.
+    async fn queue_wake(&self, task: &Task, prompt: String) -> Result<(), TaskServiceError> {
+        self.record(
+            &task.id,
+            &[TaskHistoryEvent::ExecutionQueued {
+                execution_status: TaskExecutionStatus::Pending,
+                wake: Some(prompt),
+            }],
+        )
+        .await?;
+        Ok(())
     }
 
     pub async fn confirm_operator_signal(

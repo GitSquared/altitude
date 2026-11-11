@@ -45,7 +45,7 @@ use crate::{
 
 use super::settings::ServeSettings;
 use super::tracker_host::PushedTrackers;
-use super::{OwnTasks, Transfers, Watchers};
+use super::{OwnTasks, Transfers, Watchers, publish_change, publish_queue, summary_of};
 use crate::remote::host::{admin, install};
 
 pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
@@ -266,8 +266,13 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
                     TaskExecutionUpdate::Created(Ok(task))
                     | TaskExecutionUpdate::Started(Ok(task))
                     | TaskExecutionUpdate::Finished(_, Ok(task))
-                    | TaskExecutionUpdate::OperatorReady(task) => watchers.publish(&task),
-                    TaskExecutionUpdate::Removed(id, _) => watchers.removed(id),
+                    | TaskExecutionUpdate::OperatorReady(task) => {
+                        publish_change(&watchers, &tasks, &task).await
+                    }
+                    TaskExecutionUpdate::Removed(id, _) => {
+                        watchers.removed(id);
+                        publish_queue(&watchers, &tasks).await;
+                    }
                     // A failure that came before a task existed carries no task
                     // with it, so what changed is read from the store rather than
                     // guessed at. Errors are rare; a card left saying the wrong
@@ -276,8 +281,14 @@ pub async fn run(args: ServeArgs) -> Result<(), Box<dyn Error>> {
                     | TaskExecutionUpdate::Started(Err(_))
                     | TaskExecutionUpdate::Finished(_, Err(_)) => {
                         if let Ok(all) = tasks.list().await {
+                            let standings = tasks.standings(&all);
                             for task in &all {
-                                watchers.publish(task);
+                                if let Some(operator) = task.operator_id() {
+                                    watchers.publish(
+                                        operator,
+                                        summary_of(task, standings.get(&task.id)),
+                                    );
+                                }
                             }
                         }
                     }

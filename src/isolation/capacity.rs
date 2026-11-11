@@ -1,10 +1,11 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use serde::{Deserialize, Serialize};
 use sysinfo::{Disks, MINIMUM_CPU_UPDATE_INTERVAL, System};
 
 use super::SandboxCeiling;
@@ -31,9 +32,9 @@ pub const DISK_FLOOR_MIB: u64 = 5 * 1_024;
 
 pub const MIN_READINGS: usize = 4;
 
-// What one sandbox's disk may grow to. A ceiling is a bound rather than a reservation,
-// and the disk is the one resource whose exhaustion is a machine stopping mid-build
-// instead of slowing down, so it is sized for a Rust workspace with room to spare.
+// What one sandbox's disk may grow to. The runtime enforces a disk ceiling, so nothing
+// here counts it, and it is the one resource whose exhaustion stops a machine mid-build
+// instead of slowing it: it is sized for a Rust workspace with room to spare.
 pub const SANDBOX_DISK_CEILING_MIB: u32 = 30 * 1_024;
 
 pub const MEMORY_SHARE_OF_HOST: u64 = 80;
@@ -41,14 +42,16 @@ pub const MINIMUM_CEILING_MIB: u64 = 2 * 1_024;
 pub const MAXIMUM_CEILING_MIB: u64 = 8 * 1_024;
 pub const MAXIMUM_CEILING_CPUS: u8 = 4;
 
-// What a machine is too busy with. A ceiling is a bound and not a reservation, so
-// there is no count of what fits anywhere in this module: the only question a queue
-// can ask a host is whether it is coping, and this is the answer when it is not.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// What a machine is too busy with. Three of these are readings and one is a count: a
+// guest fills what it was given minutes later, so a machine can look idle while its
+// sandboxes have been promised more than it has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Pressure {
     Cpu,
     Memory,
     Disk,
+    Promised,
 }
 
 // How many starts may be landing at once. A start is minutes of boot before it shows
@@ -65,7 +68,6 @@ pub struct ResourceSample {
     pub at_ms: i64,
     pub cpu_percent: f64,
     pub memory_percent: f64,
-    pub available_mib: u64,
 }
 
 #[derive(Debug, Default)]
@@ -98,10 +100,13 @@ impl SampleWindow {
     pub fn cpu_p75(&self) -> Option<f64> {
         percentile_75(self.samples.iter().map(|sample| sample.cpu_percent))
     }
+}
 
-    pub fn memory_p75(&self) -> Option<f64> {
-        percentile_75(self.samples.iter().map(|sample| sample.memory_percent))
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SandboxRoom {
+    pub offered: Option<SandboxCeiling>,
+    pub promised_mib: u64,
+    pub fitting: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,17 +129,6 @@ fn total_memory_mib(system: &System) -> u64 {
     system.total_memory() / (1024 * 1024)
 }
 
-fn smallest_ceiling() -> SandboxCeiling {
-    SandboxCeiling {
-        cpus: 1,
-        memory_mib: u32::try_from(MINIMUM_CEILING_MIB).unwrap_or(u32::MAX),
-        disk_mib: SANDBOX_DISK_CEILING_MIB,
-    }
-}
-
-// The valve, and the sizes that go with it. It holds no count of how many sandboxes
-// the machine may carry, because nothing here reserves anything: it reads what the
-// machine is doing and answers whether it is coping.
 #[derive(Debug)]
 pub struct HostPressure {
     sampler: Option<HostSampler>,
@@ -142,6 +136,9 @@ pub struct HostPressure {
     window: SampleWindow,
     data_dir: PathBuf,
     held: Option<Pressure>,
+    // Empty after a restart is empty correctly: every guest is in this machine's own
+    // unit, so none outlives the process that counted it.
+    promises: HashMap<String, u32>,
 }
 
 impl HostPressure {
@@ -160,6 +157,33 @@ impl HostPressure {
             window: SampleWindow::new(),
             data_dir: data_dir.to_owned(),
             held: None,
+            promises: HashMap::new(),
+        }
+    }
+
+    // One size per machine, so a task gets the same sandbox however it arrived: a build
+    // that fitted this morning must not fail this afternoon because the machine was
+    // busier when it started. What depends on the moment is whether it runs at all.
+    fn sandbox_mib(&self) -> u64 {
+        if self.totals.memory_mib == 0 {
+            return MINIMUM_CEILING_MIB;
+        }
+        (self.budget_mib() / landings() as u64).clamp(MINIMUM_CEILING_MIB, MAXIMUM_CEILING_MIB)
+    }
+
+    pub fn room(&self) -> SandboxRoom {
+        let memory_mib = self.sandbox_mib();
+        let room_mib = self.room_mib();
+        SandboxRoom {
+            // Every guest may be told the machine's cores: vcpus are time-shared.
+            offered: (room_mib >= memory_mib).then(|| SandboxCeiling {
+                cpus: u8::try_from(self.totals.cpus.clamp(1, usize::from(MAXIMUM_CEILING_CPUS)))
+                    .unwrap_or(1),
+                memory_mib: u32::try_from(memory_mib).unwrap_or(u32::MAX),
+                disk_mib: SANDBOX_DISK_CEILING_MIB,
+            }),
+            promised_mib: self.promised_mib(),
+            fitting: usize::try_from(room_mib / memory_mib).unwrap_or(usize::MAX),
         }
     }
 
@@ -170,7 +194,13 @@ impl HostPressure {
         if let Some(sample) = self.sampler.as_mut().and_then(HostSampler::sample) {
             self.window.push(sample);
         }
-        let (Some(cpu), Some(memory)) = (self.window.cpu_p75(), self.window.memory_p75()) else {
+        // Memory is the reading of now, cpu the window: a burst is over as quickly as it
+        // started, but noticing a minute late that memory came back leaves the queue
+        // idle after nothing is wrong.
+        let (Some(cpu), Some(memory)) = (
+            self.window.cpu_p75(),
+            self.window.latest().map(|sample| sample.memory_percent),
+        ) else {
             // Too few readings to judge the machine. A valve that shut on no readings
             // would refuse the first task after every restart, so only the disk — which
             // is a fact rather than a sample — can close it this early.
@@ -181,16 +211,19 @@ impl HostPressure {
             self.held = low_disk.then_some(Pressure::Disk);
             return self.held;
         }
+        let full = self.room_mib() < self.sandbox_mib();
         let busy = if cpu > BUSY_CPU_PERCENT {
             Some(Pressure::Cpu)
         } else if memory > BUSY_MEMORY_PERCENT {
             Some(Pressure::Memory)
         } else if low_disk {
             Some(Pressure::Disk)
+        } else if full {
+            Some(Pressure::Promised)
         } else {
             None
         };
-        let calm = cpu < CALM_CPU_PERCENT && memory < CALM_MEMORY_PERCENT && !low_disk;
+        let calm = cpu < CALM_CPU_PERCENT && memory < CALM_MEMORY_PERCENT && !low_disk && !full;
         self.held = match busy {
             // The reason is the current reading, so a machine that shut for cpu and is
             // now holding on memory says memory.
@@ -208,27 +241,39 @@ impl HostPressure {
         self.held
     }
 
-    // Sized from what the machine has left rather than from a count of how many it is
-    // keeping: a ceiling is an upper bound, so the only honest input is memory it can
-    // actually give away now. A box filling up hands out smaller sandboxes by itself.
-    pub fn ceiling(&self) -> SandboxCeiling {
+    // Taken in the one call that makes the sandbox and held until it is gone, because
+    // memory is spent when it is handed out. A machine with less room than a sandbox
+    // takes waits rather than making a smaller one.
+    pub fn promise(&mut self, id: &str, wanted: SandboxCeiling) -> Option<SandboxCeiling> {
+        if u64::from(wanted.memory_mib) > self.room_mib() {
+            return None;
+        }
+        self.promises.insert(id.to_owned(), wanted.memory_mib);
+        Some(wanted)
+    }
+
+    pub fn release(&mut self, id: &str) {
+        self.promises.remove(id);
+    }
+
+    pub fn promised_mib(&self) -> u64 {
+        self.promises
+            .values()
+            .map(|memory_mib| u64::from(*memory_mib))
+            .sum()
+    }
+
+    fn budget_mib(&self) -> u64 {
+        self.totals.memory_mib * MEMORY_SHARE_OF_HOST / 100
+    }
+
+    // A machine that cannot say how much memory it has is not a machine to stop taking
+    // work for, which is the answer this module gives an unreadable disk too.
+    fn room_mib(&self) -> u64 {
         if self.totals.memory_mib == 0 {
-            return smallest_ceiling();
+            return u64::MAX;
         }
-        let available_mib = self
-            .window
-            .latest()
-            .map_or(self.totals.memory_mib, |sample| sample.available_mib);
-        let memory_mib = (available_mib * MEMORY_SHARE_OF_HOST / 100)
-            .clamp(MINIMUM_CEILING_MIB, MAXIMUM_CEILING_MIB);
-        SandboxCeiling {
-            // Every guest may be told the machine's cores: vcpus are time-shared, and
-            // what keeps the number of guests down is the valve, not the ceiling.
-            cpus: u8::try_from(self.totals.cpus.clamp(1, usize::from(MAXIMUM_CEILING_CPUS)))
-                .unwrap_or(1),
-            memory_mib: u32::try_from(memory_mib.min(u64::from(u32::MAX))).unwrap_or(u32::MAX),
-            disk_mib: SANDBOX_DISK_CEILING_MIB,
-        }
+        self.budget_mib().saturating_sub(self.promised_mib())
     }
 
     fn disk_available_mib(&self) -> u64 {
@@ -299,7 +344,6 @@ impl HostSampler {
             at_ms: now_ms(),
             cpu_percent: f64::from(self.system.global_cpu_usage()).clamp(0.0, 100.0),
             memory_percent: (100.0 * used as f64 / total as f64).clamp(0.0, 100.0),
-            available_mib: available / (1024 * 1024),
         })
     }
 }

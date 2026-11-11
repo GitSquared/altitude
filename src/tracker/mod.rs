@@ -6,9 +6,7 @@ mod surface;
 pub(crate) use logins::{Login, claim_account, logins, logins_of, yield_account};
 
 pub use host::TrackerReadiness;
-pub(crate) use host::{
-    BoundTask, DelegatedWork, DelegatedWorkFuture, QueueStanding, Start, TrackerIntegration,
-};
+pub(crate) use host::{BoundTask, DelegatedWork, DelegatedWorkFuture, TrackerIntegration};
 pub(crate) use providers::provider;
 pub(crate) use surface::{AskSurface, ask_marker};
 

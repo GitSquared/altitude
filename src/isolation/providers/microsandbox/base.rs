@@ -139,7 +139,7 @@ impl MicrosandboxIsolation {
         // An environment build is a sandbox like any other, so it takes the same
         // ceiling: it runs apt and a package manager, which is exactly the work
         // that wants the room.
-        let ceiling = self.sandbox_ceiling();
+        let ceiling = self.sandbox_room().offered;
         self.create_sandbox(sandbox_id.clone(), options, ceiling, PullPolicy::Always)
             .await?;
         let result = async {

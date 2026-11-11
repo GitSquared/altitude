@@ -9,7 +9,7 @@ use ratatui::{
 };
 
 use crate::{
-    isolation::EnvironmentProgress,
+    isolation::{EnvironmentProgress, Pressure},
     remote::TaskSummary,
     task::{
         TaskAskKind, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
@@ -394,7 +394,6 @@ struct Held {
 
 fn rows(app: &App) -> Built {
     let project = app.active_project_id();
-    let taking_work = app.pressure.is_none();
     let filter = app
         .task_filter
         .chosen_value()
@@ -421,7 +420,7 @@ fn rows(app: &App) -> Built {
                 app,
                 &summary,
                 place_in_queue(&app.tasks, &task.id),
-                taking_work,
+                app.pressure,
             ),
         );
         entries.push(Held {
@@ -443,7 +442,7 @@ fn rows(app: &App) -> Built {
             summary,
             standing,
             false,
-            detail_of(app, summary, None, taking_work),
+            detail_of(app, summary, summary.ahead, summary.holding),
         );
         // A machine is a name only when the task is not on this one.
         if summary.tracker_issue.is_none() {
@@ -539,7 +538,12 @@ fn row_of(summary: &TaskSummary, standing: Standing, live: bool, detail: String)
     row
 }
 
-fn detail_of(app: &App, summary: &TaskSummary, ahead: Option<usize>, taking_work: bool) -> String {
+fn detail_of(
+    app: &App,
+    summary: &TaskSummary,
+    ahead: Option<usize>,
+    holding: Option<Pressure>,
+) -> String {
     // A row says what the task is asking, and otherwise that it is working. What the
     // model is saying this second changes faster than a list is read, so it is the
     // activity pane's line rather than the row's.
@@ -607,11 +611,17 @@ fn detail_of(app: &App, summary: &TaskSummary, ahead: Option<usize>, taking_work
             .last_error
             .clone()
             .unwrap_or_else(|| "the run ended in an error".to_owned()),
-        TaskExecutionStatus::Pending => match ahead {
-            Some(0) if !taking_work => "next up".to_owned(),
-            Some(ahead) => format!("{ahead} ahead"),
-            None => "waiting".to_owned(),
-        },
+        TaskExecutionStatus::Pending => {
+            let place = match ahead {
+                Some(0) if holding.is_none() => "next up".to_owned(),
+                Some(ahead) => format!("{ahead} ahead"),
+                None => "waiting".to_owned(),
+            };
+            match holding {
+                Some(pressure) => format!("{place} · {}", holding_words(pressure)),
+                None => place,
+            }
+        }
         TaskExecutionStatus::Running => match summary.mode {
             TaskExecutionMode::Autopilot => "working…".to_owned(),
             TaskExecutionMode::Operator => "at the terminal".to_owned(),
@@ -634,6 +644,16 @@ fn detail_of(app: &App, summary: &TaskSummary, ahead: Option<usize>, taking_work
 }
 
 // A limit is the one wait with a time on it, so it is the one that says when.
+// Why the machine is not taking work, in the width of a row.
+fn holding_words(pressure: Pressure) -> &'static str {
+    match pressure {
+        Pressure::Cpu => "the machine is busy",
+        Pressure::Memory => "the machine is out of memory",
+        Pressure::Disk => "the machine is low on disk",
+        Pressure::Promised => "the machine is full",
+    }
+}
+
 fn limit_of(summary: &TaskSummary) -> String {
     let window = summary
         .limit_window

@@ -1068,6 +1068,7 @@ fn pressure_words(pressure: Pressure) -> &'static str {
         Pressure::Cpu => "the machine is using as much cpu as it will take",
         Pressure::Memory => "the machine is using as much memory as it will take",
         Pressure::Disk => "the machine is low on disk",
+        Pressure::Promised => "the machine has promised all the memory it can to the tasks on it",
     }
 }
 

@@ -83,8 +83,7 @@ where
                 .reply_operator_signal(&task_id, &signal_id, body)
                 .await
             {
-                Ok(Some(run)) => event_loop.watch_agent_run(Ok(run)),
-                Ok(None) => {}
+                Ok(()) => event_loop.admit(),
                 Err(error) => event_loop.watch_agent_run(Err(error)),
             }
         });
@@ -93,17 +92,14 @@ where
     pub fn settle_signal(&self, task_id: String, signal_id: String, body: String) {
         let event_loop = self.clone();
         tokio::spawn(async move {
-            let run = match event_loop
+            if let Err(error) = event_loop
                 .service
                 .reply_operator_signal(&task_id, &signal_id, body)
                 .await
             {
-                Ok(run) => run,
-                Err(error) => {
-                    event_loop.watch_agent_run(Err(error));
-                    return;
-                }
-            };
+                event_loop.watch_agent_run(Err(error));
+                return;
+            }
             if let Err(error) = event_loop
                 .service
                 .resolve_signal(&task_id, &signal_id, true)
@@ -112,9 +108,7 @@ where
                 event_loop.watch_agent_run(Err(error));
                 return;
             }
-            if let Some(run) = run {
-                event_loop.watch_agent_run(Ok(run));
-            }
+            event_loop.admit();
         });
     }
 

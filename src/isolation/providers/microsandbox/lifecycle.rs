@@ -9,13 +9,37 @@ use super::base::BASE_IMAGE;
 use super::{MicrosandboxIsolation, output_tail};
 
 impl MicrosandboxIsolation {
+    pub(super) fn promise_ceiling(
+        &self,
+        id: &str,
+        wanted: Option<SandboxCeiling>,
+    ) -> Result<SandboxCeiling, IsolationError> {
+        let mut pressure = self.host_pressure.lock().expect("pressure lock poisoned");
+        wanted
+            .and_then(|wanted| pressure.promise(id, wanted))
+            .ok_or_else(|| {
+                IsolationError::new(
+                    "this machine has promised all the memory it can to the sandboxes it is \
+                     running, so it has none left to give this one",
+                )
+            })
+    }
+
+    pub(super) fn release_ceiling(&self, id: &str) {
+        self.host_pressure
+            .lock()
+            .expect("pressure lock poisoned")
+            .release(id);
+    }
+
     pub(super) async fn create_sandbox(
         &self,
         id: String,
         mut options: SandboxOptions,
-        ceiling: SandboxCeiling,
+        offered: Option<SandboxCeiling>,
         pull_policy: PullPolicy,
     ) -> Result<(), IsolationError> {
+        let ceiling = self.promise_ceiling(&id, offered)?;
         mount_git_cache(&mut options, &self.config.git_cache_dir());
         let trusted = trust_host_roots(&mut options, self.config.data_dir());
         tracing::debug!(sandbox_id = %id, network_enabled = options.network_enabled, cpus = ceiling.cpus, memory_mib = ceiling.memory_mib, "creating sandbox");
@@ -99,6 +123,9 @@ impl MicrosandboxIsolation {
             {
                 tracing::warn!(sandbox_id = %id, %cleanup_error, "could not remove failed sandbox creation");
             }
+            // A sandbox that was never made is not removed, so the promise is handed
+            // back here as well as from the removal.
+            self.release_ceiling(&id);
             return Err(IsolationError::new(error.to_string()));
         }
 

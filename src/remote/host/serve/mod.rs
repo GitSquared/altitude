@@ -20,8 +20,8 @@ use crate::{
     config::Config,
     isolation::{IsolationStatus, MicrosandboxIsolation},
     remote::announce::Phase,
-    remote::protocol::TaskSummary,
-    task::{Task, TaskEventLoop, TaskHistoryEvent},
+    remote::protocol::{self, TaskSummary},
+    task::{QueueStanding, Task, TaskEventLoop, TaskHistoryEvent, waits_for_room},
 };
 
 use crate::tracker::TrackerIntegration;
@@ -181,10 +181,45 @@ impl Watchers {
         });
     }
 
-    fn publish(&self, task: &Task) {
-        if let Some(operator) = task.operator_id() {
-            self.changed(operator, TaskSummary::of(task));
-        }
+    fn publish(&self, operator: &str, summary: TaskSummary) {
+        self.changed(operator, summary);
+    }
+}
+
+// What a client is told about one task: the task itself, and where it stands when it is
+// waiting for room. The numbering is the machine's, so a client cannot work it out.
+fn summary_of(task: &Task, standing: Option<&QueueStanding>) -> protocol::TaskSummary {
+    let mut summary = protocol::TaskSummary::of(task);
+    summary.ahead = standing.map(|standing| standing.ahead);
+    summary.holding = standing.and_then(|standing| standing.holding);
+    summary
+}
+
+// A card for one task, and then the queue again: one start or finish moves every
+// number behind it, and the numbering is the machine's to say.
+async fn publish_change(
+    watchers: &Watchers,
+    tasks: &TaskEventLoop<MicrosandboxIsolation>,
+    task: &Task,
+) {
+    if let Some(operator) = task.operator_id() {
+        watchers.publish(operator, summary_of(task, None));
+    }
+    publish_queue(watchers, tasks).await;
+}
+
+// One start moves every number behind it, so a change anywhere in the queue is said to
+// every task still waiting in it.
+async fn publish_queue(watchers: &Watchers, tasks: &TaskEventLoop<MicrosandboxIsolation>) {
+    let Ok(all) = tasks.service().list_in_play().await else {
+        return;
+    };
+    let standings = tasks.standings(&all);
+    for task in all.iter().filter(|task| waits_for_room(task)) {
+        let Some(operator) = task.operator_id() else {
+            continue;
+        };
+        watchers.publish(operator, summary_of(task, standings.get(&task.id)));
     }
 }
 

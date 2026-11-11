@@ -332,10 +332,10 @@ pub struct TaskFacts {
     pub leading_ask: Option<LeadingAsk>,
     #[sqlx(json(nullable))]
     pub deferred_review: Option<DeferredReview>,
-    // The news the run that is starting was woken with, and the last news any run
-    // was woken with. The first opens the turn; the second is what a wake compares
-    // itself against, because saying the same thing twice is what a wake loop is.
-    pub review_wake_news: Option<String>,
+    // What the run that is starting opens with, said by whatever queued the task. The
+    // second is the last thing said about this task's pull requests, which is what a
+    // review poll compares itself against: saying it again unchanged is a wake loop.
+    pub wake_news: Option<String>,
     pub last_wake_news: Option<String>,
     #[sqlx(json)]
     pub pending_inputs: Vec<TaskInput>,
@@ -500,6 +500,9 @@ pub enum TaskHistoryEvent {
     },
     ExecutionQueued {
         execution_status: TaskExecutionStatus,
+        // What the run opens with, when something asked the task to move again.
+        #[serde(default)]
+        wake: Option<String>,
     },
     SandboxRemoved {
         sandbox_available: bool,

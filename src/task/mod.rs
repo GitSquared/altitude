@@ -174,7 +174,8 @@ impl Error for TaskServiceError {}
 
 // Execution policy consumes recorded values; the store does not infer these decisions.
 
-pub(crate) use queue::{place_in_queue, tasks_waiting_for_room};
+pub use queue::{QueueStanding, Start};
+pub(crate) use queue::{place_in_queue, tasks_waiting_for_room, waits_for_room};
 
 fn should_resume(task: &Task) -> bool {
     matches!(
@@ -358,6 +359,9 @@ where
     }
     pub async fn list(&self) -> Result<Vec<Task>, TaskServiceError> {
         self.store.list().await.map_err(TaskServiceError::Task)
+    }
+    pub async fn list_in_play(&self) -> Result<Vec<Task>, TaskServiceError> {
+        self.store.in_play().await.map_err(TaskServiceError::Task)
     }
     pub fn base_description(&self) -> Option<EnvironmentDescription> {
         self.isolation.base_description()

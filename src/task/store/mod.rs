@@ -77,6 +77,19 @@ impl TaskStore {
         .map_err(TaskError::Database)
     }
 
+    pub async fn in_play(&self) -> Result<Vec<Task>, TaskError> {
+        sqlx::query_as::<_, TaskRow>(concat!(
+            include_str!("read_task.sql"),
+            " WHERE tasks.removed_at_ms IS NULL",
+            " AND NOT EXISTS (SELECT 1 FROM finished_tasks WHERE finished_tasks.task_id = tasks.id)",
+            " ORDER BY last_event_sequence DESC"
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| rows.into_iter().map(Task::from).collect())
+        .map_err(TaskError::Database)
+    }
+
     pub async fn list_held_reviews(&self) -> Result<Vec<Task>, TaskError> {
         sqlx::query_as::<_, TaskRow>(concat!(
             include_str!("read_task.sql"),
@@ -219,9 +232,7 @@ impl TaskStore {
             include_str!("read_task.sql"),
             r#" WHERE tasks.removed_at_ms IS NULL
                   AND NOT EXISTS (
-                      SELECT 1 FROM task_event_logs AS finished
-                      WHERE finished.task_id = tasks.id
-                        AND finished.event_type IN ('operator_signal_confirmed', 'task_completed')
+                      SELECT 1 FROM finished_tasks WHERE finished_tasks.task_id = tasks.id
                   )
                   AND EXISTS (
                       SELECT 1 FROM task_event_logs AS bound

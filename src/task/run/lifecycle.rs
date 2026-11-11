@@ -138,17 +138,10 @@ where
                     resumed = resume,
                     "the agent's conversation is ready"
                 );
-                // A task the host woke because a linked pull request needed
-                // attention carries the news itself. Anything else is a paused
-                // capsule coming back, whose last turn may be days old by now, so
-                // the agent is told what happened to it rather than simply asked to
-                // resume.
-                let prompt = task
-                    .facts
-                    .review_wake_news
-                    .as_ref()
-                    .map(|news| format!("altitude checked the pull requests linked to this task:\n\n{news}"))
-                    .unwrap_or_else(|| {
+                // Whatever woke this task says what the turn opens with. Anything else
+                // is a paused capsule coming back, whose last turn may be days old, so
+                // the agent is told what happened to it rather than asked to resume.
+                let prompt = task.facts.wake_news.clone().unwrap_or_else(|| {
                     if resume {
                         "altitude paused this task and restored its sandbox from a snapshot. You \
                          are continuing the same conversation, and the current time is in the \
@@ -540,6 +533,7 @@ where
                             );
                             let mut events = vec![TaskHistoryEvent::ExecutionQueued {
                                 execution_status: TaskExecutionStatus::Pending,
+                                wake: None,
                             }];
                             events.extend(restart_events(
                                 &task,
@@ -775,7 +769,7 @@ fn restart_events(task: &Task, said: &str) -> Vec<TaskHistoryEvent> {
 
 // The machine telling the agent something it has to know at its next turn: what it is
 // starting from, when the workspace it had is gone.
-fn notice_event(task: &Task, body: &str) -> Vec<TaskHistoryEvent> {
+pub(super) fn notice_event(task: &Task, body: &str) -> Vec<TaskHistoryEvent> {
     vec![TaskHistoryEvent::TaskInputExpressed {
         input: TaskInput {
             id: uuid::Uuid::new_v4().to_string(),

@@ -6,8 +6,7 @@ use std::{
 
 use crate::agent::Activity;
 use crate::remote::{StartFuture, StartRefusal};
-use crate::task::tasks_waiting_for_room;
-use crate::task::{TaskExecutionPauseReason, TaskExecutionStatus};
+use crate::task::{QueueStanding, TaskExecutionPauseReason, TaskExecutionStatus};
 use iroh::EndpointId;
 
 use crate::{
@@ -15,8 +14,8 @@ use crate::{
     credentials::Service,
     task::{TaskAsk, TaskHistoryEvent, TrackerHost},
     tracker::{
-        self, BoundTask, DelegatedWork, DelegatedWorkFuture, IssueSnapshot, QueueStanding, Start,
-        TrackerProvider, TrackerStatus,
+        self, BoundTask, DelegatedWork, DelegatedWorkFuture, IssueSnapshot, TrackerProvider,
+        TrackerStatus,
     },
 };
 
@@ -292,39 +291,12 @@ impl DelegatedWork for OwnTasks {
         Box::pin(async move { Ok(self.tasks.current_activity(&task_id)) })
     }
 
-    // One read of the queue for every task on it, rather than one read per task: the
-    // queue, the machine and the start are the same three facts for all of them.
     fn queue_standings(&self) -> DelegatedWorkFuture<'_, HashMap<String, QueueStanding>> {
         Box::pin(async move {
-            let tasks = self.tasks.list().await.map_err(|error| error.to_string())?;
-            // A task waiting for room has no capsule, so every capsule counted here
-            // belongs to work that is ahead of it.
-            let on_machine = tasks
-                .iter()
-                .filter(|task| task.facts.sandbox_available)
-                .count();
-            let holding = self.tasks.pressure();
-            Ok(tasks_waiting_for_room(&tasks)
-                .into_iter()
-                .enumerate()
-                .map(|(ahead, task)| {
-                    let start = self.tasks.is_starting(&task.id).then(|| {
-                        match self.tasks.service().environment_step(&task.id) {
-                            Some(progress) => Start::Building(progress),
-                            None => Start::Provisioning,
-                        }
-                    });
-                    (
-                        task.id.clone(),
-                        QueueStanding {
-                            ahead,
-                            on_machine,
-                            holding,
-                            start,
-                        },
-                    )
-                })
-                .collect())
+            self.tasks
+                .queue_standings()
+                .await
+                .map_err(|error| error.to_string())
         })
     }
 

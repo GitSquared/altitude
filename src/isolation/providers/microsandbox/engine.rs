@@ -15,7 +15,8 @@ use crate::isolation::{
     CommandSession, CredentialCheck, CredentialReport, CredentialSandbox, EnvironmentDescription,
     EnvironmentProgressSink, FileTally, FileTransferSink, ImagePull, IsolationEngine,
     IsolationError, IsolationStatus, OutputStream, PackageInstall, PackageInstallSink, Pressure,
-    ProfileRecipe, SandboxCeiling, SandboxOptions, SandboxPurpose, VsockRoute, WATCHER_PREFIX,
+    ProfileRecipe, SandboxCeiling, SandboxOptions, SandboxPurpose, SandboxRoom, VsockRoute,
+    WATCHER_PREFIX,
     sandbox::{self, REFRESH_AFTER, private_directory},
 };
 
@@ -53,11 +54,11 @@ impl IsolationEngine for MicrosandboxIsolation {
             .observe()
     }
 
-    fn sandbox_ceiling(&self) -> SandboxCeiling {
+    fn sandbox_room(&self) -> SandboxRoom {
         self.host_pressure
             .lock()
             .expect("pressure lock poisoned")
-            .ceiling()
+            .room()
     }
 
     fn project_memory_dir(&self, project_id: &str) -> PathBuf {
@@ -295,8 +296,8 @@ impl IsolationEngine for MicrosandboxIsolation {
         purpose: SandboxPurpose,
     ) -> Result<(), IsolationError> {
         let ceiling = match purpose {
-            SandboxPurpose::Capsule => self.sandbox_ceiling(),
-            SandboxPurpose::Command => SandboxCeiling::COMMAND,
+            SandboxPurpose::Capsule => self.sandbox_room().offered,
+            SandboxPurpose::Command => Some(SandboxCeiling::COMMAND),
         };
         if let Some(route) = self.credential_shell_channel(&id) {
             options.vsock.push(route);
@@ -489,6 +490,7 @@ impl IsolationEngine for MicrosandboxIsolation {
             // that went away — is a sandbox the caller no longer has to worry about,
             // and reporting it would fail a task for being tidier than expected.
             Err(microsandbox::MicrosandboxError::SandboxNotFound(_)) => {
+                self.release_ceiling(&id);
                 return Ok(());
             }
             Err(error) => return Err(IsolationError::new(error.to_string())),
@@ -502,7 +504,9 @@ impl IsolationEngine for MicrosandboxIsolation {
         sandbox
             .remove()
             .await
-            .map_err(|error| IsolationError::new(error.to_string()))
+            .map_err(|error| IsolationError::new(error.to_string()))?;
+        self.release_ceiling(&id);
+        Ok(())
     }
 
     async fn suspend(
@@ -537,6 +541,8 @@ impl IsolationEngine for MicrosandboxIsolation {
             .remove()
             .await
             .map_err(|error| IsolationError::new(error.to_string()))?;
+        // A suspended guest is not using its memory any more, so its promise goes back.
+        self.release_ceiling(&id);
         let path = snapshot
             .path()
             .map_err(|error| IsolationError::new(error.to_string()))?

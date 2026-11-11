@@ -7,8 +7,7 @@ use crate::{
         BaseSandboxRecipe, BaseSandboxSnapshot, CommandSession, CredentialCheck, CredentialReport,
         CredentialSandbox, EnvironmentDescription, EnvironmentProgressSink, FileTally,
         FileTransferSink, IsolationEngine, IsolationError, IsolationStatus, Pressure,
-        ProfileRecipe, SandboxCeiling, SandboxOptions, SandboxPurpose, VsockRoute,
-        private_directory,
+        ProfileRecipe, SandboxOptions, SandboxPurpose, SandboxRoom, VsockRoute, private_directory,
         sandbox::{self, ProvisionRequest},
     },
     project::Project,
@@ -33,11 +32,11 @@ impl IsolationEngine for TestbedIsolation {
             .observe()
     }
 
-    fn sandbox_ceiling(&self) -> SandboxCeiling {
+    fn sandbox_room(&self) -> SandboxRoom {
         self.host_pressure
             .lock()
             .expect("pressure lock poisoned")
-            .ceiling()
+            .room()
     }
 
     fn project_memory_dir(&self, project_id: &str) -> PathBuf {
