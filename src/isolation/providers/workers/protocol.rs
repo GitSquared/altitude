@@ -1,11 +1,8 @@
-use std::path::PathBuf;
-
 use serde::{Deserialize, Serialize};
 
-use crate::agent::AgentKind;
 use crate::isolation::{
-    BaseSandboxSnapshot, Command, CommandEvent, CredentialCheck, CredentialReport,
-    EnvironmentDescription, Pressure, SandboxOptions, SandboxPurpose, SandboxRoom, VsockRoute,
+    Command, CommandEvent, CredentialCheck, CredentialReport, SandboxOptions, SandboxPurpose,
+    VsockRoute,
 };
 use crate::project::Project;
 
@@ -35,15 +32,6 @@ pub(crate) struct WorkerProfile {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) enum WorkerCall {
-    // Say whether this host can make sandboxes at all.
-    Probe,
-    // Build a project's environment here and return the snapshot the host made.
-    // The recipes are rebuilt from the agent kind, so the wire carries no
-    // `ProfileRecipe`.
-    EnsureProject {
-        project: Project,
-        agent: AgentKind,
-    },
     // Make the one task sandbox this host was spawned for. The two profile ids
     // name the credentials to mount; the host rebuilds their recipes itself.
     Provision {
@@ -127,13 +115,6 @@ pub(crate) enum WorkerCall {
         id: String,
         path: String,
     },
-    ProjectMemoryDir {
-        project_id: String,
-    },
-    BaseDescription,
-    Pressure,
-    Room,
-    CleanupLeftovers,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -141,17 +122,12 @@ pub(crate) enum WorkerReply {
     // The host started a command and what follows on the stream is its output.
     Ready,
     Ok,
-    Snapshot(BaseSandboxSnapshot),
     // Bytes follow on the stream: a collected file or a tar of a collected tree,
     // and what the collecting machine counted.
     Blob { len: u64, files: u64, bytes: u64 },
     Reports(Option<Vec<(String, CredentialReport)>>),
     Bool(bool),
-    Path(PathBuf),
     Text(String),
-    Description(Option<EnvironmentDescription>),
-    Pressure(Option<Pressure>),
-    Room(SandboxRoom),
     Failed(String),
 }
 

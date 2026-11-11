@@ -14,7 +14,7 @@ use crate::{
     credentials::profile_recipe,
     isolation::{
         CommandEvent, CredentialSandbox, IsolationEngine, ProfileRecipe, Unwatched, VsockRoute,
-        mounts, private_directory,
+        private_directory,
         worker_protocol::{CommandFrame, WorkerCall, WorkerProfile, WorkerReply},
     },
     remote::protocol::{read_frame, write_frame},
@@ -23,7 +23,7 @@ use crate::{
 #[cfg(target_os = "linux")]
 use crate::remote::cache::{self, CacheFs};
 
-use super::{Readiness, WorkerService};
+use super::WorkerService;
 
 impl WorkerService {
     // The host's end of the agent channel: it listens on the loopback the sandbox
@@ -126,29 +126,6 @@ impl WorkerService {
     fn unmount_cache(&self, _id: &str) {}
     pub(super) async fn dispatch(&self, call: WorkerCall) -> WorkerReply {
         match call {
-            WorkerCall::Probe => {
-                let readiness = self.readiness.lock().expect("worker readiness");
-                match &*readiness {
-                    Readiness::Ready => WorkerReply::Ready,
-                    Readiness::Preparing => WorkerReply::Failed(
-                        "this host is still preparing its sandbox runtime".into(),
-                    ),
-                    Readiness::Failed(error) => WorkerReply::Failed(format!(
-                        "this host cannot prepare its sandbox runtime: {error}"
-                    )),
-                }
-            }
-            WorkerCall::EnsureProject { project, agent } => {
-                let recipes = mounts::task(&self.agents, agent);
-                match self
-                    .engine
-                    .ensure_project(project, recipes, &Unwatched)
-                    .await
-                {
-                    Ok(snapshot) => WorkerReply::Snapshot(snapshot),
-                    Err(error) => WorkerReply::Failed(error.to_string()),
-                }
-            }
             WorkerCall::Provision {
                 id,
                 snapshot,
@@ -212,19 +189,6 @@ impl WorkerService {
                     Ok(exists) => WorkerReply::Bool(exists),
                     Err(error) => WorkerReply::Failed(error.to_string()),
                 }
-            }
-            WorkerCall::ProjectMemoryDir { project_id } => WorkerReply::Text(
-                self.engine
-                    .project_memory_dir(&project_id)
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
-            WorkerCall::BaseDescription => WorkerReply::Description(self.engine.base_description()),
-            WorkerCall::Pressure => WorkerReply::Pressure(self.engine.pressure()),
-            WorkerCall::Room => WorkerReply::Room(self.engine.sandbox_room()),
-            WorkerCall::CleanupLeftovers => {
-                self.engine.remove_leftover_sandboxes().await;
-                WorkerReply::Ok
             }
             WorkerCall::CredentialShell {
                 id,
