@@ -1,4 +1,4 @@
-use std::{error::Error, io, time::Duration};
+use std::{error::Error, io, io::IsTerminal, time::Duration};
 
 use iroh::EndpointAddr;
 use tokio::{
@@ -8,7 +8,7 @@ use tokio::{
 
 use crate::{
     brand,
-    cli::WorkerArgs,
+    cli::{WORKER_GUIDE, WorkerArgs},
     config::Config,
     logging,
     remote::{
@@ -23,6 +23,13 @@ use super::workers::HEARTBEAT_INTERVAL;
 // The other end of the fleet contract: an empty box that knows nothing but who
 // made it. It registers, says it is still there, and waits to be given sandboxes.
 pub(crate) async fn run(args: &WorkerArgs, base: Config) -> Result<(), Box<dyn Error>> {
+    // A worker is spawned by a script, never typed at a terminal. Running one by
+    // hand is how a host becomes a box by accident, so say what this is instead
+    // of taking the machine over.
+    if !args.yes && io::stdin().is_terminal() && io::stdout().is_terminal() {
+        println!("{WORKER_GUIDE}");
+        return Ok(());
+    }
     logging::init_service();
     tracing::info!(
         "{}  altitude {VERSION} · isolation worker {}",
