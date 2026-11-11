@@ -1,0 +1,34 @@
+# A worker is a host a remote provisions for one task, and this container is the
+# sandbox: it is destroyed with the task, and its writable layer goes with it. That is
+# why the layers a start would rebuild belong in the image — bake them with
+# `altitude serve environment --agent claude`, under the same
+# ALTITUDE_WORKER_ENVIRONMENT this file builds with — rather than in a volume.
+#
+# The remote does not start this itself: it runs the provision script in serve.toml,
+# and that script is where the worker is launched. Running this file by hand is the
+# same thing with the arguments supplied by hand:
+#
+#   ALTITUDE_WORKER_ENVIRONMENT=demo ALTITUDE_VERSION=0.9.0 \
+#     docker compose -f compose.worker.example.yaml run --rm worker \
+#     serve worker --master "$TICKET" --token "$TOKEN" --name demo-1
+services:
+  worker:
+    build:
+      context: .
+      target: worker
+      args:
+        ALTITUDE_VERSION: "${ALTITUDE_VERSION:-}"
+        ALTITUDE_WORKER_ENVIRONMENT: "${ALTITUDE_WORKER_ENVIRONMENT:-}"
+    image: altitude-worker:local
+    init: true
+    # The sandbox is an unprivileged user and mount namespace over the account's home,
+    # and the default profiles refuse the calls that make one and the cache mount that
+    # goes inside it.
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+    cap_add:
+      - SYS_ADMIN
+    # Each project's cache is a FUSE mount of the remote's.
+    devices:
+      - /dev/fuse:/dev/fuse

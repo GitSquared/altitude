@@ -145,7 +145,8 @@ To set workers up on a remote:
       python3                   the bridge altitude's tools arrive through
       the agent harness         or the network to fetch it
     It also needs /dev/fuse and, unless it runs as root, the setuid fusermount3:
-    each project's cache is mounted from the remote through them.
+    each project's cache is mounted from the remote through them. The Dockerfile's
+    worker target and compose.worker.example.yaml are a starting point.
  6. Bake what a start would otherwise build. `altitude serve environment --agent
     claude` prints a host's layers, with the commands and the marker file that says
     they have run; a host that finds the marker starts from the built layer instead.

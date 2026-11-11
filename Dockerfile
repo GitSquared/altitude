@@ -40,3 +40,31 @@ USER altitude
 FROM runtime AS release
 COPY --from=download /out/altitude /usr/local/bin/altitude
 USER altitude
+
+# A worker is a host a remote provisions for one task, and the container is the
+# sandbox: its base image is a task's base image, so it starts from the same Node
+# image the microVM workspace does rather than from the minimal runtime above. The
+# package list is the workspace's, so a task finds the same tools on either; what a
+# host must carry, and how to bake the layers a start would otherwise rebuild, is in
+# `altitude serve worker --help`.
+#
+# ALTITUDE_WORKER_ENVIRONMENT has to name the image, and the value it names is the one
+# the layers were baked under: build with the same value you passed to
+# `altitude serve environment`, or the markers will not be found.
+FROM node:22-bookworm-slim AS worker
+ARG ALTITUDE_WORKER_ENVIRONMENT
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bash ca-certificates clang cmake curl fuse3 gh git gnupg \
+        jq libssl-dev openssh-client perl pkg-config python3 ripgrep \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g --no-fund --no-audit --no-progress @tobilu/qmd@2 \
+    && useradd --uid 1000 --create-home altitude
+ENV ALTITUDE_WORKER_ENVIRONMENT=${ALTITUDE_WORKER_ENVIRONMENT}
+ENV HOME=/home/altitude
+WORKDIR /home/altitude
+COPY --from=download /out/altitude /usr/local/bin/altitude
+USER altitude
+# The provision script supplies the arguments; run with none to read the contract.
+ENTRYPOINT ["altitude"]
+CMD ["serve", "worker", "--help"]
