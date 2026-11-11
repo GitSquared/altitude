@@ -102,7 +102,7 @@ impl SampleWindow {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SandboxRoom {
     pub offered: Option<SandboxCeiling>,
     pub promised_mib: u64,

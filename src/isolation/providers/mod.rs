@@ -2,6 +2,7 @@ use std::env;
 
 mod microsandbox;
 mod testbed;
+pub(crate) mod workers;
 
 pub use microsandbox::MicrosandboxIsolation;
 pub use testbed::TestbedIsolation;

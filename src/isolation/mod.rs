@@ -10,6 +10,7 @@ use std::{
 use tokio::sync::{mpsc, watch};
 
 use crate::project::Project;
+use serde::{Deserialize, Serialize};
 
 // How much of this host a sandbox may take, and how many may run at once. It
 // lives here rather than beside the task queue because it is a fact about the
@@ -23,6 +24,7 @@ mod providers;
 mod relay;
 mod sandbox;
 
+pub(crate) use providers::workers::protocol as worker_protocol;
 pub use providers::{IsolationBackend, MicrosandboxIsolation, TestbedIsolation};
 pub(crate) use relay::{PORT_RELAY_GUEST_PORT, install_script, with_port_relay};
 pub use relay::{PortNotice, PortRelays};
@@ -95,7 +97,7 @@ impl BaseSandboxRecipe {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SetupStep {
     pub label: String,
     pub command: String,
@@ -139,7 +141,7 @@ impl EnvironmentProgressSink for Unwatched {
     fn report(&self, _progress: EnvironmentProgress) {}
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileTally {
     pub files: u64,
     pub bytes: u64,
@@ -157,7 +159,7 @@ impl FileTransferSink for UnwatchedFiles {
     fn moving(&self, _whole: FileTally) {}
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BaseSandboxSnapshot {
     pub path: PathBuf,
     pub created_at_ms: i64,
@@ -178,26 +180,26 @@ pub const CREDENTIAL_PREFIX: &str = "credentials-";
 
 pub const WATCHER_PREFIX: &str = "watcher-";
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CredentialReport {
     pub output: String,
     pub signed_in: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CredentialCheck {
     pub profile: String,
     pub command: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EnvironmentDescription {
     pub os_release: String,
     pub packages: Vec<String>,
     pub built_at_ms: i64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SandboxOptions {
     pub snapshot_path: Option<String>,
     pub network_enabled: bool,
@@ -206,13 +208,13 @@ pub struct SandboxOptions {
     pub vsock: Vec<VsockRoute>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SandboxPurpose {
     Capsule,
     Command,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxCeiling {
     pub cpus: u8,
     pub memory_mib: u32,
@@ -227,7 +229,7 @@ impl SandboxCeiling {
     };
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VsockRoute {
     pub host_socket: PathBuf,
     pub guest_port: u32,
@@ -320,7 +322,7 @@ impl SandboxOptions {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 // Nothing a guest can write is mounted from the host: mounted files travel through
 // `sandbox.fs()` one at a time, because a guest-writable host directory is a way out
 // of the sandbox and a place to plant a hook the host will run.
@@ -331,12 +333,14 @@ pub struct SandboxMount {
     pub noexec: bool,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Command {
     Input(Vec<u8>),
     Resize { rows: u16, cols: u16 },
     Interrupt,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum CommandEvent {
     Output {
         stream: OutputStream,
@@ -346,7 +350,7 @@ pub enum CommandEvent {
     Failed(String),
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum OutputStream {
     Stdout,
     Stderr,

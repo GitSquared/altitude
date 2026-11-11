@@ -34,7 +34,7 @@ pub(crate) const MAX_BLOB_BYTES: u64 = 64 * 1024 * 1024;
 pub(super) const CHUNK_BYTES: usize = 64 * 1024;
 pub(crate) const TRANSFER_PIECE_BYTES: u64 = 4 * 1024 * 1024;
 
-pub(super) fn builder() -> Builder {
+pub(crate) fn builder() -> Builder {
     Endpoint::builder(presets::Minimal)
 }
 
@@ -431,7 +431,7 @@ pub struct TransferArchive {
     pub digest: String,
 }
 
-pub(super) async fn write_frame<W, T>(writer: &mut W, value: &T) -> LinkResult<()>
+pub(crate) async fn write_frame<W, T>(writer: &mut W, value: &T) -> LinkResult<()>
 where
     W: AsyncWrite + Unpin,
     T: Serialize,
@@ -445,7 +445,7 @@ where
     Ok(())
 }
 
-pub(super) async fn read_frame<R, T>(reader: &mut R) -> LinkResult<T>
+pub(crate) async fn read_frame<R, T>(reader: &mut R) -> LinkResult<T>
 where
     R: AsyncRead + Unpin,
     T: DeserializeOwned,

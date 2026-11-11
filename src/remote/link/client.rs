@@ -77,6 +77,12 @@ impl LinkClient {
         Ok(Self { endpoint })
     }
 
+    // An endpoint that also serves: the worker answers the master's calls on the
+    // same endpoint it registers over.
+    pub(crate) fn from_endpoint(endpoint: Endpoint) -> Self {
+        Self { endpoint }
+    }
+
     pub async fn scan_remotes(&self) -> LinkResult<Scan> {
         discovery::scan(&self.endpoint).await
     }
