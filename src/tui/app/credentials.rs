@@ -1,9 +1,10 @@
 use std::time::Instant;
 
+use crossterm::event::KeyEvent;
 use tokio::sync::mpsc;
 
 use crate::{
-    credentials::{Credential, Service, Slot, describe},
+    credentials::{Credential, Service, Slot, describe, host},
     isolation::IsolationEngine,
     remote::Announcement,
     task::TaskService,
@@ -13,7 +14,8 @@ use crate::{
 };
 
 use popups::confirm::PendingConfirm;
-use screens::settings::{Depth, RowKind};
+use popups::import_logins::{Decision, ImportLogins};
+use screens::settings::{Depth, RowKind, Section};
 
 use super::*;
 
@@ -317,6 +319,130 @@ impl App {
             .iter()
             .filter_map(|credential| task_service.credentials().summary(&credential.id))
             .collect();
+    }
+
+    // Adopting a login the operator already has: the identity is recorded and its
+    // profile is copied into, and the row that offered it is replaced by the one
+    // it became, whose own check says whether the copy signs in.
+    pub(in crate::tui) async fn import_host_login<E>(
+        &mut self,
+        login: host::HostLogin,
+        task_service: &TaskService<E>,
+        may_choose_agent: bool,
+    ) -> bool
+    where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let service = login.service;
+        // The service's own profile, so an imported login is the one the setup
+        // steps and the default identity read rather than a second identity
+        // beside them.
+        let id = service.id().to_owned();
+        let label = service.label().to_owned();
+        let Some(mut proposed) = self
+            .settings_file
+            .as_ref()
+            .map(|file| file.settings().clone())
+        else {
+            self.problem("Settings are unavailable; fix the file and reopen");
+            return false;
+        };
+        if proposed.credential(&id).is_none()
+            && let Err(error) = proposed.add_credential(Credential::new(id.clone(), label.clone()))
+        {
+            self.problem(error.to_string());
+            return false;
+        }
+        // The login is copied before the file records it, so a copy that fails
+        // leaves no identity behind; a save that fails leaves an unrecorded
+        // profile the next attempt fills in place.
+        if let Err(error) = host::import(&self.config, &login, &id) {
+            self.problem(format!("Could not import the login: {error}"));
+            return false;
+        }
+        let Some(file) = self.settings_file.as_mut() else {
+            self.problem("Settings are unavailable; fix the file and reopen");
+            return false;
+        };
+        if let Err(error) = file.save(proposed) {
+            self.problem(error.to_string());
+            return false;
+        }
+        if may_choose_agent
+            && self.agent().is_none()
+            && let Service::Agent(kind) = service
+        {
+            self.choose_active_agent(kind);
+        }
+        self.panel.section = Section::for_service(service);
+        self.reload_profiles(task_service);
+        // The imported login has not been asked about here yet, so it is checked
+        // again rather than left on the answer the offer carried.
+        self.credential_status.remove(&id);
+        self.credential_checked_at.remove(&id);
+        self.credential_checking.remove(&id);
+        self.credentials_visible_since = None;
+        self.say(format!("Imported the {label} login"));
+        true
+    }
+
+    // The sheet shown before a service picker opens on the card: the logins
+    // already on this machine for that slot, offered to adopt. Nothing is taken
+    // without a key on a row, so the sheet itself is the consent.
+    pub(in crate::tui) fn open_import_logins(&mut self, slot: Slot) -> bool {
+        let logins: Vec<host::HostLogin> = host::logins(&self.config, &self.settings_credentials())
+            .into_iter()
+            .filter(|login| login.service.slot() == slot)
+            .collect();
+        if logins.is_empty() {
+            return false;
+        }
+        self.foreground = Foreground::ImportLogins(Box::new(ImportLogins::new(logins, slot)));
+        true
+    }
+
+    pub(in crate::tui) async fn import_logins_key<E>(
+        &mut self,
+        key: KeyEvent,
+        task_service: &TaskService<E>,
+    ) where
+        E: IsolationEngine + Clone + 'static,
+    {
+        let Foreground::ImportLogins(mut modal) = mem::take(&mut self.foreground) else {
+            return;
+        };
+        match modal.handle_key(key) {
+            Decision::Still => self.foreground = Foreground::ImportLogins(modal),
+            Decision::Import(login) => {
+                let service = login.service;
+                if self.import_host_login(login, task_service, true).await {
+                    // The row turning into "imported" is the answer; the notice
+                    // that would cover the sheet is not.
+                    self.alert = None;
+                    modal.mark_imported(service);
+                    self.foreground = Foreground::ImportLogins(modal);
+                } else {
+                    // A refusal is a message, and a message is read on the card
+                    // rather than under the sheet that asked.
+                    self.foreground = Foreground::GetStarted(self.started_panel());
+                }
+            }
+            Decision::Close => {
+                // Skip sends the operator to the picker they were going to see;
+                // Done leaves them on the card, because the steps they came to
+                // fill are already filled.
+                let imported = modal.imported() > 0;
+                let then = modal.then();
+                self.foreground = Foreground::GetStarted(self.started_panel());
+                if !imported && let Foreground::GetStarted(panel) = &mut self.foreground {
+                    match then {
+                        Slot::Agent => panel.agent.open(),
+                        Slot::VersionControl => panel.vcs.open(),
+                        Slot::Tracker => panel.tracker.open(),
+                    }
+                }
+            }
+        }
     }
 
     pub(in crate::tui) fn ask_credential_checks<E>(

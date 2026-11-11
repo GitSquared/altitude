@@ -119,6 +119,7 @@ impl App {
                     panel.hints(&self.setup())
                 }
             }
+            Foreground::ImportLogins(modal) => modal.hints(),
             Foreground::Message(message) => message.hints(),
             Foreground::Panel => {
                 // Only a wait with something to show offers leaving it; a shell that
@@ -301,6 +302,7 @@ impl App {
         match &self.foreground {
             Foreground::NewTask(new_task) => new_task.is_typing(),
             Foreground::GetStarted(panel) => panel.is_typing(),
+            Foreground::ImportLogins(_) => true,
             Foreground::GitIdentity(identity) => identity.is_typing(),
             Foreground::Message(_) => true,
             _ => {

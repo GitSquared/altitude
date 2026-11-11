@@ -16,7 +16,7 @@ use super::{
     form::draw_form,
     pages::{
         credential_connector, git_connector, project_lines, remote_connector, section_heading,
-        tracker_summary,
+        tilde, tracker_summary,
     },
     panel::{Depth, Panel, Section},
     rows::{RowKind, TrackerBinding, View, mark, tracker_is_set_up},
@@ -113,7 +113,7 @@ fn draw_columns(
         .map(|(index, row)| {
             // A discovered remote waits at the end of the list until it is
             // adopted, so it stays dim even while the list has the focus.
-            let tone = if matches!(row.kind, RowKind::Discovered(_)) {
+            let tone = if matches!(row.kind, RowKind::Discovered(_) | RowKind::HostLogin(_)) {
                 palette::muted()
             } else if list_focused || index == panel.selected() {
                 palette::primary()
@@ -270,6 +270,24 @@ fn detail(panel: &Panel, view: &View, tick: Option<usize>) -> Paragraph<'static>
                 ));
             }
             lines
+        }
+        RowKind::HostLogin(login) => {
+            let service = login.service.label();
+            vec![
+                heading(label),
+                Line::from(""),
+                Line::from(format!(
+                    "Found at {}.",
+                    tilde(&login.source.display().to_string())
+                )),
+                Line::from(""),
+                Line::from(format!(
+                    "Importing copies it into altitude's own {service} profile, which every task \
+                     mounts. The file it came from is left where it is."
+                )),
+                Line::from(""),
+                Line::styled("Press ↩ to import it", palette::accent()),
+            ]
         }
         RowKind::Discovered(discovered) => {
             let mut lines = vec![

@@ -189,6 +189,9 @@ impl App {
                     }
                 }
             }
+            Some(RowKind::HostLogin(login)) => {
+                self.foreground = Foreground::Confirm(PendingConfirm::importing_host_login(login));
+            }
             Some(RowKind::GitIdentity(identity)) => match identity.saved {
                 Some(commits) => self.open_saved_commit_identity(commits),
                 None => self.open_git_identity(),

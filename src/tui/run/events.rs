@@ -220,6 +220,7 @@ where
                 return Ok(true);
             }
         }
+        Foreground::ImportLogins(_) => app.import_logins_key(key, task_service).await,
         Foreground::Message(_) => app.message_key(key, event_loop, remote_signals).await,
         Foreground::Panel => {
             app.panel_keys(

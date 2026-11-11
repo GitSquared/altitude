@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::{
-    credentials::Credential as NamedCredential,
+    credentials::{Credential as NamedCredential, host::HostLogin},
     isolation::EnvironmentDescription,
     project::{Project, ProjectCommits},
     remote::{DiscoveredRemote, RemoteKey, TrackerConnection, TrackerReadiness},
@@ -48,6 +48,7 @@ pub enum RowKind {
         binding: Option<TrackerBinding>,
     },
     Discovered(DiscoveredRemote),
+    HostLogin(HostLogin),
     Switch {
         setting: Setting,
         on: bool,
@@ -69,6 +70,7 @@ impl Row {
             // The same question mark the first screen gives a machine found on
             // the network: it is an offer, not something this client holds.
             RowKind::Discovered(_) => Some(Dot::still('?', palette::muted())),
+            RowKind::HostLogin(_) => Some(Dot::still('?', palette::muted())),
             RowKind::Credential(credential) => credential.dot(),
             RowKind::GitIdentity(identity) => Some(mark(identity.is_set(), false)),
             // A preference is the same kind of fact as a login or a remote: on,
@@ -174,6 +176,7 @@ impl Row {
                     Vec::new()
                 }
             }
+            RowKind::HostLogin(_) => vec![chrome::Hint::new("↩", "import")],
             RowKind::Switch { .. } => vec![chrome::Hint::new("↩", "toggle")],
         }
     }

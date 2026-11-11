@@ -51,6 +51,7 @@ impl App {
                 self.described_credentials(),
             ),
             RowKind::Discovered(_) => return,
+            RowKind::HostLogin(_) => return,
             RowKind::Remote { address, .. } => Form::for_remote(
                 Target::Remote {
                     original: address.clone(),
@@ -292,6 +293,9 @@ impl App {
                 return;
             }
             RowKind::Switch { .. } | RowKind::Credential(_) | RowKind::Discovered(_) => {
+                return;
+            }
+            RowKind::HostLogin(_) => {
                 return;
             }
             RowKind::Project { project } => (

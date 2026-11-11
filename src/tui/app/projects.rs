@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     agent::{AGENTS, AgentKind},
-    credentials::CredentialShellEvent,
+    credentials::{CredentialShellEvent, Slot},
     isolation::IsolationEngine,
     project::Project,
     task::{TaskExecutionStatus, TaskService},
@@ -510,7 +510,12 @@ impl App {
                         );
                         return false;
                     }
-                    None => panel.agent.open(),
+                    None => {
+                        if self.open_import_logins(Slot::Agent) {
+                            return false;
+                        }
+                        panel.agent.open();
+                    }
                 },
                 SetupFocus::VersionControl => {
                     if self
@@ -528,6 +533,9 @@ impl App {
                     // The provider list first, even with one provider in it: it
                     // is where a second one will appear, and the row already
                     // says which one is signed in.
+                    if self.open_import_logins(Slot::VersionControl) {
+                        return false;
+                    }
                     panel.vcs.open();
                 }
                 SetupFocus::Commits => {
@@ -541,6 +549,9 @@ impl App {
                         return false;
                     }
                     if self.tracker_state != TrackerState::Connecting {
+                        if self.open_import_logins(Slot::Tracker) {
+                            return false;
+                        }
                         panel.tracker.open();
                     }
                 }

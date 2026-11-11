@@ -9,6 +9,8 @@ mod view;
 
 pub(in crate::tui) use draw::{SettingsHit, draw};
 pub(in crate::tui) use form::{Focus, Form, Target};
-pub(in crate::tui) use pages::{remote_setup_lines, remote_tracker_setup_lines, tracker_dot};
+pub(in crate::tui) use pages::{
+    hostname, remote_setup_lines, remote_tracker_setup_lines, tilde, tracker_dot,
+};
 pub(in crate::tui) use panel::{Depth, Panel, Section, Setting};
 pub(in crate::tui) use rows::{CredentialKind, GitIdentity, RowKind};

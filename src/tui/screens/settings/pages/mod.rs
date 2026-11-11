@@ -190,7 +190,7 @@ pub(super) fn public_identity(profile: &str, output: &str) -> Option<String> {
     format::identity_from_output(output, kind.account_markers())
 }
 
-pub(super) fn hostname() -> String {
+pub(in crate::tui) fn hostname() -> String {
     let name: String = whoami::hostname()
         .unwrap_or_default()
         .split_whitespace()
@@ -202,7 +202,7 @@ pub(super) fn hostname() -> String {
     }
 }
 
-pub(super) fn tilde(path: &str) -> String {
+pub(in crate::tui) fn tilde(path: &str) -> String {
     let Some(home) = env::var_os("HOME") else {
         return path.to_owned();
     };
