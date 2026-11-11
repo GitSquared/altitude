@@ -210,6 +210,12 @@ impl IsolationEngine for WorkersIsolation {
         }
     }
 
+    // The master's cores say nothing about how many boxes it may start; `max` is
+    // what the fleet is allowed to run.
+    fn start_landings(&self) -> usize {
+        self.fleet.capacity().2
+    }
+
     fn project_memory_dir(&self, project_id: &str) -> PathBuf {
         // Memory belongs to the master, which owns the task's history; a box is
         // handed it and returns it.

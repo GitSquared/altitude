@@ -48,6 +48,13 @@ impl IsolationEngine for ServeIsolation {
         }
     }
 
+    fn start_landings(&self) -> usize {
+        match self {
+            Self::Microsandbox(engine) => engine.start_landings(),
+            Self::Workers(engine) => engine.start_landings(),
+        }
+    }
+
     fn project_memory_dir(&self, project_id: &str) -> PathBuf {
         match self {
             Self::Microsandbox(engine) => engine.project_memory_dir(project_id),

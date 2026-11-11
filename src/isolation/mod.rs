@@ -402,6 +402,14 @@ pub trait IsolationEngine: Send + Sync {
 
     fn sandbox_room(&self) -> SandboxRoom;
 
+    // How many sandboxes may be starting at once. A host engine counts cores,
+    // because a start is minutes of boot before it shows in the load and two at
+    // a time is what a machine absorbs; a provider that spawns compute elsewhere
+    // counts what it is allowed to run at all.
+    fn start_landings(&self) -> usize {
+        landings()
+    }
+
     // Where a project's memory lives on this machine. It comes from the engine rather
     // than from the caller's config because the engine is the piece that knows
     // whether this machine scopes storage per operator, and the sandbox mount and the
